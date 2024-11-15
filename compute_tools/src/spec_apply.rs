@@ -10,7 +10,7 @@ use crate::pg_helpers::{escape_literal, DatabaseExt, Escaping, GenericOptionsSea
 use anyhow::{bail, Result};
 use compute_api::spec::{ComputeFeature, ComputeSpec, Database, PgIdent, Role};
 use futures::future::join_all;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio_postgres::Client;
 use tracing::{debug, info_span, Instrument};
 
@@ -69,6 +69,11 @@ pub struct Operation {
     pub comment: Option<String>,
 }
 
+pub struct MutableApplyContext {
+    pub roles: HashMap<String, Role>,
+    pub dbs: HashMap<String, Database>,
+}
+
 /// Appply the operations that belong to the given spec apply phase.
 ///
 /// Commands within a single phase are executed in order of Iterator yield.
@@ -85,8 +90,7 @@ pub struct Operation {
 /// - The caller is responsible for limiting and/or applying concurrency.
 pub async fn apply_operations<'a, Fut, F>(
     spec: Arc<ComputeSpec>,
-    roles: Arc<Mutex<HashMap<String, Role>>>,
-    databases: Arc<Mutex<HashMap<String, Database>>>,
+    ctx: Arc<RwLock<MutableApplyContext>>,
     jwks_roles: Arc<HashSet<String>>,
     apply_spec_phase: ApplySpecPhase,
     client: F,
@@ -99,19 +103,17 @@ where
     let span = info_span!("db_apply_changes", phase=?apply_spec_phase);
     let span2 = span.clone();
     async move {
-        let mut roles = roles.lock().await;
-        let mut dbs = databases.lock().await;
-
-        debug!("Processing phase {:?}", &apply_spec_phase);
+         debug!("Processing phase {:?}", &apply_spec_phase);
+        let ctx = ctx;
 
         let mut ops = get_operations(
             &spec,
-            &mut roles,
-            &mut dbs,
+            &ctx,
             &jwks_roles,
-            apply_spec_phase.clone(),
-        )?
-        .peekable();
+            &apply_spec_phase,
+        )
+            .await?
+            .peekable();
 
         // Return (and by doing so, skip requesting the PostgreSQL client) if
         // we don't have any operations scheduled.
@@ -149,8 +151,7 @@ where
             })
             .collect::<Vec<_>>();
 
-        drop(roles);
-        drop(dbs);
+        drop(ctx);
 
         for it in join_all(active_queries).await {
             drop(it?);
@@ -170,14 +171,13 @@ where
 /// In the future we may generate a single stream of changes and then
 /// sort/merge/batch execution, but for now this is a nice way to improve
 /// batching behaviour of the commands.
-pub fn get_operations<'a>(
+async fn get_operations<'a>(
     spec: &'a ComputeSpec,
-    roles: &'a mut HashMap<String, Role>,
-    databases: &'a mut HashMap<String, Database>,
+    ctx: &'a RwLock<MutableApplyContext>,
     jwks_roles: &'a HashSet<String>,
-    apply_spec_phase: ApplySpecPhase,
+    apply_spec_phase: &'a ApplySpecPhase,
 ) -> Result<Box<dyn Iterator<Item = Operation> + 'a + Send>> {
-    match &apply_spec_phase {
+    match apply_spec_phase {
         ApplySpecPhase::CreateSuperUser => {
             let query = construct_superuser_query(spec);
 
@@ -187,6 +187,9 @@ pub fn get_operations<'a>(
             })))
         }
         ApplySpecPhase::DropInvalidDatabases => {
+            let mut ctx = ctx.write().await;
+            let databases = &mut ctx.dbs;
+            
             let keys: Vec<_> = databases
                 .iter()
                 .filter(|(_, db)| db.invalid)
@@ -207,7 +210,7 @@ pub fn get_operations<'a>(
             // Postgres they would need to do the same).
             let operations = keys
                 .into_iter()
-                .filter_map(|dbname| databases.remove(&dbname))
+                .filter_map(move |dbname| ctx.dbs.remove(&dbname))
                 .map(|db| Operation {
                     query: format!("DROP DATABASE IF EXISTS {}", db.name.pg_quote()),
                     comment: Some(format!("Dropping invalid database {}", db.name)),
@@ -216,12 +219,16 @@ pub fn get_operations<'a>(
             Ok(Box::new(operations))
         }
         ApplySpecPhase::RenameRoles => {
+            let mut ctx = ctx.write().await;
+            
             let operations = spec
                 .delta_operations
                 .iter()
                 .flatten()
                 .filter(|op| op.action == "rename_role")
-                .filter_map(|op| {
+                .filter_map(move |op| {
+                    let roles = &mut ctx.roles;
+
                     if roles.contains_key(op.name.as_str()) {
                         None
                     } else {
@@ -246,9 +253,12 @@ pub fn get_operations<'a>(
             Ok(Box::new(operations))
         }
         ApplySpecPhase::CreateAndAlterRoles => {
+            let mut ctx = ctx.write().await;
+
             let operations = spec.cluster.roles
                 .iter()
-                .filter_map(|role| {
+                .filter_map(move |role| {
+                    let roles = &mut ctx.roles;
                     let db_role = roles.get(&role.name);
 
                     match db_role {
@@ -297,11 +307,14 @@ pub fn get_operations<'a>(
             Ok(Box::new(operations))
         }
         ApplySpecPhase::RenameAndDeleteDatabases => {
+            let mut ctx = ctx.write().await;
+
             let operations = spec
                 .delta_operations
                 .iter()
                 .flatten()
-                .filter_map(|op| {
+                .filter_map(move |op| {
+                    let databases = &mut ctx.dbs;
                     match op.action.as_str() {
                         // We do not check whether the DB exists or not,
                         // Postgres will take care of it for us
@@ -376,11 +389,14 @@ pub fn get_operations<'a>(
             Ok(Box::new(operations))
         }
         ApplySpecPhase::CreateAndAlterDatabases => {
+            let mut ctx = ctx.write().await;
+
             let operations = spec
                 .cluster
                 .databases
                 .iter()
-                .filter_map(|db| {
+                .filter_map(move |db| {
+                    let databases = &mut ctx.dbs;
                     if let Some(edb) = databases.get_mut(&db.name) {
                         let change_owner = if edb.owner.starts_with('"') {
                             db.owner.pg_quote() != edb.owner
@@ -434,23 +450,27 @@ pub fn get_operations<'a>(
         ApplySpecPhase::RunInEachDatabase { db, subphase } => {
             match subphase {
                 PerDatabasePhase::DeleteDBRoleReferences => {
-                    let db = db.clone();
-                    let db2 = db.clone();
+                    let ctx = ctx.read().await;
+
                     let operations =
                         spec.delta_operations
                             .iter()
                             .flatten()
                             .filter(|op| op.action == "delete_role")
-                            .filter(move |op| !db.is_owned_by(&op.name))
-                            .filter(|op| roles.contains_key(&op.name))
-                            .flat_map(move |op| {
+                            .filter_map(move |op| {
+                                if !db.is_owned_by(&op.name) {
+                                    return None;
+                                }
+                                if !ctx.roles.contains_key(&op.name) {
+                                    return None;
+                                }
                                 let quoted = op.name.pg_quote();
-                                let new_owner = match &db2 {
+                                let new_owner = match &db {
                                     DB::SystemDB => "cloud_admin".pg_quote(),
                                     DB::UserDB(db) => db.owner.pg_quote(),
                                 };
 
-                                vec![
+                                Some(vec![
                                     // This will reassign all dependent objects to the db owner
                                     Operation {
                                         query: format!(
@@ -464,12 +484,16 @@ pub fn get_operations<'a>(
                                         query: format!("DROP OWNED BY {}", quoted),
                                         comment: None,
                                     },
-                                ]
-                            });
+                                ])
+                            })
+                            .flatten();
 
                     Ok(Box::new(operations))
                 }
                 PerDatabasePhase::ChangeSchemaPerms => {
+                    let ctx = ctx.read().await;
+                    let databases = &ctx.dbs;
+
                     let db = match &db {
                         // ignore schema permissions on the system database
                         DB::SystemDB => return Ok(Box::new(empty())),

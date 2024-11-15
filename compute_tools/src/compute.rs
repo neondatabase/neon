@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use compute_api::spec::{Database, PgIdent, Role};
+use compute_api::spec::{PgIdent, Role};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -48,7 +48,7 @@ use crate::spec_apply::ApplySpecPhase::{
 use crate::spec_apply::PerDatabasePhase::{
     ChangeSchemaPerms, DeleteDBRoleReferences, HandleAnonExtension,
 };
-use crate::spec_apply::{apply_operations, DB};
+use crate::spec_apply::{apply_operations, MutableApplyContext, DB};
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
 use crate::{config, extension_server};
 
@@ -874,7 +874,8 @@ impl ComputeNode {
             .enable_all()
             .build()?;
 
-        debug!("Applying config {:?}", spec);
+        info!("Applying config with max {} concurrency", concurrency);
+        debug!("Config: {:?}", spec);
 
         rt.block_on(async {
             // Proceed with post-startup configuration. Note, that order of operations is important.
@@ -882,19 +883,15 @@ impl ComputeNode {
             let spec = spec.clone();
 
             let xact = client.transaction().await?;
-            let roles = Arc::new(tokio::sync::Mutex::new(
-                get_existing_roles_async(&xact)
-                    .await?
-                    .into_iter()
-                    .map(|role| (role.name.clone(), role))
-                    .collect::<HashMap<String, Role>>(),
-            ));
+            let roles = get_existing_roles_async(&xact)
+                .await?
+                .into_iter()
+                .map(|role| (role.name.clone(), role))
+                .collect::<HashMap<String, Role>>();
 
             xact.commit().await?;
 
-            let databases = Arc::new(tokio::sync::Mutex::new(
-                get_existing_dbs_async(&client).await?,
-            ));
+            let databases = get_existing_dbs_async(&client).await?;
 
             let jwks_roles = Arc::new(
                 spec.as_ref()
@@ -906,6 +903,11 @@ impl ComputeNode {
                     .cloned()
                     .collect::<HashSet<_>>(),
             );
+            
+            let ctx = Arc::new(tokio::sync::RwLock::new(MutableApplyContext {
+                roles,
+                dbs: databases,
+            }));
 
             for phase in [
                 CreateSuperUser,
@@ -918,8 +920,7 @@ impl ComputeNode {
                 debug!("Applying phase {:?}", &phase);
                 apply_operations(
                     spec.clone(),
-                    roles.clone(),
-                    databases.clone(),
+                    ctx.clone(),
                     jwks_roles.clone(),
                     phase,
                     || async { Ok(&client) },
@@ -938,8 +939,7 @@ impl ComputeNode {
                 .chain(once(DB::SystemDB))
                 .map(|db| {
                     let spec = spec.clone();
-                    let roles = roles.clone();
-                    let databases = databases.clone();
+                    let ctx = ctx.clone();
                     let jwks_roles = jwks_roles.clone();
                     let mut url = url.as_ref().clone();
                     let concurrency_token = concurrency_token.clone();
@@ -958,8 +958,7 @@ impl ComputeNode {
                     let fut = Self::apply_spec_sql_db(
                         spec.clone(),
                         url,
-                        roles.clone(),
-                        databases.clone(),
+                        ctx.clone(),
                         jwks_roles.clone(),
                         concurrency_token.clone(),
                         db,
@@ -983,8 +982,7 @@ impl ComputeNode {
                 debug!("Applying phase {:?}", &phase);
                 apply_operations(
                     spec.clone(),
-                    roles.clone(),
-                    databases.clone(),
+                    ctx.clone(),
                     jwks_roles.clone(),
                     phase,
                     || async { Ok(&client) },
@@ -1006,8 +1004,7 @@ impl ComputeNode {
     async fn apply_spec_sql_db(
         spec: Arc<ComputeSpec>,
         url: Arc<Url>,
-        roles: Arc<tokio::sync::Mutex<HashMap<String, Role>>>,
-        databases: Arc<tokio::sync::Mutex<HashMap<String, Database>>>,
+        ctx: Arc<tokio::sync::RwLock<MutableApplyContext>>,
         jwks_roles: Arc<HashSet<String>>,
         concurrency_token: Arc<tokio::sync::Semaphore>,
         db: DB,
@@ -1023,8 +1020,7 @@ impl ComputeNode {
         ] {
             apply_operations(
                 spec.clone(),
-                roles.clone(),
-                databases.clone(),
+                ctx.clone(),
                 jwks_roles.clone(),
                 RunInEachDatabase {
                     db: db.clone(),
@@ -1075,19 +1071,47 @@ impl ComputeNode {
         );
 
         let max_concurrent_connections = if compute_state.status != ComputeStatus::Running {
-            spec.cluster
-                .settings
-                .find("max_connections")
-                .iter()
-                .filter_map(|val| val.parse::<usize>().ok())
-                .map(|limit| match limit {
-                    0..10 => limit,
-                    10..20 => 10,
-                    20.. => limit - 10,
-                })
-                // If max_connections is not configured, use 10 as safe default.
-                .last()
-                .unwrap_or(10)
+            if let Some(config) = spec.cluster.settings.find("max_connections") {
+                config.parse::<usize>()
+                    .ok()
+                    .map(|limit| match limit {
+                        0..10 => limit,
+                        10..30 => 10,
+                        30.. => limit / 3,
+                    })
+                    .unwrap_or(10)
+            } else {
+                spec.cluster.postgresql_conf
+                    .iter()
+                    .flat_map(|conf| conf.split("\n"))
+                    .filter_map(|line| {
+                        if !line.contains("max_connections") {
+                            return None;
+                        }
+
+                        let (key, value) = line.split_once("=")?;
+                        let key = key
+                            .trim_start_matches(char::is_whitespace)
+                            .trim_end_matches(char::is_whitespace);
+
+                        let value = value
+                            .trim_start_matches(char::is_whitespace)
+                            .trim_end_matches(char::is_whitespace);
+
+                        if key != "max_connections" {
+                            return None;
+                        }
+
+                        value.parse::<usize>().ok()
+                    })
+                    .map(|limit| match limit {
+                        0..10 => limit,
+                        10..30 => 10,
+                        30.. => limit / 3,
+                    })
+                    .next()
+                    .unwrap_or(10)
+            }
         } else {
             spec.cluster
                 .settings
