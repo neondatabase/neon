@@ -817,7 +817,7 @@ def test_timeline_retain_lsn(
     # Now, after unarchival, the child timeline should still have its data accessible (or corrupted)
     if offload_child == "offload-corrupt":
         if with_intermediary:
-            error_regex = "(.*could not read block .* from page server.*|.*relation .* does not exist)"
+            error_regex = "(.*could not read .* from page server.*|.*relation .* does not exist)"
         else:
             error_regex = ".*failed to get basebackup.*"
         with pytest.raises((RuntimeError, IoError, UndefinedTable), match=error_regex):
