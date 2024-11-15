@@ -141,9 +141,10 @@ async fn remove_maybe_offloaded_timeline_from_tenant(
             );
         }
         TimelineOrOffloaded::Offloaded(timeline) => {
-            timelines_offloaded
+            let offloaded_timeline = timelines_offloaded
                 .remove(&timeline.timeline_id)
                 .expect("timeline that we were deleting was concurrently removed from 'timelines_offloaded' map");
+            offloaded_timeline.delete_from_ancestor_with_timelines(&timelines);
         }
     }
 

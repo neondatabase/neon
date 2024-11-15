@@ -39,6 +39,7 @@ use remote_timeline_client::UploadQueueNotReadyError;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
+use std::sync::atomic::AtomicBool;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
@@ -524,6 +525,9 @@ pub struct OffloadedTimeline {
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
     pub delete_progress: TimelineDeleteProgress,
+
+    /// Part of the `OffloadedTimeline` object's lifecycle: this needs to be set before we drop it
+    pub deleted_from_ancestor: AtomicBool,
 }
 
 impl OffloadedTimeline {
@@ -533,9 +537,16 @@ impl OffloadedTimeline {
     /// the timeline is not in a stopped state.
     /// Panics if the timeline is not archived.
     fn from_timeline(timeline: &Timeline) -> Result<Self, UploadQueueNotReadyError> {
-        let ancestor_retain_lsn = timeline
-            .get_ancestor_timeline_id()
-            .map(|_timeline_id| timeline.get_ancestor_lsn());
+        let (ancestor_retain_lsn, ancestor_timeline_id) =
+            if let Some(ancestor_timeline) = timeline.ancestor_timeline() {
+                let ancestor_lsn = timeline.get_ancestor_lsn();
+                let ancestor_timeline_id = ancestor_timeline.timeline_id;
+                let mut gc_info = ancestor_timeline.gc_info.write().unwrap();
+                gc_info.insert_child(timeline.timeline_id, ancestor_lsn, MaybeOffloaded::Yes);
+                (Some(ancestor_lsn), Some(ancestor_timeline_id))
+            } else {
+                (None, None)
+            };
         let archived_at = timeline
             .remote_client
             .archived_at_stopped_queue()?
@@ -543,14 +554,17 @@ impl OffloadedTimeline {
         Ok(Self {
             tenant_shard_id: timeline.tenant_shard_id,
             timeline_id: timeline.timeline_id,
-            ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
+            ancestor_timeline_id,
             ancestor_retain_lsn,
             archived_at,
 
             delete_progress: timeline.delete_progress.clone(),
+            deleted_from_ancestor: AtomicBool::new(false),
         })
     }
     fn from_manifest(tenant_shard_id: TenantShardId, manifest: &OffloadedTimelineManifest) -> Self {
+        // We expect to reach this case in tenant loading, where the `retain_lsn` is populated in the parent's `gc_info`
+        // by the `initialize_gc_info` function.
         let OffloadedTimelineManifest {
             timeline_id,
             ancestor_timeline_id,
@@ -564,6 +578,7 @@ impl OffloadedTimeline {
             ancestor_retain_lsn,
             archived_at,
             delete_progress: TimelineDeleteProgress::default(),
+            deleted_from_ancestor: AtomicBool::new(false),
         }
     }
     fn manifest(&self) -> OffloadedTimelineManifest {
@@ -581,11 +596,49 @@ impl OffloadedTimeline {
             archived_at: *archived_at,
         }
     }
+    /// Delete this timeline's retain_lsn from its ancestor, if present in the given tenant
+    fn delete_from_ancestor_with_timelines(
+        &self,
+        timelines: &std::sync::MutexGuard<'_, HashMap<TimelineId, Arc<Timeline>>>,
+    ) {
+        if let (Some(_retain_lsn), Some(ancestor_timeline_id)) =
+            (self.ancestor_retain_lsn, self.ancestor_timeline_id)
+        {
+            if let Some((_, ancestor_timeline)) = timelines
+                .iter()
+                .find(|(tid, _tl)| **tid == ancestor_timeline_id)
+            {
+                ancestor_timeline
+                    .gc_info
+                    .write()
+                    .unwrap()
+                    .remove_child_offloaded(self.timeline_id);
+            }
+        }
+        self.deleted_from_ancestor.store(true, Ordering::Release);
+    }
+    /// Call [`Self::delete_from_ancestor_with_timelines`] instead if possible.
+    ///
+    /// As the entire tenant is being dropped, don't bother deregistering the `retain_lsn` from the ancestor.
+    fn defuse_for_tenant_drop(&self) {
+        self.deleted_from_ancestor.store(true, Ordering::Release);
+    }
 }
 
 impl fmt::Debug for OffloadedTimeline {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "OffloadedTimeline<{}>", self.timeline_id)
+    }
+}
+
+impl Drop for OffloadedTimeline {
+    fn drop(&mut self) {
+        if !self.deleted_from_ancestor.load(Ordering::Acquire) {
+            tracing::warn!(
+                "offloaded timeline {} was dropped without having cleaned it up at the ancestor",
+                self.timeline_id
+            );
+        }
     }
 }
 
@@ -1531,7 +1584,7 @@ impl Tenant {
         }
         // Complete deletions for offloaded timeline id's.
         offloaded_timelines_list
-            .retain(|(offloaded_id, _offloaded)| {
+            .retain(|(offloaded_id, offloaded)| {
                 // At this point, offloaded_timeline_ids has the list of all offloaded timelines
                 // without a prefix in S3, so they are inexistent.
                 // In the end, existence of a timeline is finally determined by the existence of an index-part.json in remote storage.
@@ -1539,6 +1592,7 @@ impl Tenant {
                 let delete = offloaded_timeline_ids.contains(offloaded_id);
                 if delete {
                     tracing::info!("Removing offloaded timeline {offloaded_id} from manifest as no remote prefix was found");
+                    offloaded.defuse_for_tenant_drop();
                 }
                 !delete
         });
@@ -1927,9 +1981,15 @@ impl Tenant {
                 )));
             };
             let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
-            if offloaded_timelines.remove(&timeline_id).is_none() {
-                warn!("timeline already removed from offloaded timelines");
+            match offloaded_timelines.remove(&timeline_id) {
+                Some(offloaded) => {
+                    offloaded.delete_from_ancestor_with_timelines(&timelines);
+                }
+                None => warn!("timeline already removed from offloaded timelines"),
             }
+
+            self.initialize_gc_info(&timelines, &offloaded_timelines, Some(timeline_id));
+
             Arc::clone(timeline)
         };
 
@@ -2667,7 +2727,7 @@ impl Tenant {
                 .filter(|timeline| !(timeline.is_broken() || timeline.is_stopping()));
 
             // Before activation, populate each Timeline's GcInfo with information about its children
-            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor);
+            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor, None);
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
@@ -2782,8 +2842,14 @@ impl Tenant {
                 let timeline_id = timeline.timeline_id;
                 let span = tracing::info_span!("timeline_shutdown", %timeline_id, ?shutdown_mode);
                 js.spawn(async move { timeline.shutdown(shutdown_mode).instrument(span).await });
-            })
-        };
+            });
+        }
+        {
+            let timelines_offloaded = self.timelines_offloaded.lock().unwrap();
+            timelines_offloaded.values().for_each(|timeline| {
+                timeline.defuse_for_tenant_drop();
+            });
+        }
         // test_long_timeline_create_then_tenant_delete is leaning on this message
         tracing::info!("Waiting for timelines...");
         while let Some(res) = js.join_next().await {
@@ -3767,10 +3833,13 @@ impl Tenant {
         &self,
         timelines: &std::sync::MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
         timelines_offloaded: &std::sync::MutexGuard<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
+        restrict_to_timeline: Option<TimelineId>,
     ) {
-        // This function must be called before activation: after activation timeline create/delete operations
-        // might happen, and this function is not safe to run concurrently with those.
-        assert!(!self.is_active());
+        if restrict_to_timeline.is_none() {
+            // This function must be called before activation: after activation timeline create/delete operations
+            // might happen, and this function is not safe to run concurrently with those.
+            assert!(!self.is_active());
+        }
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
@@ -3803,7 +3872,12 @@ impl Tenant {
         let horizon = self.get_gc_horizon();
 
         // Populate each timeline's GcInfo with information about its child branches
-        for timeline in timelines.values() {
+        let timelines_to_write = if let Some(timeline_id) = restrict_to_timeline {
+            itertools::Either::Left(timelines.get(&timeline_id).into_iter())
+        } else {
+            itertools::Either::Right(timelines.values())
+        };
+        for timeline in timelines_to_write {
             let mut branchpoints: Vec<(Lsn, TimelineId, MaybeOffloaded)> = all_branchpoints
                 .remove(&timeline.timeline_id)
                 .unwrap_or_default();
@@ -9647,6 +9721,56 @@ mod tests {
                 },
             ],
         );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn test_timeline_offload_retain_lsn() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_timeline_offload_retain_lsn")
+            .await
+            .unwrap();
+        let (tenant, ctx) = harness.load().await;
+        let tline_parent = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+        let tline_child = tenant
+            .branch_timeline_test(&tline_parent, NEW_TIMELINE_ID, Some(Lsn(0x20)), &ctx)
+            .await
+            .unwrap();
+        {
+            let gc_info_parent = tline_parent.gc_info.read().unwrap();
+            assert_eq!(
+                gc_info_parent.retain_lsns,
+                vec![(Lsn(0x20), tline_child.timeline_id, MaybeOffloaded::No)]
+            );
+        }
+        // We have to directly call the remote_client instead of using the archive function to avoid constructing broker client...
+        tline_child
+            .remote_client
+            .schedule_index_upload_for_timeline_archival_state(TimelineArchivalState::Archived)
+            .unwrap();
+        tline_child.remote_client.wait_completion().await.unwrap();
+        offload_timeline(&tenant, &tline_child)
+            .instrument(tracing::info_span!(parent: None, "offload_test", tenant_id=%"test", shard_id=%"test", timeline_id=%"test"))
+            .await.unwrap();
+        let child_timeline_id = tline_child.timeline_id;
+        Arc::try_unwrap(tline_child).unwrap();
+
+        {
+            let gc_info_parent = tline_parent.gc_info.read().unwrap();
+            assert_eq!(
+                gc_info_parent.retain_lsns,
+                vec![(Lsn(0x20), child_timeline_id, MaybeOffloaded::Yes)]
+            );
+        }
+
+        tenant
+            .get_offloaded_timeline(child_timeline_id)
+            .unwrap()
+            .defuse_for_tenant_drop();
 
         Ok(())
     }

@@ -66,7 +66,7 @@ pub(crate) async fn offload_timeline(
     let conf = &tenant.conf;
     delete_local_timeline_directory(conf, tenant.tenant_shard_id, &timeline).await;
 
-    remove_timeline_from_tenant(tenant, &timeline, &guard);
+    let remaining_refcount = remove_timeline_from_tenant(tenant, &timeline, &guard);
 
     {
         let mut offloaded_timelines = tenant.timelines_offloaded.lock().unwrap();
@@ -87,16 +87,20 @@ pub(crate) async fn offload_timeline(
     // not our actual state of offloaded timelines.
     tenant.store_tenant_manifest().await?;
 
+    tracing::info!("Timeline offload complete (remaining arc refcount: {remaining_refcount})");
+
     Ok(())
 }
 
 /// It is important that this gets called when DeletionGuard is being held.
 /// For more context see comments in [`DeleteTimelineFlow::prepare`]
+///
+/// Returns the strong count of the timeline `Arc`
 fn remove_timeline_from_tenant(
     tenant: &Tenant,
     timeline: &Timeline,
     _: &DeletionGuard, // using it as a witness
-) {
+) -> usize {
     // Remove the timeline from the map.
     let mut timelines = tenant.timelines.lock().unwrap();
     let children_exist = timelines
@@ -109,7 +113,9 @@ fn remove_timeline_from_tenant(
         panic!("Timeline grew children while we removed layer files");
     }
 
-    timelines
+    let timeline = timelines
         .remove(&timeline.timeline_id)
         .expect("timeline that we were deleting was concurrently removed from 'timelines' map");
+
+    Arc::strong_count(&timeline)
 }
