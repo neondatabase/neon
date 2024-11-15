@@ -406,7 +406,13 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
     tenant_shard_id = TenantShardId(tenant_id, 0, 0)
 
     # Unavailable pageservers during timeline CRUD operations can be logged as errors on the storage controller
-    env.storage_controller.allowed_errors.append(".*error sending request.*")
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*error sending request.*",
+            # FIXME: the pageserver should not return 500s on cancellation (https://github.com/neondatabase/neon/issues/97680)
+            ".*InternalServerError(Error deleting timeline .* on .* on .*: pageserver API: error: Cancelled",
+        ]
+    )
 
     for ps in env.pageservers:
         # We will do unclean restarts, which results in these messages when cleaning up files
@@ -415,10 +421,10 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
                 ".*removing local file.*because it has unexpected length.*",
                 ".*__temp.*",
                 # FIXME: there are still anyhow::Error paths in timeline creation/deletion which
-                # generate 500 results when called during shutdown
+                # generate 500 results when called during shutdown (https://github.com/neondatabase/neon/issues/9768)
                 ".*InternalServerError.*",
                 # FIXME: there are still anyhow::Error paths in timeline deletion that generate
-                # log lines at error severity
+                # log lines at error severity (https://github.com/neondatabase/neon/issues/9768)
                 ".*delete_timeline.*Error",
             ]
         )
