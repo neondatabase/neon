@@ -28,7 +28,8 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
 VARIABLES
   prop_state, \* prop_state[p] is state of proposer p
   acc_state, \* acc_state[a] is state of acceptor a
-  committed \* bag (set) of ever committed <<term, lsn>> entries
+  committed, \* bag (set) of ever committed <<term, lsn>> entries
+  elected_history \* counter for elected terms, see TypeOk for details
 
 CONSTANT
   acceptors,
@@ -61,6 +62,11 @@ IsEmptyF(f) == DOMAIN f = {}
 
 \* Set of values (image) of the function f. Apparently no such builtin.
 Range(f) == {f[x] : x \in DOMAIN f}
+
+\* If key k is in function f, map it using l, otherwise insert v. Returns the
+\* updated function.
+Upsert(f, k, v, l(_)) == LET new_val == IF k \in DOMAIN f THEN l(f[k]) ELSE v IN
+    (k :> new_val) @@ f
 
 \*****************
 
@@ -141,6 +147,21 @@ TypeOk ==
     /\ \A c \in committed:
       /\ c.term \in Terms
       /\ c.lsn \in Lsns
+    \* elected_history is a retrospective map of term -> number of times it was
+    \* elected, for use in ElectionSafetyFull invariant. For static spec it is
+    \* fairly convincing that it holds, but with membership change it is less
+    \* trivial. And as we identify log entries only with <term, lsn>, importance
+    \* of it is quite high as violation of log safety might go undetected if
+    \* election safety is violated. Note though that this is not always the
+    \* case, i.e. you can imagine (and TLC should find) schedule where log
+    \* safety violation is still detected because two leaders with the same term
+    \* commit histories which are different in previous terms, so it is not that
+    \* crucial. Plus if spec allows ElectionSafetyFull violation, likely
+    \* ElectionSafety will also be violated in some schedules. But neither it
+    \* should bloat the model too much.
+    /\ \A term \in DOMAIN elected_history:
+      /\ term \in Terms
+      /\ elected_history[term] \in Nat
 
 \********************************************************************************
 \* Initial
@@ -167,6 +188,7 @@ Init ==
                     wal |-> << >>
                  ]]
   /\ committed = {}
+  /\ elected_history = EmptyF
 
 
 \********************************************************************************
@@ -188,7 +210,7 @@ RestartProposer(p, q) ==
                                            ![p].termHistory = << >>,
                                            ![p].wal = << >>,
                                            ![p].nextSendLsn = EmptyF]
-       /\ UNCHANGED <<acc_state, committed>>
+       /\ UNCHANGED <<acc_state, committed, elected_history>>
 
 \* Term history of acceptor a's WAL: the one saved truncated to contain only <=
 \* local FlushLsn entries.
@@ -204,7 +226,7 @@ Vote(p, a) ==
       vote == [termHistory |-> AcceptorTermHistory(a), flushLsn |-> FlushLsn(a)]
     IN
       prop_state' = [prop_state EXCEPT ![p].votes = (a :> vote) @@ prop_state[p].votes]
- /\ UNCHANGED <<committed>>
+ /\ UNCHANGED <<committed, elected_history>>
 
 
 \* Get lastLogTerm from term history th.
@@ -235,6 +257,7 @@ BecomeLeader(p) ==
                                            ![p].termHistory = prop_th,
                                            ![p].wal = acc_state[max_vote_acc].wal
                         ]
+       /\ elected_history' = Upsert(elected_history, prop_state[p].term, 1, LAMBDA c: c + 1)
        /\ UNCHANGED <<acc_state, committed>>
 
 
@@ -245,7 +268,7 @@ UpdateTerm(p, a) ==
   /\ prop_state[p].state = "leader"
   /\ acc_state[a].term < prop_state[p].term
   /\ acc_state' = [acc_state EXCEPT ![a].term = prop_state[p].term]
-  /\ UNCHANGED <<prop_state, committed>>
+  /\ UNCHANGED <<prop_state, committed, elected_history>>
 
 \* Find highest common point (LSN of the first divergent record) in the logs of
 \* proposer p and acceptor a. Returns <term, lsn> of the highest common point.
@@ -283,7 +306,7 @@ TruncateWal(p, a) ==
                                          ![a].wal = SubSeq(acc_state[a].wal, 1, hcp.lsn - 1)
                        ]
        /\ prop_state' = [prop_state EXCEPT ![p].nextSendLsn = next_send_lsn]
-       /\ UNCHANGED <<committed>>
+       /\ UNCHANGED <<committed, elected_history>>
 
 \* Append new log entry to elected proposer
 NewEntry(p) ==
@@ -293,7 +316,7 @@ NewEntry(p) ==
        new_entry == prop_state[p].term
      IN
        /\ prop_state' = [prop_state EXCEPT ![p].wal = Append(prop_state[p].wal, new_entry)]
-       /\ UNCHANGED <<acc_state, committed>>
+       /\ UNCHANGED <<acc_state, committed, elected_history>>
 
 \* Immediately append next entry from elected proposer to acceptor a.
 AppendEntry(p, a) ==
@@ -309,7 +332,7 @@ AppendEntry(p, a) ==
      IN
        /\ prop_state' = [prop_state EXCEPT ![p].nextSendLsn[a] = send_lsn + 1]
        /\ acc_state' = [acc_state EXCEPT ![a].wal = Append(acc_state[a].wal, entry)]
-       /\ UNCHANGED <<committed>>
+       /\ UNCHANGED <<committed, elected_history>>
 
 \* LSN where elected proposer p starts writing its records.
 PropStartLsn(p) ==
@@ -335,7 +358,7 @@ CommitEntries(p, q) ==
        \* quorum recovers, i.e. last_log_term on it reaches leader's term).
        /\ quorum_lsn >= PropStartLsn(p)
        /\ committed' = committed \cup {[term |-> prop_state[p].wal[lsn], lsn |-> lsn]: lsn \in 1..(quorum_lsn - 1)}
-       /\ UNCHANGED <<prop_state, acc_state>>
+       /\ UNCHANGED <<prop_state, acc_state, elected_history>>
 
 \*******************************************************************************
 \* Final spec
@@ -351,19 +374,22 @@ Next ==
   \/ \E p \in proposers: \E a \in acceptors: AppendEntry(p, a)
   \/ \E q \in Quorums: \E p \in proposers: CommitEntries(p, q)
 
-Spec == Init /\ [][Next]_<<prop_state, acc_state, committed>>
+Spec == Init /\ [][Next]_<<prop_state, acc_state, committed, elected_history>>
 
 
 \********************************************************************************
 \* Invariants
 \********************************************************************************
 
-\* we don't track history, but this property is fairly convincing anyway
+\* Lighter version of ElectionSafetyFull which doesn't require elected_history.
 ElectionSafety ==
   \A p1, p2 \in proposers:
     (/\ prop_state[p1].state = "leader"
      /\ prop_state[p2].state = "leader"
      /\ prop_state[p1].term = prop_state[p2].term) => (p1 = p2)
+
+\* Single term must never be elected more than once.
+ElectionSafetyFull == \A term \in DOMAIN elected_history: elected_history[term] <= 1
 
 LogIsMonotonic ==
   \A a \in acceptors:
