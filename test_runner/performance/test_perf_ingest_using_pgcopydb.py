@@ -248,7 +248,7 @@ def report_metrics_to_db(metrics):
             conn.commit()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def log_file_path(tmp_path):
     """Fixture to provide a temporary log file path."""
     if not os.getenv("TARGET_PROJECT_TYPE"):
