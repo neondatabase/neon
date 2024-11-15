@@ -54,6 +54,11 @@ jobs:
       # Hence keeping target/ (and general cache size) smaller
       BUILD_TYPE: release
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
       - name: Checkout with postgres-${{ matrix.postgres-version }} Submodule
         uses: actions/checkout@v4
         with:
