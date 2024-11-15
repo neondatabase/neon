@@ -1366,7 +1366,7 @@ RUN mkdir /ext-src
 #COPY --from=postgis-build /postgis.tar.gz /ext-src/
 #COPY --from=postgis-build /sfcgal/* /usr
 COPY --from=plv8-build /plv8.tar.gz /ext-src/
-COPY --from=h3-pg-build /h3-pg.tar.gz /ext-src/
+#COPY --from=h3-pg-build /h3-pg.tar.gz /ext-src/
 COPY --from=unit-pg-build /postgresql-unit.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.patch /ext-src/
