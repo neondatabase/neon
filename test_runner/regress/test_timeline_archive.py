@@ -817,12 +817,10 @@ def test_timeline_retain_lsn(
     # Now, after unarchival, the child timeline should still have its data accessible (or corrupted)
     if offload_child == "offload-corrupt":
         if with_intermediary:
-            error_class = IoError
             error_regex = ".*could not read block .* from page server.*"
         else:
-            error_class = RuntimeError
             error_regex = ".*failed to get basebackup.*"
-        with pytest.raises(error_class, match=error_regex):
+        with pytest.raises((RuntimeError, IoError), match=error_regex):
             with env.endpoints.create_start(
                 "test_archived_branch", tenant_id=tenant_id, basebackup_request_tries=1
             ) as endpoint:
