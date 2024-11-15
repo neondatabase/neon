@@ -2,14 +2,14 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlparse
 
-import psycopg2
 import pytest
+from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.utils import humantime_to_ms
+
 
 def setup_environment():
     """Set up necessary environment variables for pgcopydb execution.
@@ -74,7 +74,8 @@ def build_pgcopydb_command(pgcopydb_filter_file: Path, test_output_dir: Path):
         str(pgcopydb_filter_file),
     ]
 
-@pytest.fixture() # must be function scoped because test_output_dir is function scoped
+
+@pytest.fixture()  # must be function scoped because test_output_dir is function scoped
 def pgcopydb_filter_file(test_output_dir: Path) -> Path:
     """Creates the pgcopydb_filter.txt file required by pgcopydb."""
     filter_content = """\
@@ -159,7 +160,10 @@ def run_command_and_log_output(command, log_file_path: Path):
         if process.returncode != 0:
             raise subprocess.CalledProcessError(process.returncode, command)
 
-def parse_log_and_report_metrics(log_file_path: Path, backpressure_time_diff: float):
+
+def parse_log_and_report_metrics(
+    zenbenchmark: NeonBenchmarker, log_file_path: Path, backpressure_time_diff: float
+):
     """Parses the pgcopydb log file for performance metrics and reports them to the database."""
     metrics = {"backpressure_time": backpressure_time_diff}
 
@@ -184,13 +188,23 @@ def parse_log_and_report_metrics(log_file_path: Path, backpressure_time_diff: fl
                     duration_match = re.search(r"\d+h\d+m|\d+s|\d+ms|\d+\.\d+s", line)
                     if duration_match:
                         duration_str = duration_match.group(0)
-                        parts = re.findall(r'\d+[a-zA-Z]+', duration_str)
-                        rust_like_humantime = ' '.join(parts)
-                        duration_seconds = humantime_to_ms(rust_like_humantime)/1000.0
+                        parts = re.findall(r"\d+[a-zA-Z]+", duration_str)
+                        rust_like_humantime = " ".join(parts)
+                        duration_seconds = humantime_to_ms(rust_like_humantime) / 1000.0
                         metrics[metric_name] = duration_seconds
 
-    # Report metrics to the database
-    report_metrics_to_db(metrics)
+    endpoint_id = get_endpoint_id()
+    for metric_name, duration_seconds in metrics.items():
+        zenbenchmark.record(
+            metric_name, duration_seconds, "s", MetricReport.LOWER_IS_BETTER, endpoint_id
+        )
+
+    # make sure we report project type as part of platform in NeonBenchmarker report
+    project_type = os.getenv("TARGET_PROJECT_TYPE")
+    if not project_type:
+        raise OSError("TARGET_PROJECT_TYPE environment variable is not set.")
+    platform = f"pg16-{project_type}-us-east-2-staging"
+    os.environ["PLATFORM"] = platform
 
 
 def get_endpoint_id():
@@ -213,46 +227,7 @@ def get_endpoint_id():
     return endpoint_id
 
 
-def report_metrics_to_db(metrics):
-    """Inserts parsed metrics into the performance database."""
-    # Connection string for the performance database
-    connstr = os.getenv("PERF_TEST_RESULT_CONNSTR")
-    if not connstr:
-        raise OSError("PERF_TEST_RESULT_CONNSTR environment variable is not set.")
-    commit_hash = os.getenv("COMMIT_HASH")
-    if not commit_hash:
-        raise OSError("COMMIT_HASH environment variable is not set.")
-    endpoint_id = get_endpoint_id()
-    project_type = os.getenv("TARGET_PROJECT_TYPE")
-    if not project_type:
-        raise OSError("TARGET_PROJECT_TYPE environment variable is not set.")
-    platform = f"pg16-{project_type}-us-east-2-staging"
-
-    # Connect to the database
-    with psycopg2.connect(connstr) as conn:
-        with conn.cursor() as cur:
-            for metric_name, metric_value in metrics.items():
-                cur.execute(
-                    """
-                    INSERT INTO public.perf_test_results (suit, revision, platform, metric_name, metric_value, metric_unit, metric_report_type, recorded_at_timestamp, label_1)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                    (
-                        "pgcopydb_ingest_bench_test",  # Suit
-                        commit_hash,  # Revision (example value, replace as needed)
-                        platform,
-                        metric_name,
-                        metric_value,  # in seconds
-                        "seconds",  # Metric unit
-                        "lower_is_better",  # Metric report type
-                        datetime.now(),  # Recorded timestamp
-                        endpoint_id,  # Label 1
-                    ),
-                )
-            conn.commit()
-
-
-@pytest.fixture() # must be function scoped because test_output_dir is function scoped
+@pytest.fixture()  # must be function scoped because test_output_dir is function scoped
 def log_file_path(test_output_dir):
     """Fixture to provide a temporary log file path."""
     if not os.getenv("TARGET_PROJECT_TYPE"):
@@ -261,7 +236,12 @@ def log_file_path(test_output_dir):
 
 
 @pytest.mark.remote_cluster
-def test_ingest_performance_using_pgcopydb(log_file_path: Path, pgcopydb_filter_file: Path, test_output_dir: Path):
+def test_ingest_performance_using_pgcopydb(
+    zenbenchmark: NeonBenchmarker,
+    log_file_path: Path,
+    pgcopydb_filter_file: Path,
+    test_output_dir: Path,
+):
     """
     Simulate project migration from another PostgreSQL provider to Neon.
 
@@ -292,7 +272,7 @@ def test_ingest_performance_using_pgcopydb(log_file_path: Path, pgcopydb_filter_
     backpressure_time_diff = backpressure_time_after - backpressure_time_before
 
     # Parse log file and report metrics, including backpressure time difference
-    parse_log_and_report_metrics(log_file_path, backpressure_time_diff)
+    parse_log_and_report_metrics(zenbenchmark, log_file_path, backpressure_time_diff)
 
     # Check log file creation and content
     assert log_file_path.exists(), "Log file should be created"

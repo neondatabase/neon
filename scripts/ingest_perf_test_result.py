@@ -92,6 +92,7 @@ def ingest_perf_test_result(cursor, data_file: Path, recorded_at_timestamp: int)
                 "metric_unit": metric["unit"],
                 "metric_report_type": metric["report"],
                 "recorded_at_timestamp": datetime.utcfromtimestamp(recorded_at_timestamp),
+                "label_1": metric.get("label"),
             }
             args_list.append(values)
 
@@ -106,7 +107,8 @@ def ingest_perf_test_result(cursor, data_file: Path, recorded_at_timestamp: int)
             metric_value,
             metric_unit,
             metric_report_type,
-            recorded_at_timestamp
+            recorded_at_timestamp,
+            label_1
         ) VALUES %s
         """,
         args_list,
@@ -118,7 +120,8 @@ def ingest_perf_test_result(cursor, data_file: Path, recorded_at_timestamp: int)
             %(metric_value)s,
             %(metric_unit)s,
             %(metric_report_type)s,
-            %(recorded_at_timestamp)s
+            %(recorded_at_timestamp)s,
+            %(label_1)s
         )""",
     )
     return len(args_list)

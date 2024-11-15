@@ -256,6 +256,9 @@ class NeonBenchmarker:
         metric_value: float,
         unit: str,
         report: MetricReport,
+        label: Optional[
+            str
+        ] = None,  # use this to assocaite additional Neon object IDs like project ID with the metric
     ):
         """
         Record a benchmark result.
@@ -269,6 +272,7 @@ class NeonBenchmarker:
                 "value": metric_value,
                 "unit": unit,
                 "report": report,
+                "label": label,
             },
         )
 
