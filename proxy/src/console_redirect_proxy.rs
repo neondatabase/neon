@@ -156,16 +156,21 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let request_gauge = metrics.connection_requests.guard(proto);
 
     let tls = config.tls_config.as_ref();
-
     let record_handshake_error = !ctx.has_private_peer_addr();
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
     let do_handshake = handshake(ctx, stream, tls, record_handshake_error);
+
     let (mut stream, params) =
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
             HandshakeData::Startup(stream, params) => (stream, params),
             HandshakeData::Cancel(cancel_key_data) => {
                 return Ok(cancellation_handler
-                    .cancel_session(cancel_key_data, ctx.session_id())
+                    .cancel_session(
+                        cancel_key_data,
+                        ctx.session_id(),
+                        &ctx.peer_addr(),
+                        config.authentication_config.ip_allowlist_check_enabled,
+                    )
                     .await
                     .map(|()| None)?)
             }
@@ -174,7 +179,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     ctx.set_db_options(params.clone());
 
-    let user_info = match backend
+    let (user_info, ip_allowlist) = match backend
         .authenticate(ctx, &config.authentication_config, &mut stream)
         .await
     {
@@ -198,6 +203,8 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     .or_else(|e| stream.throw_error(e))
     .await?;
 
+    node.cancel_closure
+        .set_ip_allowlist(ip_allowlist.unwrap_or_default());
     let session = cancellation_handler.get_session();
     prepare_client_connection(&node, &session, &mut stream).await?;
 
