@@ -14,6 +14,7 @@ use itertools::Itertools as _;
 use pageserver_api::models::TenantState;
 use remote_storage::{GenericRemoteStorage, RemoteStorageConfig};
 use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -35,12 +36,62 @@ const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// upload attempts.
 type RawMetric = (MetricsKey, (EventType, u64));
 
+/// The new serializable metrics format
+#[derive(Serialize, Deserialize)]
+struct NewMetricsRoot {
+    version: usize,
+    metrics: Vec<NewRawMetric>,
+}
+
+impl NewMetricsRoot {
+    pub fn is_v2_metrics(json_value: &serde_json::Value) -> bool {
+        if let Some(ver) = json_value.get("version") {
+            if let Some(2) = ver.as_u64() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// The new serializable metrics format
+#[derive(Serialize)]
+struct NewMetricsRefRoot<'a> {
+    version: usize,
+    metrics: &'a [NewRawMetric],
+}
+
+impl<'a> NewMetricsRefRoot<'a> {
+    fn new(metrics: &'a [NewRawMetric]) -> Self {
+        Self {
+            version: 2,
+            metrics,
+        }
+    }
+}
+
+/// The new serializable metrics format
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct NewRawMetric {
+    key: MetricsKey,
+    kind: EventType,
+    value: u64,
+    // TODO: add generation field and check against generations
+}
+
+impl NewRawMetric {
+    #[cfg(test)]
+    fn to_kv_pair(&self) -> (MetricsKey, NewRawMetric) {
+        (self.key, self.clone())
+    }
+}
+
 /// Caches the [`RawMetric`]s
 ///
 /// In practice, during startup, last sent values are stored here to be used in calculating new
 /// ones. After successful uploading, the cached values are updated to cache. This used to be used
 /// for deduplication, but that is no longer needed.
-type Cache = HashMap<MetricsKey, (EventType, u64)>;
+type Cache = HashMap<MetricsKey, NewRawMetric>;
 
 pub async fn run(
     conf: &'static PageServerConf,
@@ -231,11 +282,14 @@ async fn restore_and_reschedule(
             // collect_all_metrics
             let earlier_metric_at = found_some
                 .iter()
-                .map(|(_, (et, _))| et.recorded_at())
+                .map(|item| item.kind.recorded_at())
                 .copied()
                 .next();
 
-            let cached = found_some.into_iter().collect::<Cache>();
+            let cached = found_some
+                .into_iter()
+                .map(|item| (item.key, item))
+                .collect::<Cache>();
 
             (cached, earlier_metric_at)
         }

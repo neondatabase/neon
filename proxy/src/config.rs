@@ -1,28 +1,26 @@
-use crate::{
-    auth::backend::{jwt::JwkCache, AuthRateLimiter},
-    control_plane::locks::ApiLocks,
-    rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig},
-    scram::threadpool::ThreadPool,
-    serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},
-    Host,
-};
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::{bail, ensure, Context, Ok};
 use clap::ValueEnum;
 use itertools::Itertools;
 use remote_storage::RemoteStorageConfig;
-use rustls::{
-    crypto::ring::sign,
-    pki_types::{CertificateDer, PrivateKeyDer},
-};
+use rustls::crypto::ring::{self, sign};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::{HashMap, HashSet},
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
-};
 use tracing::{error, info};
 use x509_parser::oid_registry;
+
+use crate::auth::backend::jwt::JwkCache;
+use crate::auth::backend::AuthRateLimiter;
+use crate::control_plane::locks::ApiLocks;
+use crate::rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig};
+use crate::scram::threadpool::ThreadPool;
+use crate::serverless::cancel_set::CancelSet;
+use crate::serverless::GlobalConnPoolOptions;
+use crate::types::Host;
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
@@ -80,7 +78,7 @@ pub struct AuthenticationConfig {
     pub jwks_cache: JwkCache,
     pub is_auth_broker: bool,
     pub accept_jwts: bool,
-    pub webauth_confirmation_timeout: tokio::time::Duration,
+    pub console_redirect_confirmation_timeout: tokio::time::Duration,
 }
 
 impl TlsConfig {
@@ -128,12 +126,12 @@ pub fn configure_tls(
     let cert_resolver = Arc::new(cert_resolver);
 
     // allow TLS 1.2 to be compatible with older client libraries
-    let mut config = rustls::ServerConfig::builder_with_protocol_versions(&[
-        &rustls::version::TLS13,
-        &rustls::version::TLS12,
-    ])
-    .with_no_client_auth()
-    .with_cert_resolver(cert_resolver.clone());
+    let mut config =
+        rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+            .context("ring should support TLS1.2 and TLS1.3")?
+            .with_no_client_auth()
+            .with_cert_resolver(cert_resolver.clone());
 
     config.alpn_protocols = vec![PG_ALPN_PROTOCOL.to_vec()];
 
@@ -273,7 +271,7 @@ impl CertResolver {
         // auth-broker does not use SNI and instead uses the Neon-Connection-String header.
         // Auth broker has the subdomain `apiauth` we need to remove for the purposes of validating the Neon-Connection-String.
         //
-        // Console Web proxy does not use any wildcard domains and does not need any certificate selection or conn string
+        // Console Redirect proxy does not use any wildcard domains and does not need any certificate selection or conn string
         // validation, so let's we can continue with any common-name
         let common_name = if let Some(s) = common_name.strip_prefix("CN=*.") {
             s.to_string()
@@ -368,7 +366,7 @@ pub struct EndpointCacheConfig {
 }
 
 impl EndpointCacheConfig {
-    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::NodeInfoCache`].
     /// Notice that by default the limiter is empty, which means that cache is disabled.
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
         "initial_batch_size=1000,default_batch_size=10,xread_timeout=5m,stream_name=controlPlane,disable_cache=true,limiter_info=1000@1s,retry_interval=1s";
@@ -443,7 +441,7 @@ pub struct CacheOptions {
 }
 
 impl CacheOptions {
-    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::NodeInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=4000,ttl=4m";
 
     /// Parse cache options passed via cmdline.
@@ -499,7 +497,7 @@ pub struct ProjectInfoCacheOptions {
 }
 
 impl ProjectInfoCacheOptions {
-    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::NodeInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
         "size=10000,ttl=4m,max_roles=10,gc_interval=60m";
 
@@ -560,7 +558,7 @@ pub struct RetryConfig {
 }
 
 impl RetryConfig {
-    /// Default options for RetryConfig.
+    // Default options for RetryConfig.
 
     /// Total delay for 5 retries with 200ms base delay and 2 backoff factor is about 6s.
     pub const CONNECT_TO_COMPUTE_DEFAULT_VALUES: &'static str =
@@ -618,9 +616,9 @@ pub struct ConcurrencyLockOptions {
 }
 
 impl ConcurrencyLockOptions {
-    /// Default options for [`crate::control_plane::provider::ApiLocks`].
+    /// Default options for [`crate::control_plane::client::ApiLocks`].
     pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "permits=0";
-    /// Default options for [`crate::control_plane::provider::ApiLocks`].
+    /// Default options for [`crate::control_plane::client::ApiLocks`].
     pub const DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK: &'static str =
         "shards=64,permits=100,epoch=10m,timeout=10ms";
 
@@ -692,9 +690,8 @@ impl FromStr for ConcurrencyLockOptions {
 
 #[cfg(test)]
 mod tests {
-    use crate::rate_limiter::Aimd;
-
     use super::*;
+    use crate::rate_limiter::Aimd;
 
     #[test]
     fn test_parse_cache_options() -> anyhow::Result<()> {

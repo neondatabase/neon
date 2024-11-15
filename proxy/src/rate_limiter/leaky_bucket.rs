@@ -1,7 +1,5 @@
-use std::{
-    hash::Hash,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::hash::Hash;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ahash::RandomState;
 use dashmap::DashMap;

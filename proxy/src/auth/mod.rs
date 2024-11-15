@@ -14,24 +14,25 @@ pub(crate) use password_hack::parse_endpoint_param;
 use password_hack::PasswordHackPayload;
 
 mod flow;
+use std::io;
+use std::net::IpAddr;
+
 pub(crate) use flow::*;
+use thiserror::Error;
 use tokio::time::error::Elapsed;
 
-use crate::{
-    control_plane,
-    error::{ReportableError, UserFacingError},
-};
-use std::{io, net::IpAddr};
-use thiserror::Error;
+use crate::auth::backend::jwt::JwtError;
+use crate::control_plane;
+use crate::error::{ReportableError, UserFacingError};
 
 /// Convenience wrapper for the authentication error.
 pub(crate) type Result<T> = std::result::Result<T, AuthError>;
 
 /// Common authentication error.
 #[derive(Debug, Error)]
-pub(crate) enum AuthErrorImpl {
+pub(crate) enum AuthError {
     #[error(transparent)]
-    Web(#[from] backend::WebAuthError),
+    ConsoleRedirect(#[from] backend::ConsoleRedirectError),
 
     #[error(transparent)]
     GetAuthInfo(#[from] control_plane::errors::GetAuthInfoError),
@@ -55,7 +56,7 @@ pub(crate) enum AuthErrorImpl {
     MissingEndpointName,
 
     #[error("password authentication failed for user '{0}'")]
-    AuthFailed(Box<str>),
+    PasswordFailed(Box<str>),
 
     /// Errors produced by e.g. [`crate::stream::PqStream`].
     #[error(transparent)]
@@ -76,82 +77,77 @@ pub(crate) enum AuthErrorImpl {
 
     #[error("Disconnected due to inactivity after {0}.")]
     ConfirmationTimeout(humantime::Duration),
-}
 
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub(crate) struct AuthError(Box<AuthErrorImpl>);
+    #[error(transparent)]
+    Jwt(#[from] JwtError),
+}
 
 impl AuthError {
     pub(crate) fn bad_auth_method(name: impl Into<Box<str>>) -> Self {
-        AuthErrorImpl::BadAuthMethod(name.into()).into()
+        AuthError::BadAuthMethod(name.into())
     }
 
-    pub(crate) fn auth_failed(user: impl Into<Box<str>>) -> Self {
-        AuthErrorImpl::AuthFailed(user.into()).into()
+    pub(crate) fn password_failed(user: impl Into<Box<str>>) -> Self {
+        AuthError::PasswordFailed(user.into())
     }
 
     pub(crate) fn ip_address_not_allowed(ip: IpAddr) -> Self {
-        AuthErrorImpl::IpAddressNotAllowed(ip).into()
+        AuthError::IpAddressNotAllowed(ip)
     }
 
     pub(crate) fn too_many_connections() -> Self {
-        AuthErrorImpl::TooManyConnections.into()
+        AuthError::TooManyConnections
     }
 
-    pub(crate) fn is_auth_failed(&self) -> bool {
-        matches!(self.0.as_ref(), AuthErrorImpl::AuthFailed(_))
+    pub(crate) fn is_password_failed(&self) -> bool {
+        matches!(self, AuthError::PasswordFailed(_))
     }
 
     pub(crate) fn user_timeout(elapsed: Elapsed) -> Self {
-        AuthErrorImpl::UserTimeout(elapsed).into()
+        AuthError::UserTimeout(elapsed)
     }
 
     pub(crate) fn confirmation_timeout(timeout: humantime::Duration) -> Self {
-        AuthErrorImpl::ConfirmationTimeout(timeout).into()
-    }
-}
-
-impl<E: Into<AuthErrorImpl>> From<E> for AuthError {
-    fn from(e: E) -> Self {
-        Self(Box::new(e.into()))
+        AuthError::ConfirmationTimeout(timeout)
     }
 }
 
 impl UserFacingError for AuthError {
     fn to_string_client(&self) -> String {
-        match self.0.as_ref() {
-            AuthErrorImpl::Web(e) => e.to_string_client(),
-            AuthErrorImpl::GetAuthInfo(e) => e.to_string_client(),
-            AuthErrorImpl::Sasl(e) => e.to_string_client(),
-            AuthErrorImpl::AuthFailed(_) => self.to_string(),
-            AuthErrorImpl::BadAuthMethod(_) => self.to_string(),
-            AuthErrorImpl::MalformedPassword(_) => self.to_string(),
-            AuthErrorImpl::MissingEndpointName => self.to_string(),
-            AuthErrorImpl::Io(_) => "Internal error".to_string(),
-            AuthErrorImpl::IpAddressNotAllowed(_) => self.to_string(),
-            AuthErrorImpl::TooManyConnections => self.to_string(),
-            AuthErrorImpl::UserTimeout(_) => self.to_string(),
-            AuthErrorImpl::ConfirmationTimeout(_) => self.to_string(),
+        match self {
+            Self::ConsoleRedirect(e) => e.to_string_client(),
+            Self::GetAuthInfo(e) => e.to_string_client(),
+            Self::Sasl(e) => e.to_string_client(),
+            Self::PasswordFailed(_) => self.to_string(),
+            Self::BadAuthMethod(_) => self.to_string(),
+            Self::MalformedPassword(_) => self.to_string(),
+            Self::MissingEndpointName => self.to_string(),
+            Self::Io(_) => "Internal error".to_string(),
+            Self::IpAddressNotAllowed(_) => self.to_string(),
+            Self::TooManyConnections => self.to_string(),
+            Self::UserTimeout(_) => self.to_string(),
+            Self::ConfirmationTimeout(_) => self.to_string(),
+            Self::Jwt(_) => self.to_string(),
         }
     }
 }
 
 impl ReportableError for AuthError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
-        match self.0.as_ref() {
-            AuthErrorImpl::Web(e) => e.get_error_kind(),
-            AuthErrorImpl::GetAuthInfo(e) => e.get_error_kind(),
-            AuthErrorImpl::Sasl(e) => e.get_error_kind(),
-            AuthErrorImpl::AuthFailed(_) => crate::error::ErrorKind::User,
-            AuthErrorImpl::BadAuthMethod(_) => crate::error::ErrorKind::User,
-            AuthErrorImpl::MalformedPassword(_) => crate::error::ErrorKind::User,
-            AuthErrorImpl::MissingEndpointName => crate::error::ErrorKind::User,
-            AuthErrorImpl::Io(_) => crate::error::ErrorKind::ClientDisconnect,
-            AuthErrorImpl::IpAddressNotAllowed(_) => crate::error::ErrorKind::User,
-            AuthErrorImpl::TooManyConnections => crate::error::ErrorKind::RateLimit,
-            AuthErrorImpl::UserTimeout(_) => crate::error::ErrorKind::User,
-            AuthErrorImpl::ConfirmationTimeout(_) => crate::error::ErrorKind::User,
+        match self {
+            Self::ConsoleRedirect(e) => e.get_error_kind(),
+            Self::GetAuthInfo(e) => e.get_error_kind(),
+            Self::Sasl(e) => e.get_error_kind(),
+            Self::PasswordFailed(_) => crate::error::ErrorKind::User,
+            Self::BadAuthMethod(_) => crate::error::ErrorKind::User,
+            Self::MalformedPassword(_) => crate::error::ErrorKind::User,
+            Self::MissingEndpointName => crate::error::ErrorKind::User,
+            Self::Io(_) => crate::error::ErrorKind::ClientDisconnect,
+            Self::IpAddressNotAllowed(_) => crate::error::ErrorKind::User,
+            Self::TooManyConnections => crate::error::ErrorKind::RateLimit,
+            Self::UserTimeout(_) => crate::error::ErrorKind::User,
+            Self::ConfirmationTimeout(_) => crate::error::ErrorKind::User,
+            Self::Jwt(_) => crate::error::ErrorKind::User,
         }
     }
 }

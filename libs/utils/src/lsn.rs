@@ -12,7 +12,7 @@ use crate::seqwait::MonotonicCounter;
 pub const XLOG_BLCKSZ: u32 = 8192;
 
 /// A Postgres LSN (Log Sequence Number), also known as an XLogRecPtr
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash)]
+#[derive(Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct Lsn(pub u64);
 
 impl Serialize for Lsn {
@@ -37,7 +37,7 @@ impl<'de> Deserialize<'de> for Lsn {
             is_human_readable_deserializer: bool,
         }
 
-        impl<'de> Visitor<'de> for LsnVisitor {
+        impl Visitor<'_> for LsnVisitor {
             type Value = Lsn;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -136,6 +136,11 @@ impl Lsn {
     pub fn checked_sub<T: Into<u64>>(self, other: T) -> Option<Lsn> {
         let other: u64 = other.into();
         self.0.checked_sub(other).map(Lsn)
+    }
+
+    /// Subtract a number, saturating at numeric bounds instead of overflowing.
+    pub fn saturating_sub<T: Into<u64>>(self, other: T) -> Lsn {
+        Lsn(self.0.saturating_sub(other.into()))
     }
 
     /// Subtract a number, returning the difference as i128 to avoid overflow.

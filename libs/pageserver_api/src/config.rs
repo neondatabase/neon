@@ -64,6 +64,7 @@ pub struct ConfigToml {
     #[serde(with = "humantime_serde")]
     pub wal_redo_timeout: Duration,
     pub superuser: String,
+    pub locale: String,
     pub page_cache_size: usize,
     pub max_file_descriptors: usize,
     pub pg_distrib_dir: Option<Utf8PathBuf>,
@@ -102,9 +103,12 @@ pub struct ConfigToml {
     pub ingest_batch_size: u64,
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
     pub image_compression: ImageCompressionAlgorithm,
+    pub timeline_offloading: bool,
     pub ephemeral_bytes_per_memory_kb: usize,
     pub l0_flush: Option<crate::models::L0FlushConfig>,
     pub virtual_file_io_mode: Option<crate::models::virtual_file::IoMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_sync: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -249,12 +253,6 @@ pub struct TenantConfigToml {
     // Expresed in multiples of checkpoint distance.
     pub image_layer_creation_check_threshold: u8,
 
-    /// Switch to a new aux file policy. Switching this flag requires the user has not written any aux file into
-    /// the storage before, and this flag cannot be switched back. Otherwise there will be data corruptions.
-    /// There is a `last_aux_file_policy` flag which gets persisted in `index_part.json` once the first aux
-    /// file is written.
-    pub switch_aux_file_policy: crate::models::AuxFilePolicy,
-
     /// The length for an explicit LSN lease request.
     /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
     #[serde(with = "humantime_serde")]
@@ -264,6 +262,10 @@ pub struct TenantConfigToml {
     /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
     #[serde(with = "humantime_serde")]
     pub lsn_lease_length_for_ts: Duration,
+
+    /// Enable auto-offloading of timelines.
+    /// (either this flag or the pageserver-global one need to be set)
+    pub timeline_offloading: bool,
 }
 
 pub mod defaults {
@@ -275,6 +277,11 @@ pub mod defaults {
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
 
     pub const DEFAULT_SUPERUSER: &str = "cloud_admin";
+    pub const DEFAULT_LOCALE: &str = if cfg!(target_os = "macos") {
+        "C"
+    } else {
+        "C.UTF-8"
+    };
 
     pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
     pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
@@ -325,6 +332,7 @@ impl Default for ConfigToml {
             wal_redo_timeout: (humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)
                 .expect("cannot parse default wal redo timeout")),
             superuser: (DEFAULT_SUPERUSER.to_string()),
+            locale: DEFAULT_LOCALE.to_string(),
             page_cache_size: (DEFAULT_PAGE_CACHE_SIZE),
             max_file_descriptors: (DEFAULT_MAX_FILE_DESCRIPTORS),
             pg_distrib_dir: None, // Utf8PathBuf::from("./pg_install"), // TODO: formely, this was std::env::current_dir()
@@ -385,10 +393,12 @@ impl Default for ConfigToml {
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
             image_compression: (DEFAULT_IMAGE_COMPRESSION),
+            timeline_offloading: false,
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: None,
             virtual_file_io_mode: None,
             tenant_config: TenantConfigToml::default(),
+            no_sync: None,
         }
     }
 }
@@ -473,9 +483,9 @@ impl Default for TenantConfigToml {
             lazy_slru_download: false,
             timeline_get_throttle: crate::models::ThrottleConfig::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
-            switch_aux_file_policy: crate::models::AuxFilePolicy::default_tenant_config(),
             lsn_lease_length: LsnLease::DEFAULT_LENGTH,
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
+            timeline_offloading: false,
         }
     }
 }

@@ -246,6 +246,11 @@ fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
             // storage controller's auth configuration.
             ApiError::InternalServerError(anyhow::anyhow!("{node} {status}: {msg}"))
         }
+        mgmt_api::Error::ApiError(status @ StatusCode::TOO_MANY_REQUESTS, msg) => {
+            // Pass through 429 errors: if pageserver is asking us to wait + retry, we in
+            // turn ask our clients to wait + retry
+            ApiError::Conflict(format!("{node} {status}: {status} {msg}"))
+        }
         mgmt_api::Error::ApiError(status, msg) => {
             // Presume general case of pageserver API errors is that we tried to do something
             // that can't be done right now.
@@ -929,7 +934,6 @@ impl Service {
         self.startup_complete.clone().wait().await;
 
         const BACKGROUND_RECONCILE_PERIOD: Duration = Duration::from_secs(20);
-
         let mut interval = tokio::time::interval(BACKGROUND_RECONCILE_PERIOD);
         while !self.reconcilers_cancel.is_cancelled() {
             tokio::select! {
@@ -1069,8 +1073,9 @@ impl Service {
     /// the observed state of the tenant such that subsequent calls to [`TenantShard::get_reconcile_needed`]
     /// will indicate that reconciliation is not needed.
     #[instrument(skip_all, fields(
-        tenant_id=%result.tenant_shard_id.tenant_id, shard_id=%result.tenant_shard_id.shard_slug(),
-        sequence=%result.sequence
+        seq=%result.sequence,
+        tenant_id=%result.tenant_shard_id.tenant_id,
+        shard_id=%result.tenant_shard_id.shard_slug(),
     ))]
     fn process_result(&self, result: ReconcileResult) {
         let mut locked = self.inner.write().unwrap();
@@ -1266,6 +1271,10 @@ impl Service {
             .collect::<Vec<_>>();
         let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.get_id(), n)).collect();
         tracing::info!("Loaded {} nodes from database.", nodes.len());
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pageserver_nodes
+            .set(nodes.len() as i64);
 
         tracing::info!("Loading shards from database...");
         let mut tenant_shard_persistence = persistence.list_tenant_shards().await?;
@@ -2856,17 +2865,12 @@ impl Service {
         let _tenant_lock =
             trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
 
-        // Detach all shards
-        let (detach_waiters, shard_ids, node) = {
-            let mut shard_ids = Vec::new();
+        // Detach all shards. This also deletes local pageserver shard data.
+        let (detach_waiters, node) = {
             let mut detach_waiters = Vec::new();
             let mut locked = self.inner.write().unwrap();
             let (nodes, tenants, scheduler) = locked.parts_mut();
-            for (tenant_shard_id, shard) in
-                tenants.range_mut(TenantShardId::tenant_range(tenant_id))
-            {
-                shard_ids.push(*tenant_shard_id);
-
+            for (_, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
                 // Update the tenant's intent to remove all attachments
                 shard.policy = PlacementPolicy::Detached;
                 shard
@@ -2886,7 +2890,7 @@ impl Service {
             let node = nodes
                 .get(&node_id)
                 .expect("Pageservers may not be deleted while lock is active");
-            (detach_waiters, shard_ids, node.clone())
+            (detach_waiters, node.clone())
         };
 
         // This reconcile wait can fail in a few ways:
@@ -2901,38 +2905,34 @@ impl Service {
         self.await_waiters(detach_waiters, RECONCILE_TIMEOUT)
             .await?;
 
-        let locations = shard_ids
-            .into_iter()
-            .map(|s| (s, node.clone()))
-            .collect::<Vec<_>>();
-        let results = self.tenant_for_shards_api(
-            locations,
-            |tenant_shard_id, client| async move { client.tenant_delete(tenant_shard_id).await },
-            1,
-            3,
-            RECONCILE_TIMEOUT,
-            &self.cancel,
-        )
-        .await;
-        for result in results {
-            match result {
-                Ok(StatusCode::ACCEPTED) => {
-                    // This should never happen: we waited for detaches to finish above
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                        "Unexpectedly still attached on {}",
-                        node
-                    )));
-                }
-                Ok(_) => {}
-                Err(mgmt_api::Error::Cancelled) => {
-                    return Err(ApiError::ShuttingDown);
-                }
-                Err(e) => {
-                    // This is unexpected: remote deletion should be infallible, unless the object store
-                    // at large is unavailable.
-                    tracing::error!("Error deleting via node {}: {e}", node);
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(e)));
-                }
+        // Delete the entire tenant (all shards) from remote storage via a random pageserver.
+        // Passing an unsharded tenant ID will cause the pageserver to remove all remote paths with
+        // the tenant ID prefix, including all shards (even possibly stale ones).
+        match node
+            .with_client_retries(
+                |client| async move {
+                    client
+                        .tenant_delete(TenantShardId::unsharded(tenant_id))
+                        .await
+                },
+                &self.config.jwt_token,
+                1,
+                3,
+                RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await
+            .unwrap_or(Err(mgmt_api::Error::Cancelled))
+        {
+            Ok(_) => {}
+            Err(mgmt_api::Error::Cancelled) => {
+                return Err(ApiError::ShuttingDown);
+            }
+            Err(e) => {
+                // This is unexpected: remote deletion should be infallible, unless the object store
+                // at large is unavailable.
+                tracing::error!("Error deleting via node {node}: {e}");
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(e)));
             }
         }
 
@@ -3130,9 +3130,11 @@ impl Service {
             .await?;
 
             // Propagate the LSN that shard zero picked, if caller didn't provide one
-            if create_req.ancestor_timeline_id.is_some() && create_req.ancestor_start_lsn.is_none()
-            {
-                create_req.ancestor_start_lsn = timeline_info.ancestor_lsn;
+            match &mut create_req.mode {
+                models::TimelineCreateRequestMode::Branch { ancestor_start_lsn, .. } if ancestor_start_lsn.is_none() => {
+                    *ancestor_start_lsn = timeline_info.ancestor_lsn;
+                },
+                _ => {}
             }
 
             // Create timeline on remaining shards with number >0
@@ -3633,14 +3635,22 @@ impl Service {
                 );
 
                 let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
-                client
+                let res = client
                     .timeline_delete(tenant_shard_id, timeline_id)
-                    .await
-                    .map_err(|e| {
-                        ApiError::InternalServerError(anyhow::anyhow!(
-                            "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {node}: {e}",
-                        ))
-                    })
+                    .await;
+
+                match res {
+                    Ok(ok) => Ok(ok),
+                    Err(mgmt_api::Error::ApiError(StatusCode::CONFLICT, _)) => Ok(StatusCode::CONFLICT),
+                    Err(mgmt_api::Error::ApiError(StatusCode::SERVICE_UNAVAILABLE, msg)) => Err(ApiError::ResourceUnavailable(msg.into())),
+                    Err(e) => {
+                        Err(
+                            ApiError::InternalServerError(anyhow::anyhow!(
+                                "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {node}: {e}",
+                            ))
+                        )
+                    }
+                }
             }
 
             let locations = targets.0.iter().map(|t| (*t.0, t.1.latest.node.clone())).collect();
@@ -3655,7 +3665,13 @@ impl Service {
                 })
                 .await?;
 
-            // If any shards >0 haven't finished deletion yet, don't start deletion on shard zero
+            // If any shards >0 haven't finished deletion yet, don't start deletion on shard zero.
+            // We return 409 (Conflict) if deletion was already in progress on any of the shards
+            // and 202 (Accepted) if deletion was not already in progress on any of the shards.
+            if statuses.iter().any(|s| s == &StatusCode::CONFLICT) {
+                return Ok(StatusCode::CONFLICT);
+            }
+
             if statuses.iter().any(|s| s != &StatusCode::NOT_FOUND) {
                 return Ok(StatusCode::ACCEPTED);
             }
@@ -4100,9 +4116,9 @@ impl Service {
                     (
                         old_attached,
                         generation,
-                        old_state.policy,
+                        old_state.policy.clone(),
                         old_state.shard,
-                        old_state.config,
+                        old_state.config.clone(),
                     )
                 };
 
@@ -4819,6 +4835,43 @@ impl Service {
         Ok(TenantShardMigrateResponse {})
     }
 
+    /// 'cancel' in this context means cancel any ongoing reconcile
+    pub(crate) async fn tenant_shard_cancel_reconcile(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<(), ApiError> {
+        // Take state lock and fire the cancellation token, after which we drop lock and wait for any ongoing reconcile to complete
+        let waiter = {
+            let locked = self.inner.write().unwrap();
+            let Some(shard) = locked.tenants.get(&tenant_shard_id) else {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant shard not found").into(),
+                ));
+            };
+
+            let waiter = shard.get_waiter();
+            match waiter {
+                None => {
+                    tracing::info!("Shard does not have an ongoing Reconciler");
+                    return Ok(());
+                }
+                Some(waiter) => {
+                    tracing::info!("Cancelling Reconciler");
+                    shard.cancel_reconciler();
+                    waiter
+                }
+            }
+        };
+
+        // Cancellation should be prompt.  If this fails we have still done our job of firing the
+        // cancellation token, but by returning an ApiError we will indicate to the caller that
+        // the Reconciler is misbehaving and not respecting the cancellation token
+        self.await_waiters(vec![waiter], SHORT_RECONCILE_TIMEOUT)
+            .await?;
+
+        Ok(())
+    }
+
     /// This is for debug/support only: we simply drop all state for a tenant, without
     /// detaching or deleting it on pageservers.
     pub(crate) async fn tenant_drop(&self, tenant_id: TenantId) -> Result<(), ApiError> {
@@ -4906,16 +4959,7 @@ impl Service {
                     stripe_size,
                 },
                 placement_policy: Some(PlacementPolicy::Attached(0)), // No secondaries, for convenient debug/hacking
-
-                // There is no way to know what the tenant's config was: revert to defaults
-                //
-                // TODO: remove `switch_aux_file_policy` once we finish auxv2 migration
-                //
-                // we write to both v1+v2 storage, so that the test case can use either storage format for testing
-                config: TenantConfig {
-                    switch_aux_file_policy: Some(models::AuxFilePolicy::CrossValidation),
-                    ..TenantConfig::default()
-                },
+                config: TenantConfig::default(),
             })
             .await?;
 
@@ -5065,6 +5109,10 @@ impl Service {
         let mut nodes = (*locked.nodes).clone();
         nodes.remove(&node_id);
         locked.nodes = Arc::new(nodes);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pageserver_nodes
+            .set(locked.nodes.len() as i64);
 
         locked.scheduler.node_remove(node_id);
 
@@ -5148,6 +5196,10 @@ impl Service {
                     removed_node.set_availability(NodeAvailability::Offline);
                 }
                 *nodes = Arc::new(nodes_mut);
+                metrics::METRICS_REGISTRY
+                    .metrics_group
+                    .storage_controller_pageserver_nodes
+                    .set(nodes.len() as i64);
             }
         }
 
@@ -5335,6 +5387,11 @@ impl Service {
         new_nodes.insert(register_req.node_id, new_node);
 
         locked.nodes = Arc::new(new_nodes);
+
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pageserver_nodes
+            .set(locked.nodes.len() as i64);
 
         tracing::info!(
             "Registered pageserver {}, now have {} pageservers",
@@ -6299,6 +6356,19 @@ impl Service {
 
         // Pick the biggest tenant to split first
         top_n.sort_by_key(|i| i.resident_size);
+
+        // Filter out tenants in a prohibiting scheduling mode
+        {
+            let locked = self.inner.read().unwrap();
+            top_n.retain(|i| {
+                if let Some(shard) = locked.tenants.get(&i.id) {
+                    matches!(shard.get_scheduling_policy(), ShardSchedulingPolicy::Active)
+                } else {
+                    false
+                }
+            });
+        }
+
         let Some(split_candidate) = top_n.into_iter().next() else {
             tracing::debug!("No split-elegible shards found");
             return;
@@ -6665,6 +6735,16 @@ impl Service {
             .tenants
             .iter_mut()
             .filter_map(|(tid, tenant_shard)| {
+                if !matches!(
+                    tenant_shard.get_scheduling_policy(),
+                    ShardSchedulingPolicy::Active
+                ) {
+                    // Only include tenants in fills if they have a normal (Active) scheduling policy.  We
+                    // even exclude Essential, because moving to fill a node is not essential to keeping this
+                    // tenant available.
+                    return None;
+                }
+
                 if tenant_shard.intent.get_secondary().contains(&node_id) {
                     if let Some(primary) = tenant_shard.intent.get_attached() {
                         return Some((*primary, *tid));

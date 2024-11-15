@@ -1,15 +1,3 @@
-use crate::{
-    auth,
-    cache::Cached,
-    compute,
-    config::AuthenticationConfig,
-    context::RequestMonitoring,
-    control_plane::{self, provider::NodeInfo, CachedNodeInfo},
-    error::{ReportableError, UserFacingError},
-    proxy::connect_compute::ComputeConnectBackend,
-    stream::PqStream,
-    waiters,
-};
 use async_trait::async_trait;
 use pq_proto::BeMessage as Be;
 use thiserror::Error;
@@ -18,9 +6,17 @@ use tokio_postgres::config::SslMode;
 use tracing::{info, info_span};
 
 use super::ComputeCredentialKeys;
+use crate::cache::Cached;
+use crate::config::AuthenticationConfig;
+use crate::context::RequestMonitoring;
+use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
+use crate::error::{ReportableError, UserFacingError};
+use crate::proxy::connect_compute::ComputeConnectBackend;
+use crate::stream::PqStream;
+use crate::{auth, compute, waiters};
 
 #[derive(Debug, Error)]
-pub(crate) enum WebAuthError {
+pub(crate) enum ConsoleRedirectError {
     #[error(transparent)]
     WaiterRegister(#[from] waiters::RegisterError),
 
@@ -36,13 +32,13 @@ pub struct ConsoleRedirectBackend {
     console_uri: reqwest::Url,
 }
 
-impl UserFacingError for WebAuthError {
+impl UserFacingError for ConsoleRedirectError {
     fn to_string_client(&self) -> String {
         "Internal error".to_string()
     }
 }
 
-impl ReportableError for WebAuthError {
+impl ReportableError for ConsoleRedirectError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
             Self::WaiterRegister(_) => crate::error::ErrorKind::Service,
@@ -107,7 +103,7 @@ async fn authenticate(
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<NodeInfo> {
-    ctx.set_auth_method(crate::context::AuthMethod::Web);
+    ctx.set_auth_method(crate::context::AuthMethod::ConsoleRedirect);
 
     // registering waiter can fail if we get unlucky with rng.
     // just try again.
@@ -120,7 +116,7 @@ async fn authenticate(
         }
     };
 
-    let span = info_span!("web", psql_session_id = &psql_session_id);
+    let span = info_span!("console_redirect", psql_session_id = &psql_session_id);
     let greeting = hello_message(link_uri, &psql_session_id);
 
     // Give user a URL to spawn a new database.
@@ -131,14 +127,16 @@ async fn authenticate(
         .write_message(&Be::NoticeResponse(&greeting))
         .await?;
 
-    // Wait for web console response (see `mgmt`).
+    // Wait for console response via control plane (see `mgmt`).
     info!(parent: &span, "waiting for console's reply...");
-    let db_info = tokio::time::timeout(auth_config.webauth_confirmation_timeout, waiter)
+    let db_info = tokio::time::timeout(auth_config.console_redirect_confirmation_timeout, waiter)
         .await
         .map_err(|_elapsed| {
-            auth::AuthError::confirmation_timeout(auth_config.webauth_confirmation_timeout.into())
+            auth::AuthError::confirmation_timeout(
+                auth_config.console_redirect_confirmation_timeout.into(),
+            )
         })?
-        .map_err(WebAuthError::from)?;
+        .map_err(ConsoleRedirectError::from)?;
 
     if auth_config.ip_allowlist_check_enabled {
         if let Some(allowed_ips) = &db_info.allowed_ips {

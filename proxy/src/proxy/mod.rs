@@ -7,40 +7,33 @@ pub(crate) mod handshake;
 pub(crate) mod passthrough;
 pub(crate) mod retry;
 pub(crate) mod wake_compute;
-pub use copy_bidirectional::copy_bidirectional_client_compute;
-pub use copy_bidirectional::ErrorSource;
+use std::sync::Arc;
 
-use crate::config::ProxyProtocolV2;
-use crate::{
-    auth,
-    cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal},
-    compute,
-    config::{ProxyConfig, TlsConfig},
-    context::RequestMonitoring,
-    error::ReportableError,
-    metrics::{Metrics, NumClientConnectionsGuard},
-    protocol2::read_proxy_protocol,
-    proxy::handshake::{handshake, HandshakeData},
-    rate_limiter::EndpointRateLimiter,
-    stream::{PqStream, Stream},
-    EndpointCacheKey,
-};
+pub use copy_bidirectional::{copy_bidirectional_client_compute, ErrorSource};
 use futures::TryFutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, StartupMessageParams};
 use regex::Regex;
 use smol_str::{format_smolstr, SmolStr};
-use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn, Instrument};
+use tracing::{debug, error, info, warn, Instrument};
 
-use self::{
-    connect_compute::{connect_to_compute, TcpMechanism},
-    passthrough::ProxyPassthrough,
-};
+use self::connect_compute::{connect_to_compute, TcpMechanism};
+use self::passthrough::ProxyPassthrough;
+use crate::cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal};
+use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
+use crate::context::RequestMonitoring;
+use crate::error::ReportableError;
+use crate::metrics::{Metrics, NumClientConnectionsGuard};
+use crate::protocol2::{read_proxy_protocol, ConnectHeader, ConnectionInfo};
+use crate::proxy::handshake::{handshake, HandshakeData};
+use crate::rate_limiter::EndpointRateLimiter;
+use crate::stream::{PqStream, Stream};
+use crate::types::EndpointCacheKey;
+use crate::{auth, compute};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 
@@ -90,25 +83,30 @@ pub async fn task_main(
         let session_id = uuid::Uuid::new_v4();
         let cancellation_handler = Arc::clone(&cancellation_handler);
 
-        tracing::info!(protocol = "tcp", %session_id, "accepted new TCP connection");
+        debug!(protocol = "tcp", %session_id, "accepted new TCP connection");
         let endpoint_rate_limiter2 = endpoint_rate_limiter.clone();
 
         connections.spawn(async move {
-            let (socket, peer_addr) = match read_proxy_protocol(socket).await {
+            let (socket, conn_info) = match read_proxy_protocol(socket).await {
                 Err(e) => {
                     warn!("per-client task finished with an error: {e:#}");
                     return;
                 }
-                Ok((_socket, None)) if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
+                // our load balancers will not send any more data. let's just exit immediately
+                Ok((_socket, ConnectHeader::Local)) => {
+                    debug!("healthcheck received");
+                    return;
+                }
+                Ok((_socket, ConnectHeader::Missing)) if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
                     warn!("missing required proxy protocol header");
                     return;
                 }
-                Ok((_socket, Some(_))) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
+                Ok((_socket, ConnectHeader::Proxy(_))) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
                     warn!("proxy protocol header not supported");
                     return;
                 }
-                Ok((socket, Some(addr))) => (socket, addr.ip()),
-                Ok((socket, None)) => (socket, peer_addr.ip()),
+                Ok((socket, ConnectHeader::Proxy(info))) => (socket, info),
+                Ok((socket, ConnectHeader::Missing)) => (socket, ConnectionInfo { addr: peer_addr, extra: None }),
             };
 
             match socket.inner.set_nodelay(true) {
@@ -121,7 +119,7 @@ pub async fn task_main(
 
             let ctx = RequestMonitoring::new(
                 session_id,
-                peer_addr,
+                conn_info,
                 crate::metrics::Protocol::Tcp,
                 &config.region,
             );

@@ -154,20 +154,28 @@ fn main() -> anyhow::Result<()> {
             },
         };
 
-        let started = Instant::now();
-        syncfs(dirfd)?;
-        let elapsed = started.elapsed();
-        info!(
-            elapsed_ms = elapsed.as_millis(),
-            "made tenant directory contents durable"
-        );
+        if conf.no_sync {
+            info!("Skipping syncfs on startup");
+        } else {
+            let started = Instant::now();
+            syncfs(dirfd)?;
+            let elapsed = started.elapsed();
+            info!(
+                elapsed_ms = elapsed.as_millis(),
+                "made tenant directory contents durable"
+            );
+        }
     }
 
     // Initialize up failpoints support
     let scenario = failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
-    virtual_file::init(conf.max_file_descriptors, conf.virtual_file_io_engine);
+    virtual_file::init(
+        conf.max_file_descriptors,
+        conf.virtual_file_io_engine,
+        conf.virtual_file_io_mode,
+    );
     page_cache::init(conf.page_cache_size);
 
     start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
@@ -394,9 +402,7 @@ fn start_pageserver(
         ControllerUpcallClient::new(conf, &shutdown_pageserver),
         conf,
     );
-    if let Some(deletion_workers) = deletion_workers {
-        deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
-    }
+    deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.

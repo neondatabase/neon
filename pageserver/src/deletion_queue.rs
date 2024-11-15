@@ -618,13 +618,11 @@ impl DeletionQueue {
     /// Caller may use the returned object to construct clients with new_client.
     /// Caller should tokio::spawn the background() members of the two worker objects returned:
     /// we don't spawn those inside new() so that the caller can use their runtime/spans of choice.
-    ///
-    /// If remote_storage is None, then the returned workers will also be None.
     pub fn new<C>(
         remote_storage: GenericRemoteStorage,
         controller_upcall_client: Option<C>,
         conf: &'static PageServerConf,
-    ) -> (Self, Option<DeletionQueueWorkers<C>>)
+    ) -> (Self, DeletionQueueWorkers<C>)
     where
         C: ControlPlaneGenerationsApi + Send + Sync,
     {
@@ -656,7 +654,7 @@ impl DeletionQueue {
                 },
                 cancel: cancel.clone(),
             },
-            Some(DeletionQueueWorkers {
+            DeletionQueueWorkers {
                 frontend: ListWriter::new(conf, rx, backend_tx, cancel.clone()),
                 backend: Validator::new(
                     conf,
@@ -667,7 +665,7 @@ impl DeletionQueue {
                     cancel.clone(),
                 ),
                 executor: Deleter::new(remote_storage, executor_rx, cancel.clone()),
-            }),
+            },
         )
     }
 
@@ -696,7 +694,7 @@ impl DeletionQueue {
 mod test {
     use camino::Utf8Path;
     use hex_literal::hex;
-    use pageserver_api::{shard::ShardIndex, upcall_api::ReAttachResponseTenant};
+    use pageserver_api::{key::Key, shard::ShardIndex, upcall_api::ReAttachResponseTenant};
     use std::{io::ErrorKind, time::Duration};
     use tracing::info;
 
@@ -705,7 +703,6 @@ mod test {
 
     use crate::{
         controller_upcall_client::RetryForeverError,
-        repository::Key,
         tenant::{harness::TenantHarness, storage_layer::DeltaLayerName},
     };
 
@@ -743,9 +740,7 @@ mod test {
             );
 
             tracing::debug!("Spawning worker for new queue queue");
-            let worker_join = workers
-                .unwrap()
-                .spawn_with(&tokio::runtime::Handle::current());
+            let worker_join = workers.spawn_with(&tokio::runtime::Handle::current());
 
             let old_worker_join = std::mem::replace(&mut self.worker_join, worker_join);
             let old_deletion_queue = std::mem::replace(&mut self.deletion_queue, deletion_queue);
@@ -856,7 +851,6 @@ mod test {
             harness.conf,
         );
 
-        let worker = worker.unwrap();
         let worker_join = worker.spawn_with(&tokio::runtime::Handle::current());
 
         Ok(TestSetup {

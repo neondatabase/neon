@@ -22,6 +22,7 @@ use tokio::{select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn, Instrument};
+use wal_decoder::models::{FlushUncommittedRecords, InterpretedWalRecord};
 
 use super::TaskStateUpdate;
 use crate::{
@@ -31,7 +32,6 @@ use crate::{
     task_mgr::{TaskKind, WALRECEIVER_RUNTIME},
     tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
     walingest::WalIngest,
-    walrecord::{decode_wal_record, DecodedWALRecord},
 };
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
@@ -331,19 +331,23 @@ pub(super) async fn handle_walreceiver_connection(
                         Ok(())
                     }
 
-                    while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                    while let Some((record_end_lsn, recdata)) = waldecoder.poll_decode()? {
                         // It is important to deal with the aligned records as lsn in getPage@LSN is
                         // aligned and can be several bytes bigger. Without this alignment we are
                         // at risk of hitting a deadlock.
-                        if !lsn.is_aligned() {
+                        if !record_end_lsn.is_aligned() {
                             return Err(WalReceiverError::Other(anyhow!("LSN not aligned")));
                         }
 
-                        // Deserialize WAL record
-                        let mut decoded = DecodedWALRecord::default();
-                        decode_wal_record(recdata, &mut decoded, modification.tline.pg_version)?;
+                        // Deserialize and interpret WAL record
+                        let interpreted = InterpretedWalRecord::from_bytes_filtered(
+                            recdata,
+                            modification.tline.get_shard_identity(),
+                            record_end_lsn,
+                            modification.tline.pg_version,
+                        )?;
 
-                        if decoded.is_dbase_create_copy(timeline.pg_version)
+                        if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes)
                             && uncommitted_records > 0
                         {
                             // Special case: legacy PG database creations operate by reading pages from a 'template' database:
@@ -360,11 +364,13 @@ pub(super) async fn handle_walreceiver_connection(
 
                         // Ingest the records without immediately committing them.
                         let ingested = walingest
-                            .ingest_record(decoded, lsn, &mut modification, &ctx)
+                            .ingest_record(interpreted, &mut modification, &ctx)
                             .await
-                            .with_context(|| format!("could not ingest record at {lsn}"))?;
+                            .with_context(|| {
+                                format!("could not ingest record at {record_end_lsn}")
+                            })?;
                         if !ingested {
-                            tracing::debug!("ingest: filtered out record @ LSN {lsn}");
+                            tracing::debug!("ingest: filtered out record @ LSN {record_end_lsn}");
                             WAL_INGEST.records_filtered.inc();
                             filtered_records += 1;
                         }
@@ -374,7 +380,7 @@ pub(super) async fn handle_walreceiver_connection(
                         // to timeout the tests.
                         fail_point!("walreceiver-after-ingest");
 
-                        last_rec_lsn = lsn;
+                        last_rec_lsn = record_end_lsn;
 
                         // Commit every ingest_batch_size records. Even if we filtered out
                         // all records, we still need to call commit to advance the LSN.

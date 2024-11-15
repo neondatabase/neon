@@ -130,6 +130,26 @@ class LayerMapInfo:
 
 
 @dataclass
+class ScanDisposableKeysResponse:
+    disposable_count: int
+    not_disposable_count: int
+
+    def __add__(self, b):
+        a = self
+        assert isinstance(a, ScanDisposableKeysResponse)
+        assert isinstance(b, ScanDisposableKeysResponse)
+        return ScanDisposableKeysResponse(
+            a.disposable_count + b.disposable_count, a.not_disposable_count + b.not_disposable_count
+        )
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> ScanDisposableKeysResponse:
+        disposable_count = d["disposable_count"]
+        not_disposable_count = d["not_disposable_count"]
+        return ScanDisposableKeysResponse(disposable_count, not_disposable_count)
+
+
+@dataclass
 class TenantConfig:
     tenant_specific_overrides: dict[str, Any]
     effective_config: dict[str, Any]
@@ -139,6 +159,19 @@ class TenantConfig:
         return TenantConfig(
             tenant_specific_overrides=d["tenant_specific_overrides"],
             effective_config=d["effective_config"],
+        )
+
+
+@dataclass
+class TimelinesInfoAndOffloaded:
+    timelines: list[dict[str, Any]]
+    offloaded: list[dict[str, Any]]
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> TimelinesInfoAndOffloaded:
+        return TimelinesInfoAndOffloaded(
+            timelines=d["timelines"],
+            offloaded=d["offloaded"],
         )
 
 
@@ -283,7 +316,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def tenant_location_conf(
         self,
         tenant_id: Union[TenantId, TenantShardId],
-        location_conf=dict[str, Any],
+        location_conf: dict[str, Any],
         flush_ms=None,
         lazy: Optional[bool] = None,
     ):
@@ -371,6 +404,12 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         return res.json()
 
     def set_tenant_config(self, tenant_id: Union[TenantId, TenantShardId], config: dict[str, Any]):
+        """
+        Only use this via storage_controller.pageserver_api().
+
+        Storcon is the authority on tenant config - changes you make directly
+        against pageserver may be reconciled away at any time.
+        """
         assert "tenant_id" not in config.keys()
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/config",
@@ -384,6 +423,11 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         inserts: Optional[dict[str, Any]] = None,
         removes: Optional[list[str]] = None,
     ):
+        """
+        Only use this via storage_controller.pageserver_api().
+
+        See `set_tenant_config` for more information.
+        """
         current = self.tenant_config(tenant_id).tenant_specific_overrides
         if inserts is not None:
             current.update(inserts)
@@ -464,6 +508,18 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json, list)
         return res_json
 
+    def timeline_and_offloaded_list(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+    ) -> TimelinesInfoAndOffloaded:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline_and_offloaded",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return TimelinesInfoAndOffloaded.from_json(res_json)
+
     def timeline_create(
         self,
         pg_version: PgVersion,
@@ -476,12 +532,13 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     ) -> dict[Any, Any]:
         body: dict[str, Any] = {
             "new_timeline_id": str(new_timeline_id),
-            "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
-            "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
-            "existing_initdb_timeline_id": str(existing_initdb_timeline_id)
-            if existing_initdb_timeline_id
-            else None,
         }
+        if ancestor_timeline_id:
+            body["ancestor_timeline_id"] = str(ancestor_timeline_id)
+        if ancestor_start_lsn:
+            body["ancestor_start_lsn"] = str(ancestor_start_lsn)
+        if existing_initdb_timeline_id:
+            body["existing_initdb_timeline_id"] = str(existing_initdb_timeline_id)
         if pg_version != PgVersion.NOT_SET:
             body["pg_version"] = int(pg_version)
 
@@ -582,6 +639,22 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         log.info(f"Got GC request response code: {res.status_code}")
         self.verbose_error(res)
+
+    def timeline_offload(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+        timeline_id: TimelineId,
+    ):
+        self.is_testing_enabled_or_skip()
+
+        log.info(f"Requesting offload: tenant {tenant_id}, timeline {timeline_id}")
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/offload",
+        )
+        log.info(f"Got offload request response code: {res.status_code}")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is None
 
     def timeline_compact(
         self,
@@ -862,6 +935,16 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
         return LayerMapInfo.from_json(res.json())
+
+    def timeline_layer_scan_disposable_keys(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str
+    ) -> ScanDisposableKeysResponse:
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/{layer_name}/scan_disposable_keys",
+        )
+        self.verbose_error(res)
+        assert res.status_code == 200
+        return ScanDisposableKeysResponse.from_json(res.json())
 
     def download_layer(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str

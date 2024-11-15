@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::BufRead;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -15,6 +14,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use compute_api::spec::PgIdent;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -25,8 +25,9 @@ use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
+use compute_api::privilege::Privilege;
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
-use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec};
+use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec, ExtVersion};
 use utils::measured_stream::MeasuredReader;
 
 use nix::sys::signal::{kill, Signal};
@@ -34,6 +35,7 @@ use nix::sys::signal::{kill, Signal};
 use remote_storage::{DownloadError, RemotePath};
 
 use crate::checker::create_availability_check_data;
+use crate::installed_extensions::get_installed_extensions_sync;
 use crate::local_proxy;
 use crate::logger::inlinify;
 use crate::pg_helpers::*;
@@ -362,48 +364,43 @@ impl ComputeNode {
         let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
 
         let basebackup_cmd = match lsn {
-            // HACK We don't use compression on first start (Lsn(0)) because there's no API for it
-            Lsn(0) => format!("basebackup {} {}", spec.tenant_id, spec.timeline_id),
-            _ => format!(
-                "basebackup {} {} {} --gzip",
-                spec.tenant_id, spec.timeline_id, lsn
-            ),
+            Lsn(0) => {
+                if spec.spec.mode != ComputeMode::Primary {
+                    format!(
+                        "basebackup {} {} --gzip --replica",
+                        spec.tenant_id, spec.timeline_id
+                    )
+                } else {
+                    format!("basebackup {} {} --gzip", spec.tenant_id, spec.timeline_id)
+                }
+            }
+            _ => {
+                if spec.spec.mode != ComputeMode::Primary {
+                    format!(
+                        "basebackup {} {} {} --gzip --replica",
+                        spec.tenant_id, spec.timeline_id, lsn
+                    )
+                } else {
+                    format!(
+                        "basebackup {} {} {} --gzip",
+                        spec.tenant_id, spec.timeline_id, lsn
+                    )
+                }
+            }
         };
 
         let copyreader = client.copy_out(basebackup_cmd.as_str())?;
         let mut measured_reader = MeasuredReader::new(copyreader);
-
-        // Check the magic number to see if it's a gzip or not. Even though
-        // we might explicitly ask for gzip, an old pageserver with no implementation
-        // of gzip compression might send us uncompressed data. After some time
-        // passes we can assume all pageservers know how to compress and we can
-        // delete this check.
-        //
-        // If the data is not gzip, it will be tar. It will not be mistakenly
-        // recognized as gzip because tar starts with an ascii encoding of a filename,
-        // and 0x1f and 0x8b are unlikely first characters for any filename. Moreover,
-        // we send the "global" directory first from the pageserver, so it definitely
-        // won't be recognized as gzip.
         let mut bufreader = std::io::BufReader::new(&mut measured_reader);
-        let gzip = {
-            let peek = bufreader.fill_buf().unwrap();
-            peek[0] == 0x1f && peek[1] == 0x8b
-        };
 
         // Read the archive directly from the `CopyOutReader`
         //
         // Set `ignore_zeros` so that unpack() reads all the Copy data and
         // doesn't stop at the end-of-archive marker. Otherwise, if the server
         // sends an Error after finishing the tarball, we will not notice it.
-        if gzip {
-            let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut bufreader));
-            ar.set_ignore_zeros(true);
-            ar.unpack(&self.pgdata)?;
-        } else {
-            let mut ar = tar::Archive::new(&mut bufreader);
-            ar.set_ignore_zeros(true);
-            ar.unpack(&self.pgdata)?;
-        };
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut bufreader));
+        ar.set_ignore_zeros(true);
+        ar.unpack(&self.pgdata)?;
 
         // Report metrics
         let mut state = self.state.lock().unwrap();
@@ -1121,6 +1118,11 @@ impl ComputeNode {
                 self.pg_reload_conf()?;
             }
             self.post_apply_config()?;
+
+            let connstr = self.connstr.clone();
+            thread::spawn(move || {
+                get_installed_extensions_sync(connstr).context("get_installed_extensions")
+            });
         }
 
         let startup_end_time = Utc::now();
@@ -1367,6 +1369,97 @@ LIMIT 100",
         download_size
     }
 
+    pub async fn set_role_grants(
+        &self,
+        db_name: &PgIdent,
+        schema_name: &PgIdent,
+        privileges: &[Privilege],
+        role_name: &PgIdent,
+    ) -> Result<()> {
+        use tokio_postgres::config::Config;
+        use tokio_postgres::NoTls;
+
+        let mut conf = Config::from_str(self.connstr.as_str()).unwrap();
+        conf.dbname(db_name);
+
+        let (db_client, conn) = conf
+            .connect(NoTls)
+            .await
+            .context("Failed to connect to the database")?;
+        tokio::spawn(conn);
+
+        // TODO: support other types of grants apart from schemas?
+        let query = format!(
+            "GRANT {} ON SCHEMA {} TO {}",
+            privileges
+                .iter()
+                // should not be quoted as it's part of the command.
+                // is already sanitized so it's ok
+                .map(|p| p.as_str())
+                .collect::<Vec<&'static str>>()
+                .join(", "),
+            // quote the schema and role name as identifiers to sanitize them.
+            schema_name.pg_quote(),
+            role_name.pg_quote(),
+        );
+        db_client
+            .simple_query(&query)
+            .await
+            .with_context(|| format!("Failed to execute query: {}", query))?;
+
+        Ok(())
+    }
+
+    pub async fn install_extension(
+        &self,
+        ext_name: &PgIdent,
+        db_name: &PgIdent,
+        ext_version: ExtVersion,
+    ) -> Result<ExtVersion> {
+        use tokio_postgres::config::Config;
+        use tokio_postgres::NoTls;
+
+        let mut conf = Config::from_str(self.connstr.as_str()).unwrap();
+        conf.dbname(db_name);
+
+        let (db_client, conn) = conf
+            .connect(NoTls)
+            .await
+            .context("Failed to connect to the database")?;
+        tokio::spawn(conn);
+
+        let version_query = "SELECT extversion FROM pg_extension WHERE extname = $1";
+        let version: Option<ExtVersion> = db_client
+            .query_opt(version_query, &[&ext_name])
+            .await
+            .with_context(|| format!("Failed to execute query: {}", version_query))?
+            .map(|row| row.get(0));
+
+        // sanitize the inputs as postgres idents.
+        let ext_name: String = ext_name.pg_quote();
+        let quoted_version: String = ext_version.pg_quote();
+
+        if let Some(installed_version) = version {
+            if installed_version == ext_version {
+                return Ok(installed_version);
+            }
+            let query = format!("ALTER EXTENSION {ext_name} UPDATE TO {quoted_version}");
+            db_client
+                .simple_query(&query)
+                .await
+                .with_context(|| format!("Failed to execute query: {}", query))?;
+        } else {
+            let query =
+                format!("CREATE EXTENSION IF NOT EXISTS {ext_name} WITH VERSION {quoted_version}");
+            db_client
+                .simple_query(&query)
+                .await
+                .with_context(|| format!("Failed to execute query: {}", query))?;
+        }
+
+        Ok(ext_version)
+    }
+
     #[tokio::main]
     pub async fn prepare_preload_libraries(
         &self,
@@ -1483,28 +1576,6 @@ LIMIT 100",
         if !unchanged {
             info!("Pageserver config changed");
         }
-    }
-
-    // Gather info about installed extensions
-    pub fn get_installed_extensions(&self) -> Result<()> {
-        let connstr = self.connstr.clone();
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create runtime");
-        let result = rt
-            .block_on(crate::installed_extensions::get_installed_extensions(
-                connstr,
-            ))
-            .expect("failed to get installed extensions");
-
-        info!(
-            "{}",
-            serde_json::to_string(&result).expect("failed to serialize extensions list")
-        );
-
-        Ok(())
     }
 }
 

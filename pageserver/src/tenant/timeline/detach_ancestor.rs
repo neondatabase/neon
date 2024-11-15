@@ -12,7 +12,7 @@ use crate::{
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
 use anyhow::Context;
-use pageserver_api::models::detach_ancestor::AncestorDetached;
+use pageserver_api::{models::detach_ancestor::AncestorDetached, shard::ShardIdentity};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -28,6 +28,9 @@ pub(crate) enum Error {
 
     #[error("shutting down, please retry later")]
     ShuttingDown,
+
+    #[error("archived: {}", .0)]
+    Archived(TimelineId),
 
     #[error(transparent)]
     NotFound(crate::tenant::GetTimelineError),
@@ -79,8 +82,9 @@ impl From<Error> for ApiError {
     fn from(value: Error) -> Self {
         match value {
             Error::NoAncestor => ApiError::Conflict(value.to_string()),
-            Error::TooManyAncestors => ApiError::BadRequest(anyhow::anyhow!("{}", value)),
+            Error::TooManyAncestors => ApiError::BadRequest(anyhow::anyhow!("{value}")),
             Error::ShuttingDown => ApiError::ShuttingDown,
+            Error::Archived(_) => ApiError::BadRequest(anyhow::anyhow!("{value}")),
             Error::OtherTimelineDetachOngoing(_) | Error::FailedToReparentAll => {
                 ApiError::ResourceUnavailable(value.to_string().into())
             }
@@ -201,11 +205,17 @@ pub(super) async fn prepare(
         }));
     };
 
+    if detached.is_archived() != Some(false) {
+        return Err(Archived(detached.timeline_id));
+    }
+
     if !ancestor_lsn.is_valid() {
         // rare case, probably wouldn't even load
         tracing::error!("ancestor is set, but ancestor_lsn is invalid, this timeline needs fixing");
         return Err(NoAncestor);
     }
+
+    check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn)?;
 
     if ancestor.ancestor_timeline.is_some() {
         // non-technical requirement; we could flatten N ancestors just as easily but we chose
@@ -366,8 +376,14 @@ pub(super) async fn prepare(
         tasks.spawn(
             async move {
                 let _permit = limiter.acquire().await;
-                let owned =
-                    remote_copy(&adopted, &timeline, timeline.generation, &timeline.cancel).await?;
+                let owned = remote_copy(
+                    &adopted,
+                    &timeline,
+                    timeline.generation,
+                    timeline.shard_identity,
+                    &timeline.cancel,
+                )
+                .await?;
                 tracing::info!(layer=%owned, "remote copied");
                 Ok(owned)
             }
@@ -619,6 +635,7 @@ async fn remote_copy(
     adopted: &Layer,
     adoptee: &Arc<Timeline>,
     generation: Generation,
+    shard_identity: ShardIdentity,
     cancel: &CancellationToken,
 ) -> Result<Layer, Error> {
     // depending if Layer::keep_resident we could hardlink
@@ -626,6 +643,7 @@ async fn remote_copy(
     let mut metadata = adopted.metadata();
     debug_assert!(metadata.generation <= generation);
     metadata.generation = generation;
+    metadata.shard = shard_identity.shard_index();
 
     let owned = crate::tenant::storage_layer::Layer::for_evicted(
         adoptee.conf,
@@ -949,4 +967,37 @@ where
             None
         }
     })
+}
+
+fn check_no_archived_children_of_ancestor(
+    tenant: &Tenant,
+    detached: &Arc<Timeline>,
+    ancestor: &Arc<Timeline>,
+    ancestor_lsn: Lsn,
+) -> Result<(), Error> {
+    let timelines = tenant.timelines.lock().unwrap();
+    let timelines_offloaded = tenant.timelines_offloaded.lock().unwrap();
+    for timeline in reparentable_timelines(timelines.values(), detached, ancestor, ancestor_lsn) {
+        if timeline.is_archived() == Some(true) {
+            return Err(Error::Archived(timeline.timeline_id));
+        }
+    }
+    for timeline_offloaded in timelines_offloaded.values() {
+        if timeline_offloaded.ancestor_timeline_id != Some(ancestor.timeline_id) {
+            continue;
+        }
+        // This forbids the detach ancestor feature if flattened timelines are present,
+        // even if the ancestor_lsn is from after the branchpoint of the detached timeline.
+        // But as per current design, we don't record the ancestor_lsn of flattened timelines.
+        // This is a bit unfortunate, but as of writing this we don't support flattening
+        // anyway. Maybe we can evolve the data model in the future.
+        if let Some(retain_lsn) = timeline_offloaded.ancestor_retain_lsn {
+            let is_earlier = retain_lsn <= ancestor_lsn;
+            if !is_earlier {
+                continue;
+            }
+        }
+        return Err(Error::Archived(timeline_offloaded.timeline_id));
+    }
+    Ok(())
 }

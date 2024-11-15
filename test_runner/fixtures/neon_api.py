@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, final
 
 import requests
+
+from fixtures.log_helper import log
 
 if TYPE_CHECKING:
     from typing import Any, Literal, Optional
@@ -30,7 +32,11 @@ class NeonAPI:
             kwargs["headers"] = {}
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
 
-        return requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
+        resp = requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
+        log.debug("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
+        resp.raise_for_status()
+
+        return resp
 
     def create_project(
         self,
@@ -66,8 +72,6 @@ class NeonAPI:
             json=data,
         )
 
-        assert resp.status_code == 201
-
         return cast("dict[str, Any]", resp.json())
 
     def get_project_details(self, project_id: str) -> dict[str, Any]:
@@ -79,7 +83,7 @@ class NeonAPI:
                 "Content-Type": "application/json",
             },
         )
-        assert resp.status_code == 200
+
         return cast("dict[str, Any]", resp.json())
 
     def delete_project(
@@ -94,8 +98,6 @@ class NeonAPI:
                 "Content-Type": "application/json",
             },
         )
-
-        assert resp.status_code == 200
 
         return cast("dict[str, Any]", resp.json())
 
@@ -112,8 +114,6 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
         return cast("dict[str, Any]", resp.json())
 
     def suspend_endpoint(
@@ -129,8 +129,6 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
         return cast("dict[str, Any]", resp.json())
 
     def restart_endpoint(
@@ -145,8 +143,6 @@ class NeonAPI:
                 "Accept": "application/json",
             },
         )
-
-        assert resp.status_code == 200
 
         return cast("dict[str, Any]", resp.json())
 
@@ -178,8 +174,6 @@ class NeonAPI:
             json=data,
         )
 
-        assert resp.status_code == 201
-
         return cast("dict[str, Any]", resp.json())
 
     def get_connection_uri(
@@ -206,8 +200,6 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
         return cast("dict[str, Any]", resp.json())
 
     def get_branches(self, project_id: str) -> dict[str, Any]:
@@ -218,8 +210,6 @@ class NeonAPI:
                 "Accept": "application/json",
             },
         )
-
-        assert resp.status_code == 200
 
         return cast("dict[str, Any]", resp.json())
 
@@ -232,8 +222,6 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
         return cast("dict[str, Any]", resp.json())
 
     def get_operations(self, project_id: str) -> dict[str, Any]:
@@ -245,8 +233,6 @@ class NeonAPI:
                 "Authorization": f"Bearer {self.__neon_api_key}",
             },
         )
-
-        assert resp.status_code == 200
 
         return cast("dict[str, Any]", resp.json())
 
@@ -261,17 +247,22 @@ class NeonAPI:
             time.sleep(0.5)
 
 
+@final
 class NeonApiEndpoint:
     def __init__(self, neon_api: NeonAPI, pg_version: PgVersion, project_id: Optional[str]):
         self.neon_api = neon_api
+        self.project_id: str
+        self.endpoint_id: str
+        self.connstr: str
+
         if project_id is None:
             project = neon_api.create_project(pg_version)
-            neon_api.wait_for_operation_to_finish(project["project"]["id"])
+            neon_api.wait_for_operation_to_finish(cast("str", project["project"]["id"]))
             self.project_id = project["project"]["id"]
             self.endpoint_id = project["endpoints"][0]["id"]
             self.connstr = project["connection_uris"][0]["connection_uri"]
             self.pgbench_env = connection_parameters_to_env(
-                project["connection_uris"][0]["connection_parameters"]
+                cast("dict[str, str]", project["connection_uris"][0]["connection_parameters"])
             )
             self.is_new = True
         else:

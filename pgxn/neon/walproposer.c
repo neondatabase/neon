@@ -841,6 +841,23 @@ HandleElectedProposer(WalProposer *wp)
 		wp_log(FATAL, "failed to download WAL for logical replicaiton");
 	}
 
+	/*
+	 * Zero propEpochStartLsn means majority of safekeepers doesn't have any
+	 * WAL, timeline was just created. Compute bumps it to basebackup LSN,
+	 * otherwise we must be sync-safekeepers and we have nothing to do then.
+	 *
+	 * Proceeding is not only pointless but harmful, because we'd give
+	 * safekeepers term history starting with 0/0. These hacks will go away once
+	 * we disable implicit timeline creation on safekeepers and create it with
+	 * non zero LSN from the start.
+	 */
+	if (wp->propEpochStartLsn == InvalidXLogRecPtr)
+	{
+		Assert(wp->config->syncSafekeepers);
+		wp_log(LOG, "elected with zero propEpochStartLsn in sync-safekeepers, exiting");
+		wp->api.finish_sync_safekeepers(wp, wp->propEpochStartLsn);
+	}
+
 	if (wp->truncateLsn == wp->propEpochStartLsn && wp->config->syncSafekeepers)
 	{
 		/* Sync is not needed: just exit */
@@ -1344,29 +1361,35 @@ SendAppendRequests(Safekeeper *sk)
 		if (sk->active_state == SS_ACTIVE_READ_WAL)
 		{
 			char	   *errmsg;
+			int			req_len;
 
 			req = &sk->appendRequest;
+			req_len = req->endLsn - req->beginLsn;
 
-			switch (wp->api.wal_read(sk,
-									 &sk->outbuf.data[sk->outbuf.len],
-									 req->beginLsn,
-									 req->endLsn - req->beginLsn,
-									 &errmsg))
+			/* We send zero sized AppenRequests as heartbeats; don't wal_read for these. */
+			if (req_len > 0)
 			{
-				case NEON_WALREAD_SUCCESS:
-					break;
-				case NEON_WALREAD_WOULDBLOCK:
-					return true;
-				case NEON_WALREAD_ERROR:
-					wp_log(WARNING, "WAL reading for node %s:%s failed: %s",
-						   sk->host, sk->port, errmsg);
-					ShutdownConnection(sk);
-					return false;
-				default:
-					Assert(false);
+				switch (wp->api.wal_read(sk,
+										&sk->outbuf.data[sk->outbuf.len],
+										req->beginLsn,
+										req_len,
+										&errmsg))
+				{
+					case NEON_WALREAD_SUCCESS:
+						break;
+					case NEON_WALREAD_WOULDBLOCK:
+						return true;
+					case NEON_WALREAD_ERROR:
+						wp_log(WARNING, "WAL reading for node %s:%s failed: %s",
+							sk->host, sk->port, errmsg);
+						ShutdownConnection(sk);
+						return false;
+					default:
+						Assert(false);
+				}
 			}
 
-			sk->outbuf.len += req->endLsn - req->beginLsn;
+			sk->outbuf.len += req_len;
 
 			writeResult = wp->api.conn_async_write(sk, sk->outbuf.data, sk->outbuf.len);
 

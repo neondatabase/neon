@@ -225,6 +225,7 @@ pub struct PageServerConf {
     pub listen_http_addr: String,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
+    pub no_sync: bool,
 }
 
 impl Default for PageServerConf {
@@ -235,6 +236,7 @@ impl Default for PageServerConf {
             listen_http_addr: String::new(),
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
+            no_sync: false,
         }
     }
 }
@@ -249,6 +251,8 @@ pub struct NeonLocalInitPageserverConf {
     pub listen_http_addr: String,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_sync: bool,
     #[serde(flatten)]
     pub other: HashMap<String, toml::Value>,
 }
@@ -261,6 +265,7 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             listen_http_addr,
             pg_auth_type,
             http_auth_type,
+            no_sync,
             other: _,
         } = conf;
         Self {
@@ -269,6 +274,7 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             listen_http_addr: listen_http_addr.clone(),
             pg_auth_type: *pg_auth_type,
             http_auth_type: *http_auth_type,
+            no_sync: *no_sync,
         }
     }
 }
@@ -569,6 +575,8 @@ impl LocalEnv {
                     listen_http_addr: String,
                     pg_auth_type: AuthType,
                     http_auth_type: AuthType,
+                    #[serde(default)]
+                    no_sync: bool,
                 }
                 let config_toml_path = dentry.path().join("pageserver.toml");
                 let config_toml: PageserverConfigTomlSubset = toml_edit::de::from_str(
@@ -591,6 +599,7 @@ impl LocalEnv {
                     listen_http_addr,
                     pg_auth_type,
                     http_auth_type,
+                    no_sync,
                 } = config_toml;
                 let IdentityTomlSubset {
                     id: identity_toml_id,
@@ -607,6 +616,7 @@ impl LocalEnv {
                     listen_http_addr,
                     pg_auth_type,
                     http_auth_type,
+                    no_sync,
                 };
                 pageservers.push(conf);
             }

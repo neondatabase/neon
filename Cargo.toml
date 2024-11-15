@@ -33,6 +33,7 @@ members = [
     "libs/postgres_ffi/wal_craft",
     "libs/vm_monitor",
     "libs/walproposer",
+    "libs/wal_decoder",
 ]
 
 [workspace.package]
@@ -107,6 +108,7 @@ indexmap = "2"
 indoc = "2"
 ipnet = "2.9.0"
 itertools = "0.10"
+itoa = "1.0.11"
 jsonwebtoken = "9"
 lasso = "0.7"
 libc = "0.2"
@@ -141,7 +143,7 @@ reqwest-retry = "0.5"
 routerify = "3"
 rpds = "0.13"
 rustc-hash = "1.1.0"
-rustls = "0.22"
+rustls = { version = "0.23.16", default-features = false }
 rustls-pemfile = "2"
 scopeguard = "1.1"
 sysinfo = "0.29.2"
@@ -171,8 +173,8 @@ tikv-jemalloc-ctl = "0.5"
 tokio = { version = "1.17", features = ["macros"] }
 tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
-tokio-postgres-rustls = "0.11.0"
-tokio-rustls = "0.25"
+tokio-postgres-rustls = "0.12.0"
+tokio-rustls = { version = "0.26.0", default-features = false, features = ["tls12", "ring"]}
 tokio-stream = "0.1"
 tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }
@@ -191,30 +193,20 @@ url = "2.2"
 urlencoding = "2.1"
 uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
-rustls-native-certs = "0.7"
-x509-parser = "0.15"
+rustls-native-certs = "0.8"
+x509-parser = "0.16"
 whoami = "1.5.1"
+zerocopy = { version = "0.7", features = ["derive"] }
 
 ## TODO replace this with tracing
 env_logger = "0.10"
 log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
-
-# We want to use the 'neon' branch for these, but there's currently one
-# incompatible change on the branch. See:
-#
-# - PR #8076 which contained changes that depended on the new changes in
-#   the rust-postgres crate, and
-# - PR #8654 which reverted those changes and made the code in proxy incompatible
-#   with the tip of the 'neon' branch again.
-#
-# When those proxy changes are re-applied (see PR #8747), we can switch using
-# the tip of the 'neon' branch again.
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
-postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
-postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }
+postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }
+postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }
 
 ## Local libraries
 compute_api = { version = "0.1", path = "./libs/compute_api/" }
@@ -237,13 +229,14 @@ tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
 utils = { version = "0.1", path = "./libs/utils/" }
 vm_monitor = { version = "0.1", path = "./libs/vm_monitor/" }
 walproposer = { version = "0.1", path = "./libs/walproposer/" }
+wal_decoder = { version = "0.1", path = "./libs/wal_decoder" }
 
 ## Common library dependency
 workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
 criterion = "0.5.1"
-rcgen = "0.12"
+rcgen = "0.13"
 rstest = "0.18"
 camino-tempfile = "1.0.2"
 tonic-build = "0.12"
@@ -251,7 +244,7 @@ tonic-build = "0.12"
 [patch.crates-io]
 
 # Needed to get `tokio-postgres-rustls` to depend on our fork.
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }
 
 ################# Binary contents sections
 

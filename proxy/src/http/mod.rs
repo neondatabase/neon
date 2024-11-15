@@ -6,21 +6,19 @@ pub mod health_server;
 
 use std::time::Duration;
 
-use anyhow::bail;
 use bytes::Bytes;
+use http::Method;
 use http_body_util::BodyExt;
 use hyper::body::Body;
-use serde::de::DeserializeOwned;
-
 pub(crate) use reqwest::{Request, Response};
-pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
-pub(crate) use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
-
-use crate::{
-    metrics::{ConsoleRequest, Metrics},
-    url::ApiUrl,
-};
 use reqwest_middleware::RequestBuilder;
+pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
+pub(crate) use reqwest_retry::policies::ExponentialBackoff;
+pub(crate) use reqwest_retry::RetryTransientMiddleware;
+use thiserror::Error;
+
+use crate::metrics::{ConsoleRequest, Metrics};
+use crate::url::ApiUrl;
 
 /// This is the preferred way to create new http clients,
 /// because it takes care of observability (OpenTelemetry).
@@ -95,9 +93,19 @@ impl Endpoint {
     /// Return a [builder](RequestBuilder) for a `GET` request,
     /// accepting a closure to modify the url path segments for more complex paths queries.
     pub(crate) fn get_with_url(&self, f: impl for<'a> FnOnce(&'a mut ApiUrl)) -> RequestBuilder {
+        self.request_with_url(Method::GET, f)
+    }
+
+    /// Return a [builder](RequestBuilder) for a request,
+    /// accepting a closure to modify the url path segments for more complex paths queries.
+    pub(crate) fn request_with_url(
+        &self,
+        method: Method,
+        f: impl for<'a> FnOnce(&'a mut ApiUrl),
+    ) -> RequestBuilder {
         let mut url = self.endpoint.clone();
         f(&mut url);
-        self.client.get(url.into_inner())
+        self.client.request(method, url.into_inner())
     }
 
     /// Execute a [request](reqwest::Request).
@@ -113,10 +121,19 @@ impl Endpoint {
     }
 }
 
-pub(crate) async fn parse_json_body_with_limit<D: DeserializeOwned>(
+#[derive(Error, Debug)]
+pub(crate) enum ReadBodyError {
+    #[error("Content length exceeds limit of {limit} bytes")]
+    BodyTooLarge { limit: usize },
+
+    #[error(transparent)]
+    Read(#[from] reqwest::Error),
+}
+
+pub(crate) async fn read_body_with_limit(
     mut b: impl Body<Data = Bytes, Error = reqwest::Error> + Unpin,
     limit: usize,
-) -> anyhow::Result<D> {
+) -> Result<Vec<u8>, ReadBodyError> {
     // We could use `b.limited().collect().await.to_bytes()` here
     // but this ends up being slightly more efficient as far as I can tell.
 
@@ -124,26 +141,27 @@ pub(crate) async fn parse_json_body_with_limit<D: DeserializeOwned>(
     // in reqwest, this value is influenced by the Content-Length header.
     let lower_bound = match usize::try_from(b.size_hint().lower()) {
         Ok(bound) if bound <= limit => bound,
-        _ => bail!("Content length exceeds limit of {limit} bytes"),
+        _ => return Err(ReadBodyError::BodyTooLarge { limit }),
     };
     let mut bytes = Vec::with_capacity(lower_bound);
 
     while let Some(frame) = b.frame().await.transpose()? {
         if let Ok(data) = frame.into_data() {
             if bytes.len() + data.len() > limit {
-                bail!("Content length exceeds limit of {limit} bytes")
+                return Err(ReadBodyError::BodyTooLarge { limit });
             }
             bytes.extend_from_slice(&data);
         }
     }
 
-    Ok(serde_json::from_slice::<D>(&bytes)?)
+    Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use reqwest::Client;
+
+    use super::*;
 
     #[test]
     fn optional_query_params() -> anyhow::Result<()> {

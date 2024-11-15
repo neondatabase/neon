@@ -19,6 +19,7 @@ from fixtures.metrics import (
     parse_metrics,
 )
 from fixtures.neon_fixtures import (
+    Endpoint,
     NeonEnv,
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
@@ -426,7 +427,7 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
             env.pageserver.start()
 
             for f in futs:
-                f.result(timeout=10)
+                f.result(timeout=30)
 
     # The tenant should end up active
     wait_until_tenant_active(env.pageserver.http_client(), tenant_id, iterations=10, period=1)
@@ -490,8 +491,8 @@ def test_timelines_parallel_endpoints(neon_simple_env: NeonEnv):
     n_threads = 16
     barrier = threading.Barrier(n_threads)
 
-    def test_timeline(branch_name: str, timeline_id: TimelineId):
-        endpoint = env.endpoints.create_start(branch_name)
+    def test_timeline(branch_name: str, timeline_id: TimelineId, endpoint: Endpoint):
+        endpoint.start()
         endpoint.stop()
         # Use a barrier to make sure we restart endpoints at the same time
         barrier.wait()
@@ -502,8 +503,12 @@ def test_timelines_parallel_endpoints(neon_simple_env: NeonEnv):
     for i in range(0, n_threads):
         branch_name = f"branch_{i}"
         timeline_id = env.create_branch(branch_name)
-        w = threading.Thread(target=test_timeline, args=[branch_name, timeline_id])
+        endpoint = env.endpoints.create(branch_name)
+        w = threading.Thread(target=test_timeline, args=[branch_name, timeline_id, endpoint])
         workers.append(w)
+
+    # Only start the restarts once we're done creating all timelines & endpoints
+    for w in workers:
         w.start()
 
     for w in workers:

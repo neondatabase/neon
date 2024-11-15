@@ -1,15 +1,14 @@
-use super::{ComputeCredentials, ComputeUserInfo};
-use crate::{
-    auth::{self, backend::ComputeCredentialKeys, AuthFlow},
-    compute,
-    config::AuthenticationConfig,
-    context::RequestMonitoring,
-    control_plane::AuthSecret,
-    sasl,
-    stream::{PqStream, Stream},
-};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
+
+use super::{ComputeCredentials, ComputeUserInfo};
+use crate::auth::backend::ComputeCredentialKeys;
+use crate::auth::{self, AuthFlow};
+use crate::config::AuthenticationConfig;
+use crate::context::RequestMonitoring;
+use crate::control_plane::AuthSecret;
+use crate::stream::{PqStream, Stream};
+use crate::{compute, sasl};
 
 pub(super) async fn authenticate(
     ctx: &RequestMonitoring,
@@ -52,7 +51,7 @@ pub(super) async fn authenticate(
                 sasl::Outcome::Success(key) => key,
                 sasl::Outcome::Failure(reason) => {
                     info!("auth backend failed with an error: {reason}");
-                    return Err(auth::AuthError::auth_failed(&*creds.user));
+                    return Err(auth::AuthError::password_failed(&*creds.user));
                 }
             };
 
