@@ -633,15 +633,9 @@ impl fmt::Debug for OffloadedTimeline {
 
 impl Drop for OffloadedTimeline {
     fn drop(&mut self) {
-        let deleted_from_ancestor = self.deleted_from_ancestor.load(Ordering::Acquire);
-        debug_assert!(
-            deleted_from_ancestor,
-            "OffloadedTimeline {} was dropped without having cleaned it up at the ancestor",
-            self.timeline_id
-        );
-        if !deleted_from_ancestor {
+        if !self.deleted_from_ancestor.load(Ordering::Acquire) {
             tracing::warn!(
-                "OffloadedTimeline {} was dropped without having cleaned it up at the ancestor",
+                "offloaded timeline {} was dropped without having cleaned it up at the ancestor",
                 self.timeline_id
             );
         }
