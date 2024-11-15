@@ -52,8 +52,10 @@ pub struct InterpretedWalRecord {
     /// A pre-serialized batch along with the required metadata for ingestion
     /// by the pageserver
     pub batch: SerializedValueBatch,
-    /// Byte offset within WAL for the end of the original PG WAL record
-    pub end_lsn: Lsn,
+    /// Byte offset within WAL for the start of the next PG WAL record.
+    /// Usually this is the end LSN of the current record, but in case of
+    /// XLOG SWITCH records it will be within the next segment.
+    pub next_record_lsn: Lsn,
     /// Whether to flush all uncommitted modifications to the storage engine
     /// before ingesting this record. This is currently only used for legacy PG
     /// database creations which read pages from a template database. Such WAL
