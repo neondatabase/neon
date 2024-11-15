@@ -30,13 +30,6 @@ runs:
         echo "REPORT_DIR=${REPORT_DIR}"     >> $GITHUB_ENV
       env:
         REPORT_DIR: ${{ inputs.report-dir }}
-    
-    - name: Configure AWS credentials # necessary to upload reports to S3 after a long-running test
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-region: eu-central-1
-        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-        role-duration-seconds: 18000 # 5 hours is currently max associated with IAM role 
 
     - name: Upload test results
       shell: bash -euxo pipefail {0}

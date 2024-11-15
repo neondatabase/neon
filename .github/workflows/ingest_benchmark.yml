@@ -129,6 +129,8 @@ jobs:
         run_in_parallel: false
         extra_params: -s -m remote_cluster --timeout 86400 -k test_ingest_performance_using_pgcopydb
         pg_version: v16
+        reacquire_s3_credentials: true
+        reacquire_aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_INGEST_SOURCE_CONNSTR: ${{ secrets.BENCHMARK_INGEST_SOURCE_CONNSTR }}
         TARGET_PROJECT_TYPE: ${{ matrix.target_project }}
