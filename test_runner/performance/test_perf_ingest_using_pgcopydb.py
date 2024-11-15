@@ -44,18 +44,8 @@ def setup_environment():
         if not os.getenv(var):
             raise OSError(f"Required environment variable '{var}' is not set.")
 
-    # Set additional environment variables for the pgcopydb command
-    os.environ["LD_LIBRARY_PATH"] = (
-        f"{os.getenv('PGCOPYDB_LIB_PATH')}:{os.getenv('PG_16_LIB_PATH')}"
-    )
-    os.environ["PGCOPYDB_SOURCE_PGURI"] = cast(str, os.getenv("BENCHMARK_INGEST_SOURCE_CONNSTR"))
-    os.environ["PGCOPYDB_TARGET_PGURI"] = cast(str, os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR"))
-    os.environ["PGOPTIONS"] = (
-        "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7"
-    )
 
-
-def build_pgcopydb_command():
+def build_pgcopydb_command(pgcopydb_filter_file: Path):
     """Builds the pgcopydb command to execute using existing environment variables."""
     pgcopydb_executable = os.getenv("PGCOPYDB")
     if not pgcopydb_executable:
@@ -79,12 +69,12 @@ def build_pgcopydb_command():
         "--skip-extensions",
         "--use-copy-binary",
         "--filters",
-        "/tmp/pgcopydb_filter.txt",
+        str(pgcopydb_filter_file),
     ]
 
-
-def create_pgcopydb_filter_file():
-    """Creates the /tmp/pgcopydb_filter.txt file required by pgcopydb."""
+@pytest.fixture() # must be function scoped because test_output_dir is function scoped
+def pgcopydb_filter_file(test_output_dir: Path) -> Path:
+    """Creates the pgcopydb_filter.txt file required by pgcopydb."""
     filter_content = """\
 [include-only-table]
 public.events
@@ -114,8 +104,9 @@ public.payment_gateways
 public.management
 public.event_names
 """
-    filter_path = Path("/tmp/pgcopydb_filter.txt")
+    filter_path = test_output_dir / "pgcopydb_filter.txt"
     filter_path.write_text(filter_content)
+    return filter_path
 
 
 def get_backpressure_time(connstr):
@@ -138,9 +129,20 @@ def run_command_and_log_output(command, log_file_path: Path):
         command (list): The command to execute.
         log_file_path (Path): Path object for the log file where output is written.
     """
+    # Define a list of necessary environment variables for pgcopydb
+    custom_env_vars = {
+        "LD_LIBRARY_PATH": f"{os.getenv('PGCOPYDB_LIB_PATH')}:{os.getenv('PG_16_LIB_PATH')}",
+        "PGCOPYDB_SOURCE_PGURI": cast(str, os.getenv("BENCHMARK_INGEST_SOURCE_CONNSTR")),
+        "PGCOPYDB_TARGET_PGURI": cast(str, os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR")),
+        "PGOPTIONS": "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7",
+    }
+    # Combine the current environment with custom variables
+    env = os.environ.copy()
+    env.update(custom_env_vars)
+
     with log_file_path.open("w") as log_file:
         process = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env
         )
 
         assert process.stdout is not None, "process.stdout should not be None"
@@ -234,7 +236,7 @@ def report_metrics_to_db(metrics):
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                     (
-                        "pgcopydb_ingest_bench",  # Suit
+                        "pgcopydb_ingest_bench_test",  # Suit
                         commit_hash,  # Revision (example value, replace as needed)
                         platform,
                         metric_name,
@@ -248,16 +250,16 @@ def report_metrics_to_db(metrics):
             conn.commit()
 
 
-@pytest.fixture(scope="session")
-def log_file_path(tmp_path):
+@pytest.fixture() # must be function scoped because test_output_dir is function scoped
+def log_file_path(test_output_dir):
     """Fixture to provide a temporary log file path."""
     if not os.getenv("TARGET_PROJECT_TYPE"):
         raise OSError("Required environment variable 'TARGET_PROJECT_TYPE' is not set.")
-    return (tmp_path / os.getenv("TARGET_PROJECT_TYPE")).with_suffix(".log")
+    return (test_output_dir / os.getenv("TARGET_PROJECT_TYPE")).with_suffix(".log")
 
 
 @pytest.mark.remote_cluster
-def test_ingest_performance_using_pgcopydb(log_file_path: Path):
+def test_ingest_performance_using_pgcopydb(log_file_path: Path, pgcopydb_filter_file: Path):
     """
     Simulate project migration from another PostgreSQL provider to Neon.
 
@@ -272,13 +274,12 @@ def test_ingest_performance_using_pgcopydb(log_file_path: Path):
     """
     # Set up environment and create filter file
     setup_environment()
-    create_pgcopydb_filter_file()
 
     # Get backpressure time before ingest
     backpressure_time_before = get_backpressure_time(os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR"))
 
     # Build and run the pgcopydb command
-    command = build_pgcopydb_command()
+    command = build_pgcopydb_command(pgcopydb_filter_file)
     try:
         run_command_and_log_output(command, log_file_path)
     except subprocess.CalledProcessError as e:
