@@ -55,12 +55,16 @@ log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 nix = { version = "0.26" }
 nom = { version = "7" }
+num = { version = "0.4" }
 num-bigint = { version = "0.4" }
+num-complex = { version = "0.4", default-features = false, features = ["std"] }
 num-integer = { version = "0.1", features = ["i128"] }
+num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
+num-rational = { version = "0.4", default-features = false, features = ["num-bigint-std", "std"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
 parquet = { version = "53", default-features = false, features = ["zstd"] }
-prost = { version = "0.13", features = ["prost-derive"] }
+prost = { version = "0.13", features = ["no-recursion-limit", "prost-derive"] }
 rand = { version = "0.8", features = ["small_rng"] }
 regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
@@ -76,7 +80,8 @@ smallvec = { version = "1", default-features = false, features = ["const_new", "
 spki = { version = "0.7", default-features = false, features = ["pem", "std"] }
 subtle = { version = "2" }
 sync_wrapper = { version = "0.1", default-features = false, features = ["futures"] }
-tikv-jemalloc-sys = { version = "0.6", features = ["stats"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "use_std"] }
+tikv-jemalloc-sys = { version = "0.6", features = ["profiling", "stats", "unprefixed_malloc_on_supported_platforms"] }
 time = { version = "0.3", features = ["macros", "serde-well-known"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
@@ -111,14 +116,18 @@ libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 nom = { version = "7" }
+num = { version = "0.4" }
 num-bigint = { version = "0.4" }
+num-complex = { version = "0.4", default-features = false, features = ["std"] }
 num-integer = { version = "0.1", features = ["i128"] }
+num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
+num-rational = { version = "0.4", default-features = false, features = ["num-bigint-std", "std"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
 parquet = { version = "53", default-features = false, features = ["zstd"] }
 prettyplease = { version = "0.2", default-features = false, features = ["verbatim"] }
 proc-macro2 = { version = "1" }
-prost = { version = "0.13", features = ["prost-derive"] }
+prost = { version = "0.13", features = ["no-recursion-limit", "prost-derive"] }
 quote = { version = "1" }
 regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }

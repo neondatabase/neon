@@ -114,6 +114,7 @@ indoc = "2"
 ipnet = "2.10.0"
 itertools = "0.10"
 itoa = "1.0.11"
+jemalloc_pprof = "0.6"
 jsonwebtoken = "9"
 lasso = "0.7"
 libc = "0.2"
@@ -174,9 +175,9 @@ sync_wrapper = "0.1.2"
 tar = "0.4"
 test-context = "0.3"
 thiserror = "1.0"
-tikv-jemallocator = { version = "0.6", features = ["stats"] }
+tikv-jemallocator = { version = "0.6", features = ["profiling", "stats", "unprefixed_malloc_on_supported_platforms"] }
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
-tokio = { version = "1.17", features = ["macros"] }
+tokio = { version = "1.17", features = ["macros", "process"] }
 tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.12.0"

@@ -1,7 +1,9 @@
 use crate::auth::{AuthError, Claims, SwappableJwtAuth};
 use crate::http::error::{api_error_handler, route_error_handler, ApiError};
 use crate::http::request::{get_query_param, parse_query_param};
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
+use camino::Utf8Path;
+use camino_tempfile::NamedUtf8TempFile;
 use hyper::header::{HeaderName, AUTHORIZATION, CONTENT_DISPOSITION};
 use hyper::http::HeaderValue;
 use hyper::Method;
@@ -10,10 +12,15 @@ use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
 use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
+use tokio::io::AsyncWriteExt as _;
+use tokio::process::Command;
+use tokio_util::io::ReaderStream;
 use tracing::{debug, info, info_span, warn, Instrument};
 
 use std::future::Future;
+use std::include_bytes;
 use std::io::Write as _;
+use std::process::Stdio;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -405,6 +412,120 @@ pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, A
                 .map_err(|err| ApiError::InternalServerError(err.into()))
         }
     }
+}
+
+/// Generates heap profiles.
+///
+/// This only works with jemalloc on Linux.
+pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    enum Format {
+        Jemalloc,
+        Pprof,
+        Svg,
+    }
+
+    // Parameters.
+    let format = match get_query_param(&req, "format")?.as_deref() {
+        None => Format::Pprof,
+        Some("jemalloc") => Format::Jemalloc,
+        Some("pprof") => Format::Pprof,
+        Some("svg") => Format::Svg,
+        Some(format) => return Err(ApiError::BadRequest(anyhow!("invalid format {format}"))),
+    };
+
+    // Obtain profiler handle.
+    let mut prof_ctl = jemalloc_pprof::PROF_CTL
+        .as_ref()
+        .ok_or(ApiError::InternalServerError(anyhow!(
+            "heap profiling not enabled"
+        )))?
+        .lock()
+        .await;
+    if !prof_ctl.activated() {
+        return Err(ApiError::InternalServerError(anyhow!(
+            "heap profiling not enabled"
+        )));
+    }
+
+    // Take and return the profile.
+    match format {
+        Format::Jemalloc => {
+            let file = tokio::task::spawn_blocking(move || prof_ctl.dump())
+                .await
+                .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
+                .map_err(ApiError::InternalServerError)?;
+            let stream = ReaderStream::new(tokio::fs::File::from_std(file));
+            Response::builder()
+                .status(200)
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .header(CONTENT_DISPOSITION, "attachment; filename=\"heap.dump\"")
+                .body(Body::wrap_stream(stream))
+                .map_err(|err| ApiError::InternalServerError(err.into()))
+        }
+
+        Format::Pprof => {
+            let data = tokio::task::spawn_blocking(move || prof_ctl.dump_pprof())
+                .await
+                .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
+                .map_err(ApiError::InternalServerError)?;
+            Response::builder()
+                .status(200)
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .header(CONTENT_DISPOSITION, "attachment; filename=\"heap.pb\"")
+                .body(Body::from(data))
+                .map_err(|err| ApiError::InternalServerError(err.into()))
+        }
+
+        Format::Svg => {
+            let tempfile = tokio::task::spawn_blocking(move || {
+                let mut file = prof_ctl.dump()?;
+                // Write the profile to a tempfile we can get the path to. If dump() returned the
+                // NamedTempFile instead of a File then this wouldn't be necessary.
+                let mut tempfile = NamedUtf8TempFile::new()?;
+                std::io::copy(&mut file, &mut tempfile)?;
+                Ok(tempfile)
+            })
+            .await
+            .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
+            .map_err(ApiError::InternalServerError)?;
+            let svg = jeprof_svg(tempfile.path())
+                .await
+                .map_err(ApiError::InternalServerError)?;
+            Response::builder()
+                .status(200)
+                .header(CONTENT_TYPE, "image/svg+xml")
+                .body(Body::from(svg))
+                .map_err(|err| ApiError::InternalServerError(err.into()))
+        }
+    }
+}
+
+/// Generates an SVG for the given jemalloc profile file. Requires Perl installed.
+///
+/// TODO: jeprof is really slow (~20 seconds) because of addr2line.
+pub async fn jeprof_svg(path: &Utf8Path) -> anyhow::Result<Vec<u8>> {
+    let mut cmd = Command::new("perl")
+        .args([
+            "/dev/stdin",
+            "--show_bytes",
+            &std::env::current_exe()?.as_os_str().to_string_lossy(),
+            path.as_str(),
+            "--svg",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    cmd.stdin
+        .take()
+        .expect("no stdin")
+        .write_all(include_bytes!("data/jeprof.in"))
+        .await?;
+    let output = cmd.wait_with_output().await?;
+    if !output.status.success() {
+        bail!("jeprof failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(output.stdout)
 }
 
 pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
