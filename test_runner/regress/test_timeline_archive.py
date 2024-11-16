@@ -416,7 +416,7 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
         [
             ".*error sending request.*",
             # FIXME: the pageserver should not return 500s on cancellation (https://github.com/neondatabase/neon/issues/97680)
-            ".*InternalServerError(Error deleting timeline .* on .* on .*: pageserver API: error: Cancelled",
+            ".*InternalServerError\\(Error deleting timeline .* on .* on .*: pageserver API: error: Cancelled",
         ]
     )
 
