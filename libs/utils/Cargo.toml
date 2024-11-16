@@ -18,6 +18,7 @@ anyhow.workspace = true
 bincode.workspace = true
 bytes.workspace = true
 camino.workspace = true
+camino-tempfile.workspace = true
 chrono.workspace = true
 git-version.workspace = true
 hex = { workspace = true, features = ["serde"] }
@@ -25,6 +26,7 @@ humantime.workspace = true
 hyper0 = { workspace = true, features = ["full"] }
 fail.workspace = true
 futures = { workspace = true}
+jemalloc_pprof.workspace = true
 jsonwebtoken.workspace = true
 nix.workspace = true
 once_cell.workspace = true
