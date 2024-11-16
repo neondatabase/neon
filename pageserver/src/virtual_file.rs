@@ -43,7 +43,7 @@ pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
 mod metadata;
 mod open_options;
 use self::owned_buffers_io::write::OwnedAsyncWriter;
-pub(crate) use api::IoMode;
+pub(crate) use api::IoModeKind;
 pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
@@ -138,6 +138,7 @@ impl VirtualFile {
         ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
     ) -> Result<Self, std::io::Error> {
         let file = match get_io_mode() {
+            IoMode::NotSet => panic!("not initialized"),
             IoMode::Buffered => {
                 let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
                 VirtualFile {
@@ -1332,7 +1333,7 @@ impl OpenFiles {
 /// server startup.
 ///
 #[cfg(not(test))]
-pub fn init(num_slots: usize, engine: IoEngineKind, mode: IoMode) {
+pub fn init(num_slots: usize, engine: IoEngineKind, mode: IoModeKind) {
     if OPEN_FILES.set(OpenFiles::new(num_slots)).is_err() {
         panic!("virtual_file::init called twice");
     }
@@ -1370,14 +1371,72 @@ pub(crate) type IoBuffer = AlignedBuffer<ConstAlign<{ get_io_buffer_alignment() 
 pub(crate) type IoPageSlice<'a> =
     AlignedSlice<'a, PAGE_SZ, ConstAlign<{ get_io_buffer_alignment() }>>;
 
-static IO_MODE: AtomicU8 = AtomicU8::new(IoMode::preferred() as u8);
+#[derive(Clone, Copy, Debug)]
+#[repr(u8)]
+pub(crate) enum IoMode {
+    NotSet,
+    Buffered,
+    #[cfg(target_os = "linux")]
+    Direct,
+}
 
-pub(crate) fn set_io_mode(mode: IoMode) {
+impl TryFrom<u8> for IoMode {
+    type Error = u8;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(match value {
+            v if v == (IoMode::NotSet as u8) => IoMode::NotSet,
+            v if v == (IoMode::Buffered as u8) => IoMode::Buffered,
+            #[cfg(target_os = "linux")]
+            v if v == (IoMode::Direct as u8) => IoMode::Direct,
+            x => return Err(x),
+        })
+    }
+}
+
+impl From<IoModeKind> for IoMode {
+    fn from(value: IoModeKind) -> Self {
+        match value {
+            IoModeKind::Buffered => IoMode::Buffered,
+            #[cfg(target_os = "linux")]
+            IoModeKind::Direct => IoMode::Direct,
+        }
+    }
+}
+
+static IO_MODE: AtomicU8 = AtomicU8::new(IoMode::NotSet as u8);
+
+pub(crate) fn set_io_mode(mode_kind: IoModeKind) {
+    let mode: IoMode = mode_kind.into();
     IO_MODE.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
 }
 
-pub(crate) fn get_io_mode() -> IoMode {
-    IoMode::try_from(IO_MODE.load(Ordering::Relaxed)).unwrap()
+fn get_io_mode() -> IoMode {
+    let mode = IoMode::try_from(IO_MODE.load(Ordering::Relaxed)).unwrap();
+    if cfg!(test) {
+        match mode {
+            IoMode::NotSet => {
+                let env_var_name = "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOMODE";
+                let kind = match std::env::var(env_var_name) {
+                    Ok(v) => match v.parse::<IoModeKind>() {
+                        Ok(mode_kind) => mode_kind,
+                        Err(e) => {
+                            panic!("invalid VirtualFile io mode for env var {env_var_name}: {e:#}: {v:?}")
+                        }
+                    },
+                    Err(std::env::VarError::NotPresent) => IoModeKind::preferred(),
+                    Err(std::env::VarError::NotUnicode(_)) => {
+                        panic!("env var {env_var_name} is not unicode");
+                    }
+                };
+                set_io_mode(kind);
+                get_io_mode()
+            }
+            x => x,
+        }
+    } else {
+        mode
+    }
 }
 #[cfg(test)]
 mod tests {

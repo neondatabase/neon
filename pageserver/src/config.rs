@@ -178,7 +178,7 @@ pub struct PageServerConf {
     pub l0_flush: crate::l0_flush::L0FlushConfig,
 
     /// Direct IO settings
-    pub virtual_file_io_mode: virtual_file::IoMode,
+    pub virtual_file_io_mode: virtual_file::IoModeKind,
 
     /// Optionally disable disk syncs (unsafe!)
     pub no_sync: bool,
@@ -415,7 +415,8 @@ impl PageServerConf {
             l0_flush: l0_flush
                 .map(crate::l0_flush::L0FlushConfig::from)
                 .unwrap_or_default(),
-            virtual_file_io_mode: virtual_file_io_mode.unwrap_or(virtual_file::IoMode::preferred()),
+            virtual_file_io_mode: virtual_file_io_mode
+                .unwrap_or(virtual_file::IoModeKind::preferred()),
             no_sync: no_sync.unwrap_or(false),
         };
 

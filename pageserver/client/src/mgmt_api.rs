@@ -543,7 +543,7 @@ impl Client {
     /// Configs io mode at runtime.
     pub async fn put_io_mode(
         &self,
-        mode: &pageserver_api::models::virtual_file::IoMode,
+        mode: &pageserver_api::models::virtual_file::IoModeKind,
     ) -> Result<()> {
         let uri = format!("{}/v1/io_mode", self.mgmt_api_endpoint);
         self.request(Method::PUT, uri, mode)

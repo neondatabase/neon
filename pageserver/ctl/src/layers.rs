@@ -8,7 +8,7 @@ use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::storage_layer::{delta_layer, image_layer};
 use pageserver::tenant::storage_layer::{DeltaLayer, ImageLayer};
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
-use pageserver::virtual_file::api::IoMode;
+use pageserver::virtual_file::api::IoModeKind;
 use pageserver::{page_cache, virtual_file};
 use std::fs::{self, File};
 use utils::id::{TenantId, TimelineId};
@@ -50,7 +50,7 @@ async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result
     virtual_file::init(
         10,
         virtual_file::api::IoEngineKind::StdFs,
-        IoMode::preferred(),
+        IoModeKind::preferred(),
     );
     page_cache::init(100);
     let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
@@ -64,7 +64,7 @@ async fn read_image_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result
     virtual_file::init(
         10,
         virtual_file::api::IoEngineKind::StdFs,
-        IoMode::preferred(),
+        IoModeKind::preferred(),
     );
     page_cache::init(100);
     let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
@@ -170,7 +170,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             pageserver::virtual_file::init(
                 10,
                 virtual_file::api::IoEngineKind::StdFs,
-                IoMode::preferred(),
+                IoModeKind::preferred(),
             );
             pageserver::page_cache::init(100);
 

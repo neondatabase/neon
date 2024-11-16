@@ -976,8 +976,7 @@ pub mod virtual_file {
         Debug,
     )]
     #[strum(serialize_all = "kebab-case")]
-    #[repr(u8)]
-    pub enum IoMode {
+    pub enum IoModeKind {
         /// Uses buffered IO.
         Buffered,
         /// Uses direct IO, error out if the operation fails.
@@ -985,22 +984,16 @@ pub mod virtual_file {
         Direct,
     }
 
-    impl IoMode {
+    impl IoModeKind {
+        // TODO(yuchen): change to [`Self::Direct`] once finish rollout.
+        #[cfg(target_os = "linux")]
         pub const fn preferred() -> Self {
             Self::Buffered
         }
-    }
 
-    impl TryFrom<u8> for IoMode {
-        type Error = u8;
-
-        fn try_from(value: u8) -> Result<Self, Self::Error> {
-            Ok(match value {
-                v if v == (IoMode::Buffered as u8) => IoMode::Buffered,
-                #[cfg(target_os = "linux")]
-                v if v == (IoMode::Direct as u8) => IoMode::Direct,
-                x => return Err(x),
-            })
+        #[cfg(target_os = "macos")]
+        pub const fn preferred() -> Self {
+            Self::Buffered
         }
     }
 }
