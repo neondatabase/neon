@@ -168,8 +168,8 @@ sync_wrapper = "0.1.2"
 tar = "0.4"
 test-context = "0.3"
 thiserror = "1.0"
-tikv-jemallocator = "0.5"
-tikv-jemalloc-ctl = "0.5"
+tikv-jemallocator = { version = "0.6", features = ["stats"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 tokio = { version = "1.17", features = ["macros"] }
 tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
