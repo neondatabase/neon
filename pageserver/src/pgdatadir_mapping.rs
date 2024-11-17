@@ -248,6 +248,7 @@ impl Timeline {
         let mut slots_filled = 0;
         let page_count = pages.len();
 
+        // Would be nice to use smallvec here but it doesn't provide the spare_capacity_mut() API.
         let mut result = Vec::with_capacity(pages.len());
         let result_slots = result.spare_capacity_mut();
 
