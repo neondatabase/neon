@@ -1288,7 +1288,7 @@ impl PageServerHandler {
             page.map(|page| {
                 PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse { page })
             })
-            .map_err(PageStreamError::Read)
+            .map_err(PageStreamError::from)
         }))
     }
 
