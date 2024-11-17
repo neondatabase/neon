@@ -729,8 +729,7 @@ impl PageServerHandler {
             let batch_timeout = match self.server_side_batch_timeout {
                 Some(value) => value,
                 None => {
-                    // Debouncing is not enabled.
-                    // Stop batching on the first message.
+                    // Batching is not enabled - stop on the first message.
                     return Ok(Some(BatchOrEof::Batch(smallvec::smallvec![this_msg])));
                 }
             };
