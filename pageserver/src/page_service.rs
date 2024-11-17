@@ -546,8 +546,9 @@ enum BatchedFeMessage {
 }
 
 enum BatchOrEof {
-    // TODO: Use smallvec. May have at most two entries
-    Batch(Vec<BatchedFeMessage>),
+    /// In the common case, this has one entry.
+    /// At most, it has two entries: the first is the leftover batch, the second is an error.
+    Batch(smallvec::SmallVec<[BatchedFeMessage; 1]>),
     Eof,
 }
 
@@ -665,6 +666,17 @@ impl PageServerHandler {
                         batch_size = tracing::field::Empty, batch_id = tracing::field::Empty
                     );
 
+                    macro_rules! current_batch_and_error {
+                        ($error:expr) => {{
+                            let error = BatchedFeMessage::RespondError(span, $error);
+                            let batch_and_error = match batch {
+                                Some(b) => smallvec::smallvec![b, error],
+                                None => smallvec::smallvec![error],
+                            };
+                            Ok(Some(BatchOrEof::Batch(batch_and_error)))
+                        }};
+                    }
+
                     let key = rel_block_to_key(rel, blkno);
                     let shard = match self
                         .timeline_handles
@@ -682,29 +694,12 @@ impl PageServerHandler {
                             // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
                             // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
                             // and talk to a different pageserver.
-                            let error = BatchedFeMessage::RespondError(
-                                span,
-                                PageStreamError::Reconnect(
-                                    "getpage@lsn request routed to wrong shard".into(),
-                                ),
-                            );
-
-                            let batch_and_error = match batch {
-                                Some(b) => vec![b, error],
-                                None => vec![error],
-                            };
-
-                            return Ok(Some(BatchOrEof::Batch(batch_and_error)));
+                            return current_batch_and_error!(PageStreamError::Reconnect(
+                                "getpage@lsn request routed to wrong shard".into()
+                            ));
                         }
                         Err(e) => {
-                            let error = BatchedFeMessage::RespondError(span, e.into());
-
-                            let batch_and_error = match batch {
-                                Some(b) => vec![b, error],
-                                None => vec![error],
-                            };
-
-                            return Ok(Some(BatchOrEof::Batch(batch_and_error)));
+                            return current_batch_and_error!(e.into());
                         }
                     };
                     let effective_request_lsn = match Self::wait_or_get_last_lsn(
@@ -719,14 +714,7 @@ impl PageServerHandler {
                     {
                         Ok(lsn) => lsn,
                         Err(e) => {
-                            let error = BatchedFeMessage::RespondError(span, e);
-
-                            let batch_and_error = match batch {
-                                Some(b) => vec![b, error],
-                                None => vec![error],
-                            };
-
-                            return Ok(Some(BatchOrEof::Batch(batch_and_error)));
+                            return current_batch_and_error!(e);
                         }
                     };
                     BatchedFeMessage::GetPage {
@@ -743,7 +731,7 @@ impl PageServerHandler {
                 None => {
                     // Debouncing is not enabled.
                     // Stop batching on the first message.
-                    return Ok(Some(BatchOrEof::Batch(vec![this_msg])));
+                    return Ok(Some(BatchOrEof::Batch(smallvec::smallvec![this_msg])));
                 }
             };
 
@@ -804,7 +792,7 @@ impl PageServerHandler {
         };
 
         self.next_batch = next_batch;
-        Ok(batch.map(|b| BatchOrEof::Batch(vec![b])))
+        Ok(batch.map(|b| BatchOrEof::Batch(smallvec::smallvec![b])))
     }
 
     /// Pagestream sub-protocol handler.
