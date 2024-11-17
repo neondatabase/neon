@@ -197,10 +197,10 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         match version {
-            lsn_version @ Version::Lsn(_) => {
+            Version::Lsn(effective_lsn) => {
                 let pages = smallvec::smallvec![(tag, blknum)];
                 let res = self
-                    .get_rel_page_at_lsn_batched(pages, lsn_version, ctx)
+                    .get_rel_page_at_lsn_batched(pages, effective_lsn, ctx)
                     .await;
                 assert_eq!(res.len(), 1);
                 res.into_iter().next().unwrap()
@@ -236,14 +236,10 @@ impl Timeline {
     pub(crate) async fn get_rel_page_at_lsn_batched(
         &self,
         pages: smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
-        version: Version<'_>,
+        effective_lsn: Lsn,
         ctx: &RequestContext,
     ) -> Vec<Result<Bytes, PageReconstructError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
-        let request_lsn = match version {
-            Version::Lsn(lsn) => lsn,
-            Version::Modified(_) => panic!("unsupported"),
-        };
 
         let mut slots_filled = 0;
         let page_count = pages.len();
@@ -263,7 +259,10 @@ impl Timeline {
                 continue;
             }
 
-            let nblocks = match self.get_rel_size(tag, version, ctx).await {
+            let nblocks = match self
+                .get_rel_size(tag, Version::Lsn(effective_lsn), ctx)
+                .await
+            {
                 Ok(nblocks) => nblocks,
                 Err(err) => {
                     result_slots[response_slot_idx].write(Err(err));
@@ -275,10 +274,7 @@ impl Timeline {
             if blknum >= nblocks {
                 debug!(
                     "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
-                    tag,
-                    blknum,
-                    version.get_lsn(),
-                    nblocks
+                    tag, blknum, effective_lsn, nblocks
                 );
                 result_slots[response_slot_idx].write(Ok(ZERO_PAGE.clone()));
                 slots_filled += 1;
@@ -304,7 +300,7 @@ impl Timeline {
             acc.to_keyspace()
         };
 
-        match self.get_vectored(keyspace, request_lsn, ctx).await {
+        match self.get_vectored(keyspace, effective_lsn, ctx).await {
             Ok(results) => {
                 for (key, res) in results {
                     let mut key_slots = keys_slots.remove(&key).unwrap().into_iter();

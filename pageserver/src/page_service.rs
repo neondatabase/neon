@@ -1254,7 +1254,7 @@ impl PageServerHandler {
         );
 
         let pages = timeline
-            .get_rel_page_at_lsn_batched(pages, Version::Lsn(effective_lsn), ctx)
+            .get_rel_page_at_lsn_batched(pages, effective_lsn, ctx)
             .await;
 
         // TODO: This copies the buffers
