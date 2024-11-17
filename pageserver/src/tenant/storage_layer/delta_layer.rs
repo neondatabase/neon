@@ -30,7 +30,6 @@
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::{self, FileId, PAGE_SZ};
-use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{
@@ -44,19 +43,21 @@ use crate::tenant::vectored_blob_io::{
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
+use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
-use crate::{walrecord, TEMP_FILE_SUFFIX};
+use crate::TEMP_FILE_SUFFIX;
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use bytes::BytesMut;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
 use pageserver_api::config::MaxVectoredReadBytes;
 use pageserver_api::key::DBDIR_KEY;
+use pageserver_api::key::{Key, KEY_SIZE};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
+use pageserver_api::value::Value;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -269,7 +270,7 @@ impl AsLayerDesc for DeltaLayer {
 }
 
 impl DeltaLayer {
-    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         self.desc.dump();
 
         if !verbose {
@@ -515,8 +516,8 @@ impl DeltaLayerWriterInner {
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let temp_path = self.path.clone();
         let result = self.finish0(key_end, ctx).await;
-        if result.is_err() {
-            tracing::info!(%temp_path, "cleaning up temporary file after error during writing");
+        if let Err(ref e) = result {
+            tracing::info!(%temp_path, "cleaning up temporary file after error during writing: {e}");
             if let Err(e) = std::fs::remove_file(&temp_path) {
                 tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
             }
@@ -529,8 +530,7 @@ impl DeltaLayerWriterInner {
         key_end: Key,
         ctx: &RequestContext,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
-        let index_start_blk =
-            ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
+        let index_start_blk = self.blob_writer.size().div_ceil(PAGE_SZ as u64) as u32;
 
         let mut file = self.blob_writer.into_inner(ctx).await?;
 
@@ -651,6 +651,10 @@ impl DeltaLayerWriter {
                 .await?,
             ),
         })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.as_ref().unwrap().num_keys == 0
     }
 
     ///
@@ -1003,7 +1007,7 @@ impl DeltaLayerInner {
             .0
             .into();
         let buf_size = Self::get_min_read_buffer_size(&reads, max_vectored_read_bytes);
-        let mut buf = Some(BytesMut::with_capacity(buf_size));
+        let mut buf = Some(IoBufferMut::with_capacity(buf_size));
 
         // Note that reads are processed in reverse order (from highest key+lsn).
         // This is the order that `ReconstructState` requires such that it can
@@ -1030,7 +1034,7 @@ impl DeltaLayerInner {
 
                     // We have "lost" the buffer since the lower level IO api
                     // doesn't return the buffer on error. Allocate a new one.
-                    buf = Some(BytesMut::with_capacity(buf_size));
+                    buf = Some(IoBufferMut::with_capacity(buf_size));
 
                     continue;
                 }
@@ -1085,7 +1089,7 @@ impl DeltaLayerInner {
         }
     }
 
-    pub(super) async fn load_keys<'a>(
+    pub(crate) async fn index_entries<'a>(
         &'a self,
         ctx: &RequestContext,
     ) -> Result<Vec<DeltaEntry<'a>>> {
@@ -1204,7 +1208,7 @@ impl DeltaLayerInner {
             .map(|x| x.0.get())
             .unwrap_or(8192);
 
-        let mut buffer = Some(BytesMut::with_capacity(max_read_size));
+        let mut buffer = Some(IoBufferMut::with_capacity(max_read_size));
 
         // FIXME: buffering of DeltaLayerWriter
         let mut per_blob_copy = Vec::new();
@@ -1294,7 +1298,7 @@ impl DeltaLayerInner {
                     // is it an image or will_init walrecord?
                     // FIXME: this could be handled by threading the BlobRef to the
                     // VectoredReadBuilder
-                    let will_init = crate::repository::ValueBytes::will_init(&data)
+                    let will_init = pageserver_api::value::ValueBytes::will_init(&data)
                         .inspect_err(|_e| {
                             #[cfg(feature = "testing")]
                             tracing::error!(data=?utils::Hex(&data), err=?_e, %key, %lsn, "failed to parse will_init out of serialized value");
@@ -1347,7 +1351,7 @@ impl DeltaLayerInner {
 
         tree_reader.dump().await?;
 
-        let keys = self.load_keys(ctx).await?;
+        let keys = self.index_entries(ctx).await?;
 
         async fn dump_blob(val: &ValueRef<'_>, ctx: &RequestContext) -> anyhow::Result<String> {
             let buf = val.load_raw(ctx).await?;
@@ -1357,7 +1361,7 @@ impl DeltaLayerInner {
                     format!(" img {} bytes", img.len())
                 }
                 Value::WalRecord(rec) => {
-                    let wal_desc = walrecord::describe_wal_record(&rec)?;
+                    let wal_desc = pageserver_api::record::describe_wal_record(&rec)?;
                     format!(
                         " rec {} bytes will_init: {} {}",
                         buf.len(),
@@ -1438,7 +1442,7 @@ impl DeltaLayerInner {
         offset
     }
 
-    pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIterator<'a> {
+    pub fn iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIterator<'a> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
@@ -1453,6 +1457,16 @@ impl DeltaLayerInner {
                 1024,        // The default value. Unit tests might use a different value
             ),
         }
+    }
+
+    /// NB: not super efficient, but not terrible either. Should prob be an iterator.
+    //
+    // We're reusing the index traversal logical in plan_reads; would be nice to
+    // factor that out.
+    pub(crate) async fn load_keys(&self, ctx: &RequestContext) -> anyhow::Result<Vec<Key>> {
+        self.index_entries(ctx)
+            .await
+            .map(|entries| entries.into_iter().map(|entry| entry.key).collect())
     }
 }
 
@@ -1562,12 +1576,11 @@ impl<'a> DeltaLayerIterator<'a> {
         let vectored_blob_reader = VectoredBlobReader::new(&self.delta_layer.file);
         let mut next_batch = std::collections::VecDeque::new();
         let buf_size = plan.size();
-        let buf = BytesMut::with_capacity(buf_size);
+        let buf = IoBufferMut::with_capacity(buf_size);
         let blobs_buf = vectored_blob_reader
             .read_blobs(&plan, buf, self.ctx)
             .await?;
-        let frozen_buf = blobs_buf.buf.freeze();
-        let view = BufView::new_bytes(frozen_buf);
+        let view = BufView::new_slice(&blobs_buf.buf);
         for meta in blobs_buf.blobs.iter() {
             let blob_read = meta.read(&view).await?;
             let value = Value::des(&blob_read)?;
@@ -1602,7 +1615,6 @@ pub(crate) mod test {
     use rand::RngCore;
 
     use super::*;
-    use crate::repository::Value;
     use crate::tenant::harness::TIMELINE_ID;
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
     use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
@@ -1614,6 +1626,7 @@ pub(crate) mod test {
         DEFAULT_PG_VERSION,
     };
     use bytes::Bytes;
+    use pageserver_api::value::Value;
 
     /// Construct an index for a fictional delta layer and and then
     /// traverse in order to plan vectored reads for a query. Finally,
@@ -1942,7 +1955,7 @@ pub(crate) mod test {
                 &vectored_reads,
                 constants::MAX_VECTORED_READ_BYTES,
             );
-            let mut buf = Some(BytesMut::with_capacity(buf_size));
+            let mut buf = Some(IoBufferMut::with_capacity(buf_size));
 
             for read in vectored_reads {
                 let blobs_buf = vectored_blob_reader
@@ -1966,8 +1979,8 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn copy_delta_prefix_smoke() {
-        use crate::walrecord::NeonWalRecord;
         use bytes::Bytes;
+        use pageserver_api::record::NeonWalRecord;
 
         let h = crate::tenant::harness::TenantHarness::create("truncate_delta_smoke")
             .await
@@ -2190,6 +2203,7 @@ pub(crate) mod test {
         (k1, l1).cmp(&(k2, l2))
     }
 
+    #[cfg(feature = "testing")]
     pub(crate) fn sort_delta_value(
         (k1, l1, v1): &(Key, Lsn, Value),
         (k2, l2, v2): &(Key, Lsn, Value),

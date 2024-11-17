@@ -1,15 +1,15 @@
-use crate::{
-    control_plane::messages::{DatabaseInfo, KickSession},
-    waiters::{self, Waiter, Waiters},
-};
+use std::convert::Infallible;
+
 use anyhow::Context;
 use once_cell::sync::Lazy;
 use postgres_backend::{AuthType, PostgresBackend, PostgresBackendTCP, QueryError};
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
-use std::convert::Infallible;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, Instrument};
+
+use crate::control_plane::messages::{DatabaseInfo, KickSession};
+use crate::waiters::{self, Waiter, Waiters};
 
 static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);
 
@@ -24,8 +24,8 @@ pub(crate) fn notify(psql_session_id: &str, msg: ComputeReady) -> Result<(), wai
     CPLANE_WAITERS.notify(psql_session_id, msg)
 }
 
-/// Console management API listener task.
-/// It spawns console response handlers needed for the web auth.
+/// Management API listener task.
+/// It spawns management response handlers needed for the console redirect auth flow.
 pub async fn task_main(listener: TcpListener) -> anyhow::Result<Infallible> {
     scopeguard::defer! {
         info!("mgmt has shut down");
@@ -43,13 +43,13 @@ pub async fn task_main(listener: TcpListener) -> anyhow::Result<Infallible> {
 
         tokio::task::spawn(
             async move {
-                info!("serving a new console management API connection");
+                info!("serving a new management API connection");
 
                 // these might be long running connections, have a separate logging for cancelling
                 // on shutdown and other ways of stopping.
                 let cancelled = scopeguard::guard(tracing::Span::current(), |span| {
                     let _e = span.entered();
-                    info!("console management API task cancelled");
+                    info!("management API task cancelled");
                 });
 
                 if let Err(e) = handle_connection(socket).await {

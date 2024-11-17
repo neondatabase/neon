@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING
 
+import fixtures.utils
 import pytest
 from fixtures.auth_tokens import TokenScope
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
@@ -17,6 +18,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    NeonPageserver,
     PageserverAvailability,
     PageserverSchedulingPolicy,
     PgBin,
@@ -34,11 +36,16 @@ from fixtures.pageserver.utils import (
     remote_storage_delete_key,
     timeline_delete_wait_completed,
 )
-from fixtures.pg_version import PgVersion, run_only_on_default_postgres
+from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.storage_controller_proxy import StorageControllerProxy
-from fixtures.utils import run_pg_bench_small, subprocess_capture, wait_until
+from fixtures.utils import (
+    run_only_on_default_postgres,
+    run_pg_bench_small,
+    subprocess_capture,
+    wait_until,
+)
 from fixtures.workload import Workload
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
@@ -60,9 +67,8 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
     return counts
 
 
-def test_storage_controller_smoke(
-    neon_env_builder: NeonEnvBuilder,
-):
+@pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
+def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination):
     """
     Test the basic lifecycle of a storage controller:
     - Restarting
@@ -102,6 +108,15 @@ def test_storage_controller_smoke(
     # Creating several tenants should spread out across the pageservers
     for tid in tenant_ids:
         env.create_tenant(tid, shard_count=shards_per_tenant)
+
+    # Validate high level metrics
+    assert (
+        env.storage_controller.get_metric_value("storage_controller_tenant_shards")
+        == len(tenant_ids) * shards_per_tenant
+    )
+    assert env.storage_controller.get_metric_value("storage_controller_pageserver_nodes") == len(
+        env.storage_controller.node_list()
+    )
 
     # Repeating a creation should be idempotent (we are just testing it doesn't return an error)
     env.storage_controller.tenant_create(
@@ -285,16 +300,19 @@ def test_storage_controller_restart(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.consistency_check()
 
 
-@pytest.mark.parametrize("warm_up", [True, False])
-def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: bool):
+def prepare_onboarding_env(
+    neon_env_builder: NeonEnvBuilder,
+) -> tuple[NeonEnv, NeonPageserver, TenantId, int]:
     """
-    We onboard tenants to the sharding service by treating it as a 'virtual pageserver'
-    which provides the /location_config API.  This is similar to creating a tenant,
-    but imports the generation number.
+    For tests that do onboarding of a tenant to the storage controller, a small dance to
+    set up one pageserver that won't be managed by the storage controller and create
+    a tenant there.
     """
-
     # One pageserver to simulate legacy environment, two to be managed by storage controller
     neon_env_builder.num_pageservers = 3
+
+    # Enable tests to use methods that require real S3 API
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
 
     # Start services by hand so that we can skip registration on one of the pageservers
     env = neon_env_builder.init_configs()
@@ -316,7 +334,6 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     # will be attached after onboarding
     env.pageservers[1].start()
     env.pageservers[2].start()
-    virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
 
     for sk in env.safekeepers:
         sk.start()
@@ -325,6 +342,23 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     tenant_id = TenantId.generate()
     generation = 123
     origin_ps.tenant_create(tenant_id, generation=generation)
+
+    origin_ps.http_client().timeline_create(PgVersion.NOT_SET, tenant_id, TimelineId.generate())
+
+    return (env, origin_ps, tenant_id, generation)
+
+
+@pytest.mark.parametrize("warm_up", [True, False])
+def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: bool):
+    """
+    We onboard tenants to the sharding service by treating it as a 'virtual pageserver'
+    which provides the /location_config API.  This is similar to creating a tenant,
+    but imports the generation number.
+    """
+
+    env, origin_ps, tenant_id, generation = prepare_onboarding_env(neon_env_builder)
+
+    virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
 
     # As if doing a live migration, first configure origin into stale mode
     r = origin_ps.http_client().tenant_location_conf(
@@ -462,6 +496,70 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     env.storage_controller.consistency_check()
 
 
+@run_only_on_default_postgres("this test doesn't start an endpoint")
+def test_storage_controller_onboard_detached(neon_env_builder: NeonEnvBuilder):
+    """
+    Sometimes, the control plane wants to delete a tenant that wasn't attached to any pageserver,
+    and also wasn't ever registered with the storage controller.
+
+    It may do this by calling /location_conf in mode Detached and then calling the delete API
+    as normal.
+    """
+
+    env, origin_ps, tenant_id, generation = prepare_onboarding_env(neon_env_builder)
+
+    remote_prefix = "/".join(
+        (
+            "tenants",
+            str(tenant_id),
+        )
+    )
+
+    # Detach it from its original pageserver.
+    origin_ps.http_client().tenant_location_conf(
+        tenant_id,
+        {
+            "mode": "Detached",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": None,
+        },
+    )
+
+    # Since we will later assert that remote data is gone, as a control also check it was ever there
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix=remote_prefix,
+    )
+
+    # Register with storage controller in Detached state
+    virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
+    generation += 1
+    r = virtual_ps_http.tenant_location_conf(
+        tenant_id,
+        {
+            "mode": "Detached",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": generation,
+        },
+    )
+    assert len(r["shards"]) == 0  # location_conf tells us there are no attached shards
+
+    # Onboarding in Detached state shouldn't have attached it to any pageserver
+    for ps in env.pageservers:
+        assert ps.http_client().tenant_list() == []
+
+    # Delete it via the storage controller
+    virtual_ps_http.tenant_delete(tenant_id)
+
+    # Check that we really deleted it
+    assert_prefix_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix=remote_prefix,
+    )
+
+
 def test_storage_controller_compute_hook(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
@@ -572,6 +670,14 @@ def test_storage_controller_compute_hook(
     env.storage_controller.consistency_check()
 
 
+NOTIFY_BLOCKED_LOG = ".*Live migration blocked.*"
+NOTIFY_FAILURE_LOGS = [
+    ".*Failed to notify compute.*",
+    ".*Reconcile error.*Cancelled",
+    ".*Reconcile error.*Control plane tenant busy",
+]
+
+
 def test_storage_controller_stuck_compute_hook(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
@@ -616,15 +722,8 @@ def test_storage_controller_stuck_compute_hook(
     dest_pageserver = env.get_pageserver(dest_ps_id)
     shard_0_id = TenantShardId(tenant_id, 0, 0)
 
-    NOTIFY_BLOCKED_LOG = ".*Live migration blocked.*"
-    env.storage_controller.allowed_errors.extend(
-        [
-            NOTIFY_BLOCKED_LOG,
-            ".*Failed to notify compute.*",
-            ".*Reconcile error.*Cancelled",
-            ".*Reconcile error.*Control plane tenant busy",
-        ]
-    )
+    env.storage_controller.allowed_errors.append(NOTIFY_BLOCKED_LOG)
+    env.storage_controller.allowed_errors.extend(NOTIFY_FAILURE_LOGS)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         # We expect the controller to hit the 423 (locked) and retry.  Migration shouldn't complete until that
@@ -715,6 +814,114 @@ def test_storage_controller_stuck_compute_hook(
     env.storage_controller.consistency_check()
 
 
+@run_only_on_default_postgres("this test doesn't start an endpoint")
+def test_storage_controller_compute_hook_revert(
+    httpserver: HTTPServer,
+    neon_env_builder: NeonEnvBuilder,
+    httpserver_listen_address,
+):
+    """
+    'revert' in the sense of a migration which gets reversed shortly after, as may happen during
+    a rolling upgrade.
+
+    This is a reproducer for https://github.com/neondatabase/neon/issues/9417
+
+    The buggy behavior was that when the compute hook gave us errors, we assumed our last successfully
+    sent state was still in effect, so when migrating back to the original pageserver we didn't bother
+    notifying of that.  This is wrong because even a failed request might mutate the state on the server.
+    """
+
+    # We will run two pageserver to migrate and check that the storage controller sends notifications
+    # when migrating.
+    neon_env_builder.num_pageservers = 2
+    (host, port) = httpserver_listen_address
+    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+
+    # Set up fake HTTP notify endpoint
+    notifications = []
+
+    handle_params = {"status": 200}
+
+    def handler(request: Request):
+        status = handle_params["status"]
+        log.info(f"Notify request[{status}]: {request}")
+        notifications.append(request.json)
+        return Response(status=status)
+
+    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+
+    # Start running
+    env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
+    tenant_id = env.initial_tenant
+    tenant_shard_id = TenantShardId(tenant_id, 0, 0)
+
+    pageserver_a = env.get_tenant_pageserver(tenant_id)
+    pageserver_b = [p for p in env.pageservers if p.id != pageserver_a.id][0]
+
+    def notified_ps(ps_id: int) -> None:
+        latest = notifications[-1]
+        log.info(f"Waiting for {ps_id}, have {latest}")
+        assert latest is not None
+        assert latest["shards"] is not None
+        assert latest["shards"][0]["node_id"] == ps_id
+
+    wait_until(30, 1, lambda: notified_ps(pageserver_a.id))
+
+    env.storage_controller.allowed_errors.append(NOTIFY_BLOCKED_LOG)
+    env.storage_controller.allowed_errors.extend(NOTIFY_FAILURE_LOGS)
+
+    # Migrate A -> B, and make notifications fail while this is happening
+    handle_params["status"] = 423
+
+    with pytest.raises(StorageControllerApiException, match="Timeout waiting for shard"):
+        # We expect the controller to give us an error because its reconciliation timed out
+        # waiting for the compute hook.
+        env.storage_controller.tenant_shard_migrate(tenant_shard_id, pageserver_b.id)
+
+    # Although the migration API failed, the hook should still see pageserver B (it remembers what
+    # was posted even when returning an error code)
+    wait_until(30, 1, lambda: notified_ps(pageserver_b.id))
+
+    # Although the migration API failed, the tenant should still have moved to the right pageserver
+    assert len(pageserver_b.http_client().tenant_list()) == 1
+
+    # Before we clear the failure on the migration hook, we need the controller to give up
+    # trying to notify about B -- the bug case we're reproducing is when the controller
+    # _never_ successfully notified for B, then tries to notify for A.
+    #
+    # The controller will give up notifying if the origin of a migration becomes unavailable.
+    pageserver_a.stop()
+
+    # Preempt heartbeats for a faster test
+    env.storage_controller.node_configure(pageserver_a.id, {"availability": "Offline"})
+
+    def logged_giving_up():
+        env.storage_controller.assert_log_contains(".*Giving up on compute notification.*")
+
+    wait_until(30, 1, logged_giving_up)
+
+    pageserver_a.start()
+
+    # Preempt heartbeats for determinism
+    env.storage_controller.node_configure(pageserver_a.id, {"availability": "Active"})
+    # Starting node will prompt a reconcile to clean up old AttachedStale location, for a deterministic test
+    # we want that complete before we start our migration.  Tolerate failure because our compute hook is
+    # still configured to fail
+    try:
+        env.storage_controller.reconcile_all()
+    except StorageControllerApiException as e:
+        # This exception _might_ be raised: it depends if our reconcile_all hit the on-node-activation
+        # Reconciler lifetime or ran after it already completed.
+        log.info(f"Expected error from reconcile_all: {e}")
+
+    # Migrate B -> A, with a working compute hook: the controller should notify the hook because the
+    # last update it made that was acked (423) by the compute was for node B.
+    handle_params["status"] = 200
+    env.storage_controller.tenant_shard_migrate(tenant_shard_id, pageserver_a.id)
+
+    wait_until(30, 1, lambda: notified_ps(pageserver_a.id))
+
+
 def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
     """
     Verify that occasional-use debug APIs work as expected.  This is a lightweight test
@@ -750,6 +957,14 @@ def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
     assert sum(v["shard_count"] for v in response.json()["nodes"].values()) == 3
     assert all(v["may_schedule"] for v in response.json()["nodes"].values())
 
+    # Reconciler cancel API should be a no-op when nothing is in flight
+    env.storage_controller.request(
+        "PUT",
+        f"{env.storage_controller_api}/control/v1/tenant/{tenant_id}-0102/cancel_reconcile",
+        headers=env.storage_controller.headers(TokenScope.ADMIN),
+    )
+
+    # Node unclean drop API
     response = env.storage_controller.request(
         "POST",
         f"{env.storage_controller_api}/debug/v1/node/{env.pageservers[1].id}/drop",
@@ -757,6 +972,7 @@ def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
     )
     assert len(env.storage_controller.node_list()) == 1
 
+    # Tenant unclean drop API
     response = env.storage_controller.request(
         "POST",
         f"{env.storage_controller_api}/debug/v1/tenant/{tenant_id}/drop",
@@ -770,7 +986,6 @@ def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
         headers=env.storage_controller.headers(TokenScope.ADMIN),
     )
     assert len(response.json()) == 1
-
     # Check that the 'drop' APIs didn't leave things in a state that would fail a consistency check: they're
     # meant to be unclean wrt the pageserver state, but not leave a broken storage controller behind.
     env.storage_controller.consistency_check()
@@ -1023,6 +1238,7 @@ def test_storage_controller_tenant_deletion(
     # Assert attachments all have local content
     for shard_id in shard_ids:
         pageserver = env.get_tenant_pageserver(shard_id)
+        assert pageserver is not None
         assert pageserver.tenant_dir(shard_id).exists()
 
     # Assert all shards have some content in remote storage
@@ -1300,11 +1516,11 @@ def test_storage_controller_heartbeats(
     node_to_tenants = build_node_to_tenants_map(env)
     log.info(f"Back online: {node_to_tenants=}")
 
-    # ... expecting the storage controller to reach a consistent state
-    def storage_controller_consistent():
-        env.storage_controller.consistency_check()
+    # ... background reconciliation may need to run to clean up the location on the node that was offline
+    env.storage_controller.reconcile_until_idle()
 
-    wait_until(30, 1, storage_controller_consistent)
+    # ... expecting the storage controller to reach a consistent state
+    env.storage_controller.consistency_check()
 
 
 def test_storage_controller_re_attach(neon_env_builder: NeonEnvBuilder):
@@ -1537,6 +1753,11 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     # Pause changes on a tenant
     storcon_cli(["tenant-policy", "--tenant-id", str(env.initial_tenant), "--scheduling", "stop"])
     assert "Stop" in storcon_cli(["tenants"])[3]
+
+    # Cancel ongoing reconcile on a tenant
+    storcon_cli(
+        ["tenant-shard-cancel-reconcile", "--tenant-shard-id", f"{env.initial_tenant}-0104"]
+    )
 
     # Change a tenant's placement
     storcon_cli(
@@ -2526,6 +2747,7 @@ def test_storage_controller_validate_during_migration(neon_env_builder: NeonEnvB
 
     # Upload but don't compact
     origin_pageserver = env.get_tenant_pageserver(tenant_id)
+    assert origin_pageserver is not None
     dest_ps_id = [p.id for p in env.pageservers if p.id != origin_pageserver.id][0]
     origin_pageserver.http_client().timeline_checkpoint(
         tenant_id, timeline_id, wait_until_uploaded=True, compact=False

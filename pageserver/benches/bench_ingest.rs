@@ -8,17 +8,16 @@ use pageserver::{
     context::{DownloadBehavior, RequestContext},
     l0_flush::{L0FlushConfig, L0FlushGlobalState},
     page_cache,
-    repository::Value,
     task_mgr::TaskKind,
-    tenant::storage_layer::inmemory_layer::SerializedBatch,
     tenant::storage_layer::InMemoryLayer,
     virtual_file,
 };
-use pageserver_api::{key::Key, shard::TenantShardId};
+use pageserver_api::{key::Key, shard::TenantShardId, value::Value};
 use utils::{
     bin_ser::BeSer,
     id::{TenantId, TimelineId},
 };
+use wal_decoder::serialized_batch::SerializedValueBatch;
 
 // A very cheap hash for generating non-sequential keys.
 fn murmurhash32(mut h: u32) -> u32 {
@@ -103,13 +102,13 @@ async fn ingest(
         batch.push((key.to_compact(), lsn, data_ser_size, data.clone()));
         if batch.len() >= BATCH_SIZE {
             let this_batch = std::mem::take(&mut batch);
-            let serialized = SerializedBatch::from_values(this_batch).unwrap();
+            let serialized = SerializedValueBatch::from_values(this_batch);
             layer.put_batch(serialized, &ctx).await?;
         }
     }
     if !batch.is_empty() {
         let this_batch = std::mem::take(&mut batch);
-        let serialized = SerializedBatch::from_values(this_batch).unwrap();
+        let serialized = SerializedValueBatch::from_values(this_batch);
         layer.put_batch(serialized, &ctx).await?;
     }
     layer.freeze(lsn + 1).await;
@@ -164,7 +163,11 @@ fn criterion_benchmark(c: &mut Criterion) {
     let conf: &'static PageServerConf = Box::leak(Box::new(
         pageserver::config::PageServerConf::dummy_conf(temp_dir.path().to_path_buf()),
     ));
-    virtual_file::init(16384, virtual_file::io_engine_for_bench());
+    virtual_file::init(
+        16384,
+        virtual_file::io_engine_for_bench(),
+        conf.virtual_file_io_mode,
+    );
     page_cache::init(conf.page_cache_size);
 
     {

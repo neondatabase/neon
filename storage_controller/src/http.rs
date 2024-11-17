@@ -381,14 +381,16 @@ async fn handle_tenant_timeline_delete(
         R: std::future::Future<Output = Result<StatusCode, ApiError>> + Send + 'static,
         F: Fn(Arc<Service>) -> R + Send + Sync + 'static,
     {
+        // On subsequent retries, wait longer.
+        // Enable callers with a 25 second request timeout to reliably get a response
+        const MAX_WAIT: Duration = Duration::from_secs(25);
+        const MAX_RETRY_PERIOD: Duration = Duration::from_secs(5);
+
         let started_at = Instant::now();
+
         // To keep deletion reasonably snappy for small tenants, initially check after 1 second if deletion
         // completed.
         let mut retry_period = Duration::from_secs(1);
-        // On subsequent retries, wait longer.
-        let max_retry_period = Duration::from_secs(5);
-        // Enable callers with a 30 second request timeout to reliably get a response
-        let max_wait = Duration::from_secs(25);
 
         loop {
             let status = f(service.clone()).await?;
@@ -396,7 +398,11 @@ async fn handle_tenant_timeline_delete(
                 StatusCode::ACCEPTED => {
                     tracing::info!("Deletion accepted, waiting to try again...");
                     tokio::time::sleep(retry_period).await;
-                    retry_period = max_retry_period;
+                    retry_period = MAX_RETRY_PERIOD;
+                }
+                StatusCode::CONFLICT => {
+                    tracing::info!("Deletion already in progress, waiting to try again...");
+                    tokio::time::sleep(retry_period).await;
                 }
                 StatusCode::NOT_FOUND => {
                     tracing::info!("Deletion complete");
@@ -409,7 +415,7 @@ async fn handle_tenant_timeline_delete(
             }
 
             let now = Instant::now();
-            if now + retry_period > started_at + max_wait {
+            if now + retry_period > started_at + MAX_WAIT {
                 tracing::info!("Deletion timed out waiting for 404");
                 // REQUEST_TIMEOUT would be more appropriate, but CONFLICT is already part of
                 // the pageserver's swagger definition for this endpoint, and has the same desired
@@ -652,7 +658,7 @@ async fn handle_node_register(req: Request<Body>) -> Result<Response<Body>, ApiE
 }
 
 async fn handle_node_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -731,7 +737,7 @@ async fn handle_node_configure(req: Request<Body>) -> Result<Response<Body>, Api
 }
 
 async fn handle_node_status(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -780,7 +786,7 @@ async fn handle_get_leader(req: Request<Body>) -> Result<Response<Body>, ApiErro
 }
 
 async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -798,7 +804,7 @@ async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiErro
 }
 
 async fn handle_cancel_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -816,7 +822,7 @@ async fn handle_cancel_node_drain(req: Request<Body>) -> Result<Response<Body>, 
 }
 
 async fn handle_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -834,7 +840,7 @@ async fn handle_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError
 }
 
 async fn handle_cancel_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -962,6 +968,28 @@ async fn handle_tenant_shard_migrate(
     )
 }
 
+async fn handle_tenant_shard_cancel_reconcile(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
+    json_response(
+        StatusCode::OK,
+        service
+            .tenant_shard_cancel_reconcile(tenant_shard_id)
+            .await?,
+    )
+}
+
 async fn handle_tenant_update_policy(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -1005,7 +1033,7 @@ async fn handle_update_preferred_azs(req: Request<Body>) -> Result<Response<Body
 }
 
 async fn handle_step_down(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::ControllerPeer)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -1770,6 +1798,16 @@ pub fn make_router(
                 RequestName("control_v1_tenant_migrate"),
             )
         })
+        .put(
+            "/control/v1/tenant/:tenant_shard_id/cancel_reconcile",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_shard_cancel_reconcile,
+                    RequestName("control_v1_tenant_cancel_reconcile"),
+                )
+            },
+        )
         .put("/control/v1/tenant/:tenant_id/shard_split", |r| {
             tenant_service_handler(
                 r,

@@ -4,7 +4,7 @@
 //!
 //! The old legacy algorithm is implemented directly in `timeline.rs`.
 
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
@@ -29,38 +29,57 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
+use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
+use crate::tenant::storage_layer::batch_split_writer::{
+    BatchWriterResult, SplitDeltaLayerWriter, SplitImageLayerWriter,
+};
 use crate::tenant::storage_layer::filter_iterator::FilterIterator;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
-use crate::tenant::storage_layer::split_writer::{
-    SplitDeltaLayerWriter, SplitImageLayerWriter, SplitWriterResult,
-};
 use crate::tenant::storage_layer::{
     AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
 };
 use crate::tenant::timeline::ImageLayerCreationOutcome;
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
-use crate::tenant::DeltaLayer;
+use crate::tenant::{DeltaLayer, MaybeOffloaded};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 use pageserver_api::config::tenant_conf_defaults::{
     DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD,
 };
 
-use crate::keyspace::KeySpace;
-use crate::repository::{Key, Value};
-use crate::walrecord::NeonWalRecord;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::KeySpace;
+use pageserver_api::record::NeonWalRecord;
+use pageserver_api::value::Value;
 
 use utils::lsn::Lsn;
 
-use pageserver_compaction::helpers::overlaps_with;
+use pageserver_compaction::helpers::{fully_contains, overlaps_with};
 use pageserver_compaction::interface::*;
 
 use super::CompactionError;
 
 /// Maximum number of deltas before generating an image layer in bottom-most compaction.
 const COMPACTION_DELTA_THRESHOLD: usize = 5;
+
+pub struct GcCompactionJobDescription {
+    /// All layers to read in the compaction job
+    selected_layers: Vec<Layer>,
+    /// GC cutoff of the job
+    gc_cutoff: Lsn,
+    /// LSNs to retain for the job
+    retain_lsns_below_horizon: Vec<Lsn>,
+    /// Maximum layer LSN processed in this compaction
+    max_layer_lsn: Lsn,
+    /// Only compact layers overlapping with this range
+    compaction_key_range: Range<Key>,
+    /// When partial compaction is enabled, these layers need to be rewritten to ensure no overlap.
+    /// This field is here solely for debugging. The field will not be read once the compaction
+    /// description is generated.
+    rewrite_layers: Vec<Arc<PersistentLayerDesc>>,
+}
 
 /// The result of bottom-most compaction for a single key at each LSN.
 #[derive(Debug)]
@@ -120,18 +139,12 @@ impl KeyHistoryRetention {
     async fn pipe_to(
         self,
         key: Key,
-        tline: &Arc<Timeline>,
         delta_writer: &mut SplitDeltaLayerWriter,
         mut image_writer: Option<&mut SplitImageLayerWriter>,
         stat: &mut CompactionStatistics,
-        dry_run: bool,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut first_batch = true;
-        let discard = |key: &PersistentLayerKey| {
-            let key = key.clone();
-            async move { Self::discard_key(&key, tline, dry_run).await }
-        };
         for (cutoff_lsn, KeyLogAtLsn(logs)) in self.below_horizon {
             if first_batch {
                 if logs.len() == 1 && logs[0].1.is_image() {
@@ -140,45 +153,30 @@ impl KeyHistoryRetention {
                     };
                     stat.produce_image_key(img);
                     if let Some(image_writer) = image_writer.as_mut() {
-                        image_writer
-                            .put_image_with_discard_fn(key, img.clone(), tline, ctx, discard)
-                            .await?;
+                        image_writer.put_image(key, img.clone(), ctx).await?;
                     } else {
                         delta_writer
-                            .put_value_with_discard_fn(
-                                key,
-                                cutoff_lsn,
-                                Value::Image(img.clone()),
-                                tline,
-                                ctx,
-                                discard,
-                            )
+                            .put_value(key, cutoff_lsn, Value::Image(img.clone()), ctx)
                             .await?;
                     }
                 } else {
                     for (lsn, val) in logs {
                         stat.produce_key(&val);
-                        delta_writer
-                            .put_value_with_discard_fn(key, lsn, val, tline, ctx, discard)
-                            .await?;
+                        delta_writer.put_value(key, lsn, val, ctx).await?;
                     }
                 }
                 first_batch = false;
             } else {
                 for (lsn, val) in logs {
                     stat.produce_key(&val);
-                    delta_writer
-                        .put_value_with_discard_fn(key, lsn, val, tline, ctx, discard)
-                        .await?;
+                    delta_writer.put_value(key, lsn, val, ctx).await?;
                 }
             }
         }
         let KeyLogAtLsn(above_horizon_logs) = self.above_horizon;
         for (lsn, val) in above_horizon_logs {
             stat.produce_key(&val);
-            delta_writer
-                .put_value_with_discard_fn(key, lsn, val, tline, ctx, discard)
-                .await?;
+            delta_writer.put_value(key, lsn, val, ctx).await?;
         }
         Ok(())
     }
@@ -639,7 +637,10 @@ impl Timeline {
             let children = self.gc_info.read().unwrap().retain_lsns.clone();
 
             let mut readable_points = Vec::with_capacity(children.len() + 1);
-            for (child_lsn, _child_timeline_id) in &children {
+            for (child_lsn, _child_timeline_id, is_offloaded) in &children {
+                if *is_offloaded == MaybeOffloaded::Yes {
+                    continue;
+                }
                 readable_points.push(*child_lsn);
             }
             readable_points.push(head_lsn);
@@ -851,7 +852,12 @@ impl Timeline {
                 if self.cancel.is_cancelled() {
                     return Err(CompactionError::ShuttingDown);
                 }
-                all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
+                let delta = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
+                let keys = delta
+                    .index_entries(ctx)
+                    .await
+                    .map_err(CompactionError::Other)?;
+                all_keys.extend(keys);
             }
             // The current stdlib sorting implementation is designed in a way where it is
             // particularly fast where the slice is made up of sorted sub-ranges.
@@ -1688,20 +1694,75 @@ impl Timeline {
         unreachable!("key retention is empty")
     }
 
-    /// An experimental compaction building block that combines compaction with garbage collection.
-    ///
-    /// The current implementation picks all delta + image layers that are below or intersecting with
-    /// the GC horizon without considering retain_lsns. Then, it does a full compaction over all these delta
-    /// layers and image layers, which generates image layers on the gc horizon, drop deltas below gc horizon,
-    /// and create delta layers with all deltas >= gc horizon.
+    /// Check how much space is left on the disk
+    async fn check_available_space(self: &Arc<Self>) -> anyhow::Result<u64> {
+        let tenants_dir = self.conf.tenants_path();
+
+        let stat = Statvfs::get(&tenants_dir, None)
+            .context("statvfs failed, presumably directory got unlinked")?;
+
+        let (avail_bytes, _) = stat.get_avail_total_bytes();
+
+        Ok(avail_bytes)
+    }
+
+    /// Check if the compaction can proceed safely without running out of space. We assume the size
+    /// upper bound of the produced files of a compaction job is the same as all layers involved in
+    /// the compaction. Therefore, we need `2 * layers_to_be_compacted_size` at least to do a
+    /// compaction.
+    async fn check_compaction_space(
+        self: &Arc<Self>,
+        layer_selection: &[Layer],
+    ) -> anyhow::Result<()> {
+        let available_space = self.check_available_space().await?;
+        let mut remote_layer_size = 0;
+        let mut all_layer_size = 0;
+        for layer in layer_selection {
+            let needs_download = layer.needs_download().await?;
+            if needs_download.is_some() {
+                remote_layer_size += layer.layer_desc().file_size;
+            }
+            all_layer_size += layer.layer_desc().file_size;
+        }
+        let allocated_space = (available_space as f64 * 0.8) as u64; /* reserve 20% space for other tasks */
+        if all_layer_size /* space needed for newly-generated file */ + remote_layer_size /* space for downloading layers */ > allocated_space
+        {
+            return Err(anyhow!("not enough space for compaction: available_space={}, allocated_space={}, all_layer_size={}, remote_layer_size={}, required_space={}",
+                available_space, allocated_space, all_layer_size, remote_layer_size, all_layer_size + remote_layer_size));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn compact_with_gc(
         self: &Arc<Self>,
         cancel: &CancellationToken,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        use std::collections::BTreeSet;
+        self.partial_compact_with_gc(Key::MIN..Key::MAX, cancel, flags, ctx)
+            .await
+    }
 
+    /// An experimental compaction building block that combines compaction with garbage collection.
+    ///
+    /// The current implementation picks all delta + image layers that are below or intersecting with
+    /// the GC horizon without considering retain_lsns. Then, it does a full compaction over all these delta
+    /// layers and image layers, which generates image layers on the gc horizon, drop deltas below gc horizon,
+    /// and create delta layers with all deltas >= gc horizon.
+    ///
+    /// If `key_range` is provided, it will only compact the keys within the range, aka partial compaction.
+    /// Partial compaction will read and process all layers overlapping with the key range, even if it might
+    /// contain extra keys. After the gc-compaction phase completes, delta layers that are not fully contained
+    /// within the key range will be rewritten to ensure they do not overlap with the delta layers. Providing
+    /// Key::MIN..Key..MAX to the function indicates a full compaction, though technically, `Key::MAX` is not
+    /// part of the range.
+    pub(crate) async fn partial_compact_with_gc(
+        self: &Arc<Self>,
+        compaction_key_range: Range<Key>,
+        cancel: &CancellationToken,
+        flags: EnumSet<CompactFlags>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         // Block other compaction/GC tasks from running for now. GC-compaction could run along
         // with legacy compaction tasks in the future. Always ensure the lock order is compaction -> gc.
         // Note that we already acquired the compaction lock when the outer `compact` function gets called.
@@ -1723,7 +1784,11 @@ impl Timeline {
 
         let dry_run = flags.contains(CompactFlags::DryRun);
 
-        info!("running enhanced gc bottom-most compaction, dry_run={dry_run}");
+        if compaction_key_range == (Key::MIN..Key::MAX) {
+            info!("running enhanced gc bottom-most compaction, dry_run={dry_run}, compaction_key_range={}..{}", compaction_key_range.start, compaction_key_range.end);
+        } else {
+            info!("running enhanced gc bottom-most compaction, dry_run={dry_run}");
+        }
 
         scopeguard::defer! {
             info!("done enhanced gc bottom-most compaction");
@@ -1735,13 +1800,13 @@ impl Timeline {
         // The layer selection has the following properties:
         // 1. If a layer is in the selection, all layers below it are in the selection.
         // 2. Inferred from (1), for each key in the layer selection, the value can be reconstructed only with the layers in the layer selection.
-        let (layer_selection, gc_cutoff, retain_lsns_below_horizon) = {
+        let job_desc = {
             let guard = self.layers.read().await;
             let layers = guard.layer_map()?;
             let gc_info = self.gc_info.read().unwrap();
             let mut retain_lsns_below_horizon = Vec::new();
             let gc_cutoff = gc_info.cutoffs.select_min();
-            for (lsn, _timeline_id) in &gc_info.retain_lsns {
+            for (lsn, _timeline_id, _is_offloaded) in &gc_info.retain_lsns {
                 if lsn < &gc_cutoff {
                     retain_lsns_below_horizon.push(*lsn);
                 }
@@ -1751,7 +1816,7 @@ impl Timeline {
                     retain_lsns_below_horizon.push(*lsn);
                 }
             }
-            let mut selected_layers = Vec::new();
+            let mut selected_layers: Vec<Layer> = Vec::new();
             drop(gc_info);
             // Pick all the layers intersect or below the gc_cutoff, get the largest LSN in the selected layers.
             let Some(max_layer_lsn) = layers
@@ -1765,9 +1830,21 @@ impl Timeline {
             };
             // Then, pick all the layers that are below the max_layer_lsn. This is to ensure we can pick all single-key
             // layers to compact.
+            let mut rewrite_layers = Vec::new();
             for desc in layers.iter_historic_layers() {
-                if desc.get_lsn_range().end <= max_layer_lsn {
+                if desc.get_lsn_range().end <= max_layer_lsn
+                    && overlaps_with(&desc.get_key_range(), &compaction_key_range)
+                {
+                    // If the layer overlaps with the compaction key range, we need to read it to obtain all keys within the range,
+                    // even if it might contain extra keys
                     selected_layers.push(guard.get_from_desc(&desc));
+                    // If the layer is not fully contained within the key range, we need to rewrite it if it's a delta layer (it's fine
+                    // to overlap image layers)
+                    if desc.is_delta()
+                        && !fully_contains(&compaction_key_range, &desc.get_key_range())
+                    {
+                        rewrite_layers.push(desc);
+                    }
                 }
             }
             if selected_layers.is_empty() {
@@ -1775,70 +1852,88 @@ impl Timeline {
                 return Ok(());
             }
             retain_lsns_below_horizon.sort();
-            (selected_layers, gc_cutoff, retain_lsns_below_horizon)
+            GcCompactionJobDescription {
+                selected_layers,
+                gc_cutoff,
+                retain_lsns_below_horizon,
+                max_layer_lsn,
+                compaction_key_range,
+                rewrite_layers,
+            }
         };
         let lowest_retain_lsn = if self.ancestor_timeline.is_some() {
             Lsn(self.ancestor_lsn.0 + 1)
         } else {
-            let res = retain_lsns_below_horizon
+            let res = job_desc
+                .retain_lsns_below_horizon
                 .first()
                 .copied()
-                .unwrap_or(gc_cutoff);
+                .unwrap_or(job_desc.gc_cutoff);
             if cfg!(debug_assertions) {
                 assert_eq!(
                     res,
-                    retain_lsns_below_horizon
+                    job_desc
+                        .retain_lsns_below_horizon
                         .iter()
                         .min()
                         .copied()
-                        .unwrap_or(gc_cutoff)
+                        .unwrap_or(job_desc.gc_cutoff)
                 );
             }
             res
         };
         info!(
-            "picked {} layers for compaction with gc_cutoff={} lowest_retain_lsn={}",
-            layer_selection.len(),
-            gc_cutoff,
-            lowest_retain_lsn
+            "picked {} layers for compaction ({} layers need rewriting) with max_layer_lsn={} gc_cutoff={} lowest_retain_lsn={}, key_range={}..{}",
+            job_desc.selected_layers.len(),
+            job_desc.rewrite_layers.len(),
+            job_desc.max_layer_lsn,
+            job_desc.gc_cutoff,
+            lowest_retain_lsn,
+            job_desc.compaction_key_range.start,
+            job_desc.compaction_key_range.end
         );
 
-        // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
-        // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
-        let mut lsn_split_point = BTreeSet::new(); // TODO: use a better data structure (range tree / range set?)
-        for layer in &layer_selection {
+        for layer in &job_desc.selected_layers {
+            debug!("read layer: {}", layer.layer_desc().key());
+        }
+        for layer in &job_desc.rewrite_layers {
+            debug!("rewrite layer: {}", layer.key());
+        }
+
+        self.check_compaction_space(&job_desc.selected_layers)
+            .await?;
+
+        // Generate statistics for the compaction
+        for layer in &job_desc.selected_layers {
             let desc = layer.layer_desc();
             if desc.is_delta() {
-                // ignore single-key layer files
-                if desc.key_range.start.next() != desc.key_range.end {
-                    let lsn_range = &desc.lsn_range;
-                    lsn_split_point.insert(lsn_range.start);
-                    lsn_split_point.insert(lsn_range.end);
-                }
                 stat.visit_delta_layer(desc.file_size());
             } else {
                 stat.visit_image_layer(desc.file_size());
             }
         }
-        let layer_names: Vec<crate::tenant::storage_layer::LayerName> = layer_selection
+
+        // Step 1: construct a k-merge iterator over all layers.
+        // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
+        let layer_names = job_desc
+            .selected_layers
             .iter()
             .map(|layer| layer.layer_desc().layer_name())
             .collect_vec();
         if let Some(err) = check_valid_layermap(&layer_names) {
-            bail!("cannot run gc-compaction because {}", err);
+            warn!("gc-compaction layer map check failed because {}, this is normal if partial compaction is not finished yet", err);
         }
         // The maximum LSN we are processing in this compaction loop
-        let end_lsn = layer_selection
+        let end_lsn = job_desc
+            .selected_layers
             .iter()
             .map(|l| l.layer_desc().lsn_range.end)
             .max()
             .unwrap();
-        // We don't want any of the produced layers to cover the full key range (i.e., MIN..MAX) b/c it will then be recognized
-        // as an L0 layer.
         let mut delta_layers = Vec::new();
         let mut image_layers = Vec::new();
         let mut downloaded_layers = Vec::new();
-        for layer in &layer_selection {
+        for layer in &job_desc.selected_layers {
             let resident_layer = layer.download_and_keep_resident().await?;
             downloaded_layers.push(resident_layer);
         }
@@ -1857,8 +1952,8 @@ impl Timeline {
             dense_ks,
             sparse_ks,
         )?;
-        // Step 2: Produce images+deltas. TODO: ensure newly-produced delta does not overlap with other deltas.
-        // Data of the same key.
+
+        // Step 2: Produce images+deltas.
         let mut accumulated_values = Vec::new();
         let mut last_key: Option<Key> = None;
 
@@ -1870,7 +1965,7 @@ impl Timeline {
                     self.conf,
                     self.timeline_id,
                     self.tenant_shard_id,
-                    Key::MIN,
+                    job_desc.compaction_key_range.start,
                     lowest_retain_lsn,
                     self.get_compaction_target_size(),
                     ctx,
@@ -1889,6 +1984,13 @@ impl Timeline {
             self.get_compaction_target_size(),
         )
         .await?;
+
+        #[derive(Default)]
+        struct RewritingLayers {
+            before: Option<DeltaLayerWriter>,
+            after: Option<DeltaLayerWriter>,
+        }
+        let mut delta_layer_rewriters = HashMap::<Arc<PersistentLayerKey>, RewritingLayers>::new();
 
         /// Returns None if there is no ancestor branch. Throw an error when the key is not found.
         ///
@@ -1915,9 +2017,50 @@ impl Timeline {
         // the key and LSN range are determined. However, to keep things simple here, we still
         // create this writer, and discard the writer in the end.
 
-        while let Some((key, lsn, val)) = merge_iter.next().await? {
+        while let Some(((key, lsn, val), desc)) = merge_iter.next_with_trace().await? {
             if cancel.is_cancelled() {
                 return Err(anyhow!("cancelled")); // TODO: refactor to CompactionError and pass cancel error
+            }
+            if !job_desc.compaction_key_range.contains(&key) {
+                if !desc.is_delta {
+                    continue;
+                }
+                let rewriter = delta_layer_rewriters.entry(desc.clone()).or_default();
+                let rewriter = if key < job_desc.compaction_key_range.start {
+                    if rewriter.before.is_none() {
+                        rewriter.before = Some(
+                            DeltaLayerWriter::new(
+                                self.conf,
+                                self.timeline_id,
+                                self.tenant_shard_id,
+                                desc.key_range.start,
+                                desc.lsn_range.clone(),
+                                ctx,
+                            )
+                            .await?,
+                        );
+                    }
+                    rewriter.before.as_mut().unwrap()
+                } else if key >= job_desc.compaction_key_range.end {
+                    if rewriter.after.is_none() {
+                        rewriter.after = Some(
+                            DeltaLayerWriter::new(
+                                self.conf,
+                                self.timeline_id,
+                                self.tenant_shard_id,
+                                job_desc.compaction_key_range.end,
+                                desc.lsn_range.clone(),
+                                ctx,
+                            )
+                            .await?,
+                        );
+                    }
+                    rewriter.after.as_mut().unwrap()
+                } else {
+                    unreachable!()
+                };
+                rewriter.put_value(key, lsn, val, ctx).await?;
+                continue;
             }
             match val {
                 Value::Image(_) => stat.visit_image_key(&val),
@@ -1929,27 +2072,24 @@ impl Timeline {
                 }
                 accumulated_values.push((key, lsn, val));
             } else {
-                let last_key = last_key.as_mut().unwrap();
-                stat.on_unique_key_visited();
+                let last_key: &mut Key = last_key.as_mut().unwrap();
+                stat.on_unique_key_visited(); // TODO: adjust statistics for partial compaction
                 let retention = self
                     .generate_key_retention(
                         *last_key,
                         &accumulated_values,
-                        gc_cutoff,
-                        &retain_lsns_below_horizon,
+                        job_desc.gc_cutoff,
+                        &job_desc.retain_lsns_below_horizon,
                         COMPACTION_DELTA_THRESHOLD,
                         get_ancestor_image(self, *last_key, ctx).await?,
                     )
                     .await?;
-                // Put the image into the image layer. Currently we have a single big layer for the compaction.
                 retention
                     .pipe_to(
                         *last_key,
-                        self,
                         &mut delta_layer_writer,
                         image_layer_writer.as_mut(),
                         &mut stat,
-                        dry_run,
                         ctx,
                     )
                     .await?;
@@ -1959,31 +2099,46 @@ impl Timeline {
             }
         }
 
+        // TODO: move the below part to the loop body
         let last_key = last_key.expect("no keys produced during compaction");
-        // TODO: move this part to the loop body
         stat.on_unique_key_visited();
+
         let retention = self
             .generate_key_retention(
                 last_key,
                 &accumulated_values,
-                gc_cutoff,
-                &retain_lsns_below_horizon,
+                job_desc.gc_cutoff,
+                &job_desc.retain_lsns_below_horizon,
                 COMPACTION_DELTA_THRESHOLD,
                 get_ancestor_image(self, last_key, ctx).await?,
             )
             .await?;
-        // Put the image into the image layer. Currently we have a single big layer for the compaction.
         retention
             .pipe_to(
                 last_key,
-                self,
                 &mut delta_layer_writer,
                 image_layer_writer.as_mut(),
                 &mut stat,
-                dry_run,
                 ctx,
             )
             .await?;
+        // end: move the above part to the loop body
+
+        let mut rewrote_delta_layers = Vec::new();
+        for (key, writers) in delta_layer_rewriters {
+            if let Some(delta_writer_before) = writers.before {
+                let (desc, path) = delta_writer_before
+                    .finish(job_desc.compaction_key_range.start, ctx)
+                    .await?;
+                let layer = Layer::finish_creating(self.conf, self, desc, &path)?;
+                rewrote_delta_layers.push(layer);
+            }
+            if let Some(delta_writer_after) = writers.after {
+                let (desc, path) = delta_writer_after.finish(key.key_range.end, ctx).await?;
+                let layer = Layer::finish_creating(self.conf, self, desc, &path)?;
+                rewrote_delta_layers.push(layer);
+            }
+        }
 
         let discard = |key: &PersistentLayerKey| {
             let key = key.clone();
@@ -1992,12 +2147,12 @@ impl Timeline {
 
         let produced_image_layers = if let Some(writer) = image_layer_writer {
             if !dry_run {
+                let end_key = job_desc.compaction_key_range.end;
                 writer
-                    .finish_with_discard_fn(self, ctx, Key::MAX, discard)
+                    .finish_with_discard_fn(self, ctx, end_key, discard)
                     .await?
             } else {
-                let (layers, _) = writer.take()?;
-                assert!(layers.is_empty(), "image layers produced in dry run mode?");
+                drop(writer);
                 Vec::new()
             }
         } else {
@@ -2009,40 +2164,95 @@ impl Timeline {
                 .finish_with_discard_fn(self, ctx, discard)
                 .await?
         } else {
-            let (layers, _) = delta_layer_writer.take()?;
-            assert!(layers.is_empty(), "delta layers produced in dry run mode?");
+            drop(delta_layer_writer);
             Vec::new()
         };
 
+        // TODO: make image/delta/rewrote_delta layers generation atomic. At this point, we already generated resident layers, and if
+        // compaction is cancelled at this point, we might have some layers that are not cleaned up.
         let mut compact_to = Vec::new();
         let mut keep_layers = HashSet::new();
         let produced_delta_layers_len = produced_delta_layers.len();
         let produced_image_layers_len = produced_image_layers.len();
         for action in produced_delta_layers {
             match action {
-                SplitWriterResult::Produced(layer) => {
+                BatchWriterResult::Produced(layer) => {
+                    if cfg!(debug_assertions) {
+                        info!("produced delta layer: {}", layer.layer_desc().key());
+                    }
                     stat.produce_delta_layer(layer.layer_desc().file_size());
                     compact_to.push(layer);
                 }
-                SplitWriterResult::Discarded(l) => {
+                BatchWriterResult::Discarded(l) => {
+                    if cfg!(debug_assertions) {
+                        info!("discarded delta layer: {}", l);
+                    }
                     keep_layers.insert(l);
                     stat.discard_delta_layer();
                 }
             }
         }
+        for layer in &rewrote_delta_layers {
+            debug!(
+                "produced rewritten delta layer: {}",
+                layer.layer_desc().key()
+            );
+        }
+        compact_to.extend(rewrote_delta_layers);
         for action in produced_image_layers {
             match action {
-                SplitWriterResult::Produced(layer) => {
+                BatchWriterResult::Produced(layer) => {
+                    debug!("produced image layer: {}", layer.layer_desc().key());
                     stat.produce_image_layer(layer.layer_desc().file_size());
                     compact_to.push(layer);
                 }
-                SplitWriterResult::Discarded(l) => {
+                BatchWriterResult::Discarded(l) => {
+                    debug!("discarded image layer: {}", l);
                     keep_layers.insert(l);
                     stat.discard_image_layer();
                 }
             }
         }
-        let mut layer_selection = layer_selection;
+
+        let mut layer_selection = job_desc.selected_layers;
+
+        // Partial compaction might select more data than it processes, e.g., if
+        // the compaction_key_range only partially overlaps:
+        //
+        //         [---compaction_key_range---]
+        //   [---A----][----B----][----C----][----D----]
+        //
+        // For delta layers, we will rewrite the layers so that it is cut exactly at
+        // the compaction key range, so we can always discard them. However, for image
+        // layers, as we do not rewrite them for now, we need to handle them differently.
+        // Assume image layers  A, B, C, D are all in the `layer_selection`.
+        //
+        // The created image layers contain whatever is needed from B, C, and from
+        // `----]` of A, and from  `[---` of D.
+        //
+        // In contrast, `[---A` and `D----]` have not been processed, so, we must
+        // keep that data.
+        //
+        // The solution for now is to keep A and D completely if they are image layers.
+        // (layer_selection is what we'll remove from the layer map, so, retain what
+        // is _not_ fully covered by compaction_key_range).
+        for layer in &layer_selection {
+            if !layer.layer_desc().is_delta() {
+                if !overlaps_with(
+                    &layer.layer_desc().key_range,
+                    &job_desc.compaction_key_range,
+                ) {
+                    bail!("violated constraint: image layer outside of compaction key range");
+                }
+                if !fully_contains(
+                    &job_desc.compaction_key_range,
+                    &layer.layer_desc().key_range,
+                ) {
+                    keep_layers.insert(layer.layer_desc().key());
+                }
+            }
+        }
+
         layer_selection.retain(|x| !keep_layers.contains(&x.layer_desc().key()));
 
         info!(
@@ -2063,6 +2273,7 @@ impl Timeline {
 
         // Step 3: Place back to the layer map.
         {
+            // TODO: sanity check if the layer map is valid (i.e., should not have overlaps)
             let mut guard = self.layers.write().await;
             guard
                 .open_mut()?
@@ -2125,7 +2336,7 @@ struct ResidentDeltaLayer(ResidentLayer);
 struct ResidentImageLayer(ResidentLayer);
 
 impl CompactionJobExecutor for TimelineAdaptor {
-    type Key = crate::repository::Key;
+    type Key = pageserver_api::key::Key;
 
     type Layer = OwnArc<PersistentLayerDesc>;
     type DeltaLayer = ResidentDeltaLayer;
@@ -2420,7 +2631,7 @@ impl CompactionDeltaLayer<TimelineAdaptor> for ResidentDeltaLayer {
     type DeltaEntry<'a> = DeltaEntry<'a>;
 
     async fn load_keys<'a>(&self, ctx: &RequestContext) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
-        self.0.load_keys(ctx).await
+        self.0.get_as_delta(ctx).await?.index_entries(ctx).await
     }
 }
 

@@ -944,6 +944,9 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                         pg_auth_type: AuthType::Trust,
                         http_auth_type: AuthType::Trust,
                         other: Default::default(),
+                        // Typical developer machines use disks with slow fsync, and we don't care
+                        // about data integrity: disable disk syncs.
+                        no_sync: true,
                     }
                 })
                 .collect(),
@@ -1073,10 +1076,10 @@ async fn handle_tenant(subcmd: &TenantCmd, env: &mut local_env::LocalEnv) -> any
                     tenant_id,
                     TimelineCreateRequest {
                         new_timeline_id,
-                        ancestor_timeline_id: None,
-                        ancestor_start_lsn: None,
-                        existing_initdb_timeline_id: None,
-                        pg_version: Some(args.pg_version),
+                        mode: pageserver_api::models::TimelineCreateRequestMode::Bootstrap {
+                            existing_initdb_timeline_id: None,
+                            pg_version: Some(args.pg_version),
+                        },
                     },
                 )
                 .await?;
@@ -1133,10 +1136,10 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
             let storage_controller = StorageController::from_env(env);
             let create_req = TimelineCreateRequest {
                 new_timeline_id,
-                ancestor_timeline_id: None,
-                existing_initdb_timeline_id: None,
-                ancestor_start_lsn: None,
-                pg_version: Some(args.pg_version),
+                mode: pageserver_api::models::TimelineCreateRequestMode::Bootstrap {
+                    existing_initdb_timeline_id: None,
+                    pg_version: Some(args.pg_version),
+                },
             };
             let timeline_info = storage_controller
                 .tenant_timeline_create(tenant_id, create_req)
@@ -1189,10 +1192,11 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
             let storage_controller = StorageController::from_env(env);
             let create_req = TimelineCreateRequest {
                 new_timeline_id,
-                ancestor_timeline_id: Some(ancestor_timeline_id),
-                existing_initdb_timeline_id: None,
-                ancestor_start_lsn: start_lsn,
-                pg_version: None,
+                mode: pageserver_api::models::TimelineCreateRequestMode::Branch {
+                    ancestor_timeline_id,
+                    ancestor_start_lsn: start_lsn,
+                    pg_version: None,
+                },
             };
             let timeline_info = storage_controller
                 .tenant_timeline_create(tenant_id, create_req)

@@ -183,7 +183,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/pypoetry/virtualenvs
-        key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-${{ hashFiles('poetry.lock') }}
+        key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
 
     - name: Store Allure test stat in the DB (new)
       if: ${{ !cancelled() && inputs.store-test-results-into-db == 'true' }}
@@ -221,6 +221,8 @@ runs:
         REPORT_URL: ${{ steps.generate-report.outputs.report-url }}
         COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       with:
+        # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+        retries: 5
         script: |
           const { REPORT_URL, COMMIT_SHA } = process.env
 

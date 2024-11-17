@@ -8,7 +8,8 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(crate) use console_redirect::WebAuthError;
+pub use console_redirect::ConsoleRedirectBackend;
+pub(crate) use console_redirect::ConsoleRedirectError;
 use ipnet::{Ipv4Net, Ipv6Net};
 use local::LocalBackend;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -16,29 +17,23 @@ use tokio_postgres::config::AuthKeys;
 use tracing::{info, warn};
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
-use crate::auth::{validate_password_and_exchange, AuthError};
+use crate::auth::{self, validate_password_and_exchange, AuthError, ComputeUserInfoMaybeEndpoint};
 use crate::cache::Cached;
+use crate::config::AuthenticationConfig;
 use crate::context::RequestMonitoring;
+use crate::control_plane::client::ControlPlaneClient;
 use crate::control_plane::errors::GetAuthInfoError;
-use crate::control_plane::provider::{CachedRoleSecret, ControlPlaneBackend};
-use crate::control_plane::{AuthSecret, NodeInfo};
+use crate::control_plane::{
+    self, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, ControlPlaneApi,
+};
 use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
 use crate::rate_limiter::{BucketRateLimiter, EndpointRateLimiter, RateBucketInfo};
 use crate::stream::Stream;
-use crate::{
-    auth::{self, ComputeUserInfoMaybeEndpoint},
-    config::AuthenticationConfig,
-    control_plane::{
-        self,
-        provider::{CachedAllowedIps, CachedNodeInfo},
-        Api,
-    },
-    stream, url,
-};
-use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
+use crate::types::{EndpointCacheKey, EndpointId, RoleName};
+use crate::{scram, stream};
 
 /// Alternative to [`std::borrow::Cow`] but doesn't need `T: ToOwned` as we don't need that functionality
 pub enum MaybeOwned<'a, T> {
@@ -65,87 +60,62 @@ impl<T> std::ops::Deref for MaybeOwned<'_, T> {
 /// * However, when we substitute `T` with [`ComputeUserInfoMaybeEndpoint`],
 ///   this helps us provide the credentials only to those auth
 ///   backends which require them for the authentication process.
-pub enum Backend<'a, T, D> {
+pub enum Backend<'a, T> {
     /// Cloud API (V2).
-    ControlPlane(MaybeOwned<'a, ControlPlaneBackend>, T),
-    /// Authentication via a web browser.
-    ConsoleRedirect(MaybeOwned<'a, url::ApiUrl>, D),
+    ControlPlane(MaybeOwned<'a, ControlPlaneClient>, T),
     /// Local proxy uses configured auth credentials and does not wake compute
     Local(MaybeOwned<'a, LocalBackend>),
 }
 
-#[cfg(test)]
-pub(crate) trait TestBackend: Send + Sync + 'static {
-    fn wake_compute(&self) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError>;
-    fn get_allowed_ips_and_secret(
-        &self,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), control_plane::errors::GetAuthInfoError>;
-    fn dyn_clone(&self) -> Box<dyn TestBackend>;
-}
-
-#[cfg(test)]
-impl Clone for Box<dyn TestBackend> {
-    fn clone(&self) -> Self {
-        TestBackend::dyn_clone(&**self)
-    }
-}
-
-impl std::fmt::Display for Backend<'_, (), ()> {
+impl std::fmt::Display for Backend<'_, ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ControlPlane(api, ()) => match &**api {
-                ControlPlaneBackend::Management(endpoint) => fmt
-                    .debug_tuple("ControlPlane::Management")
+                ControlPlaneClient::Neon(endpoint) => fmt
+                    .debug_tuple("ControlPlane::Neon")
                     .field(&endpoint.url())
                     .finish(),
                 #[cfg(any(test, feature = "testing"))]
-                ControlPlaneBackend::PostgresMock(endpoint) => fmt
+                ControlPlaneClient::PostgresMock(endpoint) => fmt
                     .debug_tuple("ControlPlane::PostgresMock")
                     .field(&endpoint.url())
                     .finish(),
                 #[cfg(test)]
-                ControlPlaneBackend::Test(_) => fmt.debug_tuple("ControlPlane::Test").finish(),
+                ControlPlaneClient::Test(_) => fmt.debug_tuple("ControlPlane::Test").finish(),
             },
-            Self::ConsoleRedirect(url, ()) => fmt
-                .debug_tuple("ConsoleRedirect")
-                .field(&url.as_str())
-                .finish(),
             Self::Local(_) => fmt.debug_tuple("Local").finish(),
         }
     }
 }
 
-impl<T, D> Backend<'_, T, D> {
+impl<T> Backend<'_, T> {
     /// Very similar to [`std::option::Option::as_ref`].
     /// This helps us pass structured config to async tasks.
-    pub(crate) fn as_ref(&self) -> Backend<'_, &T, &D> {
+    pub(crate) fn as_ref(&self) -> Backend<'_, &T> {
         match self {
             Self::ControlPlane(c, x) => Backend::ControlPlane(MaybeOwned::Borrowed(c), x),
-            Self::ConsoleRedirect(c, x) => Backend::ConsoleRedirect(MaybeOwned::Borrowed(c), x),
             Self::Local(l) => Backend::Local(MaybeOwned::Borrowed(l)),
         }
     }
 }
 
-impl<'a, T, D> Backend<'a, T, D> {
+impl<'a, T> Backend<'a, T> {
     /// Very similar to [`std::option::Option::map`].
     /// Maps [`Backend<T>`] to [`Backend<R>`] by applying
     /// a function to a contained value.
-    pub(crate) fn map<R>(self, f: impl FnOnce(T) -> R) -> Backend<'a, R, D> {
+    pub(crate) fn map<R>(self, f: impl FnOnce(T) -> R) -> Backend<'a, R> {
         match self {
             Self::ControlPlane(c, x) => Backend::ControlPlane(c, f(x)),
-            Self::ConsoleRedirect(c, x) => Backend::ConsoleRedirect(c, x),
             Self::Local(l) => Backend::Local(l),
         }
     }
 }
-impl<'a, T, D, E> Backend<'a, Result<T, E>, D> {
+impl<'a, T, E> Backend<'a, Result<T, E>> {
     /// Very similar to [`std::option::Option::transpose`].
     /// This is most useful for error handling.
-    pub(crate) fn transpose(self) -> Result<Backend<'a, T, D>, E> {
+    pub(crate) fn transpose(self) -> Result<Backend<'a, T>, E> {
         match self {
             Self::ControlPlane(c, x) => x.map(|x| Backend::ControlPlane(c, x)),
-            Self::ConsoleRedirect(c, x) => Ok(Backend::ConsoleRedirect(c, x)),
             Self::Local(l) => Ok(Backend::Local(l)),
         }
     }
@@ -241,7 +211,6 @@ impl AuthenticationConfig {
     pub(crate) fn check_rate_limit(
         &self,
         ctx: &RequestMonitoring,
-        config: &AuthenticationConfig,
         secret: AuthSecret,
         endpoint: &EndpointId,
         is_cleartext: bool,
@@ -265,7 +234,7 @@ impl AuthenticationConfig {
         let limit_not_exceeded = self.rate_limiter.check(
             (
                 endpoint_int,
-                MaskedIp::new(ctx.peer_addr(), config.rate_limit_ip_subnet),
+                MaskedIp::new(ctx.peer_addr(), self.rate_limit_ip_subnet),
             ),
             password_weight,
         );
@@ -297,7 +266,7 @@ impl AuthenticationConfig {
 /// All authentication flows will emit an AuthenticationOk message if successful.
 async fn auth_quirks(
     ctx: &RequestMonitoring,
-    api: &impl control_plane::Api,
+    api: &impl control_plane::ControlPlaneApi,
     user_info: ComputeUserInfoMaybeEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
@@ -339,7 +308,6 @@ async fn auth_quirks(
     let secret = if let Some(secret) = secret {
         config.check_rate_limit(
             ctx,
-            config,
             secret,
             &info.endpoint,
             unauthenticated_password.is_some() || allow_cleartext,
@@ -365,7 +333,7 @@ async fn auth_quirks(
     {
         Ok(keys) => Ok(keys),
         Err(e) => {
-            if e.is_auth_failed() {
+            if e.is_password_failed() {
                 // The password could have been changed, so we invalidate the cache.
                 cached_entry.invalidate();
             }
@@ -392,7 +360,7 @@ async fn authenticate_with_secret(
             crate::sasl::Outcome::Success(key) => key,
             crate::sasl::Outcome::Failure(reason) => {
                 info!("auth backend failed with an error: {reason}");
-                return Err(auth::AuthError::auth_failed(&*info.user));
+                return Err(auth::AuthError::password_failed(&*info.user));
             }
         };
 
@@ -415,12 +383,11 @@ async fn authenticate_with_secret(
     classic::authenticate(ctx, info, client, config, secret).await
 }
 
-impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint, &()> {
+impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
     /// Get username from the credentials.
     pub(crate) fn get_user(&self) -> &str {
         match self {
             Self::ControlPlane(_, user_info) => &user_info.user,
-            Self::ConsoleRedirect(_, ()) => "web",
             Self::Local(_) => "local",
         }
     }
@@ -434,7 +401,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint, &()> {
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    ) -> auth::Result<Backend<'a, ComputeCredentials, NodeInfo>> {
+    ) -> auth::Result<Backend<'a, ComputeCredentials>> {
         let res = match self {
             Self::ControlPlane(api, user_info) => {
                 info!(
@@ -455,14 +422,6 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint, &()> {
                 .await?;
                 Backend::ControlPlane(api, credentials)
             }
-            // NOTE: this auth backend doesn't use client credentials.
-            Self::ConsoleRedirect(url, ()) => {
-                info!("performing web authentication");
-
-                let info = console_redirect::authenticate(ctx, config, &url, client).await?;
-
-                Backend::ConsoleRedirect(url, info)
-            }
             Self::Local(_) => {
                 return Err(auth::AuthError::bad_auth_method("invalid for local proxy"))
             }
@@ -473,14 +432,13 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint, &()> {
     }
 }
 
-impl Backend<'_, ComputeUserInfo, &()> {
+impl Backend<'_, ComputeUserInfo> {
     pub(crate) async fn get_role_secret(
         &self,
         ctx: &RequestMonitoring,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         match self {
             Self::ControlPlane(api, user_info) => api.get_role_secret(ctx, user_info).await,
-            Self::ConsoleRedirect(_, ()) => Ok(Cached::new_uncached(None)),
             Self::Local(_) => Ok(Cached::new_uncached(None)),
         }
     }
@@ -493,21 +451,19 @@ impl Backend<'_, ComputeUserInfo, &()> {
             Self::ControlPlane(api, user_info) => {
                 api.get_allowed_ips_and_secret(ctx, user_info).await
             }
-            Self::ConsoleRedirect(_, ()) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
             Self::Local(_) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl ComputeConnectBackend for Backend<'_, ComputeCredentials, NodeInfo> {
+impl ComputeConnectBackend for Backend<'_, ComputeCredentials> {
     async fn wake_compute(
         &self,
         ctx: &RequestMonitoring,
     ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         match self {
             Self::ControlPlane(api, creds) => api.wake_compute(ctx, &creds.info).await,
-            Self::ConsoleRedirect(_, info) => Ok(Cached::new_uncached(info.clone())),
             Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
         }
     }
@@ -515,31 +471,6 @@ impl ComputeConnectBackend for Backend<'_, ComputeCredentials, NodeInfo> {
     fn get_keys(&self) -> &ComputeCredentialKeys {
         match self {
             Self::ControlPlane(_, creds) => &creds.keys,
-            Self::ConsoleRedirect(_, _) => &ComputeCredentialKeys::None,
-            Self::Local(_) => &ComputeCredentialKeys::None,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl ComputeConnectBackend for Backend<'_, ComputeCredentials, &()> {
-    async fn wake_compute(
-        &self,
-        ctx: &RequestMonitoring,
-    ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
-        match self {
-            Self::ControlPlane(api, creds) => api.wake_compute(ctx, &creds.info).await,
-            Self::ConsoleRedirect(_, ()) => {
-                unreachable!("web auth flow doesn't support waking the compute")
-            }
-            Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
-        }
-    }
-
-    fn get_keys(&self) -> &ComputeCredentialKeys {
-        match self {
-            Self::ControlPlane(_, creds) => &creds.keys,
-            Self::ConsoleRedirect(_, ()) => &ComputeCredentialKeys::None,
             Self::Local(_) => &ComputeCredentialKeys::None,
         }
     }
@@ -547,41 +478,38 @@ impl ComputeConnectBackend for Backend<'_, ComputeCredentials, &()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::IpAddr, sync::Arc, time::Duration};
+    use std::net::IpAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use bytes::BytesMut;
+    use control_plane::AuthSecret;
     use fallible_iterator::FallibleIterator;
     use once_cell::sync::Lazy;
-    use postgres_protocol::{
-        authentication::sasl::{ChannelBinding, ScramSha256},
-        message::{backend::Message as PgMessage, frontend},
-    };
-    use provider::AuthSecret;
+    use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
+    use postgres_protocol::message::backend::Message as PgMessage;
+    use postgres_protocol::message::frontend;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
-    use crate::{
-        auth::{backend::MaskedIp, ComputeUserInfoMaybeEndpoint, IpPattern},
-        config::AuthenticationConfig,
-        context::RequestMonitoring,
-        control_plane::{
-            self,
-            provider::{self, CachedAllowedIps, CachedRoleSecret},
-            CachedNodeInfo,
-        },
-        proxy::NeonOptions,
-        rate_limiter::{EndpointRateLimiter, RateBucketInfo},
-        scram::{threadpool::ThreadPool, ServerSecret},
-        stream::{PqStream, Stream},
-    };
-
-    use super::{auth_quirks, jwt::JwkCache, AuthRateLimiter};
+    use super::jwt::JwkCache;
+    use super::{auth_quirks, AuthRateLimiter};
+    use crate::auth::backend::MaskedIp;
+    use crate::auth::{ComputeUserInfoMaybeEndpoint, IpPattern};
+    use crate::config::AuthenticationConfig;
+    use crate::context::RequestMonitoring;
+    use crate::control_plane::{self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret};
+    use crate::proxy::NeonOptions;
+    use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo};
+    use crate::scram::threadpool::ThreadPool;
+    use crate::scram::ServerSecret;
+    use crate::stream::{PqStream, Stream};
 
     struct Auth {
         ips: Vec<IpPattern>,
         secret: AuthSecret,
     }
 
-    impl control_plane::Api for Auth {
+    impl control_plane::ControlPlaneApi for Auth {
         async fn get_role_secret(
             &self,
             _ctx: &RequestMonitoring,
@@ -607,8 +535,9 @@ mod tests {
         async fn get_endpoint_jwks(
             &self,
             _ctx: &RequestMonitoring,
-            _endpoint: crate::EndpointId,
-        ) -> anyhow::Result<Vec<super::jwt::AuthRule>> {
+            _endpoint: crate::types::EndpointId,
+        ) -> Result<Vec<super::jwt::AuthRule>, control_plane::errors::GetEndpointJwksError>
+        {
             unimplemented!()
         }
 
@@ -631,7 +560,7 @@ mod tests {
         ip_allowlist_check_enabled: true,
         is_auth_broker: false,
         accept_jwts: false,
-        webauth_confirmation_timeout: std::time::Duration::from_secs(5),
+        console_redirect_confirmation_timeout: std::time::Duration::from_secs(5),
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {

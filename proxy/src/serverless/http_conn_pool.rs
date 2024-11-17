@@ -1,37 +1,39 @@
+use std::collections::VecDeque;
+use std::sync::atomic::{self, AtomicUsize};
+use std::sync::{Arc, Weak};
+
 use dashmap::DashMap;
 use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
 use rand::Rng;
-use std::collections::VecDeque;
-use std::sync::atomic::{self, AtomicUsize};
-use std::{sync::Arc, sync::Weak};
 use tokio::net::TcpStream;
+use tracing::{debug, error, info, info_span, Instrument};
 
+use super::backend::HttpConnError;
+use super::conn_pool_lib::{ClientInnerExt, ConnInfo};
+use crate::context::RequestMonitoring;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
+use crate::types::EndpointCacheKey;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
-use crate::{context::RequestMonitoring, EndpointCacheKey};
-
-use tracing::{debug, error};
-use tracing::{info, info_span, Instrument};
-
-use super::conn_pool::ConnInfo;
 
 pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;
 pub(crate) type Connect =
     http2::Connection<TokioIo<TcpStream>, hyper::body::Incoming, TokioExecutor>;
 
 #[derive(Clone)]
-struct ConnPoolEntry {
-    conn: Send,
+pub(crate) struct ConnPoolEntry<C: ClientInnerExt + Clone> {
+    conn: C,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 }
 
+pub(crate) struct ClientDataHttp();
+
 // Per-endpoint connection pool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
-pub(crate) struct EndpointConnPool {
+pub(crate) struct EndpointConnPool<C: ClientInnerExt + Clone> {
     // TODO(conrad):
     // either we should open more connections depending on stream count
     // (not exposed by hyper, need our own counter)
@@ -41,13 +43,13 @@ pub(crate) struct EndpointConnPool {
     // seems somewhat redundant though.
     //
     // Probably we should run a semaphore and just the single conn. TBD.
-    conns: VecDeque<ConnPoolEntry>,
+    conns: VecDeque<ConnPoolEntry<C>>,
     _guard: HttpEndpointPoolsGuard<'static>,
     global_connections_count: Arc<AtomicUsize>,
 }
 
-impl EndpointConnPool {
-    fn get_conn_entry(&mut self) -> Option<ConnPoolEntry> {
+impl<C: ClientInnerExt + Clone> EndpointConnPool<C> {
+    fn get_conn_entry(&mut self) -> Option<ConnPoolEntry<C>> {
         let Self { conns, .. } = self;
 
         loop {
@@ -82,7 +84,7 @@ impl EndpointConnPool {
     }
 }
 
-impl Drop for EndpointConnPool {
+impl<C: ClientInnerExt + Clone> Drop for EndpointConnPool<C> {
     fn drop(&mut self) {
         if !self.conns.is_empty() {
             self.global_connections_count
@@ -96,12 +98,12 @@ impl Drop for EndpointConnPool {
     }
 }
 
-pub(crate) struct GlobalConnPool {
+pub(crate) struct GlobalConnPool<C: ClientInnerExt + Clone> {
     // endpoint -> per-endpoint connection pool
     //
     // That should be a fairly conteded map, so return reference to the per-endpoint
     // pool as early as possible and release the lock.
-    global_pool: DashMap<EndpointCacheKey, Arc<RwLock<EndpointConnPool>>>,
+    global_pool: DashMap<EndpointCacheKey, Arc<RwLock<EndpointConnPool<C>>>>,
 
     /// Number of endpoint-connection pools
     ///
@@ -116,7 +118,7 @@ pub(crate) struct GlobalConnPool {
     config: &'static crate::config::HttpConfig,
 }
 
-impl GlobalConnPool {
+impl<C: ClientInnerExt + Clone> GlobalConnPool<C> {
     pub(crate) fn new(config: &'static crate::config::HttpConfig) -> Arc<Self> {
         let shards = config.pool_options.pool_shards;
         Arc::new(Self {
@@ -207,14 +209,22 @@ impl GlobalConnPool {
         }
     }
 
+    #[expect(unused_results)]
     pub(crate) fn get(
         self: &Arc<Self>,
         ctx: &RequestMonitoring,
         conn_info: &ConnInfo,
-    ) -> Option<Client> {
-        let endpoint = conn_info.endpoint_cache_key()?;
+    ) -> Result<Option<Client<C>>, HttpConnError> {
+        let result: Result<Option<Client<C>>, HttpConnError>;
+        let Some(endpoint) = conn_info.endpoint_cache_key() else {
+            result = Ok(None);
+            return result;
+        };
         let endpoint_pool = self.get_or_create_endpoint_pool(&endpoint);
-        let client = endpoint_pool.write().get_conn_entry()?;
+        let Some(client) = endpoint_pool.write().get_conn_entry() else {
+            result = Ok(None);
+            return result;
+        };
 
         tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
         info!(
@@ -223,13 +233,13 @@ impl GlobalConnPool {
         );
         ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
         ctx.success();
-        Some(Client::new(client.conn, client.aux))
+        Ok(Some(Client::new(client.conn, client.aux)))
     }
 
     fn get_or_create_endpoint_pool(
         self: &Arc<Self>,
         endpoint: &EndpointCacheKey,
-    ) -> Arc<RwLock<EndpointConnPool>> {
+    ) -> Arc<RwLock<EndpointConnPool<C>>> {
         // fast path
         if let Some(pool) = self.global_pool.get(endpoint) {
             return pool.clone();
@@ -269,14 +279,14 @@ impl GlobalConnPool {
 }
 
 pub(crate) fn poll_http2_client(
-    global_pool: Arc<GlobalConnPool>,
+    global_pool: Arc<GlobalConnPool<Send>>,
     ctx: &RequestMonitoring,
     conn_info: &ConnInfo,
     client: Send,
     connection: Connect,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
-) -> Client {
+) -> Client<Send> {
     let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
     let session_id = ctx.session_id();
 
@@ -295,6 +305,11 @@ pub(crate) fn poll_http2_client(
                 conn_id,
                 aux: aux.clone(),
             });
+            Metrics::get()
+                .proxy
+                .http_pool_opened_connections
+                .get_metric()
+                .inc();
 
             Arc::downgrade(&pool)
         }
@@ -307,7 +322,7 @@ pub(crate) fn poll_http2_client(
             let res = connection.await;
             match res {
                 Ok(()) => info!("connection closed"),
-                Err(e) => error!(%session_id, "connection error: {}", e),
+                Err(e) => error!(%session_id, "connection error: {e:?}"),
             }
 
             // remove from connection pool
@@ -323,13 +338,13 @@ pub(crate) fn poll_http2_client(
     Client::new(client, aux)
 }
 
-pub(crate) struct Client {
-    pub(crate) inner: Send,
+pub(crate) struct Client<C: ClientInnerExt + Clone> {
+    pub(crate) inner: C,
     aux: MetricsAuxInfo,
 }
 
-impl Client {
-    pub(self) fn new(inner: Send, aux: MetricsAuxInfo) -> Self {
+impl<C: ClientInnerExt + Clone> Client<C> {
+    pub(self) fn new(inner: C, aux: MetricsAuxInfo) -> Self {
         Self { inner, aux }
     }
 
@@ -338,5 +353,16 @@ impl Client {
             endpoint_id: self.aux.endpoint_id,
             branch_id: self.aux.branch_id,
         })
+    }
+}
+
+impl ClientInnerExt for Send {
+    fn is_closed(&self) -> bool {
+        self.is_closed()
+    }
+
+    fn get_process_id(&self) -> i32 {
+        // ideally throw something meaningful
+        -1
     }
 }

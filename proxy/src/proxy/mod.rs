@@ -7,40 +7,33 @@ pub(crate) mod handshake;
 pub(crate) mod passthrough;
 pub(crate) mod retry;
 pub(crate) mod wake_compute;
-pub use copy_bidirectional::copy_bidirectional_client_compute;
-pub use copy_bidirectional::ErrorSource;
+use std::sync::Arc;
 
-use crate::config::ProxyProtocolV2;
-use crate::{
-    auth,
-    cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal},
-    compute,
-    config::{ProxyConfig, TlsConfig},
-    context::RequestMonitoring,
-    error::ReportableError,
-    metrics::{Metrics, NumClientConnectionsGuard},
-    protocol2::read_proxy_protocol,
-    proxy::handshake::{handshake, HandshakeData},
-    rate_limiter::EndpointRateLimiter,
-    stream::{PqStream, Stream},
-    EndpointCacheKey,
-};
+pub use copy_bidirectional::{copy_bidirectional_client_compute, ErrorSource};
 use futures::TryFutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, StartupMessageParams};
 use regex::Regex;
 use smol_str::{format_smolstr, SmolStr};
-use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, Instrument};
+use tracing::{debug, error, info, warn, Instrument};
 
-use self::{
-    connect_compute::{connect_to_compute, TcpMechanism},
-    passthrough::ProxyPassthrough,
-};
+use self::connect_compute::{connect_to_compute, TcpMechanism};
+use self::passthrough::ProxyPassthrough;
+use crate::cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal};
+use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
+use crate::context::RequestMonitoring;
+use crate::error::ReportableError;
+use crate::metrics::{Metrics, NumClientConnectionsGuard};
+use crate::protocol2::{read_proxy_protocol, ConnectHeader, ConnectionInfo};
+use crate::proxy::handshake::{handshake, HandshakeData};
+use crate::rate_limiter::EndpointRateLimiter;
+use crate::stream::{PqStream, Stream};
+use crate::types::EndpointCacheKey;
+use crate::{auth, compute};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 
@@ -61,6 +54,7 @@ pub async fn run_until_cancelled<F: std::future::Future>(
 
 pub async fn task_main(
     config: &'static ProxyConfig,
+    auth_backend: &'static auth::Backend<'static, ()>,
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -89,25 +83,30 @@ pub async fn task_main(
         let session_id = uuid::Uuid::new_v4();
         let cancellation_handler = Arc::clone(&cancellation_handler);
 
-        tracing::info!(protocol = "tcp", %session_id, "accepted new TCP connection");
+        debug!(protocol = "tcp", %session_id, "accepted new TCP connection");
         let endpoint_rate_limiter2 = endpoint_rate_limiter.clone();
 
         connections.spawn(async move {
-            let (socket, peer_addr) = match read_proxy_protocol(socket).await {
+            let (socket, conn_info) = match read_proxy_protocol(socket).await {
                 Err(e) => {
-                    error!("per-client task finished with an error: {e:#}");
+                    warn!("per-client task finished with an error: {e:#}");
                     return;
                 }
-                Ok((_socket, None)) if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
-                    error!("missing required proxy protocol header");
+                // our load balancers will not send any more data. let's just exit immediately
+                Ok((_socket, ConnectHeader::Local)) => {
+                    debug!("healthcheck received");
                     return;
                 }
-                Ok((_socket, Some(_))) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
-                    error!("proxy protocol header not supported");
+                Ok((_socket, ConnectHeader::Missing)) if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
+                    warn!("missing required proxy protocol header");
                     return;
                 }
-                Ok((socket, Some(addr))) => (socket, addr.ip()),
-                Ok((socket, None)) => (socket, peer_addr.ip()),
+                Ok((_socket, ConnectHeader::Proxy(_))) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
+                    warn!("proxy protocol header not supported");
+                    return;
+                }
+                Ok((socket, ConnectHeader::Proxy(info))) => (socket, info),
+                Ok((socket, ConnectHeader::Missing)) => (socket, ConnectionInfo { addr: peer_addr, extra: None }),
             };
 
             match socket.inner.set_nodelay(true) {
@@ -120,7 +119,7 @@ pub async fn task_main(
 
             let ctx = RequestMonitoring::new(
                 session_id,
-                peer_addr,
+                conn_info,
                 crate::metrics::Protocol::Tcp,
                 &config.region,
             );
@@ -129,6 +128,7 @@ pub async fn task_main(
             let startup = Box::pin(
                 handle_client(
                     config,
+                    auth_backend,
                     &ctx,
                     cancellation_handler,
                     socket,
@@ -144,7 +144,7 @@ pub async fn task_main(
                 Err(e) => {
                     // todo: log and push to ctx the error kind
                     ctx.set_error_kind(e.get_error_kind());
-                    error!(parent: &span, "per-client task finished with an error: {e:#}");
+                    warn!(parent: &span, "per-client task finished with an error: {e:#}");
                 }
                 Ok(None) => {
                     ctx.set_success();
@@ -155,7 +155,7 @@ pub async fn task_main(
                     match p.proxy_pass().instrument(span.clone()).await {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
-                            error!(parent: &span, "per-client task finished with an IO error from the client: {e:#}");
+                            warn!(parent: &span, "per-client task finished with an IO error from the client: {e:#}");
                         }
                         Err(ErrorSource::Compute(e)) => {
                             error!(parent: &span, "per-client task finished with an IO error from the compute: {e:#}");
@@ -243,8 +243,10 @@ impl ReportableError for ClientRequestError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
+    auth_backend: &'static auth::Backend<'static, ()>,
     ctx: &RequestMonitoring,
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
@@ -285,8 +287,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let common_names = tls.map(|tls| &tls.common_names);
 
     // Extract credentials which we're going to use for auth.
-    let result = config
-        .auth_backend
+    let result = auth_backend
         .as_ref()
         .map(|()| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names))
         .transpose();
@@ -353,7 +354,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
 #[tracing::instrument(skip_all)]
-async fn prepare_client_connection<P>(
+pub(crate) async fn prepare_client_connection<P>(
     node: &compute::PostgresConnection,
     session: &cancellation::Session<P>,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,

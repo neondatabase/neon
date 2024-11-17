@@ -1,14 +1,10 @@
 use tracing::Subscriber;
-use tracing_subscriber::{
-    filter::{EnvFilter, LevelFilter},
-    fmt::{
-        format::{Format, Full},
-        time::SystemTime,
-        FormatEvent, FormatFields,
-    },
-    prelude::*,
-    registry::LookupSpan,
-};
+use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+use tracing_subscriber::fmt::format::{Format, Full};
+use tracing_subscriber::fmt::time::SystemTime;
+use tracing_subscriber::fmt::{FormatEvent, FormatFields};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::registry::LookupSpan;
 
 /// Initialize logging and OpenTelemetry tracing and exporter.
 ///
@@ -22,6 +18,7 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy()
+        .add_directive("aws_config=info".parse().unwrap())
         .add_directive("azure_core::policies::transport=off".parse().unwrap());
 
     let fmt_layer = tracing_subscriber::fmt::layer()

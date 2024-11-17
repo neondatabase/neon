@@ -56,6 +56,9 @@ impl Manager {
             // This also works for the first segment despite last_removed_segno
             // being 0 on init because this 0 triggers run of wal_removal_task
             // on success of which manager updates the horizon.
+            //
+            // **Note** pull_timeline functionality assumes that evicted timelines always have
+            // a partial segment: if we ever change this condition, must also update that code.
             && self
                 .partial_backup_uploaded
                 .as_ref()
@@ -66,15 +69,15 @@ impl Manager {
         ready
     }
 
-    /// Evict the timeline to remote storage.
+    /// Evict the timeline to remote storage. Returns whether the eviction was successful.
     #[instrument(name = "evict_timeline", skip_all)]
-    pub(crate) async fn evict_timeline(&mut self) {
+    pub(crate) async fn evict_timeline(&mut self) -> bool {
         assert!(!self.is_offloaded);
         let partial_backup_uploaded = match &self.partial_backup_uploaded {
             Some(p) => p.clone(),
             None => {
                 warn!("no partial backup uploaded, skipping eviction");
-                return;
+                return false;
             }
         };
 
@@ -91,11 +94,12 @@ impl Manager {
 
         if let Err(e) = do_eviction(self, &partial_backup_uploaded).await {
             warn!("failed to evict timeline: {:?}", e);
-            return;
+            return false;
         }
 
         info!("successfully evicted timeline");
         NUM_EVICTED_TIMELINES.inc();
+        true
     }
 
     /// Attempt to restore evicted timeline from remote storage; it must be

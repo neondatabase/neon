@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import enum
 import json
 import os
 import re
@@ -16,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Callable, TypeVar
 from urllib.parse import urlencode
 
 import allure
+import pytest
 import zstandard
 from psycopg2.extensions import cursor
 from typing_extensions import override
@@ -25,6 +25,7 @@ from fixtures.pageserver.common_types import (
     parse_delta_layer,
     parse_image_layer,
 )
+from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -37,6 +38,24 @@ if TYPE_CHECKING:
 
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
+
+COMPONENT_BINARIES = {
+    "storage_controller": ("storage_controller",),
+    "storage_broker": ("storage_broker",),
+    "compute": ("compute_ctl",),
+    "safekeeper": ("safekeeper",),
+    "pageserver": ("pageserver", "pagectl"),
+}
+# Disable auto-formatting for better readability
+# fmt: off
+VERSIONS_COMBINATIONS = (
+    {"storage_controller": "new", "storage_broker": "new", "compute": "new", "safekeeper": "new", "pageserver": "new"},
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "old"},
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "new"},
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "new", "pageserver": "new"},
+    {"storage_controller": "old", "storage_broker": "old", "compute": "new", "safekeeper": "new", "pageserver": "new"},
+)
+# fmt: on
 
 
 def subprocess_capture(
@@ -400,7 +419,7 @@ def wait_until(
             time.sleep(interval)
             continue
         return res
-    raise Exception("timed out while waiting for %s" % func) from last_exception
+    raise Exception(f"timed out while waiting for {func}") from last_exception
 
 
 def assert_eq(a, b) -> None:
@@ -497,27 +516,12 @@ def assert_no_errors(log_file: Path, service: str, allowed_errors: list[str]):
     assert not errors, f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
 
 
-@enum.unique
-class AuxFileStore(str, enum.Enum):
-    V1 = "v1"
-    V2 = "v2"
-    CrossValidation = "cross-validation"
-
-    @override
-    def __repr__(self) -> str:
-        return f"'aux-{self.value}'"
-
-    @override
-    def __str__(self) -> str:
-        return f"'aux-{self.value}'"
-
-
 def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str]):
     """
     This is essentially:
 
     lines=$(comm -3 \
-        <(mkdir left && cd left && tar xf "$left" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        <(mkdir left  && cd left  && tar xf "$left"  && find . -type f -print0 | xargs sha256sum | sort -k2) \
         <(mkdir right && cd right && tar xf "$right" && find . -type f -print0 | xargs sha256sum | sort -k2) \
         | wc -l)
     [ "$lines" = "0" ]
@@ -607,3 +611,74 @@ def human_bytes(amt: float) -> str:
         amt = amt / 1024
 
     raise RuntimeError("unreachable")
+
+
+def allpairs_versions():
+    """
+    Returns a dictionary with arguments for pytest parametrize
+    to test the compatibility with the previous version of Neon components
+    combinations were pre-computed to test all the pairs of the components with
+    the different versions.
+    """
+    ids = []
+    argvalues = []
+    compat_not_defined = (
+        os.getenv("COMPATIBILITY_POSTGRES_DISTRIB_DIR") is None
+        or os.getenv("COMPATIBILITY_NEON_BIN") is None
+    )
+    for pair in VERSIONS_COMBINATIONS:
+        cur_id = []
+        all_new = all(v == "new" for v in pair.values())
+        for component in sorted(pair.keys()):
+            cur_id.append(pair[component][0])
+        # Adding None if all versions are new, sof no need to mix at all
+        # If COMPATIBILITY_NEON_BIN or COMPATIBILITY_POSTGRES_DISTRIB_DIR are not defined,
+        # we will skip all the tests which include the versions mix.
+        argvalues.append(
+            pytest.param(
+                None if all_new else pair,
+                marks=pytest.mark.skipif(
+                    compat_not_defined and not all_new,
+                    reason="COMPATIBILITY_NEON_BIN or COMPATIBILITY_POSTGRES_DISTRIB_DIR is not set",
+                ),
+            )
+        )
+        ids.append(f"combination_{''.join(cur_id)}")
+    return {"argnames": "combination", "argvalues": tuple(argvalues), "ids": ids}
+
+
+def skip_on_postgres(version: PgVersion, reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is version,
+        reason=reason,
+    )
+
+
+def xfail_on_postgres(version: PgVersion, reason: str):
+    return pytest.mark.xfail(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is version,
+        reason=reason,
+    )
+
+
+def run_only_on_default_postgres(reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is not PgVersion.DEFAULT,
+        reason=reason,
+    )
+
+
+def skip_in_debug_build(reason: str):
+    return pytest.mark.skipif(
+        os.getenv("BUILD_TYPE", "debug") == "debug",
+        reason=reason,
+    )
+
+
+def skip_on_ci(reason: str):
+    # `CI` variable is always set to `true` on GitHub
+    # Ref: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/store-information-in-variables#default-environment-variables
+    return pytest.mark.skipif(
+        os.getenv("CI", "false") == "true",
+        reason=reason,
+    )

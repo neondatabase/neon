@@ -5,6 +5,8 @@
 mod backend;
 pub mod cancel_set;
 mod conn_pool;
+mod conn_pool_lib;
+mod error;
 mod http_conn_pool;
 mod http_util;
 mod json;
@@ -12,12 +14,15 @@ mod local_conn_pool;
 mod sql_over_http;
 mod websocket;
 
+use std::net::{IpAddr, SocketAddr};
+use std::pin::{pin, Pin};
+use std::sync::Arc;
+
+use anyhow::Context;
 use async_trait::async_trait;
 use atomic_take::AtomicTake;
 use bytes::Bytes;
-pub use conn_pool::GlobalConnPoolOptions;
-
-use anyhow::Context;
+pub use conn_pool_lib::GlobalConnPoolOptions;
 use futures::future::{select, Either};
 use futures::TryFutureExt;
 use http::{Method, Response, StatusCode};
@@ -28,33 +33,31 @@ use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use sql_over_http::{uuid_to_header_value, NEON_REQUEST_ID};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use tracing::{info, warn, Instrument};
+use utils::http::error::ApiError;
 
 use crate::cancellation::CancellationHandlerMain;
-use crate::config::ProxyConfig;
+use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestMonitoring;
 use crate::metrics::Metrics;
-use crate::protocol2::{read_proxy_protocol, ChainRW};
+use crate::protocol2::{read_proxy_protocol, ChainRW, ConnectHeader, ConnectionInfo};
 use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
 use crate::serverless::http_util::{api_error_into_response, json_response};
 
-use std::net::{IpAddr, SocketAddr};
-use std::pin::{pin, Pin};
-use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
-use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn, Instrument};
-use utils::http::error::ApiError;
-
 pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
+    auth_backend: &'static crate::auth::Backend<'static, ()>,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -65,7 +68,7 @@ pub async fn task_main(
     }
 
     let local_pool = local_conn_pool::LocalConnPool::new(&config.http_config);
-    let conn_pool = conn_pool::GlobalConnPool::new(&config.http_config);
+    let conn_pool = conn_pool_lib::GlobalConnPool::new(&config.http_config);
     {
         let conn_pool = Arc::clone(&conn_pool);
         tokio::spawn(async move {
@@ -110,6 +113,7 @@ pub async fn task_main(
         local_pool,
         pool: Arc::clone(&conn_pool),
         config,
+        auth_backend,
         endpoint_rate_limiter: Arc::clone(&endpoint_rate_limiter),
     });
     let tls_acceptor: Arc<dyn MaybeTlsAcceptor> = match config.tls_config.as_ref() {
@@ -176,7 +180,7 @@ pub async fn task_main(
                     peer_addr,
                 ))
                 .await;
-                let Some((conn, peer_addr)) = startup_result else {
+                let Some((conn, conn_info)) = startup_result else {
                     return;
                 };
 
@@ -188,7 +192,7 @@ pub async fn task_main(
                     endpoint_rate_limiter,
                     conn_token,
                     conn,
-                    peer_addr,
+                    conn_info,
                     session_id,
                 ))
                 .await;
@@ -236,27 +240,47 @@ async fn connection_startup(
     session_id: uuid::Uuid,
     conn: TcpStream,
     peer_addr: SocketAddr,
-) -> Option<(AsyncRW, IpAddr)> {
+) -> Option<(AsyncRW, ConnectionInfo)> {
     // handle PROXY protocol
     let (conn, peer) = match read_proxy_protocol(conn).await {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
+            tracing::warn!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
             return None;
         }
     };
 
-    let peer_addr = peer.unwrap_or(peer_addr).ip();
-    let has_private_peer_addr = match peer_addr {
+    let conn_info = match peer {
+        // our load balancers will not send any more data. let's just exit immediately
+        ConnectHeader::Local => {
+            tracing::debug!("healthcheck received");
+            return None;
+        }
+        ConnectHeader::Missing if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
+            tracing::warn!("missing required proxy protocol header");
+            return None;
+        }
+        ConnectHeader::Proxy(_) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
+            tracing::warn!("proxy protocol header not supported");
+            return None;
+        }
+        ConnectHeader::Proxy(info) => info,
+        ConnectHeader::Missing => ConnectionInfo {
+            addr: peer_addr,
+            extra: None,
+        },
+    };
+
+    let has_private_peer_addr = match conn_info.addr.ip() {
         IpAddr::V4(ip) => ip.is_private(),
         IpAddr::V6(_) => false,
     };
-    info!(?session_id, %peer_addr, "accepted new TCP connection");
+    info!(?session_id, %conn_info, "accepted new TCP connection");
 
     // try upgrade to TLS, but with a timeout.
     let conn = match timeout(config.handshake_timeout, tls_acceptor.accept(conn)).await {
         Ok(Ok(conn)) => {
-            info!(?session_id, %peer_addr, "accepted new TLS connection");
+            info!(?session_id, %conn_info, "accepted new TLS connection");
             conn
         }
         // The handshake failed
@@ -264,7 +288,7 @@ async fn connection_startup(
             if !has_private_peer_addr {
                 Metrics::get().proxy.tls_handshake_failures.inc();
             }
-            warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
+            warn!(?session_id, %conn_info, "failed to accept TLS connection: {e:?}");
             return None;
         }
         // The handshake timed out
@@ -272,12 +296,12 @@ async fn connection_startup(
             if !has_private_peer_addr {
                 Metrics::get().proxy.tls_handshake_failures.inc();
             }
-            warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
+            warn!(?session_id, %conn_info, "failed to accept TLS connection: {e:?}");
             return None;
         }
     };
 
-    Some((conn, peer_addr))
+    Some((conn, conn_info))
 }
 
 /// Handles HTTP connection
@@ -293,7 +317,7 @@ async fn connection_handler(
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_token: CancellationToken,
     conn: AsyncRW,
-    peer_addr: IpAddr,
+    conn_info: ConnectionInfo,
     session_id: uuid::Uuid,
 ) {
     let session_id = AtomicTake::new(session_id);
@@ -302,12 +326,24 @@ async fn connection_handler(
     let http_cancellation_token = CancellationToken::new();
     let _cancel_connection = http_cancellation_token.clone().drop_guard();
 
+    let conn_info2 = conn_info.clone();
     let server = Builder::new(TokioExecutor::new());
     let conn = server.serve_connection_with_upgrades(
         hyper_util::rt::TokioIo::new(conn),
         hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
             // First HTTP request shares the same session ID
-            let session_id = session_id.take().unwrap_or_else(uuid::Uuid::new_v4);
+            let mut session_id = session_id.take().unwrap_or_else(uuid::Uuid::new_v4);
+
+            if matches!(backend.auth_backend, crate::auth::Backend::Local(_)) {
+                // take session_id from request, if given.
+                if let Some(id) = req
+                    .headers()
+                    .get(&NEON_REQUEST_ID)
+                    .and_then(|id| uuid::Uuid::try_parse_ascii(id.as_bytes()).ok())
+                {
+                    session_id = id;
+                }
+            }
 
             // Cancel the current inflight HTTP request if the requets stream is closed.
             // This is slightly different to `_cancel_connection` in that
@@ -325,7 +361,7 @@ async fn connection_handler(
                     connections.clone(),
                     cancellation_handler.clone(),
                     session_id,
-                    peer_addr,
+                    conn_info2.clone(),
                     http_request_token,
                     endpoint_rate_limiter.clone(),
                 )
@@ -333,8 +369,15 @@ async fn connection_handler(
                 .map_ok_or_else(api_error_into_response, |r| r),
             );
             async move {
-                let res = handler.await;
+                let mut res = handler.await;
                 cancel_request.disarm();
+
+                // add the session ID to the response
+                if let Ok(resp) = &mut res {
+                    resp.headers_mut()
+                        .append(&NEON_REQUEST_ID, uuid_to_header_value(session_id));
+                }
+
                 res
             }
         }),
@@ -343,7 +386,7 @@ async fn connection_handler(
     // On cancellation, trigger the HTTP connection handler to shut down.
     let res = match select(pin!(cancellation_token.cancelled()), pin!(conn)).await {
         Either::Left((_cancelled, mut conn)) => {
-            tracing::debug!(%peer_addr, "cancelling connection");
+            tracing::debug!(%conn_info, "cancelling connection");
             conn.as_mut().graceful_shutdown();
             conn.await
         }
@@ -351,8 +394,8 @@ async fn connection_handler(
     };
 
     match res {
-        Ok(()) => tracing::info!(%peer_addr, "HTTP connection closed"),
-        Err(e) => tracing::warn!(%peer_addr, "HTTP connection error {e}"),
+        Ok(()) => tracing::info!(%conn_info, "HTTP connection closed"),
+        Err(e) => tracing::warn!(%conn_info, "HTTP connection error {e}"),
     }
 }
 
@@ -364,7 +407,7 @@ async fn request_handler(
     ws_connections: TaskTracker,
     cancellation_handler: Arc<CancellationHandlerMain>,
     session_id: uuid::Uuid,
-    peer_addr: IpAddr,
+    conn_info: ConnectionInfo,
     // used to cancel in-flight HTTP requests. not used to cancel websockets
     http_cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -382,7 +425,7 @@ async fn request_handler(
     {
         let ctx = RequestMonitoring::new(
             session_id,
-            peer_addr,
+            conn_info,
             crate::metrics::Protocol::Ws,
             &config.region,
         );
@@ -397,6 +440,7 @@ async fn request_handler(
             async move {
                 if let Err(e) = websocket::serve_websocket(
                     config,
+                    backend.auth_backend,
                     ctx,
                     websocket,
                     cancellation_handler,
@@ -405,7 +449,7 @@ async fn request_handler(
                 )
                 .await
                 {
-                    error!("error in websocket connection: {e:#}");
+                    warn!("error in websocket connection: {e:#}");
                 }
             }
             .instrument(span),
@@ -416,7 +460,7 @@ async fn request_handler(
     } else if request.uri().path() == "/sql" && *request.method() == Method::POST {
         let ctx = RequestMonitoring::new(
             session_id,
-            peer_addr,
+            conn_info,
             crate::metrics::Protocol::Http,
             &config.region,
         );

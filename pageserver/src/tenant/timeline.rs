@@ -20,17 +20,19 @@ use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
 use handle::ShardTimelineId;
+use offload::OffloadError;
 use once_cell::sync::Lazy;
 use pageserver_api::{
+    config::tenant_conf_defaults::DEFAULT_COMPACTION_THRESHOLD,
     key::{
-        CompactKey, KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX,
-        NON_INHERITED_RANGE, NON_INHERITED_SPARSE_RANGE,
+        KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
+        NON_INHERITED_SPARSE_RANGE,
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
-        AtomicAuxFilePolicy, AuxFilePolicy, CompactionAlgorithm, CompactionAlgorithmSettings,
-        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
-        InMemoryLayerInfo, LayerMapInfo, LsnLease, TimelineState,
+        CompactionAlgorithm, CompactionAlgorithmSettings, DownloadRemoteLayersTaskInfo,
+        DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
+        LsnLease, TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
@@ -48,6 +50,7 @@ use utils::{
     fs_ext, pausable_failpoint,
     sync::gate::{Gate, GateGuard},
 };
+use wal_decoder::serialized_batch::SerializedValueBatch;
 
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -98,12 +101,12 @@ use crate::{
 use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
 };
-use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
-use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
 use crate::{
-    pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
+    pgdatadir_mapping::DirectoryKind,
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
+use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
+use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 
 use crate::config::PageServerConf;
@@ -125,11 +128,11 @@ use utils::{
     simple_rcu::{Rcu, RcuReadGuard},
 };
 
-use crate::repository::GcResult;
-use crate::repository::{Key, Value};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::gc_result::GcResult;
 use crate::ZERO_PAGE;
+use pageserver_api::key::Key;
 
 use self::delete::DeleteTimelineFlow;
 pub(super) use self::eviction_task::EvictionTaskTenantState;
@@ -139,8 +142,8 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::{
-    config::TenantConf, storage_layer::inmemory_layer, storage_layer::LayerVisibilityHint,
-    upload_queue::NotInitialized,
+    config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
+    MaybeOffloaded,
 };
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
@@ -152,6 +155,9 @@ use super::{
     secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
     GcError,
 };
+
+#[cfg(test)]
+use pageserver_api::value::Value;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum FlushLoopState {
@@ -202,11 +208,6 @@ pub struct TimelineResources {
     pub timeline_get_throttle:
         Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
-}
-
-pub(crate) struct AuxFilesState {
-    pub(crate) dir: Option<AuxFilesDirectory>,
-    pub(crate) n_deltas: usize,
 }
 
 /// The relation size cache caches relation sizes at the end of the timeline. It speeds up WAL
@@ -374,7 +375,7 @@ pub struct Timeline {
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
-    pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,
+    pub delete_progress: TimelineDeleteProgress,
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 
@@ -411,14 +412,8 @@ pub struct Timeline {
     timeline_get_throttle:
         Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
 
-    /// Keep aux directory cache to avoid it's reconstruction on each update
-    pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
-
     /// Size estimator for aux file v2
     pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
-
-    /// Indicate whether aux file v2 storage is enabled.
-    pub(crate) last_aux_file_policy: AtomicAuxFilePolicy,
 
     /// Some test cases directly place keys into the timeline without actually modifying the directory
     /// keys (i.e., DB_DIR). The test cases creating such keys will put the keyspaces here, so that
@@ -433,7 +428,12 @@ pub struct Timeline {
     pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
 
     pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
+
+    /// Cf. [`crate::tenant::CreateTimelineIdempotency`].
+    pub(crate) create_idempotency: crate::tenant::CreateTimelineIdempotency,
 }
+
+pub type TimelineDeleteProgress = Arc<tokio::sync::Mutex<DeleteTimelineFlow>>;
 
 pub struct WalReceiverInfo {
     pub wal_source_connconf: PgConnectionConfig,
@@ -450,7 +450,7 @@ pub(crate) struct GcInfo {
     /// Currently, this includes all points where child branches have
     /// been forked off from. In the future, could also include
     /// explicit user-defined snapshot points.
-    pub(crate) retain_lsns: Vec<(Lsn, TimelineId)>,
+    pub(crate) retain_lsns: Vec<(Lsn, TimelineId, MaybeOffloaded)>,
 
     /// The cutoff coordinates, which are combined by selecting the minimum.
     pub(crate) cutoffs: GcCutoffs,
@@ -467,8 +467,13 @@ impl GcInfo {
         self.cutoffs.select_min()
     }
 
-    pub(super) fn insert_child(&mut self, child_id: TimelineId, child_lsn: Lsn) {
-        self.retain_lsns.push((child_lsn, child_id));
+    pub(super) fn insert_child(
+        &mut self,
+        child_id: TimelineId,
+        child_lsn: Lsn,
+        is_offloaded: MaybeOffloaded,
+    ) {
+        self.retain_lsns.push((child_lsn, child_id, is_offloaded));
         self.retain_lsns.sort_by_key(|i| i.0);
     }
 
@@ -848,6 +853,10 @@ pub(crate) enum ShutdownMode {
     /// While we are flushing, we continue to accept read I/O for LSNs ingested before
     /// the call to [`Timeline::shutdown`].
     FreezeAndFlush,
+    /// Only flush the layers to the remote storage without freezing any open layers. This is the
+    /// mode used by ancestor detach and any other operations that reloads a tenant but not increasing
+    /// the generation number.
+    Flush,
     /// Shut down immediately, without waiting for any open layers to flush.
     Hard,
 }
@@ -1558,14 +1567,19 @@ impl Timeline {
     }
 
     /// Checks if the internal state of the timeline is consistent with it being able to be offloaded.
+    ///
     /// This is neccessary but not sufficient for offloading of the timeline as it might have
     /// child timelines that are not offloaded yet.
-    pub(crate) fn can_offload(&self) -> bool {
+    pub(crate) fn can_offload(&self) -> (bool, &'static str) {
         if self.remote_client.is_archived() != Some(true) {
-            return false;
+            return (false, "the timeline is not archived");
+        }
+        if !self.remote_client.no_pending_work() {
+            // if the remote client is still processing some work, we can't offload
+            return (false, "the upload queue is not drained yet");
         }
 
-        true
+        (true, "ok")
     }
 
     /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
@@ -1673,11 +1687,6 @@ impl Timeline {
     pub(crate) async fn shutdown(&self, mode: ShutdownMode) {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let try_freeze_and_flush = match mode {
-            ShutdownMode::FreezeAndFlush => true,
-            ShutdownMode::Hard => false,
-        };
-
         // Regardless of whether we're going to try_freeze_and_flush
         // or not, stop ingesting any more data. Walreceiver only provides
         // cancellation but no "wait until gone", because it uses the Timeline::gate.
@@ -1699,7 +1708,7 @@ impl Timeline {
         // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();
 
-        if try_freeze_and_flush {
+        if let ShutdownMode::FreezeAndFlush = mode {
             if let Some((open, frozen)) = self
                 .layers
                 .read()
@@ -1740,6 +1749,20 @@ impl Timeline {
                     // we have some extra WAL replay to do next time the timeline starts.
                     warn!("failed to freeze and flush: {e:#}");
                 }
+            }
+
+            // `self.remote_client.shutdown().await` above should have already flushed everything from the queue, but
+            // we also do a final check here to ensure that the queue is empty.
+            if !self.remote_client.no_pending_work() {
+                warn!("still have pending work in remote upload queue, but continuing shutting down anyways");
+            }
+        }
+
+        if let ShutdownMode::Flush = mode {
+            // drain the upload queue
+            self.remote_client.shutdown().await;
+            if !self.remote_client.no_pending_work() {
+                warn!("still have pending work in remote upload queue, but continuing shutting down anyways");
             }
         }
 
@@ -2004,14 +2027,6 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
     }
 
-    pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
-        let tenant_conf = self.tenant_conf.load();
-        tenant_conf
-            .tenant_conf
-            .switch_aux_file_policy
-            .unwrap_or(self.conf.default_tenant_conf.switch_aux_file_policy)
-    }
-
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2144,8 +2159,8 @@ impl Timeline {
         resources: TimelineResources,
         pg_version: u32,
         state: TimelineState,
-        aux_file_policy: Option<AuxFilePolicy>,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
+        create_idempotency: crate::tenant::CreateTimelineIdempotency,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2164,7 +2179,9 @@ impl Timeline {
 
         if let Some(ancestor) = &ancestor {
             let mut ancestor_gc_info = ancestor.gc_info.write().unwrap();
-            ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn());
+            // If we construct an explicit timeline object, it's obviously not offloaded
+            let is_offloaded = MaybeOffloaded::No;
+            ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn(), is_offloaded);
         }
 
         Arc::new_cyclic(|myself| {
@@ -2260,7 +2277,7 @@ impl Timeline {
                 eviction_task_timeline_state: tokio::sync::Mutex::new(
                     EvictionTaskTimelineState::default(),
                 ),
-                delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
+                delete_progress: TimelineDeleteProgress::default(),
 
                 cancel,
                 gate: Gate::default(),
@@ -2272,14 +2289,7 @@ impl Timeline {
 
                 timeline_get_throttle: resources.timeline_get_throttle,
 
-                aux_files: tokio::sync::Mutex::new(AuxFilesState {
-                    dir: None,
-                    n_deltas: 0,
-                }),
-
                 aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
-
-                last_aux_file_policy: AtomicAuxFilePolicy::new(aux_file_policy),
 
                 #[cfg(test)]
                 extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
@@ -2289,11 +2299,9 @@ impl Timeline {
                 handles: Default::default(),
 
                 attach_wal_lag_cooldown,
-            };
 
-            if aux_file_policy == Some(AuxFilePolicy::V1) {
-                warn!("this timeline is using deprecated aux file policy V1 (when loading the timeline)");
-            }
+                create_idempotency,
+            };
 
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -2423,7 +2431,7 @@ impl Timeline {
     pub(super) async fn load_layer_map(
         &self,
         disk_consistent_lsn: Lsn,
-        index_part: Option<IndexPart>,
+        index_part: IndexPart,
     ) -> anyhow::Result<()> {
         use init::{Decision::*, Discovered, DismissedLayer};
         use LayerName::*;
@@ -2487,8 +2495,7 @@ impl Timeline {
                     );
                 }
 
-                let decided =
-                    init::reconcile(discovered_layers, index_part.as_ref(), disk_consistent_lsn);
+                let decided = init::reconcile(discovered_layers, &index_part, disk_consistent_lsn);
 
                 let mut loaded_layers = Vec::new();
                 let mut needs_cleanup = Vec::new();
@@ -3083,7 +3090,6 @@ impl Timeline {
 }
 
 impl Timeline {
-    #[allow(unknown_lints)] // doc_lazy_continuation is still a new lint
     #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///
@@ -3500,18 +3506,37 @@ impl Timeline {
 
                 let timer = self.metrics.flush_time_histo.start_timer();
 
+                let num_frozen_layers;
+                let frozen_layer_total_size;
                 let layer_to_flush = {
                     let guard = self.layers.read().await;
                     let Ok(lm) = guard.layer_map() else {
                         info!("dropping out of flush loop for timeline shutdown");
                         return;
                     };
+                    num_frozen_layers = lm.frozen_layers.len();
+                    frozen_layer_total_size = lm
+                        .frozen_layers
+                        .iter()
+                        .map(|l| l.estimated_in_mem_size())
+                        .sum::<u64>();
                     lm.frozen_layers.front().cloned()
                     // drop 'layers' lock to allow concurrent reads and writes
                 };
                 let Some(layer_to_flush) = layer_to_flush else {
                     break Ok(());
                 };
+                if num_frozen_layers
+                    > std::cmp::max(
+                        self.get_compaction_threshold(),
+                        DEFAULT_COMPACTION_THRESHOLD,
+                    )
+                    && frozen_layer_total_size >= /* 128 MB */ 128000000
+                {
+                    tracing::warn!(
+                        "too many frozen layers: {num_frozen_layers} layers with estimated in-mem size of {frozen_layer_total_size} bytes",
+                    );
+                }
                 match self.flush_frozen_layer(layer_to_flush, ctx).await {
                     Ok(this_layer_to_lsn) => {
                         flushed_to_lsn = std::cmp::max(flushed_to_lsn, this_layer_to_lsn);
@@ -4102,6 +4127,7 @@ impl Timeline {
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         // Metadata keys image layer creation.
         let mut reconstruct_state = ValuesReconstructState::default();
+        let begin = Instant::now();
         let data = self
             .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
             .await?;
@@ -4118,14 +4144,11 @@ impl Timeline {
             (new_data, total_kb_retrieved / 1024, total_keys_retrieved)
         };
         let delta_files_accessed = reconstruct_state.get_delta_layers_visited();
+        let elapsed = begin.elapsed();
 
         let trigger_generation = delta_files_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
-        debug!(
-            trigger_generation,
-            delta_files_accessed,
-            total_kb_retrieved,
-            total_keys_retrieved,
-            "generate metadata images"
+        info!(
+            "metadata key compaction: trigger_generation={trigger_generation}, delta_files_accessed={delta_files_accessed}, total_kb_retrieved={total_kb_retrieved}, total_keys_retrieved={total_keys_retrieved}, read_time={}s", elapsed.as_secs_f64()
         );
 
         if !trigger_generation && mode == ImageLayerCreationMode::Try {
@@ -4470,14 +4493,6 @@ impl Timeline {
     ) -> Result<(), detach_ancestor::Error> {
         detach_ancestor::complete(self, tenant, attempt, ctx).await
     }
-
-    /// Switch aux file policy and schedule upload to the index part.
-    pub(crate) fn do_switch_aux_policy(&self, policy: AuxFilePolicy) -> anyhow::Result<()> {
-        self.last_aux_file_policy.store(Some(policy));
-        self.remote_client
-            .schedule_index_upload_for_aux_file_policy_update(Some(policy))?;
-        Ok(())
-    }
 }
 
 impl Drop for Timeline {
@@ -4497,9 +4512,21 @@ impl Drop for Timeline {
 pub(crate) enum CompactionError {
     #[error("The timeline or pageserver is shutting down")]
     ShuttingDown,
+    /// Compaction tried to offload a timeline and failed
+    #[error("Failed to offload timeline: {0}")]
+    Offload(OffloadError),
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error(transparent)]
     Other(anyhow::Error),
+}
+
+impl From<OffloadError> for CompactionError {
+    fn from(e: OffloadError) -> Self {
+        match e {
+            OffloadError::Cancelled => Self::ShuttingDown,
+            _ => Self::Offload(e),
+        }
+    }
 }
 
 impl CompactionError {
@@ -4875,7 +4902,7 @@ impl Timeline {
             let retain_lsns = gc_info
                 .retain_lsns
                 .iter()
-                .map(|(lsn, _child_id)| *lsn)
+                .map(|(lsn, _child_id, _is_offloaded)| *lsn)
                 .collect();
 
             // Gets the maximum LSN that holds the valid lease.
@@ -5745,23 +5772,22 @@ impl<'a> TimelineWriter<'a> {
     /// Put a batch of keys at the specified Lsns.
     pub(crate) async fn put_batch(
         &mut self,
-        batch: Vec<(CompactKey, Lsn, usize, Value)>,
+        batch: SerializedValueBatch,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
 
-        let serialized_batch = inmemory_layer::SerializedBatch::from_values(batch)?;
-        let batch_max_lsn = serialized_batch.max_lsn;
-        let buf_size: u64 = serialized_batch.raw.len() as u64;
+        let batch_max_lsn = batch.max_lsn;
+        let buf_size: u64 = batch.buffer_size() as u64;
 
         let action = self.get_open_layer_action(batch_max_lsn, buf_size);
         let layer = self
             .handle_open_layer_action(batch_max_lsn, action, ctx)
             .await?;
 
-        let res = layer.put_batch(serialized_batch, ctx).await;
+        let res = layer.put_batch(batch, ctx).await;
 
         if res.is_ok() {
             // Update the current size only when the entire write was ok.
@@ -5796,11 +5822,14 @@ impl<'a> TimelineWriter<'a> {
             );
         }
         let val_ser_size = value.serialized_size().unwrap() as usize;
-        self.put_batch(
-            vec![(key.to_compact(), lsn, val_ser_size, value.clone())],
-            ctx,
-        )
-        .await
+        let batch = SerializedValueBatch::from_values(vec![(
+            key.to_compact(),
+            lsn,
+            val_ser_size,
+            value.clone(),
+        )]);
+
+        self.put_batch(batch, ctx).await
     }
 
     pub(crate) async fn delete_batch(
@@ -5845,17 +5874,15 @@ fn is_send() {
 #[cfg(test)]
 mod tests {
     use pageserver_api::key::Key;
+    use pageserver_api::value::Value;
     use utils::{id::TimelineId, lsn::Lsn};
 
-    use crate::{
-        repository::Value,
-        tenant::{
-            harness::{test_img, TenantHarness},
-            layer_map::LayerMap,
-            storage_layer::{Layer, LayerName},
-            timeline::{DeltaLayerTestDesc, EvictionError},
-            Timeline,
-        },
+    use crate::tenant::{
+        harness::{test_img, TenantHarness},
+        layer_map::LayerMap,
+        storage_layer::{Layer, LayerName},
+        timeline::{DeltaLayerTestDesc, EvictionError},
+        Timeline,
     };
 
     #[tokio::test]

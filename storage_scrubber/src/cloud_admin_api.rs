@@ -138,7 +138,7 @@ pub struct ProjectData {
     pub name: String,
     pub region_id: String,
     pub platform_id: String,
-    pub user_id: String,
+    pub user_id: Option<String>,
     pub pageserver_id: Option<u64>,
     #[serde(deserialize_with = "from_nullable_id")]
     pub tenant: TenantId,
@@ -147,7 +147,7 @@ pub struct ProjectData {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub pg_version: u32,
-    pub max_project_size: u64,
+    pub max_project_size: i64,
     pub remote_storage_size: u64,
     pub resident_size: u64,
     pub synthetic_storage_size: u64,
@@ -261,7 +261,7 @@ impl CloudAdminApiClient {
         }
     }
 
-    pub async fn list_projects(&self, region_id: String) -> Result<Vec<ProjectData>, Error> {
+    pub async fn list_projects(&self) -> Result<Vec<ProjectData>, Error> {
         let _permit = self
             .request_limiter
             .acquire()
@@ -318,7 +318,7 @@ impl CloudAdminApiClient {
 
             pagination_offset += response.data.len();
 
-            result.extend(response.data.drain(..).filter(|t| t.region_id == region_id));
+            result.append(&mut response.data);
 
             if pagination_offset >= response.total.unwrap_or(0) {
                 break;

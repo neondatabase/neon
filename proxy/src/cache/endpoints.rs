@@ -1,49 +1,55 @@
-use std::{
-    convert::Infallible,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::convert::Infallible;
+use std::future::pending;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashSet;
-use redis::{
-    streams::{StreamReadOptions, StreamReadReply},
-    AsyncCommands, FromRedisValue, Value,
-};
+use redis::streams::{StreamReadOptions, StreamReadReply};
+use redis::{AsyncCommands, FromRedisValue, Value};
 use serde::Deserialize;
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::{
-    config::EndpointCacheConfig,
-    context::RequestMonitoring,
-    intern::{BranchIdInt, EndpointIdInt, ProjectIdInt},
-    metrics::{Metrics, RedisErrors, RedisEventsCount},
-    rate_limiter::GlobalRateLimiter,
-    redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider,
-    EndpointId,
-};
+use crate::config::EndpointCacheConfig;
+use crate::context::RequestMonitoring;
+use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
+use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
+use crate::rate_limiter::GlobalRateLimiter;
+use crate::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
+use crate::types::EndpointId;
 
-#[derive(Deserialize, Debug, Clone)]
-pub(crate) struct ControlPlaneEventKey {
+// TODO: this could be an enum, but events in Redis need to be fixed first.
+// ProjectCreated was sent with type:branch_created. So we ignore type.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+struct ControlPlaneEvent {
     endpoint_created: Option<EndpointCreated>,
     branch_created: Option<BranchCreated>,
     project_created: Option<ProjectCreated>,
+    #[serde(rename = "type")]
+    _type: Option<String>,
 }
-#[derive(Deserialize, Debug, Clone)]
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 struct EndpointCreated {
-    endpoint_id: String,
+    endpoint_id: EndpointIdInt,
 }
-#[derive(Deserialize, Debug, Clone)]
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 struct BranchCreated {
-    branch_id: String,
+    branch_id: BranchIdInt,
 }
-#[derive(Deserialize, Debug, Clone)]
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 struct ProjectCreated {
-    project_id: String,
+    project_id: ProjectIdInt,
+}
+
+impl TryFrom<&Value> for ControlPlaneEvent {
+    type Error = anyhow::Error;
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        let json = String::from_redis_value(value)?;
+        Ok(serde_json::from_str(&json)?)
+    }
 }
 
 pub struct EndpointsCache {
@@ -68,60 +74,80 @@ impl EndpointsCache {
             ready: AtomicBool::new(false),
         }
     }
-    pub(crate) async fn is_valid(&self, ctx: &RequestMonitoring, endpoint: &EndpointId) -> bool {
+
+    pub(crate) fn is_valid(&self, ctx: &RequestMonitoring, endpoint: &EndpointId) -> bool {
         if !self.ready.load(Ordering::Acquire) {
+            // the endpoint cache is not yet fully initialised.
             return true;
         }
-        let rejected = self.should_reject(endpoint);
-        ctx.set_rejected(rejected);
-        info!(?rejected, "check endpoint is valid, disabled cache");
-        // If cache is disabled, just collect the metrics and return or
-        // If the limiter allows, we don't need to check the cache.
-        if self.config.disable_cache || self.limiter.lock().await.check() {
+
+        if !self.should_reject(endpoint) {
+            ctx.set_rejected(false);
             return true;
         }
-        !rejected
+
+        // report that we might want to reject this endpoint
+        ctx.set_rejected(true);
+
+        // If cache is disabled, just collect the metrics and return.
+        if self.config.disable_cache {
+            return true;
+        }
+
+        // If the limiter allows, we can pretend like it's valid
+        // (incase it is, due to redis channel lag).
+        if self.limiter.lock().unwrap().check() {
+            return true;
+        }
+
+        // endpoint not found, and there's too much load.
+        false
     }
+
     fn should_reject(&self, endpoint: &EndpointId) -> bool {
         if endpoint.is_endpoint() {
-            !self.endpoints.contains(&EndpointIdInt::from(endpoint))
+            let Some(endpoint) = EndpointIdInt::get(endpoint) else {
+                // if we haven't interned this endpoint, it's not in the cache.
+                return true;
+            };
+            !self.endpoints.contains(&endpoint)
         } else if endpoint.is_branch() {
-            !self
-                .branches
-                .contains(&BranchIdInt::from(&endpoint.as_branch()))
+            let Some(branch) = BranchIdInt::get(endpoint) else {
+                // if we haven't interned this branch, it's not in the cache.
+                return true;
+            };
+            !self.branches.contains(&branch)
         } else {
-            !self
-                .projects
-                .contains(&ProjectIdInt::from(&endpoint.as_project()))
+            let Some(project) = ProjectIdInt::get(endpoint) else {
+                // if we haven't interned this project, it's not in the cache.
+                return true;
+            };
+            !self.projects.contains(&project)
         }
     }
-    fn insert_event(&self, key: ControlPlaneEventKey) {
-        // Do not do normalization here, we expect the events to be normalized.
-        if let Some(endpoint_created) = key.endpoint_created {
-            self.endpoints
-                .insert(EndpointIdInt::from(&endpoint_created.endpoint_id.into()));
+
+    fn insert_event(&self, event: ControlPlaneEvent) {
+        if let Some(endpoint_created) = event.endpoint_created {
+            self.endpoints.insert(endpoint_created.endpoint_id);
             Metrics::get()
                 .proxy
                 .redis_events_count
                 .inc(RedisEventsCount::EndpointCreated);
-        }
-        if let Some(branch_created) = key.branch_created {
-            self.branches
-                .insert(BranchIdInt::from(&branch_created.branch_id.into()));
+        } else if let Some(branch_created) = event.branch_created {
+            self.branches.insert(branch_created.branch_id);
             Metrics::get()
                 .proxy
                 .redis_events_count
                 .inc(RedisEventsCount::BranchCreated);
-        }
-        if let Some(project_created) = key.project_created {
-            self.projects
-                .insert(ProjectIdInt::from(&project_created.project_id.into()));
+        } else if let Some(project_created) = event.project_created {
+            self.projects.insert(project_created.project_id);
             Metrics::get()
                 .proxy
                 .redis_events_count
                 .inc(RedisEventsCount::ProjectCreated);
         }
     }
+
     pub async fn do_read(
         &self,
         mut con: ConnectionWithCredentialsProvider,
@@ -139,12 +165,13 @@ impl EndpointsCache {
             }
             if cancellation_token.is_cancelled() {
                 info!("cancellation token is cancelled, exiting");
-                tokio::time::sleep(Duration::from_secs(60 * 60 * 24 * 7)).await;
-                // 1 week.
+                // Maintenance tasks run forever. Sleep forever when canceled.
+                pending::<()>().await;
             }
             tokio::time::sleep(self.config.retry_interval).await;
         }
     }
+
     async fn read_from_stream(
         &self,
         con: &mut ConnectionWithCredentialsProvider,
@@ -170,10 +197,7 @@ impl EndpointsCache {
         )
         .await
     }
-    fn parse_key_value(value: &Value) -> anyhow::Result<ControlPlaneEventKey> {
-        let s: String = FromRedisValue::from_redis_value(value)?;
-        Ok(serde_json::from_str(&s)?)
-    }
+
     async fn batch_read(
         &self,
         conn: &mut ConnectionWithCredentialsProvider,
@@ -204,27 +228,25 @@ impl EndpointsCache {
                 anyhow::bail!("Cannot read from redis stream {}", self.config.stream_name);
             }
 
-            let res = res.keys.pop().expect("Checked length above");
-            let len = res.ids.len();
-            for x in res.ids {
+            let key = res.keys.pop().expect("Checked length above");
+            let len = key.ids.len();
+            for stream_id in key.ids {
                 total += 1;
-                for (_, v) in x.map {
-                    let key = match Self::parse_key_value(&v) {
-                        Ok(x) => x,
-                        Err(e) => {
+                for value in stream_id.map.values() {
+                    match value.try_into() {
+                        Ok(event) => self.insert_event(event),
+                        Err(err) => {
                             Metrics::get().proxy.redis_errors_total.inc(RedisErrors {
                                 channel: &self.config.stream_name,
                             });
-                            tracing::error!("error parsing value {v:?}: {e:?}");
-                            continue;
+                            tracing::error!("error parsing value {value:?}: {err:?}");
                         }
                     };
-                    self.insert_event(key);
                 }
                 if total.is_power_of_two() {
                     tracing::debug!("endpoints read {}", total);
                 }
-                *last_id = x.id;
+                *last_id = stream_id.id;
             }
             if return_when_finish && len <= self.config.default_batch_size {
                 break;
@@ -237,11 +259,24 @@ impl EndpointsCache {
 
 #[cfg(test)]
 mod tests {
-    use super::ControlPlaneEventKey;
+    use super::*;
 
     #[test]
-    fn test() {
-        let s = "{\"branch_created\":null,\"endpoint_created\":{\"endpoint_id\":\"ep-rapid-thunder-w0qqw2q9\"},\"project_created\":null,\"type\":\"endpoint_created\"}";
-        serde_json::from_str::<ControlPlaneEventKey>(s).unwrap();
+    fn test_parse_control_plane_event() {
+        let s = r#"{"branch_created":null,"endpoint_created":{"endpoint_id":"ep-rapid-thunder-w0qqw2q9"},"project_created":null,"type":"endpoint_created"}"#;
+
+        let endpoint_id: EndpointId = "ep-rapid-thunder-w0qqw2q9".into();
+
+        assert_eq!(
+            serde_json::from_str::<ControlPlaneEvent>(s).unwrap(),
+            ControlPlaneEvent {
+                endpoint_created: Some(EndpointCreated {
+                    endpoint_id: endpoint_id.into(),
+                }),
+                branch_created: None,
+                project_created: None,
+                _type: Some("endpoint_created".into()),
+            }
+        );
     }
 }

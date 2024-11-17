@@ -1,6 +1,9 @@
-use std::{error::Error as StdError, fmt, io};
+use std::error::Error as StdError;
+use std::{fmt, io};
 
+use anyhow::Context;
 use measured::FixedCardinalityLabel;
+use tokio::task::JoinError;
 
 /// Upcast (almost) any error into an opaque [`io::Error`].
 pub(crate) fn io_error(e: impl Into<Box<dyn StdError + Send + Sync>>) -> io::Error {
@@ -49,6 +52,10 @@ pub enum ErrorKind {
     #[label(rename = "serviceratelimit")]
     ServiceRateLimit,
 
+    /// Proxy quota limit violation
+    #[label(rename = "quota")]
+    Quota,
+
     /// internal errors
     Service,
 
@@ -70,6 +77,7 @@ impl ErrorKind {
             ErrorKind::ClientDisconnect => "clientdisconnect",
             ErrorKind::RateLimit => "ratelimit",
             ErrorKind::ServiceRateLimit => "serviceratelimit",
+            ErrorKind::Quota => "quota",
             ErrorKind::Service => "service",
             ErrorKind::ControlPlane => "controlplane",
             ErrorKind::Postgres => "postgres",
@@ -90,4 +98,9 @@ impl ReportableError for tokio_postgres::error::Error {
             ErrorKind::Compute
         }
     }
+}
+
+/// Flattens `Result<Result<T>>` into `Result<T>`.
+pub fn flatten_err<T>(r: Result<anyhow::Result<T>, JoinError>) -> anyhow::Result<T> {
+    r.context("join error").and_then(|x| x)
 }

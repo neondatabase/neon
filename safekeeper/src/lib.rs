@@ -112,8 +112,7 @@ impl SafeKeeperConf {
 }
 
 impl SafeKeeperConf {
-    #[cfg(test)]
-    fn dummy() -> Self {
+    pub fn dummy() -> Self {
         SafeKeeperConf {
             workdir: Utf8PathBuf::from("./"),
             no_sync: false,

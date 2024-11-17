@@ -46,7 +46,9 @@ def test_local_only_layers_after_crash(neon_env_builder: NeonEnvBuilder, pg_bin:
     for sk in env.safekeepers:
         sk.stop()
 
-    pageserver_http.patch_tenant_config_client_side(tenant_id, {"compaction_threshold": 3})
+    env.storage_controller.pageserver_api().patch_tenant_config_client_side(
+        tenant_id, {"compaction_threshold": 3}
+    )
     # hit the exit failpoint
     with pytest.raises(ConnectionError, match="Remote end closed connection without response"):
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)

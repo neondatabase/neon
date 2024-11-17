@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import psycopg2
 import psycopg2.extras
@@ -9,17 +9,20 @@ import pytest
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import AuxFileStore, logical_replication_sync
+from fixtures.neon_fixtures import logical_replication_sync
 
 if TYPE_CHECKING:
+    from subprocess import Popen
+    from typing import AnyStr
+
     from fixtures.benchmark_fixture import NeonBenchmarker
     from fixtures.neon_api import NeonApiEndpoint
-    from fixtures.neon_fixtures import NeonEnv, PgBin
+    from fixtures.neon_fixtures import NeonEnv, PgBin, VanillaPostgres
+    from psycopg2.extensions import cursor
 
 
-@pytest.mark.parametrize("pageserver_aux_file_policy", [AuxFileStore.V2])
 @pytest.mark.timeout(1000)
-def test_logical_replication(neon_simple_env: NeonEnv, pg_bin: PgBin, vanilla_pg):
+def test_logical_replication(neon_simple_env: NeonEnv, pg_bin: PgBin, vanilla_pg: VanillaPostgres):
     env = neon_simple_env
 
     endpoint = env.endpoints.create_start("main")
@@ -48,24 +51,26 @@ def test_logical_replication(neon_simple_env: NeonEnv, pg_bin: PgBin, vanilla_pg
     logical_replication_sync(vanilla_pg, endpoint)
     log.info(f"Sync with master took {time.time() - start} seconds")
 
-    sum_master = endpoint.safe_psql("select sum(abalance) from pgbench_accounts")[0][0]
-    sum_replica = vanilla_pg.safe_psql("select sum(abalance) from pgbench_accounts")[0][0]
+    sum_master = cast("int", endpoint.safe_psql("select sum(abalance) from pgbench_accounts")[0][0])
+    sum_replica = cast(
+        "int", vanilla_pg.safe_psql("select sum(abalance) from pgbench_accounts")[0][0]
+    )
     assert sum_master == sum_replica
 
 
-def check_pgbench_still_running(pgbench, label=""):
+def check_pgbench_still_running(pgbench: Popen[AnyStr], label: str = ""):
     rc = pgbench.poll()
     if rc is not None:
         raise RuntimeError(f"{label} pgbench terminated early with return code {rc}")
 
 
-def measure_logical_replication_lag(sub_cur, pub_cur, timeout_sec=600):
+def measure_logical_replication_lag(sub_cur: cursor, pub_cur: cursor, timeout_sec: float = 600):
     start = time.time()
     pub_cur.execute("SELECT pg_current_wal_flush_lsn()")
-    pub_lsn = Lsn(pub_cur.fetchall()[0][0])
+    pub_lsn = Lsn(cast("str", pub_cur.fetchall()[0][0]))
     while (time.time() - start) < timeout_sec:
         sub_cur.execute("SELECT latest_end_lsn FROM pg_catalog.pg_stat_subscription")
-        res = sub_cur.fetchall()[0][0]
+        res = cast("str", sub_cur.fetchall()[0][0])
         if res:
             log.info(f"subscriber_lsn={res}")
             sub_lsn = Lsn(res)
@@ -144,11 +149,16 @@ def test_subscriber_lag(
                 check_pgbench_still_running(pub_workload, "pub")
                 check_pgbench_still_running(sub_workload, "sub")
 
-                with psycopg2.connect(pub_connstr) as pub_conn, psycopg2.connect(
-                    sub_connstr
-                ) as sub_conn:
-                    with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
-                        lag = measure_logical_replication_lag(sub_cur, pub_cur)
+                pub_conn = psycopg2.connect(pub_connstr)
+                sub_conn = psycopg2.connect(sub_connstr)
+                pub_conn.autocommit = True
+                sub_conn.autocommit = True
+
+                with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
+                    lag = measure_logical_replication_lag(sub_cur, pub_cur)
+
+                pub_conn.close()
+                sub_conn.close()
 
                 log.info(f"Replica lagged behind master by {lag} seconds")
                 zenbenchmark.record("replica_lag", lag, "s", MetricReport.LOWER_IS_BETTER)
@@ -200,6 +210,7 @@ def test_publisher_restart(
     sub_conn = psycopg2.connect(sub_connstr)
     pub_conn.autocommit = True
     sub_conn.autocommit = True
+
     with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
         pub_cur.execute("SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'pub1'")
         pub_exists = len(pub_cur.fetchall()) != 0
@@ -216,6 +227,7 @@ def test_publisher_restart(
             sub_cur.execute(f"create subscription sub1 connection '{pub_connstr}' publication pub1")
 
         initial_sync_lag = measure_logical_replication_lag(sub_cur, pub_cur)
+
     pub_conn.close()
     sub_conn.close()
 
@@ -242,11 +254,17 @@ def test_publisher_restart(
                     ["pgbench", "-c10", pgbench_duration, "-Mprepared"],
                     env=pub_env,
                 )
-                with psycopg2.connect(pub_connstr) as pub_conn, psycopg2.connect(
-                    sub_connstr
-                ) as sub_conn:
-                    with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
-                        lag = measure_logical_replication_lag(sub_cur, pub_cur)
+
+                pub_conn = psycopg2.connect(pub_connstr)
+                sub_conn = psycopg2.connect(sub_connstr)
+                pub_conn.autocommit = True
+                sub_conn.autocommit = True
+
+                with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
+                    lag = measure_logical_replication_lag(sub_cur, pub_cur)
+
+                pub_conn.close()
+                sub_conn.close()
 
                 log.info(f"Replica lagged behind master by {lag} seconds")
                 zenbenchmark.record("replica_lag", lag, "s", MetricReport.LOWER_IS_BETTER)
@@ -281,58 +299,56 @@ def test_snap_files(
     env = benchmark_project_pub.pgbench_env
     connstr = benchmark_project_pub.connstr
 
-    with psycopg2.connect(connstr) as conn:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute("SELECT rolsuper FROM pg_roles WHERE rolname = 'neondb_owner'")
-            is_super = cur.fetchall()[0][0]
-            assert is_super, "This benchmark won't work if we don't have superuser"
+    conn = psycopg2.connect(connstr)
+    conn.autocommit = True
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT rolsuper FROM pg_roles WHERE rolname = 'neondb_owner'")
+        is_super = cast("bool", cur.fetchall()[0][0])
+        assert is_super, "This benchmark won't work if we don't have superuser"
+
+    conn.close()
 
     pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=env)
 
     conn = psycopg2.connect(connstr)
     conn.autocommit = True
-    cur = conn.cursor()
-    cur.execute("ALTER SYSTEM SET neon.logical_replication_max_snap_files = -1")
 
-    with psycopg2.connect(connstr) as conn:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute("SELECT pg_reload_conf()")
-
-    with psycopg2.connect(connstr) as conn:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                DO $$
-                    BEGIN
-                    IF EXISTS (
-                        SELECT 1
-                        FROM pg_replication_slots
-                        WHERE slot_name = 'slotter'
-                    ) THEN
-                        PERFORM pg_drop_replication_slot('slotter');
-                    END IF;
-                END $$;
+    with conn.cursor() as cur:
+        cur.execute(
             """
-            )
-            cur.execute("SELECT pg_create_logical_replication_slot('slotter', 'test_decoding')")
+            DO $$
+                BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM pg_replication_slots
+                    WHERE slot_name = 'slotter'
+                ) THEN
+                    PERFORM pg_drop_replication_slot('slotter');
+                END IF;
+            END $$;
+        """
+        )
+        cur.execute("SELECT pg_create_logical_replication_slot('slotter', 'test_decoding')")
+
+    conn.close()
 
     workload = pg_bin.run_nonblocking(["pgbench", "-c10", pgbench_duration, "-Mprepared"], env=env)
     try:
         start = time.time()
         prev_measurement = time.time()
         while time.time() - start < test_duration_min * 60:
-            with psycopg2.connect(connstr) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT count(*) FROM (SELECT pg_log_standby_snapshot() FROM generate_series(1, 10000) g) s"
-                    )
-                    check_pgbench_still_running(workload)
-                    cur.execute(
-                        "SELECT pg_replication_slot_advance('slotter', pg_current_wal_lsn())"
-                    )
+            conn = psycopg2.connect(connstr)
+            conn.autocommit = True
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM (SELECT pg_log_standby_snapshot() FROM generate_series(1, 10000) g) s"
+                )
+                check_pgbench_still_running(workload)
+                cur.execute("SELECT pg_replication_slot_advance('slotter', pg_current_wal_lsn())")
+
+            conn.close()
 
             # Measure storage
             if time.time() - prev_measurement > test_interval_min * 60:
