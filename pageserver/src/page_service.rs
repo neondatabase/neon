@@ -660,6 +660,7 @@ impl PageServerHandler {
                     rel,
                     blkno,
                 }) => {
+                    // shard_id is filled in by the handler
                     let span = tracing::info_span!(
                         "handle_get_page_at_lsn_request_batched",
                         %tenant_id, %timeline_id, shard_id = tracing::field::Empty, req_lsn = %request_lsn,
@@ -889,7 +890,6 @@ impl PageServerHandler {
                         pages,
                     } => {
                         fail::fail_point!("ps::handle-pagerequest-message::getpage");
-                        // shard_id is filled in by the handler
                         (
                             {
                                 let npages = pages.len();
