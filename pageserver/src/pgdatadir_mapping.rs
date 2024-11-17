@@ -292,7 +292,7 @@ impl Timeline {
         }
 
         let keyspace = {
-            // add_key reuqires monotonicity
+            // add_key requires monotonicity
             let mut acc = KeySpaceAccum::new();
             for key in keys_slots
                 .keys()
