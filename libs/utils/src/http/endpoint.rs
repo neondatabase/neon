@@ -331,25 +331,29 @@ pub async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<
     Ok(response)
 }
 
-/// Generates pprof CPU profiles.
-pub async fn pprof_profile_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+/// Generates CPU profiles.
+pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    enum Format {
+        Pprof,
+        Svg,
+    }
+
     // Parameters.
-    let protobuf = match get_query_param(&req, "format")?.as_deref() {
-        Some("flamegraph") => false,
-        Some("protobuf") => true,
+    let format = match get_query_param(&req, "format")?.as_deref() {
+        None => Format::Svg,
+        Some("pprof") => Format::Pprof,
+        Some("svg") => Format::Svg,
         Some(format) => return Err(ApiError::BadRequest(anyhow!("invalid format {format}"))),
-        None => false,
     };
     let seconds = match parse_query_param(&req, "seconds")? {
-        Some(0) => return Err(ApiError::BadRequest(anyhow!("duration can't be 0"))),
-        Some(s @ 1..=30) => s,
-        Some(_) => return Err(ApiError::BadRequest(anyhow!("max duration is 30 seconds"))),
         None => 5,
+        Some(seconds @ 1..=30) => seconds,
+        Some(_) => return Err(ApiError::BadRequest(anyhow!("duration must be 1-30 secs"))),
     };
     let frequency = match parse_query_param(&req, "frequency")? {
+        None => 100,
         Some(0..100) => return Err(ApiError::BadRequest(anyhow!("frequency must be >=100"))),
         Some(frequency) => frequency,
-        None => 100,
     };
 
     // Only allow one profiler at a time.
@@ -372,29 +376,34 @@ pub async fn pprof_profile_handler(req: Request<Body>) -> Result<Response<Body>,
     .map_err(|pprof_err| ApiError::InternalServerError(pprof_err.into()))?;
 
     // Return the report in the requested format.
-    let mut body = Vec::new();
-    if protobuf {
-        report
-            .pprof()
-            .map_err(|err| ApiError::InternalServerError(err.into()))?
-            .write_to_vec(&mut body)
-            .map_err(|err| ApiError::InternalServerError(err.into()))?;
+    match format {
+        Format::Pprof => {
+            let mut body = Vec::new();
+            report
+                .pprof()
+                .map_err(|err| ApiError::InternalServerError(err.into()))?
+                .write_to_vec(&mut body)
+                .map_err(|err| ApiError::InternalServerError(err.into()))?;
 
-        Response::builder()
-            .status(200)
-            .header(CONTENT_TYPE, "application/octet-stream")
-            .header(CONTENT_DISPOSITION, "attachment; filename=\"profile\"")
-            .body(Body::from(body))
-            .map_err(|err| ApiError::InternalServerError(err.into()))
-    } else {
-        report
-            .flamegraph(&mut body)
-            .map_err(|err| ApiError::InternalServerError(err.into()))?;
-        Response::builder()
-            .status(200)
-            .header(CONTENT_TYPE, "image/svg+xml")
-            .body(Body::from(body))
-            .map_err(|err| ApiError::InternalServerError(err.into()))
+            Response::builder()
+                .status(200)
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .header(CONTENT_DISPOSITION, "attachment; filename=\"profile.pb\"")
+                .body(Body::from(body))
+                .map_err(|err| ApiError::InternalServerError(err.into()))
+        }
+
+        Format::Svg => {
+            let mut body = Vec::new();
+            report
+                .flamegraph(&mut body)
+                .map_err(|err| ApiError::InternalServerError(err.into()))?;
+            Response::builder()
+                .status(200)
+                .header(CONTENT_TYPE, "image/svg+xml")
+                .body(Body::from(body))
+                .map_err(|err| ApiError::InternalServerError(err.into()))
+        }
     }
 }
 

@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info_span, Instrument};
 use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::{
-    pprof_profile_handler, prometheus_metrics_handler, request_span, ChannelWriter,
+    profile_cpu_handler, prometheus_metrics_handler, request_span, ChannelWriter,
 };
 use utils::http::request::parse_query_param;
 
@@ -600,7 +600,7 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .data(Arc::new(conf))
         .data(auth)
         .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
-        .get("/pprof/profile", |r| request_span(r, pprof_profile_handler))
+        .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
         .get("/v1/status", |r| request_span(r, status_handler))
         .put("/v1/failpoints", |r| {
             request_span(r, move |r| async {
