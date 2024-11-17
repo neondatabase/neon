@@ -337,6 +337,7 @@ impl Timeline {
             }
             Err(err) => {
                 // this cannot really happen because get_vectored only errors globally on invalid LSN or too large batch size
+                // (We enforce the max batch size outside of this function, in the code that constructs the batch request.)
                 for slot in keys_slots.values().flatten() {
                     // this whole `match` is a lot like `From<GetVectoredError> for PageReconstructError`
                     // but without taking ownership of the GetVectoredError
