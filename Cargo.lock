@@ -7538,6 +7538,7 @@ dependencies = [
  "libc",
  "log",
  "memchr",
+ "nix 0.26.4",
  "nom",
  "num-bigint",
  "num-integer",
