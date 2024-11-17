@@ -1283,7 +1283,6 @@ impl PageServerHandler {
             .get_rel_page_at_lsn_batched(pages, effective_lsn, ctx)
             .await;
 
-        // TODO: This copies the buffers
         Vec::from_iter(pages.into_iter().map(|page| {
             page.map(|page| {
                 PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse { page })
