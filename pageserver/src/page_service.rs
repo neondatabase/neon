@@ -532,17 +532,32 @@ impl From<WaitLsnError> for QueryError {
 }
 
 enum BatchedFeMessage {
-    Exists(models::PagestreamExistsRequest),
-    Nblocks(models::PagestreamNblocksRequest),
+    Exists {
+        span: Span,
+        req: models::PagestreamExistsRequest,
+    },
+    Nblocks {
+        span: Span,
+        req: models::PagestreamNblocksRequest,
+    },
     GetPage {
         span: Span,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         effective_request_lsn: Lsn,
         pages: smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
     },
-    DbSize(models::PagestreamDbSizeRequest),
-    GetSlruSegment(models::PagestreamGetSlruSegmentRequest),
-    RespondError(Span, PageStreamError),
+    DbSize {
+        span: Span,
+        req: models::PagestreamDbSizeRequest,
+    },
+    GetSlruSegment {
+        span: Span,
+        req: models::PagestreamGetSlruSegmentRequest,
+    },
+    RespondError {
+        span: Span,
+        error: PageStreamError,
+    },
 }
 
 enum BatchOrEof {
@@ -650,10 +665,22 @@ impl PageServerHandler {
             let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
             let this_msg = match neon_fe_msg {
-                PagestreamFeMessage::Exists(msg) => BatchedFeMessage::Exists(msg),
-                PagestreamFeMessage::Nblocks(msg) => BatchedFeMessage::Nblocks(msg),
-                PagestreamFeMessage::DbSize(msg) => BatchedFeMessage::DbSize(msg),
-                PagestreamFeMessage::GetSlruSegment(msg) => BatchedFeMessage::GetSlruSegment(msg),
+                PagestreamFeMessage::Exists(req) => BatchedFeMessage::Exists {
+                    span: tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn),
+                    req,
+                },
+                PagestreamFeMessage::Nblocks(req) => BatchedFeMessage::Nblocks {
+                    span: tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn),
+                    req,
+                },
+                PagestreamFeMessage::DbSize(req) => BatchedFeMessage::DbSize {
+                    span: tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn),
+                    req,
+                },
+                PagestreamFeMessage::GetSlruSegment(req) => BatchedFeMessage::GetSlruSegment {
+                    span: tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn),
+                    req,
+                },
                 PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
                     request_lsn,
                     not_modified_since,
@@ -669,7 +696,10 @@ impl PageServerHandler {
 
                     macro_rules! current_batch_and_error {
                         ($error:expr) => {{
-                            let error = BatchedFeMessage::RespondError(span, $error);
+                            let error = BatchedFeMessage::RespondError {
+                                span,
+                                error: $error,
+                            };
                             let batch_and_error = match batch {
                                 Some(b) => smallvec::smallvec![b, error],
                                 None => smallvec::smallvec![error],
@@ -854,9 +884,8 @@ impl PageServerHandler {
                     Vec<Result<PagestreamBeMessage, PageStreamError>>,
                     _,
                 ) = match batch {
-                    BatchedFeMessage::Exists(req) => {
+                    BatchedFeMessage::Exists { span, req } => {
                         fail::fail_point!("ps::handle-pagerequest-message::exists");
-                        let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
                         (
                             vec![
                                 self.handle_get_rel_exists_request(
@@ -871,9 +900,8 @@ impl PageServerHandler {
                             span,
                         )
                     }
-                    BatchedFeMessage::Nblocks(req) => {
+                    BatchedFeMessage::Nblocks { span, req } => {
                         fail::fail_point!("ps::handle-pagerequest-message::nblocks");
-                        let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn);
                         (
                             vec![
                                 self.handle_get_nblocks_request(tenant_id, timeline_id, &req, &ctx)
@@ -908,9 +936,8 @@ impl PageServerHandler {
                             span,
                         )
                     }
-                    BatchedFeMessage::DbSize(req) => {
+                    BatchedFeMessage::DbSize { span, req } => {
                         fail::fail_point!("ps::handle-pagerequest-message::dbsize");
-                        let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn);
                         (
                             vec![
                                 self.handle_db_size_request(tenant_id, timeline_id, &req, &ctx)
@@ -920,9 +947,8 @@ impl PageServerHandler {
                             span,
                         )
                     }
-                    BatchedFeMessage::GetSlruSegment(req) => {
+                    BatchedFeMessage::GetSlruSegment { span, req } => {
                         fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
-                        let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn);
                         (
                             vec![
                                 self.handle_get_slru_segment_request(
@@ -937,10 +963,10 @@ impl PageServerHandler {
                             span,
                         )
                     }
-                    BatchedFeMessage::RespondError(span, e) => {
+                    BatchedFeMessage::RespondError { span, error } => {
                         // We've already decided to respond with an error, so we don't need to
                         // call the handler.
-                        (vec![Err(e)], span)
+                        (vec![Err(error)], span)
                     }
                 };
 
