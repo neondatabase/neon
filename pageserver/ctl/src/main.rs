@@ -209,6 +209,7 @@ async fn print_layerfile(path: &Utf8Path) -> anyhow::Result<()> {
         10,
         virtual_file::api::IoEngineKind::StdFs,
         IoMode::preferred(),
+        virtual_file::SyncMode::Sync,
     );
     page_cache::init(100);
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
