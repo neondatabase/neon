@@ -41,6 +41,11 @@ pub enum NeonWalRecord {
         file_path: String,
         content: Option<Bytes>,
     },
+    // Truncate visibility map page
+    TruncateVisibilityMap {
+        trunc_byte: usize,
+        trunc_offs: usize,
+    },
 
     /// A testing record for unit testing purposes. It supports append data to an existing image, or clear it.
     #[cfg(feature = "testing")]
