@@ -227,6 +227,7 @@ def test_sharding_compaction(
     workload.validate()
 
     if gc_compaction:
+        # trigger gc compaction to get more coverage for that, piggyback on the existing workload
         for shard in env.storage_controller.locate(tenant_id):
             pageserver = env.get_pageserver(shard["node_id"])
             tenant_shard_id = shard["shard_id"]
