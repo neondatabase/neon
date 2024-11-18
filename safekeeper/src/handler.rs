@@ -2,6 +2,7 @@
 //! protocol commands.
 
 use anyhow::Context;
+use pageserver_api::models::ShardParameters;
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
 use std::future::Future;
 use std::str::{self, FromStr};
@@ -168,25 +169,32 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                     }
                 }
 
-                if self.protocol == Some(PostgresClientProtocol::Interpreted) {
-                    match (shard_count, shard_number, shard_stripe_size) {
-                        (Some(0), _, _) => {
-                            self.shard = Some(ShardIdentity::unsharded());
-                        }
-                        (Some(count), Some(number), Some(stripe_size)) => {
-                            self.shard = Some(
-                                ShardIdentity::new(
-                                    ShardNumber(number),
-                                    ShardCount(count),
-                                    ShardStripeSize(stripe_size),
-                                )
-                                .with_context(|| "Failed to create shard identity")?,
-                            );
-                        }
-                        _ => {
+                match self.protocol() {
+                    PostgresClientProtocol::Vanilla => {
+                        if shard_count.is_some()
+                            || shard_number.is_some()
+                            || shard_stripe_size.is_some()
+                        {
                             return Err(QueryError::Other(anyhow::anyhow!(
-                                "Shard params were not specified"
+                                "Shard params specified for vanilla protocol"
                             )));
+                        }
+                    }
+                    PostgresClientProtocol::Interpreted => {
+                        match (shard_count, shard_number, shard_stripe_size) {
+                            (Some(count), Some(number), Some(stripe_size)) => {
+                                let params = ShardParameters {
+                                    count: ShardCount(count),
+                                    stripe_size: ShardStripeSize(stripe_size),
+                                };
+                                self.shard =
+                                    Some(ShardIdentity::from_params(ShardNumber(number), &params));
+                            }
+                            _ => {
+                                return Err(QueryError::Other(anyhow::anyhow!(
+                                    "Shard params were not specified"
+                                )));
+                            }
                         }
                     }
                 }
