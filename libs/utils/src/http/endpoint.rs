@@ -450,6 +450,7 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
     // Take and return the profile.
     match format {
         Format::Jemalloc => {
+            // NB: file is an open handle to a tempfile that's already deleted.
             let file = tokio::task::spawn_blocking(move || prof_ctl.dump())
                 .await
                 .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
@@ -479,8 +480,9 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
         Format::Svg => {
             let tempfile = tokio::task::spawn_blocking(move || {
                 let mut file = prof_ctl.dump()?;
-                // Write the profile to a tempfile we can get the path to. If dump() returned the
-                // NamedTempFile instead of a File then this wouldn't be necessary.
+                // dump() returns a file that's already been deleted from the file system, but with
+                // an open file handle to read from. jeprof_svg() needs a path to a file in the file
+                // system. We therefore copy the file to another temp file we can get the path to.
                 let mut tempfile = NamedUtf8TempFile::new()?;
                 std::io::copy(&mut file, &mut tempfile)?;
                 Ok(tempfile)
