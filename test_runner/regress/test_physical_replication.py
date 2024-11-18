@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import random
-import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -158,20 +157,14 @@ def test_physical_replication_config_mismatch_max_prepared(neon_simple_env: Neon
         assert secondary.log_contains("maximum number of prepared transactions reached")
 
 
-def do_txn(ep, i):
+def connect(ep):
     max_reconnect_attempts = 10
     for _ in range(max_reconnect_attempts):
         try:
-            con = ep.connect()
-            break
+            return ep.connect()
         except Exception as e:
             log.info(f"Failed to connect with primary: {e}")
             time.sleep(1)
-    cur = con.cursor()
-    cur.execute("begin")
-    cur.execute(f"insert into t values ({i})")
-    time.sleep(10)
-    cur.execute("commit")
 
 
 def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_env: NeonEnv):
@@ -205,28 +198,24 @@ def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_en
     p_cur = p_con.cursor()
     p_cur.execute("CREATE TABLE t(x integer)")
 
-    threads = []
-    n_threads = 990
-    for i in range(n_threads):
-        t = threading.Thread(
-            target=do_txn,
-            args=(
-                primary,
-                i,
-            ),
-        )
-        threads.append(t)
-        t.start()
+    n_connections = 990
+    cursors = []
+    for i in range(n_connections):
+        p_con = connect(primary)
+        p_cur = p_con.cursor()
+        p_cur.execute("begin")
+        p_cur.execute(f"insert into t values({i})")
+        cursors.append(p_cur)
 
-    for t in threads:
-        t.join()
+    for cur in cursors:
+        cur.execute("commit")
 
     time.sleep(5)
     try:
         s_con = secondary.connect()
         s_cur = s_con.cursor()
         s_cur.execute("select count(*) from t")
-        assert s_cur.fetchall()[0][0] == n_threads
+        assert s_cur.fetchall()[0][0] == n_connections
         secondary.stop()
     except Exception as e:
         log.info(f"Replica crashed with {e}")
