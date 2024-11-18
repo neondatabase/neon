@@ -117,7 +117,7 @@ def test_physical_replication_config_mismatch_max_connections(neon_simple_env: N
 def test_physical_replication_config_mismatch_max_prepared(neon_simple_env: NeonEnv):
     """
     Test for primary and replica with different configuration settings (max_prepared_transactions).
-    If number of transaction at primary exceeds it's limit at replica then walreceiver is terminated.
+    If number of transactions at primary exceeds its limit at replica then WAL replay is terminated.
     """
     env = neon_simple_env
     primary = env.endpoints.create_start(
