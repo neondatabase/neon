@@ -239,6 +239,10 @@ impl SafekeeperPostgresHandler {
         pgb: &mut PostgresBackend<IO>,
         tli: &mut Option<WalResidentTimeline>,
     ) -> Result<(), CopyStreamHandlerEnd> {
+        // The `tli` parameter is only used for passing _out_ a timeline, one should
+        // not have been passed in.
+        assert!(tli.is_none());
+
         // Notify the libpq client that it's allowed to send `CopyData` messages
         pgb.write_message(&BeMessage::CopyBothResponse).await?;
 
@@ -256,10 +260,6 @@ impl SafekeeperPostgresHandler {
         // sends, so this avoids deadlocks.
         let mut pgb_reader = pgb.split().context("START_WAL_PUSH split")?;
         let peer_addr = *pgb.get_peer_addr();
-
-        // The `tli` parameter is only used for passing _out_ a timeline, one should
-        // not have been passed in.
-        assert!(tli.is_none());
 
         let mut network_reader = NetworkReader {
             ttid: self.ttid,

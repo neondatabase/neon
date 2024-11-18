@@ -48,7 +48,7 @@ pub struct WalBackupTaskHandle {
 impl WalBackupTaskHandle {
     pub(crate) async fn join(self) {
         if let Err(e) = self.handle.await {
-            warn!("WAL backup task panicked: {}", e);
+            error!("WAL backup task panicked: {}", e);
         }
     }
 }
