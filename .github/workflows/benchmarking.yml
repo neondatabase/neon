@@ -546,8 +546,8 @@ jobs:
 
         cd /home/nonroot
         wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-17/libpq5_17.0-1.pgdg110+1_${arch}.deb"
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.4-1.pgdg110+2_${arch}.deb"
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.4-1.pgdg110+2_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.5-1.pgdg110+1_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.5-1.pgdg110+1_${arch}.deb"
         dpkg -x libpq5_17.0-1.pgdg110+1_${arch}.deb pg
         dpkg -x postgresql-16_16.4-1.pgdg110+2_${arch}.deb pg
         dpkg -x postgresql-client-16_16.4-1.pgdg110+2_${arch}.deb pg
