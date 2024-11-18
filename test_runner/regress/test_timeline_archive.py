@@ -23,7 +23,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import S3Storage, s3_storage
-from fixtures.utils import run_only_on_default_postgres, wait_until
+from fixtures.utils import run_only_on_default_postgres, skip_in_debug_build, wait_until
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )
@@ -390,6 +390,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
 
 
 @run_only_on_default_postgres("this test isn't sensitive to the contents of timelines")
+@skip_in_debug_build("times out in debug builds")
 def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
     """
     A general consistency check on archival/offload timeline state, and its intersection
@@ -416,7 +417,7 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
         [
             ".*error sending request.*",
             # FIXME: the pageserver should not return 500s on cancellation (https://github.com/neondatabase/neon/issues/97680)
-            ".*InternalServerError(Error deleting timeline .* on .* on .*: pageserver API: error: Cancelled",
+            ".*InternalServerError\\(Error deleting timeline .* on .* on .*: pageserver API: error: Cancelled",
         ]
     )
 
