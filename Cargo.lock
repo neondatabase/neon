@@ -4009,7 +4009,7 @@ dependencies = [
 [[package]]
 name = "postgres"
 version = "0.19.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=vlad/interpreted-wal-record-replication-support#e6c92ba268ee7d75ed9ee53c10f9a148747f7e1c"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=vlad/interpreted-wal-record-replication-support#e619cf8c2c572e71cbc97f1c7f4cab8219f07d55"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -4022,7 +4022,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=vlad/interpreted-wal-record-replication-support#e6c92ba268ee7d75ed9ee53c10f9a148747f7e1c"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=vlad/interpreted-wal-record-replication-support#e619cf8c2c572e71cbc97f1c7f4cab8219f07d55"
 dependencies = [
  "base64 0.20.0",
  "byteorder",
@@ -4041,7 +4041,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=vlad/interpreted-wal-record-replication-support#e6c92ba268ee7d75ed9ee53c10f9a148747f7e1c"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=vlad/interpreted-wal-record-replication-support#e619cf8c2c572e71cbc97f1c7f4cab8219f07d55"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -6229,7 +6229,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.7"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=vlad/interpreted-wal-record-replication-support#e6c92ba268ee7d75ed9ee53c10f9a148747f7e1c"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=vlad/interpreted-wal-record-replication-support#e619cf8c2c572e71cbc97f1c7f4cab8219f07d55"
 dependencies = [
  "async-trait",
  "byteorder",
