@@ -297,7 +297,7 @@ pub(super) async fn handle_walreceiver_connection(
                     connection_status.latest_wal_update = now;
                 }
 
-                connection_status.commit_lsn = Some(Lsn::from(raw.wal_end()));
+                connection_status.commit_lsn = Some(Lsn::from(raw.commit_lsn()));
                 connection_status.streaming_lsn = Some(Lsn::from(raw.streaming_lsn()));
             }
             &_ => {}

@@ -680,7 +680,7 @@ pub struct InterpretedWalRecordsBody<'a> {
     /// End of raw WAL in [`Self::data`]
     pub streaming_lsn: u64,
     /// Current end of WAL on the server
-    pub safekeeper_wal_end_lsn: u64,
+    pub commit_lsn: u64,
     /// Start LSN of the next record in PG WAL.
     /// Is 0 if the portion of PG WAL did not contain any records.
     pub next_record_lsn: u64,
@@ -1020,7 +1020,7 @@ impl BeMessage<'_> {
                     buf.put_u8(b'0'); // matches INTERPRETED_WAL_RECORD_TAG in postgres-protocol
                                       // dependency
                     buf.put_u64(rec.streaming_lsn);
-                    buf.put_u64(rec.safekeeper_wal_end_lsn);
+                    buf.put_u64(rec.commit_lsn);
                     buf.put_u64(rec.next_record_lsn);
                     buf.put_slice(rec.data);
                 });

@@ -49,7 +49,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
             tokio::select! {
                 // Get some WAL from the stream and then: decode, interpret and send it
                 wal = stream.next() => {
-                    let WalBytes { wal, wal_start_lsn, wal_end_lsn, available_wal_end_lsn } = match wal {
+                    let WalBytes { wal, wal_start_lsn, wal_end_lsn, commit_lsn } = match wal {
                         Some(some) => some?,
                         None => { break; }
                     };
@@ -92,7 +92,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
                     self.pgb
                         .write_message(&BeMessage::InterpretedWalRecords(InterpretedWalRecordsBody {
                             streaming_lsn: wal_end_lsn.0,
-                            safekeeper_wal_end_lsn: available_wal_end_lsn.0,
+                            commit_lsn: commit_lsn.0,
                             next_record_lsn: max_next_record_lsn.unwrap_or(Lsn::INVALID).0,
                             data: buf.as_slice(),
                         })).await?;
