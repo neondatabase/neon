@@ -4,6 +4,7 @@ use anyhow::Context;
 use futures::StreamExt;
 use pageserver_api::shard::ShardIdentity;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend};
+use postgres_ffi::MAX_SEND_SIZE;
 use postgres_ffi::{get_current_timestamp, waldecoder::WalStreamDecoder};
 use pq_proto::{BeMessage, InterpretedWalRecordsBody, WalSndKeepAlive};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -38,7 +39,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
         let mut wal_decoder =
             WalStreamDecoder::new(self.wal_stream_builder.start_pos(), self.pg_version);
 
-        let stream = self.wal_stream_builder.build().await?;
+        let stream = self.wal_stream_builder.build(MAX_SEND_SIZE).await?;
         let mut stream = std::pin::pin!(stream);
 
         let mut keepalive_ticker = tokio::time::interval(Duration::from_secs(1));
