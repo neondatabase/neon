@@ -51,8 +51,33 @@ def test_physical_replication(neon_simple_env: NeonEnv):
 def test_physical_replication_config_mismatch_max_connections(neon_simple_env: NeonEnv):
     """
     Test for primary and replica with different configuration settings (max_connections).
-    It should normally work because such small difference in maximal number of backends can not cause
-    problems during recovery.
+    PostgreSQL enforces that settings that affect how many transactions can be open at the same time
+    have values equal to or higher in a hot standby replica than in the primary. If they don't, the replica refuses
+    to start up. If the settings are changed in the primary, it emits a WAL record with the new settings, and
+    when the replica sees that record it pauses the replay.
+
+    PostgreSQL enforces this to ensure that the replica can hold all the XIDs in the so-called
+    "known-assigned XIDs" array, which is a fixed size array that needs to be allocated
+    upfront and server startup. That's pretty pessimistic, though; usually you can get
+    away with smaller settings, because we allocate space for 64 subtransactions per
+    transaction too. If you get unlucky and you run out of space, WAL redo dies with
+    "ERROR: too many KnownAssignedXids". It's better to take the chances than refuse
+    to start up, especially in Neon: if the WAL redo dies, the server is restarted, which is
+    no worse than refusing to start up in the first place. Furthermore, the control plane
+    tries to ensure that on restart, the settings are set high enough, so most likely it will
+    work after restart. Because of that, we have patched Postgres to disable to checks when
+    the `recovery_pause_on_misconfig` setting is set to `false` (which is the default on neon).
+
+    This test tests all those cases of running out of space in known-assigned XIDs array that
+    we can hit with `recovery_pause_on_misconfig=false`, which are unreachable in unpatched
+    Postgres.
+    
+    There's a similar check for `max_locks_per_transactions` too, which is related to running out
+    of space in the lock manager rather than known-assigned XIDs. Similar story with that, although
+    running out of space in the lock manager is possible in unmodified Postgres too. Enforcing the
+    check for `max_locks_per_transactions` ensures  that you don't run out of space in the lock manager
+    when there are no read-only queries holding locks in the replica, but you can still run out if you have
+    those.
     """
     env = neon_simple_env
     with env.endpoints.create_start(
