@@ -2021,6 +2021,14 @@ impl Timeline {
             if cancel.is_cancelled() {
                 return Err(anyhow!("cancelled")); // TODO: refactor to CompactionError and pass cancel error
             }
+            if self.shard_identity.is_key_disposable(&key) {
+                // If this shard does not need to store this key, simply skip it.
+                //
+                // This is not handled in the filter iterator because shard is determined by hash.
+                // Therefore, it does not give us any performance benefit to do things like skip
+                // a whole layer file as handling key spaces (ranges).
+                continue;
+            }
             if !job_desc.compaction_key_range.contains(&key) {
                 if !desc.is_delta {
                     continue;
