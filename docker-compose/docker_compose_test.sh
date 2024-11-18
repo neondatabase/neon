@@ -54,8 +54,7 @@ for pg_version in 14 15 16 17; do
         fi
     done
 
-    if [ $pg_version -ge 16 ]
-    then
+    if [ $pg_version -ge 16 ]; then
         echo Enabling trust connection
         docker exec $COMPUTE_CONTAINER_NAME bash -c "sed -i '\$d' /var/db/postgres/compute/pg_hba.conf && echo -e 'host\t all\t all\t all\t trust' >> /var/db/postgres/compute/pg_hba.conf && psql $PSQL_OPTION -c 'select pg_reload_conf()' "
         echo Adding postgres role
@@ -68,7 +67,9 @@ for pg_version in 14 15 16 17; do
         # The test assumes that it is running on the same host with the postgres engine.
         # In our case it's not true, that's why we are copying files to the compute node
         TMPDIR=$(mktemp -d)
+        # Add support for pg_anon for pg_v16
         if [ $pg_version -ne 17 ]; then
+          docker exec $COMPUTE_CONTAINER_NAME bash -c "psql $PSQL_OPTION -c \"alter system set session_preload_libraries = 'anon'\""
           docker cp $TEST_CONTAINER_NAME:/ext-src/pg_anon-src/data $TMPDIR/data
           echo -e '1\t too \t many \t tabs' > $TMPDIR/data/bad.csv
           docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/tmp/tmp_anon_alternate_data

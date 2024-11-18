@@ -1407,10 +1407,7 @@ RUN cd /ext-src/ && for f in *.tar.gz; \
     || exit 1; rm -f $f; done
 RUN cd /ext-src/rum-src && patch -p1 <../rum.patch
 RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
-RUN case "${PG_VERSION}" in "v17") \
-    echo Skip for PG17 for now ;; \
-    "v16") cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan_v16.patch ;;\
-    esac
+RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan_${PG_VERSION}.patch
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN case "${PG_VERSION}" in "v17") \
     echo "postgresql_anonymizer does not yet support PG17" && exit 0;; \
