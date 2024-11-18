@@ -324,6 +324,7 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
                     .into_boxed_str(),
             ),
             a @ AlreadyInProgress(_) => ApiError::Conflict(a.to_string()),
+            Cancelled => ApiError::ResourceUnavailable("shutting down".into()),
             Other(e) => ApiError::InternalServerError(e),
         }
     }
