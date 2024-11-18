@@ -599,10 +599,6 @@ CreateFakeSharedMemoryAndSemaphores(void)
 		ShmemBackendArrayAllocation();
 #endif
 
-	/* Initialize dynamic shared memory facilities. */
-	if (!IsUnderPostmaster)
-		dsm_postmaster_startup(shim);
-
 	/*
 	 * Now give loadable modules a chance to set up their shmem allocations
 	 */
