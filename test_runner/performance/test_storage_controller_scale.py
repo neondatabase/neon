@@ -16,7 +16,7 @@ from fixtures.neon_fixtures import (
     PageserverAvailability,
     PageserverSchedulingPolicy,
 )
-from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pg_version import PgVersion
 
 
@@ -273,7 +273,17 @@ def test_storage_controller_many_tenants(
             archival_state = rng.choice(
                 [TimelineArchivalState.ARCHIVED, TimelineArchivalState.UNARCHIVED]
             )
-            virtual_ps_http.timeline_archival_config(tenant_id, timeline_id, archival_state)
+            try:
+                virtual_ps_http.timeline_archival_config(tenant_id, timeline_id, archival_state)
+            except PageserverApiException as e:
+                if e.status_code == 404:
+                    # FIXME: there is an edge case where timeline ops can encounter a 404 during
+                    # a very short time window between generating a new generation number and
+                    # attaching this tenant to its new pageserver.
+                    # See https://github.com/neondatabase/neon/issues/9471
+                    pass
+                else:
+                    raise
 
         # Generate a mixture of operations and dispatch them all concurrently
         futs = []

@@ -12,7 +12,7 @@ use crate::{
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
 use anyhow::Context;
-use pageserver_api::models::detach_ancestor::AncestorDetached;
+use pageserver_api::{models::detach_ancestor::AncestorDetached, shard::ShardIdentity};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -376,8 +376,14 @@ pub(super) async fn prepare(
         tasks.spawn(
             async move {
                 let _permit = limiter.acquire().await;
-                let owned =
-                    remote_copy(&adopted, &timeline, timeline.generation, &timeline.cancel).await?;
+                let owned = remote_copy(
+                    &adopted,
+                    &timeline,
+                    timeline.generation,
+                    timeline.shard_identity,
+                    &timeline.cancel,
+                )
+                .await?;
                 tracing::info!(layer=%owned, "remote copied");
                 Ok(owned)
             }
@@ -629,6 +635,7 @@ async fn remote_copy(
     adopted: &Layer,
     adoptee: &Arc<Timeline>,
     generation: Generation,
+    shard_identity: ShardIdentity,
     cancel: &CancellationToken,
 ) -> Result<Layer, Error> {
     // depending if Layer::keep_resident we could hardlink
@@ -636,6 +643,7 @@ async fn remote_copy(
     let mut metadata = adopted.metadata();
     debug_assert!(metadata.generation <= generation);
     metadata.generation = generation;
+    metadata.shard = shard_identity.shard_index();
 
     let owned = crate::tenant::storage_layer::Layer::for_evicted(
         adoptee.conf,

@@ -3,9 +3,10 @@
   metrics: [
     import 'sql_exporter/checkpoints_req.libsonnet',
     import 'sql_exporter/checkpoints_timed.libsonnet',
-    import 'sql_exporter/compute_backpressure_throttling_ms.libsonnet',
+    import 'sql_exporter/compute_backpressure_throttling_seconds.libsonnet',
     import 'sql_exporter/compute_current_lsn.libsonnet',
     import 'sql_exporter/compute_logical_snapshot_files.libsonnet',
+    import 'sql_exporter/compute_max_connections.libsonnet',
     import 'sql_exporter/compute_receive_lsn.libsonnet',
     import 'sql_exporter/compute_subscriptions_count.libsonnet',
     import 'sql_exporter/connection_counts.libsonnet',

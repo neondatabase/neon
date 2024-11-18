@@ -25,6 +25,7 @@ from fixtures.pageserver.common_types import (
     parse_delta_layer,
     parse_image_layer,
 )
+from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
 
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
+
 COMPONENT_BINARIES = {
     "storage_controller": ("storage_controller",),
     "storage_broker": ("storage_broker",),
@@ -521,7 +523,7 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str
     This is essentially:
 
     lines=$(comm -3 \
-        <(mkdir left && cd left && tar xf "$left" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        <(mkdir left  && cd left  && tar xf "$left"  && find . -type f -print0 | xargs sha256sum | sort -k2) \
         <(mkdir right && cd right && tar xf "$right" && find . -type f -print0 | xargs sha256sum | sort -k2) \
         | wc -l)
     [ "$lines" = "0" ]
@@ -663,3 +665,40 @@ def size_to_bytes(hr_size: str) -> int:
     else:
         amp = 8192
     return int(number) * amp
+
+
+def skip_on_postgres(version: PgVersion, reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is version,
+        reason=reason,
+    )
+
+
+def xfail_on_postgres(version: PgVersion, reason: str):
+    return pytest.mark.xfail(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is version,
+        reason=reason,
+    )
+
+
+def run_only_on_default_postgres(reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is not PgVersion.DEFAULT,
+        reason=reason,
+    )
+
+
+def skip_in_debug_build(reason: str):
+    return pytest.mark.skipif(
+        os.getenv("BUILD_TYPE", "debug") == "debug",
+        reason=reason,
+    )
+
+
+def skip_on_ci(reason: str):
+    # `CI` variable is always set to `true` on GitHub
+    # Ref: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/store-information-in-variables#default-environment-variables
+    return pytest.mark.skipif(
+        os.getenv("CI", "false") == "true",
+        reason=reason,
+    )

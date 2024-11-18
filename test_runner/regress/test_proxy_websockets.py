@@ -37,7 +37,7 @@ async def test_websockets(static_proxy: NeonProxy):
         startup_message.extend(b"\0")
         length = (4 + len(startup_message)).to_bytes(4, byteorder="big")
 
-        await websocket.send([length, startup_message])
+        await websocket.send([length, bytes(startup_message)])
 
         startup_response = await websocket.recv()
         assert isinstance(startup_response, bytes)

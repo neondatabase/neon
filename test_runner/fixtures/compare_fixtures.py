@@ -8,7 +8,7 @@ from contextlib import _GeneratorContextManager, contextmanager
 
 # Type-related stuff
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, final
 
 import pytest
 from _pytest.fixtures import FixtureRequest
@@ -70,12 +70,12 @@ class PgCompare(ABC):
 
     @contextmanager
     @abstractmethod
-    def record_pageserver_writes(self, out_name: str):
+    def record_pageserver_writes(self, out_name: str) -> Iterator[None]:
         pass
 
     @contextmanager
     @abstractmethod
-    def record_duration(self, out_name: str):
+    def record_duration(self, out_name: str) -> Iterator[None]:
         pass
 
     @contextmanager
@@ -105,6 +105,7 @@ class PgCompare(ABC):
         return results
 
 
+@final
 class NeonCompare(PgCompare):
     """PgCompare interface for the neon stack."""
 
@@ -206,6 +207,7 @@ class NeonCompare(PgCompare):
         return self.zenbenchmark.record_duration(out_name)
 
 
+@final
 class VanillaCompare(PgCompare):
     """PgCompare interface for vanilla postgres."""
 
@@ -271,6 +273,7 @@ class VanillaCompare(PgCompare):
         return self.zenbenchmark.record_duration(out_name)
 
 
+@final
 class RemoteCompare(PgCompare):
     """PgCompare interface for a remote postgres instance."""
 

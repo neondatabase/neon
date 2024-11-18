@@ -112,7 +112,7 @@ def compatibility_snapshot_dir() -> Iterator[Path]:
 
 
 @pytest.fixture(scope="session")
-def compatibility_neon_binpath() -> Optional[Iterator[Path]]:
+def compatibility_neon_binpath() -> Iterator[Optional[Path]]:
     if os.getenv("REMOTE_ENV"):
         return
     comp_binpath = None
@@ -133,7 +133,7 @@ def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
 
 
 @pytest.fixture(scope="session")
-def compatibility_pg_distrib_dir() -> Optional[Iterator[Path]]:
+def compatibility_pg_distrib_dir() -> Iterator[Optional[Path]]:
     compat_distrib_dir = None
     if env_compat_postgres_bin := os.environ.get("COMPATIBILITY_POSTGRES_DISTRIB_DIR"):
         compat_distrib_dir = Path(env_compat_postgres_bin).resolve()

@@ -562,6 +562,9 @@ impl WalAcceptor {
                     // Don't flush the WAL on every append, only periodically via flush_ticker.
                     // This batches multiple appends per fsync. If the channel is empty after
                     // sending the reply, we'll schedule an immediate flush.
+                    //
+                    // Note that a flush can still happen on segment bounds, which will result
+                    // in an AppendResponse.
                     if let ProposerAcceptorMessage::AppendRequest(append_request) = msg {
                         msg = ProposerAcceptorMessage::NoFlushAppendRequest(append_request);
                         dirty = true;

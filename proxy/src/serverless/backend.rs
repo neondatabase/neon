@@ -14,7 +14,7 @@ use tracing::{debug, info};
 use super::conn_pool::poll_client;
 use super::conn_pool_lib::{Client, ConnInfo, GlobalConnPool};
 use super::http_conn_pool::{self, poll_http2_client, Send};
-use super::local_conn_pool::{self, LocalClient, LocalConnPool, EXT_NAME, EXT_SCHEMA, EXT_VERSION};
+use super::local_conn_pool::{self, LocalConnPool, EXT_NAME, EXT_SCHEMA, EXT_VERSION};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
 use crate::auth::{self, check_peer_addr_is_in_list, AuthError};
@@ -24,9 +24,9 @@ use crate::compute_ctl::{
 };
 use crate::config::ProxyConfig;
 use crate::context::RequestMonitoring;
+use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::provider::ApiLockError;
 use crate::control_plane::CachedNodeInfo;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
@@ -205,7 +205,7 @@ impl PoolingBackend {
         conn_info: ConnInfo,
     ) -> Result<http_conn_pool::Client<Send>, HttpConnError> {
         info!("pool: looking for an existing connection");
-        if let Some(client) = self.http_conn_pool.get(ctx, &conn_info) {
+        if let Ok(Some(client)) = self.http_conn_pool.get(ctx, &conn_info) {
             return Ok(client);
         }
 
@@ -248,7 +248,7 @@ impl PoolingBackend {
         &self,
         ctx: &RequestMonitoring,
         conn_info: ConnInfo,
-    ) -> Result<LocalClient<tokio_postgres::Client>, HttpConnError> {
+    ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
         if let Some(client) = self.local_pool.get(ctx, &conn_info)? {
             return Ok(client);
         }

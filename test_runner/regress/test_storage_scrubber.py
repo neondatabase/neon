@@ -245,6 +245,7 @@ def test_scrubber_physical_gc_ancestors(
     workload.write_rows(100, upload=False)
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
+        assert ps is not None
         log.info(f"Waiting for shard {shard} on pageserver {ps.id}")
         ps.http_client().timeline_checkpoint(
             shard, timeline_id, compact=False, wait_until_uploaded=True
@@ -270,6 +271,7 @@ def test_scrubber_physical_gc_ancestors(
     workload.churn_rows(100)
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
+        assert ps is not None
         ps.http_client().timeline_compact(shard, timeline_id, force_image_layer_creation=True)
         ps.http_client().timeline_gc(shard, timeline_id, 0)
 
@@ -336,12 +338,15 @@ def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder
 
     # Issue a deletion queue flush so that the parent shard can't leave behind layers
     # that will look like unexpected garbage to the scrubber
-    env.get_tenant_pageserver(tenant_id).http_client().deletion_queue_flush(execute=True)
+    ps = env.get_tenant_pageserver(tenant_id)
+    assert ps is not None
+    ps.http_client().deletion_queue_flush(execute=True)
 
     new_shard_count = 4
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
+        assert ps is not None
         log.info(f"Waiting for shard {shard} on pageserver {ps.id}")
         ps.http_client().timeline_checkpoint(
             shard, timeline_id, compact=False, wait_until_uploaded=True

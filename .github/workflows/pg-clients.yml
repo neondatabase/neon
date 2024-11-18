@@ -39,15 +39,9 @@ jobs:
     with:
       github-event-name: ${{ github.event_name }}
 
-  check-build-tools-image:
-    needs: [ check-permissions ]
-    uses: ./.github/workflows/check-build-tools-image.yml
-
   build-build-tools-image:
-    needs: [ check-build-tools-image ]
+    needs: [ check-permissions ]
     uses: ./.github/workflows/build-build-tools-image.yml
-    with:
-      image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
     secrets: inherit
 
   test-logical-replication:

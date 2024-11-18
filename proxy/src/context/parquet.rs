@@ -134,7 +134,7 @@ impl From<&RequestMonitoringInner> for RequestData {
                 .as_ref()
                 .and_then(|options| serde_json::to_string(&Options { options }).ok()),
             auth_method: value.auth_method.as_ref().map(|x| match x {
-                super::AuthMethod::Web => "web",
+                super::AuthMethod::ConsoleRedirect => "console_redirect",
                 super::AuthMethod::ScramSha256 => "scram_sha_256",
                 super::AuthMethod::ScramSha256Plus => "scram_sha_256_plus",
                 super::AuthMethod::Cleartext => "cleartext",
