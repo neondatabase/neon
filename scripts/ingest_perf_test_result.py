@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS perf_test_results (
     metric_unit VARCHAR(10),
     metric_report_type TEXT,
     recorded_at_timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    label_1 TEXT
+    labels JSONB with default '{}'
 )
 """
 
@@ -92,7 +92,7 @@ def ingest_perf_test_result(cursor, data_file: Path, recorded_at_timestamp: int)
                 "metric_unit": metric["unit"],
                 "metric_report_type": metric["report"],
                 "recorded_at_timestamp": datetime.utcfromtimestamp(recorded_at_timestamp),
-                "label_1": metric.get("label"),
+                "labels": json.dumps(metric.get("labels")),
             }
             args_list.append(values)
 
@@ -108,7 +108,7 @@ def ingest_perf_test_result(cursor, data_file: Path, recorded_at_timestamp: int)
             metric_unit,
             metric_report_type,
             recorded_at_timestamp,
-            label_1
+            labels
         ) VALUES %s
         """,
         args_list,
@@ -121,7 +121,7 @@ def ingest_perf_test_result(cursor, data_file: Path, recorded_at_timestamp: int)
             %(metric_unit)s,
             %(metric_report_type)s,
             %(recorded_at_timestamp)s,
-            %(label_1)s
+            %(labels)s
         )""",
     )
     return len(args_list)

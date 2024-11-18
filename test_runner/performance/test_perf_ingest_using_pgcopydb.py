@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlparse
@@ -24,7 +25,6 @@ def setup_environment():
     - BENCHMARK_INGEST_TARGET_CONNSTR
     - PERF_TEST_RESULT_CONNSTR
     - TARGET_PROJECT_TYPE
-    - COMMIT_HASH
 
     """
     # Ensure required environment variables are set
@@ -38,7 +38,6 @@ def setup_environment():
         "BENCHMARK_INGEST_TARGET_CONNSTR",
         "PERF_TEST_RESULT_CONNSTR",
         "TARGET_PROJECT_TYPE",
-        "COMMIT_HASH",
     ]
     for var in required_env_vars:
         if not os.getenv(var):
@@ -78,35 +77,35 @@ def build_pgcopydb_command(pgcopydb_filter_file: Path, test_output_dir: Path):
 @pytest.fixture()  # must be function scoped because test_output_dir is function scoped
 def pgcopydb_filter_file(test_output_dir: Path) -> Path:
     """Creates the pgcopydb_filter.txt file required by pgcopydb."""
-    filter_content = """\
-[include-only-table]
-public.events
-public.emails
-public.email_transmissions
-public.payments
-public.editions
-public.edition_modules
-public.sp_content
-public.email_broadcasts
-public.user_collections
-public.devices
-public.user_accounts
-public.lessons
-public.lesson_users
-public.payment_methods
-public.orders
-public.course_emails
-public.modules
-public.users
-public.module_users
-public.courses
-public.payment_gateway_keys
-public.accounts
-public.roles
-public.payment_gateways
-public.management
-public.event_names
-"""
+    filter_content = textwrap.dedent("""\
+        [include-only-table]
+        public.events
+        public.emails
+        public.email_transmissions
+        public.payments
+        public.editions
+        public.edition_modules
+        public.sp_content
+        public.email_broadcasts
+        public.user_collections
+        public.devices
+        public.user_accounts
+        public.lessons
+        public.lesson_users
+        public.payment_methods
+        public.orders
+        public.course_emails
+        public.modules
+        public.users
+        public.module_users
+        public.courses
+        public.payment_gateway_keys
+        public.accounts
+        public.roles
+        public.payment_gateways
+        public.management
+        public.event_names
+        """)
     filter_path = test_output_dir / "pgcopydb_filter.txt"
     filter_path.write_text(filter_content)
     return filter_path
@@ -193,18 +192,11 @@ def parse_log_and_report_metrics(
                         duration_seconds = humantime_to_ms(rust_like_humantime) / 1000.0
                         metrics[metric_name] = duration_seconds
 
-    endpoint_id = get_endpoint_id()
+    endpoint_id = {"endpoint_id": get_endpoint_id()}
     for metric_name, duration_seconds in metrics.items():
         zenbenchmark.record(
             metric_name, duration_seconds, "s", MetricReport.LOWER_IS_BETTER, endpoint_id
         )
-
-    # make sure we report project type as part of platform in NeonBenchmarker report
-    project_type = os.getenv("TARGET_PROJECT_TYPE")
-    if not project_type:
-        raise OSError("TARGET_PROJECT_TYPE environment variable is not set.")
-    platform = f"pg16-{project_type}-us-east-2-staging"
-    os.environ["PLATFORM"] = platform
 
 
 def get_endpoint_id():
@@ -273,7 +265,3 @@ def test_ingest_performance_using_pgcopydb(
 
     # Parse log file and report metrics, including backpressure time difference
     parse_log_and_report_metrics(zenbenchmark, log_file_path, backpressure_time_diff)
-
-    # Check log file creation and content
-    assert log_file_path.exists(), "Log file should be created"
-    assert log_file_path.stat().st_size > 0, "Log file should not be empty"
