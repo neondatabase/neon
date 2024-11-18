@@ -240,8 +240,9 @@ jobs:
       env:
         REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
+    # Post both success and failure to the Slack channel
     - name: Post to a Slack channel
-      if: ${{ github.event.schedule && failure() }}
+      if: ${{ github.event.schedule }}
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C06T9AMNDQQ" # on-call-compute-staging-stream
