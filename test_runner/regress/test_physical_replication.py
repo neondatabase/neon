@@ -152,6 +152,7 @@ def test_physical_replication_config_mismatch_max_prepared(neon_simple_env: Neon
         s_cur.execute("select count(*) from t")
         assert s_cur.fetchall()[0][0] == 10
         secondary.stop()
+        raise AssertionError("Replica should crash")
     except Exception as e:
         log.info(f"Replica crashed with {e}")
         assert secondary.log_contains("maximum number of prepared transactions reached")
@@ -217,6 +218,7 @@ def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_en
         s_cur.execute("select count(*) from t")
         assert s_cur.fetchall()[0][0] == n_connections
         secondary.stop()
+        raise AssertionError("Replica should crash")
     except Exception as e:
         log.info(f"Replica crashed with {e}")
         assert secondary.log_contains("too many KnownAssignedXids")
@@ -257,6 +259,7 @@ def test_physical_replication_config_mismatch_max_locks_per_transaction(neon_sim
     try:
         wait_replica_caughtup(primary, secondary)
         secondary.stop()
+        raise AssertionError("Replica should crash")
     except Exception as e:
         log.info(f"Replica crashed with {e}")
         assert secondary.log_contains("You might need to increase")
