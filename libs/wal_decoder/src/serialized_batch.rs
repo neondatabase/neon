@@ -16,6 +16,7 @@ use pageserver_api::shard::ShardIdentity;
 use pageserver_api::{key::CompactKey, value::Value};
 use postgres_ffi::walrecord::{DecodedBkpBlock, DecodedWALRecord};
 use postgres_ffi::{page_is_new, page_set_lsn, pg_constants, BLCKSZ};
+use serde::{Deserialize, Serialize};
 use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
 
@@ -29,6 +30,7 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 /// relation sizes. In the case of "observed" values, we only need to know
 /// the key and LSN, so two types of metadata are supported to save on network
 /// bandwidth.
+#[derive(Serialize, Deserialize)]
 pub enum ValueMeta {
     Serialized(SerializedValueMeta),
     Observed(ObservedValueMeta),
@@ -75,6 +77,7 @@ impl PartialEq for OrderedValueMeta {
 impl Eq for OrderedValueMeta {}
 
 /// Metadata for a [`Value`] serialized into the batch.
+#[derive(Serialize, Deserialize)]
 pub struct SerializedValueMeta {
     pub key: CompactKey,
     pub lsn: Lsn,
@@ -86,12 +89,14 @@ pub struct SerializedValueMeta {
 }
 
 /// Metadata for a [`Value`] observed by the batch
+#[derive(Serialize, Deserialize)]
 pub struct ObservedValueMeta {
     pub key: CompactKey,
     pub lsn: Lsn,
 }
 
 /// Batch of serialized [`Value`]s.
+#[derive(Serialize, Deserialize)]
 pub struct SerializedValueBatch {
     /// [`Value`]s serialized in EphemeralFile's native format,
     /// ready for disk write by the pageserver
@@ -132,7 +137,7 @@ impl SerializedValueBatch {
     pub(crate) fn from_decoded_filtered(
         decoded: DecodedWALRecord,
         shard: &ShardIdentity,
-        record_end_lsn: Lsn,
+        next_record_lsn: Lsn,
         pg_version: u32,
     ) -> anyhow::Result<SerializedValueBatch> {
         // First determine how big the buffer needs to be and allocate it up-front.
@@ -156,13 +161,17 @@ impl SerializedValueBatch {
             let key = rel_block_to_key(rel, blk.blkno);
 
             if !key.is_valid_key_on_write_path() {
-                anyhow::bail!("Unsupported key decoded at LSN {}: {}", record_end_lsn, key);
+                anyhow::bail!(
+                    "Unsupported key decoded at LSN {}: {}",
+                    next_record_lsn,
+                    key
+                );
             }
 
             let key_is_local = shard.is_key_local(&key);
 
             tracing::debug!(
-                lsn=%record_end_lsn,
+                lsn=%next_record_lsn,
                 key=%key,
                 "ingest: shard decision {}",
                 if !key_is_local { "drop" } else { "keep" },
@@ -174,7 +183,7 @@ impl SerializedValueBatch {
                     // its blkno in case it implicitly extends a relation.
                     metadata.push(ValueMeta::Observed(ObservedValueMeta {
                         key: key.to_compact(),
-                        lsn: record_end_lsn,
+                        lsn: next_record_lsn,
                     }))
                 }
 
@@ -205,7 +214,7 @@ impl SerializedValueBatch {
                 // that would corrupt the page.
                 //
                 if !page_is_new(&image) {
-                    page_set_lsn(&mut image, record_end_lsn)
+                    page_set_lsn(&mut image, next_record_lsn)
                 }
                 assert_eq!(image.len(), BLCKSZ as usize);
 
@@ -224,12 +233,12 @@ impl SerializedValueBatch {
 
             metadata.push(ValueMeta::Serialized(SerializedValueMeta {
                 key: key.to_compact(),
-                lsn: record_end_lsn,
+                lsn: next_record_lsn,
                 batch_offset: relative_off,
                 len: val_ser_size,
                 will_init: val.will_init(),
             }));
-            max_lsn = std::cmp::max(max_lsn, record_end_lsn);
+            max_lsn = std::cmp::max(max_lsn, next_record_lsn);
             len += 1;
         }
 
