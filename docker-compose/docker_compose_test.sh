@@ -56,7 +56,7 @@ for pg_version in 14 15 16 17; do
 
     if [ $pg_version -ge 16 ]; then
         echo Enabling trust connection
-        docker exec $COMPUTE_CONTAINER_NAME bash -c "sed -i '\$d' /var/db/postgres/compute/pg_hba.conf && echo -e 'host\t all\t all\t all\t trust' >> /var/db/postgres/compute/pg_hba.conf"
+        docker exec $COMPUTE_CONTAINER_NAME bash -c "sed -i '\$d' /var/db/postgres/compute/pg_hba.conf && echo -e 'host\t all\t all\t all\t trust' >> /var/db/postgres/compute/pg_hba.conf && psql $PSQL_OPTION -c 'select pg_reload_conf()' "
         echo Adding postgres role
         docker exec $COMPUTE_CONTAINER_NAME psql $PSQL_OPTION -c "CREATE ROLE postgres SUPERUSER LOGIN"
         # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
@@ -68,11 +68,13 @@ for pg_version in 14 15 16 17; do
         # In our case it's not true, that's why we are copying files to the compute node
         TMPDIR=$(mktemp -d)
         # Add support for pg_anon for pg_v16
-        docker exec $COMPUTE_CONTAINER_NAME bash -c "psql $PSQL_OPTION -c \"alter system set session_preload_libraries = 'anon'\" && psql $PSQL_OPTION -c 'select pg_reload_conf()'"
-        docker cp $TEST_CONTAINER_NAME:/ext-src/pg_anon-src/data $TMPDIR/data
-        echo -e '1\t too \t many \t tabs' > $TMPDIR/data/bad.csv
-        docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/tmp/tmp_anon_alternate_data
+        if [ $pg_version -ne 17 ]; then
+          docker exec $COMPUTE_CONTAINER_NAME bash -c "psql $PSQL_OPTION -c \"alter system set session_preload_libraries = 'anon'\" && psql $PSQL_OPTION -c 'select pg_reload_conf()'"
+          docker cp $TEST_CONTAINER_NAME:/ext-src/pg_anon-src/data $TMPDIR/data
+          echo -e '1\t too \t many \t tabs' > $TMPDIR/data/bad.csv
+          docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/tmp/tmp_anon_alternate_data
         rm -rf $TMPDIR
+        fi
         TMPDIR=$(mktemp -d)
         # The following block does the same for the pg_hintplan test
         docker cp $TEST_CONTAINER_NAME:/ext-src/pg_hint_plan-src/data $TMPDIR/data
