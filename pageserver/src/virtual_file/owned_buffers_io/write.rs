@@ -15,6 +15,8 @@ use super::{
     io_buf_ext::{FullSlice, IoBufExt},
 };
 
+pub(crate) use flush::FlushControl;
+
 /// A trait for doing owned-buffer write IO.
 /// Think [`tokio::io::AsyncWrite`] but with owned buffers.
 /// The owned buffers need to be aligned due to Direct IO requirements.
@@ -133,7 +135,10 @@ where
         // avoid memcpy for the middle of the chunk
         if chunk.len() >= self.mutable().cap() {
             // TODO(yuchen): do we still want to keep the bypass path?
-            self.flush(false, ctx).await?;
+            let control = self.flush(false, ctx).await?;
+            if let Some(control) = control {
+                control.release().await;
+            }
             // do a big write, bypassing `buf`
             assert_eq!(
                 self.mutable
@@ -155,7 +160,11 @@ where
         // in-memory copy the < BUFFER_SIZED tail of the chunk
         assert!(chunk.len() < self.mutable().cap());
         let mut slice = &chunk[..];
+        let mut control: Option<FlushControl> = None;
         while !slice.is_empty() {
+            if let Some(control) = control.take() {
+                control.release().await;
+            }
             let buf = self.mutable.as_mut().expect("must not use after an error");
             let need = buf.cap() - buf.pending();
             let have = slice.len();
@@ -164,8 +173,11 @@ where
             slice = &slice[n..];
             if buf.pending() >= buf.cap() {
                 assert_eq!(buf.pending(), buf.cap());
-                self.flush(true, ctx).await?;
+                control = self.flush(true, ctx).await?;
             }
+        }
+        if let Some(control) = control.take() {
+            control.release().await;
         }
         assert!(slice.is_empty(), "by now we should have drained the chunk");
         Ok((chunk_len, FullSlice::must_new(chunk)))
@@ -178,10 +190,24 @@ where
     /// for large writes.
     pub async fn write_buffered_borrowed(
         &mut self,
-        mut chunk: &[u8],
+        chunk: &[u8],
         ctx: &RequestContext,
     ) -> std::io::Result<usize> {
+        let (len, control) = self.write_buffered_borrowed_controlled(chunk, ctx).await?;
+        if let Some(control) = control {
+            control.release().await;
+        }
+        Ok(len)
+    }
+
+    /// In addition to bytes submitted in this write, also returns a handle that can control the flush behavior.
+    pub async fn write_buffered_borrowed_controlled(
+        &mut self,
+        mut chunk: &[u8],
+        ctx: &RequestContext,
+    ) -> std::io::Result<(usize, Option<FlushControl>)> {
         let chunk_len = chunk.len();
+        let mut control: Option<FlushControl> = None;
         while !chunk.is_empty() {
             let buf = self.mutable.as_mut().expect("must not use after an error");
             let need = buf.cap() - buf.pending();
@@ -191,30 +217,34 @@ where
             chunk = &chunk[n..];
             if buf.pending() >= buf.cap() {
                 assert_eq!(buf.pending(), buf.cap());
-                self.flush(true, ctx).await?;
+                if let Some(control) = control.take() {
+                    control.release().await;
+                }
+                control = self.flush(true, ctx).await?;
             }
         }
-        Ok(chunk_len)
+        Ok((chunk_len, control))
     }
 
+    #[must_use]
     async fn flush(
         &mut self,
         save_buf_for_read: bool,
         _ctx: &RequestContext,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<Option<FlushControl>> {
         let buf = self.mutable.take().expect("must not use after an error");
         let buf_len = buf.pending();
         if buf_len == 0 {
             self.mutable = Some(buf);
-            return Ok(());
+            return Ok(None);
         }
-        let recycled = self
+        let (recycled, flush_control) = self
             .flush_handle
             .flush(buf, self.bytes_submitted, save_buf_for_read)
             .await?;
         self.bytes_submitted += u64::try_from(buf_len).unwrap();
         self.mutable = Some(recycled);
-        Ok(())
+        Ok(Some(flush_control))
     }
 }
 

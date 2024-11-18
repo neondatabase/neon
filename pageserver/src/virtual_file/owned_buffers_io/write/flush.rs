@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use utils::sync::duplex;
 
 use crate::{
     context::RequestContext,
@@ -8,50 +8,6 @@ use crate::{
 };
 
 use super::{Buffer, OwnedAsyncWriter};
-
-/// A bi-directional channel.
-pub struct Duplex<S, R> {
-    pub tx: mpsc::Sender<S>,
-    pub rx: mpsc::Receiver<R>,
-}
-
-/// Creates a bi-directional channel.
-///
-/// The channel will buffer up to the provided number of messages. Once the buffer is full,
-/// attempts to send new messages will wait until a message is received from the channel.
-/// The provided buffer capacity must be at least 1.
-pub fn duplex_channel<A: Send, B: Send>(buffer: usize) -> (Duplex<A, B>, Duplex<B, A>) {
-    let (tx_a, rx_a) = mpsc::channel::<A>(buffer);
-    let (tx_b, rx_b) = mpsc::channel::<B>(buffer);
-
-    (Duplex { tx: tx_a, rx: rx_b }, Duplex { tx: tx_b, rx: rx_a })
-}
-
-impl<S: Send, R: Send> Duplex<S, R> {
-    /// Sends a value, waiting until there is capacity.
-    ///
-    /// A successful send occurs when it is determined that the other end of the channel has not hung up already.
-    pub async fn send(&self, x: S) -> Result<(), mpsc::error::SendError<S>> {
-        self.tx.send(x).await
-    }
-
-    /// Receives the next value for this receiver.
-    ///
-    /// This method returns `None` if the channel has been closed and there are
-    /// no remaining messages in the channel's buffer.
-    pub async fn recv(&mut self) -> Option<R> {
-        self.rx.recv().await
-    }
-}
-
-// TODO(yuchen): special actions in drop to clean up the join handle?
-pub struct FlushHandleInner<Buf, W> {
-    /// A bi-directional channel that sends (buffer, offset) for writes,
-    /// and receives recyled buffer.
-    channel: Duplex<(FullSlice<Buf>, u64), FullSlice<Buf>>,
-    /// Join handle for the background flush task.
-    join_handle: tokio::task::JoinHandle<std::io::Result<Arc<W>>>,
-}
 
 /// A handle to the flush task.
 pub struct FlushHandle<Buf, W> {
@@ -61,54 +17,97 @@ pub struct FlushHandle<Buf, W> {
     pub(super) maybe_flushed: Option<Buf>,
 }
 
-/// A background task for flushing data to disk.
-pub struct FlushBackgroundTask<Buf, W> {
-    /// A bi-directional channel that receives (buffer, offset) for writes,
-    /// and send back recycled buffer.
-    channel: Duplex<FullSlice<Buf>, (FullSlice<Buf>, u64)>,
-    /// A writter for persisting data to disk.
-    writer: Arc<W>,
-    ctx: RequestContext,
+// TODO(yuchen): special actions in drop to clean up the join handle?
+pub struct FlushHandleInner<Buf, W> {
+    /// A bi-directional channel that sends (buffer, offset) for writes,
+    /// and receives recyled buffer.
+    channel: duplex::mpsc::Duplex<FlushRequest<Buf>, FullSlice<Buf>>,
+    /// Join handle for the background flush task.
+    join_handle: tokio::task::JoinHandle<std::io::Result<Arc<W>>>,
 }
 
-impl<Buf, W> FlushBackgroundTask<Buf, W>
-where
-    Buf: IoBufAligned + Send + Sync,
-    W: OwnedAsyncWriter + Sync + 'static,
-{
-    /// Creates a new background flush task.
-    fn new(
-        channel: Duplex<FullSlice<Buf>, (FullSlice<Buf>, u64)>,
-        file: Arc<W>,
-        ctx: RequestContext,
+struct FlushRequest<Buf> {
+    slice: FullSlice<Buf>,
+    offset: u64,
+    #[cfg(test)]
+    ready_to_flush_rx: tokio::sync::oneshot::Receiver<()>,
+    #[cfg(test)]
+    done_flush_tx: tokio::sync::oneshot::Sender<()>,
+}
+
+#[cfg(not(test))]
+fn new_flush_op<Buf>(slice: FullSlice<Buf>, offset: u64) -> (FlushRequest<Buf>, FlushControl) {
+    let request = FlushRequest { slice, offset };
+    let control = FlushControl::untracked();
+
+    (request, control)
+}
+
+#[cfg(test)]
+fn new_flush_op<Buf>(slice: FullSlice<Buf>, offset: u64) -> (FlushRequest<Buf>, FlushControl) {
+    let (ready_to_flush_tx, ready_to_flush_rx) = tokio::sync::oneshot::channel();
+    let (done_flush_tx, done_flush_rx) = tokio::sync::oneshot::channel();
+    let control = FlushControl::not_started(ready_to_flush_tx, done_flush_rx);
+
+    let request = FlushRequest {
+        slice,
+        offset,
+        ready_to_flush_rx,
+        done_flush_tx,
+    };
+    (request, control)
+}
+
+pub enum FlushStartState {
+    #[cfg(not(test))]
+    Untracked,
+    #[cfg(test)]
+    NotStarted(FlushNotStarted),
+}
+
+pub(crate) struct FlushControl {
+    state: FlushStartState,
+}
+
+impl FlushControl {
+    #[cfg(test)]
+    fn not_started(
+        ready_to_flush_tx: tokio::sync::oneshot::Sender<()>,
+        done_flush_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Self {
-        FlushBackgroundTask {
-            channel,
-            writer: file,
-            ctx,
+        FlushControl {
+            state: FlushStartState::NotStarted(FlushNotStarted {
+                ready_to_flush_tx,
+                done_flush_rx,
+            }),
+        }
+    }
+    #[cfg(not(test))]
+    fn untracked() -> Self {
+        FlushControl {
+            state: FlushStartState::Untracked,
         }
     }
 
-    /// Runs the background flush task.
-    async fn run(mut self, slice: FullSlice<Buf>) -> std::io::Result<Arc<W>> {
-        // Sends the extra buffer back to the handle.
-        self.channel.send(slice).await.map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "flush handle closed early")
-        })?;
+    #[cfg(test)]
+    pub(crate) fn as_not_started(self) -> FlushNotStarted {
+        match self.state {
+            FlushStartState::NotStarted(not_started) => not_started,
+        }
+    }
 
-        //  Exit condition: channel is closed and there is no remaining buffer to be flushed
-        while let Some((slice, offset)) = self.channel.recv().await {
-            // Write slice to disk at `offset`.
-            let slice = self.writer.write_all_at(slice, offset, &self.ctx).await?;
-
-            // Sends the buffer back to the handle for reuse. The handle is in charged of cleaning the buffer.
-            if self.channel.send(slice).await.is_err() {
-                // Although channel is closed. Still need to finish flushing the remaining buffers.
-                continue;
+    pub async fn release(self) {
+        match self.state {
+            #[cfg(not(test))]
+            FlushStartState::Untracked => (),
+            #[cfg(test)]
+            FlushStartState::NotStarted(not_started) => {
+                not_started
+                    .ready_to_flush()
+                    .wait_until_flush_is_done()
+                    .await;
             }
         }
-
-        Ok(self.writer)
     }
 }
 
@@ -122,7 +121,7 @@ where
     where
         B: Buffer<IoBuf = Buf> + Send + 'static,
     {
-        let (front, back) = duplex_channel(2);
+        let (front, back) = duplex::mpsc::channel(1);
 
         let bg = FlushBackgroundTask::new(back, file, ctx);
         let join_handle = tokio::spawn(async move { bg.run(buf.flush()).await });
@@ -145,21 +144,23 @@ where
         buf: B,
         offset: u64,
         save_buf_for_read: bool,
-    ) -> std::io::Result<B>
+    ) -> std::io::Result<(B, FlushControl)>
     where
         B: Buffer<IoBuf = Buf> + Send + 'static,
     {
-        let freezed = buf.flush();
+        let slice = buf.flush();
 
         // Saves a buffer for read while flushing. This also removes reference to the old buffer.
         self.maybe_flushed = if save_buf_for_read {
-            Some(freezed.as_raw_slice().get_ref().clone())
+            Some(slice.as_raw_slice().get_ref().clone())
         } else {
             None
         };
 
+        let (request, flush_control) = new_flush_op(slice, offset);
+
         // Submits the buffer to the background task.
-        let submit = self.inner_mut().channel.send((freezed, offset)).await;
+        let submit = self.inner_mut().channel.send(request).await;
         if submit.is_err() {
             return self.handle_error().await;
         }
@@ -171,9 +172,9 @@ where
 
         // The only other place that could hold a reference to the recycled buffer
         // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.
-        Ok(Buffer::reuse_after_flush(
-            recycled.into_raw_slice().into_inner(),
-        ))
+
+        let recycled = Buffer::reuse_after_flush(recycled.into_raw_slice().into_inner());
+        Ok((recycled, flush_control))
     }
 
     /// Cleans up the channel, join the flush task.
@@ -196,5 +197,109 @@ where
 
     async fn handle_error<T>(&mut self) -> std::io::Result<T> {
         Err(self.shutdown().await.unwrap_err())
+    }
+}
+
+/// A background task for flushing data to disk.
+pub struct FlushBackgroundTask<Buf, W> {
+    /// A bi-directional channel that receives (buffer, offset) for writes,
+    /// and send back recycled buffer.
+    channel: duplex::mpsc::Duplex<FullSlice<Buf>, FlushRequest<Buf>>,
+    /// A writter for persisting data to disk.
+    writer: Arc<W>,
+    ctx: RequestContext,
+}
+
+impl<Buf, W> FlushBackgroundTask<Buf, W>
+where
+    Buf: IoBufAligned + Send + Sync,
+    W: OwnedAsyncWriter + Sync + 'static,
+{
+    /// Creates a new background flush task.
+    fn new(
+        channel: duplex::mpsc::Duplex<FullSlice<Buf>, FlushRequest<Buf>>,
+        file: Arc<W>,
+        ctx: RequestContext,
+    ) -> Self {
+        FlushBackgroundTask {
+            channel,
+            writer: file,
+            ctx,
+        }
+    }
+
+    /// Runs the background flush task.
+    async fn run(mut self, slice: FullSlice<Buf>) -> std::io::Result<Arc<W>> {
+        // Sends the extra buffer back to the handle.
+        self.channel.send(slice).await.map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "flush handle closed early")
+        })?;
+
+        //  Exit condition: channel is closed and there is no remaining buffer to be flushed
+        while let Some(request) = self.channel.recv().await {
+            #[cfg(test)]
+            {
+                // In test, wait for control to signal that we are ready to flush.
+                if request.ready_to_flush_rx.await.is_err() {
+                    tracing::debug!("control dropped");
+                }
+            }
+
+            // Write slice to disk at `offset`.
+            let slice = self
+                .writer
+                .write_all_at(request.slice, request.offset, &self.ctx)
+                .await?;
+
+            #[cfg(test)]
+            {
+                // In test, tell control we are done flushing buffer.
+                if request.done_flush_tx.send(()).is_err() {
+                    tracing::debug!("control dropped");
+                }
+            }
+
+            // Sends the buffer back to the handle for reuse. The handle is in charged of cleaning the buffer.
+            if self.channel.send(slice).await.is_err() {
+                // Although channel is closed. Still need to finish flushing the remaining buffers.
+                continue;
+            }
+        }
+
+        Ok(self.writer)
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct FlushNotStarted {
+    ready_to_flush_tx: tokio::sync::oneshot::Sender<()>,
+    done_flush_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct FlushInProgress {
+    done_flush_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct FlushDone;
+
+#[cfg(test)]
+impl FlushNotStarted {
+    pub fn ready_to_flush(self) -> FlushInProgress {
+        self.ready_to_flush_tx
+            .send(())
+            .map(|_| FlushInProgress {
+                done_flush_rx: self.done_flush_rx,
+            })
+            .unwrap()
+    }
+}
+
+#[cfg(test)]
+impl FlushInProgress {
+    pub async fn wait_until_flush_is_done(self) -> FlushDone {
+        self.done_flush_rx.await.unwrap();
+        FlushDone
     }
 }

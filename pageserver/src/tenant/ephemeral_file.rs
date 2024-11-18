@@ -131,6 +131,18 @@ impl EphemeralFile {
         srcbuf: &[u8],
         ctx: &RequestContext,
     ) -> std::io::Result<u64> {
+        let (pos, control) = self.write_raw_controlled(srcbuf, ctx).await?;
+        if let Some(control) = control {
+            control.release().await;
+        }
+        Ok(pos)
+    }
+
+    pub(crate) async fn write_raw_controlled(
+        &mut self,
+        srcbuf: &[u8],
+        ctx: &RequestContext,
+    ) -> std::io::Result<(u64, Option<owned_buffers_io::write::FlushControl>)> {
         let pos = self.bytes_written;
 
         let new_bytes_written = pos.checked_add(srcbuf.len().into_u64()).ok_or_else(|| {
@@ -144,9 +156,9 @@ impl EphemeralFile {
         })?;
 
         // Write the payload
-        let nwritten = self
+        let (nwritten, control) = self
             .buffered_writer
-            .write_buffered_borrowed(srcbuf, ctx)
+            .write_buffered_borrowed_controlled(srcbuf, ctx)
             .await?;
         assert_eq!(
             nwritten,
@@ -156,7 +168,7 @@ impl EphemeralFile {
 
         self.bytes_written = new_bytes_written;
 
-        Ok(pos)
+        Ok((pos, control))
     }
 }
 
@@ -381,7 +393,9 @@ mod tests {
                 .await
                 .unwrap();
 
-        let cap = file.buffered_writer.inspect_mutable().capacity();
+        let mutable = file.buffered_writer.inspect_mutable();
+        let cap = mutable.capacity();
+        let align = mutable.align();
 
         let write_nbytes = cap * 2 + cap / 2;
 
@@ -391,26 +405,33 @@ mod tests {
             .collect();
 
         let mut value_offsets = Vec::new();
-        for i in 0..write_nbytes {
-            let off = file.write_raw(&content[i..i + 1], &ctx).await.unwrap();
+        for range in (0..write_nbytes)
+            .step_by(align)
+            .map(|start| start..(start + align).min(write_nbytes))
+        {
+            let off = file.write_raw(&content[range], &ctx).await.unwrap();
             value_offsets.push(off);
         }
 
-        assert!(file.len() as usize == write_nbytes);
-        for i in 0..write_nbytes {
-            assert_eq!(value_offsets[i], i.into_u64());
-            let buf = IoBufferMut::with_capacity(1);
+        assert_eq!(file.len() as usize, write_nbytes);
+        for (i, range) in (0..write_nbytes)
+            .step_by(align)
+            .map(|start| start..(start + align).min(write_nbytes))
+            .enumerate()
+        {
+            assert_eq!(value_offsets[i], range.start.into_u64());
+            let buf = IoBufferMut::with_capacity(range.len());
             let (buf_slice, nread) = file
-                .read_exact_at_eof_ok(i.into_u64(), buf.slice_full(), &ctx)
+                .read_exact_at_eof_ok(range.start.into_u64(), buf.slice_full(), &ctx)
                 .await
                 .unwrap();
             let buf = buf_slice.into_inner();
-            assert_eq!(nread, 1);
-            assert_eq!(&buf, &content[i..i + 1]);
+            assert_eq!(nread, range.len());
+            assert_eq!(&buf, &content[range]);
         }
 
         let file_contents = std::fs::read(file.buffered_writer.as_inner().path()).unwrap();
-        assert!(file_contents == content[0..cap] || file_contents == content[0..cap * 2]);
+        assert!(file_contents == content[0..cap * 2]);
 
         let maybe_flushed_buffer_contents = file.buffered_writer.inspect_maybe_flushed().unwrap();
         assert_eq!(maybe_flushed_buffer_contents, &content[cap..cap * 2]);
@@ -430,7 +451,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        // mutable buffer and maybe_flushed buffer each has cap.
+        // mutable buffer and maybe_flushed buffer each has `cap` bytes.
         let cap = file.buffered_writer.inspect_mutable().capacity();
 
         let content: Vec<u8> = rand::thread_rng()
@@ -446,8 +467,9 @@ mod tests {
             &content[0..cap * 2 + cap / 2]
         );
         let md = file.buffered_writer.as_inner().path().metadata().unwrap();
-        assert!(
-            md.len() == cap.into_u64() || md.len() == 2 * cap.into_u64(),
+        assert_eq!(
+            md.len(),
+            2 * cap.into_u64(),
             "buffered writer requires one write to be flushed if we write 2.5x buffer capacity"
         );
         assert_eq!(
@@ -477,14 +499,15 @@ mod tests {
                 .await
                 .unwrap();
 
-        let cap = file.buffered_writer.inspect_mutable().capacity();
-
+        let mutable = file.buffered_writer.inspect_mutable();
+        let cap = mutable.capacity();
+        let align = mutable.align();
         let content: Vec<u8> = rand::thread_rng()
             .sample_iter(rand::distributions::Standard)
             .take(cap * 2 + cap / 2)
             .collect();
 
-        file.write_raw(&content, &ctx).await.unwrap();
+        let (_, control) = file.write_raw_controlled(&content, &ctx).await.unwrap();
 
         let test_read = |start: usize, len: usize| {
             let file = &file;
@@ -504,24 +527,37 @@ mod tests {
             }
         };
 
+        let test_read_all_offset_combinations = || {
+            async move {
+                test_read(align, align).await;
+                // border onto edge of file
+                test_read(cap - align, align).await;
+                // read across file and buffer
+                test_read(cap - align, 2 * align).await;
+                // stay from start of maybe flushed buffer
+                test_read(cap, align).await;
+                // completely within maybe flushed buffer
+                test_read(cap + align, align).await;
+                // border onto edge of maybe flushed buffer.
+                test_read(cap * 2 - align, align).await;
+                // read across maybe flushed and mutable buffer
+                test_read(cap * 2 - align, 2 * align).await;
+                // read across three segments
+                test_read(cap - align, cap + 2 * align).await;
+                // completely within mutable buffer
+                test_read(cap * 2 + align, align).await;
+            }
+        };
+
         // completely within the file range
-        assert!(20 < cap, "test assumption");
-        test_read(10, 10).await;
-        // border onto edge of file
-        test_read(cap - 10, 10).await;
-        // read across file and buffer
-        test_read(cap - 10, 20).await;
-        // stay from start of maybe flushed buffer
-        test_read(cap, 10).await;
-        // completely within maybe flushed buffer
-        test_read(cap + 10, 10).await;
-        // border onto edge of maybe flushed buffer.
-        test_read(cap * 2 - 10, 10).await;
-        // read across maybe flushed and mutable buffer
-        test_read(cap * 2 - 10, 20).await;
-        // read across three segments
-        test_read(cap - 10, cap + 20).await;
-        // completely within mutable buffer
-        test_read(cap * 2 + 10, 10).await;
+        assert!(align < cap, "test assumption");
+        assert!(cap % align == 0);
+        let not_started = control.unwrap().as_not_started();
+
+        test_read_all_offset_combinations().await;
+        let in_progress = not_started.ready_to_flush();
+        test_read_all_offset_combinations().await;
+        in_progress.wait_until_flush_is_done().await;
+        test_read_all_offset_combinations().await;
     }
 }
