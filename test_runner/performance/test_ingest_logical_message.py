@@ -11,6 +11,7 @@ from fixtures.neon_fixtures import (
     wait_for_commit_lsn,
     wait_for_last_flush_lsn,
 )
+from fixtures.pg_version import PgVersion
 
 
 @pytest.mark.timeout(600)
@@ -65,12 +66,30 @@ def test_ingest_logical_message(
                 log.info("Waiting for Pageserver to catch up")
                 wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
 
+    # Now that all data is ingested, delete and recreate the tenant in the pageserver. This will
+    # reingest all the WAL from the safekeeper without any other constraints. This gives us a
+    # baseline of how fast the pageserver can ingest this WAL in isolation.
+    client = env.pageserver.http_client()
+    pg_version = PgVersion(
+        client.timeline_detail(env.initial_tenant, env.initial_timeline)["pg_version"]
+    )
+    status = env.storage_controller.inspect(tenant_shard_id=env.initial_tenant)
+    assert status is not None
+
+    client.tenant_delete(env.initial_tenant)
+    env.pageserver.tenant_create(tenant_id=env.initial_tenant, generation=status[0])
+
+    with zenbenchmark.record_duration("pageserver_recover_ingest"):
+        log.info("Recovering WAL into pageserver")
+        client.timeline_create(pg_version, env.initial_tenant, env.initial_timeline)
+        wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+
     # Emit metrics.
     wal_written_mb = round((end_lsn - start_lsn) / (1024 * 1024))
     zenbenchmark.record("wal_written", wal_written_mb, "MB", MetricReport.TEST_PARAM)
     zenbenchmark.record("message_count", count, "messages", MetricReport.TEST_PARAM)
 
     props = {p["name"]: p["value"] for _, p in request.node.user_properties}
-    for name in ("postgres", "safekeeper", "pageserver"):
+    for name in ("postgres", "safekeeper", "pageserver", "pageserver_recover"):
         throughput = int(wal_written_mb / props[f"{name}_ingest"])
         zenbenchmark.record(f"{name}_throughput", throughput, "MB/s", MetricReport.HIGHER_IS_BETTER)
