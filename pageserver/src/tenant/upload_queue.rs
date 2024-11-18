@@ -68,6 +68,7 @@ pub(crate) struct UploadQueueInitialized {
     pub(crate) num_inprogress_layer_uploads: usize,
     pub(crate) num_inprogress_metadata_uploads: usize,
     pub(crate) num_inprogress_deletions: usize,
+    pub(crate) num_inprogress_barriers: usize,
 
     /// Tasks that are currently in-progress. In-progress means that a tokio Task
     /// has been launched for it. An in-progress task can be busy uploading, but it can
@@ -176,6 +177,7 @@ impl UploadQueue {
             num_inprogress_layer_uploads: 0,
             num_inprogress_metadata_uploads: 0,
             num_inprogress_deletions: 0,
+            num_inprogress_barriers: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
             #[cfg(feature = "testing")]
@@ -216,6 +218,7 @@ impl UploadQueue {
             num_inprogress_layer_uploads: 0,
             num_inprogress_metadata_uploads: 0,
             num_inprogress_deletions: 0,
+            num_inprogress_barriers: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
             #[cfg(feature = "testing")]
@@ -290,7 +293,10 @@ pub(crate) enum UploadOp {
     Delete(Delete),
 
     /// Barrier. When the barrier operation is reached, the channel is closed.
-    Barrier(tokio::sync::watch::Sender<()>),
+    /// The boolean value indicates whether the barrier is an initial barrier scheduled
+    /// at timeline load -- if yes, we will need to wait for all deletions to be completed
+    /// before the next upload.
+    Barrier(tokio::sync::watch::Sender<()>, bool),
 
     /// Shutdown; upon encountering this operation no new operations will be spawned, otherwise
     /// this is the same as a Barrier.
@@ -317,7 +323,8 @@ impl std::fmt::Display for UploadOp {
             UploadOp::Delete(delete) => {
                 write!(f, "Delete({} layers)", delete.layers.len())
             }
-            UploadOp::Barrier(_) => write!(f, "Barrier"),
+            UploadOp::Barrier(_, false) => write!(f, "Barrier"),
+            UploadOp::Barrier(_, true) => write!(f, "Barrier (initial)"),
             UploadOp::Shutdown => write!(f, "Shutdown"),
         }
     }

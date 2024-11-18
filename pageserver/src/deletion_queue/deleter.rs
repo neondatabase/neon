@@ -10,12 +10,12 @@ use remote_storage::GenericRemoteStorage;
 use remote_storage::RemotePath;
 use remote_storage::TimeoutOrCancel;
 use remote_storage::MAX_KEYS_PER_DELETE;
-use utils::pausable_failpoint;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::warn;
 use utils::backoff;
+use utils::pausable_failpoint;
 
 use crate::metrics;
 

@@ -2611,7 +2611,7 @@ impl Timeline {
         //     (1) and (4) ONLY IF generation number gets bumped. There are some cases where
         //     we load a tenant without bumping the generation number (i.e., detach ancestor
         //     and timeline offload/un-offload). In those cases, we need to rely on the barrier.
-        self.remote_client.schedule_barrier()?;
+        self.remote_client.schedule_barrier(true)?;
         // Tenant::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
 

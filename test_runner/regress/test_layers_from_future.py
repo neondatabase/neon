@@ -174,10 +174,8 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder, attach_mode: str):
     generation_before_detach = get_generation_number()
     env.pageserver.tenant_detach(tenant_id)
     failpoint_deletion_queue = "deletion-queue-before-execute-pause"
-    failpoint_upload_queue = "before-delete-layer-pausable"
 
     ps_http.configure_failpoints((failpoint_deletion_queue, "pause"))
-    ps_http.configure_failpoints((failpoint_upload_queue, "off"))
 
     if attach_mode == "default_generation":
         env.pageserver.tenant_attach(tenant_id, tenant_conf.tenant_specific_overrides)
@@ -270,3 +268,6 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder, attach_mode: str):
     final_stat = future_layer_path.stat()
     log.info(f"future layer path: {future_layer_path}")
     assert final_stat.st_mtime != pre_stat.st_mtime
+
+    # Ensure no weird errors in the end...
+    wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
