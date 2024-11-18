@@ -109,6 +109,7 @@ pub struct ConfigToml {
     pub virtual_file_io_mode: Option<crate::models::virtual_file::IoMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_sync: Option<bool>,
+    #[serde(with = "humantime_serde")]
     pub server_side_batch_timeout: Option<Duration>,
 }
 
