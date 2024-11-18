@@ -9,7 +9,6 @@ on:
     - Build and Test Locally
     - Build build-tools image
     - Check Permissions
-    - Check build-tools image
     - Check neon with extra platform builds
     - Cloud Regression Test
     - Create Release Branch
