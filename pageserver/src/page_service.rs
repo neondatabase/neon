@@ -611,6 +611,7 @@ impl PageServerHandler {
         )
     }
 
+    #[instrument(skip_all, level = tracing::Level::TRACE)]
     async fn read_batch_from_connection<IO>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
@@ -621,6 +622,8 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
+
         let mut batch = self.next_batch.take();
         let mut batch_started_at: Option<std::time::Instant> = None;
 
@@ -641,7 +644,8 @@ impl PageServerHandler {
                     msg
                 }
                 _ = sleep_fut => {
-                    assert!(batch.is_some());
+                    assert!(batch.is_some(), "batch_started_at => sleep_fut = futures::future::pending()");
+                    trace!("batch timeout");
                     break None;
                 }
             };
@@ -787,12 +791,14 @@ impl PageServerHandler {
                 ) if async {
                     assert_eq!(this_pages.len(), 1);
                     if accum_pages.len() >= Timeline::MAX_GET_VECTORED_KEYS as usize {
+                        trace!(%accum_lsn, %this_lsn, "stopping batching because of batch size");
                         assert_eq!(accum_pages.len(), Timeline::MAX_GET_VECTORED_KEYS as usize);
                         return false;
                     }
                     if (accum_shard.tenant_shard_id, accum_shard.timeline_id)
                         != (this_shard.tenant_shard_id, this_shard.timeline_id)
                     {
+                        trace!(%accum_lsn, %this_lsn, "stopping batching because timeline object mismatch");
                         // TODO: we _could_ batch & execute each shard seperately (and in parallel).
                         // But the current logic for keeping responses in order does not support that.
                         return false;
@@ -800,6 +806,7 @@ impl PageServerHandler {
                     // the vectored get currently only supports a single LSN, so, bounce as soon
                     // as the effective request_lsn changes
                     if *accum_lsn != this_lsn {
+                        trace!(%accum_lsn, %this_lsn, "stopping batching because LSN changed");
                         return false;
                     }
                     true
@@ -922,6 +929,7 @@ impl PageServerHandler {
                         (
                             {
                                 let npages = pages.len();
+                                trace!(npages, "handling getpage request");
                                 let res = self
                                     .handle_get_page_at_lsn_request_batched(
                                         &shard,
