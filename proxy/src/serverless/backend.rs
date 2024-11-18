@@ -12,8 +12,8 @@ use tracing::field::display;
 use tracing::{debug, info};
 
 use super::conn_pool::poll_client;
-use super::conn_pool_lib::{Client, ConnInfo, GlobalConnPool};
-use super::http_conn_pool::{self, poll_http2_client, Send};
+use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
+use super::http_conn_pool::{self, poll_http2_client, HttpConnPool, Send};
 use super::local_conn_pool::{self, LocalConnPool, EXT_NAME, EXT_SCHEMA, EXT_VERSION};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
@@ -36,9 +36,10 @@ use crate::rate_limiter::EndpointRateLimiter;
 use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
 
 pub(crate) struct PoolingBackend {
-    pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool<Send>>,
+    pub(crate) http_conn_pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
     pub(crate) local_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
-    pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
+    pub(crate) pool:
+        Arc<GlobalConnPool<tokio_postgres::Client, EndpointConnPool<tokio_postgres::Client>>>,
 
     pub(crate) config: &'static ProxyConfig,
     pub(crate) auth_backend: &'static crate::auth::Backend<'static, ()>,
@@ -474,7 +475,7 @@ impl ShouldRetryWakeCompute for LocalProxyConnError {
 }
 
 struct TokioMechanism {
-    pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
+    pool: Arc<GlobalConnPool<tokio_postgres::Client, EndpointConnPool<tokio_postgres::Client>>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 
@@ -524,7 +525,7 @@ impl ConnectMechanism for TokioMechanism {
 }
 
 struct HyperMechanism {
-    pool: Arc<http_conn_pool::GlobalConnPool<Send>>,
+    pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 

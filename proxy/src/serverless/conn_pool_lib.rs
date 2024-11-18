@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::atomic::{self, AtomicUsize};
 use std::sync::{Arc, Weak};
@@ -43,13 +44,14 @@ impl ConnInfo {
     }
 }
 
+#[derive(Clone)]
 pub(crate) enum ClientDataEnum {
     Remote(ClientDataRemote),
     Local(ClientDataLocal),
-    #[allow(dead_code)]
     Http(ClientDataHttp),
 }
 
+#[derive(Clone)]
 pub(crate) struct ClientInnerCommon<C: ClientInnerExt> {
     pub(crate) inner: C,
     pub(crate) aux: MetricsAuxInfo,
@@ -91,6 +93,7 @@ pub(crate) struct ConnPoolEntry<C: ClientInnerExt> {
 pub(crate) struct EndpointConnPool<C: ClientInnerExt> {
     pools: HashMap<(DbName, RoleName), DbUserConnPool<C>>,
     total_conns: usize,
+    /// max # connections per endpoint
     max_conns: usize,
     _guard: HttpEndpointPoolsGuard<'static>,
     global_connections_count: Arc<AtomicUsize>,
@@ -317,24 +320,49 @@ impl<C: ClientInnerExt> DbUserConn<C> for DbUserConnPool<C> {
     }
 }
 
-pub(crate) struct GlobalConnPool<C: ClientInnerExt> {
+pub(crate) trait EndpointConnPoolExt<C: ClientInnerExt> {
+    fn clear_closed(&mut self) -> usize;
+    fn total_conns(&self) -> usize;
+}
+
+impl<C: ClientInnerExt> EndpointConnPoolExt<C> for EndpointConnPool<C> {
+    fn clear_closed(&mut self) -> usize {
+        let mut clients_removed: usize = 0;
+        for db_pool in self.pools.values_mut() {
+            clients_removed += db_pool.clear_closed_clients(&mut self.total_conns);
+        }
+        clients_removed
+    }
+
+    fn total_conns(&self) -> usize {
+        self.total_conns
+    }
+}
+
+pub(crate) struct GlobalConnPool<C, P>
+where
+    C: ClientInnerExt,
+    P: EndpointConnPoolExt<C>,
+{
     // endpoint -> per-endpoint connection pool
     //
     // That should be a fairly conteded map, so return reference to the per-endpoint
     // pool as early as possible and release the lock.
-    global_pool: DashMap<EndpointCacheKey, Arc<RwLock<EndpointConnPool<C>>>>,
+    pub(crate) global_pool: DashMap<EndpointCacheKey, Arc<RwLock<P>>>,
 
     /// Number of endpoint-connection pools
     ///
     /// [`DashMap::len`] iterates over all inner pools and acquires a read lock on each.
     /// That seems like far too much effort, so we're using a relaxed increment counter instead.
     /// It's only used for diagnostics.
-    global_pool_size: AtomicUsize,
+    pub(crate) global_pool_size: AtomicUsize,
 
     /// Total number of connections in the pool
-    global_connections_count: Arc<AtomicUsize>,
+    pub(crate) global_connections_count: Arc<AtomicUsize>,
 
-    config: &'static crate::config::HttpConfig,
+    pub(crate) config: &'static crate::config::HttpConfig,
+
+    _marker: PhantomData<C>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -357,7 +385,11 @@ pub struct GlobalConnPoolOptions {
     pub max_total_conns: usize,
 }
 
-impl<C: ClientInnerExt> GlobalConnPool<C> {
+impl<C, P> GlobalConnPool<C, P>
+where
+    C: ClientInnerExt,
+    P: EndpointConnPoolExt<C>,
+{
     pub(crate) fn new(config: &'static crate::config::HttpConfig) -> Arc<Self> {
         let shards = config.pool_options.pool_shards;
         Arc::new(Self {
@@ -365,6 +397,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
             global_pool_size: AtomicUsize::new(0),
             config,
             global_connections_count: Arc::new(AtomicUsize::new(0)),
+            _marker: PhantomData,
         })
     }
 
@@ -378,6 +411,80 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
         self.config.pool_options.idle_timeout
     }
 
+    pub(crate) fn shutdown(&self) {
+        // drops all strong references to endpoint-pools
+        self.global_pool.clear();
+    }
+
+    pub(crate) async fn gc_worker(&self, mut rng: impl Rng) {
+        let epoch = self.config.pool_options.gc_epoch;
+        let mut interval = tokio::time::interval(epoch / (self.global_pool.shards().len()) as u32);
+        loop {
+            interval.tick().await;
+
+            let shard = rng.gen_range(0..self.global_pool.shards().len());
+            self.gc(shard);
+        }
+    }
+
+    pub(crate) fn gc(&self, shard: usize) {
+        debug!(shard, "pool: performing epoch reclamation");
+
+        // acquire a random shard lock
+        let mut shard = self.global_pool.shards()[shard].write();
+
+        let timer = Metrics::get()
+            .proxy
+            .http_pool_reclaimation_lag_seconds
+            .start_timer();
+        let current_len = shard.len();
+        let mut clients_removed = 0;
+        shard.retain(|endpoint, x| {
+            // if the current endpoint pool is unique (no other strong or weak references)
+            // then it is currently not in use by any connections.
+            if let Some(pool) = Arc::get_mut(x.get_mut()) {
+                let endpoints = pool.get_mut();
+                clients_removed = endpoints.clear_closed();
+
+                if endpoints.total_conns() == 0 {
+                    info!("pool: discarding pool for endpoint {endpoint}");
+                    return false;
+                }
+            }
+
+            true
+        });
+
+        let new_len = shard.len();
+        drop(shard);
+        timer.observe();
+
+        // Do logging outside of the lock.
+        if clients_removed > 0 {
+            let size = self
+                .global_connections_count
+                .fetch_sub(clients_removed, atomic::Ordering::Relaxed)
+                - clients_removed;
+            Metrics::get()
+                .proxy
+                .http_pool_opened_connections
+                .get_metric()
+                .dec_by(clients_removed as i64);
+            info!("pool: performed global pool gc. removed {clients_removed} clients, total number of clients in pool is {size}");
+        }
+        let removed = current_len - new_len;
+
+        if removed > 0 {
+            let global_pool_size = self
+                .global_pool_size
+                .fetch_sub(removed, atomic::Ordering::Relaxed)
+                - removed;
+            info!("pool: performed global pool gc. size now {global_pool_size}");
+        }
+    }
+}
+
+impl<C: ClientInnerExt> GlobalConnPool<C, EndpointConnPool<C>> {
     pub(crate) fn get(
         self: &Arc<Self>,
         ctx: &RequestContext,
@@ -432,85 +539,6 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
         Ok(None)
     }
 
-    pub(crate) fn shutdown(&self) {
-        // drops all strong references to endpoint-pools
-        self.global_pool.clear();
-    }
-
-    pub(crate) async fn gc_worker(&self, mut rng: impl Rng) {
-        let epoch = self.config.pool_options.gc_epoch;
-        let mut interval = tokio::time::interval(epoch / (self.global_pool.shards().len()) as u32);
-        loop {
-            interval.tick().await;
-
-            let shard = rng.gen_range(0..self.global_pool.shards().len());
-            self.gc(shard);
-        }
-    }
-
-    pub(crate) fn gc(&self, shard: usize) {
-        debug!(shard, "pool: performing epoch reclamation");
-
-        // acquire a random shard lock
-        let mut shard = self.global_pool.shards()[shard].write();
-
-        let timer = Metrics::get()
-            .proxy
-            .http_pool_reclaimation_lag_seconds
-            .start_timer();
-        let current_len = shard.len();
-        let mut clients_removed = 0;
-        shard.retain(|endpoint, x| {
-            // if the current endpoint pool is unique (no other strong or weak references)
-            // then it is currently not in use by any connections.
-            if let Some(pool) = Arc::get_mut(x.get_mut()) {
-                let EndpointConnPool {
-                    pools, total_conns, ..
-                } = pool.get_mut();
-
-                // ensure that closed clients are removed
-                for db_pool in pools.values_mut() {
-                    clients_removed += db_pool.clear_closed_clients(total_conns);
-                }
-
-                // we only remove this pool if it has no active connections
-                if *total_conns == 0 {
-                    info!("pool: discarding pool for endpoint {endpoint}");
-                    return false;
-                }
-            }
-
-            true
-        });
-
-        let new_len = shard.len();
-        drop(shard);
-        timer.observe();
-
-        // Do logging outside of the lock.
-        if clients_removed > 0 {
-            let size = self
-                .global_connections_count
-                .fetch_sub(clients_removed, atomic::Ordering::Relaxed)
-                - clients_removed;
-            Metrics::get()
-                .proxy
-                .http_pool_opened_connections
-                .get_metric()
-                .dec_by(clients_removed as i64);
-            info!("pool: performed global pool gc. removed {clients_removed} clients, total number of clients in pool is {size}");
-        }
-        let removed = current_len - new_len;
-
-        if removed > 0 {
-            let global_pool_size = self
-                .global_pool_size
-                .fetch_sub(removed, atomic::Ordering::Relaxed)
-                - removed;
-            info!("pool: performed global pool gc. size now {global_pool_size}");
-        }
-    }
-
     pub(crate) fn get_or_create_endpoint_pool(
         self: &Arc<Self>,
         endpoint: &EndpointCacheKey,
@@ -556,7 +584,6 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
         pool
     }
 }
-
 pub(crate) struct Client<C: ClientInnerExt> {
     span: Span,
     inner: Option<ClientInnerCommon<C>>,

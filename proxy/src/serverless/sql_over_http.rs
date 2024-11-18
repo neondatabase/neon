@@ -779,6 +779,7 @@ async fn handle_auth_broker_inner(
 
     Ok(client
         .inner
+        .inner
         .send_request(req)
         .await
         .map_err(LocalProxyConnError::from)
