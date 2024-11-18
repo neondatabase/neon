@@ -19,7 +19,7 @@ impl InterpretedWalRecord {
     pub fn from_bytes_filtered(
         buf: Bytes,
         shard: &ShardIdentity,
-        record_end_lsn: Lsn,
+        next_record_lsn: Lsn,
         pg_version: u32,
     ) -> anyhow::Result<InterpretedWalRecord> {
         let mut decoded = DecodedWALRecord::default();
@@ -32,18 +32,18 @@ impl InterpretedWalRecord {
             FlushUncommittedRecords::No
         };
 
-        let metadata_record = MetadataRecord::from_decoded(&decoded, record_end_lsn, pg_version)?;
+        let metadata_record = MetadataRecord::from_decoded(&decoded, next_record_lsn, pg_version)?;
         let batch = SerializedValueBatch::from_decoded_filtered(
             decoded,
             shard,
-            record_end_lsn,
+            next_record_lsn,
             pg_version,
         )?;
 
         Ok(InterpretedWalRecord {
             metadata_record,
             batch,
-            end_lsn: record_end_lsn,
+            next_record_lsn,
             flush_uncommitted,
             xid,
         })
@@ -53,7 +53,7 @@ impl InterpretedWalRecord {
 impl MetadataRecord {
     fn from_decoded(
         decoded: &DecodedWALRecord,
-        record_end_lsn: Lsn,
+        next_record_lsn: Lsn,
         pg_version: u32,
     ) -> anyhow::Result<Option<MetadataRecord>> {
         // Note: this doesn't actually copy the bytes since
@@ -74,7 +74,9 @@ impl MetadataRecord {
                 Ok(None)
             }
             pg_constants::RM_CLOG_ID => Self::decode_clog_record(&mut buf, decoded, pg_version),
-            pg_constants::RM_XACT_ID => Self::decode_xact_record(&mut buf, decoded, record_end_lsn),
+            pg_constants::RM_XACT_ID => {
+                Self::decode_xact_record(&mut buf, decoded, next_record_lsn)
+            }
             pg_constants::RM_MULTIXACT_ID => {
                 Self::decode_multixact_record(&mut buf, decoded, pg_version)
             }
@@ -86,7 +88,9 @@ impl MetadataRecord {
             //
             // Alternatively, one can make the checkpoint part of the subscription protocol
             // to the pageserver. This should work fine, but can be done at a later point.
-            pg_constants::RM_XLOG_ID => Self::decode_xlog_record(&mut buf, decoded, record_end_lsn),
+            pg_constants::RM_XLOG_ID => {
+                Self::decode_xlog_record(&mut buf, decoded, next_record_lsn)
+            }
             pg_constants::RM_LOGICALMSG_ID => {
                 Self::decode_logical_message_record(&mut buf, decoded)
             }
