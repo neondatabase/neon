@@ -35,7 +35,6 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, MissedTickBehavior};
-use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
@@ -285,7 +284,10 @@ impl SafekeeperPostgresHandler {
             tokio::select! {
                 // todo: add read|write .context to these errors
                 r = network_reader.run(msg_tx, msg_rx, reply_tx, timeline, next_msg) => r,
-                r = network_write(pgb, reply_rx, pageserver_feedback_rx, &timeline_cancel) => r,
+                r = network_write(pgb, reply_rx, pageserver_feedback_rx) => r,
+                _ = timeline_cancel.cancelled() => {
+                    return Err(CopyStreamHandlerEnd::Cancelled);
+                }
             }
         } else {
             res.map(|_| ())
@@ -337,7 +339,7 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
     ) -> Result<(WalResidentTimeline, ProposerAcceptorMessage), CopyStreamHandlerEnd> {
         // Receive information about server to create timeline, if not yet.  Use a dummy
         // cancellation token because we aren't holding a Timeline ref yet.
-        let next_msg = read_message(self.pgb_reader, &CancellationToken::new()).await?;
+        let next_msg = read_message(self.pgb_reader).await?;
         let tli = match next_msg {
             ProposerAcceptorMessage::Greeting(ref greeting) => {
                 info!(
@@ -364,6 +366,7 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
         Ok((tli, next_msg))
     }
 
+    /// This function is cancellation-safe (only does network I/O and channel read/writes).
     async fn run(
         self,
         msg_tx: Sender<ProposerAcceptorMessage>,
@@ -372,8 +375,6 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
         tli: WalResidentTimeline,
         next_msg: ProposerAcceptorMessage,
     ) -> Result<(), CopyStreamHandlerEnd> {
-        let tli_cancel = tli.tli.cancel.clone();
-
         *self.acceptor_handle = Some(WalAcceptor::spawn(
             tli,
             msg_rx,
@@ -382,7 +383,7 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
         ));
 
         // Forward all messages to WalAcceptor
-        read_network_loop(self.pgb_reader, msg_tx, next_msg, &tli_cancel).await
+        read_network_loop(self.pgb_reader, msg_tx, next_msg).await
     }
 }
 
@@ -390,16 +391,8 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
 /// TODO: Return Ok(None) on graceful termination.
 async fn read_message<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_reader: &mut PostgresBackendReader<IO>,
-    cancel: &CancellationToken,
 ) -> Result<ProposerAcceptorMessage, CopyStreamHandlerEnd> {
-    let copy_data = tokio::select! {
-        copy_data = pgb_reader.read_copy_message() => {
-            copy_data?
-        },
-        _ = cancel.cancelled() => {
-            return Err(CopyStreamHandlerEnd::Cancelled)
-        }
-    };
+    let copy_data = pgb_reader.read_copy_message().await?;
     let msg = ProposerAcceptorMessage::parse(copy_data)?;
     Ok(msg)
 }
@@ -408,7 +401,6 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_reader: &mut PostgresBackendReader<IO>,
     msg_tx: Sender<ProposerAcceptorMessage>,
     mut next_msg: ProposerAcceptorMessage,
-    cancel: &CancellationToken,
 ) -> Result<(), CopyStreamHandlerEnd> {
     /// Threshold for logging slow WalAcceptor sends.
     const SLOW_THRESHOLD: Duration = Duration::from_secs(5);
@@ -439,28 +431,25 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
                     Err(SendTimeoutError::Closed(_)) => return Ok(()),
                 }
             },
-            _ = cancel.cancelled() => {
-                return Err(CopyStreamHandlerEnd::Cancelled)
-            }
-
         }
 
         // Update metrics. Will be decremented in WalAcceptor.
         WAL_RECEIVER_QUEUE_DEPTH_TOTAL.inc();
         WAL_RECEIVER_QUEUE_SIZE_TOTAL.add(size as i64);
 
-        next_msg = read_message(pgb_reader, cancel).await?;
+        next_msg = read_message(pgb_reader).await?;
     }
 }
 
 /// Read replies from WalAcceptor and pass them back to socket. Returns Ok(())
 /// if reply_rx closed; it must mean WalAcceptor terminated, joining it should
 /// tell the error.
+///
+/// This function is cancellation-safe (only does network I/O and channel read/writes).
 async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_writer: &mut PostgresBackend<IO>,
     mut reply_rx: Receiver<AcceptorProposerMessage>,
     mut pageserver_feedback_rx: tokio::sync::broadcast::Receiver<PageserverFeedback>,
-    cancel: &CancellationToken,
 ) -> Result<(), CopyStreamHandlerEnd> {
     let mut buf = BytesMut::with_capacity(128);
 
@@ -491,9 +480,6 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
                     }
                     _ => None,
                 },
-            _ = cancel.cancelled() => {
-                return Err(CopyStreamHandlerEnd::Cancelled)
-            }
         };
 
         let Some(msg) = msg else {
@@ -559,6 +545,10 @@ impl WalAcceptor {
 
     /// The main loop. Returns Ok(()) if either msg_rx or reply_tx got closed;
     /// it must mean that network thread terminated.
+    ///
+    /// This function is *not* cancellation safe, it does local disk I/O: it should always
+    /// be allowed to run to completion. It respects Timeline::cancel and shuts down cleanly
+    /// when that gets triggered.
     async fn run(&mut self) -> anyhow::Result<()> {
         let walreceiver_guard = self.tli.get_walreceivers().register(self.conn_id);
 
