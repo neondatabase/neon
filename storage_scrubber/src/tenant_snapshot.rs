@@ -16,7 +16,7 @@ use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::IndexPart;
 use pageserver_api::shard::TenantShardId;
-use remote_storage::GenericRemoteStorage;
+use remote_storage::{GenericRemoteStorage, S3Config};
 use utils::generation::Generation;
 use utils::id::TenantId;
 
@@ -24,6 +24,7 @@ pub struct SnapshotDownloader {
     s3_client: Arc<Client>,
     s3_root: RootTarget,
     bucket_config: BucketConfig,
+    bucket_config_s3: S3Config,
     tenant_id: TenantId,
     output_path: Utf8PathBuf,
     concurrency: usize,
@@ -36,12 +37,17 @@ impl SnapshotDownloader {
         output_path: Utf8PathBuf,
         concurrency: usize,
     ) -> anyhow::Result<Self> {
+        let bucket_config_s3 = match &bucket_config.0.storage {
+            remote_storage::RemoteStorageKind::AwsS3(config) => config.clone(),
+            _ => panic!("only S3 configuration is supported for snapshot downloading"),
+        };
         let (s3_client, s3_root) =
-            init_remote_s3(bucket_config.clone(), NodeKind::Pageserver).await?;
+            init_remote_s3(bucket_config_s3.clone(), NodeKind::Pageserver).await?;
         Ok(Self {
             s3_client,
             s3_root,
             bucket_config,
+            bucket_config_s3,
             tenant_id,
             output_path,
             concurrency,
@@ -87,7 +93,7 @@ impl SnapshotDownloader {
             let versions = self
                 .s3_client
                 .list_object_versions()
-                .bucket(self.bucket_config.bucket.clone())
+                .bucket(self.bucket_config_s3.bucket_name.clone())
                 .prefix(&remote_layer_path)
                 .send()
                 .await?;
@@ -96,7 +102,7 @@ impl SnapshotDownloader {
             };
             download_object_to_file_s3(
                 &self.s3_client,
-                &self.bucket_config.bucket,
+                &self.bucket_config_s3.bucket_name,
                 &remote_layer_path,
                 version.version_id.as_deref(),
                 &local_path,

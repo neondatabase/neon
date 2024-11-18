@@ -3578,7 +3578,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
- "toml_edit",
  "utils",
  "workspace_hack",
 ]
