@@ -1013,7 +1013,9 @@ impl BeMessage<'_> {
             }
 
             BeMessage::InterpretedWalRecords(rec) => {
-                buf.put_u8(b'd'); // arbitrary byte
+                // We use the COPY_DATA_TAG for our custom message
+                // since this tag is interpreted as raw bytes.
+                buf.put_u8(b'd');
                 write_body(buf, |buf| {
                     buf.put_u8(b'0'); // matches INTERPRETED_WAL_RECORD_TAG in postgres-protocol
                                       // dependency
