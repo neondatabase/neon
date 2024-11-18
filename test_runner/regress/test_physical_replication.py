@@ -23,8 +23,8 @@ def test_physical_replication(neon_simple_env: NeonEnv):
                 p_cur.execute(
                     "CREATE TABLE t(pk bigint primary key, payload text default repeat('?',200))"
                 )
-        time.sleep(1)
         with env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary") as secondary:
+            wait_replica_caughtup(primary, secondary)
             with primary.connect() as p_con:
                 with p_con.cursor() as p_cur:
                     with secondary.connect() as s_con:
@@ -71,7 +71,6 @@ def test_physical_replication_config_mismatch_max_connections(neon_simple_env: N
     This test tests all those cases of running out of space in known-assigned XIDs array that
     we can hit with `recovery_pause_on_misconfig=false`, which are unreachable in unpatched
     Postgres.
-    
     There's a similar check for `max_locks_per_transactions` too, which is related to running out
     of space in the lock manager rather than known-assigned XIDs. Similar story with that, although
     running out of space in the lock manager is possible in unmodified Postgres too. Enforcing the
@@ -89,13 +88,12 @@ def test_physical_replication_config_mismatch_max_connections(neon_simple_env: N
                 p_cur.execute(
                     "CREATE TABLE t(pk bigint primary key, payload text default repeat('?',200))"
                 )
-        time.sleep(1)
-
         with env.endpoints.new_replica_start(
             origin=primary,
             endpoint_id="secondary",
             config_lines=["max_connections=5"],
         ) as secondary:
+            wait_replica_caughtup(primary, secondary)
             with secondary.connect() as s_con:
                 with s_con.cursor() as s_cur:
                     cursors = []
@@ -109,7 +107,7 @@ def test_physical_replication_config_mismatch_max_connections(neon_simple_env: N
                     for p_cur in cursors:
                         p_cur.execute("commit")
 
-                    time.sleep(5)
+                    wait_replica_caughtup(primary, secondary)
                     s_cur.execute("select count(*) from t")
                     assert s_cur.fetchall()[0][0] == 10
 
@@ -128,13 +126,14 @@ def test_physical_replication_config_mismatch_max_prepared(neon_simple_env: Neon
     p_con = primary.connect()
     p_cur = p_con.cursor()
     p_cur.execute("CREATE TABLE t(pk bigint primary key, payload text default repeat('?',200))")
-    time.sleep(1)
 
     secondary = env.endpoints.new_replica_start(
         origin=primary,
         endpoint_id="secondary",
         config_lines=["max_prepared_transactions=5"],
     )
+    wait_replica_caughtup(primary, secondary)
+
     s_con = secondary.connect()
     s_cur = s_con.cursor()
     cursors = []
@@ -178,7 +177,7 @@ def do_txn(ep, i):
 def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_env: NeonEnv):
     """
     Test for primary and replica with different configuration settings (max_connections).
-    In this case large difference in this setting and larger number of concurrent trsanctions at primary
+    In this case large difference in this setting and larger number of concurrent transactions at primary
     # cause too many known xids error  at replica.
     """
     env = neon_simple_env
@@ -236,9 +235,9 @@ def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_en
 
 def test_physical_replication_config_mismatch_max_locks_per_transaction(neon_simple_env: NeonEnv):
     """
-    Test for primary and replica with different configuration settings (max_connections).
-    In this case large difference in this setting and larger number of concurrent trsanctions at primary
-    # cause too many known xids error  at replica.
+    Test for primary and replica with different configuration settings (max_locks_per_transaction).
+    In  conjunction with different number of max_connections at primary and standby it "cause out of shared memory"
+    error if primary obtain larger number of locks.
     """
     env = neon_simple_env
     primary = env.endpoints.create_start(
