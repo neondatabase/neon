@@ -623,6 +623,8 @@ impl WalAcceptor {
                 }
 
                 _ = self.tli.cancel.cancelled() => {
+                    // FIXME: this outer select! risks leaving local I/O in flight after
+                    // cancellation: see https://github.com/neondatabase/neon/issues/9788
                     break;
                 }
             };
