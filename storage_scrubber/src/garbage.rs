@@ -177,7 +177,7 @@ async fn find_garbage_inner(
     }));
 
     // Enumerate Tenants in S3, and check if each one exists in Console
-    tracing::info!("Finding all tenants in bucket {}...", bucket_config.bucket);
+    tracing::info!("Finding all tenants in {}...", bucket_config.desc_str());
     let tenants = stream_tenants(&remote_client, &target);
     let tenants_checked = tenants.map_ok(|t| {
         let api_client = cloud_admin_api_client.clone();
@@ -524,7 +524,7 @@ pub async fn purge_garbage(
         init_remote(garbage_list.bucket_config.clone(), garbage_list.node_kind).await?;
 
     assert_eq!(
-        &garbage_list.bucket_config.bucket,
+        garbage_list.bucket_config.bucket_name().unwrap(),
         remote_client.bucket_name().unwrap()
     );
 
