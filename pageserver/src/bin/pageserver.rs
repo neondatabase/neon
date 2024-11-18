@@ -154,24 +154,35 @@ fn main() -> anyhow::Result<()> {
             },
         };
 
-        let started = Instant::now();
-        syncfs(dirfd)?;
-        let elapsed = started.elapsed();
-        info!(
-            elapsed_ms = elapsed.as_millis(),
-            "made tenant directory contents durable"
-        );
+        if conf.no_sync {
+            info!("Skipping syncfs on startup");
+        } else {
+            let started = Instant::now();
+            syncfs(dirfd)?;
+            let elapsed = started.elapsed();
+            info!(
+                elapsed_ms = elapsed.as_millis(),
+                "made tenant directory contents durable"
+            );
+        }
     }
 
     // Initialize up failpoints support
     let scenario = failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
+    tracing::info!("Initializing virtual_file...");
     virtual_file::init(
         conf.max_file_descriptors,
         conf.virtual_file_io_engine,
         conf.virtual_file_io_mode,
+        if conf.no_sync {
+            virtual_file::SyncMode::UnsafeNoSync
+        } else {
+            virtual_file::SyncMode::Sync
+        },
     );
+    tracing::info!("Initializing page_cache...");
     page_cache::init(conf.page_cache_size);
 
     start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;

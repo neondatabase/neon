@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import enum
 import json
-import os
 import time
 from typing import TYPE_CHECKING
 
@@ -13,7 +12,7 @@ from fixtures.neon_fixtures import (
     generate_uploads_and_deletions,
 )
 from fixtures.pageserver.http import PageserverApiException
-from fixtures.utils import wait_until
+from fixtures.utils import skip_in_debug_build, wait_until
 from fixtures.workload import Workload
 
 if TYPE_CHECKING:
@@ -32,7 +31,7 @@ AGGRESIVE_COMPACTION_TENANT_CONF = {
 }
 
 
-@pytest.mark.skipif(os.environ.get("BUILD_TYPE") == "debug", reason="only run with release build")
+@skip_in_debug_build("only run with release build")
 def test_pageserver_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     """
     This is a smoke test that compaction kicks in. The workload repeatedly churns
@@ -123,10 +122,19 @@ LARGE_STRIPES = 32768
 
 
 @pytest.mark.parametrize(
-    "shard_count,stripe_size", [(None, None), (4, TINY_STRIPES), (4, LARGE_STRIPES)]
+    "shard_count,stripe_size,gc_compaction",
+    [
+        (None, None, False),
+        (4, TINY_STRIPES, False),
+        (4, LARGE_STRIPES, False),
+        (4, LARGE_STRIPES, True),
+    ],
 )
 def test_sharding_compaction(
-    neon_env_builder: NeonEnvBuilder, stripe_size: int, shard_count: Optional[int]
+    neon_env_builder: NeonEnvBuilder,
+    stripe_size: int,
+    shard_count: Optional[int],
+    gc_compaction: bool,
 ):
     """
     Use small stripes, small layers, and small compaction thresholds to exercise how compaction
@@ -217,6 +225,17 @@ def test_sharding_compaction(
 
     # Assert that everything is still readable
     workload.validate()
+
+    if gc_compaction:
+        # trigger gc compaction to get more coverage for that, piggyback on the existing workload
+        for shard in env.storage_controller.locate(tenant_id):
+            pageserver = env.get_pageserver(shard["node_id"])
+            tenant_shard_id = shard["shard_id"]
+            pageserver.http_client().timeline_compact(
+                tenant_shard_id,
+                timeline_id,
+                enhanced_gc_bottom_most_compaction=True,
+            )
 
 
 class CompactionAlgorithm(str, enum.Enum):

@@ -19,9 +19,9 @@ use tracing::{error, info, warn};
 use crate::auth::parse_endpoint_param;
 use crate::cancellation::CancelClosure;
 use crate::context::RequestMonitoring;
+use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::messages::MetricsAuxInfo;
-use crate::control_plane::provider::ApiLockError;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
 use crate::proxy::neon_option;
@@ -135,13 +135,13 @@ impl ConnCfg {
     /// Apply startup message params to the connection config.
     pub(crate) fn set_startup_params(&mut self, params: &StartupMessageParams) {
         // Only set `user` if it's not present in the config.
-        // Web auth flow takes username from the console's response.
+        // Console redirect auth flow takes username from the console's response.
         if let (None, Some(user)) = (self.get_user(), params.get("user")) {
             self.user(user);
         }
 
         // Only set `dbname` if it's not present in the config.
-        // Web auth flow takes dbname from the console's response.
+        // Console redirect auth flow takes dbname from the console's response.
         if let (None, Some(dbname)) = (self.get_dbname(), params.get("database")) {
             self.dbname(dbname);
         }

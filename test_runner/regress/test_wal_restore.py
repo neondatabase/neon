@@ -64,6 +64,7 @@ def test_wal_restore(
                 ),
                 str(data_dir),
                 str(port),
+                env.pg_version,
             ]
         )
         restored.start()
@@ -127,6 +128,7 @@ def test_wal_restore_initdb(
                 ),
                 str(data_dir),
                 str(port),
+                env.pg_version,
             ]
         )
         restored.start()

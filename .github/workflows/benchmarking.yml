@@ -240,8 +240,9 @@ jobs:
       env:
         REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
+    # Post both success and failure to the Slack channel
     - name: Post to a Slack channel
-      if: ${{ github.event.schedule && failure() }}
+      if: ${{ github.event.schedule }}
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C06T9AMNDQQ" # on-call-compute-staging-stream
@@ -545,12 +546,12 @@ jobs:
         arch=$(uname -m | sed 's/x86_64/amd64/g' | sed 's/aarch64/arm64/g')
 
         cd /home/nonroot
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-17/libpq5_17.0-1.pgdg110+1_${arch}.deb"
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.4-1.pgdg110+2_${arch}.deb"
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.4-1.pgdg110+2_${arch}.deb"
-        dpkg -x libpq5_17.0-1.pgdg110+1_${arch}.deb pg
-        dpkg -x postgresql-16_16.4-1.pgdg110+2_${arch}.deb pg
-        dpkg -x postgresql-client-16_16.4-1.pgdg110+2_${arch}.deb pg
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-17/libpq5_17.1-1.pgdg110+1_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.5-1.pgdg110+1_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.5-1.pgdg110+1_${arch}.deb"
+        dpkg -x libpq5_17.1-1.pgdg110+1_${arch}.deb pg
+        dpkg -x postgresql-16_16.5-1.pgdg110+1_${arch}.deb pg
+        dpkg -x postgresql-client-16_16.5-1.pgdg110+1_${arch}.deb pg
 
         mkdir -p /tmp/neon/pg_install/v16/bin
         ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench

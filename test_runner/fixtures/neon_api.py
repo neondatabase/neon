@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, cast, final
 
 import requests
 
+from fixtures.log_helper import log
+
 if TYPE_CHECKING:
     from typing import Any, Literal, Optional
 
@@ -30,7 +32,11 @@ class NeonAPI:
             kwargs["headers"] = {}
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
 
-        return requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
+        resp = requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
+        log.debug("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
+        resp.raise_for_status()
+
+        return resp
 
     def create_project(
         self,
@@ -66,8 +72,6 @@ class NeonAPI:
             json=data,
         )
 
-        assert resp.status_code == 201
-
         return cast("dict[str, Any]", resp.json())
 
     def get_project_details(self, project_id: str) -> dict[str, Any]:
@@ -79,7 +83,7 @@ class NeonAPI:
                 "Content-Type": "application/json",
             },
         )
-        assert resp.status_code == 200
+
         return cast("dict[str, Any]", resp.json())
 
     def delete_project(
@@ -94,8 +98,6 @@ class NeonAPI:
                 "Content-Type": "application/json",
             },
         )
-
-        assert resp.status_code == 200
 
         return cast("dict[str, Any]", resp.json())
 
@@ -112,8 +114,6 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
         return cast("dict[str, Any]", resp.json())
 
     def suspend_endpoint(
@@ -129,8 +129,6 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
         return cast("dict[str, Any]", resp.json())
 
     def restart_endpoint(
@@ -145,8 +143,6 @@ class NeonAPI:
                 "Accept": "application/json",
             },
         )
-
-        assert resp.status_code == 200
 
         return cast("dict[str, Any]", resp.json())
 
@@ -178,8 +174,6 @@ class NeonAPI:
             json=data,
         )
 
-        assert resp.status_code == 201
-
         return cast("dict[str, Any]", resp.json())
 
     def get_connection_uri(
@@ -206,8 +200,6 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
         return cast("dict[str, Any]", resp.json())
 
     def get_branches(self, project_id: str) -> dict[str, Any]:
@@ -218,8 +210,6 @@ class NeonAPI:
                 "Accept": "application/json",
             },
         )
-
-        assert resp.status_code == 200
 
         return cast("dict[str, Any]", resp.json())
 
@@ -232,8 +222,6 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
         return cast("dict[str, Any]", resp.json())
 
     def get_operations(self, project_id: str) -> dict[str, Any]:
@@ -245,8 +233,6 @@ class NeonAPI:
                 "Authorization": f"Bearer {self.__neon_api_key}",
             },
         )
-
-        assert resp.status_code == 200
 
         return cast("dict[str, Any]", resp.json())
 

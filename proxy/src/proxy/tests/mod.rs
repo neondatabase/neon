@@ -20,14 +20,14 @@ use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
 use super::*;
 use crate::auth::backend::{
-    ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned, TestBackend,
+    ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned,
 };
 use crate::config::{CertResolver, RetryConfig};
-use crate::control_plane::messages::{ControlPlaneError, Details, MetricsAuxInfo, Status};
-use crate::control_plane::provider::{
-    CachedAllowedIps, CachedRoleSecret, ControlPlaneBackend, NodeInfoCache,
+use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
+use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
+use crate::control_plane::{
+    self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo, NodeInfoCache,
 };
-use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
 use crate::types::{BranchId, EndpointId, ProjectId};
 use crate::{sasl, scram};
@@ -490,7 +490,7 @@ impl ConnectMechanism for TestConnectMechanism {
     fn update_connect_config(&self, _conf: &mut compute::ConnCfg) {}
 }
 
-impl TestBackend for TestConnectMechanism {
+impl TestControlPlaneClient for TestConnectMechanism {
     fn wake_compute(&self) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         let mut counter = self.counter.lock().unwrap();
         let action = self.sequence[*counter];
@@ -498,18 +498,19 @@ impl TestBackend for TestConnectMechanism {
         match action {
             ConnectAction::Wake => Ok(helper_create_cached_node_info(self.cache)),
             ConnectAction::WakeFail => {
-                let err =
-                    control_plane::errors::ApiError::ControlPlane(Box::new(ControlPlaneError {
+                let err = control_plane::errors::ControlPlaneError::Message(Box::new(
+                    ControlPlaneErrorMessage {
                         http_status_code: StatusCode::BAD_REQUEST,
                         error: "TEST".into(),
                         status: None,
-                    }));
+                    },
+                ));
                 assert!(!err.could_retry());
-                Err(control_plane::errors::WakeComputeError::ApiError(err))
+                Err(control_plane::errors::WakeComputeError::ControlPlane(err))
             }
             ConnectAction::WakeRetry => {
-                let err =
-                    control_plane::errors::ApiError::ControlPlane(Box::new(ControlPlaneError {
+                let err = control_plane::errors::ControlPlaneError::Message(Box::new(
+                    ControlPlaneErrorMessage {
                         http_status_code: StatusCode::BAD_REQUEST,
                         error: "TEST".into(),
                         status: Some(Status {
@@ -523,9 +524,10 @@ impl TestBackend for TestConnectMechanism {
                                 user_facing_message: None,
                             },
                         }),
-                    }));
+                    },
+                ));
                 assert!(err.could_retry());
-                Err(control_plane::errors::WakeComputeError::ApiError(err))
+                Err(control_plane::errors::WakeComputeError::ControlPlane(err))
             }
             x => panic!("expecting action {x:?}, wake_compute is called instead"),
         }
@@ -538,7 +540,7 @@ impl TestBackend for TestConnectMechanism {
         unimplemented!("not used in tests")
     }
 
-    fn dyn_clone(&self) -> Box<dyn TestBackend> {
+    fn dyn_clone(&self) -> Box<dyn TestControlPlaneClient> {
         Box::new(self.clone())
     }
 }
@@ -562,7 +564,7 @@ fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
 ) -> auth::Backend<'static, ComputeCredentials> {
     let user_info = auth::Backend::ControlPlane(
-        MaybeOwned::Owned(ControlPlaneBackend::Test(Box::new(mechanism.clone()))),
+        MaybeOwned::Owned(ControlPlaneClient::Test(Box::new(mechanism.clone()))),
         ComputeCredentials {
             info: ComputeUserInfo {
                 endpoint: "endpoint".into(),
