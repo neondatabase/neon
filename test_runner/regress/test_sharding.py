@@ -20,7 +20,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.utils import assert_prefix_empty, assert_prefix_not_empty
 from fixtures.remote_storage import s3_storage
-from fixtures.utils import wait_until
+from fixtures.utils import skip_in_debug_build, wait_until
 from fixtures.workload import Workload
 from pytest_httpserver import HTTPServer
 from typing_extensions import override
@@ -256,6 +256,7 @@ def test_sharding_split_compaction(
     # Cleanup part 1: while layers are still in PITR window, we should only drop layers that are fully redundant
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
+        assert ps is not None
 
         # Invoke compaction: this should drop any layers that don't overlap with the shard's key stripes
         detail_before = ps.http_client().timeline_detail(shard, timeline_id)
@@ -852,12 +853,9 @@ def test_sharding_split_stripe_size(
     wait_until(10, 1, assert_restart_notification)
 
 
-@pytest.mark.skipif(
-    # The quantity of data isn't huge, but debug can be _very_ slow, and the things we're
-    # validating in this test don't benefit much from debug assertions.
-    os.getenv("BUILD_TYPE") == "debug",
-    reason="Avoid running bulkier ingest tests in debug mode",
-)
+# The quantity of data isn't huge, but debug can be _very_ slow, and the things we're
+# validating in this test don't benefit much from debug assertions.
+@skip_in_debug_build("Avoid running bulkier ingest tests in debug mode")
 def test_sharding_ingest_layer_sizes(
     neon_env_builder: NeonEnvBuilder,
 ):

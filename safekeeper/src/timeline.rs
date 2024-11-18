@@ -109,16 +109,11 @@ pub type ReadGuardSharedState<'a> = RwLockReadGuard<'a, SharedState>;
 pub struct WriteGuardSharedState<'a> {
     tli: Arc<Timeline>,
     guard: RwLockWriteGuard<'a, SharedState>,
-    skip_update: bool,
 }
 
 impl<'a> WriteGuardSharedState<'a> {
     fn new(tli: Arc<Timeline>, guard: RwLockWriteGuard<'a, SharedState>) -> Self {
-        WriteGuardSharedState {
-            tli,
-            guard,
-            skip_update: false,
-        }
+        WriteGuardSharedState { tli, guard }
     }
 }
 
@@ -160,12 +155,10 @@ impl Drop for WriteGuardSharedState<'_> {
             }
         });
 
-        if !self.skip_update {
-            // send notification about shared state update
-            self.tli.shared_state_version_tx.send_modify(|old| {
-                *old += 1;
-            });
-        }
+        // send notification about shared state update
+        self.tli.shared_state_version_tx.send_modify(|old| {
+            *old += 1;
+        });
     }
 }
 

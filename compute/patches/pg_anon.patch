@@ -1,3 +1,45 @@
+commit 00aa659afc9c7336ab81036edec3017168aabf40
+Author: Heikki Linnakangas <heikki@neon.tech>
+Date:   Tue Nov 12 16:59:19 2024 +0200
+
+    Temporarily disable test that depends on timezone
+
+diff --git a/tests/expected/generalization.out b/tests/expected/generalization.out
+index 23ef5fa..9e60deb 100644
+--- a/ext-src/pg_anon-src/tests/expected/generalization.out
++++ b/ext-src/pg_anon-src/tests/expected/generalization.out
+@@ -284,12 +284,9 @@ SELECT anon.generalize_tstzrange('19041107','century');
+  ["Tue Jan 01 00:00:00 1901 PST","Mon Jan 01 00:00:00 2001 PST")
+ (1 row)
+ 
+-SELECT anon.generalize_tstzrange('19041107','millennium');
+-                      generalize_tstzrange                       
+------------------------------------------------------------------
+- ["Thu Jan 01 00:00:00 1001 PST","Mon Jan 01 00:00:00 2001 PST")
+-(1 row)
+-
++-- temporarily disabled, see:
++-- https://gitlab.com/dalibo/postgresql_anonymizer/-/commit/199f0a392b37c59d92ae441fb8f037e094a11a52#note_2148017485
++--SELECT anon.generalize_tstzrange('19041107','millennium');
+ -- generalize_daterange
+ SELECT anon.generalize_daterange('19041107');
+   generalize_daterange   
+diff --git a/tests/sql/generalization.sql b/tests/sql/generalization.sql
+index b868344..b4fc977 100644
+--- a/ext-src/pg_anon-src/tests/sql/generalization.sql
++++ b/ext-src/pg_anon-src/tests/sql/generalization.sql
+@@ -61,7 +61,9 @@ SELECT anon.generalize_tstzrange('19041107','month');
+ SELECT anon.generalize_tstzrange('19041107','year');
+ SELECT anon.generalize_tstzrange('19041107','decade');
+ SELECT anon.generalize_tstzrange('19041107','century');
+-SELECT anon.generalize_tstzrange('19041107','millennium');
++-- temporarily disabled, see:
++-- https://gitlab.com/dalibo/postgresql_anonymizer/-/commit/199f0a392b37c59d92ae441fb8f037e094a11a52#note_2148017485
++--SELECT anon.generalize_tstzrange('19041107','millennium');
+ 
+ -- generalize_daterange
+ SELECT anon.generalize_daterange('19041107');
+
 commit 7dd414ee75f2875cffb1d6ba474df1f135a6fc6f
 Author: Alexey Masterov <alexeymasterov@neon.tech>
 Date:   Fri May 31 06:34:26 2024 +0000

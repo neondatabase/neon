@@ -243,7 +243,7 @@ use self::index::IndexPart;
 use super::metadata::MetadataUpdate;
 use super::storage_layer::{Layer, LayerName, ResidentLayer};
 use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
-use super::Generation;
+use super::{DeleteTimelineError, Generation};
 
 pub(crate) use download::{
     download_index_part, download_tenant_manifest, is_temp_download_file,
@@ -574,12 +574,18 @@ impl RemoteTimelineClient {
 
             if latest_index_generation > index_generation {
                 // Unexpected!  Why are we loading such an old index if a more recent one exists?
-                tracing::warn!(
+                // We will refuse to proceed, as there is no reasonable scenario where this should happen, but
+                // there _is_ a clear bug/corruption scenario where it would happen (controller sets the generation
+                // backwards).
+                tracing::error!(
                     ?index_generation,
                     ?latest_index_generation,
                     ?latest_index_mtime,
                     "Found a newer index while loading an old one"
                 );
+                return Err(DownloadError::Fatal(
+                    "Index age exceeds threshold and a newer index exists".into(),
+                ));
             }
         }
 
@@ -1544,15 +1550,17 @@ impl RemoteTimelineClient {
     /// Prerequisites: UploadQueue should be in stopped state and deleted_at should be successfuly set.
     /// The function deletes layer files one by one, then lists the prefix to see if we leaked something
     /// deletes leaked files if any and proceeds with deletion of index file at the end.
-    pub(crate) async fn delete_all(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub(crate) async fn delete_all(self: &Arc<Self>) -> Result<(), DeleteTimelineError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         let layers: Vec<RemotePath> = {
             let mut locked = self.upload_queue.lock().unwrap();
-            let stopped = locked.stopped_mut()?;
+            let stopped = locked.stopped_mut().map_err(DeleteTimelineError::Other)?;
 
             if !matches!(stopped.deleted_at, SetDeletedFlagProgress::Successful(_)) {
-                anyhow::bail!("deleted_at is not set")
+                return Err(DeleteTimelineError::Other(anyhow::anyhow!(
+                    "deleted_at is not set"
+                )));
             }
 
             debug_assert!(stopped.upload_queue_for_deletion.no_pending_work());
@@ -1587,7 +1595,10 @@ impl RemoteTimelineClient {
         };
 
         let layer_deletion_count = layers.len();
-        self.deletion_queue_client.push_immediate(layers).await?;
+        self.deletion_queue_client
+            .push_immediate(layers)
+            .await
+            .map_err(|_| DeleteTimelineError::Cancelled)?;
 
         // Delete the initdb.tar.zst, which is not always present, but deletion attempts of
         // inexistant objects are not considered errors.
@@ -1595,7 +1606,8 @@ impl RemoteTimelineClient {
             remote_initdb_archive_path(&self.tenant_shard_id.tenant_id, &self.timeline_id);
         self.deletion_queue_client
             .push_immediate(vec![initdb_path])
-            .await?;
+            .await
+            .map_err(|_| DeleteTimelineError::Cancelled)?;
 
         // Do not delete index part yet, it is needed for possible retry. If we remove it first
         // and retry will arrive to different pageserver there wont be any traces of it on remote storage
@@ -1603,7 +1615,9 @@ impl RemoteTimelineClient {
 
         // Execute all pending deletions, so that when we proceed to do a listing below, we aren't
         // taking the burden of listing all the layers that we already know we should delete.
-        self.flush_deletion_queue().await?;
+        self.flush_deletion_queue()
+            .await
+            .map_err(|_| DeleteTimelineError::Cancelled)?;
 
         let cancel = shutdown_token();
 
@@ -1666,28 +1680,32 @@ impl RemoteTimelineClient {
         if !remaining_layers.is_empty() {
             self.deletion_queue_client
                 .push_immediate(remaining_layers)
-                .await?;
+                .await
+                .map_err(|_| DeleteTimelineError::Cancelled)?;
         }
 
         fail::fail_point!("timeline-delete-before-index-delete", |_| {
-            Err(anyhow::anyhow!(
+            Err(DeleteTimelineError::Other(anyhow::anyhow!(
                 "failpoint: timeline-delete-before-index-delete"
-            ))?
+            )))?
         });
 
         debug!("enqueuing index part deletion");
         self.deletion_queue_client
             .push_immediate([latest_index].to_vec())
-            .await?;
+            .await
+            .map_err(|_| DeleteTimelineError::Cancelled)?;
 
         // Timeline deletion is rare and we have probably emitted a reasonably number of objects: wait
         // for a flush to a persistent deletion list so that we may be sure deletion will occur.
-        self.flush_deletion_queue().await?;
+        self.flush_deletion_queue()
+            .await
+            .map_err(|_| DeleteTimelineError::Cancelled)?;
 
         fail::fail_point!("timeline-delete-after-index-delete", |_| {
-            Err(anyhow::anyhow!(
+            Err(DeleteTimelineError::Other(anyhow::anyhow!(
                 "failpoint: timeline-delete-after-index-delete"
-            ))?
+            )))?
         });
 
         info!(prefix=%timeline_storage_path, referenced=layer_deletion_count, not_referenced=%not_referenced_count, "done deleting in timeline prefix, including index_part.json");
@@ -2200,6 +2218,18 @@ impl RemoteTimelineClient {
         let mut inner = self.upload_queue.lock().unwrap();
         inner.initialized_mut()?;
         Ok(UploadQueueAccessor { inner })
+    }
+
+    pub(crate) fn no_pending_work(&self) -> bool {
+        let inner = self.upload_queue.lock().unwrap();
+        match &*inner {
+            UploadQueue::Uninitialized
+            | UploadQueue::Stopped(UploadQueueStopped::Uninitialized) => true,
+            UploadQueue::Stopped(UploadQueueStopped::Deletable(x)) => {
+                x.upload_queue_for_deletion.no_pending_work()
+            }
+            UploadQueue::Initialized(x) => x.no_pending_work(),
+        }
     }
 }
 

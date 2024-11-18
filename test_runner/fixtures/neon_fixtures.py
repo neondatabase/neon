@@ -286,7 +286,7 @@ class PgProtocol:
         return self.safe_psql_many([query], **kwargs)[0]
 
     def safe_psql_many(
-        self, queries: Iterable[str], log_query=True, **kwargs: Any
+        self, queries: Iterable[str], log_query: bool = True, **kwargs: Any
     ) -> list[list[tuple[Any, ...]]]:
         """
         Execute queries against the node and return all rows.
@@ -306,7 +306,7 @@ class PgProtocol:
                         result.append(cur.fetchall())
         return result
 
-    def safe_psql_scalar(self, query, log_query=True) -> Any:
+    def safe_psql_scalar(self, query: str, log_query: bool = True) -> Any:
         """
         Execute query returning single row with single column.
         """
@@ -1065,6 +1065,9 @@ class NeonEnv:
                 "http_auth_type": http_auth_type,
                 # Default which can be overriden with `NeonEnvBuilder.pageserver_config_override`
                 "availability_zone": "us-east-2a",
+                # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
+                # the pageserver taking a long time to start up due to syncfs flushing other tests' data
+                "no_sync": True,
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
@@ -1782,7 +1785,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.request(
             "PUT",
             f"{self.api}/control/v1/node/{node_id}/drain",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
 
     def cancel_node_drain(self, node_id):
@@ -1790,7 +1793,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.request(
             "DELETE",
             f"{self.api}/control/v1/node/{node_id}/drain",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
 
     def node_fill(self, node_id):
@@ -1798,7 +1801,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.request(
             "PUT",
             f"{self.api}/control/v1/node/{node_id}/fill",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
 
     def cancel_node_fill(self, node_id):
@@ -1806,14 +1809,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.request(
             "DELETE",
             f"{self.api}/control/v1/node/{node_id}/fill",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
 
     def node_status(self, node_id):
         response = self.request(
             "GET",
             f"{self.api}/control/v1/node/{node_id}",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
         return response.json()
 
@@ -1829,7 +1832,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response = self.request(
             "GET",
             f"{self.api}/control/v1/node",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
         return response.json()
 
@@ -1857,7 +1860,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         tenant_config: Optional[dict[Any, Any]] = None,
-        placement_policy: Optional[Union[dict[Any, Any] | str]] = None,
+        placement_policy: Optional[Union[dict[Any, Any], str]] = None,
     ):
         """
         Use this rather than pageserver_api() when you need to include shard parameters
@@ -2376,6 +2379,17 @@ class NeonPageserver(PgProtocol, LogUtils):
         #
         # The entries in the list are regular experessions.
         self.allowed_errors: list[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
+        # Store persistent failpoints that should be reapplied on each start
+        self._persistent_failpoints: dict[str, str] = {}
+
+    def add_persistent_failpoint(self, name: str, action: str):
+        """
+        Add a failpoint that will be automatically reapplied each time the pageserver starts.
+        The failpoint will be set immediately if the pageserver is running.
+        """
+        self._persistent_failpoints[name] = action
+        if self.running:
+            self.http_client().configure_failpoints([(name, action)])
 
     def timeline_dir(
         self,
@@ -2442,6 +2456,15 @@ class NeonPageserver(PgProtocol, LogUtils):
         Returns self.
         """
         assert self.running is False
+
+        if self._persistent_failpoints:
+            # Tests shouldn't use this mechanism _and_ set FAILPOINTS explicitly
+            assert extra_env_vars is None or "FAILPOINTS" not in extra_env_vars
+            if extra_env_vars is None:
+                extra_env_vars = {}
+            extra_env_vars["FAILPOINTS"] = ",".join(
+                f"{k}={v}" for (k, v) in self._persistent_failpoints.items()
+            )
 
         storage = self.env.pageserver_remote_storage
         if isinstance(storage, S3Storage):
@@ -4519,7 +4542,7 @@ def pytest_addoption(parser: Parser):
 
 
 SMALL_DB_FILE_NAME_REGEX: re.Pattern[str] = re.compile(
-    r"config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql|conf)"
+    r"config-v1|heatmap-v1|tenant-manifest|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
 
 

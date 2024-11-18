@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -21,7 +20,7 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_active,
 )
 from fixtures.pg_version import PgVersion
-from fixtures.utils import wait_until
+from fixtures.utils import skip_in_debug_build, wait_until
 
 
 def test_empty_tenant_size(neon_env_builder: NeonEnvBuilder):
@@ -279,7 +278,7 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Pa
     size_debug_file.write(size_debug)
 
 
-@pytest.mark.skipif(os.environ.get("BUILD_TYPE") == "debug", reason="only run with release build")
+@skip_in_debug_build("only run with release build")
 def test_single_branch_get_tenant_size_grows(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_version: PgVersion
 ):
@@ -315,6 +314,7 @@ def test_single_branch_get_tenant_size_grows(
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> tuple[Lsn, int]:
+        size = 0
         consistent = False
         size_debug = None
 
@@ -360,7 +360,7 @@ def test_single_branch_get_tenant_size_grows(
         collected_responses.append(("CREATE", current_lsn, size))
 
         batch_size = 100
-
+        prev_size = 0
         for i in range(3):
             with endpoint.cursor() as cur:
                 cur.execute(
