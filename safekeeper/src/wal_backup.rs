@@ -259,15 +259,11 @@ impl WalBackupTask {
         while !self.timeline.cancel.is_cancelled() {
             if retry_attempt == 0 {
                 // wait for new WAL to arrive
-                tokio::select! {
-                    r = self.commit_lsn_watch_rx.changed() => {
-                        if let Err(e) = r {
-                            // should never happen, as we hold Arc to timeline and transmitter's lifetime
-                            // is within Timeline's
-                            error!("commit_lsn watch shut down: {:?}", e);
-                            return;
-                        }
-                    },
+                if let Err(e) = self.commit_lsn_watch_rx.changed().await {
+                    // should never happen, as we hold Arc to timeline and transmitter's lifetime
+                    // is within Timeline's
+                    error!("commit_lsn watch shut down: {:?}", e);
+                    return;
                 };
             } else {
                 // or just sleep if we errored previously
