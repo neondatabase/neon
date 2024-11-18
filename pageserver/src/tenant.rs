@@ -2382,6 +2382,12 @@ impl Tenant {
             .remote_client
             .wait_completion()
             .await
+            .map_err(|e| match e {
+                WaitCompletionError::NotInitialized(
+                    e, // If the queue is already stopped, it's a shutdown error.
+                ) if e.is_stopping() => CreateTimelineError::ShuttingDown,
+                e => CreateTimelineError::Other(e.into()),
+            })
             .context("wait for timeline initial uploads to complete")?;
 
         // The creating task is responsible for activating the timeline.

@@ -389,8 +389,6 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
     # so we allow it to log at WARN, even if it is occasionally a false positive.
     env.pageserver.allowed_errors.append(".*failed to freeze and flush.*")
 
-    wait_until_tenant_active(env.pageserver.http_client(), tenant_id)
-
     def create_bg(delay_ms):
         time.sleep(delay_ms / 1000.0)
         try:
