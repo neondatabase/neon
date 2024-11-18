@@ -22,8 +22,8 @@ class PgVersion(str, enum.Enum):
     V16 = "16"
     V17 = "17"
 
-    # Default Postgres Version for tests that don't really depend on Postgres itself
-    DEFAULT = V16
+    # Postgres Version for tests that uses `fixtures.utils.run_only_on_default_postgres`
+    DEFAULT = V17
 
     # Instead of making version an optional parameter in methods, we can use this fake entry
     # to explicitly rely on the default server version (could be different from pg_version fixture value)
