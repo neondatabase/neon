@@ -10,6 +10,7 @@ use remote_storage::GenericRemoteStorage;
 use remote_storage::RemotePath;
 use remote_storage::TimeoutOrCancel;
 use remote_storage::MAX_KEYS_PER_DELETE;
+use utils::pausable_failpoint;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -90,6 +91,7 @@ impl Deleter {
     /// Block until everything in accumulator has been executed
     async fn flush(&mut self) -> Result<(), DeletionQueueError> {
         while !self.accumulator.is_empty() && !self.cancel.is_cancelled() {
+            pausable_failpoint!("deletion-queue-before-execute-pause");
             match self.remote_delete().await {
                 Ok(()) => {
                     // Note: we assume that the remote storage layer returns Ok(()) if some
