@@ -11,9 +11,14 @@ testing = ["pageserver_api/testing"]
 anyhow.workspace = true
 bytes.workspace = true
 pageserver_api.workspace = true
+prost.workspace = true
 postgres_ffi.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tonic.workspace = true
 tracing.workspace = true
 utils.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+
+[build-dependencies]
+tonic-build.workspace = true
