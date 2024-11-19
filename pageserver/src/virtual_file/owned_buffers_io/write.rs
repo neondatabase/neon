@@ -201,7 +201,7 @@ where
     }
 
     /// In addition to bytes submitted in this write, also returns a handle that can control the flush behavior.
-    pub async fn write_buffered_borrowed_controlled(
+    pub(crate) async fn write_buffered_borrowed_controlled(
         &mut self,
         mut chunk: &[u8],
         ctx: &RequestContext,
