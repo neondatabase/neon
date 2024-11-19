@@ -1,3 +1,4 @@
+/.github/ @neondatabase/developer-productivity
 /compute_tools/ @neondatabase/control-plane @neondatabase/compute
 /storage_controller @neondatabase/storage
 /storage_scrubber @neondatabase/storage
