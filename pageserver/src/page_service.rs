@@ -3,6 +3,7 @@
 
 use anyhow::{bail, Context};
 use async_compression::tokio::write::GzipEncoder;
+use async_timer::Oneshot;
 use bytes::Buf;
 use futures::FutureExt;
 use itertools::Itertools;
@@ -22,6 +23,7 @@ use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
 use std::borrow::Cow;
 use std::io;
+use std::pin::Pin;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -314,11 +316,15 @@ struct PageServerHandler {
 
     timeline_handles: TimelineHandles,
 
-    /// Messages queued up for the next processing batch
-    next_batch: Option<BatchedFeMessage>,
-
     /// See [`PageServerConf::server_side_batch_timeout`]
     server_side_batch_timeout: Option<Duration>,
+
+    server_side_batch_timer: Pin<Box<async_timer::oneshot::Timer>>,
+}
+
+struct Carry {
+    msg: BatchedFeMessage,
+    started_at: Instant,
 }
 
 struct TimelineHandles {
@@ -582,8 +588,10 @@ impl PageServerHandler {
             connection_ctx,
             timeline_handles: TimelineHandles::new(tenant_manager),
             cancel,
-            next_batch: None,
             server_side_batch_timeout,
+            server_side_batch_timer: Box::pin(async_timer::oneshot::Timer::new(
+                Duration::from_secs(999),
+            )), // reset each iteration
         }
     }
 
@@ -617,42 +625,87 @@ impl PageServerHandler {
         pgb: &mut PostgresBackend<IO>,
         tenant_id: &TenantId,
         timeline_id: &TimelineId,
+        maybe_carry: &mut Option<Carry>,
         ctx: &RequestContext,
-    ) -> Result<Option<BatchOrEof>, QueryError>
+    ) -> Result<BatchOrEof, QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
-        let mut batch = self.next_batch.take();
-        let mut batch_started_at: Option<std::time::Instant> = None;
+        let mut batching_deadline_storage = None; // TODO: can this just be an unsync once_cell?
 
-        let next_batch: Option<BatchedFeMessage> = loop {
-            let sleep_fut = match (self.server_side_batch_timeout, batch_started_at) {
-                (Some(batch_timeout), Some(started_at)) => futures::future::Either::Left(
-                    tokio::time::sleep_until((started_at + batch_timeout).into()),
-                ),
-                _ => futures::future::Either::Right(futures::future::pending()),
+        loop {
+            // Create a future that will become ready when we need to stop batching.
+            // If there's carry, take the time it already spent batching into consideration.
+            use futures::future::Either;
+            let batching_deadline = match (
+                &*maybe_carry as &Option<Carry>,
+                &mut batching_deadline_storage,
+            ) {
+                (None, None) => Either::Left(futures::future::pending()), // there's no deadline before we have something batched
+                (None, Some(_)) => unreachable!(),
+                (Some(_), Some(fut)) => Either::Right(fut), // below arm already ran
+                (Some(carry), None) => {
+                    match self.server_side_batch_timeout {
+                        None => {
+                            return Ok(BatchOrEof::Batch(smallvec::smallvec![
+                                maybe_carry
+                                    .take()
+                                    .expect("we already checked it's Some")
+                                    .msg
+                            ]))
+                        }
+                        Some(batch_timeout) => {
+                            // Take into consideration the time the carry spent waiting.
+                            let now = Instant::now();
+                            let batch_timeout =
+                                batch_timeout.saturating_sub(now - carry.started_at);
+                            if batch_timeout.is_zero() {
+                                // the timer doesn't support restarting with zero duration
+                                return Ok(BatchOrEof::Batch(smallvec::smallvec![
+                                    maybe_carry
+                                        .take()
+                                        .expect("we already checked it's Some")
+                                        .msg
+                                ]));
+                            } else {
+                                std::future::poll_fn(|ctx| {
+                                    self.server_side_batch_timer
+                                        .restart(batch_timeout, ctx.waker());
+                                    std::task::Poll::Ready(())
+                                })
+                                .await;
+                                batching_deadline_storage = Some(&mut self.server_side_batch_timer);
+                                Either::Right(
+                                    batching_deadline_storage.as_mut().expect("we just set it"),
+                                )
+                            }
+                        }
+                    }
+                }
             };
-
             let msg = tokio::select! {
                 biased;
                 _ = self.cancel.cancelled() => {
                     return Err(QueryError::Shutdown)
                 }
-                msg = pgb.read_message() => {
-                    msg
+                _ = batching_deadline => {
+                    return Ok(BatchOrEof::Batch(smallvec::smallvec![maybe_carry.take().expect("per construction of batching_deadline").msg]));
                 }
-                _ = sleep_fut => {
-                    assert!(batch.is_some(), "batch_started_at => sleep_fut = futures::future::pending()");
-                    trace!("batch timeout");
-                    break None;
-                }
+                msg = pgb.read_message() => { msg }
             };
+
+            let msg_start = Instant::now();
+
+            // Rest of this loop body is trying to batch `msg` into `batch`.
+            // If we can add msg to batch we continue into the next loop iteration.
+            // If we can't add msg to batch batch, we carry `msg` over to the next call.
+
             let copy_data_bytes = match msg? {
                 Some(FeMessage::CopyData(bytes)) => bytes,
                 Some(FeMessage::Terminate) => {
-                    return Ok(Some(BatchOrEof::Eof));
+                    return Ok(BatchOrEof::Eof);
                 }
                 Some(m) => {
                     return Err(QueryError::Other(anyhow::anyhow!(
@@ -660,10 +713,11 @@ impl PageServerHandler {
                     )));
                 }
                 None => {
-                    return Ok(Some(BatchOrEof::Eof));
+                    return Ok(BatchOrEof::Eof);
                 } // client disconnected
             };
             trace!("query: {copy_data_bytes:?}");
+
             fail::fail_point!("ps::handle-pagerequest-message");
 
             // parse request
@@ -705,11 +759,11 @@ impl PageServerHandler {
                                 span,
                                 error: $error,
                             };
-                            let batch_and_error = match batch {
-                                Some(b) => smallvec::smallvec![b, error],
+                            let batch_and_error = match maybe_carry.take() {
+                                Some(carry) => smallvec::smallvec![carry.msg, error],
                                 None => smallvec::smallvec![error],
                             };
-                            Ok(Some(BatchOrEof::Batch(batch_and_error)))
+                            Ok(BatchOrEof::Batch(batch_and_error))
                         }};
                     }
 
@@ -762,26 +816,18 @@ impl PageServerHandler {
                 }
             };
 
-            let batch_timeout = match self.server_side_batch_timeout {
-                Some(value) => value,
-                None => {
-                    // Batching is not enabled - stop on the first message.
-                    return Ok(Some(BatchOrEof::Batch(smallvec::smallvec![this_msg])));
-                }
-            };
-
             // check if we can batch
-            match (&mut batch, this_msg) {
+            match (maybe_carry.take(), this_msg) {
                 (None, this_msg) => {
-                    batch = Some(this_msg);
+                    *maybe_carry = Some(Carry { msg: this_msg, started_at: msg_start });
                 }
                 (
-                    Some(BatchedFeMessage::GetPage {
+                    Some(Carry { msg: BatchedFeMessage::GetPage {
                         span: _,
                         shard: accum_shard,
-                        pages: accum_pages,
+                        pages: mut accum_pages,
                         effective_request_lsn: accum_lsn,
-                    }),
+                    }, started_at: _}),
                     BatchedFeMessage::GetPage {
                         span: _,
                         shard: this_shard,
@@ -805,7 +851,7 @@ impl PageServerHandler {
                     }
                     // the vectored get currently only supports a single LSN, so, bounce as soon
                     // as the effective request_lsn changes
-                    if *accum_lsn != this_lsn {
+                    if accum_lsn != this_lsn {
                         trace!(%accum_lsn, %this_lsn, "stopping batching because LSN changed");
                         return false;
                     }
@@ -816,21 +862,16 @@ impl PageServerHandler {
                     // ok to batch
                     accum_pages.extend(this_pages);
                 }
-                (Some(_), this_msg) => {
+                (Some(carry), this_msg) => {
                     // by default, don't continue batching
-                    break Some(this_msg);
+                    *maybe_carry = Some(Carry {
+                        msg: this_msg,
+                        started_at: msg_start,
+                    });
+                    return Ok(BatchOrEof::Batch(smallvec::smallvec![carry.msg]));
                 }
             }
-
-            // batching impl piece
-            let started_at = batch_started_at.get_or_insert_with(Instant::now);
-            if started_at.elapsed() > batch_timeout {
-                break None;
-            }
-        };
-
-        self.next_batch = next_batch;
-        Ok(batch.map(|b| BatchOrEof::Batch(smallvec::smallvec![b])))
+        }
     }
 
     /// Pagestream sub-protocol handler.
@@ -868,21 +909,16 @@ impl PageServerHandler {
             }
         }
 
-        // If [`PageServerHandler`] is reused for multiple pagestreams,
-        // then make sure to not process requests from the previous ones.
-        self.next_batch = None;
+        let mut carry: Option<Carry> = None;
 
         loop {
             let maybe_batched = self
-                .read_batch_from_connection(pgb, &tenant_id, &timeline_id, &ctx)
+                .read_batch_from_connection(pgb, &tenant_id, &timeline_id, &mut carry, &ctx)
                 .await?;
             let batched = match maybe_batched {
-                Some(BatchOrEof::Batch(b)) => b,
-                Some(BatchOrEof::Eof) => {
+                BatchOrEof::Batch(b) => b,
+                BatchOrEof::Eof => {
                     break;
-                }
-                None => {
-                    continue;
                 }
             };
 

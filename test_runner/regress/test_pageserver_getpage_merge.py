@@ -7,9 +7,10 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
 
 @pytest.mark.parametrize("tablesize_mib", [50, 500])
-@pytest.mark.parametrize("batch_timeout", ["10us", "100us", "1ms"])
-@pytest.mark.parametrize("target_runtime", [30])
-def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, tablesize_mib: int, batch_timeout: str, target_runtime: int):
+@pytest.mark.parametrize("batch_timeout", [None, "1ns", "5us", "10us", "100us", "1ms"])
+@pytest.mark.parametrize("target_runtime", [5])
+@pytest.mark.parametrize("effective_io_concurrency", [1, 32, 64, 100]) # 32 is the current vectored get max batch size
+def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, tablesize_mib: int, batch_timeout: str, target_runtime: int, effective_io_concurrency: int):
     """
     Do a bunch of sequential scans and ensure that the pageserver does some merging.
     """
@@ -22,6 +23,12 @@ def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, tablesize_mib: in
 
     conn = endpoint.connect()
     cur = conn.cursor()
+
+    log.info("tablesize_mib=%d, batch_timeout=%s, target_runtime=%d, effective_io_concurrency=%d", tablesize_mib, batch_timeout, target_runtime, effective_io_concurrency)
+
+    cur.execute("SET max_parallel_workers_per_gather=0") # disable parallel backends
+    cur.execute(f"SET effective_io_concurrency={effective_io_concurrency}")
+    cur.execute("SET neon.readahead_buffer_size=128") # this is the current default value, but let's hard-code that
 
     #
     # Setup
@@ -93,11 +100,6 @@ def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, tablesize_mib: in
             return self.metrics.normalize(self.iters)
     def workload() -> Result:
 
-        cur.execute("SET max_parallel_workers_per_gather=0") # disable parallel backends
-        cur.execute("SET effective_io_concurrency=100")
-        cur.execute("SET neon.readahead_buffer_size=128")
-        # cur.execute("SET neon.flush_output_after=1")
-
         start = time.time()
         iters = 0
         while time.time() - start < target_runtime or iters < 2:
@@ -112,21 +114,9 @@ def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, tablesize_mib: in
         after = get_metrics()
         return Result(metrics=after-before, iters=iters)
 
-    log.info("workload without merge")
-    env.pageserver.restart() # reset the metrics
-    without_merge = workload()
-
-    log.info("workload with merge")
     env.pageserver.patch_config_toml_nonrecursive({"server_side_batch_timeout": batch_timeout})
     env.pageserver.restart()
-    with_merge = workload()
-
-    results = {
-        "baseline": without_merge.normalized,
-        "candiate": with_merge.normalized,
-        "delta": with_merge.normalized - without_merge.normalized,
-        "relative": with_merge.normalized / without_merge.normalized
-    }
+    results = workload()
 
     #
     # Assertions on collected data
