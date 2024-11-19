@@ -210,13 +210,13 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
             }
         }
 
-        // [     written     ][ maybe_flushed ][    mutable    ]
-        // 				      |-   TAIL_SZ   -||-   TAIL_SZ   -|
-        //                                     ^
-        //                                `flushed_offset`
-        //
         let (written_range, maybe_flushed_range) = {
             if maybe_flushed.is_some() {
+                // [       written       ][ maybe_flushed ][    mutable    ]
+                //                        <-   TAIL_SZ   -><-   TAIL_SZ   ->
+                //                                         ^
+                //                                 `submitted_offset`
+                // <++++++ on disk +++++++????????????????>
                 (
                     Range(
                         start,
@@ -228,6 +228,11 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
                     ),
                 )
             } else {
+                // [       written                        ][    mutable    ]
+                //                                         <-   TAIL_SZ   ->
+                //                                         ^
+                //                                 `submitted_offset`
+                // <++++++ on disk +++++++++++++++++++++++>
                 (
                     Range(start, std::cmp::min(end, submitted_offset)),
                     // zero len
@@ -434,7 +439,7 @@ mod tests {
         assert!(file_contents == content[0..cap * 2]);
 
         let maybe_flushed_buffer_contents = file.buffered_writer.inspect_maybe_flushed().unwrap();
-        assert_eq!(maybe_flushed_buffer_contents, &content[cap..cap * 2]);
+        assert_eq!(&maybe_flushed_buffer_contents[..], &content[cap..cap * 2]);
 
         let mutable_buffer_contents = file.buffered_writer.inspect_mutable();
         assert_eq!(mutable_buffer_contents, &content[cap * 2..write_nbytes]);

@@ -14,7 +14,7 @@ pub struct FlushHandle<Buf, W> {
     inner: Option<FlushHandleInner<Buf, W>>,
     /// Immutable buffer for serving tail reads.
     /// `None` if no flush request has been submitted.
-    pub(super) maybe_flushed: Option<Buf>,
+    pub(super) maybe_flushed: Option<FullSlice<Buf>>,
 }
 
 // TODO(yuchen): special actions in drop to clean up the join handle?
@@ -162,7 +162,7 @@ where
 
         // Saves a buffer for read while flushing. This also removes reference to the old buffer.
         self.maybe_flushed = if save_buf_for_read {
-            Some(slice.as_raw_slice().get_ref().clone())
+            Some(slice.clone())
         } else {
             None
         };

@@ -92,7 +92,7 @@ where
 
     /// Gets a reference to the maybe flushed read-only buffer.
     /// Returns `None` if the writer has not submitted any flush request.
-    pub fn inspect_maybe_flushed(&self) -> Option<&Buf> {
+    pub fn inspect_maybe_flushed(&self) -> Option<&FullSlice<Buf>> {
         self.flush_handle.maybe_flushed.as_ref()
     }
 

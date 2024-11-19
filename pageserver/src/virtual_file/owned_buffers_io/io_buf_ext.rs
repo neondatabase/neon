@@ -27,10 +27,16 @@ where
         let FullSlice { slice: s } = self;
         s
     }
+}
 
-    pub(crate) fn as_raw_slice(&self) -> &Slice<B> {
-        let FullSlice { slice: s } = &self;
-        s
+impl<B> Clone for FullSlice<B>
+where
+    B: IoBuf + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            slice: self.slice.get_ref().clone().slice_full(),
+        }
     }
 }
 
