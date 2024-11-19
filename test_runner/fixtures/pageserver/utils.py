@@ -54,23 +54,15 @@ def wait_for_upload(
     tenant: TenantId | TenantShardId,
     timeline: TimelineId,
     lsn: Lsn,
+    timeout=20,
 ):
-    """waits for local timeline upload up to specified lsn"""
+    """Waits for local timeline upload up to specified LSN"""
 
-    current_lsn = Lsn(0)
-    for i in range(20):
-        current_lsn = remote_consistent_lsn(pageserver_http, tenant, timeline)
-        if current_lsn >= lsn:
-            log.info("wait finished")
-            return
-        lr_lsn = last_record_lsn(pageserver_http, tenant, timeline)
-        log.info(
-            f"waiting for remote_consistent_lsn to reach {lsn}, now {current_lsn}, last_record_lsn={lr_lsn}, iteration {i + 1}"
-        )
-        time.sleep(1)
-    raise Exception(
-        f"timed out while waiting for {tenant}/{timeline} remote_consistent_lsn to reach {lsn}, was {current_lsn}"
-    )
+    def is_uploaded():
+        remote_lsn = remote_consistent_lsn(pageserver_http, tenant, timeline)
+        assert remote_lsn >= lsn, f"remote_consistent_lsn at {remote_lsn}"
+
+    wait_until(is_uploaded, name=f"upload to {lsn}", timeout=timeout)
 
 
 def _tenant_in_expected_state(tenant_info: dict[str, Any], expected_state: str):
