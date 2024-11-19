@@ -45,7 +45,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
     timeout-minutes: 30
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       matrix:
         postgres-version: ${{ fromJSON(needs.files-changed.outputs.postgres_changes) }}
