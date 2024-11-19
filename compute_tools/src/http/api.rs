@@ -24,8 +24,11 @@ use metrics::proto::MetricFamily;
 use metrics::Encoder;
 use metrics::TextEncoder;
 use tokio::task;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tracing_utils::http::OtelName;
+use utils::failpoint_support::failpoints_handler;
+use utils::http::error::ApiError;
 use utils::http::request::must_get_query_param;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
@@ -307,6 +310,18 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                     &format!("could not get list of installed extensions: {}", e),
                     StatusCode::INTERNAL_SERVER_ERROR,
                 ),
+            }
+        }
+
+        (&Method::POST, "/failpoints") if cfg!(feature = "testing") => {
+            match failpoints_handler(req, CancellationToken::new()).await {
+                Ok(r) => r,
+                Err(ApiError::BadRequest(e)) => {
+                    render_json_error(&e.to_string(), StatusCode::BAD_REQUEST)
+                }
+                Err(_) => {
+                    render_json_error("Internal server error", StatusCode::INTERNAL_SERVER_ERROR)
+                }
             }
         }
 
