@@ -43,6 +43,15 @@ pub enum FlushUncommittedRecords {
     No,
 }
 
+/// A batch of interpreted WAL records
+#[derive(Serialize, Deserialize)]
+pub struct InterpretedWalRecords {
+    pub records: Vec<InterpretedWalRecord>,
+    // Start LSN of the next record after the batch.
+    // Note that said record may belong to the current shard.
+    pub next_record_lsn: Option<Lsn>,
+}
+
 /// An interpreted Postgres WAL record, ready to be handled by the pageserver
 #[derive(Serialize, Deserialize)]
 pub struct InterpretedWalRecord {

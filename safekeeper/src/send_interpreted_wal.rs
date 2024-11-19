@@ -9,9 +9,8 @@ use postgres_ffi::{get_current_timestamp, waldecoder::WalStreamDecoder};
 use pq_proto::{BeMessage, InterpretedWalRecordsBody, WalSndKeepAlive};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::MissedTickBehavior;
-use utils::lsn::Lsn;
 use utils::postgres_client::InterpretedFormat;
-use wal_decoder::models::InterpretedWalRecord;
+use wal_decoder::models::{InterpretedWalRecord, InterpretedWalRecords};
 use wal_decoder::wire_format::ToWireFormat;
 
 use crate::send_wal::EndWatchView;
@@ -83,7 +82,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
                         }
                     }
 
-                    let buf = records.to_wire(self.format).with_context(|| "Failed to serialize interpreted WAL")?;
+                    let batch = InterpretedWalRecords {
+                        records,
+                        next_record_lsn: max_next_record_lsn
+                    };
+                    let buf = batch.to_wire(self.format).with_context(|| "Failed to serialize interpreted WAL")?;
 
                     // Reset the keep alive ticker since we are sending something
                     // over the wire now.
@@ -93,7 +96,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
                         .write_message(&BeMessage::InterpretedWalRecords(InterpretedWalRecordsBody {
                             streaming_lsn: wal_end_lsn.0,
                             commit_lsn: available_wal_end_lsn.0,
-                            next_record_lsn: max_next_record_lsn.unwrap_or(Lsn::INVALID).0,
                             data: &buf,
                         })).await?;
                 }

@@ -2,7 +2,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use utils::bin_ser::{BeSer, DeserializeError, SerializeError};
 use utils::postgres_client::InterpretedFormat;
 
-use crate::models::InterpretedWalRecord;
+use crate::models::InterpretedWalRecords;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToWireFormatError {
@@ -25,7 +25,7 @@ pub trait FromWireFormat {
     fn from_wire(buf: &Bytes, format: InterpretedFormat) -> Result<Self::T, FromWireFormatError>;
 }
 
-impl ToWireFormat for Vec<InterpretedWalRecord> {
+impl ToWireFormat for InterpretedWalRecords {
     fn to_wire(self, format: InterpretedFormat) -> Result<Bytes, ToWireFormatError> {
         match format {
             InterpretedFormat::Bincode => {
@@ -39,13 +39,13 @@ impl ToWireFormat for Vec<InterpretedWalRecord> {
     }
 }
 
-impl FromWireFormat for Vec<InterpretedWalRecord> {
+impl FromWireFormat for InterpretedWalRecords {
     type T = Self;
 
     fn from_wire(buf: &Bytes, format: InterpretedFormat) -> Result<Self, FromWireFormatError> {
         match format {
             InterpretedFormat::Bincode => {
-                Vec::<InterpretedWalRecord>::des(buf).map_err(FromWireFormatError::Bincode)
+                InterpretedWalRecords::des(buf).map_err(FromWireFormatError::Bincode)
             }
         }
     }

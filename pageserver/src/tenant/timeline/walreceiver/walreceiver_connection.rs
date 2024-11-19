@@ -23,7 +23,7 @@ use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn, Instrument};
 use wal_decoder::{
-    models::{FlushUncommittedRecords, InterpretedWalRecord},
+    models::{FlushUncommittedRecords, InterpretedWalRecord, InterpretedWalRecords},
     wire_format::FromWireFormat,
 };
 
@@ -341,18 +341,25 @@ pub(super) async fn handle_walreceiver_connection(
                 // This is the end LSN of the raw WAL from which the records
                 // were interpreted.
                 let streaming_lsn = Lsn::from(raw.streaming_lsn());
-                tracing::debug!(
-                    "Received WAL up to {streaming_lsn} with next_record_lsn={}",
-                    Lsn(raw.next_record_lsn().unwrap_or(0))
-                );
 
-                let records =
-                    Vec::<InterpretedWalRecord>::from_wire(raw.data(), interpreted_format.unwrap())
+                let batch =
+                    InterpretedWalRecords::from_wire(raw.data(), interpreted_format.unwrap())
                         .with_context(|| {
                             anyhow::anyhow!(
                         "Failed to deserialize interpreted records ending at LSN {streaming_lsn}"
                     )
                         })?;
+
+                let InterpretedWalRecords {
+                    records,
+                    next_record_lsn,
+                } = batch;
+
+                tracing::debug!(
+                    "Received WAL up to {} with next_record_lsn={:?}",
+                    streaming_lsn,
+                    next_record_lsn
+                );
 
                 // We start the modification at 0 because each interpreted record
                 // advances it to its end LSN. 0 is just an initialization placeholder.
@@ -371,14 +378,18 @@ pub(super) async fn handle_walreceiver_connection(
                         .await?;
                     }
 
-                    let next_record_lsn = interpreted.next_record_lsn;
+                    let local_next_record_lsn = interpreted.next_record_lsn;
                     let ingested = walingest
                         .ingest_record(interpreted, &mut modification, &ctx)
                         .await
-                        .with_context(|| format!("could not ingest record at {next_record_lsn}"))?;
+                        .with_context(|| {
+                            format!("could not ingest record at {local_next_record_lsn}")
+                        })?;
 
                     if !ingested {
-                        tracing::debug!("ingest: filtered out record @ LSN {next_record_lsn}");
+                        tracing::debug!(
+                            "ingest: filtered out record @ LSN {local_next_record_lsn}"
+                        );
                         WAL_INGEST.records_filtered.inc();
                         filtered_records += 1;
                     }
@@ -410,7 +421,7 @@ pub(super) async fn handle_walreceiver_connection(
                 // need to advance last record LSN on all shards. If we've not ingested the latest
                 // record, then set the LSN of the modification past it. This way all shards
                 // advance their last record LSN at the same time.
-                let needs_last_record_lsn_advance = match raw.next_record_lsn().map(Lsn::from) {
+                let needs_last_record_lsn_advance = match next_record_lsn.map(Lsn::from) {
                     Some(lsn) if lsn > modification.get_lsn() => {
                         modification.set_lsn(lsn).unwrap();
                         true
