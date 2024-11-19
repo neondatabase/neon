@@ -13,6 +13,7 @@ bytes.workspace = true
 pageserver_api.workspace = true
 postgres_ffi.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 utils.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }

@@ -7124,6 +7124,7 @@ dependencies = [
  "pageserver_api",
  "postgres_ffi",
  "serde",
+ "thiserror",
  "tracing",
  "utils",
  "workspace_hack",

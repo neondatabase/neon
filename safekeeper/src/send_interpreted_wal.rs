@@ -9,9 +9,10 @@ use postgres_ffi::{get_current_timestamp, waldecoder::WalStreamDecoder};
 use pq_proto::{BeMessage, InterpretedWalRecordsBody, WalSndKeepAlive};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::MissedTickBehavior;
-use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
+use utils::postgres_client::InterpretedFormat;
 use wal_decoder::models::InterpretedWalRecord;
+use wal_decoder::wire_format::ToWireFormat;
 
 use crate::send_wal::EndWatchView;
 use crate::wal_reader_stream::{WalBytes, WalReaderStreamBuilder};
@@ -20,6 +21,7 @@ use crate::wal_reader_stream::{WalBytes, WalReaderStreamBuilder};
 /// This is used for sending WAL to the pageserver. Said WAL
 /// is pre-interpreted and filtered for the shard.
 pub(crate) struct InterpretedWalSender<'a, IO> {
+    pub(crate) format: InterpretedFormat,
     pub(crate) pgb: &'a mut PostgresBackend<IO>,
     pub(crate) wal_stream_builder: WalReaderStreamBuilder,
     pub(crate) end_watch_view: EndWatchView,
@@ -81,10 +83,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
                         }
                     }
 
-                    let mut buf = Vec::new();
-                    records
-                        .ser_into(&mut buf)
-                        .with_context(|| "Failed to serialize interpreted WAL")?;
+                    let buf = records.to_wire(self.format).with_context(|| "Failed to serialize interpreted WAL")?;
 
                     // Reset the keep alive ticker since we are sending something
                     // over the wire now.
@@ -95,7 +94,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
                             streaming_lsn: wal_end_lsn.0,
                             commit_lsn: available_wal_end_lsn.0,
                             next_record_lsn: max_next_record_lsn.unwrap_or(Lsn::INVALID).0,
-                            data: buf.as_slice(),
+                            data: &buf,
                         })).await?;
                 }
 

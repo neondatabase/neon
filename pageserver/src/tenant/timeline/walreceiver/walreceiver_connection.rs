@@ -22,7 +22,10 @@ use tokio::{select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn, Instrument};
-use wal_decoder::models::{FlushUncommittedRecords, InterpretedWalRecord};
+use wal_decoder::{
+    models::{FlushUncommittedRecords, InterpretedWalRecord},
+    wire_format::FromWireFormat,
+};
 
 use super::TaskStateUpdate;
 use crate::{
@@ -36,7 +39,7 @@ use crate::{
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use utils::{bin_ser::BeSer, id::NodeId, lsn::Lsn};
+use utils::{id::NodeId, lsn::Lsn, postgres_client::PostgresClientProtocol};
 use utils::{pageserver_feedback::PageserverFeedback, sync::gate::GateError};
 
 /// Status of the connection.
@@ -109,6 +112,7 @@ impl From<WalDecodeError> for WalReceiverError {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_walreceiver_connection(
     timeline: Arc<Timeline>,
+    protocol: PostgresClientProtocol,
     wal_source_connconf: PgConnectionConfig,
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
     cancellation: CancellationToken,
@@ -260,6 +264,11 @@ pub(super) async fn handle_walreceiver_connection(
 
     let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx).await?;
 
+    let interpreted_format = match protocol {
+        PostgresClientProtocol::Vanilla => None,
+        PostgresClientProtocol::Interpreted { format } => Some(format),
+    };
+
     while let Some(replication_message) = {
         select! {
             _ = cancellation.cancelled() => {
@@ -337,11 +346,13 @@ pub(super) async fn handle_walreceiver_connection(
                     Lsn(raw.next_record_lsn().unwrap_or(0))
                 );
 
-                let records = Vec::<InterpretedWalRecord>::des(raw.data()).with_context(|| {
-                    anyhow::anyhow!(
+                let records =
+                    Vec::<InterpretedWalRecord>::from_wire(raw.data(), interpreted_format.unwrap())
+                        .with_context(|| {
+                            anyhow::anyhow!(
                         "Failed to deserialize interpreted records ending at LSN {streaming_lsn}"
                     )
-                })?;
+                        })?;
 
                 // We start the modification at 0 because each interpreted record
                 // advances it to its end LSN. 0 is just an initialization placeholder.

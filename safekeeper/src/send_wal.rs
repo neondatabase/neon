@@ -454,7 +454,7 @@ impl SafekeeperPostgresHandler {
         }
 
         info!(
-            "starting streaming from {:?}, available WAL ends at {}, recovery={}, appname={:?}, protocol={}",
+            "starting streaming from {:?}, available WAL ends at {}, recovery={}, appname={:?}, protocol={:?}",
             start_pos,
             end_pos,
             matches!(end_watch, EndWatch::Flush(_)),
@@ -489,7 +489,7 @@ impl SafekeeperPostgresHandler {
 
                 Either::Left(sender.run())
             }
-            PostgresClientProtocol::Interpreted => {
+            PostgresClientProtocol::Interpreted { format } => {
                 let pg_version = tli.tli.get_state().await.1.server.pg_version / 10000;
                 let end_watch_view = end_watch.view();
                 let wal_stream_builder = WalReaderStreamBuilder {
@@ -502,6 +502,7 @@ impl SafekeeperPostgresHandler {
                 };
 
                 let sender = InterpretedWalSender {
+                    format,
                     pgb,
                     wal_stream_builder,
                     end_watch_view,

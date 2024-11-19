@@ -27,14 +27,29 @@ def test_sharded_ingest(
     and fanning out to a large number of shards on dedicated Pageservers. Comparing the base case
     (shard_count=1) to the sharded case indicates the overhead of sharding.
     """
-    neon_env_builder.pageserver_config_override = (
-        f"wal_receiver_protocol = '{wal_receiver_protocol}'"
-    )
-
     ROW_COUNT = 100_000_000  # about 7 GB of WAL
 
     neon_env_builder.num_pageservers = shard_count
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_configs()
+
+    for ps in env.pageservers:
+        if wal_receiver_protocol == "vanilla":
+            ps.patch_config_toml_nonrecursive({
+                "wal_receiver_protocol": {
+                    "type": "vanilla",
+                }
+            })
+        elif wal_receiver_protocol == "interpreted":
+            ps.patch_config_toml_nonrecursive({
+                "wal_receiver_protocol": {
+                    "type": "interpreted",
+                    "args": {
+                        "format": "bincode"
+                    }
+                }
+            })
+
+    env.start()
 
     # Create a sharded tenant and timeline, and migrate it to the respective pageservers. Ensure
     # the storage controller doesn't mess with shard placements.
