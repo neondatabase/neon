@@ -337,8 +337,7 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
     async fn read_first_message(
         &mut self,
     ) -> Result<(WalResidentTimeline, ProposerAcceptorMessage), CopyStreamHandlerEnd> {
-        // Receive information about server to create timeline, if not yet.  Use a dummy
-        // cancellation token because we aren't holding a Timeline ref yet.
+        // Receive information about server to create timeline, if not yet.
         let next_msg = read_message(self.pgb_reader).await?;
         let tli = match next_msg {
             ProposerAcceptorMessage::Greeting(ref greeting) => {
@@ -409,28 +408,24 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
         let started = Instant::now();
         let size = next_msg.size();
 
-        tokio::select! {
-            r = msg_tx.send_timeout(next_msg, SLOW_THRESHOLD)  => {
-                match r {
-                    Ok(()) => {}
-                    // Slow send, log a message and keep trying. Log context has timeline ID.
-                    Err(SendTimeoutError::Timeout(next_msg)) => {
-                        warn!(
-                            "slow WalAcceptor send blocked for {:.3}s",
-                            Instant::now().duration_since(started).as_secs_f64()
-                        );
-                        if msg_tx.send(next_msg).await.is_err() {
-                            return Ok(()); // WalAcceptor terminated
-                        }
-                        warn!(
-                            "slow WalAcceptor send completed after {:.3}s",
-                            Instant::now().duration_since(started).as_secs_f64()
-                        )
-                    }
-                    // WalAcceptor terminated.
-                    Err(SendTimeoutError::Closed(_)) => return Ok(()),
+        match msg_tx.send_timeout(next_msg, SLOW_THRESHOLD).await {
+            Ok(()) => {}
+            // Slow send, log a message and keep trying. Log context has timeline ID.
+            Err(SendTimeoutError::Timeout(next_msg)) => {
+                warn!(
+                    "slow WalAcceptor send blocked for {:.3}s",
+                    Instant::now().duration_since(started).as_secs_f64()
+                );
+                if msg_tx.send(next_msg).await.is_err() {
+                    return Ok(()); // WalAcceptor terminated
                 }
-            },
+                warn!(
+                    "slow WalAcceptor send completed after {:.3}s",
+                    Instant::now().duration_since(started).as_secs_f64()
+                )
+            }
+            // WalAcceptor terminated.
+            Err(SendTimeoutError::Closed(_)) => return Ok(()),
         }
 
         // Update metrics. Will be decremented in WalAcceptor.
@@ -623,8 +618,6 @@ impl WalAcceptor {
                 }
 
                 _ = self.tli.cancel.cancelled() => {
-                    // FIXME: this outer select! risks leaving local I/O in flight after
-                    // cancellation: see https://github.com/neondatabase/neon/issues/9788
                     break;
                 }
             };
@@ -638,7 +631,7 @@ impl WalAcceptor {
         }
 
         // Flush WAL on disconnect, see https://github.com/neondatabase/neon/issues/9259.
-        if dirty {
+        if dirty && !self.tli.cancel.is_cancelled() {
             self.tli
                 .process_msg(&ProposerAcceptorMessage::FlushWAL)
                 .await?;
