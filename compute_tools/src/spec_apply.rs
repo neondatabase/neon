@@ -461,7 +461,7 @@ async fn get_operations<'a>(
                                 }
                                 let quoted = op.name.pg_quote();
                                 let new_owner = match &db {
-                                    DB::SystemDB => "cloud_admin".pg_quote(),
+                                    DB::SystemDB => PgIdent::from("cloud_admin").pg_quote(),
                                     DB::UserDB(db) => db.owner.pg_quote(),
                                 };
 

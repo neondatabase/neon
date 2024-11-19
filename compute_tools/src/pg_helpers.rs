@@ -196,13 +196,6 @@ impl Escaping for PgIdent {
     }
 }
 
-impl Escaping for &'static str {
-    fn pg_quote(&self) -> String {
-        let result = format!("\"{}\"", self.replace('"', "\"\""));
-        result
-    }
-}
-
 /// Build a list of existing Postgres roles
 pub async fn get_existing_roles_async(client: &tokio_postgres::Client) -> Result<Vec<Role>> {
     let postgres_roles = client

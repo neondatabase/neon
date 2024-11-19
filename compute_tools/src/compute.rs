@@ -1066,18 +1066,16 @@ impl ComputeNode {
                 .clone(),
         );
 
+        // Choose how many concurrent connections to use for applying the spec changes.
+        // If the cluster is not currently Running we don't have to deal with user connections,
+        // and can thus use all `max_connections` connection slots. However, that's generally not
+        // very efficient, so we generally still limit it to a smaller number.
         let max_concurrent_connections = if compute_state.status != ComputeStatus::Running {
+            // If the settings contain 'max_connections', use that as template
             if let Some(config) = spec.cluster.settings.find("max_connections") {
-                config
-                    .parse::<usize>()
-                    .ok()
-                    .map(|limit| match limit {
-                        0..10 => limit,
-                        10..30 => 10,
-                        30.. => limit / 3,
-                    })
-                    .unwrap_or(10)
+                config.parse::<usize>().ok()
             } else {
+                // Otherwise, try to find the setting in the postgresql_conf string
                 spec.cluster
                     .postgresql_conf
                     .iter()
@@ -1102,15 +1100,24 @@ impl ComputeNode {
 
                         value.parse::<usize>().ok()
                     })
-                    .map(|limit| match limit {
-                        0..10 => limit,
-                        10..30 => 10,
-                        30.. => limit / 3,
-                    })
                     .next()
-                    .unwrap_or(10)
             }
+            // If max_connections is present, use at most 1/3rd of that.
+            // When max_connections is lower than 30, try to use at least 10 connections, but
+            // never more than max_connections.
+            .map(|limit| match limit {
+                0..10 => limit,
+                10..30 => 10,
+                30.. => limit / 3,
+            })
+            // If we didn't find max_connections, default to 10 concurrent connections.
+            .unwrap_or(10)
         } else {
+            // state == Running
+            // Because the cluster is already in the Running state, we should assume users are
+            // already connected to the cluster, and high concurrency could negatively
+            // impact user connectivity. Therefore, we can limit concurrency to the number of
+            // reserved superuser connections, which users wouldn't be able to use anyway.
             spec.cluster
                 .settings
                 .find("superuser_reserved_connections")
