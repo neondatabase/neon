@@ -15,6 +15,11 @@ on:
         type: boolean
         description: 'Create Proxy release PR'
         required: false
+      # DO NOT MERGE
+      create-test-release-branch:
+        type: boolean
+        description: 'Create Test release PR'
+        required: false
 
 # No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
 permissions: {}
@@ -47,5 +52,19 @@ jobs:
     with:
       component-name: 'Proxy'
       release-branch: 'release-proxy'
+    secrets:
+      ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
+
+  # DO NOT MERGE
+  create-test-pr:
+    if: ${{ format('{0}', inputs.create-test-release-branch) == 'true' }}
+
+    permissions:
+      contents: write
+
+    uses: ./.github/workflows/_create-release-pr.yml
+    with:
+      component-name: 'Test'
+      release-branch: 'bayandin/reusable-workflow-for-releases'
     secrets:
       ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
