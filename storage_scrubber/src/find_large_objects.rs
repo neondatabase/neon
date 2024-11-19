@@ -106,9 +106,9 @@ pub async fn find_large_objects(
         }
     }
 
-    let bucket_name = target.bucket_name();
+    let desc_str = target.desc_str();
     tracing::info!(
-        "Scan of {bucket_name} finished. Scanned {tenant_ctr} shards. objects={object_ctr}, found={}.",
+        "Scan of {desc_str} finished. Scanned {tenant_ctr} shards. objects={object_ctr}, found={}.",
         objects.len()
     );
     Ok(LargeObjectListing { objects })

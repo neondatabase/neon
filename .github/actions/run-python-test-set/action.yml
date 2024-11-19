@@ -48,6 +48,10 @@ inputs:
     description: 'benchmark durations JSON'
     required: false
     default: '{}'
+  aws_oicd_role_arn:
+    description: 'the OIDC role arn to (re-)acquire for allure report upload - if not set call must acquire OIDC role'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -222,6 +226,13 @@ runs:
         # (for example if we didn't run the test for non build-and-test workflow)
         skip-if-does-not-exist: true
 
+    - name: (Re-)configure AWS credentials # necessary to upload reports to S3 after a long-running test
+      if: ${{ !cancelled() && (inputs.aws_oicd_role_arn != '') }}
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ inputs.aws_oicd_role_arn }}
+        role-duration-seconds: 3600 # 1 hour should be more than enough to upload report
     - name: Upload test results
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-store

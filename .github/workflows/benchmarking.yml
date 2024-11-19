@@ -133,6 +133,7 @@ jobs:
           --ignore test_runner/performance/test_perf_pgvector_queries.py
           --ignore test_runner/performance/test_logical_replication.py
           --ignore test_runner/performance/test_physical_replication.py
+          --ignore test_runner/performance/test_perf_ingest_using_pgcopydb.py
       env:
         BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -240,8 +241,9 @@ jobs:
       env:
         REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
+    # Post both success and failure to the Slack channel
     - name: Post to a Slack channel
-      if: ${{ github.event.schedule && failure() }}
+      if: ${{ github.event.schedule }}
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C06T9AMNDQQ" # on-call-compute-staging-stream

@@ -608,11 +608,15 @@ impl OffloadedTimeline {
                 .iter()
                 .find(|(tid, _tl)| **tid == ancestor_timeline_id)
             {
-                ancestor_timeline
+                let removal_happened = ancestor_timeline
                     .gc_info
                     .write()
                     .unwrap()
                     .remove_child_offloaded(self.timeline_id);
+                if !removal_happened {
+                    tracing::error!(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id,
+                        "Couldn't remove retain_lsn entry from offloaded timeline's parent: already removed");
+                }
             }
         }
         self.deleted_from_ancestor.store(true, Ordering::Release);

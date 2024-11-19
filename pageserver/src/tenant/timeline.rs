@@ -481,17 +481,27 @@ impl GcInfo {
         &mut self,
         child_id: TimelineId,
         maybe_offloaded: MaybeOffloaded,
-    ) {
-        self.retain_lsns
-            .retain(|i| !(i.1 == child_id && i.2 == maybe_offloaded));
+    ) -> bool {
+        // Remove at most one element. Needed for correctness if there is two live `Timeline` objects referencing
+        // the same timeline. Shouldn't but maybe can occur when Arc's live longer than intended.
+        let mut removed = false;
+        self.retain_lsns.retain(|i| {
+            if removed {
+                return true;
+            }
+            let remove = i.1 == child_id && i.2 == maybe_offloaded;
+            removed |= remove;
+            !remove
+        });
+        removed
     }
 
-    pub(super) fn remove_child_not_offloaded(&mut self, child_id: TimelineId) {
-        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::No);
+    pub(super) fn remove_child_not_offloaded(&mut self, child_id: TimelineId) -> bool {
+        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::No)
     }
 
-    pub(super) fn remove_child_offloaded(&mut self, child_id: TimelineId) {
-        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes);
+    pub(super) fn remove_child_offloaded(&mut self, child_id: TimelineId) -> bool {
+        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes)
     }
 }
 
@@ -4514,7 +4524,10 @@ impl Drop for Timeline {
             // This lock should never be poisoned, but in case it is we do a .map() instead of
             // an unwrap(), to avoid panicking in a destructor and thereby aborting the process.
             if let Ok(mut gc_info) = ancestor.gc_info.write() {
-                gc_info.remove_child_not_offloaded(self.timeline_id)
+                if !gc_info.remove_child_not_offloaded(self.timeline_id) {
+                    tracing::error!(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id,
+                        "Couldn't remove retain_lsn entry from offloaded timeline's parent: already removed");
+                }
             }
         }
     }
