@@ -129,6 +129,20 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     log.info("Writing initial data ...")
     workload.write_rows(row_count, env.pageserver.id)
 
+    # schedule a gc-compaction in advance, it will be triggered along with L0 compaction
+    ps_http.timeline_compact(
+        tenant_id,
+        timeline_id,
+        enhanced_gc_bottom_most_compaction=True,
+        body={
+            "scheduled": True,
+            "compact_range": {
+                "start": "000000000000000000000000000000000000",
+                "end": "030000000000000000000000000000000000",
+            },
+        },
+    )
+
     for i in range(1, churn_rounds + 1):
         if i % 10 == 0:
             log.info(f"Running churn round {i}/{churn_rounds} ...")
@@ -142,10 +156,14 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
             timeline_id,
             enhanced_gc_bottom_most_compaction=True,
             body={
-                "start": "000000000000000000000000000000000000",
-                "end": "030000000000000000000000000000000000",
+                "compact_range": {
+                    "start": "000000000000000000000000000000000000",
+                    "end": "030000000000000000000000000000000000",
+                }
             },
         )
+
+    env.pageserver.assert_log_contains("scheduled_compaction")
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)

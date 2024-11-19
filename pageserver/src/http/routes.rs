@@ -87,7 +87,7 @@ use crate::tenant::timeline::offload::offload_timeline;
 use crate::tenant::timeline::offload::OffloadError;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::CompactOptions;
-use crate::tenant::timeline::CompactRange;
+use crate::tenant::timeline::CompactRequest;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
@@ -1971,7 +1971,7 @@ async fn timeline_compact_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    let compact_range = json_request_maybe::<Option<CompactRange>>(&mut request).await?;
+    let compact_request = json_request_maybe::<Option<CompactRequest>>(&mut request).await?;
 
     let state = get_state(&request);
 
@@ -1996,22 +1996,44 @@ async fn timeline_compact_handler(
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
+    let wait_until_scheduled_compaction_done =
+        parse_query_param::<_, bool>(&request, "wait_until_scheduled_compaction_done")?
+            .unwrap_or(false);
+
     let options = CompactOptions {
-        compact_range,
+        compact_range: compact_request
+            .as_ref()
+            .and_then(|r| r.compact_range.clone()),
+        compact_below_lsn: compact_request
+            .as_ref()
+            .and_then(|r| r.compact_below_lsn.as_ref().map(|x| x.0)),
         flags,
     };
+
+    let scheduled = compact_request.map(|r| r.scheduled).unwrap_or(false);
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
-        timeline
-            .compact_with_options(&cancel, options, &ctx)
-            .await
-            .map_err(|e| ApiError::InternalServerError(e.into()))?;
-        if wait_until_uploaded {
-            timeline.remote_client.wait_completion().await
-            // XXX map to correct ApiError for the cases where it's due to shutdown
-            .context("wait completion").map_err(ApiError::InternalServerError)?;
+        if scheduled {
+            let tenant = state
+                .tenant_manager
+                .get_attached_tenant_shard(tenant_shard_id)?;
+            let rx = tenant.schedule_compaction(timeline_id, options).await;
+            if wait_until_scheduled_compaction_done {
+                // It is possible that this will take a long time, dropping the HTTP request will not cancel the compaction.
+                rx.await.ok();
+            }
+        } else {
+            timeline
+                .compact_with_options(&cancel, options, &ctx)
+                .await
+                .map_err(|e| ApiError::InternalServerError(e.into()))?;
+            if wait_until_uploaded {
+                timeline.remote_client.wait_completion().await
+                // XXX map to correct ApiError for the cases where it's due to shutdown
+                .context("wait completion").map_err(ApiError::InternalServerError)?;
+            }
         }
         json_response(StatusCode::OK, ())
     }
