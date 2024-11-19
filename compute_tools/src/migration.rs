@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use fail::fail_point;
 use postgres::Client;
 use tracing::info;
 
@@ -75,6 +76,23 @@ impl<'m> MigrationRunner<'m> {
                     migration_id!(current_migration),
                     migration
                 );
+
+                // We use this fail point in order to check that failing in
+                // the middle of applying a series of migrations fails in
+                // an expected manner, including
+                // neon_migration.migration_id reporting as 1 and that we
+                // start applying migrations on the next restart at 2.
+                {
+                    fail_point!(
+                        "the-second-compute-migration",
+                        migration_id!(current_migration) == 2,
+                        |_| {
+                            Err(anyhow::anyhow!(
+                            "Failing the second migration for that restarted endpoints start at the correct migration"
+                        ))
+                        }
+                    );
+                }
 
                 self.client
                     .simple_query("BEGIN")

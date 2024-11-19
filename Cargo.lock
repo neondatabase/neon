@@ -1226,6 +1226,7 @@ dependencies = [
  "chrono",
  "clap",
  "compute_api",
+ "fail",
  "flate2",
  "futures",
  "hyper 0.14.30",
