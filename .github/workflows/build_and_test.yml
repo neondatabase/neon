@@ -258,8 +258,8 @@ jobs:
         ${{ matrix.build-type == 'release' && '[{"pg_version":"v14", "lfc_state": "without-lfc"},
                                                 {"pg_version":"v15", "lfc_state": "without-lfc"},
                                                 {"pg_version":"v16", "lfc_state": "without-lfc"},
-                                                {"pg_version":"v16", "lfc_state": "with-lfc"},
-                                                {"pg_version":"v17", "lfc_state": "without-lfc"}]'
+                                                {"pg_version":"v17", "lfc_state": "without-lfc"}]',
+                                                {"pg_version":"v17", "lfc_state": "with-lfc"},
                                            || '[{"pg_version":"v17", "lfc_state": "without-lfc"}]' }}
     secrets: inherit
 

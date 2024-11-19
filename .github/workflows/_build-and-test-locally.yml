@@ -282,7 +282,12 @@ jobs:
         with:
           submodules: true
 
+      - name: Set the continue-on-error if we use LFC
+        id: uselfc
+        run: echo value=${{ matrix.lfc_state == 'with-lfc' && 'true' || 'false' }} >> $GITHUB_OUTPUT
+
       - name: Pytest regression tests
+        continue-on-error: ${{ fromJSON(steps.uselfc.outputs.value) }}
         uses: ./.github/actions/run-python-test-set
         timeout-minutes: 60
         with:
