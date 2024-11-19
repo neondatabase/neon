@@ -5,13 +5,13 @@ use super::{ComputeCredentials, ComputeUserInfo};
 use crate::auth::backend::ComputeCredentialKeys;
 use crate::auth::{self, AuthFlow};
 use crate::config::AuthenticationConfig;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::AuthSecret;
 use crate::stream::{PqStream, Stream};
 use crate::{compute, sasl};
 
 pub(super) async fn authenticate(
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     creds: ComputeUserInfo,
     client: &mut PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     config: &'static AuthenticationConfig,

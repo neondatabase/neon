@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 
 use crate::auth::parse_endpoint_param;
 use crate::cancellation::CancelClosure;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::messages::MetricsAuxInfo;
@@ -286,7 +286,7 @@ impl ConnCfg {
     /// Connect to a corresponding compute node.
     pub(crate) async fn connect(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         allow_self_signed_compute: bool,
         aux: MetricsAuxInfo,
         timeout: Duration,
