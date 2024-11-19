@@ -125,8 +125,8 @@ async fn main() -> anyhow::Result<()> {
 
     Metrics::install(Arc::new(ThreadPoolMetrics::new(0)));
 
-    info!("Version: {GIT_VERSION}");
-    info!("Build_tag: {BUILD_TAG}");
+    debug!("Version: {GIT_VERSION}");
+    debug!("Build_tag: {BUILD_TAG}");
     let neon_metrics = ::metrics::NeonMetrics::new(::metrics::BuildInfo {
         revision: GIT_VERSION,
         build_tag: BUILD_TAG,
