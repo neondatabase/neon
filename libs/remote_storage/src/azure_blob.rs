@@ -97,10 +97,7 @@ impl AzureBlobStorage {
 
     pub fn relative_path_to_name(&self, path: &RemotePath) -> String {
         assert_eq!(std::path::MAIN_SEPARATOR, REMOTE_STORAGE_PREFIX_SEPARATOR);
-        let path_string = path
-            .get_path()
-            .as_str()
-            .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR);
+        let path_string = path.get_path().as_str();
         match &self.prefix_in_container {
             Some(prefix) => {
                 if prefix.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
@@ -277,19 +274,14 @@ impl RemoteStorage for AzureBlobStorage {
         cancel: &CancellationToken,
     ) -> impl Stream<Item = Result<Listing, DownloadError>> {
         // get the passed prefix or if it is not set use prefix_in_bucket value
-        let list_prefix = prefix
-            .map(|p| self.relative_path_to_name(p))
-            .or_else(|| self.prefix_in_container.clone())
-            .map(|mut p| {
-                // required to end with a separator
-                // otherwise request will return only the entry of a prefix
-                if matches!(mode, ListingMode::WithDelimiter)
-                    && !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR)
-                {
-                    p.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
+        let list_prefix = prefix.map(|p| self.relative_path_to_name(p)).or_else(|| {
+            self.prefix_in_container.clone().map(|mut s| {
+                if !s.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+                    s.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
                 }
-                p
-            });
+                s
+            })
+        });
 
         async_stream::stream! {
             let _permit = self.permit(RequestKind::List, cancel).await?;
