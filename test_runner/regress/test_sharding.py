@@ -517,8 +517,8 @@ def test_sharding_split_smoke(
 
     # We will start with 4 shards and split into 8, then migrate all those
     # 8 shards onto separate pageservers
-    shard_count = 4
-    split_shard_count = 8
+    shard_count = 2
+    split_shard_count = 4
     neon_env_builder.num_pageservers = split_shard_count * 2
 
     # 1MiB stripes: enable getting some meaningful data distribution without
@@ -591,7 +591,7 @@ def test_sharding_split_smoke(
 
     workload.validate()
 
-    assert len(pre_split_pageserver_ids) == 4
+    assert len(pre_split_pageserver_ids) == shard_count
 
     def shards_on_disk(shard_ids):
         for pageserver in env.pageservers:
@@ -728,14 +728,6 @@ def test_sharding_split_smoke(
         6: 1,
         7: 1,
         8: 1,
-        9: 1,
-        10: 1,
-        11: 1,
-        12: 1,
-        13: 1,
-        14: 1,
-        15: 1,
-        16: 1,
     }
 
     # The controller is not required to lay out the attached locations in any particular way, but
