@@ -113,6 +113,13 @@ pub struct PhysicalStorage {
     /// non-aligned chunks of data.
     write_record_lsn: Lsn,
 
+    /// The last LSN flushed to disk. May be in the middle of a record.
+    ///
+    /// NB: when the rest of the system refers to `flush_lsn`, it usually
+    /// actually refers to `flush_record_lsn`. This ambiguity can be dangerous
+    /// and should be resolved.
+    flush_lsn: Lsn,
+
     /// The LSN of the last WAL record flushed to disk.
     flush_record_lsn: Lsn,
 
@@ -127,23 +134,29 @@ pub struct PhysicalStorage {
     /// - doesn't point to the end of the segment
     file: Option<File>,
 
-    /// When false, we have just initialized storage using the LSN from find_end_of_wal().
-    /// In this case, [`write_lsn`] can be less than actually written WAL on disk. In particular,
-    /// there can be a case with unexpected .partial file.
+    /// When true, WAL truncation potentially has been interrupted and we need
+    /// to finish it before allowing WAL writes; see truncate_wal for details.
+    /// In this case [`write_lsn`] can be less than actually written WAL on
+    /// disk. In particular, there can be a case with unexpected .partial file.
     ///
     /// Imagine the following:
     /// - 000000010000000000000001
-    ///   - it was fully written, but the last record is split between 2 segments
-    ///   - after restart, `find_end_of_wal()` returned 0/1FFFFF0, which is in the end of this segment
-    ///   - `write_lsn`, `write_record_lsn` and `flush_record_lsn` were initialized to 0/1FFFFF0
+    ///   - it was fully written, but the last record is split between 2
+    ///     segments
+    ///   - after restart, `find_end_of_wal()` returned 0/1FFFFF0, which is in
+    ///     the end of this segment
+    ///   - `write_lsn`, `write_record_lsn` and `flush_record_lsn` were
+    ///     initialized to 0/1FFFFF0
     /// - 000000010000000000000002.partial
-    ///   - it has only 1 byte written, which is not enough to make a full WAL record
+    ///   - it has only 1 byte written, which is not enough to make a full WAL
+    ///     record
     ///
-    /// Partial segment 002 has no WAL records, and it will be removed by the next truncate_wal().
-    /// This flag will be set to true after the first truncate_wal() call.
+    /// Partial segment 002 has no WAL records, and it will be removed by the
+    /// next truncate_wal(). This flag will be set to true after the first
+    /// truncate_wal() call.
     ///
     /// [`write_lsn`]: Self::write_lsn
-    is_truncated_after_restart: bool,
+    pending_wal_truncation: bool,
 }
 
 impl PhysicalStorage {
@@ -205,10 +218,11 @@ impl PhysicalStorage {
             system_id: state.server.system_id,
             write_lsn,
             write_record_lsn: write_lsn,
+            flush_lsn,
             flush_record_lsn: flush_lsn,
             decoder: WalStreamDecoder::new(write_lsn, state.server.pg_version / 10000),
             file: None,
-            is_truncated_after_restart: false,
+            pending_wal_truncation: true,
         })
     }
 
@@ -289,8 +303,9 @@ impl PhysicalStorage {
         }
     }
 
-    /// Write WAL bytes, which are known to be located in a single WAL segment.
-    async fn write_in_segment(&mut self, segno: u64, xlogoff: usize, buf: &[u8]) -> Result<()> {
+    /// Write WAL bytes, which are known to be located in a single WAL segment. Returns true if the
+    /// segment was completed, closed, and flushed to disk.
+    async fn write_in_segment(&mut self, segno: u64, xlogoff: usize, buf: &[u8]) -> Result<bool> {
         let mut file = if let Some(file) = self.file.take() {
             file
         } else {
@@ -314,20 +329,24 @@ impl PhysicalStorage {
             let (wal_file_path, wal_file_partial_path) =
                 wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size);
             fs::rename(wal_file_partial_path, wal_file_path).await?;
+            Ok(true)
         } else {
             // otherwise, file can be reused later
             self.file = Some(file);
+            Ok(false)
         }
-
-        Ok(())
     }
 
     /// Writes WAL to the segment files, until everything is writed. If some segments
     /// are fully written, they are flushed to disk. The last (partial) segment can
     /// be flushed separately later.
     ///
-    /// Updates `write_lsn`.
+    /// Updates `write_lsn` and `flush_lsn`.
     async fn write_exact(&mut self, pos: Lsn, mut buf: &[u8]) -> Result<()> {
+        // TODO: this shouldn't be possible, except possibly with write_lsn == 0.
+        // Rename this method to `append_exact`, and make it append-only, removing
+        // the `pos` parameter and this check. For this reason, we don't update
+        // `flush_lsn` here.
         if self.write_lsn != pos {
             // need to flush the file before discarding it
             if let Some(file) = self.file.take() {
@@ -349,9 +368,13 @@ impl PhysicalStorage {
                 buf.len()
             };
 
-            self.write_in_segment(segno, xlogoff, &buf[..bytes_write])
+            let flushed = self
+                .write_in_segment(segno, xlogoff, &buf[..bytes_write])
                 .await?;
             self.write_lsn += bytes_write as u64;
+            if flushed {
+                self.flush_lsn = self.write_lsn;
+            }
             buf = &buf[bytes_write..];
         }
 
@@ -365,6 +388,9 @@ impl Storage for PhysicalStorage {
         self.write_lsn
     }
     /// flush_lsn returns LSN of last durably stored WAL record.
+    ///
+    /// TODO: flush_lsn() returns flush_record_lsn, but write_lsn() returns write_lsn: confusing.
+    #[allow(clippy::misnamed_getters)]
     fn flush_lsn(&self) -> Lsn {
         self.flush_record_lsn
     }
@@ -405,14 +431,22 @@ impl Storage for PhysicalStorage {
                 startpos
             );
         }
+        if self.pending_wal_truncation {
+            bail!(
+                "write_wal called with pending WAL truncation, write_lsn={}, startpos={}",
+                self.write_lsn,
+                startpos
+            );
+        }
 
         let write_seconds = time_io_closure(self.write_exact(startpos, buf)).await?;
         // WAL is written, updating write metrics
         self.metrics.observe_write_seconds(write_seconds);
         self.metrics.observe_write_bytes(buf.len());
 
-        // figure out last record's end lsn for reporting (if we got the
-        // whole record)
+        // Figure out the last record's end LSN and update `write_record_lsn`
+        // (if we got a whole record). The write may also have closed and
+        // flushed a segment, so update `flush_record_lsn` as well.
         if self.decoder.available() != startpos {
             info!(
                 "restart decoder from {} to {}",
@@ -423,12 +457,15 @@ impl Storage for PhysicalStorage {
             self.decoder = WalStreamDecoder::new(startpos, pg_version);
         }
         self.decoder.feed_bytes(buf);
-        loop {
-            match self.decoder.poll_decode()? {
-                None => break, // no full record yet
-                Some((lsn, _rec)) => {
-                    self.write_record_lsn = lsn;
-                }
+
+        if self.write_record_lsn <= self.flush_lsn {
+            // We may have flushed a previously written record.
+            self.flush_record_lsn = self.write_record_lsn;
+        }
+        while let Some((lsn, _rec)) = self.decoder.poll_decode()? {
+            self.write_record_lsn = lsn;
+            if lsn <= self.flush_lsn {
+                self.flush_record_lsn = lsn;
             }
         }
 
@@ -445,19 +482,17 @@ impl Storage for PhysicalStorage {
             self.fdatasync_file(&unflushed_file).await?;
             self.file = Some(unflushed_file);
         } else {
-            // We have unflushed data (write_lsn != flush_lsn), but no file.
-            // This should only happen if last file was fully written and flushed,
-            // but haven't updated flush_lsn yet.
-            if self.write_lsn.segment_offset(self.wal_seg_size) != 0 {
-                bail!(
-                    "unexpected unflushed data with no open file, write_lsn={}, flush_lsn={}",
-                    self.write_lsn,
-                    self.flush_record_lsn
-                );
-            }
+            // We have unflushed data (write_lsn != flush_lsn), but no file. This
+            // shouldn't happen, since the segment is flushed on close.
+            bail!(
+                "unexpected unflushed data with no open file, write_lsn={}, flush_lsn={}",
+                self.write_lsn,
+                self.flush_record_lsn
+            );
         }
 
         // everything is flushed now, let's update flush_lsn
+        self.flush_lsn = self.write_lsn;
         self.flush_record_lsn = self.write_record_lsn;
         Ok(())
     }
@@ -479,14 +514,34 @@ impl Storage for PhysicalStorage {
             );
         }
 
-        // Quick exit if nothing to do to avoid writing up to 16 MiB of zeros on
-        // disk (this happens on each connect).
-        if self.is_truncated_after_restart
+        // Quick exit if nothing to do and we know that the state is clean to
+        // avoid writing up to 16 MiB of zeros on disk (this happens on each
+        // connect).
+        if !self.pending_wal_truncation
             && end_pos == self.write_lsn
             && end_pos == self.flush_record_lsn
         {
             return Ok(());
         }
+
+        // Atomicity: we start with LSNs reset because once on disk deletion is
+        // started it can't be reversed. However, we might crash/error in the
+        // middle, leaving garbage above the truncation point. In theory,
+        // concatenated with previous records it might form bogus WAL (though
+        // very unlikely in practice because CRC would guard from that). To
+        // protect, set pending_wal_truncation flag before beginning: it means
+        // truncation must be retried and WAL writes are prohibited until it
+        // succeeds. Flag is also set on boot because we don't know if the last
+        // state was clean.
+        //
+        // Protocol (HandleElected before first AppendRequest) ensures we'll
+        // always try to ensure clean truncation before any writes.
+        self.pending_wal_truncation = true;
+
+        self.write_lsn = end_pos;
+        self.flush_lsn = end_pos;
+        self.write_record_lsn = end_pos;
+        self.flush_record_lsn = end_pos;
 
         // Close previously opened file, if any
         if let Some(unflushed_file) = self.file.take() {
@@ -513,11 +568,7 @@ impl Storage for PhysicalStorage {
             fs::rename(wal_file_path, wal_file_partial_path).await?;
         }
 
-        // Update LSNs
-        self.write_lsn = end_pos;
-        self.write_record_lsn = end_pos;
-        self.flush_record_lsn = end_pos;
-        self.is_truncated_after_restart = true;
+        self.pending_wal_truncation = false;
         Ok(())
     }
 

@@ -453,7 +453,6 @@ WalRedoMain(int argc, char *argv[])
 static void
 CreateFakeSharedMemoryAndSemaphores(void)
 {
-	PGShmemHeader *shim = NULL;
 	PGShmemHeader *hdr;
 	Size		size;
 	int			numSemas;
@@ -486,7 +485,6 @@ CreateFakeSharedMemoryAndSemaphores(void)
 		hdr->totalsize = size;
 		hdr->freeoffset = MAXALIGN(sizeof(PGShmemHeader));
 
-		shim = hdr;
 		UsedShmemSegAddr = hdr;
 		UsedShmemSegID = (unsigned long) 42; /* not relevant for non-shared memory */
 	}
@@ -522,8 +520,6 @@ CreateFakeSharedMemoryAndSemaphores(void)
 	 * Set up shmem.c index hashtable
 	 */
 	InitShmemIndex();
-
-	dsm_shmem_init();
 
 	/*
 	 * Set up xlog, clog, and buffers
@@ -598,10 +594,6 @@ CreateFakeSharedMemoryAndSemaphores(void)
 	if (!IsUnderPostmaster)
 		ShmemBackendArrayAllocation();
 #endif
-
-	/* Initialize dynamic shared memory facilities. */
-	if (!IsUnderPostmaster)
-		dsm_postmaster_startup(shim);
 
 	/*
 	 * Now give loadable modules a chance to set up their shmem allocations

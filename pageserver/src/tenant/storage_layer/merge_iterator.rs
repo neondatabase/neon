@@ -562,7 +562,7 @@ mod tests {
             (
                 get_key(0),
                 Lsn(0x10),
-                Value::WalRecord(NeonWalRecord::wal_init()),
+                Value::WalRecord(NeonWalRecord::wal_init("")),
             ),
             (
                 get_key(0),
@@ -572,7 +572,7 @@ mod tests {
             (
                 get_key(5),
                 Lsn(0x10),
-                Value::WalRecord(NeonWalRecord::wal_init()),
+                Value::WalRecord(NeonWalRecord::wal_init("")),
             ),
             (
                 get_key(5),
