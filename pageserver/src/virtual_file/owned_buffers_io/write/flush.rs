@@ -89,8 +89,9 @@ impl FlushControl {
         }
     }
 
+    /// In tests, turn flush control into a not started state.
     #[cfg(test)]
-    pub(crate) fn as_not_started(self) -> FlushNotStarted {
+    pub(crate) fn into_not_started(self) -> FlushNotStarted {
         match self.state {
             FlushStartState::NotStarted(not_started) => not_started,
         }

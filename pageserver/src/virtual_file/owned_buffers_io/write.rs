@@ -226,7 +226,7 @@ where
         Ok((chunk_len, control))
     }
 
-    #[must_use]
+    #[must_use = "caller must explcitly check the flush control"]
     async fn flush(
         &mut self,
         save_buf_for_read: bool,

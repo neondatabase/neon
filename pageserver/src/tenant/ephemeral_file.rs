@@ -552,7 +552,7 @@ mod tests {
         // completely within the file range
         assert!(align < cap, "test assumption");
         assert!(cap % align == 0);
-        let not_started = control.unwrap().as_not_started();
+        let not_started = control.unwrap().into_not_started();
 
         test_read_all_offset_combinations().await;
         let in_progress = not_started.ready_to_flush();
