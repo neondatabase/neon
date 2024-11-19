@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
 
+/// Parse a json request body and deserialize it to the type `T`.
 pub async fn json_request<T: for<'de> Deserialize<'de>>(
     request: &mut Request<Body>,
 ) -> Result<T, ApiError> {
@@ -27,6 +28,7 @@ pub async fn json_request<T: for<'de> Deserialize<'de>>(
         .map_err(ApiError::BadRequest)
 }
 
+/// Parse a json request body and deserialize it to the type `T`. If the body is empty, return `T::default`.
 pub async fn json_request_maybe<T: for<'de> Deserialize<'de> + Default>(
     request: &mut Request<Body>,
 ) -> Result<T, ApiError> {

@@ -117,12 +117,6 @@ page_cache_size=10
 
 
 def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
-    # Effectively disable the page cache to rely only on image layers
-    # to shorten reads.
-    neon_env_builder.pageserver_config_override = """
-page_cache_size=10
-"""
-
     env = neon_env_builder.init_start(initial_tenant_conf=AGGRESIVE_COMPACTION_TENANT_CONF)
 
     tenant_id = env.initial_tenant
@@ -167,10 +161,19 @@ LARGE_STRIPES = 32768
 
 
 @pytest.mark.parametrize(
-    "shard_count,stripe_size", [(None, None), (4, TINY_STRIPES), (4, LARGE_STRIPES)]
+    "shard_count,stripe_size,gc_compaction",
+    [
+        (None, None, False),
+        (4, TINY_STRIPES, False),
+        (4, LARGE_STRIPES, False),
+        (4, LARGE_STRIPES, True),
+    ],
 )
 def test_sharding_compaction(
-    neon_env_builder: NeonEnvBuilder, stripe_size: int, shard_count: Optional[int]
+    neon_env_builder: NeonEnvBuilder,
+    stripe_size: int,
+    shard_count: Optional[int],
+    gc_compaction: bool,
 ):
     """
     Use small stripes, small layers, and small compaction thresholds to exercise how compaction
