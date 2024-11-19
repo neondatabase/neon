@@ -11,6 +11,7 @@ use crate::id::TenantTimelineId;
 #[serde(rename_all = "kebab-case")]
 pub enum InterpretedFormat {
     Bincode,
+    Protobuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
