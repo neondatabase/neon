@@ -4,6 +4,7 @@ import random
 import time
 from typing import TYPE_CHECKING
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import wait_replica_caughtup
 
@@ -148,14 +149,13 @@ def test_physical_replication_config_mismatch_max_prepared(neon_simple_env: Neon
         cursors[i].execute(f"commit prepared 't{i}'")
 
     time.sleep(5)
-    try:
+    with pytest.raises(Exception) as e:
         s_cur.execute("select count(*) from t")
         assert s_cur.fetchall()[0][0] == 10
         secondary.stop()
-        raise AssertionError("Replica should crash")
-    except Exception as e:
-        log.info(f"Replica crashed with {e}")
-        assert secondary.log_contains("maximum number of prepared transactions reached")
+
+    log.info(f"Replica crashed with {e}")
+    assert secondary.log_contains("maximum number of prepared transactions reached")
 
 
 def connect(ep):
@@ -212,16 +212,15 @@ def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_en
         cur.execute("commit")
 
     time.sleep(5)
-    try:
+    with pytest.raises(Exception) as e:
         s_con = secondary.connect()
         s_cur = s_con.cursor()
         s_cur.execute("select count(*) from t")
         assert s_cur.fetchall()[0][0] == n_connections
         secondary.stop()
-        raise AssertionError("Replica should crash")
-    except Exception as e:
-        log.info(f"Replica crashed with {e}")
-        assert secondary.log_contains("too many KnownAssignedXids")
+
+    log.info(f"Replica crashed with {e}")
+    assert secondary.log_contains("too many KnownAssignedXids")
 
 
 def test_physical_replication_config_mismatch_max_locks_per_transaction(neon_simple_env: NeonEnv):
@@ -256,10 +255,9 @@ def test_physical_replication_config_mismatch_max_locks_per_transaction(neon_sim
         p_cur.execute(f"CREATE TABLE t_{i}(x integer)")
     p_cur.execute("commit")
 
-    try:
+    with pytest.raises(Exception) as e:
         wait_replica_caughtup(primary, secondary)
         secondary.stop()
-        raise AssertionError("Replica should crash")
-    except Exception as e:
-        log.info(f"Replica crashed with {e}")
-        assert secondary.log_contains("You might need to increase")
+
+    log.info(f"Replica crashed with {e}")
+    assert secondary.log_contains("You might need to increase")
