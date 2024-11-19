@@ -67,12 +67,15 @@ use compute_tools::params::*;
 use compute_tools::spec::*;
 use compute_tools::swap::resize_swap;
 use rlimit::{setrlimit, Resource};
+use utils::failpoint_support;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
 const BUILD_TAG_DEFAULT: &str = "latest";
 
 fn main() -> Result<()> {
+    let scenario = failpoint_support::init();
+
     let (build_tag, clap_args) = init()?;
 
     // enable core dumping for all child processes
@@ -99,6 +102,8 @@ fn main() -> Result<()> {
     let delay_exit = cleanup_after_postgres_exit(start_pg_result)?;
 
     maybe_delay_exit(delay_exit);
+
+    scenario.teardown();
 
     deinit_and_exit(wait_pg_result);
 }
