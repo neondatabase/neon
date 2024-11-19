@@ -3008,9 +3008,9 @@ impl Tenant {
                                 )
                                 .instrument(info_span!("scheduled_compact_timeline", %timeline_id))
                                 .await?;
-                            if let Some(rx) = next_scheduled_compaction_task.result_rx.take() {
+                            if let Some(tx) = next_scheduled_compaction_task.result_tx.take() {
                                 // TODO: we can send compaction statistics in the future
-                                rx.send(()).ok();
+                                tx.send(()).ok();
                             }
                             Some(true)
                         }
@@ -3047,10 +3047,10 @@ impl Tenant {
     ) -> tokio::sync::oneshot::Receiver<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
-        let tline_pending_tasks = guard.entry(timeline_id).or_insert_with(VecDeque::new);
+        let tline_pending_tasks = guard.entry(timeline_id).or_default();
         tline_pending_tasks.push_back(ScheduledCompactionTask {
             options,
-            result_rx: Some(tx),
+            result_tx: Some(tx),
         });
         rx
     }

@@ -782,6 +782,7 @@ pub(crate) struct CompactRequest {
     pub compact_range: Option<CompactRange>,
     pub compact_below_lsn: Option<LsnDisplay>,
     /// Whether the compaction job should be scheduled.
+    #[serde(default)]
     pub scheduled: bool,
 }
 

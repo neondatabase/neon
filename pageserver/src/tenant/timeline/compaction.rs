@@ -66,7 +66,7 @@ const COMPACTION_DELTA_THRESHOLD: usize = 5;
 /// A scheduled compaction task.
 pub struct ScheduledCompactionTask {
     pub options: CompactOptions,
-    pub result_rx: Option<tokio::sync::oneshot::Sender<()>>,
+    pub result_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 pub struct GcCompactionJobDescription {
