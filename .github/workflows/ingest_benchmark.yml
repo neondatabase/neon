@@ -135,7 +135,7 @@ jobs:
         BENCHMARK_INGEST_SOURCE_CONNSTR: ${{ secrets.BENCHMARK_INGEST_SOURCE_CONNSTR }}
         TARGET_PROJECT_TYPE: ${{ matrix.target_project }}
         # we report PLATFORM in zenbenchmark NeonBenchmarker perf database and want to distinguish between new project and large tenant
-        PLATFORM: "pg16-${{ matrix.target_project }}-us-east-2-staging"
+        PLATFORM: "${{ matrix.target_project }}-us-east-2-staging"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
     - name: show tables sizes after ingest
