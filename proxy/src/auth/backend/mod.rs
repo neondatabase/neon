@@ -14,7 +14,7 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use local::LocalBackend;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::AuthKeys;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::{self, validate_password_and_exchange, AuthError, ComputeUserInfoMaybeEndpoint};
@@ -286,7 +286,7 @@ async fn auth_quirks(
         Ok(info) => (info, None),
     };
 
-    info!("fetching user's authentication info");
+    debug!("fetching user's authentication info");
     let (allowed_ips, maybe_secret) = api.get_allowed_ips_and_secret(ctx, &info).await?;
 
     // check allowed list
@@ -404,7 +404,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
     ) -> auth::Result<Backend<'a, ComputeCredentials>> {
         let res = match self {
             Self::ControlPlane(api, user_info) => {
-                info!(
+                debug!(
                     user = &*user_info.user,
                     project = user_info.endpoint(),
                     "performing authentication using the console"
@@ -427,6 +427,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
             }
         };
 
+        // TODO: replace with some metric
         info!("user successfully authenticated");
         Ok(res)
     }

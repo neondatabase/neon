@@ -8,7 +8,7 @@ use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 use tracing::field::display;
-use tracing::{debug, info, info_span, Span};
+use tracing::{debug, info_span, Span};
 use try_lock::TryLock;
 use uuid::Uuid;
 
@@ -122,6 +122,7 @@ impl RequestMonitoring {
         protocol: Protocol,
         region: &'static str,
     ) -> Self {
+        // TODO: be careful with long lived spans
         let span = info_span!(
             "connect_request",
             %protocol,
@@ -384,6 +385,10 @@ impl RequestMonitoringInner {
         } else {
             ConnectOutcome::Failed
         };
+
+        // TODO: get rid of entirely/refactor
+        // check for false positives
+        // AND false negatives
         if let Some(rejected) = self.rejected {
             let ep = self
                 .endpoint_id
@@ -391,7 +396,7 @@ impl RequestMonitoringInner {
                 .map(|x| x.as_str())
                 .unwrap_or_default();
             // This makes sense only if cache is disabled
-            info!(
+            debug!(
                 ?outcome,
                 ?rejected,
                 ?ep,
