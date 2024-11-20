@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, Span};
 use utils::backoff;
 
-use super::{RequestMonitoringInner, LOG_CHAN};
+use super::{RequestContextInner, LOG_CHAN};
 use crate::config::remote_storage_from_toml;
 use crate::context::LOG_CHAN_DISCONNECT;
 
@@ -117,8 +117,8 @@ impl serde::Serialize for Options<'_> {
     }
 }
 
-impl From<&RequestMonitoringInner> for RequestData {
-    fn from(value: &RequestMonitoringInner) -> Self {
+impl From<&RequestContextInner> for RequestData {
+    fn from(value: &RequestContextInner) -> Self {
         Self {
             session_id: value.session_id,
             peer_addr: value.conn_info.addr.ip().to_string(),
