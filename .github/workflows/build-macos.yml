@@ -45,7 +45,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
     timeout-minutes: 30
-    runs-on: ubuntu-22.04
+    runs-on: macos-15
     strategy:
       matrix:
         postgres-version: ${{ fromJSON(needs.files-changed.outputs.postgres_changes) }}
@@ -64,17 +64,17 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          echo brew install flex bison openssl protobuf icu4c
+          brew install flex bison openssl protobuf icu4c
 
       - name: Build Postgres ${{ matrix.postgres-version }}
         run: |
-          echo make postgres-${{ matrix.postgres-version }}
+          make postgres-${{ matrix.postgres-version }}
 
       - name: Build Neon Pg Ext ${{ matrix.postgres-version }}
         run: |
-          echo make "neon-pg-ext-${{ matrix.postgres-version }}"
+          make "neon-pg-ext-${{ matrix.postgres-version }}"
 
       - name: Build walproposer-lib (only for v17)
         if: matrix.postgres-version == 'v17'
         run:
-          echo make walproposer-lib
+          make walproposer-lib
