@@ -1,9 +1,7 @@
 use crate::auth::{AuthError, Claims, SwappableJwtAuth};
 use crate::http::error::{api_error_handler, route_error_handler, ApiError};
 use crate::http::request::{get_query_param, parse_query_param};
-use anyhow::{anyhow, bail, Context};
-use camino::Utf8Path;
-use camino_tempfile::NamedUtf8TempFile;
+use anyhow::{anyhow, Context};
 use hyper::header::{HeaderName, AUTHORIZATION, CONTENT_DISPOSITION};
 use hyper::http::HeaderValue;
 use hyper::Method;
@@ -12,15 +10,11 @@ use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
 use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
-use tokio::io::AsyncWriteExt as _;
-use tokio::process::Command;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, info_span, warn, Instrument};
 
 use std::future::Future;
-use std::include_bytes;
 use std::io::Write as _;
-use std::process::Stdio;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -421,7 +415,6 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
     enum Format {
         Jemalloc,
         Pprof,
-        Svg,
     }
 
     // Parameters.
@@ -429,7 +422,6 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
         None => Format::Pprof,
         Some("jemalloc") => Format::Jemalloc,
         Some("pprof") => Format::Pprof,
-        Some("svg") => Format::Svg,
         Some(format) => return Err(ApiError::BadRequest(anyhow!("invalid format {format}"))),
     };
 
@@ -476,58 +468,7 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
                 .body(Body::from(data))
                 .map_err(|err| ApiError::InternalServerError(err.into()))
         }
-
-        Format::Svg => {
-            let tempfile = tokio::task::spawn_blocking(move || {
-                let mut file = prof_ctl.dump()?;
-                // dump() returns a file that's already been deleted from the file system, but with
-                // an open file handle to read from. jeprof_svg() needs a path to a file in the file
-                // system. We therefore copy the file to another temp file we can get the path to.
-                let mut tempfile = NamedUtf8TempFile::new()?;
-                std::io::copy(&mut file, &mut tempfile)?;
-                Ok(tempfile)
-            })
-            .await
-            .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
-            .map_err(ApiError::InternalServerError)?;
-            let svg = jeprof_svg(tempfile.path())
-                .await
-                .map_err(ApiError::InternalServerError)?;
-            Response::builder()
-                .status(200)
-                .header(CONTENT_TYPE, "image/svg+xml")
-                .body(Body::from(svg))
-                .map_err(|err| ApiError::InternalServerError(err.into()))
-        }
     }
-}
-
-/// Generates an SVG for the given jemalloc profile file. Requires Perl installed.
-///
-/// TODO: jeprof is really slow (~20 seconds) because of addr2line.
-pub async fn jeprof_svg(path: &Utf8Path) -> anyhow::Result<Vec<u8>> {
-    let mut cmd = Command::new("perl")
-        .args([
-            "/dev/stdin",
-            "--show_bytes",
-            &std::env::current_exe()?.as_os_str().to_string_lossy(),
-            path.as_str(),
-            "--svg",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    cmd.stdin
-        .take()
-        .expect("no stdin")
-        .write_all(include_bytes!("data/jeprof.in"))
-        .await?;
-    let output = cmd.wait_with_output().await?;
-    if !output.status.success() {
-        bail!("jeprof failed: {}", String::from_utf8_lossy(&output.stderr));
-    }
-    Ok(output.stdout)
 }
 
 pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
