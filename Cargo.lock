@@ -252,6 +252,7 @@ checksum = "1d420af8e042475e58a20d91af8eda7d6528989418c03f3f527e1c3415696f70"
 dependencies = [
  "error-code",
  "libc",
+ "tokio",
  "wasm-bindgen",
  "web-time",
 ]
