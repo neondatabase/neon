@@ -158,7 +158,7 @@ jobs:
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic perf testing: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -506,7 +506,7 @@ jobs:
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic perf testing on ${{ matrix.platform }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -643,7 +643,7 @@ jobs:
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic perf testing on ${{ env.PLATFORM }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -759,7 +759,7 @@ jobs:
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic OLAP perf testing on ${{ matrix.platform }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -874,7 +874,7 @@ jobs:
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic TPC-H perf testing on ${{ matrix.platform }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -974,7 +974,7 @@ jobs:
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic TPC-H perf testing on ${{ matrix.platform }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
