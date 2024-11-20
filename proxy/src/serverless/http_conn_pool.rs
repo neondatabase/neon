@@ -227,7 +227,7 @@ impl<C: ClientInnerExt + Clone> GlobalConnPool<C> {
         };
 
         tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
-        info!(
+        debug!(
             cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
             "pool: reusing connection '{conn_info}'"
         );

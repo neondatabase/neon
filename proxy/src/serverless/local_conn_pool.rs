@@ -29,7 +29,7 @@ use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{AsyncMessage, Socket};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use super::backend::HttpConnError;
 use super::conn_pool_lib::{
@@ -110,7 +110,7 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
                 "pid",
                 tracing::field::display(client.inner.get_process_id()),
             );
-            info!(
+            debug!(
                 cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
                 "local_pool: reusing connection '{conn_info}'"
             );

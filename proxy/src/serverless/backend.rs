@@ -167,10 +167,10 @@ impl PoolingBackend {
         force_new: bool,
     ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
         let maybe_client = if force_new {
-            info!("pool: pool is disabled");
+            debug!("pool: pool is disabled");
             None
         } else {
-            info!("pool: looking for an existing connection");
+            debug!("pool: looking for an existing connection");
             self.pool.get(ctx, &conn_info)?
         };
 
@@ -204,14 +204,14 @@ impl PoolingBackend {
         ctx: &RequestContext,
         conn_info: ConnInfo,
     ) -> Result<http_conn_pool::Client<Send>, HttpConnError> {
-        info!("pool: looking for an existing connection");
+        debug!("pool: looking for an existing connection");
         if let Ok(Some(client)) = self.http_conn_pool.get(ctx, &conn_info) {
             return Ok(client);
         }
 
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
-        info!(%conn_id, "pool: opening a new connection '{conn_info}'");
+        debug!(%conn_id, "pool: opening a new connection '{conn_info}'");
         let backend = self.auth_backend.as_ref().map(|()| ComputeCredentials {
             info: ComputeUserInfo {
                 user: conn_info.user_info.user.clone(),
