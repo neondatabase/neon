@@ -7,7 +7,7 @@ use super::retry::ShouldRetryWakeCompute;
 use crate::auth::backend::ComputeCredentialKeys;
 use crate::compute::{self, PostgresConnection, COULD_NOT_CONNECT};
 use crate::config::RetryConfig;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::locks::ApiLocks;
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
@@ -47,7 +47,7 @@ pub(crate) trait ConnectMechanism {
     type Error: From<Self::ConnectError>;
     async fn connect_once(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         node_info: &control_plane::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError>;
@@ -59,7 +59,7 @@ pub(crate) trait ConnectMechanism {
 pub(crate) trait ComputeConnectBackend {
     async fn wake_compute(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
     ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError>;
 
     fn get_keys(&self) -> &ComputeCredentialKeys;
@@ -82,7 +82,7 @@ impl ConnectMechanism for TcpMechanism<'_> {
     #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
     async fn connect_once(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         node_info: &control_plane::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<PostgresConnection, Self::Error> {
@@ -99,7 +99,7 @@ impl ConnectMechanism for TcpMechanism<'_> {
 /// Try to connect to the compute node, retrying if necessary.
 #[tracing::instrument(skip_all)]
 pub(crate) async fn connect_to_compute<M: ConnectMechanism, B: ComputeConnectBackend>(
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     mechanism: &M,
     user_info: &B,
     allow_self_signed_compute: bool,

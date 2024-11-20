@@ -34,7 +34,7 @@ use super::json::{json_to_pg_text, pg_text_row_to_json, JsonConversionError};
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
 use crate::auth::{endpoint_sni, ComputeUserInfoParseError};
 use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::metrics::{HttpDirection, Metrics};
 use crate::proxy::{run_until_cancelled, NeonOptions};
@@ -133,7 +133,7 @@ impl UserFacingError for ConnInfoError {
 
 fn get_conn_info(
     config: &'static AuthenticationConfig,
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     headers: &HeaderMap,
     tls: Option<&TlsConfig>,
 ) -> Result<ConnInfoWithAuth, ConnInfoError> {
@@ -240,7 +240,7 @@ fn get_conn_info(
 
 pub(crate) async fn handle(
     config: &'static ProxyConfig,
-    ctx: RequestMonitoring,
+    ctx: RequestContext,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
@@ -516,7 +516,7 @@ fn map_isolation_level_to_headers(level: IsolationLevel) -> Option<HeaderValue> 
 async fn handle_inner(
     cancel: CancellationToken,
     config: &'static ProxyConfig,
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, SqlOverHttpError> {
@@ -562,7 +562,7 @@ async fn handle_inner(
 async fn handle_db_inner(
     cancel: CancellationToken,
     config: &'static ProxyConfig,
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     request: Request<Incoming>,
     conn_info: ConnInfo,
     auth: AuthData,
@@ -733,7 +733,7 @@ pub(crate) fn uuid_to_header_value(id: Uuid) -> HeaderValue {
 }
 
 async fn handle_auth_broker_inner(
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     request: Request<Incoming>,
     conn_info: ConnInfo,
     jwt: String,

@@ -14,7 +14,7 @@ use tracing::warn;
 
 use crate::cancellation::CancellationHandlerMain;
 use crate::config::ProxyConfig;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::error::{io_error, ReportableError};
 use crate::metrics::Metrics;
 use crate::proxy::{handle_client, ClientMode, ErrorSource};
@@ -126,7 +126,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 pub(crate) async fn serve_websocket(
     config: &'static ProxyConfig,
     auth_backend: &'static crate::auth::Backend<'static, ()>,
-    ctx: RequestMonitoring,
+    ctx: RequestContext,
     websocket: OnUpgrade,
     cancellation_handler: Arc<CancellationHandlerMain>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,

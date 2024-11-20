@@ -2,7 +2,7 @@ use std::convert::Infallible;
 
 use anyhow::bail;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Handle unix signals appropriately.
 pub async fn handle<F>(
@@ -22,7 +22,7 @@ where
         tokio::select! {
             // Hangup is commonly used for config reload.
             _ = hangup.recv() => {
-                warn!("received SIGHUP");
+                info!("received SIGHUP");
                 refresh_config();
             }
             // Shut down the whole application.

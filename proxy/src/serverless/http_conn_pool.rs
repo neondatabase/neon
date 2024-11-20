@@ -12,7 +12,7 @@ use tracing::{debug, error, info, info_span, Instrument};
 
 use super::backend::HttpConnError;
 use super::conn_pool_lib::{ClientInnerExt, ConnInfo};
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::types::EndpointCacheKey;
@@ -212,7 +212,7 @@ impl<C: ClientInnerExt + Clone> GlobalConnPool<C> {
     #[expect(unused_results)]
     pub(crate) fn get(
         self: &Arc<Self>,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         conn_info: &ConnInfo,
     ) -> Result<Option<Client<C>>, HttpConnError> {
         let result: Result<Option<Client<C>>, HttpConnError>;
@@ -280,7 +280,7 @@ impl<C: ClientInnerExt + Clone> GlobalConnPool<C> {
 
 pub(crate) fn poll_http2_client(
     global_pool: Arc<GlobalConnPool<Send>>,
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     conn_info: &ConnInfo,
     client: Send,
     connection: Connect,
