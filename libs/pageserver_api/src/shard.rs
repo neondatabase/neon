@@ -170,6 +170,26 @@ impl ShardIdentity {
         }
     }
 
+    /// Return true if the key should be stored on all shards, not just one.
+    fn is_key_global(&self, key: &Key) -> bool {
+        if key.is_slru_block_key() || key.is_slru_segment_size_key() {
+            // SLRU blocks are only stored on shard 0
+            false
+        } else if key.is_rel_block_key() {
+            // Ordinary relation blocks are distributed across shards
+            false
+        } else if key.is_rel_size_key() {
+            // All shards maintain rel size keys (although only shard 0 is responsible for
+            // keeping it strictly accurate, other shards just reflect the highest block they've ingested)
+            true
+        } else {
+            // For everything else, we assume it must be kept everywhere, because ingest code
+            // might assume this -- this covers functionality where the ingest code has
+            // not (yet) been made fully shard aware.
+            true
+        }
+    }
+
     /// Return true if the key should be discarded if found in this shard's
     /// data store, e.g. during compaction after a split.
     ///
@@ -180,14 +200,7 @@ impl ShardIdentity {
             return false;
         }
 
-        if key_is_shard0(key) && key.field1 != 0x01 {
-            // Q: Why can't we dispose of shard0 content if we're not shard 0?
-            // A1: because the WAL ingestion logic currently ingests some shard 0
-            //     content on all shards, even though it's only read on shard 0.  If we
-            //     dropped it, then subsequent WAL ingest to these keys would encounter
-            //     an error.
-            // A2: because key_is_shard0 also covers relation size keys, which are written
-            //     on all shards even though they're only maintained accurately on shard 0.
+        if self.is_key_global(key) {
             false
         } else {
             !self.is_key_local(key)
