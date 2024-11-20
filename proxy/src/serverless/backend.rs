@@ -33,7 +33,7 @@ use crate::intern::EndpointIdInt;
 use crate::proxy::connect_compute::ConnectMechanism;
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
-use crate::types::{EndpointId, Host};
+use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
 
 pub(crate) struct PoolingBackend {
     pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool<Send>>,
@@ -215,7 +215,10 @@ impl PoolingBackend {
         let backend = self.auth_backend.as_ref().map(|()| ComputeCredentials {
             info: ComputeUserInfo {
                 user: conn_info.user_info.user.clone(),
-                endpoint: EndpointId::from(format!("{}-local-proxy", conn_info.user_info.endpoint)),
+                endpoint: EndpointId::from(format!(
+                    "{}{LOCAL_PROXY_SUFFIX}",
+                    conn_info.user_info.endpoint.normalize()
+                )),
                 options: conn_info.user_info.options.clone(),
             },
             keys: crate::auth::backend::ComputeCredentialKeys::None,
