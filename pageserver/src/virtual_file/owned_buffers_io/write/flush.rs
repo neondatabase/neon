@@ -127,14 +127,19 @@ where
     W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
 {
     /// Spawns a new background flush task and obtains a handle.
+    ///
+    /// Note: The background task so we do not need to explicitly maintain a queue of buffers.
     pub fn spawn_new<B>(file: Arc<W>, buf: B, ctx: RequestContext) -> Self
     where
         B: Buffer<IoBuf = Buf> + Send + 'static,
     {
-        let (front, back) = duplex::mpsc::channel(1);
+        let (front, back) = duplex::mpsc::channel(2);
 
-        let bg = FlushBackgroundTask::new(back, file, ctx);
-        let join_handle = tokio::spawn(async move { bg.run(buf.flush()).await });
+        let join_handle = tokio::spawn(async move {
+            FlushBackgroundTask::new(back, file, ctx)
+                .run(buf.flush())
+                .await
+        });
 
         FlushHandle {
             inner: Some(FlushHandleInner {
@@ -239,6 +244,7 @@ where
     }
 
     /// Runs the background flush task.
+    /// The passed in slice is immediately sent back to the flush handle through the duplex channel.
     async fn run(mut self, slice: FullSlice<Buf>) -> std::io::Result<Arc<W>> {
         // Sends the extra buffer back to the handle.
         self.channel.send(slice).await.map_err(|_| {
