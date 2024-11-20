@@ -39,7 +39,7 @@ def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, zenbenchmark: Neo
             "batch_timeout": (batch_timeout, {"unit": "s"}),
             # target_runtime is just a polite ask to the workload to run for this long
             "effective_io_concurrency": (effective_io_concurrency, {}),
-            "readhead_buffer_size": (readhead_buffer_size, {"unit": "KiB"}),
+            "readhead_buffer_size": (readhead_buffer_size, {}),
             # name is not a metric
         }
     )
