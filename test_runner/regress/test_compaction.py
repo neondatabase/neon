@@ -14,7 +14,8 @@ from fixtures.pageserver.http import PageserverApiException
 from fixtures.utils import skip_in_debug_build, wait_until
 from fixtures.workload import Workload
 
-AGGRESIVE_COMPACTION_TENANT_CONF = {
+
+AGGRESSIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.
     "gc_period": "0s",
     "compaction_period": "0s",
@@ -23,6 +24,7 @@ AGGRESIVE_COMPACTION_TENANT_CONF = {
     # Compact small layers
     "compaction_target_size": 1024**2,
     "image_creation_threshold": 2,
+    "lsn_lease_length": "0s",
 }
 
 
@@ -43,7 +45,7 @@ def test_pageserver_compaction_smoke(neon_env_builder: NeonEnvBuilder, wal_recei
 page_cache_size=10; wal_receiver_protocol='{wal_receiver_protocol}'
 """
 
-    env = neon_env_builder.init_start(initial_tenant_conf=AGGRESIVE_COMPACTION_TENANT_CONF)
+    env = neon_env_builder.init_start(initial_tenant_conf=AGGRESSIVE_COMPACTION_TENANT_CONF)
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
@@ -117,6 +119,10 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
         # Run both gc and gc-compaction.
         "gc_period": "5s",
         "compaction_period": "5s",
+        # No PiTR interval and small GC horizon
+        "pitr_interval": "0s",
+        "gc_horizon": f"{1024 ** 2}",
+        "lsn_lease_length": "0s",
     }
 
     env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
@@ -154,7 +160,10 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
 
         workload.churn_rows(row_count, env.pageserver.id)
 
-    env.pageserver.assert_log_contains("scheduled_compaction")
+    # ensure gc_compaction is scheduled
+    env.pageserver.assert_log_contains("scheduled_compact_timeline")
+    # and it's actually run instead of skipped (i.e., no layers to compact)
+    env.pageserver.assert_log_contains("gc-compaction statistics")
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
