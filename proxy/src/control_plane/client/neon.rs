@@ -73,6 +73,8 @@ impl NeonControlPlaneClient {
             .endpoints_cache
             .is_valid(ctx, &user_info.endpoint.normalize())
         {
+            // TODO: refactor this because it's weird
+            // this is a failure to authenticate but we return Ok.
             info!("endpoint is not valid, skipping the request");
             return Ok(AuthInfo::default());
         }
@@ -92,7 +94,7 @@ impl NeonControlPlaneClient {
                 ])
                 .build()?;
 
-            info!(url = request.url().as_str(), "sending http request");
+            debug!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
             let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
@@ -104,10 +106,12 @@ impl NeonControlPlaneClient {
                 // TODO(anna): retry
                 Err(e) => {
                     return if e.get_reason().is_not_found() {
+                        // TODO: refactor this because it's weird
+                        // this is a failure to authenticate but we return Ok.
                         Ok(AuthInfo::default())
                     } else {
                         Err(e.into())
-                    }
+                    };
                 }
             };
 
@@ -163,7 +167,7 @@ impl NeonControlPlaneClient {
                 .build()
                 .map_err(GetEndpointJwksError::RequestBuild)?;
 
-            info!(url = request.url().as_str(), "sending http request");
+            debug!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
             let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
             let response = self
@@ -220,7 +224,7 @@ impl NeonControlPlaneClient {
 
             let request = request_builder.build()?;
 
-            info!(url = request.url().as_str(), "sending http request");
+            debug!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
             let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
@@ -249,6 +253,7 @@ impl NeonControlPlaneClient {
             Ok(node)
         }
         .map_err(crate::error::log_error)
+        // TODO: redo this span stuff
         .instrument(info_span!("http", id = request_id))
         .await
     }

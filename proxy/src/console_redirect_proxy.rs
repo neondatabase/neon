@@ -146,7 +146,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     conn_gauge: NumClientConnectionsGuard<'static>,
 ) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
-    info!(
+    debug!(
         protocol = %ctx.protocol(),
         "handling interactive connection from client"
     );

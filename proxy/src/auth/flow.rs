@@ -178,6 +178,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
             SCRAM_SHA_256_PLUS => ctx.set_auth_method(crate::context::AuthMethod::ScramSha256Plus),
             _ => {}
         }
+
+        // TODO: make this a metric instead
         info!("client chooses {}", sasl.method);
 
         let outcome = sasl::SaslStream::new(self.stream, sasl.message)

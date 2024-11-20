@@ -73,7 +73,7 @@ pub(crate) async fn password_hack_no_authentication(
         .get_password()
         .await?;
 
-    info!(project = &*payload.endpoint, "received missing parameter");
+    debug!(project = &*payload.endpoint, "received missing parameter");
 
     // Report tentative success; compute node will check the password anyway.
     Ok((
