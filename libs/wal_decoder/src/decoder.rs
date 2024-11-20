@@ -100,7 +100,7 @@ impl MetadataRecord {
                 Self::decode_xlog_record(&mut buf, decoded, next_record_lsn)?
             }
             pg_constants::RM_LOGICALMSG_ID => {
-                Self::decode_logical_message_record(&mut buf, decoded)?
+                Self::decode_logical_message_record(&mut buf, shard, decoded)?
             }
             pg_constants::RM_STANDBY_ID => Self::decode_standby_record(&mut buf, decoded)?,
             pg_constants::RM_REPLORIGIN_ID => Self::decode_replorigin_record(&mut buf, decoded)?,
@@ -866,6 +866,7 @@ impl MetadataRecord {
 
     fn decode_logical_message_record(
         buf: &mut Bytes,
+        shard: &ShardIdentity,
         decoded: &DecodedWALRecord,
     ) -> anyhow::Result<Option<MetadataRecord>> {
         let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
@@ -881,14 +882,17 @@ impl MetadataRecord {
             }
 
             if let Some(path) = prefix.strip_prefix("neon-file:") {
-                let buf_size = xlrec.prefix_size + xlrec.message_size;
-                let buf = Bytes::copy_from_slice(&buf[xlrec.prefix_size..buf_size]);
-                return Ok(Some(MetadataRecord::LogicalMessage(
-                    LogicalMessageRecord::Put(PutLogicalMessage {
-                        path: path.to_string(),
-                        buf,
-                    }),
-                )));
+                // Only shard 0 stores AUX files
+                if shard.is_shard_zero() {
+                    let buf_size = xlrec.prefix_size + xlrec.message_size;
+                    let buf = Bytes::copy_from_slice(&buf[xlrec.prefix_size..buf_size]);
+                    return Ok(Some(MetadataRecord::LogicalMessage(
+                        LogicalMessageRecord::Put(PutLogicalMessage {
+                            path: path.to_string(),
+                            buf,
+                        }),
+                    )));
+                }
             }
         }
 
