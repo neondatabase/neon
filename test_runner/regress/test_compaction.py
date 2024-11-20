@@ -24,7 +24,7 @@ AGGRESSIVE_COMPACTION_TENANT_CONF = {
     # Compact small layers
     "compaction_target_size": 1024**2,
     "image_creation_threshold": 2,
-    "lsn_lease_length": "0s",
+    # "lsn_lease_length": "0s", -- TODO: would cause branch creation errors, should fix later
 }
 
 
