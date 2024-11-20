@@ -1,4 +1,3 @@
-
 from dataclasses import dataclass
 import dataclasses
 import time
@@ -84,13 +83,15 @@ def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, zenbenchmark: Neo
         pageserver_getpage_count: int
         pageserver_vectored_get_count: int
         compute_getpage_count: int
+        pageserver_cpu_seconds_total: float
 
         def __sub__(self, other):
             return Metrics(
                 time=self.time - other.time,
                 pageserver_getpage_count=self.pageserver_getpage_count - other.pageserver_getpage_count,
                 pageserver_vectored_get_count=self.pageserver_vectored_get_count - other.pageserver_vectored_get_count,
-                compute_getpage_count=self.compute_getpage_count - other.compute_getpage_count
+                compute_getpage_count=self.compute_getpage_count - other.compute_getpage_count,
+                pageserver_cpu_seconds_total=self.pageserver_cpu_seconds_total - other.pageserver_cpu_seconds_total
             )
 
         def __truediv__(self, other: "Metrics"):
@@ -98,7 +99,8 @@ def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, zenbenchmark: Neo
                 time=self.time / other.time, # doesn't really make sense but whatever
                 pageserver_getpage_count=self.pageserver_getpage_count / other.pageserver_getpage_count,
                 pageserver_vectored_get_count=self.pageserver_vectored_get_count / other.pageserver_vectored_get_count,
-                compute_getpage_count=self.compute_getpage_count / other.compute_getpage_count
+                compute_getpage_count=self.compute_getpage_count / other.compute_getpage_count,
+                pageserver_cpu_seconds_total=self.pageserver_cpu_seconds_total / other.pageserver_cpu_seconds_total
             )
 
         def normalize(self, by):
@@ -106,7 +108,8 @@ def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, zenbenchmark: Neo
                 time=self.time / by,
                 pageserver_getpage_count=self.pageserver_getpage_count / by,
                 pageserver_vectored_get_count=self.pageserver_vectored_get_count / by,
-                compute_getpage_count=self.compute_getpage_count / by
+                compute_getpage_count=self.compute_getpage_count / by,
+                pageserver_cpu_seconds_total=self.pageserver_cpu_seconds_total / by
             )
 
     def get_metrics():
@@ -118,7 +121,8 @@ def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, zenbenchmark: Neo
                 time=time.time(),
                 pageserver_getpage_count=pageserver_metrics.query_one("pageserver_smgr_query_seconds_count", {"smgr_query_type": "get_page_at_lsn"}).value,
                 pageserver_vectored_get_count=pageserver_metrics.query_one("pageserver_get_vectored_seconds_count", {"task_kind": "PageRequestHandler"}).value,
-                compute_getpage_count=compute_getpage_count
+                compute_getpage_count=compute_getpage_count,
+                pageserver_cpu_seconds_total=pageserver_metrics.query_one("process_cpu_seconds_total").value
             )
 
     def workload() -> Metrics:
