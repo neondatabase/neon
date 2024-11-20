@@ -9,7 +9,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.utils import humantime_to_ms
 
-TARGET_RUNTIME = 5
+TARGET_RUNTIME = 60
 
 
 @pytest.mark.parametrize(
@@ -18,12 +18,10 @@ TARGET_RUNTIME = 5
         # the next 4 cases demonstrate how not-batchable workloads suffer from batching timeout
         (50, None, TARGET_RUNTIME, 1, 128, "not batchable no batching"),
         (50, "10us", TARGET_RUNTIME, 1, 128, "not batchable 10us timeout"),
-        (50, "20us", TARGET_RUNTIME, 1, 128, "not batchable 20us timeout"),
         (50, "1ms", TARGET_RUNTIME, 1, 128, "not batchable 1ms timeout"),
         # the next 4 cases demonstrate how batchable workloads benefit from batching
         (50, None, TARGET_RUNTIME, 100, 128, "batchable no batching"),
         (50, "10us", TARGET_RUNTIME, 100, 128, "batchable 10us timeout"),
-        (50, "20us", TARGET_RUNTIME, 100, 128, "batchable 20us timeout"),
         (50, "100us", TARGET_RUNTIME, 100, 128, "batchable 100us timeout"),
         (50, "1ms", TARGET_RUNTIME, 100, 128, "batchable 1ms timeout"),
     ],
