@@ -256,12 +256,10 @@ impl SecondaryTenant {
     /// Exhaustive check that incrementally updated metrics match the actual state.
     #[cfg(feature = "testing")]
     fn validate_metrics(&self) {
-        if cfg!(feature = "testing") {
-            let detail = self.detail.lock().unwrap();
-            let resident_size = detail.total_resident_size();
+        let detail = self.detail.lock().unwrap();
+        let resident_size = detail.total_resident_size();
 
-            assert_eq!(resident_size, self.resident_size_metric.get());
-        }
+        assert_eq!(resident_size, self.resident_size_metric.get());
     }
 
     #[cfg(not(feature = "testing"))]
