@@ -177,6 +177,7 @@ tokio-postgres-rustls = "0.12.0"
 tokio-rustls = { version = "0.26.0", default-features = false, features = ["tls12", "ring"]}
 tokio-stream = "0.1"
 tokio-tar = "0.3"
+tokio-timerfd = "0.2.0"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }
 toml = "0.8"
 toml_edit = "0.22"
