@@ -675,6 +675,13 @@ pub struct WalSndKeepAlive {
     pub request_reply: bool,
 }
 
+/// Batch of interpreted WAL records used in the interpreted
+/// safekeeper to pageserver protocol.
+///
+/// Note that the pageserver uses the RawInterpretedWalRecordsBody
+/// counterpart of this from the neondatabase/rust-postgres repo.
+/// If you're changing this struct, you likely need to change its
+/// twin as well.
 #[derive(Debug)]
 pub struct InterpretedWalRecordsBody<'a> {
     /// End of raw WAL in [`Self::data`]
