@@ -245,6 +245,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-timer"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba5fa6ed76cb2aa820707b4eb9ec46f42da9ce70b0eafab5e5e34942b38a44d5"
+dependencies = [
+ "libc",
+ "wasm-bindgen",
+ "winapi",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.68"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3590,6 +3601,7 @@ dependencies = [
  "arc-swap",
  "async-compression",
  "async-stream",
+ "async-timer",
  "bit_field",
  "byteorder",
  "bytes",
