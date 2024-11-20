@@ -15,6 +15,12 @@ pub enum InterpretedFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Compression {
+    Zstd { level: i8 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "args")]
 #[serde(rename_all = "kebab-case")]
 pub enum PostgresClientProtocol {
@@ -22,7 +28,10 @@ pub enum PostgresClientProtocol {
     Vanilla,
     /// Custom shard-aware protocol that replicates interpreted records.
     /// Used to send wal from safekeeper to pageserver.
-    Interpreted { format: InterpretedFormat },
+    Interpreted {
+        format: InterpretedFormat,
+        compression: Option<Compression>,
+    },
 }
 
 pub struct ConnectionConfigArgs<'a> {

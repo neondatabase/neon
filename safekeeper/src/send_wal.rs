@@ -489,7 +489,10 @@ impl SafekeeperPostgresHandler {
 
                 Either::Left(sender.run())
             }
-            PostgresClientProtocol::Interpreted { format } => {
+            PostgresClientProtocol::Interpreted {
+                format,
+                compression,
+            } => {
                 let pg_version = tli.tli.get_state().await.1.server.pg_version / 10000;
                 let end_watch_view = end_watch.view();
                 let wal_stream_builder = WalReaderStreamBuilder {
@@ -503,6 +506,7 @@ impl SafekeeperPostgresHandler {
 
                 let sender = InterpretedWalSender {
                     format,
+                    compression,
                     pgb,
                     wal_stream_builder,
                     end_watch_view,

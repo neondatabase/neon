@@ -1,9 +1,10 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use pageserver_api::key::CompactKey;
 use prost::{DecodeError, EncodeError, Message};
+use tokio::io::AsyncWriteExt;
 use utils::bin_ser::{BeSer, DeserializeError, SerializeError};
 use utils::lsn::Lsn;
-use utils::postgres_client::InterpretedFormat;
+use utils::postgres_client::{Compression, InterpretedFormat};
 
 use crate::models::{
     FlushUncommittedRecords, InterpretedWalRecord, InterpretedWalRecords, MetadataRecord,
@@ -26,6 +27,8 @@ pub enum ToWireFormatError {
     Bincode(#[from] SerializeError),
     #[error("{0}")]
     Protobuf(#[from] ProtobufSerializeError),
+    #[error("{0}")]
+    Compression(#[from] std::io::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +45,8 @@ pub enum FromWireFormatError {
     Bincode(#[from] DeserializeError),
     #[error("{0}")]
     Protobuf(#[from] ProtobufDeserializeError),
+    #[error("{0}")]
+    Decompress(#[from] std::io::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -61,17 +66,32 @@ pub enum TranscodeError {
 }
 
 pub trait ToWireFormat {
-    fn to_wire(self, format: InterpretedFormat) -> Result<Bytes, ToWireFormatError>;
+    fn to_wire(
+        self,
+        format: InterpretedFormat,
+        compression: Option<Compression>,
+    ) -> impl std::future::Future<Output = Result<Bytes, ToWireFormatError>> + Send;
 }
 
 pub trait FromWireFormat {
     type T;
-    fn from_wire(buf: &Bytes, format: InterpretedFormat) -> Result<Self::T, FromWireFormatError>;
+    fn from_wire(
+        buf: &Bytes,
+        format: InterpretedFormat,
+        compression: Option<Compression>,
+    ) -> impl std::future::Future<Output = Result<Self::T, FromWireFormatError>> + Send;
 }
 
 impl ToWireFormat for InterpretedWalRecords {
-    fn to_wire(self, format: InterpretedFormat) -> Result<Bytes, ToWireFormatError> {
-        match format {
+    async fn to_wire(
+        self,
+        format: InterpretedFormat,
+        compression: Option<Compression>,
+    ) -> Result<Bytes, ToWireFormatError> {
+        use async_compression::tokio::write::ZstdEncoder;
+        use async_compression::Level;
+
+        let encode_res: Result<Bytes, ToWireFormatError> = match format {
             InterpretedFormat::Bincode => {
                 let buf = BytesMut::new();
                 let mut buf = buf.writer();
@@ -87,20 +107,52 @@ impl ToWireFormat for InterpretedWalRecords {
 
                 Ok(buf.freeze())
             }
-        }
+        };
+
+        let buf = encode_res?;
+        let compressed_buf = match compression {
+            Some(Compression::Zstd { level }) => {
+                let mut encoder = ZstdEncoder::with_quality(
+                    Vec::with_capacity(buf.len() / 4),
+                    Level::Precise(level as i32),
+                );
+                encoder.write_all(&buf).await?;
+                encoder.shutdown().await?;
+                Bytes::from(encoder.into_inner())
+            }
+            None => buf,
+        };
+
+        Ok(compressed_buf)
     }
 }
 
 impl FromWireFormat for InterpretedWalRecords {
     type T = Self;
 
-    fn from_wire(buf: &Bytes, format: InterpretedFormat) -> Result<Self, FromWireFormatError> {
+    async fn from_wire(
+        buf: &Bytes,
+        format: InterpretedFormat,
+        compression: Option<Compression>,
+    ) -> Result<Self, FromWireFormatError> {
+        let decompressed_buf = match compression {
+            Some(Compression::Zstd { .. }) => {
+                use async_compression::tokio::write::ZstdDecoder;
+                let mut decoded_buf = Vec::with_capacity(buf.len());
+                let mut decoder = ZstdDecoder::new(&mut decoded_buf);
+                decoder.write_all(buf).await?;
+                decoder.flush().await?;
+                Bytes::from(decoded_buf)
+            }
+            None => buf.clone(),
+        };
+
         match format {
             InterpretedFormat::Bincode => {
-                InterpretedWalRecords::des(buf).map_err(FromWireFormatError::Bincode)
+                InterpretedWalRecords::des(&decompressed_buf).map_err(FromWireFormatError::Bincode)
             }
             InterpretedFormat::Protobuf => {
-                let proto = ProtoInterpretedWalRecords::decode(buf.clone())
+                let proto = ProtoInterpretedWalRecords::decode(decompressed_buf)
                     .map_err(|e| FromWireFormatError::Protobuf(e.into()))?;
                 InterpretedWalRecords::try_from(proto)
                     .map_err(|e| FromWireFormatError::Protobuf(e.into()))

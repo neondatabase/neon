@@ -7120,12 +7120,14 @@ name = "wal_decoder"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-compression",
  "bytes",
  "pageserver_api",
  "postgres_ffi",
  "prost",
  "serde",
  "thiserror",
+ "tokio",
  "tonic",
  "tonic-build",
  "tracing",

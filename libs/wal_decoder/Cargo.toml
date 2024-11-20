@@ -8,6 +8,7 @@ license.workspace = true
 testing = ["pageserver_api/testing"]
 
 [dependencies]
+async-compression.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 pageserver_api.workspace = true
@@ -15,6 +16,7 @@ prost.workspace = true
 postgres_ffi.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 tonic.workspace = true
 tracing.workspace = true
 utils.workspace = true

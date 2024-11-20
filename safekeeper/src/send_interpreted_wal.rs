@@ -9,6 +9,7 @@ use postgres_ffi::{get_current_timestamp, waldecoder::WalStreamDecoder};
 use pq_proto::{BeMessage, InterpretedWalRecordsBody, WalSndKeepAlive};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::MissedTickBehavior;
+use utils::postgres_client::Compression;
 use utils::postgres_client::InterpretedFormat;
 use wal_decoder::models::{InterpretedWalRecord, InterpretedWalRecords};
 use wal_decoder::wire_format::ToWireFormat;
@@ -21,6 +22,7 @@ use crate::wal_reader_stream::{WalBytes, WalReaderStreamBuilder};
 /// is pre-interpreted and filtered for the shard.
 pub(crate) struct InterpretedWalSender<'a, IO> {
     pub(crate) format: InterpretedFormat,
+    pub(crate) compression: Option<Compression>,
     pub(crate) pgb: &'a mut PostgresBackend<IO>,
     pub(crate) wal_stream_builder: WalReaderStreamBuilder,
     pub(crate) end_watch_view: EndWatchView,
@@ -86,7 +88,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
                         records,
                         next_record_lsn: max_next_record_lsn
                     };
-                    let buf = batch.to_wire(self.format).with_context(|| "Failed to serialize interpreted WAL")?;
+                    let buf = batch.to_wire(self.format, self.compression).await
+                        .with_context(|| "Failed to serialize interpreted WAL")?;
 
                     // Reset the keep alive ticker since we are sending something
                     // over the wire now.
