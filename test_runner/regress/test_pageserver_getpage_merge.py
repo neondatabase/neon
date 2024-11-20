@@ -6,11 +6,12 @@ import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
 
-@pytest.mark.parametrize("tablesize_mib", [50, 500])
-@pytest.mark.parametrize("batch_timeout", [None, "1ns", "5us", "10us", "100us", "1ms"])
-@pytest.mark.parametrize("target_runtime", [5])
-@pytest.mark.parametrize("effective_io_concurrency", [1, 32, 64, 100]) # 32 is the current vectored get max batch size
-def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, tablesize_mib: int, batch_timeout: str, target_runtime: int, effective_io_concurrency: int):
+@pytest.mark.parametrize("tablesize_mib", [50, 500, 5000])
+@pytest.mark.parametrize("batch_timeout", [None, "1ns", "5us", "10us", "100us", "1ms", "10ms"])
+@pytest.mark.parametrize("target_runtime", [10])
+@pytest.mark.parametrize("effective_io_concurrency", [1, 32, 64, 100, 800]) # 32 is the current vectored get max batch size
+@pytest.mark.parametrize("readhead_buffer_size", [128, 1024]) # 128 is the default in prod right now
+def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, tablesize_mib: int, batch_timeout: str, target_runtime: int, effective_io_concurrency: int, readhead_buffer_size: int):
     """
     Do a bunch of sequential scans and ensure that the pageserver does some merging.
     """
@@ -28,7 +29,7 @@ def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, tablesize_mib: in
 
     cur.execute("SET max_parallel_workers_per_gather=0") # disable parallel backends
     cur.execute(f"SET effective_io_concurrency={effective_io_concurrency}")
-    cur.execute("SET neon.readahead_buffer_size=128") # this is the current default value, but let's hard-code that
+    cur.execute(f"SET neon.readahead_buffer_size={readhead_buffer_size}") # this is the current default value, but let's hard-code that
 
     #
     # Setup
