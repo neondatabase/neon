@@ -138,6 +138,7 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
         10,
         virtual_file::api::IoEngineKind::StdFs,
         IoMode::preferred(),
+        virtual_file::SyncMode::Sync,
     );
     pageserver::page_cache::init(100);
 

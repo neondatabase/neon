@@ -26,15 +26,9 @@ jobs:
     with:
       github-event-name: ${{ github.event_name}}
 
-  check-build-tools-image:
-    needs: [ check-permissions ]
-    uses: ./.github/workflows/check-build-tools-image.yml
-
   build-build-tools-image:
-    needs: [ check-build-tools-image ]
+    needs: [ check-permissions ]
     uses: ./.github/workflows/build-build-tools-image.yml
-    with:
-      image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
     secrets: inherit
 
   check-macos-build:
@@ -44,7 +38,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
     timeout-minutes: 90
-    runs-on: macos-14
+    runs-on: macos-15
 
     env:
       # Use release build only, to have less debug info around
@@ -58,7 +52,7 @@ jobs:
           submodules: true
 
       - name: Install macOS postgres dependencies
-        run: brew install flex bison openssl protobuf icu4c pkg-config
+        run: brew install flex bison openssl protobuf icu4c
 
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
