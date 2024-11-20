@@ -304,6 +304,20 @@ where
     async fn flush(&mut self) -> Result<(), DeletionQueueError> {
         tracing::debug!("Flushing with {} pending lists", self.pending_lists.len());
 
+        // Well, this check might be redundant, but it's a good sanity check. This fast
+        // path was added because `test_emergency_mode` wrt the initial barrier. The initial
+        // barrier will force and wait the deletion queue to be completely flushed, but if
+        // the control plane fails, we cannot really flush anything, and the whole test will
+        // get stuck. This check will prevent the test from getting stuck, and in reality, if
+        // there is nothing to delete, the initial barrier will not stuck.
+        if self.pending_lists.is_empty()
+            && self.validated_lists.is_empty()
+            && self.pending_key_count == 0
+        {
+            // Fast path: nothing to do
+            return Ok(());
+        }
+
         // Issue any required generation validation calls to the control plane
         self.validate().await?;
 
