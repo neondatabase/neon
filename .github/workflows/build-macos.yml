@@ -41,7 +41,7 @@ jobs:
   check-macos-build:
     needs: [ files-changed ]
     if: |
-      needs.files-changed.outputs.postgres_changes != '' && (
+      needs.files-changed.outputs.postgres_changes != '[]' && (
         contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
         contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
         github.ref_name == 'main'
