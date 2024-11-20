@@ -665,6 +665,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         force_l0_compaction=False,
         wait_until_uploaded=False,
         enhanced_gc_bottom_most_compaction=False,
+        body: Optional[dict[str, Any]] = None,
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -683,6 +684,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact",
             params=query,
+            json=body,
         )
         log.info(f"Got compact request response code: {res.status_code}")
         self.verbose_error(res)

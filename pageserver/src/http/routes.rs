@@ -83,6 +83,8 @@ use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::offload::offload_timeline;
 use crate::tenant::timeline::offload::OffloadError;
 use crate::tenant::timeline::CompactFlags;
+use crate::tenant::timeline::CompactOptions;
+use crate::tenant::timeline::CompactRange;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
@@ -100,7 +102,7 @@ use utils::{
     http::{
         endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
         error::{ApiError, HttpErrorBody},
-        json::{json_request, json_response},
+        json::{json_request, json_request_maybe, json_response},
         request::parse_request_param,
         RequestExt, RouterBuilder,
     },
@@ -1927,12 +1929,14 @@ async fn timeline_gc_handler(
 
 // Run compaction immediately on given timeline.
 async fn timeline_compact_handler(
-    request: Request<Body>,
+    mut request: Request<Body>,
     cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let compact_range = json_request_maybe::<Option<CompactRange>>(&mut request).await?;
 
     let state = get_state(&request);
 
@@ -1957,11 +1961,16 @@ async fn timeline_compact_handler(
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
+    let options = CompactOptions {
+        compact_range,
+        flags,
+    };
+
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
         timeline
-            .compact(&cancel, flags, &ctx)
+            .compact_with_options(&cancel, options, &ctx)
             .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
         if wait_until_uploaded {

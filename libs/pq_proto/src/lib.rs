@@ -184,6 +184,7 @@ pub struct CancelKeyData {
 
 impl fmt::Display for CancelKeyData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // TODO: this is producing strange results, with 0xffffffff........ always in the logs.
         let hi = (self.backend_pid as u64) << 32;
         let lo = self.cancel_key as u64;
         let id = hi | lo;

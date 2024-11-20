@@ -121,6 +121,7 @@ impl RedisPublisherClient {
         cancel_key_data: CancelKeyData,
         session_id: Uuid,
     ) -> anyhow::Result<()> {
+        // TODO: review redundant error duplication logs.
         if !self.limiter.check() {
             tracing::info!("Rate limit exceeded. Skipping cancellation message");
             return Err(anyhow::anyhow!("Rate limit exceeded"));
@@ -146,7 +147,7 @@ impl CancellationPublisherMut for RedisPublisherClient {
         tracing::info!("publishing cancellation key to Redis");
         match self.try_publish_internal(cancel_key_data, session_id).await {
             Ok(()) => {
-                tracing::info!("cancellation key successfuly published to Redis");
+                tracing::debug!("cancellation key successfuly published to Redis");
                 Ok(())
             }
             Err(e) => {

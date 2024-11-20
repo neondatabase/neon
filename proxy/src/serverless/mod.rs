@@ -45,7 +45,7 @@ use utils::http::error::ApiError;
 
 use crate::cancellation::CancellationHandlerMain;
 use crate::config::{ProxyConfig, ProxyProtocolV2};
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::metrics::Metrics;
 use crate::protocol2::{read_proxy_protocol, ChainRW, ConnectHeader, ConnectionInfo};
 use crate::proxy::run_until_cancelled;
@@ -88,7 +88,7 @@ pub async fn task_main(
         }
     });
 
-    let http_conn_pool = http_conn_pool::GlobalConnPool::new(&config.http_config);
+    let http_conn_pool = conn_pool_lib::GlobalConnPool::new(&config.http_config);
     {
         let http_conn_pool = Arc::clone(&http_conn_pool);
         tokio::spawn(async move {
@@ -423,7 +423,7 @@ async fn request_handler(
     if config.http_config.accept_websockets
         && framed_websockets::upgrade::is_upgrade_request(&request)
     {
-        let ctx = RequestMonitoring::new(
+        let ctx = RequestContext::new(
             session_id,
             conn_info,
             crate::metrics::Protocol::Ws,
@@ -458,7 +458,7 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response.map(|b| b.map_err(|x| match x {}).boxed()))
     } else if request.uri().path() == "/sql" && *request.method() == Method::POST {
-        let ctx = RequestMonitoring::new(
+        let ctx = RequestContext::new(
             session_id,
             conn_info,
             crate::metrics::Protocol::Http,

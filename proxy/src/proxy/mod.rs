@@ -25,7 +25,7 @@ use self::connect_compute::{connect_to_compute, TcpMechanism};
 use self::passthrough::ProxyPassthrough;
 use crate::cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
 use crate::protocol2::{read_proxy_protocol, ConnectHeader, ConnectionInfo};
@@ -117,7 +117,7 @@ pub async fn task_main(
                 }
             };
 
-            let ctx = RequestMonitoring::new(
+            let ctx = RequestContext::new(
                 session_id,
                 conn_info,
                 crate::metrics::Protocol::Tcp,
@@ -247,14 +247,14 @@ impl ReportableError for ClientRequestError {
 pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
     auth_backend: &'static auth::Backend<'static, ()>,
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     conn_gauge: NumClientConnectionsGuard<'static>,
 ) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
-    info!(
+    debug!(
         protocol = %ctx.protocol(),
         "handling interactive connection from client"
     );
