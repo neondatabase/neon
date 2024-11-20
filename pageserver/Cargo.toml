@@ -63,7 +63,6 @@ tokio-postgres.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = [ "serde" ] }
-tokio-timerfd.workspace = true
 tracing.workspace = true
 url.workspace = true
 walkdir.workspace = true
