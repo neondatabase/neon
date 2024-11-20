@@ -192,7 +192,7 @@ class Workload:
 
     def validate(self, pageserver_id: Optional[int] = None):
         endpoint = self.endpoint(pageserver_id)
-        endpoint.clear_shared_buffers()
+        endpoint.clear_buffers()
         result = endpoint.safe_psql(f"SELECT COUNT(*) FROM {self.table}")
 
         log.info(f"validate({self.expect_rows}): {result}")

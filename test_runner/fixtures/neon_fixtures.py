@@ -4022,14 +4022,16 @@ class Endpoint(PgProtocol, LogUtils):
         assert self.pgdata_dir is not None  # please mypy
         return get_dir_size(self.pgdata_dir / "pg_wal") / 1024 / 1024
 
-    def clear_shared_buffers(self, cursor: Optional[Any] = None):
+    def clear_buffers(self, cursor: Optional[Any] = None):
         """
         Best-effort way to clear postgres buffers. Pinned buffers will not be 'cleared.'
-
-        Might also clear LFC.
+        It clears LFC as well by setting neon.file_cache_size_limit to 0 and then returning it to the previous value,
+        if LFC is enabled
         """
         if cursor is not None:
             cursor.execute("select clear_buffer_cache()")
+            if not USE_LFC:
+                return
             cursor.execute("SHOW neon.file_cache_size_limit")
             res = cursor.fetchone()
             assert res, "Cannot get neon.file_cache_size_limit"
@@ -4042,6 +4044,8 @@ class Endpoint(PgProtocol, LogUtils):
             cursor.execute("SELECT pg_reload_conf()")
         else:
             self.safe_psql("select clear_buffer_cache()")
+            if not USE_LFC:
+                return
             file_cache_size_limit = self.safe_psql_scalar(
                 "SHOW neon.file_cache_size_limit", log_query=False
             )
