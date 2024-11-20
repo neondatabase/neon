@@ -8,7 +8,7 @@ use tracing::{debug, error, info, Instrument};
 use crate::auth::backend::ConsoleRedirectBackend;
 use crate::cancellation::{CancellationHandlerMain, CancellationHandlerMainInternal};
 use crate::config::{ProxyConfig, ProxyProtocolV2};
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
 use crate::protocol2::{read_proxy_protocol, ConnectHeader, ConnectionInfo};
@@ -82,7 +82,7 @@ pub async fn task_main(
                 }
             };
 
-            let ctx = RequestMonitoring::new(
+            let ctx = RequestContext::new(
                 session_id,
                 peer_addr,
                 crate::metrics::Protocol::Tcp,
@@ -141,12 +141,12 @@ pub async fn task_main(
 pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
     backend: &'static ConsoleRedirectBackend,
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
     conn_gauge: NumClientConnectionsGuard<'static>,
 ) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
-    info!(
+    debug!(
         protocol = %ctx.protocol(),
         "handling interactive connection from client"
     );

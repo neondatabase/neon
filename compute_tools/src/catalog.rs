@@ -1,38 +1,40 @@
-use compute_api::{
-    responses::CatalogObjects,
-    spec::{Database, Role},
-};
+use compute_api::responses::CatalogObjects;
 use futures::Stream;
-use postgres::{Client, NoTls};
+use postgres::NoTls;
 use std::{path::Path, process::Stdio, result::Result, sync::Arc};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
-    task,
+    spawn,
 };
+use tokio_postgres::connect;
 use tokio_stream::{self as stream, StreamExt};
 use tokio_util::codec::{BytesCodec, FramedRead};
 use tracing::warn;
 
-use crate::{
-    compute::ComputeNode,
-    pg_helpers::{get_existing_dbs, get_existing_roles},
-};
+use crate::compute::ComputeNode;
+use crate::pg_helpers::{get_existing_dbs_async, get_existing_roles_async};
 
 pub async fn get_dbs_and_roles(compute: &Arc<ComputeNode>) -> anyhow::Result<CatalogObjects> {
     let connstr = compute.connstr.clone();
-    task::spawn_blocking(move || {
-        let mut client = Client::connect(connstr.as_str(), NoTls)?;
-        let roles: Vec<Role>;
-        {
-            let mut xact = client.transaction()?;
-            roles = get_existing_roles(&mut xact)?;
-        }
-        let databases: Vec<Database> = get_existing_dbs(&mut client)?.values().cloned().collect();
 
-        Ok(CatalogObjects { roles, databases })
-    })
-    .await?
+    let (client, connection): (tokio_postgres::Client, _) =
+        connect(connstr.as_str(), NoTls).await?;
+
+    spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
+    let roles = get_existing_roles_async(&client).await?;
+
+    let databases = get_existing_dbs_async(&client)
+        .await?
+        .into_values()
+        .collect();
+
+    Ok(CatalogObjects { roles, databases })
 }
 
 #[derive(Debug, thiserror::Error)]

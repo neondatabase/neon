@@ -23,7 +23,7 @@ use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
 };
 use crate::config::ProxyConfig;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
@@ -48,7 +48,7 @@ pub(crate) struct PoolingBackend {
 impl PoolingBackend {
     pub(crate) async fn authenticate_with_password(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
         password: &[u8],
     ) -> Result<ComputeCredentials, AuthError> {
@@ -110,7 +110,7 @@ impl PoolingBackend {
 
     pub(crate) async fn authenticate_with_jwt(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
         jwt: String,
     ) -> Result<ComputeCredentials, AuthError> {
@@ -161,7 +161,7 @@ impl PoolingBackend {
     #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
     pub(crate) async fn connect_to_compute(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         conn_info: ConnInfo,
         keys: ComputeCredentials,
         force_new: bool,
@@ -201,7 +201,7 @@ impl PoolingBackend {
     #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
     pub(crate) async fn connect_to_local_proxy(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         conn_info: ConnInfo,
     ) -> Result<http_conn_pool::Client<Send>, HttpConnError> {
         info!("pool: looking for an existing connection");
@@ -249,7 +249,7 @@ impl PoolingBackend {
     #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
     pub(crate) async fn connect_to_local_postgres(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         conn_info: ConnInfo,
     ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
         if let Some(client) = self.local_pool.get(ctx, &conn_info)? {
@@ -490,7 +490,7 @@ impl ConnectMechanism for TokioMechanism {
 
     async fn connect_once(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         node_info: &CachedNodeInfo,
         timeout: Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
@@ -540,7 +540,7 @@ impl ConnectMechanism for HyperMechanism {
 
     async fn connect_once(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         node_info: &CachedNodeInfo,
         timeout: Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {

@@ -9,7 +9,7 @@ use tracing::{info, warn};
 
 use crate::auth::endpoint_sni;
 use crate::config::{TlsConfig, PG_ALPN_PROTOCOL};
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::Metrics;
 use crate::proxy::ERR_INSECURE_CONNECTION;
@@ -66,7 +66,7 @@ pub(crate) enum HandshakeData<S> {
 /// we also take an extra care of propagating only the select handshake errors to client.
 #[tracing::instrument(skip_all)]
 pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     stream: S,
     mut tls: Option<&TlsConfig>,
     record_handshake_error: bool,
