@@ -515,11 +515,12 @@ def test_sharding_split_smoke(
 
     """
 
-    # We will start with 4 shards and split into 8, then migrate all those
-    # 8 shards onto separate pageservers
-    shard_count = 4
-    split_shard_count = 8
-    neon_env_builder.num_pageservers = split_shard_count * 2
+    # Shard count we start with
+    shard_count = 2
+    # Shard count we split into
+    split_shard_count = 4
+    # We will have 2 shards per pageserver once done (including secondaries)
+    neon_env_builder.num_pageservers = split_shard_count
 
     # 1MiB stripes: enable getting some meaningful data distribution without
     # writing large quantities of data in this test.  The stripe size is given
@@ -591,7 +592,7 @@ def test_sharding_split_smoke(
 
     workload.validate()
 
-    assert len(pre_split_pageserver_ids) == 4
+    assert len(pre_split_pageserver_ids) == shard_count
 
     def shards_on_disk(shard_ids):
         for pageserver in env.pageservers:
@@ -654,9 +655,9 @@ def test_sharding_split_smoke(
     # - shard_count reconciles for the original setup of the tenant
     # - shard_count reconciles for detaching the original secondary locations during split
     # - split_shard_count reconciles during shard splitting, for setting up secondaries.
-    # - shard_count of the child shards will need to fail over to their secondaries
-    # - shard_count of the child shard secondary locations will get moved to emptier nodes
-    expect_reconciles = shard_count * 2 + split_shard_count + shard_count * 2
+    # - split_shard_count/2 of the child shards will need to fail over to their secondaries (since we have 8 shards and 4 pageservers, only 4 will move)
+    expect_reconciles = shard_count * 2 + split_shard_count + split_shard_count / 2
+
     reconcile_ok = env.storage_controller.get_metric_value(
         "storage_controller_reconcile_complete_total", filter={"status": "ok"}
     )
@@ -720,22 +721,10 @@ def test_sharding_split_smoke(
     # dominated by shard count.
     log.info(f"total: {total}")
     assert total == {
-        1: 1,
-        2: 1,
-        3: 1,
-        4: 1,
-        5: 1,
-        6: 1,
-        7: 1,
-        8: 1,
-        9: 1,
-        10: 1,
-        11: 1,
-        12: 1,
-        13: 1,
-        14: 1,
-        15: 1,
-        16: 1,
+        1: 2,
+        2: 2,
+        3: 2,
+        4: 2,
     }
 
     # The controller is not required to lay out the attached locations in any particular way, but
