@@ -499,7 +499,6 @@ impl RemoteTimelineClient {
                     }
                 }
             }
-        } else {
         }
     }
 
