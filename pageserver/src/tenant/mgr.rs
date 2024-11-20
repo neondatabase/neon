@@ -1719,10 +1719,6 @@ impl TenantManager {
                     parent_layers.push(relative_path.to_owned());
                 }
             }
-            debug_assert!(
-                !parent_layers.is_empty(),
-                "shutdown cannot empty the layermap"
-            );
             (parent_timelines, parent_layers)
         };
 
