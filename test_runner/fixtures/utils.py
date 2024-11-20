@@ -656,7 +656,7 @@ def size_to_bytes(hr_size: str) -> int:
     """
     units = {"B": 1, "kB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4, "PB": 1024**5}
     match = re.search(r"^\'?(\d+)\s*([kMGTP]?B)?\'?$", hr_size)
-    assert match is not None, f"\"{hr_size}\" is not a well-formatted human-readable size"
+    assert match is not None, f'"{hr_size}" is not a well-formatted human-readable size'
     number, unit = match.groups()
 
     if unit:
