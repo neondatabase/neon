@@ -3,7 +3,7 @@
 
 use anyhow::{bail, Context};
 use async_compression::tokio::write::GzipEncoder;
-use async_timer::Oneshot;
+use async_timer::Timer;
 use bytes::Buf;
 use futures::FutureExt;
 use itertools::Itertools;
@@ -319,7 +319,7 @@ struct PageServerHandler {
     /// See [`PageServerConf::server_side_batch_timeout`]
     server_side_batch_timeout: Option<Duration>,
 
-    server_side_batch_timer: Pin<Box<async_timer::oneshot::Timer>>,
+    server_side_batch_timer: Pin<Box<async_timer::timer::Platform>>,
 }
 
 struct Carry {
@@ -589,9 +589,7 @@ impl PageServerHandler {
             timeline_handles: TimelineHandles::new(tenant_manager),
             cancel,
             server_side_batch_timeout,
-            server_side_batch_timer: Box::pin(async_timer::oneshot::Timer::new(
-                Duration::from_secs(999),
-            )), // reset each iteration
+            server_side_batch_timer: Box::pin(async_timer::new_timer(Duration::from_secs(999))), // reset each iteration
         }
     }
 
@@ -668,12 +666,7 @@ impl PageServerHandler {
                                         .msg
                                 ]));
                             } else {
-                                std::future::poll_fn(|ctx| {
-                                    self.server_side_batch_timer
-                                        .restart(batch_timeout, ctx.waker());
-                                    std::task::Poll::Ready(())
-                                })
-                                .await;
+                                self.server_side_batch_timer.restart(batch_timeout);
                                 batching_deadline_storage = Some(&mut self.server_side_batch_timer);
                                 Either::Right(
                                     batching_deadline_storage.as_mut().expect("we just set it"),

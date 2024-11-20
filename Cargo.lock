@@ -246,13 +246,14 @@ dependencies = [
 
 [[package]]
 name = "async-timer"
-version = "0.7.4"
+version = "1.0.0-beta.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba5fa6ed76cb2aa820707b4eb9ec46f42da9ce70b0eafab5e5e34942b38a44d5"
+checksum = "1d420af8e042475e58a20d91af8eda7d6528989418c03f3f527e1c3415696f70"
 dependencies = [
+ "error-code",
  "libc",
  "wasm-bindgen",
- "winapi",
+ "web-time",
 ]
 
 [[package]]
@@ -1930,6 +1931,12 @@ dependencies = [
  "libc",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "error-code"
+version = "3.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d9305ccc6942a704f4335694ecd3de2ea531b114ac2d51f5f843750787a92f"
 
 [[package]]
 name = "event-listener"
