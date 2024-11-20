@@ -3671,7 +3671,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
- "toml_edit",
  "utils",
  "workspace_hack",
 ]
@@ -3735,6 +3734,7 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_with",
+ "smallvec",
  "storage_broker",
  "strum",
  "strum_macros",

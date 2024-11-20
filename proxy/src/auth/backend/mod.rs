@@ -14,13 +14,13 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use local::LocalBackend;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::AuthKeys;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::{self, validate_password_and_exchange, AuthError, ComputeUserInfoMaybeEndpoint};
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::client::ControlPlaneClient;
 use crate::control_plane::errors::GetAuthInfoError;
 use crate::control_plane::{
@@ -210,7 +210,7 @@ impl RateBucketInfo {
 impl AuthenticationConfig {
     pub(crate) fn check_rate_limit(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         secret: AuthSecret,
         endpoint: &EndpointId,
         is_cleartext: bool,
@@ -265,7 +265,7 @@ impl AuthenticationConfig {
 ///
 /// All authentication flows will emit an AuthenticationOk message if successful.
 async fn auth_quirks(
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     api: &impl control_plane::ControlPlaneApi,
     user_info: ComputeUserInfoMaybeEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
@@ -286,7 +286,7 @@ async fn auth_quirks(
         Ok(info) => (info, None),
     };
 
-    info!("fetching user's authentication info");
+    debug!("fetching user's authentication info");
     let (allowed_ips, maybe_secret) = api.get_allowed_ips_and_secret(ctx, &info).await?;
 
     // check allowed list
@@ -343,7 +343,7 @@ async fn auth_quirks(
 }
 
 async fn authenticate_with_secret(
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     secret: AuthSecret,
     info: ComputeUserInfo,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
@@ -396,7 +396,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
     #[tracing::instrument(fields(allow_cleartext = allow_cleartext), skip_all)]
     pub(crate) async fn authenticate(
         self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
@@ -404,7 +404,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
     ) -> auth::Result<Backend<'a, ComputeCredentials>> {
         let res = match self {
             Self::ControlPlane(api, user_info) => {
-                info!(
+                debug!(
                     user = &*user_info.user,
                     project = user_info.endpoint(),
                     "performing authentication using the console"
@@ -427,6 +427,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
             }
         };
 
+        // TODO: replace with some metric
         info!("user successfully authenticated");
         Ok(res)
     }
@@ -435,7 +436,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
 impl Backend<'_, ComputeUserInfo> {
     pub(crate) async fn get_role_secret(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         match self {
             Self::ControlPlane(api, user_info) => api.get_role_secret(ctx, user_info).await,
@@ -445,7 +446,7 @@ impl Backend<'_, ComputeUserInfo> {
 
     pub(crate) async fn get_allowed_ips_and_secret(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         match self {
             Self::ControlPlane(api, user_info) => {
@@ -460,7 +461,7 @@ impl Backend<'_, ComputeUserInfo> {
 impl ComputeConnectBackend for Backend<'_, ComputeCredentials> {
     async fn wake_compute(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
     ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         match self {
             Self::ControlPlane(api, creds) => api.wake_compute(ctx, &creds.info).await,
@@ -496,7 +497,7 @@ mod tests {
     use crate::auth::backend::MaskedIp;
     use crate::auth::{ComputeUserInfoMaybeEndpoint, IpPattern};
     use crate::config::AuthenticationConfig;
-    use crate::context::RequestMonitoring;
+    use crate::context::RequestContext;
     use crate::control_plane::{self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret};
     use crate::proxy::NeonOptions;
     use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo};
@@ -512,7 +513,7 @@ mod tests {
     impl control_plane::ControlPlaneApi for Auth {
         async fn get_role_secret(
             &self,
-            _ctx: &RequestMonitoring,
+            _ctx: &RequestContext,
             _user_info: &super::ComputeUserInfo,
         ) -> Result<CachedRoleSecret, control_plane::errors::GetAuthInfoError> {
             Ok(CachedRoleSecret::new_uncached(Some(self.secret.clone())))
@@ -520,7 +521,7 @@ mod tests {
 
         async fn get_allowed_ips_and_secret(
             &self,
-            _ctx: &RequestMonitoring,
+            _ctx: &RequestContext,
             _user_info: &super::ComputeUserInfo,
         ) -> Result<
             (CachedAllowedIps, Option<CachedRoleSecret>),
@@ -534,7 +535,7 @@ mod tests {
 
         async fn get_endpoint_jwks(
             &self,
-            _ctx: &RequestMonitoring,
+            _ctx: &RequestContext,
             _endpoint: crate::types::EndpointId,
         ) -> Result<Vec<super::jwt::AuthRule>, control_plane::errors::GetEndpointJwksError>
         {
@@ -543,7 +544,7 @@ mod tests {
 
         async fn wake_compute(
             &self,
-            _ctx: &RequestMonitoring,
+            _ctx: &RequestContext,
             _user_info: &super::ComputeUserInfo,
         ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
             unimplemented!()
@@ -622,7 +623,7 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(1024);
         let mut stream = PqStream::new(Stream::from_raw(server));
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let api = Auth {
             ips: vec![],
             secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
@@ -699,7 +700,7 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(1024);
         let mut stream = PqStream::new(Stream::from_raw(server));
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let api = Auth {
             ips: vec![],
             secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
@@ -751,7 +752,7 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(1024);
         let mut stream = PqStream::new(Stream::from_raw(server));
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let api = Auth {
             ips: vec![],
             secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),

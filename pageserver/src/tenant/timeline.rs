@@ -481,17 +481,27 @@ impl GcInfo {
         &mut self,
         child_id: TimelineId,
         maybe_offloaded: MaybeOffloaded,
-    ) {
-        self.retain_lsns
-            .retain(|i| !(i.1 == child_id && i.2 == maybe_offloaded));
+    ) -> bool {
+        // Remove at most one element. Needed for correctness if there is two live `Timeline` objects referencing
+        // the same timeline. Shouldn't but maybe can occur when Arc's live longer than intended.
+        let mut removed = false;
+        self.retain_lsns.retain(|i| {
+            if removed {
+                return true;
+            }
+            let remove = i.1 == child_id && i.2 == maybe_offloaded;
+            removed |= remove;
+            !remove
+        });
+        removed
     }
 
-    pub(super) fn remove_child_not_offloaded(&mut self, child_id: TimelineId) {
-        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::No);
+    pub(super) fn remove_child_not_offloaded(&mut self, child_id: TimelineId) -> bool {
+        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::No)
     }
 
-    pub(super) fn remove_child_offloaded(&mut self, child_id: TimelineId) {
-        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes);
+    pub(super) fn remove_child_offloaded(&mut self, child_id: TimelineId) -> bool {
+        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes)
     }
 }
 
@@ -762,6 +772,21 @@ pub(crate) enum CompactFlags {
     ForceL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
+}
+
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct CompactRange {
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub start: Key,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub end: Key,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct CompactOptions {
+    pub flags: EnumSet<CompactFlags>,
+    pub compact_range: Option<CompactRange>,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1603,6 +1628,25 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<bool, CompactionError> {
+        self.compact_with_options(
+            cancel,
+            CompactOptions {
+                flags,
+                compact_range: None,
+            },
+            ctx,
+        )
+        .await
+    }
+
+    /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
+    /// compaction tasks.
+    pub(crate) async fn compact_with_options(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        options: CompactOptions,
+        ctx: &RequestContext,
+    ) -> Result<bool, CompactionError> {
         // most likely the cancellation token is from background task, but in tests it could be the
         // request task as well.
 
@@ -1639,7 +1683,7 @@ impl Timeline {
                 self.compact_tiered(cancel, ctx).await?;
                 Ok(false)
             }
-            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
+            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, options, ctx).await,
         }
     }
 
@@ -4514,7 +4558,10 @@ impl Drop for Timeline {
             // This lock should never be poisoned, but in case it is we do a .map() instead of
             // an unwrap(), to avoid panicking in a destructor and thereby aborting the process.
             if let Ok(mut gc_info) = ancestor.gc_info.write() {
-                gc_info.remove_child_not_offloaded(self.timeline_id)
+                if !gc_info.remove_child_not_offloaded(self.timeline_id) {
+                    tracing::error!(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id,
+                        "Couldn't remove retain_lsn entry from offloaded timeline's parent: already removed");
+                }
             }
         }
     }

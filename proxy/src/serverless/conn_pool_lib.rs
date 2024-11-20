@@ -15,7 +15,7 @@ use super::conn_pool::ClientDataRemote;
 use super::http_conn_pool::ClientDataHttp;
 use super::local_conn_pool::ClientDataLocal;
 use crate::auth::backend::ComputeUserInfo;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::types::{DbName, EndpointCacheKey, RoleName};
@@ -380,7 +380,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
 
     pub(crate) fn get(
         self: &Arc<Self>,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         conn_info: &ConnInfo,
     ) -> Result<Option<Client<C>>, HttpConnError> {
         let mut client: Option<ClientInnerCommon<C>> = None;

@@ -1,6 +1,5 @@
+/.github/ @neondatabase/developer-productivity
 /compute_tools/ @neondatabase/control-plane @neondatabase/compute
-/storage_controller @neondatabase/storage
-/storage_scrubber @neondatabase/storage
 /libs/pageserver_api/ @neondatabase/storage
 /libs/postgres_ffi/ @neondatabase/compute @neondatabase/storage
 /libs/remote_storage/ @neondatabase/storage
@@ -11,4 +10,6 @@
 /pgxn/neon/ @neondatabase/compute @neondatabase/storage
 /proxy/ @neondatabase/proxy
 /safekeeper/ @neondatabase/storage
+/storage_controller @neondatabase/storage
+/storage_scrubber @neondatabase/storage
 /vendor/ @neondatabase/compute
