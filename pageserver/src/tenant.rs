@@ -1487,8 +1487,8 @@ impl Tenant {
         // The manifest will be uploaded later in this function.
         offloaded_timelines_list
             .retain(|(offloaded_id, offloaded)| {
-                // In the end, existence of a timeline is finally determined by the existence of an index-part.json in remote storage.
-                // If there is a dangling reference in another location, they need to be cleaned up.
+                // Existence of a timeline is finally determined by the existence of an index-part.json in remote storage.
+                // If there is dangling references in another location, they need to be cleaned up.
                 let delete = !preload.timelines.contains_key(offloaded_id);
                 if delete {
                     tracing::info!("Removing offloaded timeline {offloaded_id} from manifest as no remote prefix was found");
@@ -1615,17 +1615,12 @@ impl Tenant {
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
-        if !offloaded_timelines_list.is_empty() {
-            tracing::info!(
-                "Tenant has {} offloaded timelines",
-                offloaded_timelines_list.len()
-            );
-        }
+        let needs_manifest_upload = offloaded_timelines_list.len() != preload.tenant_manifest.offloaded_timelines.len();
         {
             let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
             offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
         }
-        if !preload.tenant_manifest.offloaded_timelines.is_empty() {
+        if needs_manifest_upload {
             self.store_tenant_manifest().await?;
         }
 
