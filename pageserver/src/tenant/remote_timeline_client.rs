@@ -469,10 +469,19 @@ impl RemoteTimelineClient {
     /// take action (unblocking deletions when transitioning from AttachedMulti to AttachedSingle)
     pub(super) fn update_config(&self, location_conf: &AttachedLocationConfig) {
         let new_conf = RemoteTimelineClientConfig::from(location_conf);
-        if !new_conf.block_deletions {
+        let unblocked = !new_conf.block_deletions;
+
+        // Update config before draining deletions, so that we don't race with more being
+        // inserted.  This can result in deletions happening our of order, but that does not
+        // violate any invariants: deletions only need to be ordered relative to upload of the index
+        // that dereferences the deleted objects, and we are not changing that order.
+        *self.config.write().unwrap() = new_conf;
+
+        if unblocked {
             // If we may now delete layers, drain any that were blocked in our old
             // configuration state
             let mut queue_locked = self.upload_queue.lock().unwrap();
+
             if let Ok(queue) = queue_locked.initialized_mut() {
                 let blocked_deletions = std::mem::take(&mut queue.blocked_deletions);
                 for d in blocked_deletions {
@@ -490,9 +499,8 @@ impl RemoteTimelineClient {
                     }
                 }
             }
+        } else {
         }
-
-        *self.config.write().unwrap() = new_conf;
     }
 
     /// Returns `None` if nothing is yet uplodaded, `Some(disk_consistent_lsn)` otherwise.
