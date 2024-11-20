@@ -477,8 +477,31 @@ impl GcInfo {
         self.retain_lsns.sort_by_key(|i| i.0);
     }
 
-    pub(super) fn remove_child(&mut self, child_id: TimelineId) {
-        self.retain_lsns.retain(|i| i.1 != child_id);
+    pub(super) fn remove_child_maybe_offloaded(
+        &mut self,
+        child_id: TimelineId,
+        maybe_offloaded: MaybeOffloaded,
+    ) -> bool {
+        // Remove at most one element. Needed for correctness if there is two live `Timeline` objects referencing
+        // the same timeline. Shouldn't but maybe can occur when Arc's live longer than intended.
+        let mut removed = false;
+        self.retain_lsns.retain(|i| {
+            if removed {
+                return true;
+            }
+            let remove = i.1 == child_id && i.2 == maybe_offloaded;
+            removed |= remove;
+            !remove
+        });
+        removed
+    }
+
+    pub(super) fn remove_child_not_offloaded(&mut self, child_id: TimelineId) -> bool {
+        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::No)
+    }
+
+    pub(super) fn remove_child_offloaded(&mut self, child_id: TimelineId) -> bool {
+        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes)
     }
 }
 
@@ -749,6 +772,21 @@ pub(crate) enum CompactFlags {
     ForceL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
+}
+
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct CompactRange {
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub start: Key,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub end: Key,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct CompactOptions {
+    pub flags: EnumSet<CompactFlags>,
+    pub compact_range: Option<CompactRange>,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1590,6 +1628,25 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<bool, CompactionError> {
+        self.compact_with_options(
+            cancel,
+            CompactOptions {
+                flags,
+                compact_range: None,
+            },
+            ctx,
+        )
+        .await
+    }
+
+    /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
+    /// compaction tasks.
+    pub(crate) async fn compact_with_options(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        options: CompactOptions,
+        ctx: &RequestContext,
+    ) -> Result<bool, CompactionError> {
         // most likely the cancellation token is from background task, but in tests it could be the
         // request task as well.
 
@@ -1626,7 +1683,7 @@ impl Timeline {
                 self.compact_tiered(cancel, ctx).await?;
                 Ok(false)
             }
-            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
+            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, options, ctx).await,
         }
     }
 
@@ -4501,7 +4558,10 @@ impl Drop for Timeline {
             // This lock should never be poisoned, but in case it is we do a .map() instead of
             // an unwrap(), to avoid panicking in a destructor and thereby aborting the process.
             if let Ok(mut gc_info) = ancestor.gc_info.write() {
-                gc_info.remove_child(self.timeline_id)
+                if !gc_info.remove_child_not_offloaded(self.timeline_id) {
+                    tracing::error!(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id,
+                        "Couldn't remove retain_lsn entry from offloaded timeline's parent: already removed");
+                }
             }
         }
     }
@@ -5030,7 +5090,7 @@ impl Timeline {
 
             // 1. Is it newer than GC horizon cutoff point?
             if l.get_lsn_range().end > space_cutoff {
-                debug!(
+                info!(
                     "keeping {} because it's newer than space_cutoff {}",
                     l.layer_name(),
                     space_cutoff,
@@ -5041,7 +5101,7 @@ impl Timeline {
 
             // 2. It is newer than PiTR cutoff point?
             if l.get_lsn_range().end > time_cutoff {
-                debug!(
+                info!(
                     "keeping {} because it's newer than time_cutoff {}",
                     l.layer_name(),
                     time_cutoff,
@@ -5060,7 +5120,7 @@ impl Timeline {
             for retain_lsn in &retain_lsns {
                 // start_lsn is inclusive
                 if &l.get_lsn_range().start <= retain_lsn {
-                    debug!(
+                    info!(
                         "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
                         l.layer_name(),
                         retain_lsn,
@@ -5075,7 +5135,7 @@ impl Timeline {
             if let Some(lsn) = &max_lsn_with_valid_lease {
                 // keep if layer start <= any of the lease
                 if &l.get_lsn_range().start <= lsn {
-                    debug!(
+                    info!(
                         "keeping {} because there is a valid lease preventing GC at {}",
                         l.layer_name(),
                         lsn,
@@ -5107,13 +5167,13 @@ impl Timeline {
             if !layers
                 .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))
             {
-                debug!("keeping {} because it is the latest layer", l.layer_name());
+                info!("keeping {} because it is the latest layer", l.layer_name());
                 result.layers_not_updated += 1;
                 continue 'outer;
             }
 
             // We didn't find any reason to keep this file, so remove it.
-            debug!(
+            info!(
                 "garbage collecting {} is_dropped: xx is_incremental: {}",
                 l.layer_name(),
                 l.is_incremental(),

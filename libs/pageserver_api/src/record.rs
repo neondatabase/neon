@@ -41,6 +41,11 @@ pub enum NeonWalRecord {
         file_path: String,
         content: Option<Bytes>,
     },
+    // Truncate visibility map page
+    TruncateVisibilityMap {
+        trunc_byte: usize,
+        trunc_offs: usize,
+    },
 
     /// A testing record for unit testing purposes. It supports append data to an existing image, or clear it.
     #[cfg(feature = "testing")]
@@ -80,18 +85,18 @@ impl NeonWalRecord {
     }
 
     #[cfg(feature = "testing")]
-    pub fn wal_clear() -> Self {
+    pub fn wal_clear(s: impl AsRef<str>) -> Self {
         Self::Test {
-            append: "".to_string(),
+            append: s.as_ref().to_string(),
             clear: true,
             will_init: false,
         }
     }
 
     #[cfg(feature = "testing")]
-    pub fn wal_init() -> Self {
+    pub fn wal_init(s: impl AsRef<str>) -> Self {
         Self::Test {
-            append: "".to_string(),
+            append: s.as_ref().to_string(),
             clear: true,
             will_init: true,
         }

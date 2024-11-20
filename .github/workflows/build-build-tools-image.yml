@@ -2,18 +2,13 @@ name: Build build-tools image
 
 on:
   workflow_call:
-    inputs:
-      image-tag:
-        description: "build-tools image tag"
-        required: true
-        type: string
     outputs:
       image-tag:
         description: "build-tools tag"
-        value: ${{ inputs.image-tag }}
+        value: ${{ jobs.check-image.outputs.tag }}
       image:
         description: "build-tools image"
-        value: neondatabase/build-tools:${{ inputs.image-tag }}
+        value: neondatabase/build-tools:${{ jobs.check-image.outputs.tag }}
 
 defaults:
   run:
@@ -35,7 +30,36 @@ permissions: {}
 
 jobs:
   check-image:
-    uses: ./.github/workflows/check-build-tools-image.yml
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.get-build-tools-tag.outputs.image-tag }}
+      found: ${{ steps.check-image.outputs.found }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get build-tools image tag for the current commit
+        id: get-build-tools-tag
+        env:
+          IMAGE_TAG: |
+            ${{ hashFiles('build-tools.Dockerfile',
+                          '.github/workflows/build-build-tools-image.yml') }}
+        run: |
+          echo "image-tag=${IMAGE_TAG}" | tee -a $GITHUB_OUTPUT
+
+      - name: Check if such tag found in the registry
+        id: check-image
+        env:
+          IMAGE_TAG: ${{ steps.get-build-tools-tag.outputs.image-tag }}
+        run: |
+          if docker manifest inspect neondatabase/build-tools:${IMAGE_TAG}; then
+            found=true
+          else
+            found=false
+          fi
+
+          echo "found=${found}" | tee -a $GITHUB_OUTPUT
+
 
   build-image:
     needs: [ check-image ]
@@ -48,20 +72,7 @@ jobs:
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
-    env:
-      IMAGE_TAG: ${{ inputs.image-tag }}
-
     steps:
-      - name: Check `input.tag` is correct
-        env:
-          INPUTS_IMAGE_TAG: ${{ inputs.image-tag }}
-          CHECK_IMAGE_TAG : ${{ needs.check-image.outputs.image-tag }}
-        run: |
-          if [ "${INPUTS_IMAGE_TAG}" != "${CHECK_IMAGE_TAG}" ]; then
-            echo "'inputs.image-tag' (${INPUTS_IMAGE_TAG}) does not match the tag of the latest build-tools image 'inputs.image-tag' (${CHECK_IMAGE_TAG})"
-            exit 1
-          fi
-
       - uses: actions/checkout@v4
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
@@ -92,10 +103,10 @@ jobs:
           cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.debian-version }}-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.debian-version, matrix.arch) || '' }}
           tags: |
-            neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.debian-version }}-${{ matrix.arch }}
+            neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian-version }}-${{ matrix.arch }}
 
   merge-images:
-    needs: [ build-image ]
+    needs: [ check-image, build-image ]
     runs-on: ubuntu-22.04
 
     steps:
@@ -107,7 +118,7 @@ jobs:
       - name: Create multi-arch image
         env:
           DEFAULT_DEBIAN_VERSION: bullseye
-          IMAGE_TAG: ${{ inputs.image-tag }}
+          IMAGE_TAG: ${{ needs.check-image.outputs.tag }}
         run: |
           for debian_version in bullseye bookworm; do
             tags=("-t" "neondatabase/build-tools:${IMAGE_TAG}-${debian_version}")

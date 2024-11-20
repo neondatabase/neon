@@ -24,7 +24,7 @@ use postgres_ffi::Oid;
 // FIXME: should move 'forknum' as last field to keep this consistent with Postgres.
 // Then we could replace the custom Ord and PartialOrd implementations below with
 // deriving them. This will require changes in walredoproc.c.
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize)]
 pub struct RelTag {
     pub forknum: u8,
     pub spcnode: Oid,

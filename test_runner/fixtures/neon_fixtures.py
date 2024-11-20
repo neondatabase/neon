@@ -1065,6 +1065,9 @@ class NeonEnv:
                 "http_auth_type": http_auth_type,
                 # Default which can be overriden with `NeonEnvBuilder.pageserver_config_override`
                 "availability_zone": "us-east-2a",
+                # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
+                # the pageserver taking a long time to start up due to syncfs flushing other tests' data
+                "no_sync": True,
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
@@ -2376,6 +2379,17 @@ class NeonPageserver(PgProtocol, LogUtils):
         #
         # The entries in the list are regular experessions.
         self.allowed_errors: list[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
+        # Store persistent failpoints that should be reapplied on each start
+        self._persistent_failpoints: dict[str, str] = {}
+
+    def add_persistent_failpoint(self, name: str, action: str):
+        """
+        Add a failpoint that will be automatically reapplied each time the pageserver starts.
+        The failpoint will be set immediately if the pageserver is running.
+        """
+        self._persistent_failpoints[name] = action
+        if self.running:
+            self.http_client().configure_failpoints([(name, action)])
 
     def timeline_dir(
         self,
@@ -2442,6 +2456,15 @@ class NeonPageserver(PgProtocol, LogUtils):
         Returns self.
         """
         assert self.running is False
+
+        if self._persistent_failpoints:
+            # Tests shouldn't use this mechanism _and_ set FAILPOINTS explicitly
+            assert extra_env_vars is None or "FAILPOINTS" not in extra_env_vars
+            if extra_env_vars is None:
+                extra_env_vars = {}
+            extra_env_vars["FAILPOINTS"] = ",".join(
+                f"{k}={v}" for (k, v) in self._persistent_failpoints.items()
+            )
 
         storage = self.env.pageserver_remote_storage
         if isinstance(storage, S3Storage):
@@ -4519,7 +4542,7 @@ def pytest_addoption(parser: Parser):
 
 
 SMALL_DB_FILE_NAME_REGEX: re.Pattern[str] = re.compile(
-    r"config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql|conf)"
+    r"config-v1|heatmap-v1|tenant-manifest|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
 
 

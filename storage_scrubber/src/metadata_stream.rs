@@ -60,7 +60,7 @@ pub async fn stream_tenant_shards<'a>(
 
             first_part
                 .parse::<TenantShardId>()
-                .with_context(|| format!("Incorrect entry id str: {first_part}"))
+                .with_context(|| format!("Incorrect tenant entry id str: {first_part}"))
         })
         .collect::<Vec<_>>();
 
@@ -114,9 +114,10 @@ pub async fn stream_tenant_timelines<'a>(
                 prefix.get_path().as_str().strip_prefix(prefix_str)
             })
             .map(|entry_id_str| {
-                entry_id_str
+                let first_part = entry_id_str.split('/').next().unwrap();
+                first_part
                     .parse::<TimelineId>()
-                    .with_context(|| format!("Incorrect entry id str: {entry_id_str}"))
+                    .with_context(|| format!("Incorrect timeline entry id str: {entry_id_str}"))
             });
 
         for i in new_entry_ids {
