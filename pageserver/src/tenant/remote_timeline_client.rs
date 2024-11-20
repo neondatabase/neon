@@ -2215,7 +2215,8 @@ impl RemoteTimelineClient {
                 assert_eq!(
                     qi.num_inprogress_layer_uploads
                         + qi.num_inprogress_metadata_uploads
-                        + qi.num_inprogress_deletions,
+                        + qi.num_inprogress_deletions
+                        + qi.num_inprogress_barriers,
                     qi.inprogress_tasks.len()
                 );
 
