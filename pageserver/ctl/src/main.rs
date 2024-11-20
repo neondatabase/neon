@@ -174,11 +174,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("specified prefix '{}' failed validation", cmd.prefix);
                 return Ok(());
             };
-            let toml_document = toml_edit::DocumentMut::from_str(&cmd.config_toml_str)?;
-            let toml_item = toml_document
-                .get("remote_storage")
-                .expect("need remote_storage");
-            let config = RemoteStorageConfig::from_toml(toml_item)?;
+            let config = RemoteStorageConfig::from_toml_str(&cmd.config_toml_str)?;
             let storage = remote_storage::GenericRemoteStorage::from_config(&config).await;
             let cancel = CancellationToken::new();
             storage
@@ -209,6 +205,7 @@ async fn print_layerfile(path: &Utf8Path) -> anyhow::Result<()> {
         10,
         virtual_file::api::IoEngineKind::StdFs,
         IoMode::preferred(),
+        virtual_file::SyncMode::Sync,
     );
     page_cache::init(100);
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);

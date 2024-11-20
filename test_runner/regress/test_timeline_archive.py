@@ -15,13 +15,19 @@ from fixtures.neon_fixtures import (
     last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import PageserverApiException
-from fixtures.pageserver.utils import assert_prefix_empty, assert_prefix_not_empty, list_prefix
+from fixtures.pageserver.utils import (
+    assert_prefix_empty,
+    assert_prefix_not_empty,
+    list_prefix,
+    wait_until_tenant_active,
+)
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import S3Storage, s3_storage
-from fixtures.utils import run_only_on_default_postgres, wait_until
+from fixtures.utils import run_only_on_default_postgres, skip_in_debug_build, wait_until
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )
+from psycopg2.errors import IoError, UndefinedTable
 
 
 @pytest.mark.parametrize("shard_count", [0, 4])
@@ -384,6 +390,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
 
 
 @run_only_on_default_postgres("this test isn't sensitive to the contents of timelines")
+@skip_in_debug_build("times out in debug builds")
 def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
     """
     A general consistency check on archival/offload timeline state, and its intersection
@@ -406,7 +413,13 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
     tenant_shard_id = TenantShardId(tenant_id, 0, 0)
 
     # Unavailable pageservers during timeline CRUD operations can be logged as errors on the storage controller
-    env.storage_controller.allowed_errors.append(".*error sending request.*")
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*error sending request.*",
+            # FIXME: the pageserver should not return 500s on cancellation (https://github.com/neondatabase/neon/issues/97680)
+            ".*InternalServerError\\(Error deleting timeline .* on .* on .*: pageserver API: error: Cancelled",
+        ]
+    )
 
     for ps in env.pageservers:
         # We will do unclean restarts, which results in these messages when cleaning up files
@@ -415,10 +428,10 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
                 ".*removing local file.*because it has unexpected length.*",
                 ".*__temp.*",
                 # FIXME: there are still anyhow::Error paths in timeline creation/deletion which
-                # generate 500 results when called during shutdown
+                # generate 500 results when called during shutdown (https://github.com/neondatabase/neon/issues/9768)
                 ".*InternalServerError.*",
                 # FIXME: there are still anyhow::Error paths in timeline deletion that generate
-                # log lines at error severity
+                # log lines at error severity (https://github.com/neondatabase/neon/issues/9768)
                 ".*delete_timeline.*Error",
             ]
         )
@@ -635,8 +648,21 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
     assert violations == []
 
 
-@pytest.mark.parametrize("offload_child", ["offload", "offload-corrupt", "archive", None])
-def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Optional[str]):
+@pytest.mark.parametrize("with_intermediary", [False, True])
+@pytest.mark.parametrize(
+    "offload_child",
+    [
+        "offload",
+        "offload-corrupt",
+        "offload-no-restart",
+        "offload-parent",
+        "archive",
+        None,
+    ],
+)
+def test_timeline_retain_lsn(
+    neon_env_builder: NeonEnvBuilder, with_intermediary: bool, offload_child: Optional[str]
+):
     """
     Ensure that retain_lsn functionality for timelines works, both for offloaded and non-offloaded ones
     """
@@ -644,6 +670,7 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
         # Our corruption code only works with S3 compatible storage
         neon_env_builder.enable_pageserver_remote_storage(s3_storage())
 
+    neon_env_builder.rust_log_override = "info,[gc_timeline]=debug"
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
 
@@ -651,22 +678,30 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
     tenant_id, root_timeline_id = env.create_tenant(
         conf={
             # small checkpointing and compaction targets to ensure we generate many upload operations
-            "checkpoint_distance": 128 * 1024,
+            "checkpoint_distance": 32 * 1024,
             "compaction_threshold": 1,
-            "compaction_target_size": 128 * 1024,
+            "compaction_target_size": 32 * 1024,
             # set small image creation thresholds so that gc deletes data
-            "image_creation_threshold": 2,
+            "image_creation_threshold": 1,
             # disable background compaction and GC. We invoke it manually when we want it to happen.
             "gc_period": "0s",
             "compaction_period": "0s",
             # Disable pitr, we only want the latest lsn
             "pitr_interval": "0s",
+            "gc_horizon": 0,
             # Don't rely on endpoint lsn leases
             "lsn_lease_length": "0s",
         }
     )
 
-    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+    if with_intermediary:
+        parent_branch_name = "test_archived_parent"
+        parent_timeline_id = env.create_branch("test_archived_parent", tenant_id)
+    else:
+        parent_branch_name = "main"
+        parent_timeline_id = root_timeline_id
+
+    with env.endpoints.create_start(parent_branch_name, tenant_id=tenant_id) as endpoint:
         endpoint.safe_psql_many(
             [
                 "CREATE TABLE foo(v int, key serial primary key, t text default 'data_content')",
@@ -676,14 +711,16 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
         )
         pre_branch_sum = endpoint.safe_psql("SELECT sum(key) from foo where v < 51200")
         log.info(f"Pre branch sum: {pre_branch_sum}")
-        last_flush_lsn_upload(env, endpoint, tenant_id, root_timeline_id)
+        last_flush_lsn_upload(env, endpoint, tenant_id, parent_timeline_id)
 
     # Create a branch and write some additional data to the parent
-    child_timeline_id = env.create_branch("test_archived_branch", tenant_id)
+    child_timeline_id = env.create_branch(
+        "test_archived_branch", tenant_id, ancestor_branch_name=parent_branch_name
+    )
 
-    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
-        # Do some churn of the data. This is important so that we can overwrite image layers.
-        for i in range(10):
+    with env.endpoints.create_start(parent_branch_name, tenant_id=tenant_id) as endpoint:
+        # Do some overwriting churn with compactions in between. This is important so that we can overwrite image layers.
+        for i in range(5):
             endpoint.safe_psql_many(
                 [
                     f"SELECT setseed(0.23{i})",
@@ -692,9 +729,9 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
                     "UPDATE foo SET v=(random() * 409600)::int WHERE v % 3 = 0",
                 ]
             )
+            last_flush_lsn_upload(env, endpoint, tenant_id, parent_timeline_id)
         post_branch_sum = endpoint.safe_psql("SELECT sum(key) from foo where v < 51200")
         log.info(f"Post branch sum: {post_branch_sum}")
-        last_flush_lsn_upload(env, endpoint, tenant_id, root_timeline_id)
 
     if offload_child is not None:
         ps_http.timeline_archival_config(
@@ -709,9 +746,19 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
         assert leaf_detail["is_archived"] is True
         if "offload" in offload_child:
             ps_http.timeline_offload(tenant_id, child_timeline_id)
+        if "offload-parent" in offload_child:
+            # Also offload the parent to ensure the retain_lsn of the child
+            # is entered in the parent at unoffloading
+            ps_http.timeline_archival_config(
+                tenant_id,
+                parent_timeline_id,
+                state=TimelineArchivalState.ARCHIVED,
+            )
+            ps_http.timeline_offload(tenant_id, parent_timeline_id)
 
     # Do a restart to get rid of any in-memory objects (we only init gc info once, at attach)
-    env.pageserver.stop()
+    if offload_child is None or "no-restart" not in offload_child:
+        env.pageserver.stop()
     if offload_child == "offload-corrupt":
         assert isinstance(env.pageserver_remote_storage, S3Storage)
         listing = list_prefix(
@@ -746,13 +793,21 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
                 ".*page_service_conn_main.*could not find data for key.*",
             ]
         )
-    env.pageserver.start()
+    if offload_child is None or "no-restart" not in offload_child:
+        env.pageserver.start()
+        if offload_child == "offload-parent":
+            wait_until_tenant_active(ps_http, tenant_id=tenant_id)
+            ps_http.timeline_archival_config(
+                tenant_id,
+                parent_timeline_id,
+                state=TimelineArchivalState.UNARCHIVED,
+            )
 
     # Do an agressive gc and compaction of the parent branch
-    ps_http.timeline_gc(tenant_id=tenant_id, timeline_id=root_timeline_id, gc_horizon=0)
+    ps_http.timeline_gc(tenant_id=tenant_id, timeline_id=parent_timeline_id, gc_horizon=0)
     ps_http.timeline_checkpoint(
         tenant_id,
-        root_timeline_id,
+        parent_timeline_id,
         force_l0_compaction=True,
         force_repartition=True,
         wait_until_uploaded=True,
@@ -768,10 +823,15 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
 
     # Now, after unarchival, the child timeline should still have its data accessible (or corrupted)
     if offload_child == "offload-corrupt":
-        with pytest.raises(RuntimeError, match=".*failed to get basebackup.*"):
-            env.endpoints.create_start(
+        if with_intermediary:
+            error_regex = "(.*could not read .* from page server.*|.*relation .* does not exist)"
+        else:
+            error_regex = ".*failed to get basebackup.*"
+        with pytest.raises((RuntimeError, IoError, UndefinedTable), match=error_regex):
+            with env.endpoints.create_start(
                 "test_archived_branch", tenant_id=tenant_id, basebackup_request_tries=1
-            )
+            ) as endpoint:
+                endpoint.safe_psql("SELECT sum(key) from foo where v < 51200")
     else:
         with env.endpoints.create_start("test_archived_branch", tenant_id=tenant_id) as endpoint:
             sum = endpoint.safe_psql("SELECT sum(key) from foo where v < 51200")

@@ -11,7 +11,7 @@ use tracing::info;
 use super::backend::ComputeCredentialKeys;
 use super::{AuthError, PasswordHackPayload};
 use crate::config::TlsServerEndPoint;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::AuthSecret;
 use crate::intern::EndpointIdInt;
 use crate::sasl;
@@ -32,7 +32,7 @@ pub(crate) struct Begin;
 /// Use [SCRAM](crate::scram)-based auth in [`AuthFlow`].
 pub(crate) struct Scram<'a>(
     pub(crate) &'a scram::ServerSecret,
-    pub(crate) &'a RequestMonitoring,
+    pub(crate) &'a RequestContext,
 );
 
 impl AuthMethod for Scram<'_> {
@@ -178,6 +178,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
             SCRAM_SHA_256_PLUS => ctx.set_auth_method(crate::context::AuthMethod::ScramSha256Plus),
             _ => {}
         }
+
+        // TODO: make this a metric instead
         info!("client chooses {}", sasl.method);
 
         let outcome = sasl::SaslStream::new(self.stream, sasl.message)

@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::config::EndpointCacheConfig;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
 use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
 use crate::rate_limiter::GlobalRateLimiter;
@@ -75,7 +75,7 @@ impl EndpointsCache {
         }
     }
 
-    pub(crate) fn is_valid(&self, ctx: &RequestMonitoring, endpoint: &EndpointId) -> bool {
+    pub(crate) fn is_valid(&self, ctx: &RequestContext, endpoint: &EndpointId) -> bool {
         if !self.ready.load(Ordering::Acquire) {
             // the endpoint cache is not yet fully initialised.
             return true;
