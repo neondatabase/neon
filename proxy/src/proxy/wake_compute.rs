@@ -17,7 +17,6 @@ pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
     api: &B,
     config: RetryConfig,
 ) -> Result<CachedNodeInfo, WakeComputeError> {
-    let retry_type = RetryType::WakeCompute;
     loop {
         match api.wake_compute(ctx).await {
             Err(e) if !should_retry(&e, *num_retries, config) => {
@@ -26,7 +25,7 @@ pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
                 Metrics::get().proxy.retries_metric.observe(
                     RetriesMetricGroup {
                         outcome: ConnectOutcome::Failed,
-                        retry_type,
+                        retry_type: RetryType::WakeCompute,
                     },
                     (*num_retries).into(),
                 );
@@ -40,10 +39,12 @@ pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
                 Metrics::get().proxy.retries_metric.observe(
                     RetriesMetricGroup {
                         outcome: ConnectOutcome::Success,
-                        retry_type,
+                        retry_type: RetryType::WakeCompute,
                     },
                     (*num_retries).into(),
                 );
+                // TODO: is this necessary? We have a metric.
+                // TODO: this log line is misleading as "wake_compute" might return cached (and stale) info.
                 info!(?num_retries, "compute node woken up after");
                 return Ok(n);
             }

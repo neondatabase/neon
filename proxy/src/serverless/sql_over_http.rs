@@ -18,7 +18,7 @@ use tokio::time;
 use tokio_postgres::error::{DbError, ErrorPosition, SqlState};
 use tokio_postgres::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use typed_json::json;
 use url::Url;
 use urlencoding;
@@ -36,6 +36,7 @@ use crate::auth::{endpoint_sni, ComputeUserInfoParseError};
 use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
+use crate::http::{read_body_with_limit, ReadBodyError};
 use crate::metrics::{HttpDirection, Metrics};
 use crate::proxy::{run_until_cancelled, NeonOptions};
 use crate::serverless::backend::HttpConnError;
@@ -358,7 +359,7 @@ pub(crate) enum SqlOverHttpError {
     #[error("{0}")]
     ConnInfo(#[from] ConnInfoError),
     #[error("request is too large (max is {0} bytes)")]
-    RequestTooLarge(u64),
+    RequestTooLarge(usize),
     #[error("response is too large (max is {0} bytes)")]
     ResponseTooLarge(usize),
     #[error("invalid isolation level")]
@@ -426,14 +427,26 @@ impl HttpCodeError for SqlOverHttpError {
 pub(crate) enum ReadPayloadError {
     #[error("could not read the HTTP request body: {0}")]
     Read(#[from] hyper::Error),
+    #[error("could not read the HTTP request body: content length exceeds limit of {limit} bytes")]
+    BodyTooLarge { limit: usize },
     #[error("could not parse the HTTP request body: {0}")]
     Parse(#[from] serde_json::Error),
+}
+
+impl From<ReadBodyError<hyper::Error>> for ReadPayloadError {
+    fn from(value: ReadBodyError<hyper::Error>) -> Self {
+        match value {
+            ReadBodyError::BodyTooLarge { limit } => Self::BodyTooLarge { limit },
+            ReadBodyError::Read(e) => Self::Read(e),
+        }
+    }
 }
 
 impl ReportableError for ReadPayloadError {
     fn get_error_kind(&self) -> ErrorKind {
         match self {
             ReadPayloadError::Read(_) => ErrorKind::ClientDisconnect,
+            ReadPayloadError::BodyTooLarge { .. } => ErrorKind::User,
             ReadPayloadError::Parse(_) => ErrorKind::User,
         }
     }
@@ -580,11 +593,14 @@ async fn handle_db_inner(
 
     let parsed_headers = HttpHeaders::try_parse(headers)?;
 
-    let request_content_length = match request.body().size_hint().upper() {
-        Some(v) => v,
-        None => config.http_config.max_request_size_bytes + 1,
-    };
-    info!(request_content_length, "request size in bytes");
+    let request_content_length = request
+        .body()
+        .size_hint()
+        .upper()
+        .and_then(|v| usize::try_from(v).ok())
+        .unwrap_or(config.http_config.max_request_size_bytes + 1);
+
+    debug!(request_content_length, "request size in bytes");
     Metrics::get()
         .proxy
         .http_conn_content_length_bytes
@@ -600,8 +616,8 @@ async fn handle_db_inner(
 
     let fetch_and_process_request = Box::pin(
         async {
-            let body = request.into_body().collect().await?.to_bytes();
-            info!(length = body.len(), "request payload read");
+            let body = read_body_with_limit(request.into_body(), request_content_length).await?;
+            debug!(length = body.len(), "request payload read");
             let payload: Payload = serde_json::from_slice(&body)?;
             Ok::<Payload, ReadPayloadError>(payload) // Adjust error type accordingly
         }

@@ -31,26 +31,32 @@ impl LimitAlgorithm for Aimd {
 
                 if utilisation > self.utilisation {
                     let limit = old_limit + self.inc;
-                    let increased_limit = limit.clamp(self.min, self.max);
-                    if increased_limit > old_limit {
-                        tracing::info!(increased_limit, "limit increased");
+                    let new_limit = limit.clamp(self.min, self.max);
+                    if new_limit > old_limit {
+                        tracing::info!(old_limit, new_limit, "limit increased");
+                    } else {
+                        tracing::debug!(old_limit, new_limit, "limit clamped at max");
                     }
 
-                    increased_limit
+                    new_limit
                 } else {
                     old_limit
                 }
             }
             Outcome::Overload => {
-                let limit = old_limit as f32 * self.dec;
+                let new_limit = old_limit as f32 * self.dec;
 
                 // Floor instead of round, so the limit reduces even with small numbers.
                 // E.g. round(2 * 0.9) = 2, but floor(2 * 0.9) = 1
-                let limit = limit.floor() as usize;
+                let new_limit = new_limit.floor() as usize;
 
-                let limit = limit.clamp(self.min, self.max);
-                tracing::info!(limit, "limit decreased");
-                limit
+                let new_limit = new_limit.clamp(self.min, self.max);
+                if new_limit < old_limit {
+                    tracing::info!(old_limit, new_limit, "limit decreased");
+                } else {
+                    tracing::debug!(old_limit, new_limit, "limit clamped at min");
+                }
+                new_limit
             }
         }
     }

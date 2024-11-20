@@ -232,7 +232,7 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
 
         // do logging outside of the mutex
         if returned {
-            info!(%conn_id, "{pool_name}: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
+            debug!(%conn_id, "{pool_name}: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
         } else {
             info!(%conn_id, "{pool_name}: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
         }
@@ -409,7 +409,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
                 "pid",
                 tracing::field::display(client.inner.get_process_id()),
             );
-            info!(
+            debug!(
                 cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
                 "pool: reusing connection '{conn_info}'"
             );
