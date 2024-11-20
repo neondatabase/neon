@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use tokio::time::Instant;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
 use crate::auth::backend::ComputeUserInfo;
@@ -214,7 +214,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         self.metrics
             .semaphore_acquire_seconds
             .observe(now.elapsed().as_secs_f64());
-        info!("acquired permit {:?}", now.elapsed().as_secs_f64());
+        debug!("acquired permit {:?}", now.elapsed().as_secs_f64());
         Ok(WakeComputePermit { permit: permit? })
     }
 

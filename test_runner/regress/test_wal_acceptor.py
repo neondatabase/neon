@@ -1784,6 +1784,89 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
             cur.execute("INSERT INTO t (key) VALUES (123)")
 
 
+def test_delete_timeline_under_load(neon_env_builder: NeonEnvBuilder):
+    """
+    Test deleting timelines on a safekeeper while they're under load.
+
+    This should not happen under normal operation, but it can happen if
+    there is some rogue compute/pageserver that is writing/reading to a
+    safekeeper that we're migrating a timeline away from, or if the timeline
+    is being deleted while such a rogue client is running.
+    """
+    neon_env_builder.auth_enabled = True
+    env = neon_env_builder.init_start()
+
+    # Create two endpoints that will generate load
+    timeline_id_a = env.create_branch("deleteme_a")
+    timeline_id_b = env.create_branch("deleteme_b")
+
+    endpoint_a = env.endpoints.create("deleteme_a")
+    endpoint_a.start()
+    endpoint_b = env.endpoints.create("deleteme_b")
+    endpoint_b.start()
+
+    # Get tenant and timeline IDs
+    tenant_id = env.initial_tenant
+
+    # Start generating load on both timelines
+    def generate_load(endpoint: Endpoint):
+        with closing(endpoint.connect()) as conn:
+            with conn.cursor() as cur:
+                cur.execute("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+                while True:
+                    try:
+                        cur.execute("INSERT INTO t SELECT generate_series(1,1000), 'data'")
+                    except:  # noqa
+                        # Ignore errors since timeline may be deleted
+                        break
+
+    t_a = threading.Thread(target=generate_load, args=(endpoint_a,))
+    t_b = threading.Thread(target=generate_load, args=(endpoint_b,))
+    try:
+        t_a.start()
+        t_b.start()
+
+        # Let the load run for a bit
+        log.info("Warming up...")
+        time.sleep(2)
+
+        # Safekeeper errors will propagate to the pageserver: it is correct that these are
+        # logged at error severity because they indicate the pageserver is trying to read
+        # a timeline that it shouldn't.
+        env.pageserver.allowed_errors.extend(
+            [
+                ".*Timeline.*was cancelled.*",
+                ".*Timeline.*was not found.*",
+            ]
+        )
+
+        # Try deleting timelines while under load
+        sk = env.safekeepers[0]
+        sk_http = sk.http_client(auth_token=env.auth_keys.generate_tenant_token(tenant_id))
+
+        # Delete first timeline
+        log.info(f"Deleting {timeline_id_a}...")
+        assert sk_http.timeline_delete(tenant_id, timeline_id_a, only_local=True)["dir_existed"]
+
+        # Delete second timeline
+        log.info(f"Deleting {timeline_id_b}...")
+        assert sk_http.timeline_delete(tenant_id, timeline_id_b, only_local=True)["dir_existed"]
+
+        # Verify timelines are gone from disk
+        sk_data_dir = sk.data_dir
+        assert not (sk_data_dir / str(tenant_id) / str(timeline_id_a)).exists()
+        # assert not (sk_data_dir / str(tenant_id) / str(timeline_id_b)).exists()
+
+    finally:
+        log.info("Stopping endpoints...")
+        # Stop endpoints with immediate mode because we deleted the timeline out from under the compute, which may cause it to hang
+        endpoint_a.stop(mode="immediate")
+        endpoint_b.stop(mode="immediate")
+        log.info("Joining threads...")
+        t_a.join()
+        t_b.join()
+
+
 # Basic pull_timeline test.
 # When live_sk_change is False, compute is restarted to change set of
 # safekeepers; otherwise it is live reload.

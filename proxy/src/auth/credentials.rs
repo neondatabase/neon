@@ -7,7 +7,7 @@ use std::str::FromStr;
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::auth::password_hack::parse_endpoint_param;
 use crate::context::RequestMonitoring;
@@ -147,22 +147,22 @@ impl ComputeUserInfoMaybeEndpoint {
         }
 
         let metrics = Metrics::get();
-        info!(%user, "credentials");
+        debug!(%user, "credentials");
         if sni.is_some() {
-            info!("Connection with sni");
+            debug!("Connection with sni");
             metrics.proxy.accepted_connections_by_sni.inc(SniKind::Sni);
         } else if endpoint.is_some() {
             metrics
                 .proxy
                 .accepted_connections_by_sni
                 .inc(SniKind::NoSni);
-            info!("Connection without sni");
+            debug!("Connection without sni");
         } else {
             metrics
                 .proxy
                 .accepted_connections_by_sni
                 .inc(SniKind::PasswordHack);
-            info!("Connection with password hack");
+            debug!("Connection with password hack");
         }
 
         let options = NeonOptions::parse_params(params);
