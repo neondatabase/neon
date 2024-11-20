@@ -1719,6 +1719,11 @@ impl TenantManager {
                     parent_layers.push(relative_path.to_owned());
                 }
             }
+
+            if parent_layers.is_empty() {
+                tracing::info!("Ancestor shard has no resident layer to hard link");
+            }
+
             (parent_timelines, parent_layers)
         };
 
