@@ -340,7 +340,7 @@ pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, A
 
     // Parameters.
     let format = match get_query_param(&req, "format")?.as_deref() {
-        None => Format::Svg,
+        None => Format::Pprof,
         Some("pprof") => Format::Pprof,
         Some("svg") => Format::Svg,
         Some(format) => return Err(ApiError::BadRequest(anyhow!("invalid format {format}"))),
