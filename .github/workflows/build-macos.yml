@@ -54,9 +54,13 @@ jobs:
       # Hence keeping target/ (and general cache size) smaller
       BUILD_TYPE: release
     steps:
-      - name: Checkout
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Checkout submodule vendor/postgres-${{ matrix.postgres-version }}
         uses: actions/checkout@v4
         with:
+          filter: vendor/postgres-${{ matrix.postgres-version }} 
           submodules: true
 
       - name: Install build dependencies
