@@ -1,5 +1,4 @@
 # pgxs/neon/Makefile
-# Test to trigger changes 3
 
 
 MODULE_big = neon
