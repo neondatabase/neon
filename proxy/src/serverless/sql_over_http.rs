@@ -8,7 +8,7 @@ use http::header::AUTHORIZATION;
 use http::Method;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
-use hyper::body::{Body, Incoming};
+use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
 use hyper::{header, HeaderMap, Request, Response, StatusCode};
 use pq_proto::StartupMessageParamsBuilder;
@@ -597,21 +597,6 @@ async fn handle_db_inner(
         || headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
 
     let parsed_headers = HttpHeaders::try_parse(headers)?;
-
-    let request_content_length = request.body().size_hint().lower();
-    debug!(request_content_length, "request size in bytes");
-
-    // reject the request early if the content length lower bound exceeds our limit.
-    match usize::try_from(request_content_length) {
-        Ok(x) if x <= config.http_config.max_request_size_bytes => {}
-        _ => {
-            return Err(SqlOverHttpError::ReadPayload(
-                ReadPayloadError::BodyTooLarge {
-                    limit: config.http_config.max_request_size_bytes,
-                },
-            ));
-        }
-    }
 
     let fetch_and_process_request = Box::pin(
         async {
