@@ -358,8 +358,6 @@ pub(crate) enum SqlOverHttpError {
     ConnectCompute(#[from] HttpConnError),
     #[error("{0}")]
     ConnInfo(#[from] ConnInfoError),
-    #[error("request is too large (max is {0} bytes)")]
-    RequestTooLarge(usize),
     #[error("response is too large (max is {0} bytes)")]
     ResponseTooLarge(usize),
     #[error("invalid isolation level")]
@@ -378,7 +376,6 @@ impl ReportableError for SqlOverHttpError {
             SqlOverHttpError::ReadPayload(e) => e.get_error_kind(),
             SqlOverHttpError::ConnectCompute(e) => e.get_error_kind(),
             SqlOverHttpError::ConnInfo(e) => e.get_error_kind(),
-            SqlOverHttpError::RequestTooLarge(_) => ErrorKind::User,
             SqlOverHttpError::ResponseTooLarge(_) => ErrorKind::User,
             SqlOverHttpError::InvalidIsolationLevel => ErrorKind::User,
             SqlOverHttpError::Postgres(p) => p.get_error_kind(),
@@ -394,7 +391,6 @@ impl UserFacingError for SqlOverHttpError {
             SqlOverHttpError::ReadPayload(p) => p.to_string(),
             SqlOverHttpError::ConnectCompute(c) => c.to_string_client(),
             SqlOverHttpError::ConnInfo(c) => c.to_string_client(),
-            SqlOverHttpError::RequestTooLarge(_) => self.to_string(),
             SqlOverHttpError::ResponseTooLarge(_) => self.to_string(),
             SqlOverHttpError::InvalidIsolationLevel => self.to_string(),
             SqlOverHttpError::Postgres(p) => p.to_string(),
@@ -407,13 +403,12 @@ impl UserFacingError for SqlOverHttpError {
 impl HttpCodeError for SqlOverHttpError {
     fn get_http_status_code(&self) -> StatusCode {
         match self {
-            SqlOverHttpError::ReadPayload(_) => StatusCode::BAD_REQUEST,
+            SqlOverHttpError::ReadPayload(e) => e.get_http_status_code(),
             SqlOverHttpError::ConnectCompute(h) => match h.get_error_kind() {
                 ErrorKind::User => StatusCode::BAD_REQUEST,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
             SqlOverHttpError::ConnInfo(_) => StatusCode::BAD_REQUEST,
-            SqlOverHttpError::RequestTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             SqlOverHttpError::ResponseTooLarge(_) => StatusCode::INSUFFICIENT_STORAGE,
             SqlOverHttpError::InvalidIsolationLevel => StatusCode::BAD_REQUEST,
             SqlOverHttpError::Postgres(_) => StatusCode::BAD_REQUEST,
@@ -427,7 +422,7 @@ impl HttpCodeError for SqlOverHttpError {
 pub(crate) enum ReadPayloadError {
     #[error("could not read the HTTP request body: {0}")]
     Read(#[from] hyper::Error),
-    #[error("could not read the HTTP request body: content length exceeds limit of {limit} bytes")]
+    #[error("request is too large (max is {limit} bytes)")]
     BodyTooLarge { limit: usize },
     #[error("could not parse the HTTP request body: {0}")]
     Parse(#[from] serde_json::Error),
@@ -448,6 +443,16 @@ impl ReportableError for ReadPayloadError {
             ReadPayloadError::Read(_) => ErrorKind::ClientDisconnect,
             ReadPayloadError::BodyTooLarge { .. } => ErrorKind::User,
             ReadPayloadError::Parse(_) => ErrorKind::User,
+        }
+    }
+}
+
+impl HttpCodeError for ReadPayloadError {
+    fn get_http_status_code(&self) -> StatusCode {
+        match self {
+            ReadPayloadError::Read(_) => StatusCode::BAD_REQUEST,
+            ReadPayloadError::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            ReadPayloadError::Parse(_) => StatusCode::BAD_REQUEST,
         }
     }
 }
@@ -593,30 +598,34 @@ async fn handle_db_inner(
 
     let parsed_headers = HttpHeaders::try_parse(headers)?;
 
-    let request_content_length = request
-        .body()
-        .size_hint()
-        .upper()
-        .and_then(|v| usize::try_from(v).ok())
-        .unwrap_or(config.http_config.max_request_size_bytes + 1);
-
+    let request_content_length = request.body().size_hint().lower();
     debug!(request_content_length, "request size in bytes");
-    Metrics::get()
-        .proxy
-        .http_conn_content_length_bytes
-        .observe(HttpDirection::Request, request_content_length as f64);
 
-    // we don't have a streaming request support yet so this is to prevent OOM
-    // from a malicious user sending an extremely large request body
-    if request_content_length > config.http_config.max_request_size_bytes {
-        return Err(SqlOverHttpError::RequestTooLarge(
-            config.http_config.max_request_size_bytes,
-        ));
+    // reject the request early if the content length lower bound exceeds our limit.
+    match usize::try_from(request_content_length) {
+        Ok(x) if x <= config.http_config.max_request_size_bytes => {}
+        _ => {
+            return Err(SqlOverHttpError::ReadPayload(
+                ReadPayloadError::BodyTooLarge {
+                    limit: config.http_config.max_request_size_bytes,
+                },
+            ));
+        }
     }
 
     let fetch_and_process_request = Box::pin(
         async {
-            let body = read_body_with_limit(request.into_body(), request_content_length).await?;
+            let body = read_body_with_limit(
+                request.into_body(),
+                config.http_config.max_request_size_bytes,
+            )
+            .await?;
+
+            Metrics::get()
+                .proxy
+                .http_conn_content_length_bytes
+                .observe(HttpDirection::Request, body.len() as f64);
+
             debug!(length = body.len(), "request payload read");
             let payload: Payload = serde_json::from_slice(&body)?;
             Ok::<Payload, ReadPayloadError>(payload) // Adjust error type accordingly
