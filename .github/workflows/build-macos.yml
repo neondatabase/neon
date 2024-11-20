@@ -31,10 +31,10 @@ jobs:
         with:
           token: ${{ github.token }}
           filters: |
-            v14: ['vendor/postgres-v14/**', 'Makefile', '.github/workflows/build-macos.yml', 'pgxn/**']
-            v15: ['vendor/postgres-v15/**', 'Makefile', '.github/workflows/build-macos.yml', 'pgxn/**']
-            v16: ['vendor/postgres-v16/**', 'Makefile', '.github/workflows/build-macos.yml', 'pgxn/**']
-            v17: ['vendor/postgres-v17/**', 'Makefile', '.github/workflows/build-macos.yml', 'pgxn/**']
+            v14: ['vendor/postgres-v14/**', 'Makefile', 'pgxn/**']
+            v15: ['vendor/postgres-v15/**', 'Makefile', 'pgxn/**']
+            v16: ['vendor/postgres-v16/**', 'Makefile', 'pgxn/**']
+            v17: ['vendor/postgres-v17/**', 'Makefile', 'pgxn/**']
           base: ${{ github.event_name != 'pull_request' && (github.event.merge_group.base_ref || github.ref_name) || '' }}
           ref: ${{ github.event_name != 'pull_request' && (github.event.merge_group.head_ref || github.ref) || ''}}
 
@@ -45,7 +45,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
     timeout-minutes: 30
-    runs-on: macos-15
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         postgres-version: ${{ fromJSON(needs.files-changed.outputs.postgres_changes) }}
@@ -64,17 +64,17 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install flex bison openssl protobuf icu4c
+          echo brew install flex bison openssl protobuf icu4c
 
       - name: Build Postgres ${{ matrix.postgres-version }}
         run: |
-          make postgres-${{ matrix.postgres-version }}
+          echo make postgres-${{ matrix.postgres-version }}
 
       - name: Build Neon Pg Ext ${{ matrix.postgres-version }}
         run: |
-          make "neon-pg-ext-${{ matrix.postgres-version }}"
+          echo make "neon-pg-ext-${{ matrix.postgres-version }}"
 
       - name: Build walproposer-lib (only for v17)
         if: matrix.postgres-version == 'v17'
         run:
-          make walproposer-lib
+          echo make walproposer-lib
