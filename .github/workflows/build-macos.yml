@@ -58,11 +58,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Checkout submodule vendor/postgres-${{ matrix.postgres-version }}
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            vendor/postgres-${{ matrix.postgres-version }}
-          submodules: true
+        run: |
+          git submodule update --init vendor/postgres-${{ matrix.postgres-version }} 
 
       - name: Install build dependencies
         run: |
