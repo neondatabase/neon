@@ -184,6 +184,10 @@ pub struct PageServerConf {
     /// Optionally disable disk syncs (unsafe!)
     pub no_sync: bool,
 
+    /// Maximum amount of time for which a get page request request
+    /// might be held up for request merging.
+    pub server_side_batch_timeout: Option<Duration>,
+
     pub wal_receiver_protocol: PostgresClientProtocol,
 }
 
@@ -339,6 +343,7 @@ impl PageServerConf {
             concurrent_tenant_warmup,
             concurrent_tenant_size_logical_size_queries,
             virtual_file_io_engine,
+            server_side_batch_timeout,
             tenant_config,
             no_sync,
             wal_receiver_protocol,
@@ -381,6 +386,7 @@ impl PageServerConf {
             image_compression,
             timeline_offloading,
             ephemeral_bytes_per_memory_kb,
+            server_side_batch_timeout,
             wal_receiver_protocol,
 
             // ------------------------------------------------------------

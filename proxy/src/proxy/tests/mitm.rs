@@ -36,7 +36,7 @@ async fn proxy_mitm(
         // begin handshake with end_server
         let end_server = connect_tls(server2, client_config2.make_tls_connect().unwrap()).await;
         let (end_client, startup) = match handshake(
-            &RequestMonitoring::test(),
+            &RequestContext::test(),
             client1,
             Some(&server_config1),
             false,

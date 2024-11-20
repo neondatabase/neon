@@ -10,10 +10,15 @@ use super::tenant::{PageReconstructError, Timeline};
 use crate::aux_file;
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
-use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
+use crate::span::{
+    debug_assert_current_span_has_tenant_and_timeline_id,
+    debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
+};
+use crate::tenant::timeline::GetVectoredError;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
+use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::key::{
     dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range, rel_size_to_key,
@@ -30,7 +35,7 @@ use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{Oid, RepOriginId, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{hash_map, BTreeMap, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
@@ -193,26 +198,195 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
-        if tag.relnode == 0 {
-            return Err(PageReconstructError::Other(
-                RelationError::InvalidRelnode.into(),
-            ));
+        match version {
+            Version::Lsn(effective_lsn) => {
+                let pages = smallvec::smallvec![(tag, blknum)];
+                let res = self
+                    .get_rel_page_at_lsn_batched(pages, effective_lsn, ctx)
+                    .await;
+                assert_eq!(res.len(), 1);
+                res.into_iter().next().unwrap()
+            }
+            Version::Modified(modification) => {
+                if tag.relnode == 0 {
+                    return Err(PageReconstructError::Other(
+                        RelationError::InvalidRelnode.into(),
+                    ));
+                }
+
+                let nblocks = self.get_rel_size(tag, version, ctx).await?;
+                if blknum >= nblocks {
+                    debug!(
+                        "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
+                        tag,
+                        blknum,
+                        version.get_lsn(),
+                        nblocks
+                    );
+                    return Ok(ZERO_PAGE.clone());
+                }
+
+                let key = rel_block_to_key(tag, blknum);
+                modification.get(key, ctx).await
+            }
+        }
+    }
+
+    /// Like [`Self::get_rel_page_at_lsn`], but returns a batch of pages.
+    ///
+    /// The ordering of the returned vec corresponds to the ordering of `pages`.
+    pub(crate) async fn get_rel_page_at_lsn_batched(
+        &self,
+        pages: smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
+        effective_lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Vec<Result<Bytes, PageReconstructError>> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
+        let mut slots_filled = 0;
+        let page_count = pages.len();
+
+        // Would be nice to use smallvec here but it doesn't provide the spare_capacity_mut() API.
+        let mut result = Vec::with_capacity(pages.len());
+        let result_slots = result.spare_capacity_mut();
+
+        let mut keys_slots: BTreeMap<Key, smallvec::SmallVec<[usize; 1]>> = BTreeMap::default();
+        for (response_slot_idx, (tag, blknum)) in pages.into_iter().enumerate() {
+            if tag.relnode == 0 {
+                result_slots[response_slot_idx].write(Err(PageReconstructError::Other(
+                    RelationError::InvalidRelnode.into(),
+                )));
+
+                slots_filled += 1;
+                continue;
+            }
+
+            let nblocks = match self
+                .get_rel_size(tag, Version::Lsn(effective_lsn), ctx)
+                .await
+            {
+                Ok(nblocks) => nblocks,
+                Err(err) => {
+                    result_slots[response_slot_idx].write(Err(err));
+                    slots_filled += 1;
+                    continue;
+                }
+            };
+
+            if blknum >= nblocks {
+                debug!(
+                    "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
+                    tag, blknum, effective_lsn, nblocks
+                );
+                result_slots[response_slot_idx].write(Ok(ZERO_PAGE.clone()));
+                slots_filled += 1;
+                continue;
+            }
+
+            let key = rel_block_to_key(tag, blknum);
+
+            let key_slots = keys_slots.entry(key).or_default();
+            key_slots.push(response_slot_idx);
         }
 
-        let nblocks = self.get_rel_size(tag, version, ctx).await?;
-        if blknum >= nblocks {
-            debug!(
-                "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
-                tag,
-                blknum,
-                version.get_lsn(),
-                nblocks
-            );
-            return Ok(ZERO_PAGE.clone());
+        let keyspace = {
+            // add_key requires monotonicity
+            let mut acc = KeySpaceAccum::new();
+            for key in keys_slots
+                .keys()
+                // in fact it requires strong monotonicity
+                .dedup()
+            {
+                acc.add_key(*key);
+            }
+            acc.to_keyspace()
+        };
+
+        match self.get_vectored(keyspace, effective_lsn, ctx).await {
+            Ok(results) => {
+                for (key, res) in results {
+                    let mut key_slots = keys_slots.remove(&key).unwrap().into_iter();
+                    let first_slot = key_slots.next().unwrap();
+
+                    for slot in key_slots {
+                        let clone = match &res {
+                            Ok(buf) => Ok(buf.clone()),
+                            Err(err) => Err(match err {
+                                PageReconstructError::Cancelled => {
+                                    PageReconstructError::Cancelled
+                                }
+
+                                x @ PageReconstructError::Other(_) |
+                                x @ PageReconstructError::AncestorLsnTimeout(_) |
+                                x @ PageReconstructError::WalRedo(_) |
+                                x @ PageReconstructError::MissingKey(_) => {
+                                    PageReconstructError::Other(anyhow::anyhow!("there was more than one request for this key in the batch, error logged once: {x:?}"))
+                                },
+                            }),
+                        };
+
+                        result_slots[slot].write(clone);
+                        slots_filled += 1;
+                    }
+
+                    result_slots[first_slot].write(res);
+                    slots_filled += 1;
+                }
+            }
+            Err(err) => {
+                // this cannot really happen because get_vectored only errors globally on invalid LSN or too large batch size
+                // (We enforce the max batch size outside of this function, in the code that constructs the batch request.)
+                for slot in keys_slots.values().flatten() {
+                    // this whole `match` is a lot like `From<GetVectoredError> for PageReconstructError`
+                    // but without taking ownership of the GetVectoredError
+                    let err = match &err {
+                        GetVectoredError::Cancelled => {
+                            Err(PageReconstructError::Cancelled)
+                        }
+                        // TODO: restructure get_vectored API to make this error per-key
+                        GetVectoredError::MissingKey(err) => {
+                            Err(PageReconstructError::Other(anyhow::anyhow!("whole vectored get request failed because one or more of the requested keys were missing: {err:?}")))
+                        }
+                        // TODO: restructure get_vectored API to make this error per-key
+                        GetVectoredError::GetReadyAncestorError(err) => {
+                            Err(PageReconstructError::Other(anyhow::anyhow!("whole vectored get request failed because one or more key required ancestor that wasn't ready: {err:?}")))
+                        }
+                        // TODO: restructure get_vectored API to make this error per-key
+                        GetVectoredError::Other(err) => {
+                            Err(PageReconstructError::Other(
+                                anyhow::anyhow!("whole vectored get request failed: {err:?}"),
+                            ))
+                        }
+                        // TODO: we can prevent this error class by moving this check into the type system
+                        GetVectoredError::InvalidLsn(e) => {
+                            Err(anyhow::anyhow!("invalid LSN: {e:?}").into())
+                        }
+                        // NB: this should never happen in practice because we limit MAX_GET_VECTORED_KEYS
+                        // TODO: we can prevent this error class by moving this check into the type system
+                        GetVectoredError::Oversized(err) => {
+                            Err(anyhow::anyhow!(
+                                "batching oversized: {err:?}"
+                            )
+                            .into())
+                        }
+                    };
+
+                    result_slots[*slot].write(err);
+                }
+
+                slots_filled += keys_slots.values().map(|slots| slots.len()).sum::<usize>();
+            }
+        };
+
+        assert_eq!(slots_filled, page_count);
+        // SAFETY:
+        // 1. `result` and any of its uninint members are not read from until this point
+        // 2. The length below is tracked at run-time and matches the number of requested pages.
+        unsafe {
+            result.set_len(page_count);
         }
 
-        let key = rel_block_to_key(tag, blknum);
-        version.get(self, key, ctx).await
+        result
     }
 
     // Get size of a database in blocks

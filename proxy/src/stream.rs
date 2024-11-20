@@ -133,6 +133,7 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
         msg: &'static str,
         error_kind: ErrorKind,
     ) -> Result<T, ReportedError> {
+        // TODO: only log this for actually interesting errors
         tracing::info!(
             kind = error_kind.to_metric_label(),
             msg,

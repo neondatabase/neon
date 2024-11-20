@@ -36,7 +36,7 @@ use super::conn_pool_lib::{
     Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, DbUserConn,
     EndpointConnPool,
 };
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
 
@@ -88,7 +88,7 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
 
     pub(crate) fn get(
         self: &Arc<Self>,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         conn_info: &ConnInfo,
     ) -> Result<Option<Client<C>>, HttpConnError> {
         let client = self
@@ -159,7 +159,7 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn poll_client<C: ClientInnerExt>(
     global_pool: Arc<LocalConnPool<C>>,
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
     mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,

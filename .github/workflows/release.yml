@@ -26,82 +26,26 @@ defaults:
 jobs:
   create-storage-release-branch:
     if: ${{ github.event.schedule == '0 6 * * MON' || format('{0}', inputs.create-storage-release-branch) == 'true' }}
-    runs-on: ubuntu-22.04
 
     permissions:
-      contents: write # for `git push`
+      contents: write
 
-    steps:
-    - name: Check out code
-      uses: actions/checkout@v4
-      with:
-        ref: main
-
-    - name: Set environment variables
-      run: |
-        echo "RELEASE_DATE=$(date +'%Y-%m-%d')" | tee -a $GITHUB_ENV
-        echo "RELEASE_BRANCH=rc/$(date +'%Y-%m-%d')" | tee -a $GITHUB_ENV
-
-    - name: Create release branch
-      run: git checkout -b $RELEASE_BRANCH
-
-    - name: Push new branch
-      run: git push origin $RELEASE_BRANCH
-
-    - name: Create pull request into release
-      env:
-        GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
-      run: |
-        TITLE="Storage & Compute release ${RELEASE_DATE}"
-
-        cat << EOF > body.md
-          ## ${TITLE}
-
-          **Please merge this Pull Request using 'Create a merge commit' button**
-        EOF
-
-        gh pr create --title "${TITLE}" \
-                     --body-file "body.md" \
-                     --head "${RELEASE_BRANCH}" \
-                     --base "release"
+    uses: ./.github/workflows/_create-release-pr.yml
+    with:
+      component-name: 'Storage & Compute'
+      release-branch: 'release'
+    secrets:
+      ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
 
   create-proxy-release-branch:
     if: ${{ github.event.schedule == '0 6 * * THU' || format('{0}', inputs.create-proxy-release-branch) == 'true' }}
-    runs-on: ubuntu-22.04
 
     permissions:
-      contents: write # for `git push`
+      contents: write
 
-    steps:
-    - name: Check out code
-      uses: actions/checkout@v4
-      with:
-        ref: main
-
-    - name: Set environment variables
-      run: |
-        echo "RELEASE_DATE=$(date +'%Y-%m-%d')" | tee -a $GITHUB_ENV
-        echo "RELEASE_BRANCH=rc/proxy/$(date +'%Y-%m-%d')" | tee -a $GITHUB_ENV
-
-    - name: Create release branch
-      run: git checkout -b $RELEASE_BRANCH
-
-    - name: Push new branch
-      run: git push origin $RELEASE_BRANCH
-
-    - name: Create pull request into release
-      env:
-        GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
-      run: |
-        TITLE="Proxy release ${RELEASE_DATE}"
-
-        cat << EOF > body.md
-          ## ${TITLE}
-
-          **Please merge this Pull Request using 'Create a merge commit' button**
-        EOF
-
-        gh pr create --title "${TITLE}" \
-                     --body-file "body.md" \
-                     --head "${RELEASE_BRANCH}" \
-                     --base "release-proxy"
+    uses: ./.github/workflows/_create-release-pr.yml
+    with:
+      component-name: 'Proxy'
+      release-branch: 'release-proxy'
+    secrets:
+      ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}

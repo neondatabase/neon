@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::layer_manager::LayerManager;
 use super::{
-    CompactFlags, CreateImageLayersError, DurationRecorder, ImageLayerCreationMode,
+    CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, ImageLayerCreationMode,
     RecordedDuration, Timeline,
 };
 
@@ -273,19 +273,29 @@ impl Timeline {
     pub(crate) async fn compact_legacy(
         self: &Arc<Self>,
         cancel: &CancellationToken,
-        flags: EnumSet<CompactFlags>,
+        options: CompactOptions,
         ctx: &RequestContext,
     ) -> Result<bool, CompactionError> {
-        if flags.contains(CompactFlags::EnhancedGcBottomMostCompaction) {
-            self.compact_with_gc(cancel, flags, ctx)
+        if options
+            .flags
+            .contains(CompactFlags::EnhancedGcBottomMostCompaction)
+        {
+            self.compact_with_gc(cancel, options, ctx)
                 .await
                 .map_err(CompactionError::Other)?;
             return Ok(false);
         }
 
-        if flags.contains(CompactFlags::DryRun) {
+        if options.flags.contains(CompactFlags::DryRun) {
             return Err(CompactionError::Other(anyhow!(
                 "dry-run mode is not supported for legacy compaction for now"
+            )));
+        }
+
+        if options.compact_range.is_some() {
+            // maybe useful in the future? could implement this at some point
+            return Err(CompactionError::Other(anyhow!(
+                "compaction range is not supported for legacy compaction for now"
             )));
         }
 
@@ -338,7 +348,7 @@ impl Timeline {
             .repartition(
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
-                flags,
+                options.flags,
                 ctx,
             )
             .await
@@ -354,7 +364,7 @@ impl Timeline {
                 let fully_compacted = self
                     .compact_level0(
                         target_file_size,
-                        flags.contains(CompactFlags::ForceL0Compaction),
+                        options.flags.contains(CompactFlags::ForceL0Compaction),
                         ctx,
                     )
                     .await?;
@@ -372,7 +382,10 @@ impl Timeline {
                         .create_image_layers(
                             &partitioning,
                             lsn,
-                            if flags.contains(CompactFlags::ForceImageLayerCreation) {
+                            if options
+                                .flags
+                                .contains(CompactFlags::ForceImageLayerCreation)
+                            {
                                 ImageLayerCreationMode::Force
                             } else {
                                 ImageLayerCreationMode::Try
@@ -1736,11 +1749,19 @@ impl Timeline {
     pub(crate) async fn compact_with_gc(
         self: &Arc<Self>,
         cancel: &CancellationToken,
-        flags: EnumSet<CompactFlags>,
+        options: CompactOptions,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        self.partial_compact_with_gc(Key::MIN..Key::MAX, cancel, flags, ctx)
-            .await
+        self.partial_compact_with_gc(
+            options
+                .compact_range
+                .map(|range| range.start..range.end)
+                .unwrap_or_else(|| Key::MIN..Key::MAX),
+            cancel,
+            options.flags,
+            ctx,
+        )
+        .await
     }
 
     /// An experimental compaction building block that combines compaction with garbage collection.
@@ -2020,6 +2041,14 @@ impl Timeline {
         while let Some(((key, lsn, val), desc)) = merge_iter.next_with_trace().await? {
             if cancel.is_cancelled() {
                 return Err(anyhow!("cancelled")); // TODO: refactor to CompactionError and pass cancel error
+            }
+            if self.shard_identity.is_key_disposable(&key) {
+                // If this shard does not need to store this key, simply skip it.
+                //
+                // This is not handled in the filter iterator because shard is determined by hash.
+                // Therefore, it does not give us any performance benefit to do things like skip
+                // a whole layer file as handling key spaces (ranges).
+                continue;
             }
             if !job_desc.compaction_key_range.contains(&key) {
                 if !desc.is_delta {

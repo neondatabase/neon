@@ -1,17 +1,17 @@
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::{ComputeCredentials, ComputeUserInfo};
 use crate::auth::backend::ComputeCredentialKeys;
 use crate::auth::{self, AuthFlow};
 use crate::config::AuthenticationConfig;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::AuthSecret;
 use crate::stream::{PqStream, Stream};
 use crate::{compute, sasl};
 
 pub(super) async fn authenticate(
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     creds: ComputeUserInfo,
     client: &mut PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     config: &'static AuthenticationConfig,
@@ -21,11 +21,11 @@ pub(super) async fn authenticate(
     let scram_keys = match secret {
         #[cfg(any(test, feature = "testing"))]
         AuthSecret::Md5(_) => {
-            info!("auth endpoint chooses MD5");
+            debug!("auth endpoint chooses MD5");
             return Err(auth::AuthError::bad_auth_method("MD5"));
         }
         AuthSecret::Scram(secret) => {
-            info!("auth endpoint chooses SCRAM");
+            debug!("auth endpoint chooses SCRAM");
             let scram = auth::Scram(&secret, ctx);
 
             let auth_outcome = tokio::time::timeout(
@@ -50,6 +50,8 @@ pub(super) async fn authenticate(
             let client_key = match auth_outcome {
                 sasl::Outcome::Success(key) => key,
                 sasl::Outcome::Failure(reason) => {
+                    // TODO: warnings?
+                    // TODO: should we get rid of this because double logging?
                     info!("auth backend failed with an error: {reason}");
                     return Err(auth::AuthError::password_failed(&*creds.user));
                 }

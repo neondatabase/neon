@@ -256,12 +256,17 @@ class NeonBenchmarker:
         metric_value: float,
         unit: str,
         report: MetricReport,
+        labels: Optional[
+            dict[str, str]
+        ] = None,  # use this to associate additional key/value pairs in json format for associated Neon object IDs like project ID with the metric
     ):
         """
         Record a benchmark result.
         """
         # just to namespace the value
         name = f"{self.PROPERTY_PREFIX}_{metric_name}"
+        if labels is None:
+            labels = {}
         self.property_recorder(
             name,
             {
@@ -269,6 +274,7 @@ class NeonBenchmarker:
                 "value": metric_value,
                 "unit": unit,
                 "report": report,
+                "labels": labels,
             },
         )
 

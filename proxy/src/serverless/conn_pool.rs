@@ -21,7 +21,7 @@ use {
 use super::conn_pool_lib::{
     Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, GlobalConnPool,
 };
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::Metrics;
 
@@ -53,7 +53,7 @@ impl fmt::Display for ConnInfo {
 
 pub(crate) fn poll_client<C: ClientInnerExt>(
     global_pool: Arc<GlobalConnPool<C>>,
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
     mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
