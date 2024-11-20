@@ -18,7 +18,7 @@ pub fn stream_tenants<'a>(
     remote_client: &'a GenericRemoteStorage,
     target: &'a RootTarget,
 ) -> impl Stream<Item = anyhow::Result<TenantShardId>> + 'a {
-    stream_tenants_maybe_prefix(&remote_client, target, None)
+    stream_tenants_maybe_prefix(remote_client, target, None)
 }
 /// Given a remote storage and a target, output a stream of TenantIds discovered via listing prefixes
 pub fn stream_tenants_maybe_prefix<'a>(
