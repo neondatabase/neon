@@ -19,7 +19,8 @@ use {
 };
 
 use super::conn_pool_lib::{
-    Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, GlobalConnPool,
+    Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, EndpointConnPool,
+    GlobalConnPool,
 };
 use crate::context::RequestContext;
 use crate::control_plane::messages::MetricsAuxInfo;
@@ -52,7 +53,7 @@ impl fmt::Display for ConnInfo {
 }
 
 pub(crate) fn poll_client<C: ClientInnerExt>(
-    global_pool: Arc<GlobalConnPool<C>>,
+    global_pool: Arc<GlobalConnPool<C, EndpointConnPool<C>>>,
     ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
@@ -167,6 +168,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     Client::new(inner, conn_info, pool_clone)
 }
 
+#[derive(Clone)]
 pub(crate) struct ClientDataRemote {
     session: tokio::sync::watch::Sender<uuid::Uuid>,
     cancel: CancellationToken,

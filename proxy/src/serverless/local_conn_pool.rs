@@ -44,6 +44,7 @@ pub(crate) const EXT_NAME: &str = "pg_session_jwt";
 pub(crate) const EXT_VERSION: &str = "0.1.2";
 pub(crate) const EXT_SCHEMA: &str = "auth";
 
+#[derive(Clone)]
 pub(crate) struct ClientDataLocal {
     session: tokio::sync::watch::Sender<uuid::Uuid>,
     cancel: CancellationToken,
