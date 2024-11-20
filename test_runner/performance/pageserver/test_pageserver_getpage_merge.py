@@ -1,39 +1,69 @@
 
 from dataclasses import dataclass
+import dataclasses
 import time
 
 import pytest
+from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
 
-@pytest.mark.parametrize("tablesize_mib", [50, 500, 5000])
-@pytest.mark.parametrize("batch_timeout", [None, "1ns", "5us", "10us", "100us", "1ms", "10ms"])
-@pytest.mark.parametrize("target_runtime", [10])
-@pytest.mark.parametrize("effective_io_concurrency", [1, 32, 64, 100, 800]) # 32 is the current vectored get max batch size
-@pytest.mark.parametrize("readhead_buffer_size", [128, 1024]) # 128 is the default in prod right now
-def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, tablesize_mib: int, batch_timeout: str, target_runtime: int, effective_io_concurrency: int, readhead_buffer_size: int):
+TARGET_RUNTIME = 5
+
+@pytest.mark.parametrize(
+    "tablesize_mib, batch_timeout, target_runtime, effective_io_concurrency, readhead_buffer_size, name",
+    [
+        # the next 4 cases demonstrate how not-batchable workloads suffer from batching timeout
+        (50, None, TARGET_RUNTIME, 1, 128, "not batchable no batching"),
+        (50, "10us", TARGET_RUNTIME, 1, 128, "not batchable 10us timeout"),
+        (50, "1ms", TARGET_RUNTIME, 1, 128, "not batchable 1ms timeout"),
+        # the next 4 cases demonstrate how batchable workloads benefit from batching
+        (50, None, TARGET_RUNTIME, 100, 128, "batchable no batching"),
+        (50, "10us", TARGET_RUNTIME, 100, 128, "batchable 10us timeout"),
+        (50, "100us", TARGET_RUNTIME, 100, 128, "batchable 100us timeout"),
+        (50, "1ms", TARGET_RUNTIME, 100, 128, "batchable 1ms timeout"),
+    ]
+)
+def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker, tablesize_mib: int, batch_timeout: str, target_runtime: int, effective_io_concurrency: int, readhead_buffer_size: int, name: str):
     """
     Do a bunch of sequential scans and ensure that the pageserver does some merging.
     """
 
+    #
+    # record perf-related parameters as metrics to simplify processing of results
+    #
+    params = {}
+
+    params.update(
+        {
+            "tablesize_mib": (tablesize_mib, {"unit": "MiB"}),
+            "batch_timeout": (batch_timeout, {"unit": "s"}),
+            # target_runtime is just a polite ask to the workload to run for this long
+            "effective_io_concurrency": (effective_io_concurrency, {}),
+            "readhead_buffer_size": (readhead_buffer_size, {"unit": "KiB"}),
+            # name is not a metric
+        }
+    )
+
+    log.info("params: %s", params)
+
+    for param, (value, kwargs) in params.items():
+        zenbenchmark.record(param, metric_value=value, unit=kwargs.pop("unit", ""), report=MetricReport.TEST_PARAM, **kwargs)
+
+    #
+    # Setup
+    #
+
     env = neon_env_builder.init_start()
-
     ps_http = env.pageserver.http_client()
-
     endpoint = env.endpoints.create_start("main")
-
     conn = endpoint.connect()
     cur = conn.cursor()
-
-    log.info("tablesize_mib=%d, batch_timeout=%s, target_runtime=%d, effective_io_concurrency=%d", tablesize_mib, batch_timeout, target_runtime, effective_io_concurrency)
 
     cur.execute("SET max_parallel_workers_per_gather=0") # disable parallel backends
     cur.execute(f"SET effective_io_concurrency={effective_io_concurrency}")
     cur.execute(f"SET neon.readahead_buffer_size={readhead_buffer_size}") # this is the current default value, but let's hard-code that
 
-    #
-    # Setup
-    #
     cur.execute("CREATE EXTENSION IF NOT EXISTS neon;")
     cur.execute("CREATE EXTENSION IF NOT EXISTS neon_test_utils;")
 
@@ -42,10 +72,10 @@ def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, tablesize_mib: in
     tablesize = tablesize_mib * 1024 * 1024
     npages = tablesize // (8*1024)
     cur.execute("INSERT INTO t SELECT generate_series(1, %s)", (npages,))
-    # TODO: can we force postgres to doe sequential scans?
+    # TODO: can we force postgres to do sequential scans?
 
     #
-    # Collect Data
+    # Run the workload, collect `Metrics` before and after, calculate difference, normalize.
     #
 
     @dataclass
@@ -91,15 +121,7 @@ def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, tablesize_mib: in
                 compute_getpage_count=compute_getpage_count
             )
 
-    @dataclass
-    class Result:
-        metrics: Metrics
-        iters: int
-
-        @property
-        def normalized(self) -> Metrics:
-            return self.metrics.normalize(self.iters)
-    def workload() -> Result:
+    def workload() -> Metrics:
 
         start = time.time()
         iters = 0
@@ -113,18 +135,31 @@ def test_getpage_merge_smoke(neon_env_builder: NeonEnvBuilder, tablesize_mib: in
             assert cur.fetchall()[0][0] == npages*(npages+1)//2
             iters += 1
         after = get_metrics()
-        return Result(metrics=after-before, iters=iters)
+        return (after-before).normalize(iters-1)
 
     env.pageserver.patch_config_toml_nonrecursive({"server_side_batch_timeout": batch_timeout})
     env.pageserver.restart()
-    results = workload()
+    metrics = workload()
+
+    log.info("Results: %s", metrics)
 
     #
-    # Assertions on collected data
+    # Sanity-checks on the collected data
+    #
+    def close_enough(a, b):
+        return (a/b > 0.99 and a/b < 1.01) and (b/a > 0.99 and b/a < 1.01)
+    # assert that getpage counts roughly match between compute and ps
+    assert close_enough(metrics.pageserver_getpage_count, metrics.compute_getpage_count)
+
+    #
+    # Record the results
     #
 
-    import pdb; pdb.set_trace()
-    # TODO: assert that getpage counts roughly match between compute and ps
-    # TODO: assert that batching occurs by asserting that vectored get count is siginificantly less than getpage count
+    for metric, value in dataclasses.asdict(metrics).items():
+        zenbenchmark.record(f"counters.{metric}", value, unit="", report=MetricReport.TEST_PARAM)
+
+    zenbenchmark.record("perfmetric.batching_factor", metrics.pageserver_getpage_count/metrics.pageserver_vectored_get_count, unit="", report=MetricReport.HIGHER_IS_BETTER)
+
+
 
 

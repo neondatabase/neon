@@ -235,6 +235,7 @@ class MetricReport(str, enum.Enum):  # str is a hack to make it json serializabl
     HIGHER_IS_BETTER = "higher_is_better"
     # the same but for lower values
     LOWER_IS_BETTER = "lower_is_better"
+    
 
 
 class NeonBenchmarker:
