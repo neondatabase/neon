@@ -2962,6 +2962,9 @@ impl Tenant {
 
         for (timeline_id, timeline, (can_compact, can_offload)) in &timelines_to_compact_or_offload
         {
+            // pending_task_left == None: cannot compact, maybe still pending tasks
+            // pending_task_left == Some(true): compaction task left
+            // pending_task_left == Some(false): no compaction task left
             let pending_task_left = if *can_compact {
                 let has_pending_l0_compaction_task = timeline
                     .compact(cancel, EnumSet::empty(), ctx)
@@ -2981,12 +2984,18 @@ impl Tenant {
                                 .fail(&CIRCUIT_BREAKERS_BROKEN, e);
                         }
                     })?;
-                if !has_pending_l0_compaction_task {
+                if has_pending_l0_compaction_task {
+                    Some(true)
+                } else {
+                    let has_pending_scheduled_compaction_task;
                     let next_scheduled_compaction_task = {
                         let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
                         if let Some(tline_pending_tasks) = guard.get_mut(timeline_id) {
-                            tline_pending_tasks.pop_front()
+                            let next_task = tline_pending_tasks.pop_front();
+                            has_pending_scheduled_compaction_task = !tline_pending_tasks.is_empty();
+                            next_task
                         } else {
+                            has_pending_scheduled_compaction_task = false;
                             None
                         }
                     };
@@ -2998,7 +3007,6 @@ impl Tenant {
                             .contains(CompactFlags::EnhancedGcBottomMostCompaction)
                         {
                             warn!("ignoring scheduled compaction task: scheduled task must be gc compaction: {:?}", next_scheduled_compaction_task.options);
-                            Some(true)
                         } else {
                             let _ = timeline
                                 .compact_with_options(
@@ -3012,13 +3020,9 @@ impl Tenant {
                                 // TODO: we can send compaction statistics in the future
                                 tx.send(()).ok();
                             }
-                            Some(true)
                         }
-                    } else {
-                        None
                     }
-                } else {
-                    Some(true)
+                    Some(has_pending_scheduled_compaction_task)
                 }
             } else {
                 None

@@ -113,13 +113,19 @@ page_cache_size=10; wal_receiver_protocol='{wal_receiver_protocol}'
 
 
 def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start(initial_tenant_conf=AGGRESIVE_COMPACTION_TENANT_CONF)
+    SMOKE_CONF = {
+        # Run both gc and gc-compaction.
+        "gc_period": "5s",
+        "compaction_period": "5s",
+    }
+
+    env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
     row_count = 1000
-    churn_rounds = 10
+    churn_rounds = 20
 
     ps_http = env.pageserver.http_client()
 
@@ -129,39 +135,24 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     log.info("Writing initial data ...")
     workload.write_rows(row_count, env.pageserver.id)
 
-    # schedule a gc-compaction in advance, it will be triggered along with L0 compaction
-    ps_http.timeline_compact(
-        tenant_id,
-        timeline_id,
-        enhanced_gc_bottom_most_compaction=True,
-        body={
-            "scheduled": True,
-            "compact_range": {
-                "start": "000000000000000000000000000000000000",
-                "end": "030000000000000000000000000000000000",
-            },
-        },
-    )
-
     for i in range(1, churn_rounds + 1):
         if i % 10 == 0:
             log.info(f"Running churn round {i}/{churn_rounds} ...")
 
-        workload.churn_rows(row_count, env.pageserver.id)
-        # Force L0 compaction to ensure the number of layers is within bounds, so that gc-compaction can run.
-        ps_http.timeline_compact(tenant_id, timeline_id, force_l0_compaction=True)
-        assert ps_http.perf_info(tenant_id, timeline_id)[0]["num_of_l0"] <= 1
         ps_http.timeline_compact(
             tenant_id,
             timeline_id,
             enhanced_gc_bottom_most_compaction=True,
             body={
+                "scheduled": True,
                 "compact_range": {
                     "start": "000000000000000000000000000000000000",
                     "end": "030000000000000000000000000000000000",
-                }
+                },
             },
         )
+
+        workload.churn_rows(row_count, env.pageserver.id)
 
     env.pageserver.assert_log_contains("scheduled_compaction")
 
