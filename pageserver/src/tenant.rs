@@ -1615,7 +1615,8 @@ impl Tenant {
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
-        let needs_manifest_upload = offloaded_timelines_list.len() != preload.tenant_manifest.offloaded_timelines.len();
+        let needs_manifest_upload =
+            offloaded_timelines_list.len() != preload.tenant_manifest.offloaded_timelines.len();
         {
             let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
             offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
