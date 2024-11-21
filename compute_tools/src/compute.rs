@@ -1161,8 +1161,21 @@ impl ComputeNode {
                 .query_pairs_mut()
                 .append_pair("application_name", "migrations");
 
-            let mut client = Client::connect(connstr.as_str(), NoTls)?;
-            handle_migrations(&mut client).context("apply_config handle_migrations")
+            match Client::connect(connstr.as_str(), NoTls) {
+                Ok(mut client) => {
+                    if let Err(e) =
+                        handle_migrations(&mut client).context("apply_config handle_migrations")
+                    {
+                        error!("Failed to run migrations: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to connect to the compute for running migrations: {}",
+                        e
+                    );
+                }
+            };
         });
 
         Ok::<(), anyhow::Error>(())

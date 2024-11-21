@@ -54,6 +54,7 @@ from fixtures.common_types import (
     TimelineArchivalState,
     TimelineId,
 )
+from fixtures.compute_migrations import NUM_COMPUTE_MIGRATIONS
 from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.h2server import H2Server
 from fixtures.log_helper import log
@@ -3753,6 +3754,7 @@ class Endpoint(PgProtocol, LogUtils):
         safekeepers: Optional[list[int]] = None,
         allow_multiple: bool = False,
         basebackup_request_tries: Optional[int] = None,
+        env: Optional[dict[str, str]] = None,
     ) -> Endpoint:
         """
         Start the Postgres instance.
@@ -3773,6 +3775,7 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             basebackup_request_tries=basebackup_request_tries,
+            env=env,
         )
         self._running.release(1)
 
@@ -3853,13 +3856,17 @@ class Endpoint(PgProtocol, LogUtils):
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
     # Please note: Migrations only run if pg_skip_catalog_updates is false
-    def wait_for_migrations(self, num_migrations: int = 11):
+    def wait_for_migrations(self, wait_for: int = NUM_COMPUTE_MIGRATIONS) -> None:
+        """
+        Wait for all compute migrations to be ran. Remember that migrations only
+        run if "pg_skip_catalog_updates" is set in the compute spec to false.
+        """
         with self.cursor() as cur:
 
             def check_migrations_done():
                 cur.execute("SELECT id FROM neon_migration.migration_id")
                 migration_id: int = cur.fetchall()[0][0]
-                assert migration_id >= num_migrations
+                assert migration_id >= wait_for
 
             wait_until(20, 0.5, check_migrations_done)
 
