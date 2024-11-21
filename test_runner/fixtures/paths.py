@@ -18,7 +18,6 @@ from fixtures.utils import allure_attach_from_dir
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from typing import Optional
 
 
 BASE_DIR = Path(__file__).parents[2]
@@ -26,9 +25,7 @@ COMPUTE_CONFIG_DIR = BASE_DIR / "compute" / "etc"
 DEFAULT_OUTPUT_DIR: str = "test_output"
 
 
-def get_test_dir(
-    request: FixtureRequest, top_output_dir: Path, prefix: Optional[str] = None
-) -> Path:
+def get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str | None = None) -> Path:
     """Compute the path to a working directory for an individual test."""
     test_name = request.node.name
     test_dir = top_output_dir / f"{prefix or ''}{test_name.replace('/', '-')}"
@@ -112,7 +109,7 @@ def compatibility_snapshot_dir() -> Iterator[Path]:
 
 
 @pytest.fixture(scope="session")
-def compatibility_neon_binpath() -> Iterator[Optional[Path]]:
+def compatibility_neon_binpath() -> Iterator[Path | None]:
     if os.getenv("REMOTE_ENV"):
         return
     comp_binpath = None
@@ -133,7 +130,7 @@ def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
 
 
 @pytest.fixture(scope="session")
-def compatibility_pg_distrib_dir() -> Iterator[Optional[Path]]:
+def compatibility_pg_distrib_dir() -> Iterator[Path | None]:
     compat_distrib_dir = None
     if env_compat_postgres_bin := os.environ.get("COMPATIBILITY_POSTGRES_DISTRIB_DIR"):
         compat_distrib_dir = Path(env_compat_postgres_bin).resolve()
@@ -197,7 +194,7 @@ class FileAndThreadLock:
     def __init__(self, path: Path):
         self.path = path
         self.thread_lock = threading.Lock()
-        self.fd: Optional[int] = None
+        self.fd: int | None = None
 
     def __enter__(self):
         self.fd = os.open(self.path, os.O_CREAT | os.O_WRONLY)
@@ -208,9 +205,9 @@ class FileAndThreadLock:
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc_value: Optional[BaseException],
-        exc_traceback: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        exc_traceback: TracebackType | None,
     ):
         assert self.fd is not None
         assert self.thread_lock.locked()  # ... by us
@@ -263,9 +260,9 @@ class SnapshotDir:
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc_value: Optional[BaseException],
-        exc_traceback: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        exc_traceback: TracebackType | None,
     ):
         self._lock.__exit__(exc_type, exc_value, exc_traceback)
 
@@ -277,7 +274,7 @@ def shared_snapshot_dir(top_output_dir: Path, ident: str) -> SnapshotDir:
 
 
 @pytest.fixture(scope="function")
-def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[Path]:
+def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Path | None:
     """
     Idempotently create a test's overlayfs mount state directory.
     If the functionality isn't enabled via env var, returns None.

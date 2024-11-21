@@ -99,7 +99,7 @@ class PgCompare(ABC):
                 assert row is not None
                 assert len(row) == len(pg_stat.columns)
 
-                for col, val in zip(pg_stat.columns, row):
+                for col, val in zip(pg_stat.columns, row, strict=False):
                     results[f"{pg_stat.table}.{col}"] = int(val)
 
         return results

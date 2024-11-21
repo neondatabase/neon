@@ -6,7 +6,6 @@ import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
@@ -20,12 +19,9 @@ from fixtures.remote_storage import S3Storage, s3_storage
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
-if TYPE_CHECKING:
-    from typing import Optional
-
 
 @pytest.mark.parametrize("shard_count", [None, 4])
-def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]):
+def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     """
     Test the `tenant-snapshot` subcommand, which grabs data from remote storage
 
@@ -131,7 +127,7 @@ def drop_local_state(env: NeonEnv, tenant_id: TenantId):
 
 
 @pytest.mark.parametrize("shard_count", [None, 4])
-def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]):
+def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.num_pageservers = 2
 
@@ -179,9 +175,7 @@ def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Opt
 
 
 @pytest.mark.parametrize("shard_count", [None, 2])
-def test_scrubber_physical_gc_ancestors(
-    neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]
-):
+def test_scrubber_physical_gc_ancestors(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.num_pageservers = 2
 
@@ -499,7 +493,7 @@ def test_scrubber_physical_gc_ancestors_split(neon_env_builder: NeonEnvBuilder):
 
 @pytest.mark.parametrize("shard_count", [None, 4])
 def test_scrubber_scan_pageserver_metadata(
-    neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]
+    neon_env_builder: NeonEnvBuilder, shard_count: int | None
 ):
     """
     Create some layers. Delete an object listed in index. Run scrubber and see if it detects the defect.

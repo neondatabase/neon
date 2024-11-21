@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 
 from fixtures.common_types import KEY_MAX, KEY_MIN, Key, Lsn
 
@@ -46,7 +46,7 @@ class DeltaLayerName:
         return ret
 
 
-LayerName = Union[ImageLayerName, DeltaLayerName]
+LayerName = ImageLayerName | DeltaLayerName
 
 
 class InvalidFileName(Exception):

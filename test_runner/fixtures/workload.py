@@ -15,7 +15,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.utils import wait_for_last_record_lsn
 
 if TYPE_CHECKING:
-    from typing import Any, Optional
+    from typing import Any
 
 # neon_local doesn't handle creating/modifying endpoints concurrently, so we use a mutex
 # to ensure we don't do that: this enables running lots of Workloads in parallel safely.
@@ -36,8 +36,8 @@ class Workload:
         env: NeonEnv,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        branch_name: Optional[str] = None,
-        endpoint_opts: Optional[dict[str, Any]] = None,
+        branch_name: str | None = None,
+        endpoint_opts: dict[str, Any] | None = None,
     ):
         self.env = env
         self.tenant_id = tenant_id
@@ -50,7 +50,7 @@ class Workload:
         self.expect_rows = 0
         self.churn_cursor = 0
 
-        self._endpoint: Optional[Endpoint] = None
+        self._endpoint: Endpoint | None = None
         self._endpoint_opts = endpoint_opts or {}
 
     def reconfigure(self):
@@ -61,7 +61,7 @@ class Workload:
             with ENDPOINT_LOCK:
                 self._endpoint.reconfigure()
 
-    def endpoint(self, pageserver_id: Optional[int] = None) -> Endpoint:
+    def endpoint(self, pageserver_id: int | None = None) -> Endpoint:
         # We may be running alongside other Workloads for different tenants.  Full TTID is
         # obnoxiously long for use here, but a cut-down version is still unique enough for tests.
         endpoint_id = f"ep-workload-{str(self.tenant_id)[0:4]}-{str(self.timeline_id)[0:4]}"
@@ -94,7 +94,7 @@ class Workload:
     def __del__(self):
         self.stop()
 
-    def init(self, pageserver_id: Optional[int] = None):
+    def init(self, pageserver_id: int | None = None):
         endpoint = self.endpoint(pageserver_id)
 
         endpoint.safe_psql(f"CREATE TABLE {self.table} (id INTEGER PRIMARY KEY, val text);")
@@ -103,7 +103,7 @@ class Workload:
             self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
         )
 
-    def write_rows(self, n: int, pageserver_id: Optional[int] = None, upload: bool = True):
+    def write_rows(self, n: int, pageserver_id: int | None = None, upload: bool = True):
         endpoint = self.endpoint(pageserver_id)
         start = self.expect_rows
         end = start + n - 1
@@ -125,7 +125,7 @@ class Workload:
             return False
 
     def churn_rows(
-        self, n: int, pageserver_id: Optional[int] = None, upload: bool = True, ingest: bool = True
+        self, n: int, pageserver_id: int | None = None, upload: bool = True, ingest: bool = True
     ):
         assert self.expect_rows >= n
 
@@ -190,7 +190,7 @@ class Workload:
                 else:
                     log.info(f"Churn: not waiting for upload, disk LSN {last_flush_lsn}")
 
-    def validate(self, pageserver_id: Optional[int] = None):
+    def validate(self, pageserver_id: int | None = None):
         endpoint = self.endpoint(pageserver_id)
         endpoint.clear_shared_buffers()
         result = endpoint.safe_psql(f"SELECT COUNT(*) FROM {self.table}")
