@@ -146,7 +146,7 @@ def test_getpage_merge_smoke(
                 ).value,
                 compute_getpage_count=compute_getpage_count,
                 pageserver_cpu_seconds_total=pageserver_metrics.query_one(
-                    "process_cpu_seconds_total"
+                    "libmetrics_process_cpu_seconds_highres"
                 ).value,
             )
 
@@ -176,11 +176,10 @@ def test_getpage_merge_smoke(
     #
     # Sanity-checks on the collected data
     #
-    def close_enough(a, b):
-        return (a / b > 0.99 and a / b < 1.01) and (b / a > 0.99 and b / a < 1.01)
-
     # assert that getpage counts roughly match between compute and ps
-    assert close_enough(metrics.pageserver_getpage_count, metrics.compute_getpage_count)
+    assert metrics.pageserver_getpage_count == pytest.approx(
+        metrics.compute_getpage_count, rel=0.01
+    )
 
     #
     # Record the results
