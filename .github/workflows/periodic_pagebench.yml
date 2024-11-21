@@ -72,7 +72,7 @@ jobs:
           echo "COMMIT_HASH=$INPUT_COMMIT_HASH" >> $GITHUB_ENV
         fi
 
-    - name: Start Bench with run_id   
+    - name: Start Bench with run_id
       run: |
         curl -k -X 'POST' \
         "${EC2_MACHINE_URL_US}/start_test/${GITHUB_RUN_ID}" \
@@ -116,7 +116,7 @@ jobs:
         -H 'accept: application/gzip' \
         -H "Authorization: Bearer $API_KEY" \
         --output "test_log_${GITHUB_RUN_ID}.gz"
-    
+
     - name: Unzip Test Log and Print it into this job's log
       if: always() && steps.poll_step.outputs.too_many_runs != 'true'
       run: |
@@ -134,13 +134,13 @@ jobs:
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: "Periodic pagebench testing on dedicated hardware: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
     - name: Cleanup Test Resources
-      if: always() 
+      if: always()
       run: |
         curl -k -X 'POST' \
         "${EC2_MACHINE_URL_US}/cleanup_test/${GITHUB_RUN_ID}" \

@@ -54,6 +54,8 @@ enum Command {
         node_kind: NodeKind,
         #[arg(short, long, default_value_t=TraversingDepth::Tenant)]
         depth: TraversingDepth,
+        #[arg(short, long, default_value=None)]
+        tenant_id_prefix: Option<String>,
         #[arg(short, long, default_value_t = String::from("garbage.json"))]
         output_path: String,
     },
@@ -209,10 +211,19 @@ async fn main() -> anyhow::Result<()> {
         Command::FindGarbage {
             node_kind,
             depth,
+            tenant_id_prefix,
             output_path,
         } => {
             let console_config = ConsoleConfig::from_env()?;
-            find_garbage(bucket_config, console_config, depth, node_kind, output_path).await
+            find_garbage(
+                bucket_config,
+                console_config,
+                depth,
+                node_kind,
+                tenant_id_prefix,
+                output_path,
+            )
+            .await
         }
         Command::PurgeGarbage {
             input_path,

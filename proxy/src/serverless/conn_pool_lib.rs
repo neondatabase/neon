@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::atomic::{self, AtomicUsize};
 use std::sync::{Arc, Weak};
@@ -15,7 +16,7 @@ use super::conn_pool::ClientDataRemote;
 use super::http_conn_pool::ClientDataHttp;
 use super::local_conn_pool::ClientDataLocal;
 use crate::auth::backend::ComputeUserInfo;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::types::{DbName, EndpointCacheKey, RoleName};
@@ -43,13 +44,14 @@ impl ConnInfo {
     }
 }
 
+#[derive(Clone)]
 pub(crate) enum ClientDataEnum {
     Remote(ClientDataRemote),
     Local(ClientDataLocal),
-    #[allow(dead_code)]
     Http(ClientDataHttp),
 }
 
+#[derive(Clone)]
 pub(crate) struct ClientInnerCommon<C: ClientInnerExt> {
     pub(crate) inner: C,
     pub(crate) aux: MetricsAuxInfo,
@@ -91,6 +93,7 @@ pub(crate) struct ConnPoolEntry<C: ClientInnerExt> {
 pub(crate) struct EndpointConnPool<C: ClientInnerExt> {
     pools: HashMap<(DbName, RoleName), DbUserConnPool<C>>,
     total_conns: usize,
+    /// max # connections per endpoint
     max_conns: usize,
     _guard: HttpEndpointPoolsGuard<'static>,
     global_connections_count: Arc<AtomicUsize>,
@@ -232,7 +235,7 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
 
         // do logging outside of the mutex
         if returned {
-            info!(%conn_id, "{pool_name}: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
+            debug!(%conn_id, "{pool_name}: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
         } else {
             info!(%conn_id, "{pool_name}: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
         }
@@ -317,24 +320,49 @@ impl<C: ClientInnerExt> DbUserConn<C> for DbUserConnPool<C> {
     }
 }
 
-pub(crate) struct GlobalConnPool<C: ClientInnerExt> {
+pub(crate) trait EndpointConnPoolExt<C: ClientInnerExt> {
+    fn clear_closed(&mut self) -> usize;
+    fn total_conns(&self) -> usize;
+}
+
+impl<C: ClientInnerExt> EndpointConnPoolExt<C> for EndpointConnPool<C> {
+    fn clear_closed(&mut self) -> usize {
+        let mut clients_removed: usize = 0;
+        for db_pool in self.pools.values_mut() {
+            clients_removed += db_pool.clear_closed_clients(&mut self.total_conns);
+        }
+        clients_removed
+    }
+
+    fn total_conns(&self) -> usize {
+        self.total_conns
+    }
+}
+
+pub(crate) struct GlobalConnPool<C, P>
+where
+    C: ClientInnerExt,
+    P: EndpointConnPoolExt<C>,
+{
     // endpoint -> per-endpoint connection pool
     //
     // That should be a fairly conteded map, so return reference to the per-endpoint
     // pool as early as possible and release the lock.
-    global_pool: DashMap<EndpointCacheKey, Arc<RwLock<EndpointConnPool<C>>>>,
+    pub(crate) global_pool: DashMap<EndpointCacheKey, Arc<RwLock<P>>>,
 
     /// Number of endpoint-connection pools
     ///
     /// [`DashMap::len`] iterates over all inner pools and acquires a read lock on each.
     /// That seems like far too much effort, so we're using a relaxed increment counter instead.
     /// It's only used for diagnostics.
-    global_pool_size: AtomicUsize,
+    pub(crate) global_pool_size: AtomicUsize,
 
     /// Total number of connections in the pool
-    global_connections_count: Arc<AtomicUsize>,
+    pub(crate) global_connections_count: Arc<AtomicUsize>,
 
-    config: &'static crate::config::HttpConfig,
+    pub(crate) config: &'static crate::config::HttpConfig,
+
+    _marker: PhantomData<C>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -357,7 +385,11 @@ pub struct GlobalConnPoolOptions {
     pub max_total_conns: usize,
 }
 
-impl<C: ClientInnerExt> GlobalConnPool<C> {
+impl<C, P> GlobalConnPool<C, P>
+where
+    C: ClientInnerExt,
+    P: EndpointConnPoolExt<C>,
+{
     pub(crate) fn new(config: &'static crate::config::HttpConfig) -> Arc<Self> {
         let shards = config.pool_options.pool_shards;
         Arc::new(Self {
@@ -365,6 +397,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
             global_pool_size: AtomicUsize::new(0),
             config,
             global_connections_count: Arc::new(AtomicUsize::new(0)),
+            _marker: PhantomData,
         })
     }
 
@@ -376,60 +409,6 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
 
     pub(crate) fn get_idle_timeout(&self) -> Duration {
         self.config.pool_options.idle_timeout
-    }
-
-    pub(crate) fn get(
-        self: &Arc<Self>,
-        ctx: &RequestMonitoring,
-        conn_info: &ConnInfo,
-    ) -> Result<Option<Client<C>>, HttpConnError> {
-        let mut client: Option<ClientInnerCommon<C>> = None;
-        let Some(endpoint) = conn_info.endpoint_cache_key() else {
-            return Ok(None);
-        };
-
-        let endpoint_pool = self.get_or_create_endpoint_pool(&endpoint);
-        if let Some(entry) = endpoint_pool
-            .write()
-            .get_conn_entry(conn_info.db_and_user())
-        {
-            client = Some(entry.conn);
-        }
-        let endpoint_pool = Arc::downgrade(&endpoint_pool);
-
-        // ok return cached connection if found and establish a new one otherwise
-        if let Some(mut client) = client {
-            if client.inner.is_closed() {
-                info!("pool: cached connection '{conn_info}' is closed, opening a new one");
-                return Ok(None);
-            }
-            tracing::Span::current()
-                .record("conn_id", tracing::field::display(client.get_conn_id()));
-            tracing::Span::current().record(
-                "pid",
-                tracing::field::display(client.inner.get_process_id()),
-            );
-            info!(
-                cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
-                "pool: reusing connection '{conn_info}'"
-            );
-
-            match client.get_data() {
-                ClientDataEnum::Local(data) => {
-                    data.session().send(ctx.session_id())?;
-                }
-
-                ClientDataEnum::Remote(data) => {
-                    data.session().send(ctx.session_id())?;
-                }
-                ClientDataEnum::Http(_) => (),
-            }
-
-            ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
-            ctx.success();
-            return Ok(Some(Client::new(client, conn_info.clone(), endpoint_pool)));
-        }
-        Ok(None)
     }
 
     pub(crate) fn shutdown(&self) {
@@ -464,17 +443,10 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
             // if the current endpoint pool is unique (no other strong or weak references)
             // then it is currently not in use by any connections.
             if let Some(pool) = Arc::get_mut(x.get_mut()) {
-                let EndpointConnPool {
-                    pools, total_conns, ..
-                } = pool.get_mut();
+                let endpoints = pool.get_mut();
+                clients_removed = endpoints.clear_closed();
 
-                // ensure that closed clients are removed
-                for db_pool in pools.values_mut() {
-                    clients_removed += db_pool.clear_closed_clients(total_conns);
-                }
-
-                // we only remove this pool if it has no active connections
-                if *total_conns == 0 {
+                if endpoints.total_conns() == 0 {
                     info!("pool: discarding pool for endpoint {endpoint}");
                     return false;
                 }
@@ -509,6 +481,62 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
                 - removed;
             info!("pool: performed global pool gc. size now {global_pool_size}");
         }
+    }
+}
+
+impl<C: ClientInnerExt> GlobalConnPool<C, EndpointConnPool<C>> {
+    pub(crate) fn get(
+        self: &Arc<Self>,
+        ctx: &RequestContext,
+        conn_info: &ConnInfo,
+    ) -> Result<Option<Client<C>>, HttpConnError> {
+        let mut client: Option<ClientInnerCommon<C>> = None;
+        let Some(endpoint) = conn_info.endpoint_cache_key() else {
+            return Ok(None);
+        };
+
+        let endpoint_pool = self.get_or_create_endpoint_pool(&endpoint);
+        if let Some(entry) = endpoint_pool
+            .write()
+            .get_conn_entry(conn_info.db_and_user())
+        {
+            client = Some(entry.conn);
+        }
+        let endpoint_pool = Arc::downgrade(&endpoint_pool);
+
+        // ok return cached connection if found and establish a new one otherwise
+        if let Some(mut client) = client {
+            if client.inner.is_closed() {
+                info!("pool: cached connection '{conn_info}' is closed, opening a new one");
+                return Ok(None);
+            }
+            tracing::Span::current()
+                .record("conn_id", tracing::field::display(client.get_conn_id()));
+            tracing::Span::current().record(
+                "pid",
+                tracing::field::display(client.inner.get_process_id()),
+            );
+            debug!(
+                cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
+                "pool: reusing connection '{conn_info}'"
+            );
+
+            match client.get_data() {
+                ClientDataEnum::Local(data) => {
+                    data.session().send(ctx.session_id())?;
+                }
+
+                ClientDataEnum::Remote(data) => {
+                    data.session().send(ctx.session_id())?;
+                }
+                ClientDataEnum::Http(_) => (),
+            }
+
+            ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
+            ctx.success();
+            return Ok(Some(Client::new(client, conn_info.clone(), endpoint_pool)));
+        }
+        Ok(None)
     }
 
     pub(crate) fn get_or_create_endpoint_pool(
@@ -556,7 +584,6 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
         pool
     }
 }
-
 pub(crate) struct Client<C: ClientInnerExt> {
     span: Span,
     inner: Option<ClientInnerCommon<C>>,

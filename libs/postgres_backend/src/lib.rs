@@ -834,7 +834,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         use CopyStreamHandlerEnd::*;
 
         let expected_end = match &end {
-            ServerInitiated(_) | CopyDone | CopyFail | Terminate | EOF => true,
+            ServerInitiated(_) | CopyDone | CopyFail | Terminate | EOF | Cancelled => true,
             CopyStreamHandlerEnd::Disconnected(ConnectionError::Io(io_error))
                 if is_expected_io_error(io_error) =>
             {
@@ -874,6 +874,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             // message from server' when it receives ErrorResponse (anything but
             // CopyData/CopyDone) back.
             CopyFail => Some((end.to_string(), SQLSTATE_SUCCESSFUL_COMPLETION)),
+
+            // When cancelled, send no response: we must not risk blocking on sending that response
+            Cancelled => None,
             _ => None,
         };
         if let Some((err, errcode)) = err_to_send_and_errcode {
@@ -1051,6 +1054,8 @@ pub enum CopyStreamHandlerEnd {
     /// The connection was lost
     #[error("connection error: {0}")]
     Disconnected(#[from] ConnectionError),
+    #[error("Shutdown")]
+    Cancelled,
     /// Some other error
     #[error(transparent)]
     Other(#[from] anyhow::Error),

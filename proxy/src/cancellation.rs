@@ -7,7 +7,7 @@ use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_postgres::{CancelToken, NoTls};
-use tracing::info;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::error::ReportableError;
@@ -73,7 +73,7 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
             break key;
         };
 
-        info!("registered new query cancellation key {key}");
+        debug!("registered new query cancellation key {key}");
         Session {
             key,
             cancellation_handler: self,
@@ -165,7 +165,7 @@ impl CancelClosure {
     pub(crate) async fn try_cancel_query(self) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
         self.cancel_token.cancel_query_raw(socket, NoTls).await?;
-        info!("query was cancelled");
+        debug!("query was cancelled");
         Ok(())
     }
 }
@@ -182,7 +182,7 @@ impl<P> Session<P> {
     /// Store the cancel token for the given session.
     /// This enables query cancellation in `crate::proxy::prepare_client_connection`.
     pub(crate) fn enable_query_cancellation(&self, cancel_closure: CancelClosure) -> CancelKeyData {
-        info!("enabling query cancellation for this session");
+        debug!("enabling query cancellation for this session");
         self.cancellation_handler
             .map
             .insert(self.key, Some(cancel_closure));
@@ -194,7 +194,7 @@ impl<P> Session<P> {
 impl<P> Drop for Session<P> {
     fn drop(&mut self) {
         self.cancellation_handler.map.remove(&self.key);
-        info!("dropped query cancellation key {}", &self.key);
+        debug!("dropped query cancellation key {}", &self.key);
     }
 }
 

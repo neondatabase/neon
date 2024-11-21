@@ -87,6 +87,8 @@ where
             transfer_one_direction(cx, &mut compute_to_client, compute, client)
                 .map_err(ErrorSource::from_compute)?;
 
+        // TODO: 1 info log, with a enum label for close direction.
+
         // Early termination checks from compute to client.
         if let TransferState::Done(_) = compute_to_client {
             if let TransferState::Running(buf) = &client_to_compute {

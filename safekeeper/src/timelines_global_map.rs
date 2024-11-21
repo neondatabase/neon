@@ -457,10 +457,12 @@ impl GlobalTimelines {
             Ok(timeline) => {
                 let was_active = timeline.broker_active.load(Ordering::Relaxed);
 
+                info!("deleting timeline {}, only_local={}", ttid, only_local);
+                timeline.shutdown().await;
+
                 // Take a lock and finish the deletion holding this mutex.
                 let mut shared_state = timeline.write_shared_state().await;
 
-                info!("deleting timeline {}, only_local={}", ttid, only_local);
                 let dir_existed = timeline.delete(&mut shared_state, only_local).await?;
 
                 Ok(TimelineDeleteForceResult {
