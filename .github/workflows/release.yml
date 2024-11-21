@@ -29,7 +29,7 @@ defaults:
 
 jobs:
   create-storage-release-branch:
-    if: ${{ github.event.schedule == '0 6 * * MON' || format('{0}', inputs.create-storage-release-branch) == 'true' }}
+    if: ${{ github.event.schedule == '0 6 * * MON' || inputs.create-storage-release-branch }}
 
     permissions:
       contents: write
@@ -42,7 +42,7 @@ jobs:
       ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
 
   create-proxy-release-branch:
-    if: ${{ github.event.schedule == '0 6 * * THU' || format('{0}', inputs.create-proxy-release-branch) == 'true' }}
+    if: ${{ github.event.schedule == '0 6 * * THU' || inputs.create-proxy-release-branch }}
 
     permissions:
       contents: write
@@ -51,5 +51,18 @@ jobs:
     with:
       component-name: 'Proxy'
       release-branch: 'release-proxy'
+    secrets:
+      ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
+
+  create-compute-release-branch:
+    if: inputs.create-compute-release-branch
+
+    permissions:
+      contents: write
+
+    uses: ./.github/workflows/_create-release-pr.yml
+    with:
+      component-name: 'Compute'
+      release-branch: 'release-compute'
     secrets:
       ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
