@@ -350,9 +350,9 @@ pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, A
         Some(seconds @ 1..=30) => seconds,
         Some(_) => return Err(ApiError::BadRequest(anyhow!("duration must be 1-30 secs"))),
     };
-    let frequency = match parse_query_param(&req, "frequency")? {
-        None => 100,
-        Some(0..100) => return Err(ApiError::BadRequest(anyhow!("frequency must be >=100"))),
+    let frequency_hz = match parse_query_param(&req, "frequency")? {
+        None => 99,
+        Some(1001..) => return Err(ApiError::BadRequest(anyhow!("frequency must be <=1000 Hz"))),
         Some(frequency) => frequency,
     };
 
@@ -365,7 +365,7 @@ pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, A
     // Take the profile.
     let report = tokio::task::spawn_blocking(move || {
         let guard = pprof::ProfilerGuardBuilder::default()
-            .frequency(frequency)
+            .frequency(frequency_hz)
             .blocklist(&["libc", "libgcc", "pthread", "vdso"])
             .build()?;
         std::thread::sleep(Duration::from_secs(seconds));
