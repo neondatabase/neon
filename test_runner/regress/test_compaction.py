@@ -160,10 +160,8 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
 
         workload.churn_rows(row_count, env.pageserver.id)
 
-    # ensure gc_compaction is scheduled
-    env.pageserver.assert_log_contains("scheduled_compact_timeline")
-    # and it's actually run instead of skipped (i.e., no layers to compact)
-    env.pageserver.assert_log_contains("gc-compaction statistics")
+    # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
+    env.pageserver.assert_log_contains("scheduled_compact_timeline.*picked .* layers for compaction")
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
