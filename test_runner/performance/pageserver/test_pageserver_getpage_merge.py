@@ -3,7 +3,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
@@ -45,7 +45,7 @@ def test_getpage_merge_smoke(
     #
     # record perf-related parameters as metrics to simplify processing of results
     #
-    params: dict[str, tuple[float | int, dict[str, Any]]] = {}
+    params: dict[str, tuple[Union[float, int], dict[str, Any]]] = {}
 
     params.update(
         {
@@ -209,6 +209,11 @@ def test_timer_precision(
 ):
     """
     Determine the batching timeout precision (mean latency) and tail latency impact.
+
+    The baseline is `None`; an ideal batching timeout implementation would increase
+    the mean latency by exactly `batch_timeout`.
+
+    That is not the case with the current implementation, will be addressed in future changes.
     """
 
     #
