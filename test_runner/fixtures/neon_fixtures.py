@@ -398,9 +398,9 @@ class NeonEnvBuilder:
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
-        self.pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]] = (
-            pageserver_default_tenant_config_compaction_algorithm
-        )
+        self.pageserver_default_tenant_config_compaction_algorithm: Optional[
+            dict[str, Any]
+        ] = pageserver_default_tenant_config_compaction_algorithm
         if self.pageserver_default_tenant_config_compaction_algorithm is not None:
             log.debug(
                 f"Overriding pageserver default compaction algorithm to {self.pageserver_default_tenant_config_compaction_algorithm}"
@@ -850,7 +850,16 @@ class NeonEnvBuilder:
         traceback: Optional[TracebackType],
     ):
         # Stop all the nodes.
+        bytes_written = 0
         if self.env:
+            log.info("Checking for lots of I/O in tests that shouldn't")
+            if self.env.safekeepers[0].running:
+                bytes_written = (
+                    self.env.safekeepers[0]
+                    .http_client()
+                    .get_metric_value("safekeeper_write_wal_bytes_sum")
+                )
+
             log.info("Cleaning up all storage and compute nodes")
             self.env.stop(
                 immediate=False,
@@ -910,6 +919,13 @@ class NeonEnvBuilder:
             log.error(f"Error cleaning up overlay state: {e}")
             if cleanup_error is not None:
                 cleanup_error = e
+
+        if os.environ.get("BUILD_TYPE") == "debug" and bytes_written and bytes_written > 128000000:
+            raise RuntimeError(
+                f"This test wrote too much data in debug mode: {bytes_written} bytes"
+            )
+        else:
+            log.info(f"This test wrote {bytes_written} bytes")
 
 
 class NeonEnv:
@@ -1073,9 +1089,9 @@ class NeonEnv:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
             if config.pageserver_default_tenant_config_compaction_algorithm is not None:
                 tenant_config = ps_cfg.setdefault("tenant_config", {})
-                tenant_config["compaction_algorithm"] = (
-                    config.pageserver_default_tenant_config_compaction_algorithm
-                )
+                tenant_config[
+                    "compaction_algorithm"
+                ] = config.pageserver_default_tenant_config_compaction_algorithm
 
             if self.pageserver_remote_storage is not None:
                 ps_cfg["remote_storage"] = remote_storage_to_toml_dict(
@@ -1119,9 +1135,9 @@ class NeonEnv:
             if config.auth_enabled:
                 sk_cfg["auth_enabled"] = True
             if self.safekeepers_remote_storage is not None:
-                sk_cfg["remote_storage"] = (
-                    self.safekeepers_remote_storage.to_toml_inline_table().strip()
-                )
+                sk_cfg[
+                    "remote_storage"
+                ] = self.safekeepers_remote_storage.to_toml_inline_table().strip()
             self.safekeepers.append(
                 Safekeeper(env=self, id=id, port=port, extra_opts=config.safekeeper_extra_opts)
             )
@@ -1197,6 +1213,7 @@ class NeonEnv:
 
         for sk in self.safekeepers:
             sk.stop(immediate=immediate)
+
         for pageserver in self.pageservers:
             if ps_assert_metric_no_errors:
                 try:
