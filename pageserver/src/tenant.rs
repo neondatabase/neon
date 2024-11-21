@@ -189,6 +189,7 @@ pub struct TenantSharedResources {
 /// A [`Tenant`] is really an _attached_ tenant.  The configuration
 /// for an attached tenant is a subset of the [`LocationConf`], represented
 /// in this struct.
+#[derive(Clone)]
 pub(super) struct AttachedTenantConf {
     tenant_conf: TenantConfOpt,
     location: AttachedLocationConfig,
@@ -249,7 +250,8 @@ struct TimelinePreload {
 
 pub(crate) struct TenantPreload {
     tenant_manifest: TenantManifest,
-    timelines: HashMap<TimelineId, TimelinePreload>,
+    /// Map from timeline ID to a possible timeline preload. It is None iff the timeline is offloaded according to the manifest.
+    timelines: HashMap<TimelineId, Option<TimelinePreload>>,
 }
 
 /// When we spawn a tenant, there is a special mode for tenant creation that
@@ -608,11 +610,15 @@ impl OffloadedTimeline {
                 .iter()
                 .find(|(tid, _tl)| **tid == ancestor_timeline_id)
             {
-                ancestor_timeline
+                let removal_happened = ancestor_timeline
                     .gc_info
                     .write()
                     .unwrap()
                     .remove_child_offloaded(self.timeline_id);
+                if !removal_happened {
+                    tracing::error!(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id,
+                        "Couldn't remove retain_lsn entry from offloaded timeline's parent: already removed");
+                }
             }
         }
         self.deleted_from_ancestor.store(true, Ordering::Release);
@@ -1393,7 +1399,7 @@ impl Tenant {
         // Get list of remote timelines
         // download index files for every tenant timeline
         info!("listing remote timelines");
-        let (remote_timeline_ids, other_keys) = remote_timeline_client::list_remote_timelines(
+        let (mut remote_timeline_ids, other_keys) = remote_timeline_client::list_remote_timelines(
             remote_storage,
             self.tenant_shard_id,
             cancel.clone(),
@@ -1427,11 +1433,27 @@ impl Tenant {
             warn!("Unexpected non timeline key {k}");
         }
 
+        // Avoid downloading IndexPart of offloaded timelines.
+        let mut offloaded_with_prefix = HashSet::new();
+        for offloaded in tenant_manifest.offloaded_timelines.iter() {
+            if remote_timeline_ids.remove(&offloaded.timeline_id) {
+                offloaded_with_prefix.insert(offloaded.timeline_id);
+            } else {
+                // We'll take care later of timelines in the manifest without a prefix
+            }
+        }
+
+        let timelines = self
+            .load_timelines_metadata(remote_timeline_ids, remote_storage, cancel)
+            .await?;
+
         Ok(TenantPreload {
             tenant_manifest,
-            timelines: self
-                .load_timelines_metadata(remote_timeline_ids, remote_storage, cancel)
-                .await?,
+            timelines: timelines
+                .into_iter()
+                .map(|(id, tl)| (id, Some(tl)))
+                .chain(offloaded_with_prefix.into_iter().map(|id| (id, None)))
+                .collect(),
         })
     }
 
@@ -1462,6 +1484,19 @@ impl Tenant {
             offloaded_timelines_list.push((timeline_id, Arc::new(offloaded_timeline)));
             offloaded_timeline_ids.insert(timeline_id);
         }
+        // Complete deletions for offloaded timeline id's from manifest.
+        // The manifest will be uploaded later in this function.
+        offloaded_timelines_list
+            .retain(|(offloaded_id, offloaded)| {
+                // Existence of a timeline is finally determined by the existence of an index-part.json in remote storage.
+                // If there is dangling references in another location, they need to be cleaned up.
+                let delete = !preload.timelines.contains_key(offloaded_id);
+                if delete {
+                    tracing::info!("Removing offloaded timeline {offloaded_id} from manifest as no remote prefix was found");
+                    offloaded.defuse_for_tenant_drop();
+                }
+                !delete
+        });
 
         let mut timelines_to_resume_deletions = vec![];
 
@@ -1469,10 +1504,9 @@ impl Tenant {
         let mut timeline_ancestors = HashMap::new();
         let mut existent_timelines = HashSet::new();
         for (timeline_id, preload) in preload.timelines {
-            if offloaded_timeline_ids.remove(&timeline_id) {
-                // The timeline is offloaded, skip loading it.
-                continue;
-            }
+            let Some(preload) = preload else { continue };
+            // This is an invariant of the `preload` function's API
+            assert!(!offloaded_timeline_ids.contains(&timeline_id));
             let index_part = match preload.index_part {
                 Ok(i) => {
                     debug!("remote index part exists for timeline {timeline_id}");
@@ -1582,31 +1616,13 @@ impl Tenant {
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
-        // Complete deletions for offloaded timeline id's.
-        offloaded_timelines_list
-            .retain(|(offloaded_id, offloaded)| {
-                // At this point, offloaded_timeline_ids has the list of all offloaded timelines
-                // without a prefix in S3, so they are inexistent.
-                // In the end, existence of a timeline is finally determined by the existence of an index-part.json in remote storage.
-                // If there is a dangling reference in another location, they need to be cleaned up.
-                let delete = offloaded_timeline_ids.contains(offloaded_id);
-                if delete {
-                    tracing::info!("Removing offloaded timeline {offloaded_id} from manifest as no remote prefix was found");
-                    offloaded.defuse_for_tenant_drop();
-                }
-                !delete
-        });
-        if !offloaded_timelines_list.is_empty() {
-            tracing::info!(
-                "Tenant has {} offloaded timelines",
-                offloaded_timelines_list.len()
-            );
-        }
+        let needs_manifest_upload =
+            offloaded_timelines_list.len() != preload.tenant_manifest.offloaded_timelines.len();
         {
             let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
             offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
         }
-        if !offloaded_timeline_ids.is_empty() {
+        if needs_manifest_upload {
             self.store_tenant_manifest().await?;
         }
 
@@ -1792,6 +1808,7 @@ impl Tenant {
             self.tenant_shard_id,
             timeline_id,
             self.generation,
+            &self.tenant_conf.load().location,
         )
     }
 
@@ -2442,6 +2459,12 @@ impl Tenant {
             .remote_client
             .wait_completion()
             .await
+            .map_err(|e| match e {
+                WaitCompletionError::NotInitialized(
+                    e, // If the queue is already stopped, it's a shutdown error.
+                ) if e.is_stopping() => CreateTimelineError::ShuttingDown,
+                e => CreateTimelineError::Other(e.into()),
+            })
             .context("wait for timeline initial uploads to complete")?;
 
         // The creating task is responsible for activating the timeline.
@@ -2506,6 +2529,10 @@ impl Tenant {
         {
             let conf = self.tenant_conf.load();
 
+            // If we may not delete layers, then simply skip GC.  Even though a tenant
+            // in AttachedMulti state could do GC and just enqueue the blocked deletions,
+            // the only advantage to doing it is to perhaps shrink the LayerMap metadata
+            // a bit sooner than we would achieve by waiting for AttachedSingle status.
             if !conf.location.may_delete_layers_hint() {
                 info!("Skipping GC in location state {:?}", conf.location);
                 return Ok(GcResult::default());
@@ -2547,7 +2574,14 @@ impl Tenant {
 
         {
             let conf = self.tenant_conf.load();
-            if !conf.location.may_delete_layers_hint() || !conf.location.may_upload_layers_hint() {
+
+            // Note that compaction usually requires deletions, but we don't respect
+            // may_delete_layers_hint here: that is because tenants in AttachedMulti
+            // should proceed with compaction even if they can't do deletion, to avoid
+            // accumulating dangerously deep stacks of L0 layers.  Deletions will be
+            // enqueued inside RemoteTimelineClient, and executed layer if/when we transition
+            // to AttachedSingle state.
+            if !conf.location.may_upload_layers_hint() {
                 info!("Skipping compaction in location state {:?}", conf.location);
                 return Ok(false);
             }
@@ -3425,6 +3459,7 @@ impl Tenant {
         // this race is not possible if both request types come from the storage
         // controller (as they should!) because an exclusive op lock is required
         // on the storage controller side.
+
         self.tenant_conf.rcu(|inner| {
             Arc::new(AttachedTenantConf {
                 tenant_conf: new_tenant_conf.clone(),
@@ -3434,20 +3469,22 @@ impl Tenant {
             })
         });
 
+        let updated = self.tenant_conf.load().clone();
+
         self.tenant_conf_updated(&new_tenant_conf);
         // Don't hold self.timelines.lock() during the notifies.
         // There's no risk of deadlock right now, but there could be if we consolidate
         // mutexes in struct Timeline in the future.
         let timelines = self.list_timelines();
         for timeline in timelines {
-            timeline.tenant_conf_updated(&new_tenant_conf);
+            timeline.tenant_conf_updated(&updated);
         }
     }
 
     pub(crate) fn set_new_location_config(&self, new_conf: AttachedTenantConf) {
         let new_tenant_conf = new_conf.tenant_conf.clone();
 
-        self.tenant_conf.store(Arc::new(new_conf));
+        self.tenant_conf.store(Arc::new(new_conf.clone()));
 
         self.tenant_conf_updated(&new_tenant_conf);
         // Don't hold self.timelines.lock() during the notifies.
@@ -3455,7 +3492,7 @@ impl Tenant {
         // mutexes in struct Timeline in the future.
         let timelines = self.list_timelines();
         for timeline in timelines {
-            timeline.tenant_conf_updated(&new_tenant_conf);
+            timeline.tenant_conf_updated(&new_conf);
         }
     }
 
@@ -4523,6 +4560,7 @@ impl Tenant {
             self.tenant_shard_id,
             timeline_id,
             self.generation,
+            &self.tenant_conf.load().location,
         )
     }
 
@@ -5244,7 +5282,7 @@ mod tests {
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
-    use timeline::DeltaLayerTestDesc;
+    use timeline::{CompactOptions, DeltaLayerTestDesc};
     use utils::id::TenantId;
 
     #[cfg(feature = "testing")]
@@ -7718,7 +7756,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
 
@@ -7795,7 +7833,7 @@ mod tests {
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
 
@@ -8227,7 +8265,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
 
@@ -8256,7 +8294,7 @@ mod tests {
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
 
@@ -8809,7 +8847,14 @@ mod tests {
         dryrun_flags.insert(CompactFlags::DryRun);
 
         tline
-            .compact_with_gc(&cancel, dryrun_flags, &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions {
+                    flags: dryrun_flags,
+                    compact_range: None,
+                },
+                &ctx,
+            )
             .await
             .unwrap();
         // We expect layer map to be the same b/c the dry run flag, but we don't know whether there will be other background jobs
@@ -8817,14 +8862,14 @@ mod tests {
         verify_result().await;
 
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
         verify_result().await;
 
         // compact again
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
         verify_result().await;
@@ -8837,14 +8882,14 @@ mod tests {
             guard.cutoffs.space = Lsn(0x38);
         }
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
         verify_result().await; // no wals between 0x30 and 0x38, so we should obtain the same result
 
         // not increasing the GC horizon and compact again
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
         verify_result().await;
@@ -9038,7 +9083,14 @@ mod tests {
         dryrun_flags.insert(CompactFlags::DryRun);
 
         tline
-            .compact_with_gc(&cancel, dryrun_flags, &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions {
+                    flags: dryrun_flags,
+                    compact_range: None,
+                },
+                &ctx,
+            )
             .await
             .unwrap();
         // We expect layer map to be the same b/c the dry run flag, but we don't know whether there will be other background jobs
@@ -9046,14 +9098,14 @@ mod tests {
         verify_result().await;
 
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
         verify_result().await;
 
         // compact again
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
         verify_result().await;
@@ -9238,7 +9290,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         branch_tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
 

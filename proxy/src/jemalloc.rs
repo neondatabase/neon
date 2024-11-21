@@ -38,7 +38,7 @@ where
 
 impl MetricRecorder {
     pub fn new() -> Result<Self, anyhow::Error> {
-        tracing::info!(
+        tracing::debug!(
             config = config::malloc_conf::read()?,
             version = version::read()?,
             "starting jemalloc recorder"

@@ -21,7 +21,7 @@ use utils::{backoff, id::TenantId};
 use crate::{
     cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData},
     init_remote, list_objects_with_retries,
-    metadata_stream::{stream_tenant_timelines, stream_tenants},
+    metadata_stream::{stream_tenant_timelines, stream_tenants_maybe_prefix},
     BucketConfig, ConsoleConfig, NodeKind, TenantShardTimelineId, TraversingDepth, MAX_RETRIES,
 };
 
@@ -118,9 +118,17 @@ pub async fn find_garbage(
     console_config: ConsoleConfig,
     depth: TraversingDepth,
     node_kind: NodeKind,
+    tenant_id_prefix: Option<String>,
     output_path: String,
 ) -> anyhow::Result<()> {
-    let garbage = find_garbage_inner(bucket_config, console_config, depth, node_kind).await?;
+    let garbage = find_garbage_inner(
+        bucket_config,
+        console_config,
+        depth,
+        node_kind,
+        tenant_id_prefix,
+    )
+    .await?;
     let serialized = serde_json::to_vec_pretty(&garbage)?;
 
     tokio::fs::write(&output_path, &serialized).await?;
@@ -152,6 +160,7 @@ async fn find_garbage_inner(
     console_config: ConsoleConfig,
     depth: TraversingDepth,
     node_kind: NodeKind,
+    tenant_id_prefix: Option<String>,
 ) -> anyhow::Result<GarbageList> {
     // Construct clients for S3 and for Console API
     let (remote_client, target) = init_remote(bucket_config.clone(), node_kind).await?;
@@ -177,8 +186,8 @@ async fn find_garbage_inner(
     }));
 
     // Enumerate Tenants in S3, and check if each one exists in Console
-    tracing::info!("Finding all tenants in bucket {}...", bucket_config.bucket);
-    let tenants = stream_tenants(&remote_client, &target);
+    tracing::info!("Finding all tenants in {}...", bucket_config.desc_str());
+    let tenants = stream_tenants_maybe_prefix(&remote_client, &target, tenant_id_prefix);
     let tenants_checked = tenants.map_ok(|t| {
         let api_client = cloud_admin_api_client.clone();
         let console_cache = console_cache.clone();
@@ -524,7 +533,7 @@ pub async fn purge_garbage(
         init_remote(garbage_list.bucket_config.clone(), garbage_list.node_kind).await?;
 
     assert_eq!(
-        &garbage_list.bucket_config.bucket,
+        garbage_list.bucket_config.bucket_name().unwrap(),
         remote_client.bucket_name().unwrap()
     );
 

@@ -77,14 +77,16 @@ class MockS3Server:
 class LocalFsStorage:
     root: Path
 
-    def tenant_path(self, tenant_id: TenantId) -> Path:
+    def tenant_path(self, tenant_id: Union[TenantId, TenantShardId]) -> Path:
         return self.root / "tenants" / str(tenant_id)
 
-    def timeline_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
+    def timeline_path(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+    ) -> Path:
         return self.tenant_path(tenant_id) / "timelines" / str(timeline_id)
 
     def timeline_latest_generation(
-        self, tenant_id: TenantId, timeline_id: TimelineId
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
     ) -> Optional[int]:
         timeline_files = os.listdir(self.timeline_path(tenant_id, timeline_id))
         index_parts = [f for f in timeline_files if f.startswith("index_part")]
@@ -102,7 +104,9 @@ class LocalFsStorage:
             raise RuntimeError(f"No index_part found for {tenant_id}/{timeline_id}")
         return generations[-1]
 
-    def index_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
+    def index_path(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+    ) -> Path:
         latest_gen = self.timeline_latest_generation(tenant_id, timeline_id)
         if latest_gen is None:
             filename = TIMELINE_INDEX_PART_FILE_NAME
@@ -126,7 +130,9 @@ class LocalFsStorage:
         filename = f"{local_name}-{generation:08x}"
         return self.timeline_path(tenant_id, timeline_id) / filename
 
-    def index_content(self, tenant_id: TenantId, timeline_id: TimelineId) -> Any:
+    def index_content(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+    ) -> Any:
         with self.index_path(tenant_id, timeline_id).open("r") as f:
             return json.load(f)
 

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs::{self};
 use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
+use utils::sync::gate::Gate;
 
 use std::cmp::max;
 use std::ops::{Deref, DerefMut};
@@ -467,6 +468,10 @@ pub struct Timeline {
     timeline_dir: Utf8PathBuf,
     manager_ctl: ManagerCtl,
 
+    /// Hold this gate from code that depends on the Timeline's non-shut-down state.  While holding
+    /// this gate, you must respect [`Timeline::cancel`]
+    pub(crate) gate: Gate,
+
     /// Delete/cancel will trigger this, background tasks should drop out as soon as it fires
     pub(crate) cancel: CancellationToken,
 
@@ -508,6 +513,7 @@ impl Timeline {
             mutex: RwLock::new(shared_state),
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
+            gate: Default::default(),
             cancel: CancellationToken::default(),
             manager_ctl: ManagerCtl::new(),
             broker_active: AtomicBool::new(false),
@@ -533,56 +539,6 @@ impl Timeline {
         ))
     }
 
-    /// Initialize fresh timeline on disk and start background tasks. If init
-    /// fails, timeline is cancelled and cannot be used anymore.
-    ///
-    /// Init is transactional, so if it fails, created files will be deleted,
-    /// and state on disk should remain unchanged.
-    pub async fn init_new(
-        self: &Arc<Timeline>,
-        shared_state: &mut WriteGuardSharedState<'_>,
-        conf: &SafeKeeperConf,
-        broker_active_set: Arc<TimelinesSet>,
-        partial_backup_rate_limiter: RateLimiter,
-    ) -> Result<()> {
-        match fs::metadata(&self.timeline_dir).await {
-            Ok(_) => {
-                // Timeline directory exists on disk, we should leave state unchanged
-                // and return error.
-                bail!(TimelineError::Invalid(self.ttid));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e.into());
-            }
-        }
-
-        // Create timeline directory.
-        fs::create_dir_all(&self.timeline_dir).await?;
-
-        // Write timeline to disk and start background tasks.
-        if let Err(e) = shared_state.sk.state_mut().flush().await {
-            // Bootstrap failed, cancel timeline and remove timeline directory.
-            self.cancel(shared_state);
-
-            if let Err(fs_err) = fs::remove_dir_all(&self.timeline_dir).await {
-                warn!(
-                    "failed to remove timeline {} directory after bootstrap failure: {}",
-                    self.ttid, fs_err
-                );
-            }
-
-            return Err(e);
-        }
-        self.bootstrap(
-            shared_state,
-            conf,
-            broker_active_set,
-            partial_backup_rate_limiter,
-        );
-        Ok(())
-    }
-
     /// Bootstrap new or existing timeline starting background tasks.
     pub fn bootstrap(
         self: &Arc<Timeline>,
@@ -593,33 +549,61 @@ impl Timeline {
     ) {
         let (tx, rx) = self.manager_ctl.bootstrap_manager();
 
+        let Ok(gate_guard) = self.gate.enter() else {
+            // Init raced with shutdown
+            return;
+        };
+
         // Start manager task which will monitor timeline state and update
         // background tasks.
-        tokio::spawn(timeline_manager::main_task(
-            ManagerTimeline { tli: self.clone() },
-            conf.clone(),
-            broker_active_set,
-            tx,
-            rx,
-            partial_backup_rate_limiter,
-        ));
+        tokio::spawn({
+            let this = self.clone();
+            let conf = conf.clone();
+            async move {
+                let _gate_guard = gate_guard;
+                timeline_manager::main_task(
+                    ManagerTimeline { tli: this },
+                    conf,
+                    broker_active_set,
+                    tx,
+                    rx,
+                    partial_backup_rate_limiter,
+                )
+                .await
+            }
+        });
+    }
+
+    /// Background timeline activities (which hold Timeline::gate) will no
+    /// longer run once this function completes.
+    pub async fn shutdown(&self) {
+        info!("timeline {} shutting down", self.ttid);
+        self.cancel.cancel();
+
+        // Wait for any concurrent tasks to stop using this timeline, to avoid e.g. attempts
+        // to read deleted files.
+        self.gate.close().await;
     }
 
     /// Delete timeline from disk completely, by removing timeline directory.
-    /// Background timeline activities will stop eventually.
     ///
     /// Also deletes WAL in s3. Might fail if e.g. s3 is unavailable, but
     /// deletion API endpoint is retriable.
+    ///
+    /// Timeline must be in shut-down state (i.e. call [`Self::shutdown`] first)
     pub async fn delete(
         &self,
         shared_state: &mut WriteGuardSharedState<'_>,
         only_local: bool,
     ) -> Result<bool> {
-        self.cancel(shared_state);
+        // Assert that [`Self::shutdown`] was already called
+        assert!(self.cancel.is_cancelled());
+        assert!(self.gate.close_complete());
 
-        // TODO: It's better to wait for s3 offloader termination before
-        // removing data from s3. Though since s3 doesn't have transactions it
-        // still wouldn't guarantee absense of data after removal.
+        // Close associated FDs. Nobody will be able to touch timeline data once
+        // it is cancelled, so WAL storage won't be opened again.
+        shared_state.sk.close_wal_store();
+
         let conf = GlobalTimelines::get_global_config();
         if !only_local && conf.is_wal_backup_enabled() {
             // Note: we concurrently delete remote storage data from multiple
@@ -629,16 +613,6 @@ impl Timeline {
         }
         let dir_existed = delete_dir(&self.timeline_dir).await?;
         Ok(dir_existed)
-    }
-
-    /// Cancel timeline to prevent further usage. Background tasks will stop
-    /// eventually after receiving cancellation signal.
-    fn cancel(&self, shared_state: &mut WriteGuardSharedState<'_>) {
-        info!("timeline {} is cancelled", self.ttid);
-        self.cancel.cancel();
-        // Close associated FDs. Nobody will be able to touch timeline data once
-        // it is cancelled, so WAL storage won't be opened again.
-        shared_state.sk.close_wal_store();
     }
 
     /// Returns if timeline is cancelled.
