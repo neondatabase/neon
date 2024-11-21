@@ -15,6 +15,8 @@ use std::time::SystemTime;
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
 use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
+use azure_core::HttpClient;
+use azure_core::TransportOptions;
 use azure_core::{Continuable, RetryOptions};
 use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
@@ -71,7 +73,9 @@ impl AzureBlobStorage {
         };
 
         // we have an outer retry
-        let builder = ClientBuilder::new(account, credentials).retry(RetryOptions::none());
+        let builder = ClientBuilder::new(account, credentials)
+            .retry(RetryOptions::none())
+            .transport(TransportOptions::new(reqwest_client(true)));
 
         let client = builder.container_client(azure_config.container_name.to_owned());
 
@@ -242,6 +246,15 @@ impl AzureBlobStorage {
     pub fn container_name(&self) -> &str {
         &self.container_name
     }
+}
+
+fn reqwest_client(allow_idle_connections: bool) -> Arc<dyn HttpClient> {
+    let max_idle = if allow_idle_connections { 8 } else { 0 };
+    let client = reqwest::ClientBuilder::new()
+        .pool_max_idle_per_host(max_idle)
+        .build()
+        .expect("failed to build `reqwest` client");
+    Arc::new(client)
 }
 
 fn to_azure_metadata(metadata: StorageMetadata) -> Metadata {
