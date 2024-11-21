@@ -39,6 +39,7 @@ use futures_util::StreamExt;
 use hyper::body::Frame;
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 use utils::backoff;
 
 use super::StorageMetadata;
@@ -329,6 +330,15 @@ impl S3Bucket {
             )))?
             .try_into()
             .map_err(|e: ConversionError| DownloadError::Other(e.into()))?;
+
+        if let Some(size) = object_output.content_length {
+            crate::metrics::BUCKET_METRICS
+                .resp_bytes
+                .get(kind)
+                .observe(size as f64);
+        } else {
+            warn!("No Content-Length header");
+        }
 
         let body = object_output.body;
         let body = ByteStreamAsStream::from(body);
@@ -739,6 +749,10 @@ impl RemoteStorage for S3Bucket {
             crate::metrics::BUCKET_METRICS
                 .req_seconds
                 .observe_elapsed(kind, inner, started_at);
+            crate::metrics::BUCKET_METRICS
+                .req_bytes
+                .get(kind)
+                .observe(from_size_bytes as f64);
         }
 
         match res {

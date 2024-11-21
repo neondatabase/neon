@@ -162,6 +162,10 @@ pub(crate) fn start_measuring_requests(
 pub(crate) struct BucketMetrics {
     /// Full request duration until successful completion, error or cancellation.
     pub(crate) req_seconds: PassFailCancelledRequestTyped<Histogram>,
+    /// Byte size of requests.
+    pub(crate) req_bytes: RequestTyped<Histogram>,
+    /// Byte size of responses.
+    pub(crate) resp_bytes: RequestTyped<Histogram>,
     /// Total amount of seconds waited on queue.
     pub(crate) wait_seconds: RequestTyped<Histogram>,
 
@@ -188,6 +192,24 @@ impl Default for BucketMetrics {
         let req_seconds = PassFailCancelledRequestTyped::build_with(|kind, outcome| {
             req_seconds.with_label_values(&[kind.as_str(), outcome.as_str()])
         });
+
+        let req_bytes = register_histogram_vec!(
+            "remote_storage_s3_request_bytes",
+            "Byte size of requests",
+            &["request_type"],
+        )
+        .unwrap();
+        let req_bytes =
+            RequestTyped::build_with(|kind| req_bytes.with_label_values(&[kind.as_str()]));
+
+        let resp_bytes = register_histogram_vec!(
+            "remote_storage_s3_response_bytes",
+            "Byte size of responses",
+            &["request_type"],
+        )
+        .unwrap();
+        let resp_bytes =
+            RequestTyped::build_with(|kind| resp_bytes.with_label_values(&[kind.as_str()]));
 
         let wait_seconds = register_histogram_vec!(
             "remote_storage_s3_wait_seconds",
@@ -216,6 +238,8 @@ impl Default for BucketMetrics {
 
         Self {
             req_seconds,
+            req_bytes,
+            resp_bytes,
             wait_seconds,
             cancelled_waits,
             deleted_objects_total,
