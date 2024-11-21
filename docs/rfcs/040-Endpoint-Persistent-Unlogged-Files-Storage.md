@@ -12,13 +12,13 @@ optimal workings across reboots and restarts, but still work without.
 Examples are the cumulative statistics file in `pg_stat/global.stat`,
 `pg_stat_statements`' `pg_stat/pg_stat_statements.stat`, and `pg_prewarm`'s
 `autoprewarm.blocks`.  We need a storage system that can store and manage
-these files for each Endpoint.
+these files for each Endpoint, without granting users access to an unlimited
+storage device.
 
 ## Goals
 - Store known files for Endpoints with reasonable persistence.  
   _Data loss in this service, while annoying and bad for UX, won't lose any
   customer's data._
-- 
 
 ## Non Goals (if relevant)
 - This storage system does not need branching, file versioning, or other such
@@ -42,18 +42,41 @@ separately hosted service.
 ## Proposed implementation
 Endpoint-related data files are managed by a newly designed service (which
 optionally is integrated in an existing service like Pageserver or Control
-Plane), which stores data directly into S3, and on the deletion of the
-Endpoint this ephemeral data is dropped, too.
+Plane), which stores data directly into S3 or any blob storage of choice.
+
+Upon deletion of the Endpoint, or reassignment of the endpoint to a different
+branch, this ephemeral data is dropped: the data stored may not match the
+state of the branch's data after reassignment, and on endpoint deletion the
+data won't have any use to the user.
+
+Compute gets credentials which it can use to authenticate to this new service
+and retrieve and store data associated with that endpoint.
+
+The path of this endpoint data in S3 is initially as follows:
+
+    s3://<regional-epufs-bucket>/
+        tenant-<hex-tenant-id>/
+            tl-<hex-timeline-id>/
+                <endpoint-id>/
+                    pgdata/<file_path_in_pgdatadir>`
+
+For other blob storages an equivalent path can be constructed.
 
 ### Reliability, failure modes and corner cases (if relevant)
 Reliability is important, but not critical to the workings of Neon.  The data
 stored in this service will, when lost, reduce performance, but won't be a
 cause of permanent data loss - only operational metadata is stored.
 
+Most, if not all, blob storage services have sufficiently high persistence
+guarantees to cater our need for persistence and uptime. The only concern with
+blob storages is that the latency is higher than local disk, but that's a
+price I think we're willing to pay.
+
 ### Interaction/Sequence diagram (if relevant)
 
 In these diagrams you can replace S3 with any persistent storage device of
-choice, but S3 is chosen as easiest method.
+choice, but S3 is chosen as well-known name of AWS' blob storage - Azure Blob
+Storage should work too, but is a much longer name.
 
 Write data:
 ```mermaid
@@ -61,13 +84,15 @@ sequenceDiagram
     autonumber
     participant co as Compute
     participant ep as EPUFS
-    participant s3 as S3
+    participant s3 as Blob Storage
 
+    co-->ep: Connect with credentials
     co->>+ep: Store Unlogged Persistent File
     opt is authenticated
         ep->>s3: Write UPF to S3
     end
     ep->>-co: OK / Failure / Auth Failure
+    co-->ep: Cancel connection
 ```
 
 Read data:
@@ -76,7 +101,7 @@ sequenceDiagram
     autonumber
     participant co as Compute
     participant ep as EPUFS
-    participant s3 as Storage
+    participant s3 as Blob Storage
 
     co->>+ep: Read Unlogged Persistent File
     opt is authenticated
@@ -119,7 +144,7 @@ sequenceDiagram
     autonumber
     participant cp as Control Plane
     participant ep as EPUFS
-    participant s3 as Storage
+    participant s3 as Blob Storage
 
     alt Tenant deleted
         cp-)ep: Tenant deleted
@@ -149,29 +174,91 @@ TBD
 
 Provisionally:  As this service is going to be part of compute startup, this
 service should be able to quickly respond to all requests.  Local caching of
-frequently restarted endpoints' data may be needed for best performance.
+frequently restarted endpoints' data or metadata may be needed for best
+performance.
 
 ### Security implications (if relevant)
 This service must be able to authenticate users at least by Tenant ID,
 preferably also Timeline ID and/or Endpoint ID.
 
-There may be a use case for transferring data from one endpoint to another,
-but that's currently not in scope.
+The service requires unlimited access to (a prefix of) a blob storage bucket,
+and thus must be hosted outside the Compute VM sandbox.
+
+A service that generates pre-signed request URLs for Compute to download the
+data from that URL is likely problematic, too:  Compute would be able to write
+unlimited data to the bucket, or exfiltrate this signed URL to get read/write
+access to specific objects in this bucket, which would still effectively give
+users access to the S3 bucket (but with improved access logging).
+
+There may be a use case for transferring data associated with one endpoint to
+another endpoint, but that's not currently in scope.
 
 ### Unresolved questions (if relevant)
 TBD
 
 ## Alternative implementation (if relevant)
-Several ideas have come up to solve this issue.  One prevalent idea was to
-WAL-log the files using our AUXfile mechanism.  This, however, would increase
-the amount of data we store in the relatively expensive PITR storage, while
-the data doesn't actually need that PITR capability, thus wasting valuable
-resources.
+Several ideas have come up to solve this issue:
 
-## Pros/cons of proposed approaches (if relevant)
-This will add another service that interacts with S3.  While strictly speaking
-not critical for PostgreSQL itself, if these files are requested in the
-critical timeline of Startup this service will still be performance-critical.
+### Use AUXfile
+One prevalent idea was to WAL-log the files using our AUXfile mechanism.
+
+Benefits:
+
++ We already have this storage mechanism
+
+Demerits:
+
+- It isn't available on read replicas
+- Additional WAL will be consumed during shutdown and after the shutdown
+  checkpoint, which needs PG modifications to work without panics.
+- It increases the data we need to manage in our versioned storage, thus
+  causing higher storage costs with higher retention due to duplication at
+  the storage layer.
+
+### Sign URLs for read/write operations, instead of proxying them
+
+Benefits:
+
++ The service can be implemented with a much reduced IO budget
+
+Demerits:
+
+- Users could get access to these signed credentials
+- Not all blob storage services may implement URL signing
+
+### Give endpoints each their own directly accessed block volume
+
+Benefits:
+
++ Easier to integrate for PostgreSQL
+
+Demerits:
+
+- Little control on data size and contents
+- Potentially problematic as we'd need to store data all across the pgdata
+  directory.
+- EBS is not a good candidate
+   - Attaches in 10s of seconds, if not more; i.e. too cold to start
+   - Shared EBS volumes are a no-go, as you'd have to schedule the endpoint
+     with users of the same EBS volumes
+   - EBS storage costs are very high
+- S3 bucket/endpoint is unfeasible
+   - AWS limits are much lower than 100s of 1000s of buckets /account
+   - Credentials limited to prefix has same issues as signed URL.
+- Volumes bound by hypervisor are unlikely
+   - This requires significant investment and increased software on the
+     hypervisor.
+   - It is unclear if we can attach volumes after boot, i.e. for pooled
+     instances.
 
 ## Definition of Done (if relevant)
-TBD
+
+This project is done if we have:
+
+- One S3 bucket equivalent per region, which stores this per-endpoint data.
+- A new service in at least every AZ, which indirectly grants endpoints access
+  to the data stored for these endpoints in these buckets.
+- Compute writes & reads temp-data at shutdown and startup, respectively, for
+  at least the stats files.
+- Cleanup of endpoint data is triggered when the endpoint is deleted or is
+  detached from its current timeline.
