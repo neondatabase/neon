@@ -304,6 +304,15 @@ where
     async fn flush(&mut self) -> Result<(), DeletionQueueError> {
         tracing::debug!("Flushing with {} pending lists", self.pending_lists.len());
 
+        // Fast path to skip validation if we do not have anything to flush.
+        if self.pending_lists.is_empty()
+            && self.validated_lists.is_empty()
+            && self.pending_key_count == 0
+        {
+            // Fast path: nothing to do
+            return Ok(());
+        }
+
         // Issue any required generation validation calls to the control plane
         self.validate().await?;
 

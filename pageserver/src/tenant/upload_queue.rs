@@ -38,6 +38,12 @@ impl UploadQueue {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum OpType {
+    Upload,
+    Delete,
+}
+
 /// This keeps track of queued and in-progress tasks.
 pub(crate) struct UploadQueueInitialized {
     /// Counter to assign task IDs
@@ -87,6 +93,12 @@ pub(crate) struct UploadQueueInitialized {
     /// bug causing leaks, then it's better to not leave this enabled for production builds.
     #[cfg(feature = "testing")]
     pub(crate) dangling_files: HashMap<LayerName, Generation>,
+
+    /// Ensure we order file operations correctly. This hashmap will grow infinitely... But it's fine,
+    /// assume the user uploaded 100k files, then we have 100k entries in this hashmap. Assume each
+    /// entry is 100B, then we have 10MB of memory used. This is fine. In theory, we can flush this
+    /// hashmap once deletion queue is flushed, but it requires complex locking and dealing with races.
+    pub(crate) last_operation: HashMap<(LayerName, Generation), OpType>,
 
     /// Deletions that are blocked by the tenant configuration
     pub(crate) blocked_deletions: Vec<Delete>,
@@ -183,6 +195,7 @@ impl UploadQueue {
             queued_operations: VecDeque::new(),
             #[cfg(feature = "testing")]
             dangling_files: HashMap::new(),
+            last_operation: HashMap::new(),
             blocked_deletions: Vec::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
@@ -224,6 +237,7 @@ impl UploadQueue {
             queued_operations: VecDeque::new(),
             #[cfg(feature = "testing")]
             dangling_files: HashMap::new(),
+            last_operation: HashMap::new(),
             blocked_deletions: Vec::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
@@ -282,8 +296,8 @@ pub(crate) struct Delete {
 
 #[derive(Debug)]
 pub(crate) enum UploadOp {
-    /// Upload a layer file
-    UploadLayer(ResidentLayer, LayerFileMetadata),
+    /// Upload a layer file. The last field indicates the last operation for thie file.
+    UploadLayer(ResidentLayer, LayerFileMetadata, Option<OpType>),
 
     /// Upload a index_part.json file
     UploadMetadata {
@@ -305,11 +319,11 @@ pub(crate) enum UploadOp {
 impl std::fmt::Display for UploadOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            UploadOp::UploadLayer(layer, metadata) => {
+            UploadOp::UploadLayer(layer, metadata, last_op) => {
                 write!(
                     f,
-                    "UploadLayer({}, size={:?}, gen={:?})",
-                    layer, metadata.file_size, metadata.generation
+                    "UploadLayer({}, size={:?}, gen={:?}, last_op={:?})",
+                    layer, metadata.file_size, metadata.generation, last_op
                 )
             }
             UploadOp::UploadMetadata { uploaded, .. } => {

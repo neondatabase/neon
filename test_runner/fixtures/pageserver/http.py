@@ -343,7 +343,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json["tenant_shards"], list)
         return res_json
 
-    def tenant_get_location(self, tenant_id: TenantShardId):
+    def tenant_get_location(self, tenant_id: TenantId | TenantShardId):
         res = self.get(
             f"http://localhost:{self.port}/v1/location_config/{tenant_id}",
         )
@@ -794,7 +794,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         if compact is not None:
             query["compact"] = "true" if compact else "false"
 
-        log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
+        log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}, wait_until_uploaded={wait_until_uploaded}")
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint",
             params=query,

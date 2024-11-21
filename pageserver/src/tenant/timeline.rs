@@ -2647,6 +2647,7 @@ impl Timeline {
         //
         // NB: generation numbers naturally protect against this because they disambiguate
         //     (1) and (4)
+        // TODO: this is basically a no-op now, should we remove it?
         self.remote_client.schedule_barrier()?;
         // Tenant::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
