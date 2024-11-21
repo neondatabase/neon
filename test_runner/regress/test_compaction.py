@@ -113,7 +113,7 @@ page_cache_size=10; wal_receiver_protocol='{wal_receiver_protocol}'
     assert non_vectored_average < 8
     assert vectored_average < 8
 
-
+@skip_in_debug_build("only run with release build")
 def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     SMOKE_CONF = {
         # Run both gc and gc-compaction.
@@ -130,8 +130,8 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    row_count = 1000
-    churn_rounds = 20
+    row_count = 10000
+    churn_rounds = 50
 
     ps_http = env.pageserver.http_client()
 
