@@ -3137,10 +3137,6 @@ class NeonProxy(PgProtocol):
     class AuthBackend(abc.ABC):
         """All auth backends must inherit from this class"""
 
-        @property
-        def default_conn_url(self) -> Optional[str]:
-            return None
-
         @abc.abstractmethod
         def extra_args(self) -> list[str]:
             pass
@@ -3154,7 +3150,7 @@ class NeonProxy(PgProtocol):
                 *["--allow-self-signed-compute", "true"],
             ]
 
-    class Console(AuthBackend):
+    class ControlPlane(AuthBackend):
         def __init__(self, endpoint: str, fixed_rate_limit: Optional[int] = None):
             self.endpoint = endpoint
             self.fixed_rate_limit = fixed_rate_limit
@@ -3178,21 +3174,6 @@ class NeonProxy(PgProtocol):
                 ]
             return args
 
-    @dataclass(frozen=True)
-    class Postgres(AuthBackend):
-        pg_conn_url: str
-
-        @property
-        def default_conn_url(self) -> Optional[str]:
-            return self.pg_conn_url
-
-        def extra_args(self) -> list[str]:
-            return [
-                # Postgres auth backend params
-                *["--auth-backend", "postgres"],
-                *["--auth-endpoint", self.pg_conn_url],
-            ]
-
     def __init__(
         self,
         neon_binpath: Path,
@@ -3207,7 +3188,7 @@ class NeonProxy(PgProtocol):
     ):
         host = "127.0.0.1"
         domain = "proxy.localtest.me"  # resolves to 127.0.0.1
-        super().__init__(dsn=auth_backend.default_conn_url, host=domain, port=proxy_port)
+        super().__init__(host=domain, port=proxy_port)
 
         self.domain = domain
         self.host = host
@@ -3558,20 +3539,39 @@ def static_proxy(
     port_distributor: PortDistributor,
     neon_binpath: Path,
     test_output_dir: Path,
+    httpserver: HTTPServer,
 ) -> Iterator[NeonProxy]:
-    """Neon proxy that routes directly to vanilla postgres."""
+    """Neon proxy that routes directly to vanilla postgres and a mocked cplane HTTP API."""
 
     port = vanilla_pg.default_options["port"]
     host = vanilla_pg.default_options["host"]
     dbname = vanilla_pg.default_options["dbname"]
-    auth_endpoint = f"postgres://proxy:password@{host}:{port}/{dbname}"
 
-    # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
-    vanilla_pg.safe_psql("CREATE SCHEMA IF NOT EXISTS neon_control_plane")
-    vanilla_pg.safe_psql(
-        "CREATE TABLE neon_control_plane.endpoints (endpoint_id VARCHAR(255) PRIMARY KEY, allowed_ips VARCHAR(255))"
+    [(rolpassword,)] = vanilla_pg.safe_psql(
+        "select rolpassword from pg_catalog.pg_authid where rolname = 'proxy'"
+    )
+
+    # return local postgres addr on ProxyWakeCompute.
+    httpserver.expect_request("/cplane/proxy_wake_compute").respond_with_json(
+        {
+            "address": f"{host}:{port}",
+            "aux": {
+                "endpoint_id": "ep-foo-bar-1234",
+                "branch_id": "br-foo-bar",
+                "project_id": "foo-bar",
+            },
+        }
+    )
+
+    # return local postgres addr on ProxyWakeCompute.
+    httpserver.expect_request("/cplane/proxy_get_role_secret").respond_with_json(
+        {
+            "role_secret": rolpassword,
+            "allowed_ips": None,
+            "project_id": "foo-bar",
+        }
     )
 
     proxy_port = port_distributor.get_port()
@@ -3586,8 +3586,12 @@ def static_proxy(
         http_port=http_port,
         mgmt_port=mgmt_port,
         external_http_port=external_http_port,
-        auth_backend=NeonProxy.Postgres(auth_endpoint),
+        auth_backend=NeonProxy.ControlPlane(httpserver.url_for("/cplane")),
     ) as proxy:
+        proxy.default_options["user"] = "proxy"
+        proxy.default_options["password"] = "password"
+        proxy.default_options["dbname"] = dbname
+
         proxy.start()
         yield proxy
 
