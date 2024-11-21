@@ -61,7 +61,7 @@ from fixtures.utils import (
 )
 
 if TYPE_CHECKING:
-    from typing import Any, Optional
+    from typing import Any
 
 
 def wait_lsn_force_checkpoint(
@@ -189,7 +189,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
                 m.flush_lsns.append(Lsn(int(sk_m.flush_lsn_inexact(tenant_id, timeline_id))))
                 m.commit_lsns.append(Lsn(int(sk_m.commit_lsn_inexact(tenant_id, timeline_id))))
 
-            for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns):
+            for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns, strict=False):
                 # Invariant. May be < when transaction is in progress.
                 assert (
                     commit_lsn <= flush_lsn
@@ -224,7 +224,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
         def __init__(self) -> None:
             super().__init__(daemon=True)
             self.should_stop = threading.Event()
-            self.exception: Optional[BaseException] = None
+            self.exception: BaseException | None = None
 
         def run(self) -> None:
             try:
@@ -521,7 +521,7 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder):
     # Shut down subsequently each of safekeepers and fill a segment while sk is
     # down; ensure segment gets offloaded by others.
     offloaded_seg_end = [Lsn("0/2000000"), Lsn("0/3000000"), Lsn("0/4000000")]
-    for victim, seg_end in zip(env.safekeepers, offloaded_seg_end):
+    for victim, seg_end in zip(env.safekeepers, offloaded_seg_end, strict=False):
         victim.stop()
         # roughly fills one segment
         cur.execute("insert into t select generate_series(1,250000), 'payload'")
@@ -666,7 +666,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
 
     # recreate timeline on pageserver from scratch
     ps_http.timeline_create(
-        pg_version=PgVersion(pg_version),
+        pg_version=PgVersion(str(pg_version)),
         tenant_id=tenant_id,
         new_timeline_id=timeline_id,
     )
@@ -1177,14 +1177,14 @@ def cmp_sk_wal(sks: list[Safekeeper], tenant_id: TenantId, timeline_id: Timeline
     # report/understand if WALs are different due to that.
     statuses = [sk_http_cli.timeline_status(tenant_id, timeline_id) for sk_http_cli in sk_http_clis]
     term_flush_lsns = [(s.last_log_term, s.flush_lsn) for s in statuses]
-    for tfl, sk in zip(term_flush_lsns[1:], sks[1:]):
+    for tfl, sk in zip(term_flush_lsns[1:], sks[1:], strict=False):
         assert (
             term_flush_lsns[0] == tfl
         ), f"(last_log_term, flush_lsn) are not equal on sks {sks[0].id} and {sk.id}: {term_flush_lsns[0]} != {tfl}"
 
     # check that WALs are identic.
     segs = [sk.list_segments(tenant_id, timeline_id) for sk in sks]
-    for cmp_segs, sk in zip(segs[1:], sks[1:]):
+    for cmp_segs, sk in zip(segs[1:], sks[1:], strict=False):
         assert (
             segs[0] == cmp_segs
         ), f"lists of segments on sks {sks[0].id} and {sk.id} are not identic: {segs[0]} and {cmp_segs}"
@@ -1455,10 +1455,10 @@ class SafekeeperEnv:
         self.pg_bin = pg_bin
         self.num_safekeepers = num_safekeepers
         self.bin_safekeeper = str(neon_binpath / "safekeeper")
-        self.safekeepers: Optional[list[subprocess.CompletedProcess[Any]]] = None
-        self.postgres: Optional[ProposerPostgres] = None
-        self.tenant_id: Optional[TenantId] = None
-        self.timeline_id: Optional[TimelineId] = None
+        self.safekeepers: list[subprocess.CompletedProcess[Any]] | None = None
+        self.postgres: ProposerPostgres | None = None
+        self.tenant_id: TenantId | None = None
+        self.timeline_id: TimelineId | None = None
 
     def init(self) -> SafekeeperEnv:
         assert self.postgres is None, "postgres is already initialized"

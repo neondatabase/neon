@@ -13,7 +13,8 @@ from fixtures.neon_fixtures import (
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 
 if TYPE_CHECKING:
-    from typing import Any, Callable
+    from collections.abc import Callable
+    from typing import Any
 
 
 def single_timeline(

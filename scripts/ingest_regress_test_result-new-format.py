@@ -11,7 +11,7 @@ import re
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import backoff
@@ -140,8 +140,8 @@ def ingest_test_result(
             suite=labels["suite"],
             name=unparametrized_name,
             status=test["status"],
-            started_at=datetime.fromtimestamp(test["time"]["start"] / 1000, tz=timezone.utc),
-            stopped_at=datetime.fromtimestamp(test["time"]["stop"] / 1000, tz=timezone.utc),
+            started_at=datetime.fromtimestamp(test["time"]["start"] / 1000, tz=UTC),
+            stopped_at=datetime.fromtimestamp(test["time"]["stop"] / 1000, tz=UTC),
             duration=test["time"]["duration"],
             flaky=test["flaky"] or test["retriesStatusChange"],
             arch=arch,

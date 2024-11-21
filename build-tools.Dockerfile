@@ -234,7 +234,7 @@ USER nonroot:nonroot
 WORKDIR /home/nonroot
 
 # Python
-ENV PYTHON_VERSION=3.9.19 \
+ENV PYTHON_VERSION=3.11.10 \
     PYENV_ROOT=/home/nonroot/.pyenv \
     PATH=/home/nonroot/.pyenv/shims:/home/nonroot/.pyenv/bin:/home/nonroot/.poetry/bin:$PATH
 RUN set -e \
