@@ -117,7 +117,6 @@ where
     node_info.set_keys(user_info.get_keys());
     node_info.allow_self_signed_compute = allow_self_signed_compute;
     mechanism.update_connect_config(&mut node_info.config);
-    let retry_type = RetryType::ConnectToCompute;
 
     // try once
     let err = match mechanism
@@ -129,7 +128,7 @@ where
             Metrics::get().proxy.retries_metric.observe(
                 RetriesMetricGroup {
                     outcome: ConnectOutcome::Success,
-                    retry_type,
+                    retry_type: RetryType::ConnectToCompute,
                 },
                 num_retries.into(),
             );
@@ -147,7 +146,7 @@ where
             Metrics::get().proxy.retries_metric.observe(
                 RetriesMetricGroup {
                     outcome: ConnectOutcome::Failed,
-                    retry_type,
+                    retry_type: RetryType::ConnectToCompute,
                 },
                 num_retries.into(),
             );
@@ -156,8 +155,9 @@ where
         node_info
     } else {
         // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
-        info!("compute node's state has likely changed; requesting a wake-up");
+        debug!("compute node's state has likely changed; requesting a wake-up");
         let old_node_info = invalidate_cache(node_info);
+        // TODO: increment num_retries?
         let mut node_info =
             wake_compute(&mut num_retries, ctx, user_info, wake_compute_retry_config).await?;
         node_info.reuse_settings(old_node_info);
@@ -169,7 +169,7 @@ where
     // now that we have a new node, try connect to it repeatedly.
     // this can error for a few reasons, for instance:
     // * DNS connection settings haven't quite propagated yet
-    info!("wake_compute success. attempting to connect");
+    debug!("wake_compute success. attempting to connect");
     num_retries = 1;
     loop {
         match mechanism
@@ -181,10 +181,11 @@ where
                 Metrics::get().proxy.retries_metric.observe(
                     RetriesMetricGroup {
                         outcome: ConnectOutcome::Success,
-                        retry_type,
+                        retry_type: RetryType::ConnectToCompute,
                     },
                     num_retries.into(),
                 );
+                // TODO: is this necessary? We have a metric.
                 info!(?num_retries, "connected to compute node after");
                 return Ok(res);
             }
@@ -194,7 +195,7 @@ where
                     Metrics::get().proxy.retries_metric.observe(
                         RetriesMetricGroup {
                             outcome: ConnectOutcome::Failed,
-                            retry_type,
+                            retry_type: RetryType::ConnectToCompute,
                         },
                         num_retries.into(),
                     );

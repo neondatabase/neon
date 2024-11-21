@@ -380,6 +380,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
         // after getting back a permit - it's possible the cache was filled
         // double check
         if permit.should_check_cache() {
+            // TODO: if there is something in the cache, mark the permit as success.
             check_cache!();
         }
 
