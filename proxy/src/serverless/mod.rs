@@ -88,7 +88,7 @@ pub async fn task_main(
         }
     });
 
-    let http_conn_pool = http_conn_pool::GlobalConnPool::new(&config.http_config);
+    let http_conn_pool = conn_pool_lib::GlobalConnPool::new(&config.http_config);
     {
         let http_conn_pool = Arc::clone(&http_conn_pool);
         tokio::spawn(async move {
