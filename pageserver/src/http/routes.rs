@@ -55,6 +55,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::auth::JwtAuth;
 use utils::failpoint_support::failpoints_handler;
+use utils::http::endpoint::profile_cpu_handler;
 use utils::http::endpoint::prometheus_metrics_handler;
 use utils::http::endpoint::request_span;
 use utils::http::request::must_parse_query_param;
@@ -146,10 +147,16 @@ impl State {
         deletion_queue_client: DeletionQueueClient,
         secondary_controller: SecondaryController,
     ) -> anyhow::Result<Self> {
-        let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml", "/metrics"]
-            .iter()
-            .map(|v| v.parse().unwrap())
-            .collect::<Vec<_>>();
+        let allowlist_routes = [
+            "/v1/status",
+            "/v1/doc",
+            "/swagger.yml",
+            "/metrics",
+            "/profile/cpu",
+        ]
+        .iter()
+        .map(|v| v.parse().unwrap())
+        .collect::<Vec<_>>();
         Ok(Self {
             conf,
             tenant_manager,
@@ -3167,6 +3174,7 @@ pub fn make_router(
     Ok(router
         .data(state)
         .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
+        .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
         .get("/v1/status", |r| api_handler(r, status_handler))
         .put("/v1/failpoints", |r| {
             testing_api_handler("manage failpoints", r, failpoints_handler)
