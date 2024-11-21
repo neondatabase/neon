@@ -4985,6 +4985,7 @@ def generate_uploads_and_deletions(
     timeline_id: TimelineId | None = None,
     data: str | None = None,
     pageserver: NeonPageserver,
+    wait_for_upload: bool = True,
 ):
     """
     Using the environment's default tenant + timeline, generate a load pattern
@@ -5046,4 +5047,4 @@ def generate_uploads_and_deletions(
         # background ingest, no more uploads pending, and therefore no non-determinism
         # in subsequent actions like pageserver restarts.
         flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
-        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=wait_for_upload)
