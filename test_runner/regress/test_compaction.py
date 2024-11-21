@@ -179,14 +179,11 @@ def test_pageserver_compaction_detach_ancestor_smoke(neon_env_builder: NeonEnvBu
 
     workload_parent = Workload(env, tenant_id, timeline_id)
     workload_parent.init(env.pageserver.id)
-
     log.info("Writing initial data ...")
     workload_parent.write_rows(row_count, env.pageserver.id)
-
     branch_id = env.create_branch("child")
-
-    workload_child = Workload(env, tenant_id, branch_id)
-    workload_child.init(env.pageserver.id)
+    workload_child = Workload(env, tenant_id, branch_id, branch_name="child")
+    workload_child.init(env.pageserver.id, allow_recreate=True)
     log.info("Writing initial data on child...")
     workload_child.write_rows(row_count, env.pageserver.id)
 
