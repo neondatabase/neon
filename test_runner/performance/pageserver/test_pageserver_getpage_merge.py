@@ -257,6 +257,11 @@ def test_timer_precision(
     # Run single-threaded pagebench (TODO: dedup with other benchmark code)
     #
 
+    env.pageserver.allowed_errors.append(
+        # https://github.com/neondatabase/neon/issues/6925
+        r".*query handler for.*pagestream.*failed: unexpected message: CopyFail during COPY.*"
+    )
+
     ps_http = env.pageserver.http_client()
 
     cmd = [
