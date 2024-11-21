@@ -462,7 +462,7 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # Because it is in emergency mode, it will not attempt to validate deletions required by the initial barrier, and therefore
     # other files cannot be uploaded b/c it's waiting for the initial barrier to be validated.
     generate_uploads_and_deletions(
-        env, init=False, pageserver=env.pageserver, wait_for_upload=False
+        env, init=False, pageserver=env.pageserver, wait_until_uploaded=False
     )
 
     # The pageserver should neither validate nor execute any deletions, it should have

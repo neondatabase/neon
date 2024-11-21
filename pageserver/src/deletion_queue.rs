@@ -3,6 +3,7 @@ mod list_writer;
 mod validator;
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -157,6 +158,7 @@ pub struct DeletionQueueClient {
     executor_tx: tokio::sync::mpsc::Sender<DeleterMessage>,
 
     lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
+    max_layer_generation_in_queue: Arc<AtomicU32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -382,6 +384,17 @@ pub enum DeletionQueueError {
 }
 
 impl DeletionQueueClient {
+    /// Returns if there is any layer file <= `gen` in the deletion queue.
+    pub(crate) fn maybe_processing_generation(&self, gen: Generation) -> bool {
+        if let Some(gen) = gen.into() {
+            self.max_layer_generation_in_queue
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= gen
+        } else {
+            false
+        }
+    }
+
     /// This is cancel-safe.  If you drop the future before it completes, the message
     /// is not pushed, although in the context of the deletion queue it doesn't matter: once
     /// we decide to do a deletion the decision is always final.
@@ -505,6 +518,13 @@ impl DeletionQueueClient {
         metrics::DELETION_QUEUE
             .keys_submitted
             .inc_by(layers.len() as u64);
+        for (_, meta) in &layers {
+            let Some(gen) = meta.generation.into() else {
+                continue;
+            };
+            self.max_layer_generation_in_queue
+                .fetch_max(gen, std::sync::atomic::Ordering::SeqCst);
+        }
         self.do_push(
             &self.tx,
             ListWriterQueueMessage::Delete(DeletionOp {
@@ -651,6 +671,7 @@ impl DeletionQueue {
                     tx,
                     executor_tx: executor_tx.clone(),
                     lsn_table: lsn_table.clone(),
+                    max_layer_generation_in_queue: Arc::new(AtomicU32::new(0)),
                 },
                 cancel: cancel.clone(),
             },
@@ -1265,6 +1286,7 @@ pub(crate) mod mock {
                 tx: self.tx.clone(),
                 executor_tx: self.executor_tx.clone(),
                 lsn_table: self.lsn_table.clone(),
+                max_layer_generation_in_queue: Arc::new(AtomicU32::new(0)),
             }
         }
     }

@@ -244,7 +244,7 @@ use self::index::IndexPart;
 use super::config::AttachedLocationConfig;
 use super::metadata::MetadataUpdate;
 use super::storage_layer::{Layer, LayerName, ResidentLayer};
-use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
+use super::upload_queue::{BarrierType, NotInitialized, SetDeletedFlagProgress};
 use super::{DeleteTimelineError, Generation};
 
 pub(crate) use download::{
@@ -896,7 +896,7 @@ impl RemoteTimelineClient {
 
                 self.schedule_index_upload(upload_queue)?;
 
-                Some(self.schedule_barrier0(upload_queue, false))
+                Some(self.schedule_wait_barrier0(upload_queue))
             }
         };
 
@@ -935,7 +935,7 @@ impl RemoteTimelineClient {
 
                 self.schedule_index_upload(upload_queue)?;
 
-                Some(self.schedule_barrier0(upload_queue, false))
+                Some(self.schedule_wait_barrier0(upload_queue))
             }
         };
 
@@ -974,7 +974,7 @@ impl RemoteTimelineClient {
             match (current, uploaded) {
                 (x, y) if wanted(x) && wanted(y) => None,
                 (x, y) if wanted(x) && !wanted(y) => {
-                    Some(self.schedule_barrier0(upload_queue, false))
+                    Some(self.schedule_wait_barrier0(upload_queue))
                 }
                 // Usual case: !wanted(x) && !wanted(y)
                 //
@@ -992,7 +992,7 @@ impl RemoteTimelineClient {
                         .map(|x| x.with_reason(reason))
                         .or_else(|| Some(index::GcBlocking::started_now_for(reason)));
                     self.schedule_index_upload(upload_queue)?;
-                    Some(self.schedule_barrier0(upload_queue, false))
+                    Some(self.schedule_wait_barrier0(upload_queue))
                 }
             }
         };
@@ -1036,7 +1036,7 @@ impl RemoteTimelineClient {
             match (current, uploaded) {
                 (x, y) if wanted(x) && wanted(y) => None,
                 (x, y) if wanted(x) && !wanted(y) => {
-                    Some(self.schedule_barrier0(upload_queue, false))
+                    Some(self.schedule_wait_barrier0(upload_queue))
                 }
                 (x, y) => {
                     if !wanted(x) && wanted(y) {
@@ -1048,7 +1048,7 @@ impl RemoteTimelineClient {
                     assert!(wanted(upload_queue.dirty.gc_blocking.as_ref()));
                     // FIXME: bogus ?
                     self.schedule_index_upload(upload_queue)?;
-                    Some(self.schedule_barrier0(upload_queue, false))
+                    Some(self.schedule_wait_barrier0(upload_queue))
                 }
             }
         };
@@ -1304,7 +1304,7 @@ impl RemoteTimelineClient {
             let upload_queue = guard
                 .initialized_mut()
                 .map_err(WaitCompletionError::NotInitialized)?;
-            self.schedule_barrier0(upload_queue, false)
+            self.schedule_wait_barrier0(upload_queue)
         };
 
         Self::wait_completion0(receiver).await
@@ -1320,20 +1320,32 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
-    pub(crate) fn schedule_barrier(self: &Arc<Self>, initial_barrier: bool) -> anyhow::Result<()> {
+    pub fn schedule_initial_barrier(self: &Arc<Self>) -> anyhow::Result<()> {
+        self.schedule_barrier(BarrierType::Initial)
+    }
+
+    fn schedule_barrier(self: &Arc<Self>, barrier: BarrierType) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
-        self.schedule_barrier0(upload_queue, initial_barrier);
+        self.schedule_barrier0(upload_queue, barrier);
         Ok(())
+    }
+
+    /// Schedule a barrier to wait for all previously scheduled operations to complete.
+    fn schedule_wait_barrier0(
+        self: &Arc<Self>,
+        upload_queue: &mut UploadQueueInitialized,
+    ) -> tokio::sync::watch::Receiver<()> {
+        self.schedule_barrier0(upload_queue, BarrierType::Normal)
     }
 
     fn schedule_barrier0(
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
-        initial_barrier: bool,
+        barrier: BarrierType,
     ) -> tokio::sync::watch::Receiver<()> {
         let (sender, receiver) = tokio::sync::watch::channel(());
-        let barrier_op = UploadOp::Barrier(sender, initial_barrier);
+        let barrier_op = UploadOp::Barrier(sender, barrier);
 
         upload_queue.queued_operations.push_back(barrier_op);
         // Don't count this kind of operation!
@@ -1801,9 +1813,12 @@ impl RemoteTimelineClient {
         while let Some(next_op) = upload_queue.queued_operations.front() {
             // Can we run this task now?
             let can_run_now = match next_op {
-                UploadOp::UploadLayer(..) => {
-                    // Can always be scheduled except when there's a barrier
+                UploadOp::UploadLayer(_, meta) => {
+                    // Can always be scheduled except when there's a barrier, or if the deletion queue doesn't contain any file with the same/lower generation.
                     upload_queue.num_inprogress_barriers == 0
+                        || !self
+                            .deletion_queue_client
+                            .maybe_processing_generation(meta.generation)
                 }
                 UploadOp::UploadMetadata { .. } => {
                     // These can only be performed after all the preceding operations
@@ -1853,12 +1868,12 @@ impl RemoteTimelineClient {
                 UploadOp::Delete(_) => {
                     upload_queue.num_inprogress_deletions += 1;
                 }
-                UploadOp::Barrier(sender, false) => {
+                UploadOp::Barrier(sender, BarrierType::Normal) => {
                     // For other barriers, simply send back the ack.
                     sender.send_replace(());
                     continue;
                 }
-                UploadOp::Barrier(_, true) => {
+                UploadOp::Barrier(_, BarrierType::Initial) => {
                     // For initial barrier, we need to wait for deletions.
                     upload_queue.num_inprogress_barriers += 1;
                 }

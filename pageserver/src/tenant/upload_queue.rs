@@ -284,6 +284,14 @@ pub(crate) struct Delete {
 }
 
 #[derive(Debug)]
+pub(crate) enum BarrierType {
+    /// Barrier is a normal barrier, not an initial barrier.
+    Normal,
+    /// Barrier is an initial barrier, scheduled at timeline load.
+    Initial,
+}
+
+#[derive(Debug)]
 pub(crate) enum UploadOp {
     /// Upload a layer file
     UploadLayer(ResidentLayer, LayerFileMetadata),
@@ -301,7 +309,7 @@ pub(crate) enum UploadOp {
     /// The boolean value indicates whether the barrier is an initial barrier scheduled
     /// at timeline load -- if yes, we will need to wait for all deletions to be completed
     /// before the next upload.
-    Barrier(tokio::sync::watch::Sender<()>, bool),
+    Barrier(tokio::sync::watch::Sender<()>, BarrierType),
 
     /// Shutdown; upon encountering this operation no new operations will be spawned, otherwise
     /// this is the same as a Barrier.
@@ -328,8 +336,8 @@ impl std::fmt::Display for UploadOp {
             UploadOp::Delete(delete) => {
                 write!(f, "Delete({} layers)", delete.layers.len())
             }
-            UploadOp::Barrier(_, false) => write!(f, "Barrier"),
-            UploadOp::Barrier(_, true) => write!(f, "Barrier (initial)"),
+            UploadOp::Barrier(_, BarrierType::Normal) => write!(f, "Barrier"),
+            UploadOp::Barrier(_, BarrierType::Initial) => write!(f, "Barrier (initial)"),
             UploadOp::Shutdown => write!(f, "Shutdown"),
         }
     }
