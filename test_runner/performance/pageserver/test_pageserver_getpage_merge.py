@@ -146,7 +146,7 @@ def test_getpage_merge_smoke(
                 ).value,
                 compute_getpage_count=compute_getpage_count,
                 pageserver_cpu_seconds_total=pageserver_metrics.query_one(
-                    "process_cpu_seconds_total"
+                    "libmetrics_process_cpu_seconds_highres"
                 ).value,
             )
 
