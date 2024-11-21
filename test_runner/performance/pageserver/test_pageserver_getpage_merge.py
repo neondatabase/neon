@@ -1,12 +1,14 @@
 import dataclasses
+import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
 from fixtures.utils import humantime_to_ms
 
 TARGET_RUNTIME = 60
@@ -194,3 +196,100 @@ def test_getpage_merge_smoke(
         unit="",
         report=MetricReport.HIGHER_IS_BETTER,
     )
+
+
+@pytest.mark.parametrize(
+    "batch_timeout", [None, "10us", "20us", "50us", "100us", "200us", "500us", "1ms"]
+)
+def test_timer_precision(
+    neon_env_builder: NeonEnvBuilder,
+    zenbenchmark: NeonBenchmarker,
+    pg_bin: PgBin,
+    batch_timeout: Optional[str],
+):
+    """
+    Determine the batching timeout precision (mean latency) and tail latency impact.
+    """
+
+    #
+    # Setup
+    #
+
+    def patch_ps_config(ps_config):
+        ps_config["server_side_batch_timeout"] = batch_timeout
+
+    neon_env_builder.pageserver_config_override = patch_ps_config
+
+    env = neon_env_builder.init_start()
+    endpoint = env.endpoints.create_start("main")
+    conn = endpoint.connect()
+    cur = conn.cursor()
+
+    cur.execute("SET max_parallel_workers_per_gather=0")  # disable parallel backends
+    cur.execute("SET effective_io_concurrency=1")
+
+    cur.execute("CREATE EXTENSION IF NOT EXISTS neon;")
+    cur.execute("CREATE EXTENSION IF NOT EXISTS neon_test_utils;")
+
+    log.info("Filling the table")
+    cur.execute("CREATE TABLE t (data char(1000)) with (fillfactor=10)")
+    tablesize = 50 * 1024 * 1024
+    npages = tablesize // (8 * 1024)
+    cur.execute("INSERT INTO t SELECT generate_series(1, %s)", (npages,))
+    # TODO: can we force postgres to do sequential scans?
+
+    cur.close()
+    conn.close()
+
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+
+    endpoint.stop()
+
+    for sk in env.safekeepers:
+        sk.stop()
+
+    #
+    # Run single-threaded pagebench (TODO: dedup with other benchmark code)
+    #
+
+    ps_http = env.pageserver.http_client()
+
+    cmd = [
+        str(env.neon_binpath / "pagebench"),
+        "get-page-latest-lsn",
+        "--mgmt-api-endpoint",
+        ps_http.base_url,
+        "--page-service-connstring",
+        env.pageserver.connstr(password=None),
+        "--num-clients",
+        "1",
+        "--runtime",
+        "10s",
+    ]
+    log.info(f"command: {' '.join(cmd)}")
+    basepath = pg_bin.run_capture(cmd, with_command_header=False)
+    results_path = Path(basepath + ".stdout")
+    log.info(f"Benchmark results at: {results_path}")
+
+    with open(results_path) as f:
+        results = json.load(f)
+    log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
+
+    total = results["total"]
+
+    metric = "latency_mean"
+    zenbenchmark.record(
+        metric,
+        metric_value=humantime_to_ms(total[metric]),
+        unit="ms",
+        report=MetricReport.LOWER_IS_BETTER,
+    )
+
+    metric = "latency_percentiles"
+    for k, v in total[metric].items():
+        zenbenchmark.record(
+            f"{metric}.{k}",
+            metric_value=humantime_to_ms(v),
+            unit="ms",
+            report=MetricReport.LOWER_IS_BETTER,
+        )
