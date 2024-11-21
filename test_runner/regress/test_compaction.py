@@ -14,7 +14,6 @@ from fixtures.pageserver.http import PageserverApiException
 from fixtures.utils import skip_in_debug_build, wait_until
 from fixtures.workload import Workload
 
-
 AGGRESSIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.
     "gc_period": "0s",
@@ -113,6 +112,7 @@ page_cache_size=10; wal_receiver_protocol='{wal_receiver_protocol}'
     assert non_vectored_average < 8
     assert vectored_average < 8
 
+
 @skip_in_debug_build("only run with release build")
 def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     SMOKE_CONF = {
@@ -161,7 +161,9 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
         workload.churn_rows(row_count, env.pageserver.id)
 
     # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
-    env.pageserver.assert_log_contains("scheduled_compact_timeline.*picked .* layers for compaction")
+    env.pageserver.assert_log_contains(
+        "scheduled_compact_timeline.*picked .* layers for compaction"
+    )
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
