@@ -23,5 +23,6 @@ pub mod monitor;
 pub mod params;
 pub mod pg_helpers;
 pub mod spec;
+mod spec_apply;
 pub mod swap;
 pub mod sync_sk;

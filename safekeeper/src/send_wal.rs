@@ -456,6 +456,8 @@ impl SafekeeperPostgresHandler {
         // not synchronized with sends, so this avoids deadlocks.
         let reader = pgb.split().context("START_REPLICATION split")?;
 
+        let tli_cancel = tli.cancel.clone();
+
         let mut sender = WalSender {
             pgb,
             // should succeed since we're already holding another guard
@@ -479,6 +481,9 @@ impl SafekeeperPostgresHandler {
             // todo: add read|write .context to these errors
             r = sender.run() => r,
             r = reply_reader.run() => r,
+            _ = tli_cancel.cancelled() => {
+                return Err(CopyStreamHandlerEnd::Cancelled);
+            }
         };
 
         let ws_state = ws_guard
@@ -557,6 +562,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
     /// Send WAL until
     /// - an error occurs
     /// - receiver is caughtup and there is no computes (if streaming up to commit_lsn)
+    /// - timeline's cancellation token fires
     ///
     /// Err(CopyStreamHandlerEnd) is always returned; Result is used only for ?
     /// convenience.
@@ -601,15 +607,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             };
             let send_buf = &send_buf[..send_size];
 
-            // and send it
-            self.pgb
-                .write_message(&BeMessage::XLogData(XLogDataBody {
-                    wal_start: self.start_pos.0,
-                    wal_end: self.end_pos.0,
-                    timestamp: get_current_timestamp(),
-                    data: send_buf,
-                }))
-                .await?;
+            // and send it, while respecting Timeline::cancel
+            let msg = BeMessage::XLogData(XLogDataBody {
+                wal_start: self.start_pos.0,
+                wal_end: self.end_pos.0,
+                timestamp: get_current_timestamp(),
+                data: send_buf,
+            });
+            self.pgb.write_message(&msg).await?;
 
             if let Some(appname) = &self.appname {
                 if appname == "replica" {
@@ -674,13 +679,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 }
             }
 
-            self.pgb
-                .write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
-                    wal_end: self.end_pos.0,
-                    timestamp: get_current_timestamp(),
-                    request_reply: true,
-                }))
-                .await?;
+            let msg = BeMessage::KeepAlive(WalSndKeepAlive {
+                wal_end: self.end_pos.0,
+                timestamp: get_current_timestamp(),
+                request_reply: true,
+            });
+
+            self.pgb.write_message(&msg).await?;
         }
     }
 

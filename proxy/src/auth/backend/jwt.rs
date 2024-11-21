@@ -17,7 +17,7 @@ use thiserror::Error;
 use tokio::time::Instant;
 
 use crate::auth::backend::ComputeCredentialKeys;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::errors::GetEndpointJwksError;
 use crate::http::read_body_with_limit;
 use crate::intern::RoleNameInt;
@@ -39,7 +39,7 @@ const JWKS_FETCH_RETRIES: u32 = 3;
 pub(crate) trait FetchAuthRules: Clone + Send + Sync + 'static {
     fn fetch_auth_rules(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         endpoint: EndpointId,
     ) -> impl Future<Output = Result<Vec<AuthRule>, FetchAuthRulesError>> + Send;
 }
@@ -144,7 +144,7 @@ impl JwkCacheEntryLock {
     async fn renew_jwks<F: FetchAuthRules>(
         &self,
         _permit: JwkRenewalPermit<'_>,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         client: &reqwest_middleware::ClientWithMiddleware,
         endpoint: EndpointId,
         auth_rules: &F,
@@ -261,7 +261,7 @@ impl JwkCacheEntryLock {
 
     async fn get_or_update_jwk_cache<F: FetchAuthRules>(
         self: &Arc<Self>,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         client: &reqwest_middleware::ClientWithMiddleware,
         endpoint: EndpointId,
         fetch: &F,
@@ -314,7 +314,7 @@ impl JwkCacheEntryLock {
 
     async fn check_jwt<F: FetchAuthRules>(
         self: &Arc<Self>,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         jwt: &str,
         client: &reqwest_middleware::ClientWithMiddleware,
         endpoint: EndpointId,
@@ -409,7 +409,7 @@ impl JwkCacheEntryLock {
 impl JwkCache {
     pub(crate) async fn check_jwt<F: FetchAuthRules>(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         endpoint: EndpointId,
         role_name: &RoleName,
         fetch: &F,
@@ -941,7 +941,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
     impl FetchAuthRules for Fetch {
         async fn fetch_auth_rules(
             &self,
-            _ctx: &RequestMonitoring,
+            _ctx: &RequestContext,
             _endpoint: EndpointId,
         ) -> Result<Vec<AuthRule>, FetchAuthRulesError> {
             Ok(self.0.clone())
@@ -1039,7 +1039,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
             for token in &tokens {
                 jwk_cache
                     .check_jwt(
-                        &RequestMonitoring::test(),
+                        &RequestContext::test(),
                         endpoint.clone(),
                         role,
                         &fetch,
@@ -1097,7 +1097,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
 
         jwk_cache
             .check_jwt(
-                &RequestMonitoring::test(),
+                &RequestContext::test(),
                 endpoint.clone(),
                 &role_name,
                 &fetch,
@@ -1136,7 +1136,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
 
         let ep = EndpointId::from("ep");
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let err = jwk_cache
             .check_jwt(&ctx, ep, &role, &fetch, &bad_jwt)
             .await
@@ -1175,7 +1175,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
         // this role_name is not accepted
         let bad_role_name = RoleName::from("cloud_admin");
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let err = jwk_cache
             .check_jwt(&ctx, ep, &bad_role_name, &fetch, &jwt)
             .await
@@ -1268,7 +1268,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
 
         let ep = EndpointId::from("ep");
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         for test in table {
             let jwt = new_custom_ec_jwt("1".into(), &key, test.body);
 
@@ -1336,7 +1336,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
 
         jwk_cache
             .check_jwt(
-                &RequestMonitoring::test(),
+                &RequestContext::test(),
                 endpoint.clone(),
                 &role_name,
                 &fetch,

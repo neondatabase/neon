@@ -32,11 +32,12 @@ project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
 use clap::Parser;
+use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use utils::sentry_init::init_sentry;
 use utils::{pid_file, project_build_tag, project_git_version};
 
@@ -110,7 +111,7 @@ struct SqlOverHttpArgs {
     sql_over_http_cancel_set_shards: usize,
 
     #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
-    sql_over_http_max_request_size_bytes: u64,
+    sql_over_http_max_request_size_bytes: usize,
 
     #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
     sql_over_http_max_response_size_bytes: usize,
@@ -124,8 +125,9 @@ async fn main() -> anyhow::Result<()> {
 
     Metrics::install(Arc::new(ThreadPoolMetrics::new(0)));
 
-    info!("Version: {GIT_VERSION}");
-    info!("Build_tag: {BUILD_TAG}");
+    // TODO: refactor these to use labels
+    debug!("Version: {GIT_VERSION}");
+    debug!("Build_tag: {BUILD_TAG}");
     let neon_metrics = ::metrics::NeonMetrics::new(::metrics::BuildInfo {
         revision: GIT_VERSION,
         build_tag: BUILD_TAG,
@@ -305,26 +307,46 @@ fn build_auth_backend(
     Ok(Box::leak(Box::new(auth_backend)))
 }
 
+#[derive(Error, Debug)]
+enum RefreshConfigError {
+    #[error(transparent)]
+    Read(#[from] std::io::Error),
+    #[error(transparent)]
+    Parse(#[from] serde_json::Error),
+    #[error(transparent)]
+    Validate(anyhow::Error),
+}
+
 async fn refresh_config_loop(path: Utf8PathBuf, rx: Arc<Notify>) {
+    let mut init = true;
     loop {
         rx.notified().await;
 
         match refresh_config_inner(&path).await {
             Ok(()) => {}
+            // don't log for file not found errors if this is the first time we are checking
+            // for computes that don't use local_proxy, this is not an error.
+            Err(RefreshConfigError::Read(e))
+                if init && e.kind() == std::io::ErrorKind::NotFound =>
+            {
+                debug!(error=?e, ?path, "could not read config file");
+            }
             Err(e) => {
                 error!(error=?e, ?path, "could not read config file");
             }
         }
+
+        init = false;
     }
 }
 
-async fn refresh_config_inner(path: &Utf8Path) -> anyhow::Result<()> {
+async fn refresh_config_inner(path: &Utf8Path) -> Result<(), RefreshConfigError> {
     let bytes = tokio::fs::read(&path).await?;
     let data: LocalProxySpec = serde_json::from_slice(&bytes)?;
 
     let mut jwks_set = vec![];
 
-    for jwks in data.jwks.into_iter().flatten() {
+    fn parse_jwks_settings(jwks: compute_api::spec::JwksSettings) -> anyhow::Result<JwksSettings> {
         let mut jwks_url = url::Url::from_str(&jwks.jwks_url).context("parsing JWKS url")?;
 
         ensure!(
@@ -367,7 +389,7 @@ async fn refresh_config_inner(path: &Utf8Path) -> anyhow::Result<()> {
             }
         }
 
-        jwks_set.push(JwksSettings {
+        Ok(JwksSettings {
             id: jwks.id,
             jwks_url,
             provider_name: jwks.provider_name,
@@ -379,6 +401,10 @@ async fn refresh_config_inner(path: &Utf8Path) -> anyhow::Result<()> {
                 .map(|s| RoleNameInt::from(&s))
                 .collect(),
         })
+    }
+
+    for jwks in data.jwks.into_iter().flatten() {
+        jwks_set.push(parse_jwks_settings(jwks).map_err(RefreshConfigError::Validate)?);
     }
 
     info!("successfully loaded new config");

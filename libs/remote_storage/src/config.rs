@@ -26,6 +26,16 @@ pub struct RemoteStorageConfig {
     pub timeout: Duration,
 }
 
+impl RemoteStorageKind {
+    pub fn bucket_name(&self) -> Option<&str> {
+        match self {
+            RemoteStorageKind::LocalFs { .. } => None,
+            RemoteStorageKind::AwsS3(config) => Some(&config.bucket_name),
+            RemoteStorageKind::AzureContainer(config) => Some(&config.container_name),
+        }
+    }
+}
+
 fn default_timeout() -> Duration {
     RemoteStorageConfig::DEFAULT_TIMEOUT
 }
@@ -178,6 +188,14 @@ impl RemoteStorageConfig {
     pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<RemoteStorageConfig> {
         Ok(utils::toml_edit_ext::deserialize_item(toml)?)
     }
+
+    pub fn from_toml_str(input: &str) -> anyhow::Result<RemoteStorageConfig> {
+        let toml_document = toml_edit::DocumentMut::from_str(input)?;
+        if let Some(item) = toml_document.get("remote_storage") {
+            return Self::from_toml(item);
+        }
+        Self::from_toml(toml_document.as_item())
+    }
 }
 
 #[cfg(test)]
@@ -185,8 +203,7 @@ mod tests {
     use super::*;
 
     fn parse(input: &str) -> anyhow::Result<RemoteStorageConfig> {
-        let toml = input.parse::<toml_edit::DocumentMut>().unwrap();
-        RemoteStorageConfig::from_toml(toml.as_item())
+        RemoteStorageConfig::from_toml_str(input)
     }
 
     #[test]
