@@ -36,8 +36,8 @@ for max_batch_size in [1, 2, 4, 8, 16, 32]:
 @pytest.mark.parametrize(
     "tablesize_mib, pipelining_config, target_runtime, effective_io_concurrency, readhead_buffer_size, name",
     [
-        # non-batchable workloads should identically modulo overheads of pipelining and batching.
-        # importantly, latency of pipelined configs should be no worse than non-pipelined
+        # non-batchable workloads
+        # (A separate benchmark will consider latency).
         *[
             (
                 50,
@@ -63,7 +63,7 @@ for max_batch_size in [1, 2, 4, 8, 16, 32]:
         ],
     ],
 )
-def test_getpage_merge_smoke(
+def test_throughput(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     tablesize_mib: int,
@@ -74,7 +74,21 @@ def test_getpage_merge_smoke(
     name: str,
 ):
     """
-    Do a bunch of sequential scans and ensure that the pageserver does some merging.
+    Do a bunch of sequential scans with varying compute and pipelining configurations.
+    Primary performance metrics are the achieved batching factor and throughput (wall clock time).
+    Resource utilization is also interesting - we currently measure CPU time.
+
+    The test is a fixed-runtime based type of test (target_runtime).
+    Hence, the results are normalized to the number of iterations completed within target runtime.
+
+    If the compute doesn't provide pipeline depth (effective_io_concurrency=1),
+    performance should be about identical in all configurations.
+    Pipelining can still yield improvements in these scenarios because it parses the
+    next request while the current one is still being executed.
+
+    If the compute provides pipeline depth (effective_io_concurrency=100), then
+    pipelining configs, especially with max_batch_size>1 should yield dramatic improvements
+    in all performance metrics.
     """
 
     #
@@ -89,7 +103,7 @@ def test_getpage_merge_smoke(
             # target_runtime is just a polite ask to the workload to run for this long
             "effective_io_concurrency": (effective_io_concurrency, {}),
             "readhead_buffer_size": (readhead_buffer_size, {}),
-            # name is not a metric
+            # name is not a metric, we just use it to identify the test easily in the `test_...[...]`` notation
         }
     )
     if pipelining_config:
@@ -249,20 +263,23 @@ for max_batch_size in [1, 32]:
         )
 
 
-@pytest.mark.parametrize("pipelining_config", PRECISION_CONFIGS)
-def test_timer_precision(
+@pytest.mark.parametrize(
+    "pipelining_config,name",
+    [(config, f"{dataclasses.asdict(config) if config else None}") for config in PRECISION_CONFIGS],
+)
+def test_latency(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
     pipelining_config: Optional[PageServicePipeliningConfig],
 ):
     """
-    Determine the batching timeout precision (mean latency) and tail latency impact.
+    Measure the latency impact of pipelining in an un-batchable workloads.
 
-    The baseline is `None`; an ideal batching timeout implementation would increase
-    the mean latency by exactly `batch_timeout`.
+    An ideal implementation should not increase average or tail latencies for such workloads.
 
-    That is not the case with the current implementation, will be addressed in future changes.
+    We don't have support in pagebench to create queue depth yet.
+    => https://github.com/neondatabase/neon/issues/9837
     """
 
     #
