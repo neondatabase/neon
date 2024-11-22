@@ -7,7 +7,7 @@ use bytes::Buf;
 use futures::FutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
-use pageserver_api::config::PageServicePipeliningConfig;
+use pageserver_api::config::{PageServicePipeliningConfig, PageServiceProtocolPipeliningMode};
 use pageserver_api::models::{self, TenantState};
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
@@ -757,6 +757,7 @@ impl PageServerHandler {
 
     /// Post-condition: `maybe_carry` is Some()
     #[instrument(skip_all, level = tracing::Level::TRACE)]
+    #[allow(clippy::boxed_local)]
     fn pagestream_do_batch(
         max_batch_size: NonZeroUsize,
         maybe_carry: &mut Option<Box<BatchedFeMessage>>,
@@ -838,7 +839,7 @@ impl PageServerHandler {
                     fail::fail_point!("ps::handle-pagerequest-message::exists");
                     (
                         vec![
-                            self.handle_get_rel_exists_request(&shard, &req, &ctx)
+                            self.handle_get_rel_exists_request(&shard, &req, ctx)
                                 .instrument(span.clone())
                                 .await,
                         ],
@@ -849,7 +850,7 @@ impl PageServerHandler {
                     fail::fail_point!("ps::handle-pagerequest-message::nblocks");
                     (
                         vec![
-                            self.handle_get_nblocks_request(&shard, &req, &ctx)
+                            self.handle_get_nblocks_request(&shard, &req, ctx)
                                 .instrument(span.clone())
                                 .await,
                         ],
@@ -872,7 +873,7 @@ impl PageServerHandler {
                                     &shard,
                                     effective_request_lsn,
                                     pages,
-                                    &ctx,
+                                    ctx,
                                 )
                                 .instrument(span.clone())
                                 .await;
@@ -886,7 +887,7 @@ impl PageServerHandler {
                     fail::fail_point!("ps::handle-pagerequest-message::dbsize");
                     (
                         vec![
-                            self.handle_db_size_request(&shard, &req, &ctx)
+                            self.handle_db_size_request(&shard, &req, ctx)
                                 .instrument(span.clone())
                                 .await,
                         ],
@@ -897,7 +898,7 @@ impl PageServerHandler {
                     fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
                     (
                         vec![
-                            self.handle_get_slru_segment_request(&shard, &req, &ctx)
+                            self.handle_get_slru_segment_request(&shard, &req, ctx)
                                 .instrument(span.clone())
                                 .await,
                         ],
@@ -1009,8 +1010,8 @@ impl PageServerHandler {
             .expect("implementation error: timeline_handles should not be locked");
 
         let request_span = info_span!("request", shard_id = tracing::field::Empty);
-        let (pgb_reader, timeline_handles) = match self.pipelining_config {
-            Some(PageServicePipeliningConfig { max_batch_size, .. }) => {
+        let (pgb_reader, timeline_handles) = match self.pipelining_config.clone() {
+            Some(pipelining_config) => {
                 self.handle_pagerequests_pipelined(
                     pgb,
                     pgb_reader,
@@ -1018,7 +1019,7 @@ impl PageServerHandler {
                     timeline_id,
                     timeline_handles,
                     request_span,
-                    max_batch_size,
+                    pipelining_config,
                     &ctx,
                 )
                 .await
@@ -1048,6 +1049,7 @@ impl PageServerHandler {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_pagerequests_serial<IO>(
         &mut self,
         pgb_writer: &mut PostgresBackend<IO>,
@@ -1068,7 +1070,7 @@ impl PageServerHandler {
                 timeline_id,
                 &mut timeline_handles,
                 &self.cancel,
-                &ctx,
+                ctx,
                 request_span.clone(),
             )
             .await?;
@@ -1079,11 +1081,12 @@ impl PageServerHandler {
                     return Ok((pgb_reader, timeline_handles));
                 }
             };
-            self.pagesteam_handle_batched_message(pgb_writer, *msg, &ctx)
+            self.pagesteam_handle_batched_message(pgb_writer, *msg, ctx)
                 .await?;
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_pagerequests_pipelined<IO>(
         &mut self,
         pgb_writer: &mut PostgresBackend<IO>,
@@ -1092,12 +1095,17 @@ impl PageServerHandler {
         timeline_id: TimelineId,
         mut timeline_handles: TimelineHandles,
         request_span: Span,
-        max_batch_size: NonZeroUsize,
+        pipelining_config: PageServicePipeliningConfig,
         ctx: &RequestContext,
     ) -> Result<(PostgresBackendReader<IO>, TimelineHandles), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     {
+        let PageServicePipeliningConfig {
+            max_batch_size,
+            protocol_pipelining_mode,
+        } = pipelining_config;
+
         let (requests_tx, mut requests_rx) = tokio::sync::mpsc::channel(1);
         let read_messages = {
             let cancel = self.cancel.child_token();
@@ -1231,19 +1239,38 @@ impl PageServerHandler {
                 };
                 notify_batcher.notify_one();
                 debug!("processing batch");
-                self.pagesteam_handle_batched_message(pgb_writer, *batch, &ctx)
+                self.pagesteam_handle_batched_message(pgb_writer, *batch, ctx)
                     .await?;
             }
             Ok(())
         };
 
-        let (read_message_task_res, _, executor_res): (_, (), _) =
-            tokio::join!(read_messages, batcher, executor);
+        let read_messages_res;
+        let executor_res;
+        match protocol_pipelining_mode {
+            PageServiceProtocolPipeliningMode::ConcurrentFutures => {
+                (read_messages_res, _, executor_res) =
+                    tokio::join!(read_messages, batcher, executor);
+            }
+            PageServiceProtocolPipeliningMode::Tasks => {
+                // cancelled via sensitivity to self.cancel
+                let read_messages_task = tokio::task::spawn(read_messages);
+                // cancelled when it observes read_messages_task disconnect the channel
+                let batcher_task = tokio::task::spawn(batcher);
+                executor_res = executor.await;
+                read_messages_res = read_messages_task
+                    .await
+                    .context("read_messages task panicked, check logs for details")?;
+                let _: () = batcher_task
+                    .await
+                    .context("batcher task panicked, check logs for details")?;
+            }
+        }
 
-        match (read_message_task_res, executor_res) {
+        match (read_messages_res, executor_res) {
             (Err(e), _) | (_, Err(e)) => {
                 let e: QueryError = e;
-                return Err(e);
+                Err(e)
             }
             (Ok((pgb_reader, timeline_handles)), Ok(())) => Ok((pgb_reader, timeline_handles)),
         }
@@ -1395,7 +1422,7 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
-            &timeline,
+            timeline,
             req.request_lsn,
             req.not_modified_since,
             &latest_gc_cutoff_lsn,
@@ -1425,7 +1452,7 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
-            &timeline,
+            timeline,
             req.request_lsn,
             req.not_modified_since,
             &latest_gc_cutoff_lsn,
@@ -1455,7 +1482,7 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
-            &timeline,
+            timeline,
             req.request_lsn,
             req.not_modified_since,
             &latest_gc_cutoff_lsn,
@@ -1513,7 +1540,7 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
-            &timeline,
+            timeline,
             req.request_lsn,
             req.not_modified_since,
             &latest_gc_cutoff_lsn,

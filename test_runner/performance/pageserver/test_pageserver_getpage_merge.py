@@ -13,24 +13,61 @@ from fixtures.utils import humantime_to_ms
 
 TARGET_RUNTIME = 5
 
-MAX_BATCH_SIZES = [None, 1, 2, 4, 8, 16, 32]
+
+@dataclass
+class PageServicePipeliningConfig:
+    max_batch_size: int
+    protocol_pipelining_mode: str
+
+
+PROTOCOL_PIPELINING_MODES = ["concurrent-futures", "tasks"]
+
+NON_BATCHABLE: list[Optional[PageServicePipeliningConfig]] = [None]
+for max_batch_size in [1, 32]:
+    for protocol_pipelining_mode in PROTOCOL_PIPELINING_MODES:
+        NON_BATCHABLE.append(PageServicePipeliningConfig(max_batch_size, protocol_pipelining_mode))
+
+BATCHABLE: list[Optional[PageServicePipeliningConfig]] = [None]
+for max_batch_size in [1, 2, 4, 8, 16, 32]:
+    for protocol_pipelining_mode in PROTOCOL_PIPELINING_MODES:
+        BATCHABLE.append(PageServicePipeliningConfig(max_batch_size, protocol_pipelining_mode))
+
+
 @pytest.mark.parametrize(
-    "tablesize_mib, max_batch_size, target_runtime, effective_io_concurrency, readhead_buffer_size, name",
+    "tablesize_mib, pipelining_config, target_runtime, effective_io_concurrency, readhead_buffer_size, name",
     [
-        # the next 4 cases demonstrate how not-batchable workloads suffer from batching timeout
+        # non-batchable workloads should identically modulo overheads of pipelining and batching.
+        # importantly, latency of pipelined configs should be no worse than non-pipelined
         *[
-            (50, n, TARGET_RUNTIME, 1, 128, f"not batchable max batch size {n}") for n in MAX_BATCH_SIZES
+            (
+                50,
+                config,
+                TARGET_RUNTIME,
+                1,
+                128,
+                f"not batchable {dataclasses.asdict(config) if config else None}",
+            )
+            for config in NON_BATCHABLE
         ],
+        # batchable workloads should show throughput and CPU efficiency improvements
         *[
-            (50, n, TARGET_RUNTIME, 100, 128, f"batchable max batch size {n}") for n in MAX_BATCH_SIZES
-        ]
+            (
+                50,
+                config,
+                TARGET_RUNTIME,
+                100,
+                128,
+                f"batchable {dataclasses.asdict(config) if config else None}",
+            )
+            for config in BATCHABLE
+        ],
     ],
 )
 def test_getpage_merge_smoke(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     tablesize_mib: int,
-    max_batch_size: Optional[int],
+    pipelining_config: None | PageServicePipeliningConfig,
     target_runtime: int,
     effective_io_concurrency: int,
     readhead_buffer_size: int,
@@ -48,16 +85,20 @@ def test_getpage_merge_smoke(
     params.update(
         {
             "tablesize_mib": (tablesize_mib, {"unit": "MiB"}),
-            "max_batch_size": (
-                -1 if max_batch_size is None else max_batch_size,
-                {},
-            ),
+            "pipelining_enabled": (1 if pipelining_config else 0, {}),
             # target_runtime is just a polite ask to the workload to run for this long
             "effective_io_concurrency": (effective_io_concurrency, {}),
             "readhead_buffer_size": (readhead_buffer_size, {}),
             # name is not a metric
         }
     )
+    if pipelining_config:
+        params.update(
+            {
+                f"pipelining_config.{k}": (v, {})
+                for k, v in dataclasses.asdict(pipelining_config).items()
+            }
+        )
 
     log.info("params: %s", params)
 
@@ -167,9 +208,11 @@ def test_getpage_merge_smoke(
         after = get_metrics()
         return (after - before).normalize(iters - 1)
 
-    env.pageserver.patch_config_toml_nonrecursive({"page_service_pipelining": {
-        "max_batch_size": max_batch_size,
-    }} if max_batch_size is not None else {})
+    env.pageserver.patch_config_toml_nonrecursive(
+        {"page_service_pipelining": dataclasses.asdict(pipelining_config)}
+        if pipelining_config is not None
+        else {}
+    )
     env.pageserver.restart()
     metrics = workload()
 
@@ -198,14 +241,20 @@ def test_getpage_merge_smoke(
     )
 
 
-@pytest.mark.parametrize(
-    "max_batch_size", [None, 1, 32]
-)
+PRECISION_CONFIGS: list[Optional[PageServicePipeliningConfig]] = [None]
+for max_batch_size in [1, 32]:
+    for protocol_pipelining_mode in PROTOCOL_PIPELINING_MODES:
+        PRECISION_CONFIGS.append(
+            PageServicePipeliningConfig(max_batch_size, protocol_pipelining_mode)
+        )
+
+
+@pytest.mark.parametrize("pipelining_config", PRECISION_CONFIGS)
 def test_timer_precision(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
-    max_batch_size: Optional[int],
+    pipelining_config: Optional[PageServicePipeliningConfig],
 ):
     """
     Determine the batching timeout precision (mean latency) and tail latency impact.
@@ -221,10 +270,8 @@ def test_timer_precision(
     #
 
     def patch_ps_config(ps_config):
-        if max_batch_size is not None:
-            ps_config["page_service_pipelining"] = {
-                "max_batch_size": max_batch_size,
-            }
+        if pipelining_config is not None:
+            ps_config["page_service_pipelining"] = dataclasses.asdict(pipelining_config)
 
     neon_env_builder.pageserver_config_override = patch_ps_config
 

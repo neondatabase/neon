@@ -129,8 +129,16 @@ pub struct DiskUsageEvictionTaskConfig {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PageServicePipeliningConfig {
-    // Causes runtime errors if larger than max get_vectored batch size.
+    /// Causes runtime errors if larger than max get_vectored batch size.
     pub max_batch_size: NonZeroUsize,
+    pub protocol_pipelining_mode: PageServiceProtocolPipeliningMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PageServiceProtocolPipeliningMode {
+    ConcurrentFutures,
+    Tasks,
 }
 
 pub mod statvfs {
