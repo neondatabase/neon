@@ -244,7 +244,7 @@ pub enum TimelineCreateRequestMode {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateRequestModeImportPgdata {
     pub location: ImportPgdataLocation,
-    pub idempotency_key: ImportPgdataIdemptencyKey,
+    pub idempotency_key: ImportPgdataIdempotencyKey,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -262,9 +262,9 @@ pub enum ImportPgdataLocation {
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(transparent)]
-pub struct ImportPgdataIdemptencyKey(pub String);
+pub struct ImportPgdataIdempotencyKey(pub String);
 
-impl ImportPgdataIdemptencyKey {
+impl ImportPgdataIdempotencyKey {
     pub fn random() -> Self {
         use rand::{distributions::Alphanumeric, Rng};
         Self(
