@@ -1583,7 +1583,7 @@ class PageserverSchedulingPolicy(StrEnum):
     PAUSE_FOR_RESTART = "PauseForRestart"
 
 
-class StorageControllerLeadershipStatus(str, Enum):
+class StorageControllerLeadershipStatus(StrEnum):
     LEADER = "leader"
     STEPPED_DOWN = "stepped_down"
     CANDIDATE = "candidate"
