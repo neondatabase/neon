@@ -1,7 +1,8 @@
 use crate::auth::{AuthError, Claims, SwappableJwtAuth};
 use crate::http::error::{api_error_handler, route_error_handler, ApiError};
-use anyhow::Context;
-use hyper::header::{HeaderName, AUTHORIZATION};
+use crate::http::request::{get_query_param, parse_query_param};
+use anyhow::{anyhow, Context};
+use hyper::header::{HeaderName, AUTHORIZATION, CONTENT_DISPOSITION};
 use hyper::http::HeaderValue;
 use hyper::Method;
 use hyper::{header::CONTENT_TYPE, Body, Request, Response};
@@ -12,11 +13,13 @@ use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
 use tracing::{debug, info, info_span, warn, Instrument};
 
 use std::future::Future;
+use std::io::Write as _;
 use std::str::FromStr;
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use std::io::Write as _;
-use tokio::sync::mpsc;
+use pprof::protos::Message as _;
+use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 
 static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
@@ -326,6 +329,82 @@ pub async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<
     });
 
     Ok(response)
+}
+
+/// Generates CPU profiles.
+pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    enum Format {
+        Pprof,
+        Svg,
+    }
+
+    // Parameters.
+    let format = match get_query_param(&req, "format")?.as_deref() {
+        None => Format::Pprof,
+        Some("pprof") => Format::Pprof,
+        Some("svg") => Format::Svg,
+        Some(format) => return Err(ApiError::BadRequest(anyhow!("invalid format {format}"))),
+    };
+    let seconds = match parse_query_param(&req, "seconds")? {
+        None => 5,
+        Some(seconds @ 1..=30) => seconds,
+        Some(_) => return Err(ApiError::BadRequest(anyhow!("duration must be 1-30 secs"))),
+    };
+    let frequency_hz = match parse_query_param(&req, "frequency")? {
+        None => 99,
+        Some(1001..) => return Err(ApiError::BadRequest(anyhow!("frequency must be <=1000 Hz"))),
+        Some(frequency) => frequency,
+    };
+
+    // Only allow one profiler at a time.
+    static PROFILE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+    let _lock = PROFILE_LOCK
+        .try_lock()
+        .map_err(|_| ApiError::Conflict("profiler already running".into()))?;
+
+    // Take the profile.
+    let report = tokio::task::spawn_blocking(move || {
+        let guard = pprof::ProfilerGuardBuilder::default()
+            .frequency(frequency_hz)
+            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+            .build()?;
+        std::thread::sleep(Duration::from_secs(seconds));
+        guard.report().build()
+    })
+    .await
+    .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
+    .map_err(|pprof_err| ApiError::InternalServerError(pprof_err.into()))?;
+
+    // Return the report in the requested format.
+    match format {
+        Format::Pprof => {
+            let mut body = Vec::new();
+            report
+                .pprof()
+                .map_err(|err| ApiError::InternalServerError(err.into()))?
+                .write_to_vec(&mut body)
+                .map_err(|err| ApiError::InternalServerError(err.into()))?;
+
+            Response::builder()
+                .status(200)
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .header(CONTENT_DISPOSITION, "attachment; filename=\"profile.pb\"")
+                .body(Body::from(body))
+                .map_err(|err| ApiError::InternalServerError(err.into()))
+        }
+
+        Format::Svg => {
+            let mut body = Vec::new();
+            report
+                .flamegraph(&mut body)
+                .map_err(|err| ApiError::InternalServerError(err.into()))?;
+            Response::builder()
+                .status(200)
+                .header(CONTENT_TYPE, "image/svg+xml")
+                .body(Body::from(body))
+                .map_err(|err| ApiError::InternalServerError(err.into()))
+        }
+    }
 }
 
 pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(

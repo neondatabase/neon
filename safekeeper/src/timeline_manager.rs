@@ -266,8 +266,10 @@ pub async fn main_task(
 
     // Start recovery task which always runs on the timeline.
     if !mgr.is_offloaded && mgr.conf.peer_recovery_enabled {
-        let tli = mgr.wal_resident_timeline();
-        mgr.recovery_task = Some(tokio::spawn(recovery_main(tli, mgr.conf.clone())));
+        // Recovery task is only spawned if we can get a residence guard (i.e. timeline is not already shutting down)
+        if let Ok(tli) = mgr.wal_resident_timeline() {
+            mgr.recovery_task = Some(tokio::spawn(recovery_main(tli, mgr.conf.clone())));
+        }
     }
 
     // If timeline is evicted, reflect that in the metric.
@@ -375,6 +377,13 @@ pub async fn main_task(
 
     // shutdown background tasks
     if mgr.conf.is_wal_backup_enabled() {
+        if let Some(backup_task) = mgr.backup_task.take() {
+            // If we fell through here, then the timeline is shutting down. This is important
+            // because otherwise joining on the wal_backup handle might hang.
+            assert!(mgr.tli.cancel.is_cancelled());
+
+            backup_task.join().await;
+        }
         wal_backup::update_task(&mut mgr, false, &last_state).await;
     }
 
@@ -442,10 +451,18 @@ impl Manager {
     /// Get a WalResidentTimeline.
     /// Manager code must use this function instead of one from `Timeline`
     /// directly, because it will deadlock.
-    pub(crate) fn wal_resident_timeline(&mut self) -> WalResidentTimeline {
+    ///
+    /// This function is fallible because the guard may not be created if the timeline is
+    /// shutting down.
+    pub(crate) fn wal_resident_timeline(&mut self) -> anyhow::Result<WalResidentTimeline> {
         assert!(!self.is_offloaded);
-        let guard = self.access_service.create_guard();
-        WalResidentTimeline::new(self.tli.clone(), guard)
+        let guard = self.access_service.create_guard(
+            self.tli
+                .gate
+                .enter()
+                .map_err(|_| anyhow::anyhow!("Timeline shutting down"))?,
+        );
+        Ok(WalResidentTimeline::new(self.tli.clone(), guard))
     }
 
     /// Get a snapshot of the timeline state.
@@ -559,6 +576,11 @@ impl Manager {
 
         if removal_horizon_segno > self.last_removed_segno {
             // we need to remove WAL
+            let Ok(timeline_gate_guard) = self.tli.gate.enter() else {
+                tracing::info!("Timeline shutdown, not spawning WAL removal task");
+                return;
+            };
+
             let remover = match self.tli.read_shared_state().await.sk {
                 StateSK::Loaded(ref sk) => {
                     crate::wal_storage::Storage::remove_up_to(&sk.wal_store, removal_horizon_segno)
@@ -573,6 +595,8 @@ impl Manager {
 
             self.wal_removal_task = Some(tokio::spawn(
                 async move {
+                    let _timeline_gate_guard = timeline_gate_guard;
+
                     remover.await?;
                     Ok(removal_horizon_segno)
                 }
@@ -619,10 +643,15 @@ impl Manager {
             return;
         }
 
+        let Ok(resident) = self.wal_resident_timeline() else {
+            // Shutting down
+            return;
+        };
+
         // Get WalResidentTimeline and start partial backup task.
         let cancel = CancellationToken::new();
         let handle = tokio::spawn(wal_backup_partial::main_task(
-            self.wal_resident_timeline(),
+            resident,
             self.conf.clone(),
             self.global_rate_limiter.clone(),
             cancel.clone(),
@@ -664,7 +693,7 @@ impl Manager {
             self.partial_backup_task = None;
         }
 
-        let tli = self.wal_resident_timeline();
+        let tli = self.wal_resident_timeline()?;
         let mut partial_backup = PartialBackup::new(tli, self.conf.clone()).await;
         // Reset might fail e.g. when cfile is already reset but s3 removal
         // failed, so set manager state to None beforehand. In any case caller
@@ -688,7 +717,12 @@ impl Manager {
                 let guard = if self.is_offloaded {
                     Err(anyhow::anyhow!("timeline is offloaded, can't get a guard"))
                 } else {
-                    Ok(self.access_service.create_guard())
+                    match self.tli.gate.enter() {
+                        Ok(gate_guard) => Ok(self.access_service.create_guard(gate_guard)),
+                        Err(_) => Err(anyhow::anyhow!(
+                            "timeline is shutting down, can't get a guard"
+                        )),
+                    }
                 };
 
                 if tx.send(guard).is_err() {
@@ -699,7 +733,10 @@ impl Manager {
                 let result = if self.is_offloaded {
                     None
                 } else {
-                    Some(self.access_service.create_guard())
+                    match self.tli.gate.enter() {
+                        Ok(gate_guard) => Some(self.access_service.create_guard(gate_guard)),
+                        Err(_) => None,
+                    }
                 };
 
                 if tx.send(result).is_err() {

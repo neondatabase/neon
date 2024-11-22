@@ -17,7 +17,7 @@ use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
 use crate::auth::IpPattern;
 use crate::cache::project_info::ProjectInfoCacheImpl;
 use crate::cache::{Cached, TimedLru};
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::messages::{ControlPlaneErrorMessage, MetricsAuxInfo};
 use crate::intern::ProjectIdInt;
 use crate::types::{EndpointCacheKey, EndpointId};
@@ -75,7 +75,7 @@ pub(crate) struct NodeInfo {
 impl NodeInfo {
     pub(crate) async fn connect(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         timeout: Duration,
     ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
         self.config
@@ -116,26 +116,26 @@ pub(crate) trait ControlPlaneApi {
     /// We still have to mock the scram to avoid leaking information that user doesn't exist.
     async fn get_role_secret(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips_and_secret(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError>;
 
     async fn get_endpoint_jwks(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         endpoint: EndpointId,
     ) -> Result<Vec<AuthRule>, errors::GetEndpointJwksError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 }

@@ -3642,6 +3642,7 @@ impl Service {
                 match res {
                     Ok(ok) => Ok(ok),
                     Err(mgmt_api::Error::ApiError(StatusCode::CONFLICT, _)) => Ok(StatusCode::CONFLICT),
+                    Err(mgmt_api::Error::ApiError(StatusCode::SERVICE_UNAVAILABLE, msg)) => Err(ApiError::ResourceUnavailable(msg.into())),
                     Err(e) => {
                         Err(
                             ApiError::InternalServerError(anyhow::anyhow!(
@@ -6355,6 +6356,19 @@ impl Service {
 
         // Pick the biggest tenant to split first
         top_n.sort_by_key(|i| i.resident_size);
+
+        // Filter out tenants in a prohibiting scheduling mode
+        {
+            let locked = self.inner.read().unwrap();
+            top_n.retain(|i| {
+                if let Some(shard) = locked.tenants.get(&i.id) {
+                    matches!(shard.get_scheduling_policy(), ShardSchedulingPolicy::Active)
+                } else {
+                    false
+                }
+            });
+        }
+
         let Some(split_candidate) = top_n.into_iter().next() else {
             tracing::debug!("No split-elegible shards found");
             return;

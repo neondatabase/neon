@@ -1,20 +1,21 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::iter::once;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
-use std::sync::{Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use compute_api::spec::PgIdent;
+use compute_api::spec::{PgIdent, Role};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -31,15 +32,23 @@ use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec, ExtVersion};
 use utils::measured_stream::MeasuredReader;
 
 use nix::sys::signal::{kill, Signal};
-
 use remote_storage::{DownloadError, RemotePath};
+use tokio::spawn;
+use url::Url;
 
-use crate::checker::create_availability_check_data;
 use crate::installed_extensions::get_installed_extensions_sync;
 use crate::local_proxy;
-use crate::logger::inlinify;
 use crate::pg_helpers::*;
 use crate::spec::*;
+use crate::spec_apply::ApplySpecPhase::{
+    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateSuperUser,
+    DropInvalidDatabases, DropRoles, HandleNeonExtension, HandleOtherExtensions,
+    RenameAndDeleteDatabases, RenameRoles, RunInEachDatabase,
+};
+use crate::spec_apply::PerDatabasePhase::{
+    ChangeSchemaPerms, DeleteDBRoleReferences, HandleAnonExtension,
+};
+use crate::spec_apply::{apply_operations, MutableApplyContext, DB};
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
 use crate::{config, extension_server};
 
@@ -224,10 +233,7 @@ fn maybe_cgexec(cmd: &str) -> Command {
     }
 }
 
-/// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
-/// that we give to customers
-#[instrument(skip_all)]
-fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
+pub(crate) fn construct_superuser_query(spec: &ComputeSpec) -> String {
     let roles = spec
         .cluster
         .roles
@@ -296,11 +302,8 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
             $$;"#,
         roles_decl, database_decl,
     );
-    info!("Neon superuser created: {}", inlinify(&query));
-    client
-        .simple_query(&query)
-        .map_err(|e| anyhow::anyhow!(e).context(query))?;
-    Ok(())
+
+    query
 }
 
 impl ComputeNode {
@@ -813,21 +816,14 @@ impl ComputeNode {
         Ok(())
     }
 
-    /// Do initial configuration of the already started Postgres.
-    #[instrument(skip_all)]
-    pub fn apply_config(&self, compute_state: &ComputeState) -> Result<()> {
-        // If connection fails,
-        // it may be the old node with `zenith_admin` superuser.
-        //
-        // In this case we need to connect with old `zenith_admin` name
-        // and create new user. We cannot simply rename connected user,
-        // but we can create a new one and grant it all privileges.
-        let mut connstr = self.connstr.clone();
+    async fn get_maintenance_client(url: &Url) -> Result<tokio_postgres::Client> {
+        let mut connstr = url.clone();
+
         connstr
             .query_pairs_mut()
             .append_pair("application_name", "apply_config");
 
-        let mut client = match Client::connect(connstr.as_str(), NoTls) {
+        let (client, conn) = match tokio_postgres::connect(connstr.as_str(), NoTls).await {
             Err(e) => match e.code() {
                 Some(&SqlState::INVALID_PASSWORD)
                 | Some(&SqlState::INVALID_AUTHORIZATION_SPECIFICATION) => {
@@ -845,8 +841,8 @@ impl ComputeNode {
                     let mut client =
                         Client::connect(zenith_admin_connstr.as_str(), NoTls)
                             .context("broken cloud_admin credential: tried connecting with cloud_admin but could not authenticate, and zenith_admin does not work either")?;
-                    // Disable forwarding so that users don't get a cloud_admin role
 
+                    // Disable forwarding so that users don't get a cloud_admin role
                     let mut func = || {
                         client.simple_query("SET neon.forward_ddl = false")?;
                         client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
@@ -858,49 +854,309 @@ impl ComputeNode {
                     drop(client);
 
                     // reconnect with connstring with expected name
-                    Client::connect(connstr.as_str(), NoTls)?
+                    tokio_postgres::connect(connstr.as_str(), NoTls).await?
                 }
                 _ => return Err(e.into()),
             },
-            Ok(client) => client,
+            Ok((client, conn)) => (client, conn),
         };
 
-        // Disable DDL forwarding because control plane already knows about these roles/databases.
+        spawn(async move {
+            if let Err(e) = conn.await {
+                error!("maintenance client connection error: {}", e);
+            }
+        });
+
+        // Disable DDL forwarding because control plane already knows about the roles/databases
+        // we're about to modify.
         client
             .simple_query("SET neon.forward_ddl = false")
+            .await
             .context("apply_config SET neon.forward_ddl = false")?;
 
-        // Proceed with post-startup configuration. Note, that order of operations is important.
-        let spec = &compute_state.pspec.as_ref().expect("spec must be set").spec;
-        create_neon_superuser(spec, &mut client).context("apply_config create_neon_superuser")?;
-        cleanup_instance(&mut client).context("apply_config cleanup_instance")?;
-        handle_roles(spec, &mut client).context("apply_config handle_roles")?;
-        handle_databases(spec, &mut client).context("apply_config handle_databases")?;
-        handle_role_deletions(spec, connstr.as_str(), &mut client)
-            .context("apply_config handle_role_deletions")?;
-        handle_grants(
-            spec,
-            &mut client,
-            connstr.as_str(),
-            self.has_feature(ComputeFeature::AnonExtension),
-        )
-        .context("apply_config handle_grants")?;
-        handle_extensions(spec, &mut client).context("apply_config handle_extensions")?;
-        handle_extension_neon(&mut client).context("apply_config handle_extension_neon")?;
-        create_availability_check_data(&mut client)
-            .context("apply_config create_availability_check_data")?;
+        Ok(client)
+    }
 
-        // 'Close' connection
-        drop(client);
+    /// Apply the spec to the running PostgreSQL instance.
+    /// The caller can decide to run with multiple clients in parallel, or
+    /// single mode.  Either way, the commands executed will be the same, and
+    /// only commands run in different databases are parallelized.
+    #[instrument(skip_all)]
+    pub fn apply_spec_sql(
+        &self,
+        spec: Arc<ComputeSpec>,
+        url: Arc<Url>,
+        concurrency: usize,
+    ) -> Result<()> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
 
-        if let Some(ref local_proxy) = spec.local_proxy_config {
+        info!("Applying config with max {} concurrency", concurrency);
+        debug!("Config: {:?}", spec);
+
+        rt.block_on(async {
+            // Proceed with post-startup configuration. Note, that order of operations is important.
+            let client = Self::get_maintenance_client(&url).await?;
+            let spec = spec.clone();
+
+            let databases = get_existing_dbs_async(&client).await?;
+            let roles = get_existing_roles_async(&client)
+                .await?
+                .into_iter()
+                .map(|role| (role.name.clone(), role))
+                .collect::<HashMap<String, Role>>();
+
+            let jwks_roles = Arc::new(
+                spec.as_ref()
+                    .local_proxy_config
+                    .iter()
+                    .flat_map(|it| &it.jwks)
+                    .flatten()
+                    .flat_map(|setting| &setting.role_names)
+                    .cloned()
+                    .collect::<HashSet<_>>(),
+            );
+
+            let ctx = Arc::new(tokio::sync::RwLock::new(MutableApplyContext {
+                roles,
+                dbs: databases,
+            }));
+
+            for phase in [
+                CreateSuperUser,
+                DropInvalidDatabases,
+                RenameRoles,
+                CreateAndAlterRoles,
+                RenameAndDeleteDatabases,
+                CreateAndAlterDatabases,
+            ] {
+                debug!("Applying phase {:?}", &phase);
+                apply_operations(
+                    spec.clone(),
+                    ctx.clone(),
+                    jwks_roles.clone(),
+                    phase,
+                    || async { Ok(&client) },
+                )
+                .await?;
+            }
+
+            let concurrency_token = Arc::new(tokio::sync::Semaphore::new(concurrency));
+
+            let db_processes = spec
+                .cluster
+                .databases
+                .iter()
+                .map(|db| DB::new(db.clone()))
+                // include
+                .chain(once(DB::SystemDB))
+                .map(|db| {
+                    let spec = spec.clone();
+                    let ctx = ctx.clone();
+                    let jwks_roles = jwks_roles.clone();
+                    let mut url = url.as_ref().clone();
+                    let concurrency_token = concurrency_token.clone();
+                    let db = db.clone();
+
+                    debug!("Applying per-database phases for Database {:?}", &db);
+
+                    match &db {
+                        DB::SystemDB => {}
+                        DB::UserDB(db) => {
+                            url.set_path(db.name.as_str());
+                        }
+                    }
+
+                    let url = Arc::new(url);
+                    let fut = Self::apply_spec_sql_db(
+                        spec.clone(),
+                        url,
+                        ctx.clone(),
+                        jwks_roles.clone(),
+                        concurrency_token.clone(),
+                        db,
+                    );
+
+                    Ok(spawn(fut))
+                })
+                .collect::<Vec<Result<_, anyhow::Error>>>();
+
+            for process in db_processes.into_iter() {
+                let handle = process?;
+                handle.await??;
+            }
+
+            for phase in vec![
+                HandleOtherExtensions,
+                HandleNeonExtension,
+                CreateAvailabilityCheck,
+                DropRoles,
+            ] {
+                debug!("Applying phase {:?}", &phase);
+                apply_operations(
+                    spec.clone(),
+                    ctx.clone(),
+                    jwks_roles.clone(),
+                    phase,
+                    || async { Ok(&client) },
+                )
+                .await?;
+            }
+
+            Ok::<(), anyhow::Error>(())
+        })?;
+
+        Ok(())
+    }
+
+    /// Apply SQL migrations of the RunInEachDatabase phase.
+    ///
+    /// May opt to not connect to databases that don't have any scheduled
+    /// operations.  The function is concurrency-controlled with the provided
+    /// semaphore.  The caller has to make sure the semaphore isn't exhausted.
+    async fn apply_spec_sql_db(
+        spec: Arc<ComputeSpec>,
+        url: Arc<Url>,
+        ctx: Arc<tokio::sync::RwLock<MutableApplyContext>>,
+        jwks_roles: Arc<HashSet<String>>,
+        concurrency_token: Arc<tokio::sync::Semaphore>,
+        db: DB,
+    ) -> Result<()> {
+        let _permit = concurrency_token.acquire().await?;
+
+        let mut client_conn = None;
+
+        for subphase in [
+            DeleteDBRoleReferences,
+            ChangeSchemaPerms,
+            HandleAnonExtension,
+        ] {
+            apply_operations(
+                spec.clone(),
+                ctx.clone(),
+                jwks_roles.clone(),
+                RunInEachDatabase {
+                    db: db.clone(),
+                    subphase,
+                },
+                // Only connect if apply_operation actually wants a connection.
+                // It's quite possible this database doesn't need any queries,
+                // so by not connecting we save time and effort connecting to
+                // that database.
+                || async {
+                    if client_conn.is_none() {
+                        let db_client = Self::get_maintenance_client(&url).await?;
+                        client_conn.replace(db_client);
+                    }
+                    let client = client_conn.as_ref().unwrap();
+                    Ok(client)
+                },
+            )
+            .await?;
+        }
+
+        drop(client_conn);
+
+        Ok::<(), anyhow::Error>(())
+    }
+
+    /// Do initial configuration of the already started Postgres.
+    #[instrument(skip_all)]
+    pub fn apply_config(&self, compute_state: &ComputeState) -> Result<()> {
+        // If connection fails,
+        // it may be the old node with `zenith_admin` superuser.
+        //
+        // In this case we need to connect with old `zenith_admin` name
+        // and create new user. We cannot simply rename connected user,
+        // but we can create a new one and grant it all privileges.
+        let mut url = self.connstr.clone();
+        url.query_pairs_mut()
+            .append_pair("application_name", "apply_config");
+
+        let url = Arc::new(url);
+        let spec = Arc::new(
+            compute_state
+                .pspec
+                .as_ref()
+                .expect("spec must be set")
+                .spec
+                .clone(),
+        );
+
+        // Choose how many concurrent connections to use for applying the spec changes.
+        // If the cluster is not currently Running we don't have to deal with user connections,
+        // and can thus use all `max_connections` connection slots. However, that's generally not
+        // very efficient, so we generally still limit it to a smaller number.
+        let max_concurrent_connections = if compute_state.status != ComputeStatus::Running {
+            // If the settings contain 'max_connections', use that as template
+            if let Some(config) = spec.cluster.settings.find("max_connections") {
+                config.parse::<usize>().ok()
+            } else {
+                // Otherwise, try to find the setting in the postgresql_conf string
+                spec.cluster
+                    .postgresql_conf
+                    .iter()
+                    .flat_map(|conf| conf.split("\n"))
+                    .filter_map(|line| {
+                        if !line.contains("max_connections") {
+                            return None;
+                        }
+
+                        let (key, value) = line.split_once("=")?;
+                        let key = key
+                            .trim_start_matches(char::is_whitespace)
+                            .trim_end_matches(char::is_whitespace);
+
+                        let value = value
+                            .trim_start_matches(char::is_whitespace)
+                            .trim_end_matches(char::is_whitespace);
+
+                        if key != "max_connections" {
+                            return None;
+                        }
+
+                        value.parse::<usize>().ok()
+                    })
+                    .next()
+            }
+            // If max_connections is present, use at most 1/3rd of that.
+            // When max_connections is lower than 30, try to use at least 10 connections, but
+            // never more than max_connections.
+            .map(|limit| match limit {
+                0..10 => limit,
+                10..30 => 10,
+                30.. => limit / 3,
+            })
+            // If we didn't find max_connections, default to 10 concurrent connections.
+            .unwrap_or(10)
+        } else {
+            // state == Running
+            // Because the cluster is already in the Running state, we should assume users are
+            // already connected to the cluster, and high concurrency could negatively
+            // impact user connectivity. Therefore, we can limit concurrency to the number of
+            // reserved superuser connections, which users wouldn't be able to use anyway.
+            spec.cluster
+                .settings
+                .find("superuser_reserved_connections")
+                .iter()
+                .filter_map(|val| val.parse::<usize>().ok())
+                .map(|val| if val > 1 { val - 1 } else { 1 })
+                .last()
+                .unwrap_or(3)
+        };
+
+        // Merge-apply spec & changes to PostgreSQL state.
+        self.apply_spec_sql(spec.clone(), url.clone(), max_concurrent_connections)?;
+
+        if let Some(ref local_proxy) = &spec.clone().local_proxy_config {
             info!("configuring local_proxy");
             local_proxy::configure(local_proxy).context("apply_config local_proxy")?;
         }
 
         // Run migrations separately to not hold up cold starts
         thread::spawn(move || {
-            let mut connstr = connstr.clone();
+            let mut connstr = url.as_ref().clone();
             connstr
                 .query_pairs_mut()
                 .append_pair("application_name", "migrations");
@@ -908,7 +1164,8 @@ impl ComputeNode {
             let mut client = Client::connect(connstr.as_str(), NoTls)?;
             handle_migrations(&mut client).context("apply_config handle_migrations")
         });
-        Ok(())
+
+        Ok::<(), anyhow::Error>(())
     }
 
     // Wrapped this around `pg_ctl reload`, but right now we don't use
@@ -971,32 +1228,16 @@ impl ComputeNode {
         config::with_compute_ctl_tmp_override(pgdata_path, "neon.max_cluster_size=-1", || {
             self.pg_reload_conf()?;
 
-            let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
-
-            // Proceed with post-startup configuration. Note, that order of operations is important.
-            // Disable DDL forwarding because control plane already knows about these roles/databases.
             if spec.mode == ComputeMode::Primary {
-                client.simple_query("SET neon.forward_ddl = false")?;
-                cleanup_instance(&mut client)?;
-                handle_roles(&spec, &mut client)?;
-                handle_databases(&spec, &mut client)?;
-                handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
-                handle_grants(
-                    &spec,
-                    &mut client,
-                    self.connstr.as_str(),
-                    self.has_feature(ComputeFeature::AnonExtension),
-                )?;
-                handle_extensions(&spec, &mut client)?;
-                handle_extension_neon(&mut client)?;
-                // We can skip handle_migrations here because a new migration can only appear
-                // if we have a new version of the compute_ctl binary, which can only happen
-                // if compute got restarted, in which case we'll end up inside of apply_config
-                // instead of reconfigure.
-            }
+                let mut url = self.connstr.clone();
+                url.query_pairs_mut()
+                    .append_pair("application_name", "apply_config");
+                let url = Arc::new(url);
 
-            // 'Close' connection
-            drop(client);
+                let spec = Arc::new(spec.clone());
+
+                self.apply_spec_sql(spec, url, 1)?;
+            }
 
             Ok(())
         })?;

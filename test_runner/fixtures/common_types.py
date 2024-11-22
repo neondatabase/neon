@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from functools import total_ordering
 from typing import TYPE_CHECKING, TypeVar
 
 from typing_extensions import override
 
 if TYPE_CHECKING:
-    from typing import Any, Union
+    from typing import Any
 
     T = TypeVar("T", bound="Id")
 
@@ -24,7 +24,7 @@ class Lsn:
     representation is like "1/0123abcd". See also pg_lsn datatype in Postgres
     """
 
-    def __init__(self, x: Union[int, str]):
+    def __init__(self, x: int | str):
         if isinstance(x, int):
             self.lsn_int = x
         else:
@@ -67,7 +67,7 @@ class Lsn:
             return NotImplemented
         return self.lsn_int - other.lsn_int
 
-    def __add__(self, other: Union[int, Lsn]) -> Lsn:
+    def __add__(self, other: int | Lsn) -> Lsn:
         if isinstance(other, int):
             return Lsn(self.lsn_int + other)
         elif isinstance(other, Lsn):
@@ -209,10 +209,6 @@ class ShardIndex:
         )
 
 
-# Workaround for compat with python 3.9, which does not have `typing.Self`
-TTenantShardId = TypeVar("TTenantShardId", bound="TenantShardId")
-
-
 class TenantShardId:
     def __init__(self, tenant_id: TenantId, shard_number: int, shard_count: int):
         self.tenant_id = tenant_id
@@ -221,7 +217,7 @@ class TenantShardId:
         assert self.shard_number < self.shard_count or self.shard_count == 0
 
     @classmethod
-    def parse(cls: type[TTenantShardId], input: str) -> TTenantShardId:
+    def parse(cls: type[TenantShardId], input: str) -> TenantShardId:
         if len(input) == 32:
             return cls(
                 tenant_id=TenantId(input),
@@ -272,7 +268,6 @@ class TenantShardId:
         return hash(self._tuple())
 
 
-# TODO: Replace with `StrEnum` when we upgrade to python 3.11
-class TimelineArchivalState(str, Enum):
+class TimelineArchivalState(StrEnum):
     ARCHIVED = "Archived"
     UNARCHIVED = "Unarchived"

@@ -1,5 +1,5 @@
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::info;
+use tracing::debug;
 use utils::measured_stream::MeasuredStream;
 
 use super::copy_bidirectional::ErrorSource;
@@ -45,7 +45,7 @@ pub(crate) async fn proxy_pass(
     );
 
     // Starting from here we only proxy the client's traffic.
-    info!("performing the proxy pass...");
+    debug!("performing the proxy pass...");
     let _ = crate::proxy::copy_bidirectional::copy_bidirectional_client_compute(
         &mut client,
         &mut compute,

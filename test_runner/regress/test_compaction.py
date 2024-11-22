@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import enum
 import json
 import time
-from typing import TYPE_CHECKING
+from enum import StrEnum
 
 import pytest
 from fixtures.log_helper import log
@@ -14,10 +13,6 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.utils import skip_in_debug_build, wait_until
 from fixtures.workload import Workload
-
-if TYPE_CHECKING:
-    from typing import Optional
-
 
 AGGRESIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.
@@ -116,16 +111,64 @@ page_cache_size=10
     assert vectored_average < 8
 
 
+def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start(initial_tenant_conf=AGGRESIVE_COMPACTION_TENANT_CONF)
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    row_count = 1000
+    churn_rounds = 10
+
+    ps_http = env.pageserver.http_client()
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init(env.pageserver.id)
+
+    log.info("Writing initial data ...")
+    workload.write_rows(row_count, env.pageserver.id)
+
+    for i in range(1, churn_rounds + 1):
+        if i % 10 == 0:
+            log.info(f"Running churn round {i}/{churn_rounds} ...")
+
+        workload.churn_rows(row_count, env.pageserver.id)
+        # Force L0 compaction to ensure the number of layers is within bounds, so that gc-compaction can run.
+        ps_http.timeline_compact(tenant_id, timeline_id, force_l0_compaction=True)
+        assert ps_http.perf_info(tenant_id, timeline_id)[0]["num_of_l0"] <= 1
+        ps_http.timeline_compact(
+            tenant_id,
+            timeline_id,
+            enhanced_gc_bottom_most_compaction=True,
+            body={
+                "start": "000000000000000000000000000000000000",
+                "end": "030000000000000000000000000000000000",
+            },
+        )
+
+    log.info("Validating at workload end ...")
+    workload.validate(env.pageserver.id)
+
+
 # Stripe sizes in number of pages.
 TINY_STRIPES = 16
 LARGE_STRIPES = 32768
 
 
 @pytest.mark.parametrize(
-    "shard_count,stripe_size", [(None, None), (4, TINY_STRIPES), (4, LARGE_STRIPES)]
+    "shard_count,stripe_size,gc_compaction",
+    [
+        (None, None, False),
+        (4, TINY_STRIPES, False),
+        (4, LARGE_STRIPES, False),
+        (4, LARGE_STRIPES, True),
+    ],
 )
 def test_sharding_compaction(
-    neon_env_builder: NeonEnvBuilder, stripe_size: int, shard_count: Optional[int]
+    neon_env_builder: NeonEnvBuilder,
+    stripe_size: int,
+    shard_count: int | None,
+    gc_compaction: bool,
 ):
     """
     Use small stripes, small layers, and small compaction thresholds to exercise how compaction
@@ -217,8 +260,19 @@ def test_sharding_compaction(
     # Assert that everything is still readable
     workload.validate()
 
+    if gc_compaction:
+        # trigger gc compaction to get more coverage for that, piggyback on the existing workload
+        for shard in env.storage_controller.locate(tenant_id):
+            pageserver = env.get_pageserver(shard["node_id"])
+            tenant_shard_id = shard["shard_id"]
+            pageserver.http_client().timeline_compact(
+                tenant_shard_id,
+                timeline_id,
+                enhanced_gc_bottom_most_compaction=True,
+            )
 
-class CompactionAlgorithm(str, enum.Enum):
+
+class CompactionAlgorithm(StrEnum):
     LEGACY = "legacy"
     TIERED = "tiered"
 

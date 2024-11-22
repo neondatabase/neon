@@ -9,6 +9,7 @@ import re
 import timeit
 from contextlib import contextmanager
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,8 +25,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonPageserver
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
-    from typing import Callable, Optional
+    from collections.abc import Callable, Iterator, Mapping
 
 
 """
@@ -61,7 +61,7 @@ class PgBenchRunResult:
     number_of_threads: int
     number_of_transactions_actually_processed: int
     latency_average: float
-    latency_stddev: Optional[float]
+    latency_stddev: float | None
     tps: float
     run_duration: float
     run_start_timestamp: int
@@ -171,14 +171,14 @@ _PGBENCH_INIT_EXTRACTORS: Mapping[str, re.Pattern[str]] = {
 
 @dataclasses.dataclass
 class PgBenchInitResult:
-    total: Optional[float]
-    drop_tables: Optional[float]
-    create_tables: Optional[float]
-    client_side_generate: Optional[float]
-    server_side_generate: Optional[float]
-    vacuum: Optional[float]
-    primary_keys: Optional[float]
-    foreign_keys: Optional[float]
+    total: float | None
+    drop_tables: float | None
+    create_tables: float | None
+    client_side_generate: float | None
+    server_side_generate: float | None
+    vacuum: float | None
+    primary_keys: float | None
+    foreign_keys: float | None
     duration: float
     start_timestamp: int
     end_timestamp: int
@@ -196,7 +196,7 @@ class PgBenchInitResult:
 
         last_line = stderr.splitlines()[-1]
 
-        timings: dict[str, Optional[float]] = {}
+        timings: dict[str, float | None] = {}
         last_line_items = re.split(r"\(|\)|,", last_line)
         for item in last_line_items:
             for key, regex in _PGBENCH_INIT_EXTRACTORS.items():
@@ -227,7 +227,7 @@ class PgBenchInitResult:
 
 
 @enum.unique
-class MetricReport(str, enum.Enum):  # str is a hack to make it json serializable
+class MetricReport(StrEnum):  # str is a hack to make it json serializable
     # this means that this is a constant test parameter
     # like number of transactions, or number of clients
     TEST_PARAM = "test_param"
@@ -256,12 +256,16 @@ class NeonBenchmarker:
         metric_value: float,
         unit: str,
         report: MetricReport,
+        # use this to associate additional key/value pairs in json format for associated Neon object IDs like project ID with the metric
+        labels: dict[str, str] | None = None,
     ):
         """
         Record a benchmark result.
         """
         # just to namespace the value
         name = f"{self.PROPERTY_PREFIX}_{metric_name}"
+        if labels is None:
+            labels = {}
         self.property_recorder(
             name,
             {
@@ -269,6 +273,7 @@ class NeonBenchmarker:
                 "value": metric_value,
                 "unit": unit,
                 "report": report,
+                "labels": labels,
             },
         )
 
@@ -406,7 +411,7 @@ class NeonBenchmarker:
         self,
         pageserver: NeonPageserver,
         metric_name: str,
-        label_filters: Optional[dict[str, str]] = None,
+        label_filters: dict[str, str] | None = None,
     ) -> int:
         """Fetch the value of given int counter from pageserver metrics."""
         all_metrics = pageserver.http_client().get_metrics()

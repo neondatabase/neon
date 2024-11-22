@@ -8,10 +8,10 @@ import subprocess
 import tarfile
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlencode
 
 import allure
@@ -29,7 +29,7 @@ from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from typing import IO, Optional
+    from typing import IO
 
     from fixtures.common_types import TimelineId
     from fixtures.neon_fixtures import PgBin
@@ -66,10 +66,10 @@ def subprocess_capture(
     echo_stderr: bool = False,
     echo_stdout: bool = False,
     capture_stdout: bool = False,
-    timeout: Optional[float] = None,
+    timeout: float | None = None,
     with_command_header: bool = True,
     **popen_kwargs: Any,
-) -> tuple[str, Optional[str], int]:
+) -> tuple[str, str | None, int]:
     """Run a process and bifurcate its output to files and the `log` logger
 
     stderr and stdout are always captured in files.  They are also optionally
@@ -495,8 +495,14 @@ def scan_log_for_errors(input: Iterable[str], allowed_errors: list[str]) -> list
 
             # It's an ERROR or WARN. Is it in the allow-list?
             for a in allowed_errors:
-                if re.match(a, line):
-                    break
+                try:
+                    if re.match(a, line):
+                        break
+                # We can switch `re.error` with `re.PatternError` after 3.13
+                # https://docs.python.org/3/library/re.html#re.PatternError
+                except re.error:
+                    log.error(f"Invalid regex: '{a}'")
+                    raise
             else:
                 errors.append((lineno, line))
     return errors
@@ -530,7 +536,7 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str
     """
     started_at = time.time()
 
-    def hash_extracted(reader: Optional[IO[bytes]]) -> bytes:
+    def hash_extracted(reader: IO[bytes] | None) -> bytes:
         assert reader is not None
         digest = sha256(usedforsecurity=False)
         while True:
@@ -557,7 +563,7 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str
 
     mismatching: set[str] = set()
 
-    for left_tuple, right_tuple in zip(left_list, right_list):
+    for left_tuple, right_tuple in zip(left_list, right_list, strict=False):
         left_path, left_hash = left_tuple
         right_path, right_hash = right_tuple
         assert (
@@ -589,7 +595,7 @@ class PropagatingThread(threading.Thread):
             self.exc = e
 
     @override
-    def join(self, timeout: Optional[float] = None) -> Any:
+    def join(self, timeout: float | None = None) -> Any:
         super().join(timeout)
         if self.exc:
             raise self.exc

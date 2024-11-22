@@ -64,7 +64,7 @@ pub struct HttpConfig {
     pub pool_options: GlobalConnPoolOptions,
     pub cancel_set: CancelSet,
     pub client_conn_threshold: u64,
-    pub max_request_size_bytes: u64,
+    pub max_request_size_bytes: usize,
     pub max_response_size_bytes: usize,
 }
 
