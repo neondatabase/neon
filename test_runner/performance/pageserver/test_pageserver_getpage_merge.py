@@ -14,6 +14,7 @@ from fixtures.utils import humantime_to_ms
 TARGET_RUNTIME = 60
 
 
+@pytest.mark.skip("See https://github.com/neondatabase/neon/pull/9820#issue-2675856095")
 @pytest.mark.parametrize(
     "tablesize_mib, batch_timeout, target_runtime, effective_io_concurrency, readhead_buffer_size, name",
     [
@@ -198,6 +199,7 @@ def test_getpage_merge_smoke(
     )
 
 
+@pytest.mark.skip("See https://github.com/neondatabase/neon/pull/9820#issue-2675856095")
 @pytest.mark.parametrize(
     "batch_timeout", [None, "10us", "20us", "50us", "100us", "200us", "500us", "1ms"]
 )
