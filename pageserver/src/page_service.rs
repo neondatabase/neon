@@ -692,7 +692,6 @@ impl PageServerHandler {
                 rel,
                 blkno,
             }) => {
-                // shard_id is filled in by the handler
                 let span = tracing::info_span!(parent: parent_span, "handle_get_page_at_lsn_request_batched", req_lsn = %request_lsn);
 
                 macro_rules! respond_error {

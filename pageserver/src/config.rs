@@ -183,8 +183,6 @@ pub struct PageServerConf {
     /// Optionally disable disk syncs (unsafe!)
     pub no_sync: bool,
 
-    /// Maximum amount of time for which a get page request request
-    /// might be held up for request merging.
     pub page_service_pipelining: Option<pageserver_api::config::PageServicePipeliningConfig>,
 }
 
