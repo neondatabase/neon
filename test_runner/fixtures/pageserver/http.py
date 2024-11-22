@@ -60,8 +60,8 @@ class AwsS3:
 
 @dataclass
 class ImportPgdataLocation:
-    LocalFs: Optional[LocalFs] = None
-    AwsS3: Optional[AwsS3] = None
+    LocalFs: None | LocalFs = None
+    AwsS3: None | AwsS3 = None
 
 
 @dataclass
@@ -72,9 +72,9 @@ class TimelineCreateRequestModeImportPgdata:
 
 @dataclass
 class TimelineCreateRequestMode:
-    Branch: Optional[dict[str, Any]] = None
-    Bootstrap: Optional[dict[str, Any]] = None
-    ImportPgdata: Optional[TimelineCreateRequestModeImportPgdata] = None
+    Branch: None | dict[str, Any] = None
+    Bootstrap: None | dict[str, Any] = None
+    ImportPgdata: None | TimelineCreateRequestModeImportPgdata = None
 
 
 @dataclass
@@ -85,7 +85,7 @@ class TimelineCreateRequest:
     def to_json(self) -> str:
         class EnhancedJSONEncoder(json.JSONEncoder):
             def default(self, o):
-                if dataclasses.is_dataclass(o):
+                if dataclasses.is_dataclass(o) and not isinstance(o, type):
                     return dataclasses.asdict(o)
                 elif isinstance(o, Id):
                     return o.id.hex()

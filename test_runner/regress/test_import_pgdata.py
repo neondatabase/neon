@@ -2,7 +2,6 @@ import json
 import re
 import time
 from enum import Enum
-from typing import Optional
 
 import psycopg2
 import psycopg2.errors
@@ -40,7 +39,7 @@ smoke_params = [
 def test_pgdata_import_smoke(
     vanilla_pg: VanillaPostgres,
     neon_env_builder: NeonEnvBuilder,
-    shard_count: Optional[int],
+    shard_count: int | None,
     stripe_size: int,
     rel_block_size: RelBlockSize,
     make_httpserver: HTTPServer,
