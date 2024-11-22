@@ -951,7 +951,7 @@ Retry:
 		Assert(slot == NULL);
 
 		/* There should be no buffer overflow */
-		Assert(MyPState->ring_last + readahead_buffer_size <= MyPState->ring_unused);
+		Assert(MyPState->ring_last + readahead_buffer_size >= MyPState->ring_unused);
 
 		/*
 		 * If the prefetch queue is full, we need to make room by clearing the
