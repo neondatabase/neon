@@ -132,12 +132,13 @@ struct JwkSet<'a> {
     keys: Vec<&'a RawValue>,
 }
 
-/// Given an [`AuthRule`] containing a jwks_url, fetch the JWKS and parse out all the signing JWKs.
+/// Given a jwks_url, fetch the JWKS and parse out all the signing JWKs.
+/// Returns `None` and log a warning if there are any errors.
 async fn fetch_jwks(
     client: &reqwest_middleware::ClientWithMiddleware,
-    rule: AuthRule,
-) -> Option<(String, KeySet)> {
-    let req = client.get(rule.jwks_url.clone());
+    jwks_url: url::Url,
+) -> Option<jose_jwk::JwkSet> {
+    let req = client.get(jwks_url.clone());
     // TODO(conrad): eventually switch to using reqwest_middleware/`new_client_with_timeout`.
     // TODO(conrad): We need to filter out URLs that point to local resources. Public internet only.
     let resp = req.send().await.and_then(|r| {
@@ -150,7 +151,7 @@ async fn fetch_jwks(
         // TODO: should we re-insert JWKs if we want to keep this JWKs URL?
         // I expect these failures would be quite sparse.
         Err(e) => {
-            tracing::warn!(url=?rule.jwks_url, error=?e, "could not fetch JWKs");
+            tracing::warn!(url=?jwks_url, error=?e, "could not fetch JWKs");
             return None;
         }
     };
@@ -160,7 +161,7 @@ async fn fetch_jwks(
     let bytes = match read_body_with_limit(resp.into_body(), MAX_JWK_BODY_SIZE).await {
         Ok(bytes) => bytes,
         Err(e) => {
-            tracing::warn!(url=?rule.jwks_url, error=?e, "could not decode JWKs");
+            tracing::warn!(url=?jwks_url, error=?e, "could not decode JWKs");
             return None;
         }
     };
@@ -168,7 +169,7 @@ async fn fetch_jwks(
     let jwks = match serde_json::from_slice::<JwkSet>(&bytes) {
         Ok(jwks) => jwks,
         Err(e) => {
-            tracing::warn!(url=?rule.jwks_url, error=?e, "could not decode JWKs");
+            tracing::warn!(url=?jwks_url, error=?e, "could not decode JWKs");
             return None;
         }
     };
@@ -185,7 +186,7 @@ async fn fetch_jwks(
         let key = match serde_json::from_str::<jose_jwk::Jwk>(key.get()) {
             Ok(key) => key,
             Err(e) => {
-                tracing::debug!(url=?rule.jwks_url, failed=?e, "could not decode JWK");
+                tracing::debug!(url=?jwks_url, failed=?e, "could not decode JWK");
                 failed += 1;
                 continue;
             }
@@ -208,22 +209,15 @@ async fn fetch_jwks(
     keys.shrink_to_fit();
 
     if failed > 0 {
-        tracing::warn!(url=?rule.jwks_url, failed, "could not decode JWKs");
+        tracing::warn!(url=?jwks_url, failed, "could not decode JWKs");
     }
 
     if keys.is_empty() {
-        tracing::warn!(url=?rule.jwks_url, "no valid JWKs found inside the response body");
+        tracing::warn!(url=?jwks_url, "no valid JWKs found inside the response body");
         return None;
     }
 
-    Some((
-        rule.id,
-        KeySet {
-            jwks: jose_jwk::JwkSet { keys },
-            audience: rule.audience,
-            role_names: rule.role_names,
-        },
-    ))
+    Some(jose_jwk::JwkSet { keys })
 }
 
 impl JwkCacheEntryLock {
@@ -260,8 +254,15 @@ impl JwkCacheEntryLock {
         // TODO(conrad): run concurrently
         // TODO(conrad): strip the JWKs urls (should be checked by cplane as well - cloud#16284)
         for rule in rules {
-            if let Some((id, key_set)) = fetch_jwks(client, rule).await {
-                key_sets.insert(id, key_set);
+            if let Some(jwks) = fetch_jwks(client, rule.jwks_url).await {
+                key_sets.insert(
+                    rule.id,
+                    KeySet {
+                        jwks,
+                        audience: rule.audience,
+                        role_names: rule.role_names,
+                    },
+                );
             }
         }
 
