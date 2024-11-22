@@ -38,6 +38,9 @@ pub struct IndexPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<NaiveDateTime>,
 
+    /// This field supports import-from-pgdata ("fast imports" platform feature).
+    /// We don't currently use fast imports, so, this field is None for all production timelines.
+    /// See <https://github.com/neondatabase/neon/pull/9218> for more information.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub import_pgdata: Option<import_pgdata::index_part_format::Root>,
