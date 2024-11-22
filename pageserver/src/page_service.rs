@@ -628,10 +628,6 @@ impl PageServerHandler {
             msg = pgb.read_message() => { msg }
         };
 
-        // Rest of this loop body is trying to batch `msg` into `batch`.
-        // If we can add msg to batch we continue into the next loop iteration.
-        // If we can't add msg to batch batch, we carry `msg` over to the next call.
-
         let copy_data_bytes = match msg? {
             Some(FeMessage::CopyData(bytes)) => bytes,
             Some(FeMessage::Terminate) => {
@@ -754,20 +750,20 @@ impl PageServerHandler {
         Ok(Some(Box::new(batched_msg)))
     }
 
-    /// Post-condition: `maybe_carry` is Some()
+    /// Post-condition: `batch` is Some()
     #[instrument(skip_all, level = tracing::Level::TRACE)]
     #[allow(clippy::boxed_local)]
     fn pagestream_do_batch(
         max_batch_size: NonZeroUsize,
-        maybe_carry: &mut Option<Box<BatchedFeMessage>>,
+        batch: &mut Option<Box<BatchedFeMessage>>,
         this_msg: Box<BatchedFeMessage>,
     ) -> Option<Box<BatchedFeMessage>> {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
-        match (maybe_carry.as_deref_mut(), *this_msg) {
+        match (batch.as_deref_mut(), *this_msg) {
             // nothing batched yet
             (None, this_msg) => {
-                *maybe_carry = Some(Box::new(this_msg));
+                *batch = Some(Box::new(this_msg));
                 None
             }
             // something batched already, let's see if we can add this message to the batch
@@ -1173,8 +1169,8 @@ impl PageServerHandler {
                         batch_tx.send_modify(|pending_batch| {
                             let mut guard = pending_batch.lock().unwrap();
                             match &mut *guard {
-                                BatchState::Building(carry) => {
-                                    *guard = BatchState::UpstreamDead(carry.take());
+                                BatchState::Building(batch) => {
+                                    *guard = BatchState::UpstreamDead(batch.take());
                                 }
                                 BatchState::UpstreamDead(_) => panic!("twice"),
                             }
