@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import pytest
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
@@ -13,7 +11,7 @@ from fixtures.utils import query_scalar
 # Test on-demand download of the pg_xact SLRUs
 #
 @pytest.mark.parametrize("shard_count", [None, 4])
-def test_ondemand_download_pg_xact(neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]):
+def test_ondemand_download_pg_xact(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
 
@@ -79,7 +77,7 @@ def test_ondemand_download_pg_xact(neon_env_builder: NeonEnvBuilder, shard_count
 
 
 @pytest.mark.parametrize("shard_count", [None, 4])
-def test_ondemand_download_replica(neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]):
+def test_ondemand_download_replica(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
 

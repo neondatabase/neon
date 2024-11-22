@@ -8,7 +8,7 @@ use tracing::{info, info_span};
 use super::ComputeCredentialKeys;
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::{ReportableError, UserFacingError};
 use crate::proxy::connect_compute::ComputeConnectBackend;
@@ -71,7 +71,7 @@ impl ConsoleRedirectBackend {
 
     pub(crate) async fn authenticate(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         auth_config: &'static AuthenticationConfig,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     ) -> auth::Result<ConsoleRedirectNodeInfo> {
@@ -87,7 +87,7 @@ pub struct ConsoleRedirectNodeInfo(pub(super) NodeInfo);
 impl ComputeConnectBackend for ConsoleRedirectNodeInfo {
     async fn wake_compute(
         &self,
-        _ctx: &RequestMonitoring,
+        _ctx: &RequestContext,
     ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         Ok(Cached::new_uncached(self.0.clone()))
     }
@@ -98,7 +98,7 @@ impl ComputeConnectBackend for ConsoleRedirectNodeInfo {
 }
 
 async fn authenticate(
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     auth_config: &'static AuthenticationConfig,
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,

@@ -20,7 +20,6 @@ from fixtures.pg_version import PgVersion
 if TYPE_CHECKING:
     from typing import (
         Any,
-        Optional,
         TypeVar,
         cast,
     )
@@ -36,7 +35,7 @@ class AbstractNeonCli:
     Do not use directly, use specific subclasses instead.
     """
 
-    def __init__(self, extra_env: Optional[dict[str, str]], binpath: Path):
+    def __init__(self, extra_env: dict[str, str] | None, binpath: Path):
         self.extra_env = extra_env
         self.binpath = binpath
 
@@ -45,7 +44,7 @@ class AbstractNeonCli:
     def raw_cli(
         self,
         arguments: list[str],
-        extra_env_vars: Optional[dict[str, str]] = None,
+        extra_env_vars: dict[str, str] | None = None,
         check_return_code=True,
         timeout=None,
     ) -> subprocess.CompletedProcess[str]:
@@ -173,7 +172,7 @@ class NeonLocalCli(AbstractNeonCli):
 
     def __init__(
         self,
-        extra_env: Optional[dict[str, str]],
+        extra_env: dict[str, str] | None,
         binpath: Path,
         repo_dir: Path,
         pg_distrib_dir: Path,
@@ -195,10 +194,10 @@ class NeonLocalCli(AbstractNeonCli):
         tenant_id: TenantId,
         timeline_id: TimelineId,
         pg_version: PgVersion,
-        conf: Optional[dict[str, Any]] = None,
-        shard_count: Optional[int] = None,
-        shard_stripe_size: Optional[int] = None,
-        placement_policy: Optional[str] = None,
+        conf: dict[str, Any] | None = None,
+        shard_count: int | None = None,
+        shard_stripe_size: int | None = None,
+        placement_policy: str | None = None,
         set_default: bool = False,
     ):
         """
@@ -302,8 +301,8 @@ class NeonLocalCli(AbstractNeonCli):
         tenant_id: TenantId,
         timeline_id: TimelineId,
         new_branch_name,
-        ancestor_branch_name: Optional[str] = None,
-        ancestor_start_lsn: Optional[Lsn] = None,
+        ancestor_branch_name: str | None = None,
+        ancestor_start_lsn: Lsn | None = None,
     ):
         cmd = [
             "timeline",
@@ -331,8 +330,8 @@ class NeonLocalCli(AbstractNeonCli):
         base_lsn: Lsn,
         base_tarfile: Path,
         pg_version: PgVersion,
-        end_lsn: Optional[Lsn] = None,
-        wal_tarfile: Optional[Path] = None,
+        end_lsn: Lsn | None = None,
+        wal_tarfile: Path | None = None,
     ):
         cmd = [
             "timeline",
@@ -380,7 +379,7 @@ class NeonLocalCli(AbstractNeonCli):
     def init(
         self,
         init_config: dict[str, Any],
-        force: Optional[str] = None,
+        force: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.NamedTemporaryFile(mode="w+") as init_config_tmpfile:
             init_config_tmpfile.write(toml.dumps(init_config))
@@ -400,9 +399,9 @@ class NeonLocalCli(AbstractNeonCli):
 
     def storage_controller_start(
         self,
-        timeout_in_seconds: Optional[int] = None,
-        instance_id: Optional[int] = None,
-        base_port: Optional[int] = None,
+        timeout_in_seconds: int | None = None,
+        instance_id: int | None = None,
+        base_port: int | None = None,
     ):
         cmd = ["storage_controller", "start"]
         if timeout_in_seconds is not None:
@@ -413,7 +412,7 @@ class NeonLocalCli(AbstractNeonCli):
             cmd.append(f"--base-port={base_port}")
         return self.raw_cli(cmd)
 
-    def storage_controller_stop(self, immediate: bool, instance_id: Optional[int] = None):
+    def storage_controller_stop(self, immediate: bool, instance_id: int | None = None):
         cmd = ["storage_controller", "stop"]
         if immediate:
             cmd.extend(["-m", "immediate"])
@@ -424,8 +423,8 @@ class NeonLocalCli(AbstractNeonCli):
     def pageserver_start(
         self,
         id: int,
-        extra_env_vars: Optional[dict[str, str]] = None,
-        timeout_in_seconds: Optional[int] = None,
+        extra_env_vars: dict[str, str] | None = None,
+        timeout_in_seconds: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
         start_args = ["pageserver", "start", f"--id={id}"]
         if timeout_in_seconds is not None:
@@ -442,9 +441,9 @@ class NeonLocalCli(AbstractNeonCli):
     def safekeeper_start(
         self,
         id: int,
-        extra_opts: Optional[list[str]] = None,
-        extra_env_vars: Optional[dict[str, str]] = None,
-        timeout_in_seconds: Optional[int] = None,
+        extra_opts: list[str] | None = None,
+        extra_env_vars: dict[str, str] | None = None,
+        timeout_in_seconds: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
         if extra_opts is not None:
             extra_opts = [f"-e={opt}" for opt in extra_opts]
@@ -457,7 +456,7 @@ class NeonLocalCli(AbstractNeonCli):
         )
 
     def safekeeper_stop(
-        self, id: Optional[int] = None, immediate=False
+        self, id: int | None = None, immediate=False
     ) -> subprocess.CompletedProcess[str]:
         args = ["safekeeper", "stop"]
         if id is not None:
@@ -467,7 +466,7 @@ class NeonLocalCli(AbstractNeonCli):
         return self.raw_cli(args)
 
     def storage_broker_start(
-        self, timeout_in_seconds: Optional[int] = None
+        self, timeout_in_seconds: int | None = None
     ) -> subprocess.CompletedProcess[str]:
         cmd = ["storage_broker", "start"]
         if timeout_in_seconds is not None:
@@ -485,10 +484,10 @@ class NeonLocalCli(AbstractNeonCli):
         http_port: int,
         tenant_id: TenantId,
         pg_version: PgVersion,
-        endpoint_id: Optional[str] = None,
+        endpoint_id: str | None = None,
         hot_standby: bool = False,
-        lsn: Optional[Lsn] = None,
-        pageserver_id: Optional[int] = None,
+        lsn: Lsn | None = None,
+        pageserver_id: int | None = None,
         allow_multiple=False,
     ) -> subprocess.CompletedProcess[str]:
         args = [
@@ -523,11 +522,11 @@ class NeonLocalCli(AbstractNeonCli):
     def endpoint_start(
         self,
         endpoint_id: str,
-        safekeepers: Optional[list[int]] = None,
-        remote_ext_config: Optional[str] = None,
-        pageserver_id: Optional[int] = None,
+        safekeepers: list[int] | None = None,
+        remote_ext_config: str | None = None,
+        pageserver_id: int | None = None,
         allow_multiple=False,
-        basebackup_request_tries: Optional[int] = None,
+        basebackup_request_tries: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
@@ -555,9 +554,9 @@ class NeonLocalCli(AbstractNeonCli):
     def endpoint_reconfigure(
         self,
         endpoint_id: str,
-        tenant_id: Optional[TenantId] = None,
-        pageserver_id: Optional[int] = None,
-        safekeepers: Optional[list[int]] = None,
+        tenant_id: TenantId | None = None,
+        pageserver_id: int | None = None,
+        safekeepers: list[int] | None = None,
         check_return_code=True,
     ) -> subprocess.CompletedProcess[str]:
         args = ["endpoint", "reconfigure", endpoint_id]
@@ -574,7 +573,7 @@ class NeonLocalCli(AbstractNeonCli):
         endpoint_id: str,
         destroy=False,
         check_return_code=True,
-        mode: Optional[str] = None,
+        mode: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",

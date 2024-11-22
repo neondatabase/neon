@@ -189,6 +189,7 @@ pub struct TenantSharedResources {
 /// A [`Tenant`] is really an _attached_ tenant.  The configuration
 /// for an attached tenant is a subset of the [`LocationConf`], represented
 /// in this struct.
+#[derive(Clone)]
 pub(super) struct AttachedTenantConf {
     tenant_conf: TenantConfOpt,
     location: AttachedLocationConfig,
@@ -1807,6 +1808,7 @@ impl Tenant {
             self.tenant_shard_id,
             timeline_id,
             self.generation,
+            &self.tenant_conf.load().location,
         )
     }
 
@@ -2527,6 +2529,10 @@ impl Tenant {
         {
             let conf = self.tenant_conf.load();
 
+            // If we may not delete layers, then simply skip GC.  Even though a tenant
+            // in AttachedMulti state could do GC and just enqueue the blocked deletions,
+            // the only advantage to doing it is to perhaps shrink the LayerMap metadata
+            // a bit sooner than we would achieve by waiting for AttachedSingle status.
             if !conf.location.may_delete_layers_hint() {
                 info!("Skipping GC in location state {:?}", conf.location);
                 return Ok(GcResult::default());
@@ -2568,7 +2574,14 @@ impl Tenant {
 
         {
             let conf = self.tenant_conf.load();
-            if !conf.location.may_delete_layers_hint() || !conf.location.may_upload_layers_hint() {
+
+            // Note that compaction usually requires deletions, but we don't respect
+            // may_delete_layers_hint here: that is because tenants in AttachedMulti
+            // should proceed with compaction even if they can't do deletion, to avoid
+            // accumulating dangerously deep stacks of L0 layers.  Deletions will be
+            // enqueued inside RemoteTimelineClient, and executed layer if/when we transition
+            // to AttachedSingle state.
+            if !conf.location.may_upload_layers_hint() {
                 info!("Skipping compaction in location state {:?}", conf.location);
                 return Ok(false);
             }
@@ -3446,6 +3459,7 @@ impl Tenant {
         // this race is not possible if both request types come from the storage
         // controller (as they should!) because an exclusive op lock is required
         // on the storage controller side.
+
         self.tenant_conf.rcu(|inner| {
             Arc::new(AttachedTenantConf {
                 tenant_conf: new_tenant_conf.clone(),
@@ -3455,20 +3469,22 @@ impl Tenant {
             })
         });
 
+        let updated = self.tenant_conf.load().clone();
+
         self.tenant_conf_updated(&new_tenant_conf);
         // Don't hold self.timelines.lock() during the notifies.
         // There's no risk of deadlock right now, but there could be if we consolidate
         // mutexes in struct Timeline in the future.
         let timelines = self.list_timelines();
         for timeline in timelines {
-            timeline.tenant_conf_updated(&new_tenant_conf);
+            timeline.tenant_conf_updated(&updated);
         }
     }
 
     pub(crate) fn set_new_location_config(&self, new_conf: AttachedTenantConf) {
         let new_tenant_conf = new_conf.tenant_conf.clone();
 
-        self.tenant_conf.store(Arc::new(new_conf));
+        self.tenant_conf.store(Arc::new(new_conf.clone()));
 
         self.tenant_conf_updated(&new_tenant_conf);
         // Don't hold self.timelines.lock() during the notifies.
@@ -3476,7 +3492,7 @@ impl Tenant {
         // mutexes in struct Timeline in the future.
         let timelines = self.list_timelines();
         for timeline in timelines {
-            timeline.tenant_conf_updated(&new_tenant_conf);
+            timeline.tenant_conf_updated(&new_conf);
         }
     }
 
@@ -4544,6 +4560,7 @@ impl Tenant {
             self.tenant_shard_id,
             timeline_id,
             self.generation,
+            &self.tenant_conf.load().location,
         )
     }
 

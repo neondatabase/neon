@@ -12,7 +12,8 @@ from fixtures.common_types import TenantId
 from fixtures.log_helper import log
 
 if TYPE_CHECKING:
-    from typing import Any, Callable, Optional
+    from collections.abc import Callable
+    from typing import Any
 
 
 class ComputeReconfigure:
@@ -20,12 +21,12 @@ class ComputeReconfigure:
         self.server = server
         self.control_plane_compute_hook_api = f"http://{server.host}:{server.port}/notify-attach"
         self.workloads: dict[TenantId, Any] = {}
-        self.on_notify: Optional[Callable[[Any], None]] = None
+        self.on_notify: Callable[[Any], None] | None = None
 
     def register_workload(self, workload: Any):
         self.workloads[workload.tenant_id] = workload
 
-    def register_on_notify(self, fn: Optional[Callable[[Any], None]]):
+    def register_on_notify(self, fn: Callable[[Any], None] | None):
         """
         Add some extra work during a notification, like sleeping to slow things down, or
         logging what was notified.

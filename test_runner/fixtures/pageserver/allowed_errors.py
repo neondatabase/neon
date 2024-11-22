@@ -25,8 +25,14 @@ def scan_pageserver_log_for_errors(
 
             # It's an ERROR or WARN. Is it in the allow-list?
             for a in allowed_errors:
-                if re.match(a, line):
-                    break
+                try:
+                    if re.match(a, line):
+                        break
+                # We can switch `re.error` with `re.PatternError` after 3.13
+                # https://docs.python.org/3/library/re.html#re.PatternError
+                except re.error:
+                    print(f"Invalid regex: '{a}'", file=sys.stderr)
+                    raise
             else:
                 errors.append((lineno, line))
     return errors

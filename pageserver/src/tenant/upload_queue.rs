@@ -88,6 +88,9 @@ pub(crate) struct UploadQueueInitialized {
     #[cfg(feature = "testing")]
     pub(crate) dangling_files: HashMap<LayerName, Generation>,
 
+    /// Deletions that are blocked by the tenant configuration
+    pub(crate) blocked_deletions: Vec<Delete>,
+
     /// Set to true when we have inserted the `UploadOp::Shutdown` into the `inprogress_tasks`.
     pub(crate) shutting_down: bool,
 
@@ -180,6 +183,7 @@ impl UploadQueue {
             queued_operations: VecDeque::new(),
             #[cfg(feature = "testing")]
             dangling_files: HashMap::new(),
+            blocked_deletions: Vec::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
         };
@@ -220,6 +224,7 @@ impl UploadQueue {
             queued_operations: VecDeque::new(),
             #[cfg(feature = "testing")]
             dangling_files: HashMap::new(),
+            blocked_deletions: Vec::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
         };
@@ -270,7 +275,7 @@ pub(crate) struct UploadTask {
 
 /// A deletion of some layers within the lifetime of a timeline.  This is not used
 /// for timeline deletion, which skips this queue and goes directly to DeletionQueue.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Delete {
     pub(crate) layers: Vec<(LayerName, LayerFileMetadata)>,
 }

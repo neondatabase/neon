@@ -14,7 +14,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, Instrument};
 use utils::failpoint_support::failpoints_handler;
-use utils::http::endpoint::{prometheus_metrics_handler, request_span, ChannelWriter};
+use utils::http::endpoint::{
+    profile_cpu_handler, prometheus_metrics_handler, request_span, ChannelWriter,
+};
 use utils::http::request::parse_query_param;
 
 use postgres_ffi::WAL_SEGMENT_SIZE;
@@ -574,7 +576,7 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         router = router.middleware(auth_middleware(|request| {
             #[allow(clippy::mutable_key_type)]
             static ALLOWLIST_ROUTES: Lazy<HashSet<Uri>> = Lazy::new(|| {
-                ["/v1/status", "/metrics"]
+                ["/v1/status", "/metrics", "/pprof/profile"]
                     .iter()
                     .map(|v| v.parse().unwrap())
                     .collect()
@@ -598,6 +600,7 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .data(Arc::new(conf))
         .data(auth)
         .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
+        .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
         .get("/v1/status", |r| request_span(r, status_handler))
         .put("/v1/failpoints", |r| {
             request_span(r, move |r| async {

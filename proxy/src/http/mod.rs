@@ -122,18 +122,18 @@ impl Endpoint {
 }
 
 #[derive(Error, Debug)]
-pub(crate) enum ReadBodyError {
+pub(crate) enum ReadBodyError<E> {
     #[error("Content length exceeds limit of {limit} bytes")]
     BodyTooLarge { limit: usize },
 
     #[error(transparent)]
-    Read(#[from] reqwest::Error),
+    Read(#[from] E),
 }
 
-pub(crate) async fn read_body_with_limit(
-    mut b: impl Body<Data = Bytes, Error = reqwest::Error> + Unpin,
+pub(crate) async fn read_body_with_limit<E>(
+    mut b: impl Body<Data = Bytes, Error = E> + Unpin,
     limit: usize,
-) -> Result<Vec<u8>, ReadBodyError> {
+) -> Result<Vec<u8>, ReadBodyError<E>> {
     // We could use `b.limited().collect().await.to_bytes()` here
     // but this ends up being slightly more efficient as far as I can tell.
 

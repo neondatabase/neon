@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import TYPE_CHECKING
 
 import psutil
 import pytest
@@ -17,17 +16,13 @@ from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.utils import skip_in_debug_build, wait_until
 
-if TYPE_CHECKING:
-    from typing import Optional
-
-
 TIMELINE_COUNT = 10
 ENTRIES_PER_TIMELINE = 10_000
 CHECKPOINT_TIMEOUT_SECONDS = 60
 
 
 async def run_worker_for_tenant(
-    env: NeonEnv, entries: int, tenant: TenantId, offset: Optional[int] = None
+    env: NeonEnv, entries: int, tenant: TenantId, offset: int | None = None
 ) -> Lsn:
     if offset is None:
         offset = 0

@@ -5,6 +5,7 @@ import enum
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from enum import StrEnum
 from queue import Empty, Queue
 from threading import Barrier
 
@@ -36,7 +37,7 @@ def layer_name(info: HistoricLayerInfo) -> str:
 
 
 @enum.unique
-class Branchpoint(str, enum.Enum):
+class Branchpoint(StrEnum):
     """
     Have branches at these Lsns possibly relative to L0 layer boundary.
     """

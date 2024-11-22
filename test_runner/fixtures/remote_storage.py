@@ -6,8 +6,9 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 
 import boto3
 import toml
@@ -20,7 +21,7 @@ from fixtures.log_helper import log
 from fixtures.pageserver.common_types import IndexPartDump
 
 if TYPE_CHECKING:
-    from typing import Any, Optional
+    from typing import Any
 
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
@@ -28,7 +29,7 @@ TENANT_HEATMAP_FILE_NAME = "heatmap-v1.json"
 
 
 @enum.unique
-class RemoteStorageUser(str, enum.Enum):
+class RemoteStorageUser(StrEnum):
     """
     Instead of using strings for the users, use a more strict enum.
     """
@@ -77,19 +78,19 @@ class MockS3Server:
 class LocalFsStorage:
     root: Path
 
-    def tenant_path(self, tenant_id: TenantId) -> Path:
+    def tenant_path(self, tenant_id: TenantId | TenantShardId) -> Path:
         return self.root / "tenants" / str(tenant_id)
 
-    def timeline_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
+    def timeline_path(self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId) -> Path:
         return self.tenant_path(tenant_id) / "timelines" / str(timeline_id)
 
     def timeline_latest_generation(
-        self, tenant_id: TenantId, timeline_id: TimelineId
-    ) -> Optional[int]:
+        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId
+    ) -> int | None:
         timeline_files = os.listdir(self.timeline_path(tenant_id, timeline_id))
         index_parts = [f for f in timeline_files if f.startswith("index_part")]
 
-        def parse_gen(filename: str) -> Optional[int]:
+        def parse_gen(filename: str) -> int | None:
             log.info(f"parsing index_part '{filename}'")
             parts = filename.split("-")
             if len(parts) == 2:
@@ -102,7 +103,7 @@ class LocalFsStorage:
             raise RuntimeError(f"No index_part found for {tenant_id}/{timeline_id}")
         return generations[-1]
 
-    def index_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
+    def index_path(self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId) -> Path:
         latest_gen = self.timeline_latest_generation(tenant_id, timeline_id)
         if latest_gen is None:
             filename = TIMELINE_INDEX_PART_FILE_NAME
@@ -116,7 +117,7 @@ class LocalFsStorage:
         tenant_id: TenantId,
         timeline_id: TimelineId,
         local_name: str,
-        generation: Optional[int] = None,
+        generation: int | None = None,
     ):
         if generation is None:
             generation = self.timeline_latest_generation(tenant_id, timeline_id)
@@ -126,7 +127,7 @@ class LocalFsStorage:
         filename = f"{local_name}-{generation:08x}"
         return self.timeline_path(tenant_id, timeline_id) / filename
 
-    def index_content(self, tenant_id: TenantId, timeline_id: TimelineId) -> Any:
+    def index_content(self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId) -> Any:
         with self.index_path(tenant_id, timeline_id).open("r") as f:
             return json.load(f)
 
@@ -158,17 +159,17 @@ class LocalFsStorage:
 class S3Storage:
     bucket_name: str
     bucket_region: str
-    access_key: Optional[str]
-    secret_key: Optional[str]
-    aws_profile: Optional[str]
+    access_key: str | None
+    secret_key: str | None
+    aws_profile: str | None
     prefix_in_bucket: str
     client: S3Client
     cleanup: bool
     """Is this MOCK_S3 (false) or REAL_S3 (true)"""
     real: bool
-    endpoint: Optional[str] = None
+    endpoint: str | None = None
     """formatting deserialized with humantime crate, for example "1s"."""
-    custom_timeout: Optional[str] = None
+    custom_timeout: str | None = None
 
     def access_env_vars(self) -> dict[str, str]:
         if self.aws_profile is not None:
@@ -266,12 +267,10 @@ class S3Storage:
     def tenants_path(self) -> str:
         return f"{self.prefix_in_bucket}/tenants"
 
-    def tenant_path(self, tenant_id: Union[TenantShardId, TenantId]) -> str:
+    def tenant_path(self, tenant_id: TenantShardId | TenantId) -> str:
         return f"{self.tenants_path()}/{tenant_id}"
 
-    def timeline_path(
-        self, tenant_id: Union[TenantShardId, TenantId], timeline_id: TimelineId
-    ) -> str:
+    def timeline_path(self, tenant_id: TenantShardId | TenantId, timeline_id: TimelineId) -> str:
         return f"{self.tenant_path(tenant_id)}/timelines/{timeline_id}"
 
     def get_latest_index_key(self, index_keys: list[str]) -> str:
@@ -309,11 +308,11 @@ class S3Storage:
         assert self.real is False
 
 
-RemoteStorage = Union[LocalFsStorage, S3Storage]
+RemoteStorage = LocalFsStorage | S3Storage
 
 
 @enum.unique
-class RemoteStorageKind(str, enum.Enum):
+class RemoteStorageKind(StrEnum):
     LOCAL_FS = "local_fs"
     MOCK_S3 = "mock_s3"
     REAL_S3 = "real_s3"
@@ -325,8 +324,8 @@ class RemoteStorageKind(str, enum.Enum):
         run_id: str,
         test_name: str,
         user: RemoteStorageUser,
-        bucket_name: Optional[str] = None,
-        bucket_region: Optional[str] = None,
+        bucket_name: str | None = None,
+        bucket_region: str | None = None,
     ) -> RemoteStorage:
         if self == RemoteStorageKind.LOCAL_FS:
             return LocalFsStorage(LocalFsStorage.component_path(repo_dir, user))

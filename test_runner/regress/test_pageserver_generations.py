@@ -11,11 +11,10 @@ of the pageserver are:
 
 from __future__ import annotations
 
-import enum
 import os
 import re
 import time
-from typing import TYPE_CHECKING
+from enum import StrEnum
 
 import pytest
 from fixtures.common_types import TenantId, TimelineId
@@ -41,10 +40,6 @@ from fixtures.remote_storage import (
 from fixtures.utils import run_only_on_default_postgres, wait_until
 from fixtures.workload import Workload
 
-if TYPE_CHECKING:
-    from typing import Optional
-
-
 # A tenant configuration that is convenient for generating uploads and deletions
 # without a large amount of postgres traffic.
 TENANT_CONF = {
@@ -65,7 +60,7 @@ TENANT_CONF = {
 
 
 def read_all(
-    env: NeonEnv, tenant_id: Optional[TenantId] = None, timeline_id: Optional[TimelineId] = None
+    env: NeonEnv, tenant_id: TenantId | None = None, timeline_id: TimelineId | None = None
 ):
     if tenant_id is None:
         tenant_id = env.initial_tenant
@@ -286,12 +281,12 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     assert get_deletion_queue_unexpected_errors(ps_http) == 0
 
 
-class KeepAttachment(str, enum.Enum):
+class KeepAttachment(StrEnum):
     KEEP = "keep"
     LOSE = "lose"
 
 
-class ValidateBefore(str, enum.Enum):
+class ValidateBefore(StrEnum):
     VALIDATE = "validate"
     NO_VALIDATE = "no-validate"
 
