@@ -2102,9 +2102,9 @@ impl<'a> Version<'a> {
 //--- Metadata structs stored in key-value pairs in the repository.
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DbDirectory {
+pub(crate) struct DbDirectory {
     // (spcnode, dbnode) -> (do relmapper and PG_VERSION files exist)
-    pub dbdirs: HashMap<(Oid, Oid), bool>,
+    pub(crate) dbdirs: HashMap<(Oid, Oid), bool>,
 }
 
 // The format of TwoPhaseDirectory changed in PostgreSQL v17, because the filenames of
@@ -2123,12 +2123,12 @@ struct TwoPhaseDirectoryV17 {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
-pub struct RelDirectory {
+pub(crate) struct RelDirectory {
     // Set of relations that exist. (relfilenode, forknum)
     //
     // TODO: Store it as a btree or radix tree or something else that spans multiple
     // key-value pairs, if you have a lot of relations
-    pub rels: HashSet<(Oid, u8)>,
+    pub(crate) rels: HashSet<(Oid, u8)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
