@@ -81,6 +81,7 @@ use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
+use crate::tenant::timeline::import_pgdata;
 use crate::tenant::timeline::offload::offload_timeline;
 use crate::tenant::timeline::offload::OffloadError;
 use crate::tenant::timeline::CompactFlags;
@@ -581,14 +582,13 @@ async fn timeline_create_handler(
                     idempotency_key,
                 },
         } => tenant::CreateTimelineParams::ImportPgdata(tenant::CreateTimelineParamsImportPgdata {
-            idempotency_key:
-                tenant::timeline::import_pgdata::index_part_format::IdempotencyKey::new(
-                    idempotency_key.0,
-                ),
+            idempotency_key: import_pgdata::index_part_format::IdempotencyKey::new(
+                idempotency_key.0,
+            ),
             new_timeline_id,
             location: {
+                use import_pgdata::index_part_format::Location;
                 use pageserver_api::models::ImportPgdataLocation;
-                use tenant::timeline::import_pgdata::index_part_format::Location;
                 match location {
                     #[cfg(feature = "testing")]
                     ImportPgdataLocation::LocalFs { path } => Location::LocalFs { path },
