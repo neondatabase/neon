@@ -53,7 +53,7 @@ class Workload:
         self._endpoint: Endpoint | None = None
         self._endpoint_opts = endpoint_opts or {}
 
-    def reconfigure(self):
+    def reconfigure(self) -> None:
         """
         Request the endpoint to reconfigure based on location reported by storage controller
         """

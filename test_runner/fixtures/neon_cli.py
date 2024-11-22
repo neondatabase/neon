@@ -20,11 +20,8 @@ from fixtures.pg_version import PgVersion
 if TYPE_CHECKING:
     from typing import (
         Any,
-        TypeVar,
         cast,
     )
-
-    T = TypeVar("T")
 
 
 # Used to be an ABC. abc.ABC removed due to linter without name change.

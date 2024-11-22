@@ -69,7 +69,7 @@ def compute_reconfigure_listener(make_httpserver: HTTPServer):
             # This causes the endpoint to query storage controller for its location, which
             # is redundant since we already have it here, but this avoids extending the
             # neon_local CLI to take full lists of locations
-            reconfigure_threads.submit(lambda workload=workload: workload.reconfigure())  # type: ignore[no-any-return]
+            reconfigure_threads.submit(lambda workload=workload: workload.reconfigure())  # type: ignore[misc]
 
         return Response(status=200)
 
