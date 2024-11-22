@@ -224,7 +224,6 @@ enum TimelineCmd {
     List(TimelineListCmdArgs),
     Branch(TimelineBranchCmdArgs),
     Create(TimelineCreateCmdArgs),
-    CreateRaw(TimelineCreateRawCmdArgs),
     Import(TimelineImportCmdArgs),
 }
 
@@ -284,21 +283,6 @@ struct TimelineCreateCmdArgs {
     #[arg(default_value_t = DEFAULT_PG_VERSION)]
     #[clap(long, help = "Postgres version")]
     pg_version: u32,
-}
-
-#[derive(clap::Args)]
-struct TimelineCreateRawCmdArgs {
-    #[clap(
-        long = "tenant-id",
-        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
-    )]
-    tenant_id: Option<TenantId>,
-
-    #[clap(long, help = "Human-readable alias for the new timeline")]
-    branch_name: String,
-
-    #[clap(long)]
-    request_json: String,
 }
 
 #[derive(clap::Args)]
@@ -1167,30 +1151,6 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
             println!(
                 "Created timeline '{}' at Lsn {last_record_lsn} for tenant: {tenant_id}",
                 timeline_info.timeline_id
-            );
-        }
-        TimelineCmd::CreateRaw(TimelineCreateRawCmdArgs {
-            tenant_id,
-            branch_name,
-            request_json,
-        }) => {
-            // basically like ::Create above, just a different way to compose the request
-
-            let tenant_id = get_tenant_id(*tenant_id, env)?;
-            let new_branch_name = branch_name;
-
-            let storage_controller = StorageController::from_env(env);
-            let req: TimelineCreateRequest = serde_json::from_str(request_json)?;
-
-            let timeline_info = storage_controller
-                .tenant_timeline_create(tenant_id, req)
-                .await?;
-            let new_timeline_id = timeline_info.timeline_id;
-
-            env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id)?;
-
-            println!(
-                "Created timeline '{new_timeline_id}' in importing mode for tenant: {tenant_id}",
             );
         }
         // TODO: rename to import-basebackup-plus-wal

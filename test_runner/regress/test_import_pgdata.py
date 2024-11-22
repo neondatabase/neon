@@ -148,8 +148,10 @@ def test_pgdata_import_smoke(
     log.info(f"idempotency key {idempotency}")
     # TODO: teach neon_local CLI about the idempotency & 429 error so we can run inside the loop
     # and check for 429
-    env.create_timeline_raw(
-        "imported",
+
+    import_branch_name = "imported"
+    env.storage_controller.timeline_create(
+        tenant_id,
         {
             "new_timeline_id": str(timeline_id),
             "import_pgdata": {
@@ -157,8 +159,9 @@ def test_pgdata_import_smoke(
                 "location": {"LocalFs": {"path": str(importbucket.absolute())}},
             },
         },
-        tenant_id=tenant_id,
     )
+    env.neon_cli.mappings_map_branch(import_branch_name, tenant_id, timeline_id)
+
     while True:
         locations = env.storage_controller.locate(tenant_id)
         active_count = 0
@@ -229,7 +232,7 @@ def test_pgdata_import_smoke(
     #
 
     ro_endpoint = env.endpoints.create_start(
-        branch_name="imported", endpoint_id="ro", tenant_id=tenant_id, lsn=last_record_lsn
+        branch_name=import_branch_name, endpoint_id="ro", tenant_id=tenant_id, lsn=last_record_lsn
     )
 
     validate_vanilla_equivalence(ro_endpoint)
@@ -259,7 +262,7 @@ def test_pgdata_import_smoke(
     # validate that we can write
     #
     rw_endpoint = env.endpoints.create_start(
-        branch_name="imported", endpoint_id="rw", tenant_id=tenant_id
+        branch_name=import_branch_name, endpoint_id="rw", tenant_id=tenant_id
     )
     rw_endpoint.safe_psql("create table othertable(values text)")
     rw_lsn = Lsn(rw_endpoint.safe_psql_scalar("select pg_current_wal_flush_lsn()"))
@@ -274,7 +277,7 @@ def test_pgdata_import_smoke(
     # ... at the tip
     _ = env.create_branch(
         new_branch_name="br-tip",
-        ancestor_branch_name="imported",
+        ancestor_branch_name=import_branch_name,
         tenant_id=tenant_id,
         ancestor_start_lsn=rw_lsn,
     )
@@ -287,7 +290,7 @@ def test_pgdata_import_smoke(
     # ... at the initdb lsn
     _ = env.create_branch(
         new_branch_name="br-initdb",
-        ancestor_branch_name="imported",
+        ancestor_branch_name=import_branch_name,
         tenant_id=tenant_id,
         ancestor_start_lsn=initdb_lsn,
     )

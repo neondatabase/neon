@@ -1380,16 +1380,6 @@ class NeonEnv:
 
         return timeline_id
 
-    def create_timeline_raw(
-        self,
-        new_branch_name: str,
-        req: dict[str, Any],
-        tenant_id: Optional[TenantId] = None,
-    ):
-        tenant_id = tenant_id or self.initial_tenant
-
-        self.neon_cli.timeline_create_from_pgdata(new_branch_name, tenant_id, req)
-
 
 @pytest.fixture(scope="function")
 def neon_simple_env(
@@ -1900,6 +1890,20 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         response.raise_for_status()
         log.info(f"tenant_create success: {response.json()}")
+
+    def timeline_create(
+        self,
+        tenant_id: TenantId,
+        body: dict[str, Any],
+    ):
+        response = self.request(
+            "POST",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline",
+            json=body,
+            headers=self.headers(TokenScope.PAGE_SERVER_API),
+        )
+        response.raise_for_status()
+        log.info(f"timeline_create success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
         """
