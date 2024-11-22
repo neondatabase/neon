@@ -274,4 +274,6 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder, attach_mode: str):
 
     if attach_mode == "same_generation":
         # we should have detected a race upload and deferred it
-        env.pageserver.assert_log_contains("upload_queue_reordering")
+        env.pageserver.assert_log_contains(
+            "waiting for deletion queue flush to complete before uploading layer"
+        )

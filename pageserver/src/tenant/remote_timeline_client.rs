@@ -1958,7 +1958,7 @@ impl RemoteTimelineClient {
                             }
                             if detected {
                                 info!(
-                                    "upload_queue_reordering: cancelled blocked deletion of layer {} at gen {:?}",
+                                    "cancelled blocked deletion of layer {} at gen {:?}",
                                     layer.layer_desc().layer_name(),
                                     layer_metadata.generation
                                 );
@@ -1968,7 +1968,7 @@ impl RemoteTimelineClient {
                             // that we still get the layer deleted. But this only happens if someone creates a layer immediately after it's deleted,
                             // which is not possible in the current system.
                             info!(
-                                "upload_queue_reordering: waiting for deletion queue flush to complete before uploading layer {} at gen {:?}",
+                                "waiting for deletion queue flush to complete before uploading layer {} at gen {:?}",
                                 layer.layer_desc().layer_name(),
                                 layer_metadata.generation
                             );
@@ -1981,13 +1981,13 @@ impl RemoteTimelineClient {
                             }
                             if let Err(e) = self.deletion_queue_client.flush_execute().await {
                                 warn!(
-                                    "upload_queue_reordering: failed to flush the deletion queue before uploading layer {} at gen {:?}, still proceeding to upload: {e:#} ",
+                                    "failed to flush the deletion queue before uploading layer {} at gen {:?}, still proceeding to upload: {e:#} ",
                                     layer.layer_desc().layer_name(),
                                     layer_metadata.generation
                                 );
                             } else {
                                 info!(
-                                    "upload_queue_reordering: done flushing deletion queue before uploading layer {} at gen {:?}",
+                                    "done flushing deletion queue before uploading layer {} at gen {:?}",
                                     layer.layer_desc().layer_name(),
                                     layer_metadata.generation
                                 );
