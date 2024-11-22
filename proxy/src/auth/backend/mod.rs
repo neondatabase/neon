@@ -6,7 +6,6 @@ pub mod local;
 
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 pub use console_redirect::ConsoleRedirectBackend;
 pub(crate) use console_redirect::ConsoleRedirectError;
@@ -30,7 +29,7 @@ use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
-use crate::rate_limiter::{BucketRateLimiter, EndpointRateLimiter, RateBucketInfo};
+use crate::rate_limiter::{BucketRateLimiter, EndpointRateLimiter};
 use crate::stream::Stream;
 use crate::types::{EndpointCacheKey, EndpointId, RoleName};
 use crate::{scram, stream};
@@ -191,21 +190,6 @@ impl MaskedIp {
 
 // This can't be just per IP because that would limit some PaaS that share IP addresses
 pub type AuthRateLimiter = BucketRateLimiter<(EndpointIdInt, MaskedIp)>;
-
-impl RateBucketInfo {
-    /// All of these are per endpoint-maskedip pair.
-    /// Context: 4096 rounds of pbkdf2 take about 1ms of cpu time to execute (1 milli-cpu-second or 1mcpus).
-    ///
-    /// First bucket: 1000mcpus total per endpoint-ip pair
-    /// * 4096000 requests per second with 1 hash rounds.
-    /// * 1000 requests per second with 4096 hash rounds.
-    /// * 6.8 requests per second with 600000 hash rounds.
-    pub const DEFAULT_AUTH_SET: [Self; 3] = [
-        Self::new(1000 * 4096, Duration::from_secs(1)),
-        Self::new(600 * 4096, Duration::from_secs(60)),
-        Self::new(300 * 4096, Duration::from_secs(600)),
-    ];
-}
 
 impl AuthenticationConfig {
     pub(crate) fn check_rate_limit(

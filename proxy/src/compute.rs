@@ -342,7 +342,7 @@ impl ConnCfg {
 
         // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
         // Yet another reason to rework the connection establishing code.
-        let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token());
+        let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token(), vec![]);
 
         let connection = PostgresConnection {
             stream,
