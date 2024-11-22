@@ -9,7 +9,7 @@ use test_context::test_context;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::common::{download_to_vec, upload_stream, wrap_stream};
+use crate::common::{download_to_vec, upload_stream, wrap_stream, RemoteBlobInfo};
 
 use super::{
     MaybeEnabledStorage, MaybeEnabledStorageWithSimpleTestBlobs, MaybeEnabledStorageWithTestBlobs,
@@ -85,7 +85,7 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
         .collect::<HashSet<_>>();
     assert_eq!(
         remote_only_prefixes.len() + missing_uploaded_prefixes.len(), 0,
-        "remote storage nested prefixes list mismatches with the uploads. Remote only prefixes: {remote_only_prefixes:?}, missing uploaded prefixes: {missing_uploaded_prefixes:?}",
+        "remote storage nested prefixes list mismatches with the uploads.\n\nRemote only prefixes: {remote_only_prefixes:?}\n\nmissing uploaded prefixes: {missing_uploaded_prefixes:?}",
     );
 
     // list_streaming
@@ -102,6 +102,7 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
     let mut segment_max_size = 0;
     while let Some(st) = nested_remote_prefixes_st.next().await {
         let st = st?;
+        dbg!(&st.prefixes);
         segment_max_size = segment_max_size.max(st.prefixes.len());
         nested_remote_prefixes_combined.extend(st.prefixes.into_iter());
         segments += 1;
@@ -156,7 +157,7 @@ async fn list_no_delimiter_works(
         .context("client list root files failure")?
         .keys
         .into_iter()
-        .map(|o| o.key)
+        .map(RemoteBlobInfo::from)
         .collect::<HashSet<_>>();
     assert_eq!(
         root_files,
@@ -183,14 +184,14 @@ async fn list_no_delimiter_works(
         .context("client list nested files failure")?
         .keys
         .into_iter()
-        .map(|o| o.key)
+        .map(RemoteBlobInfo::from)
         .collect::<HashSet<_>>();
     let trim_remote_blobs: HashSet<_> = ctx
         .remote_blobs
         .iter()
-        .map(|x| x.get_path())
-        .filter(|x| x.starts_with("folder1"))
-        .map(|x| RemotePath::new(x).expect("must be valid path"))
+        .filter(|x| x.path.get_path().starts_with("folder1"))
+        .cloned()
+        .map(RemoteBlobInfo::from)
         .collect();
     assert_eq!(
         nested_remote_files, trim_remote_blobs,
@@ -228,7 +229,7 @@ async fn list_partial_prefix(
         .await?
         .keys
         .into_iter()
-        .map(|o| o.key)
+        .map(RemoteBlobInfo::from)
         .collect();
     assert_eq!(&objects, &ctx.remote_blobs);
 
@@ -258,7 +259,7 @@ async fn list_partial_prefix(
         .await?
         .keys
         .into_iter()
-        .map(|o| o.key)
+        .map(RemoteBlobInfo::from)
         .collect();
     assert_eq!(&objects, &ctx.remote_blobs);
 
@@ -303,13 +304,14 @@ async fn list_partial_prefix(
         .await?
         .keys
         .into_iter()
-        .map(|o| o.key)
+        .map(RemoteBlobInfo::from)
         .collect();
     let expect: HashSet<_> = ctx
         .remote_blobs
         .iter()
-        .filter(|o| o.get_path().starts_with("folder2"))
+        .filter(|o| o.path.get_path().starts_with("folder2"))
         .cloned()
+        .map(RemoteBlobInfo::from)
         .collect();
     assert_eq!(&objects, &expect);
 
@@ -421,7 +423,7 @@ async fn delete_prefix(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> anyh
                 .await?
                 .keys
                 .into_iter()
-                .map(|o| o.key)
+                .map(RemoteBlobInfo::from)
                 .collect();
             assert_eq!($expect, listing);
         }};
@@ -444,13 +446,19 @@ async fn delete_prefix(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> anyh
 
     // Deleting a path which overlaps with an existing object should do nothing. We pick the first
     // path in the set as our common prefix.
-    let path = expect.iter().next().expect("empty set").clone().join("xyz");
+    let path = expect
+        .iter()
+        .next()
+        .expect("empty set")
+        .path
+        .clone()
+        .join("xyz");
     test_client.delete_prefix(&path, &cancel).await?;
     assert_list!(expect);
 
     // Deleting an exact path should work. We pick the first path in the set.
     let path = expect.iter().next().expect("empty set").clone();
-    test_client.delete_prefix(&path, &cancel).await?;
+    test_client.delete_prefix(&path.path, &cancel).await?;
     expect.remove(&path);
     assert_list!(expect);
 
@@ -458,7 +466,7 @@ async fn delete_prefix(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> anyh
     test_client
         .delete_prefix(&RemotePath::from_string("folder0/blob_")?, &cancel)
         .await?;
-    expect.retain(|p| !p.get_path().as_str().starts_with("folder0/"));
+    expect.retain(|RemoteBlobInfo { path: p, .. }| !p.get_path().as_str().starts_with("folder0/"));
     assert_list!(expect);
 
     // Deleting a common prefix should delete all objects.

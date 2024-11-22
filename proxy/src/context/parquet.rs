@@ -543,6 +543,7 @@ mod tests {
         let remote_storage_config = RemoteStorageConfig {
             storage: RemoteStorageKind::LocalFs {
                 local_path: tmpdir.to_path_buf(),
+                max_keys_per_list_response: None,
             },
             timeout: std::time::Duration::from_secs(120),
         };

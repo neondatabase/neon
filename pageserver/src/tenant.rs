@@ -5111,6 +5111,7 @@ pub(crate) mod harness {
             let config = RemoteStorageConfig {
                 storage: RemoteStorageKind::LocalFs {
                     local_path: remote_fs_dir.clone(),
+                    max_keys_per_list_response: None,
                 },
                 timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             };

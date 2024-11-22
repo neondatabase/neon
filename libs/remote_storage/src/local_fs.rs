@@ -36,12 +36,17 @@ const LOCAL_FS_TEMP_FILE_SUFFIX: &str = "___temp";
 pub struct LocalFs {
     storage_root: Utf8PathBuf,
     timeout: Duration,
+    max_keys_per_list_response: Option<NonZeroU32>,
 }
 
 impl LocalFs {
     /// Attempts to create local FS storage, along with its root directory.
     /// Storage root will be created (if does not exist) and transformed into an absolute path (if passed as relative).
-    pub fn new(mut storage_root: Utf8PathBuf, timeout: Duration) -> anyhow::Result<Self> {
+    pub fn new(
+        mut storage_root: Utf8PathBuf,
+        timeout: Duration,
+        max_keys_per_list_response: Option<NonZeroU32>,
+    ) -> anyhow::Result<Self> {
         if !storage_root.exists() {
             std::fs::create_dir_all(&storage_root).with_context(|| {
                 format!("Failed to create all directories in the given root path {storage_root:?}")
@@ -56,6 +61,7 @@ impl LocalFs {
         Ok(Self {
             storage_root,
             timeout,
+            max_keys_per_list_response,
         })
     }
 
@@ -148,10 +154,12 @@ impl LocalFs {
     // recursively lists all files in a directory,
     // mirroring the `list_files` for `s3_bucket`
     async fn list_recursive(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+        dbg!(&folder);
         let full_path = match folder {
             Some(folder) => folder.with_base(&self.storage_root),
             None => self.storage_root.clone(),
         };
+        dbg!(&full_path);
 
         // If we were given a directory, we may use it as our starting point.
         // Otherwise, we must go up to the first ancestor dir that exists.  This is because
@@ -205,6 +213,7 @@ impl LocalFs {
                 let full_file_name = cur_folder.join(file_name);
                 if full_file_name.as_str().starts_with(prefix) {
                     let file_remote_path = self.local_file_to_relative_path(full_file_name.clone());
+                    dbg!(&file_remote_path);
                     files.push(file_remote_path);
                     if full_file_name.is_dir() {
                         directory_queue.push(full_file_name);
@@ -328,6 +337,13 @@ impl LocalFs {
 
         Ok(())
     }
+
+    fn effective_max_keys(&self, max_keys: Option<NonZeroU32>) -> Option<NonZeroU32> {
+        self.max_keys_per_list_response
+            .into_iter()
+            .chain(max_keys.into_iter())
+            .min()
+    }
 }
 
 impl RemoteStorage for LocalFs {
@@ -338,8 +354,12 @@ impl RemoteStorage for LocalFs {
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
     ) -> impl Stream<Item = Result<Listing, DownloadError>> {
-        let listing = self.list(prefix, mode, max_keys, cancel);
-        futures::stream::once(listing)
+        async_stream::try_stream! {
+            let listing = self.list(prefix, mode, max_keys, cancel).await?;
+            for page in listing.paginate_like_s3(self.effective_max_keys(max_keys)) {
+                yield dbg!(page);
+            }
+        }
     }
 
     async fn list(
@@ -377,13 +397,14 @@ impl RemoteStorage for LocalFs {
             } else {
                 let mut prefixes = HashSet::new();
                 for object in objects {
-                    let key = object.key;
+                    let key = dbg!(object.key);
                     // If the part after the prefix includes a "/", take only the first part and put it in `prefixes`.
                     let relative_key = if let Some(prefix) = prefix {
                         let mut prefix = prefix.clone();
                         // We only strip the dirname of the prefix, so that when we strip it from the start of keys we
                         // end up with full file/dir names.
                         let prefix_full_local_path = prefix.with_base(&self.storage_root);
+                        dbg!(&prefix_full_local_path);
                         let has_slash = prefix.0.to_string().ends_with('/');
                         let strip_prefix = if prefix_full_local_path.is_dir() && has_slash {
                             prefix
@@ -391,6 +412,7 @@ impl RemoteStorage for LocalFs {
                             prefix.0.pop();
                             prefix
                         };
+                        dbg!(&strip_prefix);
 
                         RemotePath::new(key.strip_prefix(&strip_prefix).unwrap()).unwrap()
                     } else {
@@ -398,13 +420,20 @@ impl RemoteStorage for LocalFs {
                     };
 
                     let relative_key = format!("{}", relative_key);
+                    dbg!(&relative_key);
                     if relative_key.contains(REMOTE_STORAGE_PREFIX_SEPARATOR) {
                         let first_part = relative_key
                             .split(REMOTE_STORAGE_PREFIX_SEPARATOR)
                             .next()
                             .unwrap()
                             .to_owned();
-                        prefixes.insert(first_part);
+                        dbg!(&first_part);
+                        dbg!(&prefix);
+                        prefixes.insert(if let Some(prefix) = prefix {
+                            prefix.join(first_part).to_string()
+                        } else {
+                            first_part
+                        });
                     } else {
                         result.keys.push(ListingObject {
                             key: RemotePath::from_string(&relative_key).unwrap(),
@@ -497,6 +526,9 @@ impl RemoteStorage for LocalFs {
         let target_path = from.with_base(&self.storage_root);
 
         let file_metadata = file_metadata(&target_path).await?;
+        if let Some(etag) = &opts.etag {
+
+        }
         let etag = mock_etag(&file_metadata);
 
         if opts.etag.as_ref() == Some(&etag) {
@@ -708,9 +740,10 @@ mod fs_tests {
         Ok(())
     }
 
-    fn create_storage() -> anyhow::Result<(LocalFs, CancellationToken)> {
+    pub(crate) fn create_storage() -> anyhow::Result<(LocalFs, CancellationToken)> {
         let storage_root = tempdir()?.path().to_path_buf();
-        LocalFs::new(storage_root, Duration::from_secs(120)).map(|s| (s, CancellationToken::new()))
+        LocalFs::new(storage_root, Duration::from_secs(120), None)
+            .map(|s| (s, CancellationToken::new()))
     }
 
     #[tokio::test]
@@ -958,7 +991,7 @@ mod fs_tests {
         );
         assert_eq!(
             listing.prefixes,
-            [RemotePath::from_string("parent").unwrap()].to_vec()
+            [RemotePath::from_string("timelines/some_timeline/grandparent/parent").unwrap()].to_vec()
         );
 
         // Delimiter and prefix without a trailing slash
@@ -973,7 +1006,7 @@ mod fs_tests {
         assert_eq!(listing.keys, vec![]);
         assert_eq!(
             listing.prefixes,
-            [RemotePath::from_string("grandparent").unwrap()].to_vec()
+            [RemotePath::from_string("timelines/some_timeline/grandparent").unwrap()].to_vec()
         );
 
         // Delimiter and prefix that's partway through a path component
@@ -988,7 +1021,7 @@ mod fs_tests {
         assert_eq!(listing.keys, vec![]);
         assert_eq!(
             listing.prefixes,
-            [RemotePath::from_string("grandparent").unwrap()].to_vec()
+            [RemotePath::from_string("timelines/some_timeline/grandparent").unwrap()].to_vec()
         );
 
         Ok(())

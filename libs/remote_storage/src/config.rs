@@ -1,4 +1,9 @@
-use std::{fmt::Debug, num::NonZeroUsize, str::FromStr, time::Duration};
+use std::{
+    fmt::Debug,
+    num::{NonZeroU32, NonZeroUsize},
+    str::FromStr,
+    time::Duration,
+};
 
 use aws_sdk_s3::types::StorageClass;
 use camino::Utf8PathBuf;
@@ -50,7 +55,10 @@ fn is_default_timeout(d: &Duration) -> bool {
 pub enum RemoteStorageKind {
     /// Storage based on local file system.
     /// Specify a root folder to place all stored files into.
-    LocalFs { local_path: Utf8PathBuf },
+    LocalFs {
+        local_path: Utf8PathBuf,
+        max_keys_per_list_response: Option<NonZeroU32>,
+    },
     /// AWS S3 based storage, storing all files in the S3 bucket
     /// specified by the config
     AwsS3(S3Config),
@@ -217,7 +225,8 @@ timeout = '5s'";
             config,
             RemoteStorageConfig {
                 storage: RemoteStorageKind::LocalFs {
-                    local_path: Utf8PathBuf::from(".")
+                    local_path: Utf8PathBuf::from("."),
+                    max_keys_per_list_response: None,
                 },
                 timeout: Duration::from_secs(5)
             }
