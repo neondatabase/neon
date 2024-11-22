@@ -11,7 +11,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
 from fixtures.utils import humantime_to_ms
 
-TARGET_RUNTIME = 5
+TARGET_RUNTIME = 30
 
 
 @dataclass
