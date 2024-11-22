@@ -139,7 +139,6 @@ async fn fetch_jwks(
     jwks_url: url::Url,
 ) -> Option<jose_jwk::JwkSet> {
     let req = client.get(jwks_url.clone());
-    // TODO(conrad): eventually switch to using reqwest_middleware/`new_client_with_timeout`.
     // TODO(conrad): We need to filter out URLs that point to local resources. Public internet only.
     let resp = req.send().await.and_then(|r| {
         r.error_for_status()
