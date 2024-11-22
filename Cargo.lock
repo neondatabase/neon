@@ -245,19 +245,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-timer"
-version = "1.0.0-beta.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d420af8e042475e58a20d91af8eda7d6528989418c03f3f527e1c3415696f70"
-dependencies = [
- "error-code",
- "libc",
- "tokio",
- "wasm-bindgen",
- "web-time",
-]
-
-[[package]]
 name = "async-trait"
 version = "0.1.68"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1934,12 +1921,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "error-code"
-version = "3.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5d9305ccc6942a704f4335694ecd3de2ea531b114ac2d51f5f843750787a92f"
-
-[[package]]
 name = "event-listener"
 version = "2.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3609,7 +3590,6 @@ dependencies = [
  "arc-swap",
  "async-compression",
  "async-stream",
- "async-timer",
  "bit_field",
  "byteorder",
  "bytes",
