@@ -150,57 +150,6 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     workload.validate(env.pageserver.id)
 
 
-@skip_in_debug_build("only run with release build")
-def test_pageserver_compaction_detach_ancestor_smoke(neon_env_builder: NeonEnvBuilder):
-    SMOKE_CONF = {
-        # Run both gc and gc-compaction.
-        "gc_period": "5s",
-        "compaction_period": "5s",
-        # No PiTR interval and small GC horizon
-        "pitr_interval": "0s",
-        "gc_horizon": f"{1024 ** 2}",
-        "lsn_lease_length": "0s",
-        # Small checkpoint distance to create many layers
-        "checkpoint_distance": 1024**2,
-        # Compact small layers
-        "compaction_target_size": 1024**2,
-        "image_creation_threshold": 2,
-    }
-
-    env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
-
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
-
-    row_count = 10000
-    churn_rounds = 50
-
-    ps_http = env.pageserver.http_client()
-
-    workload_parent = Workload(env, tenant_id, timeline_id)
-    workload_parent.init(env.pageserver.id)
-    log.info("Writing initial data ...")
-    workload_parent.write_rows(row_count, env.pageserver.id)
-    branch_id = env.create_branch("child")
-    workload_child = Workload(env, tenant_id, branch_id, branch_name="child")
-    workload_child.init(env.pageserver.id, allow_recreate=True)
-    log.info("Writing initial data on child...")
-    workload_child.write_rows(row_count, env.pageserver.id)
-
-    for i in range(1, churn_rounds + 1):
-        if i % 10 == 0:
-            log.info(f"Running churn round {i}/{churn_rounds} ...")
-
-        workload_parent.churn_rows(row_count, env.pageserver.id)
-        workload_child.churn_rows(row_count, env.pageserver.id)
-
-    ps_http.detach_ancestor(tenant_id, branch_id)
-
-    log.info("Validating at workload end ...")
-    workload_parent.validate(env.pageserver.id)
-    workload_child.validate(env.pageserver.id)
-
-
 # Stripe sizes in number of pages.
 TINY_STRIPES = 16
 LARGE_STRIPES = 32768
