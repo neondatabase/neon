@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 import requests
@@ -26,9 +26,6 @@ from pytest_httpserver import HTTPServer
 from typing_extensions import override
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
-
-if TYPE_CHECKING:
-    from typing import Optional, Union
 
 
 def test_sharding_smoke(
@@ -189,7 +186,7 @@ def test_sharding_split_unsharded(
     ],
 )
 def test_sharding_split_compaction(
-    neon_env_builder: NeonEnvBuilder, failpoint: Optional[str], build_type: str
+    neon_env_builder: NeonEnvBuilder, failpoint: str | None, build_type: str
 ):
     """
     Test that after a split, we clean up parent layer data in the child shards via compaction.
@@ -782,7 +779,7 @@ def test_sharding_split_stripe_size(
     tenant_id = env.initial_tenant
 
     assert len(notifications) == 1
-    expect: dict[str, Union[list[dict[str, int]], str, None, int]] = {
+    expect: dict[str, list[dict[str, int]] | str | None | int] = {
         "tenant_id": str(env.initial_tenant),
         "stripe_size": None,
         "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
@@ -798,7 +795,7 @@ def test_sharding_split_stripe_size(
     # Check that we ended up with the stripe size that we expected, both on the pageserver
     # and in the notifications to compute
     assert len(notifications) == 2
-    expect_after: dict[str, Union[list[dict[str, int]], str, None, int]] = {
+    expect_after: dict[str, list[dict[str, int]] | str | None | int] = {
         "tenant_id": str(env.initial_tenant),
         "stripe_size": new_stripe_size,
         "shards": [
@@ -1046,7 +1043,7 @@ def test_sharding_ingest_gaps(
 
 
 class Failure:
-    pageserver_id: Optional[int]
+    pageserver_id: int | None
 
     def apply(self, env: NeonEnv):
         raise NotImplementedError()
@@ -1370,7 +1367,7 @@ def test_sharding_split_failures(
 
         assert attached_count == initial_shard_count
 
-    def assert_split_done(exclude_ps_id: Optional[int] = None) -> None:
+    def assert_split_done(exclude_ps_id: int | None = None) -> None:
         secondary_count = 0
         attached_count = 0
         for ps in env.pageservers:

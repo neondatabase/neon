@@ -196,7 +196,7 @@ async def main_impl(args, report_out, client: Client):
             gathered = await asyncio.gather(*get_timeline_id_coros, return_exceptions=True)
             assert len(tenant_ids) == len(gathered)
             tenant_and_timline_ids = []
-            for tid, tlids in zip(tenant_ids, gathered):
+            for tid, tlids in zip(tenant_ids, gathered, strict=False):
                 for tlid in tlids:
                     tenant_and_timline_ids.append((tid, tlid))
         elif len(comps) == 1:

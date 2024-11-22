@@ -17,14 +17,14 @@ from fixtures.remote_storage import RemoteStorage, RemoteStorageKind, S3Storage
 from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
-    from typing import Any, Optional, Union
+    from typing import Any
 
 
 def assert_tenant_state(
     pageserver_http: PageserverHttpClient,
     tenant: TenantId,
     expected_state: str,
-    message: Optional[str] = None,
+    message: str | None = None,
 ) -> None:
     tenant_status = pageserver_http.tenant_status(tenant)
     log.info(f"tenant_status: {tenant_status}")
@@ -33,7 +33,7 @@ def assert_tenant_state(
 
 def remote_consistent_lsn(
     pageserver_http: PageserverHttpClient,
-    tenant: Union[TenantId, TenantShardId],
+    tenant: TenantId | TenantShardId,
     timeline: TimelineId,
 ) -> Lsn:
     detail = pageserver_http.timeline_detail(tenant, timeline)
@@ -51,7 +51,7 @@ def remote_consistent_lsn(
 
 def wait_for_upload(
     pageserver_http: PageserverHttpClient,
-    tenant: Union[TenantId, TenantShardId],
+    tenant: TenantId | TenantShardId,
     timeline: TimelineId,
     lsn: Lsn,
 ):
@@ -138,7 +138,7 @@ def wait_until_all_tenants_state(
 
 def wait_until_timeline_state(
     pageserver_http: PageserverHttpClient,
-    tenant_id: Union[TenantId, TenantShardId],
+    tenant_id: TenantId | TenantShardId,
     timeline_id: TimelineId,
     expected_state: str,
     iterations: int,
@@ -188,7 +188,7 @@ def wait_until_tenant_active(
 
 def last_record_lsn(
     pageserver_http_client: PageserverHttpClient,
-    tenant: Union[TenantId, TenantShardId],
+    tenant: TenantId | TenantShardId,
     timeline: TimelineId,
 ) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
@@ -200,7 +200,7 @@ def last_record_lsn(
 
 def wait_for_last_record_lsn(
     pageserver_http: PageserverHttpClient,
-    tenant: Union[TenantId, TenantShardId],
+    tenant: TenantId | TenantShardId,
     timeline: TimelineId,
     lsn: Lsn,
 ) -> Lsn:
@@ -267,10 +267,10 @@ def wait_for_upload_queue_empty(
 
 def wait_timeline_detail_404(
     pageserver_http: PageserverHttpClient,
-    tenant_id: Union[TenantId, TenantShardId],
+    tenant_id: TenantId | TenantShardId,
     timeline_id: TimelineId,
     iterations: int,
-    interval: Optional[float] = None,
+    interval: float | None = None,
 ):
     if interval is None:
         interval = 0.25
@@ -292,10 +292,10 @@ def wait_timeline_detail_404(
 
 def timeline_delete_wait_completed(
     pageserver_http: PageserverHttpClient,
-    tenant_id: Union[TenantId, TenantShardId],
+    tenant_id: TenantId | TenantShardId,
     timeline_id: TimelineId,
     iterations: int = 20,
-    interval: Optional[float] = None,
+    interval: float | None = None,
     **delete_args,
 ) -> None:
     pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id, **delete_args)
@@ -304,9 +304,9 @@ def timeline_delete_wait_completed(
 
 # remote_storage must not be None, but that's easier for callers to make mypy happy
 def assert_prefix_empty(
-    remote_storage: Optional[RemoteStorage],
-    prefix: Optional[str] = None,
-    allowed_postfix: Optional[str] = None,
+    remote_storage: RemoteStorage | None,
+    prefix: str | None = None,
+    allowed_postfix: str | None = None,
     delimiter: str = "/",
 ) -> None:
     assert remote_storage is not None
@@ -348,8 +348,8 @@ def assert_prefix_empty(
 
 # remote_storage must not be None, but that's easier for callers to make mypy happy
 def assert_prefix_not_empty(
-    remote_storage: Optional[RemoteStorage],
-    prefix: Optional[str] = None,
+    remote_storage: RemoteStorage | None,
+    prefix: str | None = None,
     delimiter: str = "/",
 ):
     assert remote_storage is not None
@@ -358,7 +358,7 @@ def assert_prefix_not_empty(
 
 
 def list_prefix(
-    remote: RemoteStorage, prefix: Optional[str] = None, delimiter: str = "/"
+    remote: RemoteStorage, prefix: str | None = None, delimiter: str = "/"
 ) -> ListObjectsV2OutputTypeDef:
     """
     Note that this function takes into account prefix_in_bucket.

@@ -4,7 +4,7 @@ authors = []
 package-mode = false
 
 [tool.poetry.dependencies]
-python = "^3.9"
+python = "^3.11"
 pytest = "^7.4.4"
 psycopg2-binary = "^2.9.10"
 typing-extensions = "^4.6.1"
@@ -89,7 +89,7 @@ module = [
 ignore_missing_imports = true
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py311"
 extend-exclude = [
     "vendor/",
     "target/",
@@ -108,6 +108,3 @@ select = [
     "B", # bugbear
     "UP", # pyupgrade
 ]
-
-[tool.ruff.lint.pyupgrade]
-keep-runtime-typing = true # Remove this stanza when we require Python 3.10

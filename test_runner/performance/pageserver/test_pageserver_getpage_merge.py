@@ -3,7 +3,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
@@ -32,7 +32,7 @@ def test_getpage_merge_smoke(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     tablesize_mib: int,
-    batch_timeout: Optional[str],
+    batch_timeout: str | None,
     target_runtime: int,
     effective_io_concurrency: int,
     readhead_buffer_size: int,
@@ -45,7 +45,7 @@ def test_getpage_merge_smoke(
     #
     # record perf-related parameters as metrics to simplify processing of results
     #
-    params: dict[str, tuple[Union[float, int], dict[str, Any]]] = {}
+    params: dict[str, tuple[float | int, dict[str, Any]]] = {}
 
     params.update(
         {
@@ -205,7 +205,7 @@ def test_timer_precision(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
-    batch_timeout: Optional[str],
+    batch_timeout: str | None,
 ):
     """
     Determine the batching timeout precision (mean latency) and tail latency impact.

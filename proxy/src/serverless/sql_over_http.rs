@@ -14,7 +14,7 @@ use hyper::{header, HeaderMap, Request, Response, StatusCode};
 use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
 use serde_json::Value;
-use tokio::time;
+use tokio::time::{self, Instant};
 use tokio_postgres::error::{DbError, ErrorPosition, SqlState};
 use tokio_postgres::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
 use tokio_util::sync::CancellationToken;
@@ -980,10 +980,11 @@ async fn query_to_json<T: GenericClient>(
     current_size: &mut usize,
     parsed_headers: HttpHeaders,
 ) -> Result<(ReadyForQueryStatus, impl Serialize), SqlOverHttpError> {
-    info!("executing query");
+    let query_start = Instant::now();
+
     let query_params = data.params;
     let mut row_stream = std::pin::pin!(client.query_raw_txt(&data.query, query_params).await?);
-    info!("finished executing query");
+    let query_acknowledged = Instant::now();
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
@@ -1002,6 +1003,7 @@ async fn query_to_json<T: GenericClient>(
         }
     }
 
+    let query_resp_end = Instant::now();
     let ready = row_stream.ready_status();
 
     // grab the command tag and number of rows affected
@@ -1021,7 +1023,9 @@ async fn query_to_json<T: GenericClient>(
         rows = rows.len(),
         ?ready,
         command_tag,
-        "finished reading rows"
+        acknowledgement = ?(query_acknowledged - query_start),
+        response = ?(query_resp_end - query_start),
+        "finished executing query"
     );
 
     let columns_len = row_stream.columns().len();
