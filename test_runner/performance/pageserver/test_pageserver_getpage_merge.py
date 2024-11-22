@@ -13,28 +13,24 @@ from fixtures.utils import humantime_to_ms
 
 TARGET_RUNTIME = 5
 
-
+MAX_BATCH_SIZES = [None, 1, 2, 4, 8, 16, 32]
 @pytest.mark.parametrize(
-    "tablesize_mib, batch_timeout, target_runtime, effective_io_concurrency, readhead_buffer_size, name",
+    "tablesize_mib, max_batch_size, target_runtime, effective_io_concurrency, readhead_buffer_size, name",
     [
         # the next 4 cases demonstrate how not-batchable workloads suffer from batching timeout
-        (50, None, TARGET_RUNTIME, 1, 128, "not batchable no batching"),
-        (50, "10us", TARGET_RUNTIME, 1, 128, "not batchable 10us timeout"),
-        (50, "20us", TARGET_RUNTIME, 1, 128, "not batchable 20us timeout"),
-        (50, "1ms", TARGET_RUNTIME, 1, 128, "not batchable 1ms timeout"),
-        # the next 4 cases demonstrate how batchable workloads benefit from batching
-        (50, None, TARGET_RUNTIME, 100, 128, "batchable no batching"),
-        (50, "10us", TARGET_RUNTIME, 100, 128, "batchable 10us timeout"),
-        (50, "20us", TARGET_RUNTIME, 100, 128, "batchable 20us timeout"),
-        (50, "100us", TARGET_RUNTIME, 100, 128, "batchable 100us timeout"),
-        (50, "1ms", TARGET_RUNTIME, 100, 128, "batchable 1ms timeout"),
+        *[
+            (50, n, TARGET_RUNTIME, 1, 128, f"not batchable max batch size {n}") for n in MAX_BATCH_SIZES
+        ],
+        *[
+            (50, n, TARGET_RUNTIME, 100, 128, f"batchable max batch size {n}") for n in MAX_BATCH_SIZES
+        ]
     ],
 )
 def test_getpage_merge_smoke(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     tablesize_mib: int,
-    batch_timeout: Optional[str],
+    max_batch_size: Optional[int],
     target_runtime: int,
     effective_io_concurrency: int,
     readhead_buffer_size: int,
@@ -52,9 +48,9 @@ def test_getpage_merge_smoke(
     params.update(
         {
             "tablesize_mib": (tablesize_mib, {"unit": "MiB"}),
-            "batch_timeout": (
-                -1 if batch_timeout is None else 1e3 * humantime_to_ms(batch_timeout),
-                {"unit": "us"},
+            "max_batch_size": (
+                -1 if max_batch_size is None else max_batch_size,
+                {},
             ),
             # target_runtime is just a polite ask to the workload to run for this long
             "effective_io_concurrency": (effective_io_concurrency, {}),
@@ -171,7 +167,9 @@ def test_getpage_merge_smoke(
         after = get_metrics()
         return (after - before).normalize(iters - 1)
 
-    env.pageserver.patch_config_toml_nonrecursive({"server_side_batch_timeout": batch_timeout})
+    env.pageserver.patch_config_toml_nonrecursive({"page_service_pipelining": {
+        "max_batch_size": max_batch_size,
+    }} if max_batch_size is not None else {})
     env.pageserver.restart()
     metrics = workload()
 
@@ -201,13 +199,13 @@ def test_getpage_merge_smoke(
 
 
 @pytest.mark.parametrize(
-    "batch_timeout", [None, "10us", "20us", "50us", "100us", "200us", "500us", "1ms"]
+    "max_batch_size", [None, 1, 32]
 )
 def test_timer_precision(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
-    batch_timeout: Optional[str],
+    max_batch_size: Optional[int],
 ):
     """
     Determine the batching timeout precision (mean latency) and tail latency impact.
@@ -223,7 +221,10 @@ def test_timer_precision(
     #
 
     def patch_ps_config(ps_config):
-        ps_config["server_side_batch_timeout"] = batch_timeout
+        if max_batch_size is not None:
+            ps_config["page_service_pipelining"] = {
+                "max_batch_size": max_batch_size,
+            }
 
     neon_env_builder.pageserver_config_override = patch_ps_config
 

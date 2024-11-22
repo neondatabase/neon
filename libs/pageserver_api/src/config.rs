@@ -129,7 +129,8 @@ pub struct DiskUsageEvictionTaskConfig {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PageServicePipeliningConfig {
-    pub max_batch_size: usize,
+    // Causes runtime errors if larger than max get_vectored batch size.
+    pub max_batch_size: NonZeroUsize,
 }
 
 pub mod statvfs {
