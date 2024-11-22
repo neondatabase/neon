@@ -1934,8 +1934,8 @@ impl RemoteTimelineClient {
             }
 
             let upload_result: anyhow::Result<()> = match &task.op {
-                UploadOp::UploadLayer(ref layer, ref layer_metadata, last_op) => {
-                    if let Some(OpType::FlushDeletion) = last_op {
+                UploadOp::UploadLayer(ref layer, ref layer_metadata, mode) => {
+                    if let Some(OpType::FlushDeletion) = mode {
                         if self.config.read().unwrap().block_deletions {
                             // Of course, this is not efficient... but usually the queue should be empty.
                             let mut queue_locked = self.upload_queue.lock().unwrap();
@@ -1972,6 +1972,13 @@ impl RemoteTimelineClient {
                                 layer.layer_desc().layer_name(),
                                 layer_metadata.generation
                             );
+                            {
+                                // We are going to flush, we can clean up the recently deleted list.
+                                let mut queue_locked = self.upload_queue.lock().unwrap();
+                                if let Ok(queue) = queue_locked.initialized_mut() {
+                                    queue.recently_deleted.clear();
+                                }
+                            }
                             if let Err(e) = self.deletion_queue_client.flush_execute().await {
                                 warn!(
                                     "upload_queue_reordering: failed to flush the deletion queue before uploading layer {} at gen {:?}, still proceeding to upload: {e:#} ",
