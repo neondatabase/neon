@@ -57,6 +57,8 @@ VERSIONS_COMBINATIONS = (
 )
 # fmt: on
 
+# If the environment variable USE_LFC is set and its value is "false", then LFC is disabled for tests.
+# If it is not set or set to a value not equal to "false", LFC is enabled by default.
 USE_LFC = os.environ.get("USE_LFC") != "false"
 
 
