@@ -254,6 +254,8 @@ pub enum ImportPgdataLocation {
     AwsS3 {
         region: String,
         bucket: String,
+        /// A better name for this would be `prefix`; changing requires coordination with cplane.
+        /// See <https://github.com/neondatabase/cloud/issues/20646>.
         key: String,
     },
 }
