@@ -199,16 +199,12 @@ pub(crate) enum TimelineExclusionError {
 
 impl TimelineCreateGuard {
     pub(crate) fn new(
-        owning_tenant: &Tenant,
+        owning_tenant: &Arc<Tenant>,
         timeline_id: TimelineId,
         timeline_path: Utf8PathBuf,
         idempotency: CreateTimelineIdempotency,
         allow_offloaded: bool,
     ) -> Result<Self, TimelineExclusionError> {
-        let owning_tenant = owning_tenant
-            .myself
-            .upgrade()
-            .ok_or(TimelineExclusionError::ShuttingDown)?;
         let _tenant_gate_guard = owning_tenant
             .gate
             .enter()
@@ -246,7 +242,7 @@ impl TimelineCreateGuard {
         drop(timelines);
         Ok(Self {
             _tenant_gate_guard,
-            owning_tenant,
+            owning_tenant: Arc::clone(owning_tenant),
             timeline_id,
             timeline_path,
             idempotency,

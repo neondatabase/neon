@@ -371,10 +371,7 @@ pub struct Tenant {
     pub(crate) gc_block: gc_block::GcBlock,
 
     l0_flush_global_state: L0FlushGlobalState,
-
-    myself: Weak<Self>,
 }
-
 impl std::fmt::Debug for Tenant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} ({})", self.tenant_shard_id, self.current_state())
@@ -1222,20 +1219,17 @@ impl Tenant {
         let attach_mode = attached_conf.location.attach_mode;
         let generation = attached_conf.location.generation;
 
-        let tenant = Arc::new_cyclic(|myself| {
-            Tenant::new(
-                TenantState::Attaching,
-                conf,
-                attached_conf,
-                shard_identity,
-                Some(wal_redo_manager),
-                tenant_shard_id,
-                remote_storage.clone(),
-                deletion_queue_client,
-                l0_flush_global_state,
-                myself.clone(),
-            )
-        });
+        let tenant = Arc::new(Tenant::new(
+            TenantState::Attaching,
+            conf,
+            attached_conf,
+            shard_identity,
+            Some(wal_redo_manager),
+            tenant_shard_id,
+            remote_storage.clone(),
+            deletion_queue_client,
+            l0_flush_global_state,
+        ));
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
         // we shut down while attaching.
@@ -2251,7 +2245,7 @@ impl Tenant {
     ///
     /// Tests should use `Tenant::create_test_timeline` to set up the minimum required metadata keys.
     pub(crate) async fn create_empty_timeline(
-        &self,
+        self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
@@ -2301,7 +2295,7 @@ impl Tenant {
     // Our current tests don't need the background loops.
     #[cfg(test)]
     pub async fn create_test_timeline(
-        &self,
+        self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
@@ -2340,7 +2334,7 @@ impl Tenant {
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn create_test_timeline_with_layers(
-        &self,
+        self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
@@ -3798,7 +3792,6 @@ impl Tenant {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
-        myself: Weak<Tenant>,
     ) -> Tenant {
         debug_assert!(
             !attached_conf.location.generation.is_none() || conf.control_plane_api.is_none()
@@ -3899,7 +3892,6 @@ impl Tenant {
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
             l0_flush_global_state,
-            myself,
         }
     }
 
@@ -4498,7 +4490,7 @@ impl Tenant {
     /// If the timeline was already created in the meantime, we check whether this
     /// request conflicts or is idempotent , based on `state`.
     async fn start_creating_timeline(
-        &self,
+        self: &Arc<Self>,
         new_timeline_id: TimelineId,
         idempotency: CreateTimelineIdempotency,
     ) -> Result<StartCreatingTimelineResult, CreateTimelineError> {
@@ -4857,7 +4849,7 @@ impl Tenant {
     /// The `allow_offloaded` parameter controls whether to tolerate the existence of
     /// offloaded timelines or not.
     fn create_timeline_create_guard(
-        &self,
+        self: &Arc<Self>,
         timeline_id: TimelineId,
         idempotency: CreateTimelineIdempotency,
         allow_offloaded: bool,
@@ -5353,27 +5345,24 @@ pub(crate) mod harness {
         ) -> anyhow::Result<Arc<Tenant>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
-            let tenant = Arc::new_cyclic(|myself| {
-                Tenant::new(
-                    TenantState::Attaching,
-                    self.conf,
-                    AttachedTenantConf::try_from(LocationConf::attached_single(
-                        TenantConfOpt::from(self.tenant_conf.clone()),
-                        self.generation,
-                        &ShardParameters::default(),
-                    ))
-                    .unwrap(),
-                    // This is a legacy/test code path: sharding isn't supported here.
-                    ShardIdentity::unsharded(),
-                    Some(walredo_mgr),
-                    self.tenant_shard_id,
-                    self.remote_storage.clone(),
-                    self.deletion_queue.new_client(),
-                    // TODO: ideally we should run all unit tests with both configs
-                    L0FlushGlobalState::new(L0FlushConfig::default()),
-                    myself.clone(),
-                )
-            });
+            let tenant = Arc::new(Tenant::new(
+                TenantState::Attaching,
+                self.conf,
+                AttachedTenantConf::try_from(LocationConf::attached_single(
+                    TenantConfOpt::from(self.tenant_conf.clone()),
+                    self.generation,
+                    &ShardParameters::default(),
+                ))
+                .unwrap(),
+                // This is a legacy/test code path: sharding isn't supported here.
+                ShardIdentity::unsharded(),
+                Some(walredo_mgr),
+                self.tenant_shard_id,
+                self.remote_storage.clone(),
+                self.deletion_queue.new_client(),
+                // TODO: ideally we should run all unit tests with both configs
+                L0FlushGlobalState::new(L0FlushConfig::default()),
+            ));
 
             let preload = tenant
                 .preload(&self.remote_storage, CancellationToken::new())
