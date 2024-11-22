@@ -199,7 +199,7 @@ use utils::backoff::{
 use utils::pausable_failpoint;
 use utils::shard::ShardNumber;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -1839,11 +1839,15 @@ impl RemoteTimelineClient {
 
             // Update the counters and prepare
             match &mut next_op {
-                UploadOp::UploadLayer(layer, meta, last_op) => {
-                    *last_op = upload_queue.last_operation.insert(
-                        (layer.layer_desc().layer_name().clone(), meta.generation),
-                        OpType::Upload,
-                    );
+                UploadOp::UploadLayer(layer, meta, mode) => {
+                    if upload_queue
+                        .recently_deleted
+                        .remove(&(layer.layer_desc().layer_name().clone(), meta.generation))
+                    {
+                        *mode = Some(OpType::FlushDeletion);
+                    } else {
+                        *mode = Some(OpType::MayReorder)
+                    }
                     upload_queue.num_inprogress_layer_uploads += 1;
                 }
                 UploadOp::UploadMetadata { .. } => {
@@ -1852,8 +1856,8 @@ impl RemoteTimelineClient {
                 UploadOp::Delete(Delete { layers }) => {
                     for (name, meta) in layers {
                         upload_queue
-                            .last_operation
-                            .insert((name.clone(), meta.generation), OpType::Delete);
+                            .recently_deleted
+                            .insert((name.clone(), meta.generation));
                     }
                     upload_queue.num_inprogress_deletions += 1;
                 }
@@ -1931,7 +1935,7 @@ impl RemoteTimelineClient {
 
             let upload_result: anyhow::Result<()> = match &task.op {
                 UploadOp::UploadLayer(ref layer, ref layer_metadata, last_op) => {
-                    if let Some(OpType::Delete) = last_op {
+                    if let Some(OpType::FlushDeletion) = last_op {
                         if self.config.read().unwrap().block_deletions {
                             // Of course, this is not efficient... but usually the queue should be empty.
                             let mut queue_locked = self.upload_queue.lock().unwrap();
@@ -2320,7 +2324,7 @@ impl RemoteTimelineClient {
                         blocked_deletions: Vec::new(),
                         shutting_down: false,
                         shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
-                        last_operation: HashMap::new(),
+                        recently_deleted: HashSet::new(),
                     };
 
                     let upload_queue = std::mem::replace(

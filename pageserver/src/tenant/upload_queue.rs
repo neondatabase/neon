@@ -3,6 +3,7 @@ use super::storage_layer::ResidentLayer;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 
@@ -14,7 +15,6 @@ use utils::lsn::AtomicLsn;
 use std::sync::atomic::AtomicU32;
 use utils::lsn::Lsn;
 
-#[cfg(feature = "testing")]
 use utils::generation::Generation;
 
 // clippy warns that Uninitialized is much smaller than Initialized, which wastes
@@ -40,8 +40,8 @@ impl UploadQueue {
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum OpType {
-    Upload,
-    Delete,
+    MayReorder,
+    FlushDeletion,
 }
 
 /// This keeps track of queued and in-progress tasks.
@@ -94,11 +94,8 @@ pub(crate) struct UploadQueueInitialized {
     #[cfg(feature = "testing")]
     pub(crate) dangling_files: HashMap<LayerName, Generation>,
 
-    /// Ensure we order file operations correctly. This hashmap will grow infinitely... But it's fine,
-    /// assume the user uploaded 100k files, then we have 100k entries in this hashmap. Assume each
-    /// entry is 100B, then we have 10MB of memory used. This is fine. In theory, we can flush this
-    /// hashmap once deletion queue is flushed, but it requires complex locking and dealing with races.
-    pub(crate) last_operation: HashMap<(LayerName, Generation), OpType>,
+    /// Ensure we order file operations correctly.
+    pub(crate) recently_deleted: HashSet<(LayerName, Generation)>,
 
     /// Deletions that are blocked by the tenant configuration
     pub(crate) blocked_deletions: Vec<Delete>,
@@ -195,7 +192,7 @@ impl UploadQueue {
             queued_operations: VecDeque::new(),
             #[cfg(feature = "testing")]
             dangling_files: HashMap::new(),
-            last_operation: HashMap::new(),
+            recently_deleted: HashSet::new(),
             blocked_deletions: Vec::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
@@ -237,7 +234,7 @@ impl UploadQueue {
             queued_operations: VecDeque::new(),
             #[cfg(feature = "testing")]
             dangling_files: HashMap::new(),
-            last_operation: HashMap::new(),
+            recently_deleted: HashSet::new(),
             blocked_deletions: Vec::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
@@ -319,11 +316,11 @@ pub(crate) enum UploadOp {
 impl std::fmt::Display for UploadOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            UploadOp::UploadLayer(layer, metadata, last_op) => {
+            UploadOp::UploadLayer(layer, metadata, mode) => {
                 write!(
                     f,
-                    "UploadLayer({}, size={:?}, gen={:?}, last_op={:?})",
-                    layer, metadata.file_size, metadata.generation, last_op
+                    "UploadLayer({}, size={:?}, gen={:?}, mode={:?})",
+                    layer, metadata.file_size, metadata.generation, mode
                 )
             }
             UploadOp::UploadMetadata { uploaded, .. } => {
