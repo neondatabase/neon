@@ -794,7 +794,9 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         if compact is not None:
             query["compact"] = "true" if compact else "false"
 
-        log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
+        log.info(
+            f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}, wait_until_uploaded={wait_until_uploaded}"
+        )
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint",
             params=query,

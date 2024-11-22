@@ -4942,6 +4942,7 @@ def last_flush_lsn_upload(
     timeline_id: TimelineId,
     pageserver_id: int | None = None,
     auth_token: str | None = None,
+    wait_until_uploaded: bool = True,
 ) -> Lsn:
     """
     Wait for pageserver to catch to the latest flush LSN of given endpoint,
@@ -4955,7 +4956,9 @@ def last_flush_lsn_upload(
     for tenant_shard_id, pageserver in shards:
         ps_http = pageserver.http_client(auth_token=auth_token)
         wait_for_last_record_lsn(ps_http, tenant_shard_id, timeline_id, last_flush_lsn)
-        ps_http.timeline_checkpoint(tenant_shard_id, timeline_id, wait_until_uploaded=True)
+        ps_http.timeline_checkpoint(
+            tenant_shard_id, timeline_id, wait_until_uploaded=wait_until_uploaded
+        )
     return last_flush_lsn
 
 
@@ -4980,6 +4983,7 @@ def generate_uploads_and_deletions(
     timeline_id: TimelineId | None = None,
     data: str | None = None,
     pageserver: NeonPageserver,
+    wait_until_uploaded: bool = True,
 ):
     """
     Using the environment's default tenant + timeline, generate a load pattern
@@ -5002,7 +5006,12 @@ def generate_uploads_and_deletions(
         if init:
             endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
             last_flush_lsn_upload(
-                env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver.id
+                env,
+                endpoint,
+                tenant_id,
+                timeline_id,
+                pageserver_id=pageserver.id,
+                wait_until_uploaded=wait_until_uploaded,
             )
 
         def churn(data):
@@ -5025,7 +5034,12 @@ def generate_uploads_and_deletions(
             # in a state where there are "future layers" in remote storage that will generate deletions
             # after a restart.
             last_flush_lsn_upload(
-                env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver.id
+                env,
+                endpoint,
+                tenant_id,
+                timeline_id,
+                pageserver_id=pageserver.id,
+                wait_until_uploaded=wait_until_uploaded,
             )
 
         # Compaction should generate some GC-elegible layers
@@ -5041,4 +5055,4 @@ def generate_uploads_and_deletions(
         # background ingest, no more uploads pending, and therefore no non-determinism
         # in subsequent actions like pageserver restarts.
         flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
-        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=wait_until_uploaded)
