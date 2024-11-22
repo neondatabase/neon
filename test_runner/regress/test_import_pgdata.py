@@ -13,7 +13,9 @@ from fixtures.pageserver.http import (
     ImportPgdataIdemptencyKey,
     PageserverApiException,
 )
+from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind
+from fixtures.utils import run_only_on_postgres
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
@@ -35,6 +37,10 @@ smoke_params = [
 ]
 
 
+@run_only_on_postgres(
+    [PgVersion.V14, PgVersion.V15, PgVersion.V16],
+    "newer control file catalog version and struct format isn't supported",
+)
 @pytest.mark.parametrize("shard_count,stripe_size,rel_block_size", smoke_params)
 def test_pgdata_import_smoke(
     vanilla_pg: VanillaPostgres,
