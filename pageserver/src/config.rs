@@ -144,7 +144,6 @@ pub struct PageServerConf {
     /// JWT token for use with the control plane API.
     pub control_plane_api_token: Option<SecretString>,
 
-    // FIXME: use control_plane_api ? it points to generations api though I think
     pub import_pgdata_upcall_api: Option<Url>,
     pub import_pgdata_upcall_api_token: Option<SecretString>,
     pub import_pgdata_aws_endpoint_url: Option<Url>,
