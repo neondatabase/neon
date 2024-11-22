@@ -10,15 +10,22 @@ use tokio_postgres::{CancelToken, NoTls};
 use tracing::{debug, info};
 use uuid::Uuid;
 
+use crate::auth::{check_peer_addr_is_in_list, IpPattern};
 use crate::error::ReportableError;
 use crate::metrics::{CancellationRequest, CancellationSource, Metrics};
+use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::cancellation_publisher::{
     CancellationPublisher, CancellationPublisherMut, RedisPublisherClient,
 };
+use std::net::IpAddr;
+
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 pub type CancelMap = Arc<DashMap<CancelKeyData, Option<CancelClosure>>>;
 pub type CancellationHandlerMain = CancellationHandler<Option<Arc<Mutex<RedisPublisherClient>>>>;
 pub(crate) type CancellationHandlerMainInternal = Option<Arc<Mutex<RedisPublisherClient>>>;
+
+type IpSubnetKey = IpNet;
 
 /// Enables serving `CancelRequest`s.
 ///
@@ -29,14 +36,23 @@ pub struct CancellationHandler<P> {
     /// This field used for the monitoring purposes.
     /// Represents the source of the cancellation request.
     from: CancellationSource,
+    // rate limiter of cancellation requests
+    limiter: Arc<std::sync::Mutex<LeakyBucketRateLimiter<IpSubnetKey>>>,
 }
 
 #[derive(Debug, Error)]
 pub(crate) enum CancelError {
     #[error("{0}")]
     IO(#[from] std::io::Error),
+
     #[error("{0}")]
     Postgres(#[from] tokio_postgres::Error),
+
+    #[error("rate limit exceeded")]
+    RateLimit,
+
+    #[error("IP is not allowed")]
+    IpNotAllowed,
 }
 
 impl ReportableError for CancelError {
@@ -47,6 +63,8 @@ impl ReportableError for CancelError {
                 crate::error::ErrorKind::Postgres
             }
             CancelError::Postgres(_) => crate::error::ErrorKind::Compute,
+            CancelError::RateLimit => crate::error::ErrorKind::RateLimit,
+            CancelError::IpNotAllowed => crate::error::ErrorKind::User,
         }
     }
 }
@@ -79,13 +97,36 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
             cancellation_handler: self,
         }
     }
+
     /// Try to cancel a running query for the corresponding connection.
     /// If the cancellation key is not found, it will be published to Redis.
+    /// check_allowed - if true, check if the IP is allowed to cancel the query
     pub(crate) async fn cancel_session(
         &self,
         key: CancelKeyData,
         session_id: Uuid,
+        peer_addr: &IpAddr,
+        check_allowed: bool,
     ) -> Result<(), CancelError> {
+        // TODO: check for unspecified address is only for backward compatibility, should be removed
+        if !peer_addr.is_unspecified() {
+            let subnet_key = match *peer_addr {
+                IpAddr::V4(ip) => IpNet::V4(Ipv4Net::new_assert(ip, 24).trunc()), // use defaut mask here
+                IpAddr::V6(ip) => IpNet::V6(Ipv6Net::new_assert(ip, 64).trunc()),
+            };
+            if !self.limiter.lock().unwrap().check(subnet_key, 1) {
+                tracing::debug!("Rate limit exceeded. Skipping cancellation message");
+                Metrics::get()
+                    .proxy
+                    .cancellation_requests_total
+                    .inc(CancellationRequest {
+                        source: self.from,
+                        kind: crate::metrics::CancellationOutcome::RateLimitExceeded,
+                    });
+                return Err(CancelError::RateLimit);
+            }
+        }
+
         // NB: we should immediately release the lock after cloning the token.
         let Some(cancel_closure) = self.map.get(&key).and_then(|x| x.clone()) else {
             tracing::warn!("query cancellation key not found: {key}");
@@ -96,7 +137,13 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
                     source: self.from,
                     kind: crate::metrics::CancellationOutcome::NotFound,
                 });
-            match self.client.try_publish(key, session_id).await {
+
+            if session_id == Uuid::nil() {
+                // was already published, do not publish it again
+                return Ok(());
+            }
+
+            match self.client.try_publish(key, session_id, *peer_addr).await {
                 Ok(()) => {} // do nothing
                 Err(e) => {
                     return Err(CancelError::IO(std::io::Error::new(
@@ -107,6 +154,13 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
             }
             return Ok(());
         };
+
+        if check_allowed
+            && !check_peer_addr_is_in_list(peer_addr, cancel_closure.ip_allowlist.as_slice())
+        {
+            return Err(CancelError::IpNotAllowed);
+        }
+
         Metrics::get()
             .proxy
             .cancellation_requests_total
@@ -135,13 +189,29 @@ impl CancellationHandler<()> {
             map,
             client: (),
             from,
+            limiter: Arc::new(std::sync::Mutex::new(
+                LeakyBucketRateLimiter::<IpSubnetKey>::new_with_shards(
+                    LeakyBucketRateLimiter::<IpSubnetKey>::DEFAULT,
+                    64,
+                ),
+            )),
         }
     }
 }
 
 impl<P: CancellationPublisherMut> CancellationHandler<Option<Arc<Mutex<P>>>> {
     pub fn new(map: CancelMap, client: Option<Arc<Mutex<P>>>, from: CancellationSource) -> Self {
-        Self { map, client, from }
+        Self {
+            map,
+            client,
+            from,
+            limiter: Arc::new(std::sync::Mutex::new(
+                LeakyBucketRateLimiter::<IpSubnetKey>::new_with_shards(
+                    LeakyBucketRateLimiter::<IpSubnetKey>::DEFAULT,
+                    64,
+                ),
+            )),
+        }
     }
 }
 
@@ -152,13 +222,19 @@ impl<P: CancellationPublisherMut> CancellationHandler<Option<Arc<Mutex<P>>>> {
 pub struct CancelClosure {
     socket_addr: SocketAddr,
     cancel_token: CancelToken,
+    ip_allowlist: Vec<IpPattern>,
 }
 
 impl CancelClosure {
-    pub(crate) fn new(socket_addr: SocketAddr, cancel_token: CancelToken) -> Self {
+    pub(crate) fn new(
+        socket_addr: SocketAddr,
+        cancel_token: CancelToken,
+        ip_allowlist: Vec<IpPattern>,
+    ) -> Self {
         Self {
             socket_addr,
             cancel_token,
+            ip_allowlist,
         }
     }
     /// Cancels the query running on user's compute node.
@@ -167,6 +243,9 @@ impl CancelClosure {
         self.cancel_token.cancel_query_raw(socket, NoTls).await?;
         debug!("query was cancelled");
         Ok(())
+    }
+    pub(crate) fn set_ip_allowlist(&mut self, ip_allowlist: Vec<IpPattern>) {
+        self.ip_allowlist = ip_allowlist;
     }
 }
 
@@ -229,6 +308,8 @@ mod tests {
                     cancel_key: 0,
                 },
                 Uuid::new_v4(),
+                &("127.0.0.1".parse().unwrap()),
+                true,
             )
             .await
             .unwrap();

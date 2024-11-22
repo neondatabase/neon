@@ -194,9 +194,11 @@ async def main_impl(args, report_out, client: Client):
             tenant_ids = await client.get_tenant_ids()
             get_timeline_id_coros = [client.get_timeline_ids(tenant_id) for tenant_id in tenant_ids]
             gathered = await asyncio.gather(*get_timeline_id_coros, return_exceptions=True)
-            assert len(tenant_ids) == len(gathered)
             tenant_and_timline_ids = []
-            for tid, tlids in zip(tenant_ids, gathered, strict=False):
+            for tid, tlids in zip(tenant_ids, gathered, strict=True):
+                # TODO: add error handling if tlids isinstance(Exception)
+                assert isinstance(tlids, list)
+
                 for tlid in tlids:
                     tenant_and_timline_ids.append((tid, tlid))
         elif len(comps) == 1:

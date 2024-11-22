@@ -126,7 +126,7 @@ pub struct State {
     conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
-    allowlist_routes: Vec<Uri>,
+    allowlist_routes: &'static [&'static str],
     remote_storage: GenericRemoteStorage,
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
@@ -147,16 +147,13 @@ impl State {
         deletion_queue_client: DeletionQueueClient,
         secondary_controller: SecondaryController,
     ) -> anyhow::Result<Self> {
-        let allowlist_routes = [
+        let allowlist_routes = &[
             "/v1/status",
             "/v1/doc",
             "/swagger.yml",
             "/metrics",
             "/profile/cpu",
-        ]
-        .iter()
-        .map(|v| v.parse().unwrap())
-        .collect::<Vec<_>>();
+        ];
         Ok(Self {
             conf,
             tenant_manager,
@@ -3155,7 +3152,7 @@ pub fn make_router(
     if auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
             let state = get_state(request);
-            if state.allowlist_routes.contains(request.uri()) {
+            if state.allowlist_routes.contains(&request.uri().path()) {
                 None
             } else {
                 state.auth.as_deref()

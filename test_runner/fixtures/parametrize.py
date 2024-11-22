@@ -66,6 +66,7 @@ def pytest_generate_tests(metafunc: Metafunc):
 
     metafunc.parametrize("build_type", build_types)
 
+    pg_versions: list[PgVersion]
     if (v := os.getenv("DEFAULT_PG_VERSION")) is None:
         pg_versions = [version for version in PgVersion if version != PgVersion.NOT_SET]
     else:

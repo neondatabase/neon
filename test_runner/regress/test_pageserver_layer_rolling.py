@@ -131,7 +131,7 @@ def test_pageserver_small_inmemory_layers(
     wait_until_pageserver_is_caught_up(env, last_flush_lsns)
 
     # We didn't write enough data to trigger a size-based checkpoint: we should see dirty data.
-    wait_until(10, 1, lambda: assert_dirty_bytes_nonzero(env))  # type: ignore
+    wait_until(10, 1, lambda: assert_dirty_bytes_nonzero(env))
 
     ps_http_client = env.pageserver.http_client()
     total_wal_ingested_before_restart = wait_for_wal_ingest_metric(ps_http_client)
@@ -139,7 +139,7 @@ def test_pageserver_small_inmemory_layers(
     # Within ~ the checkpoint interval, all the ephemeral layers should be frozen and flushed,
     # such that there are zero bytes of ephemeral layer left on the pageserver
     log.info("Waiting for background checkpoints...")
-    wait_until(CHECKPOINT_TIMEOUT_SECONDS * 2, 1, lambda: assert_dirty_bytes(env, 0))  # type: ignore
+    wait_until(CHECKPOINT_TIMEOUT_SECONDS * 2, 1, lambda: assert_dirty_bytes(env, 0))
 
     # Zero ephemeral layer bytes does not imply that all the frozen layers were uploaded: they
     # must be uploaded to remain visible to the pageserver after restart.
@@ -180,7 +180,7 @@ def test_idle_checkpoints(neon_env_builder: NeonEnvBuilder):
     wait_until_pageserver_is_caught_up(env, last_flush_lsns)
 
     # We didn't write enough data to trigger a size-based checkpoint: we should see dirty data.
-    wait_until(10, 1, lambda: assert_dirty_bytes_nonzero(env))  # type: ignore
+    wait_until(10, 1, lambda: assert_dirty_bytes_nonzero(env))
 
     # Stop the safekeepers, so that we cannot have any more WAL receiver connections
     for sk in env.safekeepers:
@@ -193,7 +193,7 @@ def test_idle_checkpoints(neon_env_builder: NeonEnvBuilder):
     # Within ~ the checkpoint interval, all the ephemeral layers should be frozen and flushed,
     # such that there are zero bytes of ephemeral layer left on the pageserver
     log.info("Waiting for background checkpoints...")
-    wait_until(CHECKPOINT_TIMEOUT_SECONDS * 2, 1, lambda: assert_dirty_bytes(env, 0))  # type: ignore
+    wait_until(CHECKPOINT_TIMEOUT_SECONDS * 2, 1, lambda: assert_dirty_bytes(env, 0))
 
     # The code below verifies that we do not flush on the first write
     # after an idle period longer than the checkpoint timeout.
@@ -210,7 +210,7 @@ def test_idle_checkpoints(neon_env_builder: NeonEnvBuilder):
         run_worker_for_tenant(env, 5, tenant_with_extra_writes, offset=ENTRIES_PER_TIMELINE)
     )
 
-    dirty_after_write = wait_until(10, 1, lambda: assert_dirty_bytes_nonzero(env))  # type: ignore
+    dirty_after_write = wait_until(10, 1, lambda: assert_dirty_bytes_nonzero(env))
 
     # We shouldn't flush since we've just opened a new layer
     waited_for = 0
@@ -312,4 +312,4 @@ def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
         dirty_bytes = get_dirty_bytes(env)
         assert dirty_bytes < max_dirty_data
 
-    wait_until(compaction_period_s * 2, 1, lambda: assert_dirty_data_limited())  # type: ignore
+    wait_until(compaction_period_s * 2, 1, lambda: assert_dirty_data_limited())

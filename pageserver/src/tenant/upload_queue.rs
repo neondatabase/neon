@@ -3,6 +3,7 @@ use super::storage_layer::ResidentLayer;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 
@@ -14,7 +15,6 @@ use utils::lsn::AtomicLsn;
 use std::sync::atomic::AtomicU32;
 use utils::lsn::Lsn;
 
-#[cfg(feature = "testing")]
 use utils::generation::Generation;
 
 // clippy warns that Uninitialized is much smaller than Initialized, which wastes
@@ -36,6 +36,12 @@ impl UploadQueue {
             UploadQueue::Stopped(_) => "Stopped",
         }
     }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum OpType {
+    MayReorder,
+    FlushDeletion,
 }
 
 /// This keeps track of queued and in-progress tasks.
@@ -87,6 +93,9 @@ pub(crate) struct UploadQueueInitialized {
     /// bug causing leaks, then it's better to not leave this enabled for production builds.
     #[cfg(feature = "testing")]
     pub(crate) dangling_files: HashMap<LayerName, Generation>,
+
+    /// Ensure we order file operations correctly.
+    pub(crate) recently_deleted: HashSet<(LayerName, Generation)>,
 
     /// Deletions that are blocked by the tenant configuration
     pub(crate) blocked_deletions: Vec<Delete>,
@@ -183,6 +192,7 @@ impl UploadQueue {
             queued_operations: VecDeque::new(),
             #[cfg(feature = "testing")]
             dangling_files: HashMap::new(),
+            recently_deleted: HashSet::new(),
             blocked_deletions: Vec::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
@@ -224,6 +234,7 @@ impl UploadQueue {
             queued_operations: VecDeque::new(),
             #[cfg(feature = "testing")]
             dangling_files: HashMap::new(),
+            recently_deleted: HashSet::new(),
             blocked_deletions: Vec::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
@@ -282,8 +293,8 @@ pub(crate) struct Delete {
 
 #[derive(Debug)]
 pub(crate) enum UploadOp {
-    /// Upload a layer file
-    UploadLayer(ResidentLayer, LayerFileMetadata),
+    /// Upload a layer file. The last field indicates the last operation for thie file.
+    UploadLayer(ResidentLayer, LayerFileMetadata, Option<OpType>),
 
     /// Upload a index_part.json file
     UploadMetadata {
@@ -305,11 +316,11 @@ pub(crate) enum UploadOp {
 impl std::fmt::Display for UploadOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            UploadOp::UploadLayer(layer, metadata) => {
+            UploadOp::UploadLayer(layer, metadata, mode) => {
                 write!(
                     f,
-                    "UploadLayer({}, size={:?}, gen={:?})",
-                    layer, metadata.file_size, metadata.generation
+                    "UploadLayer({}, size={:?}, gen={:?}, mode={:?})",
+                    layer, metadata.file_size, metadata.generation, mode
                 )
             }
             UploadOp::UploadMetadata { uploaded, .. } => {

@@ -1405,7 +1405,7 @@ def test_sharding_split_failures(
         #   e.g. while waiting for a storage controller to re-attach a parent shard if we failed
         #   inside the pageserver and the storage controller responds by detaching children and attaching
         #   parents concurrently (https://github.com/neondatabase/neon/issues/7148)
-        wait_until(10, 1, lambda: workload.churn_rows(10, upload=False, ingest=False))  # type: ignore
+        wait_until(10, 1, lambda: workload.churn_rows(10, upload=False, ingest=False))
 
         workload.validate()
 

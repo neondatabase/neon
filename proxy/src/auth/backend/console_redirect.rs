@@ -6,6 +6,7 @@ use tokio_postgres::config::SslMode;
 use tracing::{info, info_span};
 
 use super::ComputeCredentialKeys;
+use crate::auth::IpPattern;
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
@@ -74,10 +75,10 @@ impl ConsoleRedirectBackend {
         ctx: &RequestContext,
         auth_config: &'static AuthenticationConfig,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-    ) -> auth::Result<ConsoleRedirectNodeInfo> {
+    ) -> auth::Result<(ConsoleRedirectNodeInfo, Option<Vec<IpPattern>>)> {
         authenticate(ctx, auth_config, &self.console_uri, client)
             .await
-            .map(ConsoleRedirectNodeInfo)
+            .map(|(node_info, ip_allowlist)| (ConsoleRedirectNodeInfo(node_info), ip_allowlist))
     }
 }
 
@@ -102,7 +103,7 @@ async fn authenticate(
     auth_config: &'static AuthenticationConfig,
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<NodeInfo> {
+) -> auth::Result<(NodeInfo, Option<Vec<IpPattern>>)> {
     ctx.set_auth_method(crate::context::AuthMethod::ConsoleRedirect);
 
     // registering waiter can fail if we get unlucky with rng.
@@ -176,9 +177,12 @@ async fn authenticate(
         config.password(password.as_ref());
     }
 
-    Ok(NodeInfo {
-        config,
-        aux: db_info.aux,
-        allow_self_signed_compute: false, // caller may override
-    })
+    Ok((
+        NodeInfo {
+            config,
+            aux: db_info.aux,
+            allow_self_signed_compute: false, // caller may override
+        },
+        db_info.allowed_ips,
+    ))
 }
