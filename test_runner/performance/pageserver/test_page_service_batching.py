@@ -272,6 +272,7 @@ def test_latency(
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
     pipelining_config: Optional[PageServicePipeliningConfig],
+    name: str,
 ):
     """
     Measure the latency impact of pipelining in an un-batchable workloads.
