@@ -109,8 +109,7 @@ pub struct ConfigToml {
     pub virtual_file_io_mode: Option<crate::models::virtual_file::IoMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_sync: Option<bool>,
-    #[serde(with = "humantime_serde")]
-    pub server_side_batch_timeout: Option<Duration>,
+    pub page_service_pipelining: Option<PageServicePipeliningConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -125,6 +124,12 @@ pub struct DiskUsageEvictionTaskConfig {
     /// Select sorting for evicted layers
     #[serde(default)]
     pub eviction_order: EvictionOrder,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageServicePipeliningConfig {
+    pub max_batch_size: usize,
 }
 
 pub mod statvfs {
@@ -319,8 +324,6 @@ pub mod defaults {
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
-
-    pub const DEFAULT_SERVER_SIDE_BATCH_TIMEOUT: Option<&str> = None;
 }
 
 impl Default for ConfigToml {
@@ -401,10 +404,9 @@ impl Default for ConfigToml {
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: None,
             virtual_file_io_mode: None,
-            server_side_batch_timeout: DEFAULT_SERVER_SIDE_BATCH_TIMEOUT
-                .map(|duration| humantime::parse_duration(duration).unwrap()),
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
+            page_service_pipelining: None,
         }
     }
 }

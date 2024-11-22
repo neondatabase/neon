@@ -7,6 +7,7 @@ use bytes::Buf;
 use futures::FutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use pageserver_api::config::PageServicePipeliningConfig;
 use pageserver_api::models::{self, TenantState};
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
@@ -107,7 +108,7 @@ pub fn spawn(
             pg_auth,
             tcp_listener,
             conf.pg_auth_type,
-            conf.server_side_batch_timeout,
+            conf.page_service_pipelining.clone(),
             libpq_ctx,
             cancel.clone(),
         )
@@ -156,7 +157,7 @@ pub async fn libpq_listener_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     listener: tokio::net::TcpListener,
     auth_type: AuthType,
-    server_side_batch_timeout: Option<Duration>,
+    pipelining_config: Option<PageServicePipeliningConfig>,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
 ) -> Connections {
@@ -187,7 +188,7 @@ pub async fn libpq_listener_main(
                     local_auth,
                     socket,
                     auth_type,
-                    server_side_batch_timeout,
+                    pipelining_config.clone(),
                     connection_ctx,
                     connections_cancel.child_token(),
                 ));
@@ -215,7 +216,7 @@ async fn page_service_conn_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
-    server_side_batch_timeout: Option<Duration>,
+    pipelining_config: Option<PageServicePipeliningConfig>,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
 ) -> ConnectionHandlerResult {
@@ -269,7 +270,7 @@ async fn page_service_conn_main(
     let mut conn_handler = PageServerHandler::new(
         tenant_manager,
         auth,
-        server_side_batch_timeout,
+        pipelining_config,
         connection_ctx,
         cancel.clone(),
     );
@@ -316,6 +317,8 @@ struct PageServerHandler {
 
     /// None only while pagestream protocol is being processed.
     timeline_handles: Option<TimelineHandles>,
+
+    pipelining_config: Option<PageServicePipeliningConfig>,
 }
 
 struct TimelineHandles {
@@ -566,7 +569,7 @@ impl PageServerHandler {
     pub fn new(
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
-        server_side_batch_timeout: Option<Duration>,
+        pipelining_config: Option<PageServicePipeliningConfig>,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
     ) -> Self {
@@ -576,6 +579,7 @@ impl PageServerHandler {
             connection_ctx,
             timeline_handles: Some(TimelineHandles::new(tenant_manager)),
             cancel,
+            pipelining_config,
         }
     }
 
