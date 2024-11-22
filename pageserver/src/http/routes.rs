@@ -40,6 +40,7 @@ use pageserver_api::models::TenantSorting;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::TimelineArchivalConfigRequest;
 use pageserver_api::models::TimelineCreateRequestMode;
+use pageserver_api::models::TimelineCreateRequestModeImportPgdata;
 use pageserver_api::models::TimelinesInfoAndOffloaded;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
@@ -81,6 +82,7 @@ use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
+use crate::tenant::timeline::import_pgdata;
 use crate::tenant::timeline::offload::offload_timeline;
 use crate::tenant::timeline::offload::OffloadError;
 use crate::tenant::timeline::CompactFlags;
@@ -579,6 +581,35 @@ async fn timeline_create_handler(
             new_timeline_id,
             ancestor_timeline_id,
             ancestor_start_lsn,
+        }),
+        TimelineCreateRequestMode::ImportPgdata {
+            import_pgdata:
+                TimelineCreateRequestModeImportPgdata {
+                    location,
+                    idempotency_key,
+                },
+        } => tenant::CreateTimelineParams::ImportPgdata(tenant::CreateTimelineParamsImportPgdata {
+            idempotency_key: import_pgdata::index_part_format::IdempotencyKey::new(
+                idempotency_key.0,
+            ),
+            new_timeline_id,
+            location: {
+                use import_pgdata::index_part_format::Location;
+                use pageserver_api::models::ImportPgdataLocation;
+                match location {
+                    #[cfg(feature = "testing")]
+                    ImportPgdataLocation::LocalFs { path } => Location::LocalFs { path },
+                    ImportPgdataLocation::AwsS3 {
+                        region,
+                        bucket,
+                        key,
+                    } => Location::AwsS3 {
+                        region,
+                        bucket,
+                        key,
+                    },
+                }
+            },
         }),
     };
 

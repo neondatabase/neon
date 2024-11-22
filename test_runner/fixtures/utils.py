@@ -674,6 +674,13 @@ def run_only_on_default_postgres(reason: str):
     )
 
 
+def run_only_on_postgres(versions: Iterable[PgVersion], reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) not in versions,
+        reason=reason,
+    )
+
+
 def skip_in_debug_build(reason: str):
     return pytest.mark.skipif(
         os.getenv("BUILD_TYPE", "debug") == "debug",

@@ -1883,6 +1883,20 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response.raise_for_status()
         log.info(f"tenant_create success: {response.json()}")
 
+    def timeline_create(
+        self,
+        tenant_id: TenantId,
+        body: dict[str, Any],
+    ):
+        response = self.request(
+            "POST",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline",
+            json=body,
+            headers=self.headers(TokenScope.PAGE_SERVER_API),
+        )
+        response.raise_for_status()
+        log.info(f"timeline_create success: {response.json()}")
+
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
         """
         :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr": str, "listen_http_port": int}
