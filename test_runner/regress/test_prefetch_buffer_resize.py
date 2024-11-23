@@ -28,6 +28,7 @@ def test_prefetch(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     cur.execute("CREATE TABLE t(pk integer, filler text default repeat('?', 200))")
     cur.execute(f"insert into t (pk) values (generate_series(1,{n_rec}))")
 
+    cur.execute("set statement_timeout=0")
     cur.execute("set effective_io_concurrency=20")
     cur.execute("set max_parallel_workers_per_gather=0")
 
