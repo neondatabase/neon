@@ -70,7 +70,7 @@ jobs:
     uses: ./.github/workflows/build-macos.yml
     with:
       pg_versions: ${{ needs.files-changed.outputs.postgres_changes }}
-      rebuild_everything: ${{ needs.files-changed.outputs.rebuild_everything }}
+      rebuild_everything: ${{ fromJson(needs.files-changed.outputs.rebuild_everything) }}
 
   gather-rust-build-stats:
     needs: [ check-permissions, build-build-tools-image, files-changed ]
