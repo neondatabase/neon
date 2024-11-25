@@ -8,6 +8,11 @@ on:
         type: string
         default: '[]'
         required: true
+      rebuild_everything:
+        description: "If true, rebuild for all versions"
+        type: boolean
+        default: false
+        required: false
 
 env:
   RUST_BACKTRACE: 1
@@ -19,30 +24,9 @@ env:
 # - You can call a maximum of 20 unique reusable workflows from a single workflow file.
 # https://docs.github.com/en/actions/sharing-automations/reusing-workflows#limitations
 jobs:
-  files-changed:
-    name: Detect what files changed
-    runs-on: ubuntu-22.04
-    timeout-minutes: 3
-    outputs:
-      postgres_changes: ${{ steps.postgres_changes.outputs.changes }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@6ccd57f4c5d15bdc2fef309bd9fb6cc9db2ef1c6 # v4.1.7
-        with:
-          submodules: true
-
-      - name: Check for Postgres changes
-        uses: dorny/paths-filter@1441771bbfdd59dcd748680ee64ebd8faab1a242  #v3
-        id: postgres_changes
-        with:
-          token: ${{ github.token }}
-          filters: .github/file-filters.yaml
-          base: ${{ github.event_name != 'pull_request' && (github.event.merge_group.base_ref || github.ref_name) || '' }}
-          ref: ${{ github.event_name != 'pull_request' && (github.event.merge_group.head_ref || github.ref) || ''}}
-
   check-macos-build:
     if: |
-      inputs.pg_versions != '[]' && (
+      (inputs.pg_versions != '[]' || inputs.rebuild_everything) && (
         contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
         contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
         github.ref_name == 'main'
@@ -51,7 +35,7 @@ jobs:
     runs-on: macos-15
     strategy:
       matrix:
-        postgres-version: ${{ fromJSON(inputs.pg_versions) }}
+        postgres-version: ${{ inputs.rebuild_everything && fromJson('["v14", "v15", "v16", "v17"]') || fromJSON(inputs.pg_versions) }}
     env:
       # Use release build only, to have less debug info around
       # Hence keeping target/ (and general cache size) smaller
