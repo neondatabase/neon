@@ -627,24 +627,7 @@ impl TenantShard {
         use PlacementPolicy::*;
         match self.policy {
             Attached(secondary_count) => {
-                let retain_secondaries = if self.intent.attached.is_none()
-                    && scheduler.node_preferred(&self.intent.secondary).is_some()
-                {
-                    // If we have no attached, and one of the secondaries is elegible to be promoted, retain
-                    // one more secondary than we usually would, as one of them will become attached futher down this function.
-                    secondary_count + 1
-                } else {
-                    secondary_count
-                };
-
-                while self.intent.secondary.len() > retain_secondaries {
-                    // We have no particular preference for one secondary location over another: just
-                    // arbitrarily drop from the end
-                    self.intent.pop_secondary(scheduler);
-                    modified = true;
-                }
-
-                // Should have exactly one attached, and N secondaries
+                // Should have exactly one attached, and at least N secondaries
                 let (modified_attached, attached_node_id) =
                     self.schedule_attached(scheduler, context)?;
                 modified |= modified_attached;
