@@ -11,7 +11,7 @@ use futures::future::Either;
 use futures::TryFutureExt;
 use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
-use proxy::context::RequestMonitoring;
+use proxy::context::RequestContext;
 use proxy::metrics::{Metrics, ThreadPoolMetrics};
 use proxy::protocol2::ConnectionInfo;
 use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
@@ -177,7 +177,7 @@ async fn task_main(
                     .context("failed to set socket option")?;
 
                 info!(%peer_addr, "serving");
-                let ctx = RequestMonitoring::new(
+                let ctx = RequestContext::new(
                     session_id,
                     ConnectionInfo {
                         addr: peer_addr,
@@ -208,7 +208,7 @@ async fn task_main(
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 
 async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     raw_stream: S,
     tls_config: Arc<rustls::ServerConfig>,
     tls_server_end_point: TlsServerEndPoint,
@@ -259,7 +259,7 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 async fn handle_client(
-    ctx: RequestMonitoring,
+    ctx: RequestContext,
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
     tls_server_end_point: TlsServerEndPoint,

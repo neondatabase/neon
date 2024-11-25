@@ -12,8 +12,8 @@ use tracing::field::display;
 use tracing::{debug, info};
 
 use super::conn_pool::poll_client;
-use super::conn_pool_lib::{Client, ConnInfo, GlobalConnPool};
-use super::http_conn_pool::{self, poll_http2_client, Send};
+use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
+use super::http_conn_pool::{self, poll_http2_client, HttpConnPool, Send};
 use super::local_conn_pool::{self, LocalConnPool, EXT_NAME, EXT_SCHEMA, EXT_VERSION};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
@@ -23,7 +23,7 @@ use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
 };
 use crate::config::ProxyConfig;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
@@ -33,12 +33,13 @@ use crate::intern::EndpointIdInt;
 use crate::proxy::connect_compute::ConnectMechanism;
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
-use crate::types::{EndpointId, Host};
+use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
 
 pub(crate) struct PoolingBackend {
-    pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool<Send>>,
+    pub(crate) http_conn_pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
     pub(crate) local_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
-    pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
+    pub(crate) pool:
+        Arc<GlobalConnPool<tokio_postgres::Client, EndpointConnPool<tokio_postgres::Client>>>,
 
     pub(crate) config: &'static ProxyConfig,
     pub(crate) auth_backend: &'static crate::auth::Backend<'static, ()>,
@@ -48,7 +49,7 @@ pub(crate) struct PoolingBackend {
 impl PoolingBackend {
     pub(crate) async fn authenticate_with_password(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
         password: &[u8],
     ) -> Result<ComputeCredentials, AuthError> {
@@ -110,7 +111,7 @@ impl PoolingBackend {
 
     pub(crate) async fn authenticate_with_jwt(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
         jwt: String,
     ) -> Result<ComputeCredentials, AuthError> {
@@ -161,16 +162,16 @@ impl PoolingBackend {
     #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
     pub(crate) async fn connect_to_compute(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         conn_info: ConnInfo,
         keys: ComputeCredentials,
         force_new: bool,
     ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
         let maybe_client = if force_new {
-            info!("pool: pool is disabled");
+            debug!("pool: pool is disabled");
             None
         } else {
-            info!("pool: looking for an existing connection");
+            debug!("pool: looking for an existing connection");
             self.pool.get(ctx, &conn_info)?
         };
 
@@ -201,21 +202,24 @@ impl PoolingBackend {
     #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
     pub(crate) async fn connect_to_local_proxy(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         conn_info: ConnInfo,
     ) -> Result<http_conn_pool::Client<Send>, HttpConnError> {
-        info!("pool: looking for an existing connection");
+        debug!("pool: looking for an existing connection");
         if let Ok(Some(client)) = self.http_conn_pool.get(ctx, &conn_info) {
             return Ok(client);
         }
 
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
-        info!(%conn_id, "pool: opening a new connection '{conn_info}'");
+        debug!(%conn_id, "pool: opening a new connection '{conn_info}'");
         let backend = self.auth_backend.as_ref().map(|()| ComputeCredentials {
             info: ComputeUserInfo {
                 user: conn_info.user_info.user.clone(),
-                endpoint: EndpointId::from(format!("{}-local-proxy", conn_info.user_info.endpoint)),
+                endpoint: EndpointId::from(format!(
+                    "{}{LOCAL_PROXY_SUFFIX}",
+                    conn_info.user_info.endpoint.normalize()
+                )),
                 options: conn_info.user_info.options.clone(),
             },
             keys: crate::auth::backend::ComputeCredentialKeys::None,
@@ -246,7 +250,7 @@ impl PoolingBackend {
     #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
     pub(crate) async fn connect_to_local_postgres(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         conn_info: ConnInfo,
     ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
         if let Some(client) = self.local_pool.get(ctx, &conn_info)? {
@@ -471,7 +475,7 @@ impl ShouldRetryWakeCompute for LocalProxyConnError {
 }
 
 struct TokioMechanism {
-    pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
+    pool: Arc<GlobalConnPool<tokio_postgres::Client, EndpointConnPool<tokio_postgres::Client>>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 
@@ -487,7 +491,7 @@ impl ConnectMechanism for TokioMechanism {
 
     async fn connect_once(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         node_info: &CachedNodeInfo,
         timeout: Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
@@ -521,7 +525,7 @@ impl ConnectMechanism for TokioMechanism {
 }
 
 struct HyperMechanism {
-    pool: Arc<http_conn_pool::GlobalConnPool<Send>>,
+    pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 
@@ -537,7 +541,7 @@ impl ConnectMechanism for HyperMechanism {
 
     async fn connect_once(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         node_info: &CachedNodeInfo,
         timeout: Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {

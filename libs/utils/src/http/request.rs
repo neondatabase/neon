@@ -30,7 +30,7 @@ pub fn parse_request_param<T: FromStr>(
     }
 }
 
-fn get_query_param<'a>(
+pub fn get_query_param<'a>(
     request: &'a Request<Body>,
     param_name: &str,
 ) -> Result<Option<Cow<'a, str>>, ApiError> {

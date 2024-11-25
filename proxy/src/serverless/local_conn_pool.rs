@@ -29,14 +29,14 @@ use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{AsyncMessage, Socket};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use super::backend::HttpConnError;
 use super::conn_pool_lib::{
     Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, DbUserConn,
     EndpointConnPool,
 };
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
 
@@ -44,6 +44,7 @@ pub(crate) const EXT_NAME: &str = "pg_session_jwt";
 pub(crate) const EXT_VERSION: &str = "0.1.2";
 pub(crate) const EXT_SCHEMA: &str = "auth";
 
+#[derive(Clone)]
 pub(crate) struct ClientDataLocal {
     session: tokio::sync::watch::Sender<uuid::Uuid>,
     cancel: CancellationToken,
@@ -88,7 +89,7 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
 
     pub(crate) fn get(
         self: &Arc<Self>,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         conn_info: &ConnInfo,
     ) -> Result<Option<Client<C>>, HttpConnError> {
         let client = self
@@ -110,7 +111,7 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
                 "pid",
                 tracing::field::display(client.inner.get_process_id()),
             );
-            info!(
+            debug!(
                 cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
                 "local_pool: reusing connection '{conn_info}'"
             );
@@ -159,7 +160,7 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn poll_client<C: ClientInnerExt>(
     global_pool: Arc<LocalConnPool<C>>,
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
     mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,

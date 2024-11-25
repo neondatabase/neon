@@ -5,7 +5,6 @@ import queue
 import shutil
 import threading
 import time
-from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -36,9 +35,6 @@ from fixtures.utils import (
     wait_until,
 )
 from requests import ReadTimeout
-
-if TYPE_CHECKING:
-    from typing import Optional
 
 
 #
@@ -452,7 +448,7 @@ def test_remote_timeline_client_calls_started_metric(
         for (file_kind, op_kind), observations in calls_started.items():
             log.info(f"ensure_calls_started_grew: {file_kind} {op_kind}: {observations}")
             assert all(
-                x < y for x, y in zip(observations, observations[1:])
+                x < y for x, y in zip(observations, observations[1:], strict=False)
             ), f"observations for {file_kind} {op_kind} did not grow monotonically: {observations}"
 
     def churn(data_pass1, data_pass2):
@@ -731,7 +727,7 @@ def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnv
     # sleep a bit to force the upload task go into exponential backoff
     time.sleep(1)
 
-    q: queue.Queue[Optional[PageserverApiException]] = queue.Queue()
+    q: queue.Queue[PageserverApiException | None] = queue.Queue()
     barrier = threading.Barrier(2)
 
     def create_in_background():
