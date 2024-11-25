@@ -81,10 +81,10 @@ impl WalReaderStreamBuilder {
                                     .get_ws_remote_consistent_lsn(wal_sender_guard.id())
                                 {
                                     if tli.should_walsender_stop(remote_consistent_lsn).await {
-                                        // Terminate if there is nothing more to send.
-                                        // Note that "ending streaming" part of the string is used by
-                                        // pageserver to identify WalReceiverError::SuccessfulCompletion,
-                                        // do not change this string without updating pageserver.
+                                        // Stop streaming if the receivers are caught up and
+                                        // there's no active compute. This causes the loop in
+                                        // [`crate::send_interpreted_wal::InterpretedWalSender::run`]
+                                        // to exit and terminate the WAL stream.
                                         return;
                                     }
                                 }
