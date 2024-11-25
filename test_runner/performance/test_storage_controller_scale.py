@@ -4,7 +4,7 @@ import concurrent.futures
 import random
 import time
 from collections import defaultdict
-from enum import Enum
+from enum import StrEnum
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineArchivalState, TimelineId
@@ -139,7 +139,7 @@ def test_storage_controller_many_tenants(
     tenant_timelines_count = 100
 
     # These lists are maintained for use with rng.choice
-    tenants_with_timelines = list(rng.sample(tenants.keys(), tenant_timelines_count))
+    tenants_with_timelines = list(rng.sample(list(tenants.keys()), tenant_timelines_count))
     tenants_without_timelines = list(
         tenant_id for tenant_id in tenants if tenant_id not in tenants_with_timelines
     )
@@ -171,7 +171,7 @@ def test_storage_controller_many_tenants(
     # start timing on test nodes if we aren't a bit careful.
     create_concurrency = 16
 
-    class Operation(str, Enum):
+    class Operation(StrEnum):
         TIMELINE_OPS = "timeline_ops"
         SHARD_MIGRATE = "shard_migrate"
         TENANT_PASSTHROUGH = "tenant_passthrough"

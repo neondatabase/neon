@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Optional
 
 import pytest
 from fixtures.common_types import TenantId
@@ -105,7 +104,7 @@ def test_null_config(negative_env: NegativeTests):
 
 
 @pytest.mark.parametrize("content_type", [None, "application/json"])
-def test_empty_config(positive_env: NeonEnv, content_type: Optional[str]):
+def test_empty_config(positive_env: NeonEnv, content_type: str | None):
     """
     When the 'config' body attribute is omitted, the request should be accepted
     and the tenant should use the default configuration

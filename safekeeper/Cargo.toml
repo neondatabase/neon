@@ -31,6 +31,7 @@ parking_lot.workspace = true
 pageserver_api.workspace = true
 postgres.workspace = true
 postgres-protocol.workspace = true
+pprof.workspace = true
 rand.workspace = true
 regex.workspace = true
 scopeguard.workspace = true

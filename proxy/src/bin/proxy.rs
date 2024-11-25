@@ -276,7 +276,7 @@ struct SqlOverHttpArgs {
     sql_over_http_cancel_set_shards: usize,
 
     #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
-    sql_over_http_max_request_size_bytes: u64,
+    sql_over_http_max_request_size_bytes: usize,
 
     #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
     sql_over_http_max_response_size_bytes: usize,
@@ -428,8 +428,9 @@ async fn main() -> anyhow::Result<()> {
         )?))),
         None => None,
     };
+
     let cancellation_handler = Arc::new(CancellationHandler::<
-        Option<Arc<tokio::sync::Mutex<RedisPublisherClient>>>,
+        Option<Arc<Mutex<RedisPublisherClient>>>,
     >::new(
         cancel_map.clone(),
         redis_publisher,

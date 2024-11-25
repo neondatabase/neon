@@ -56,7 +56,7 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
 
 def measure_recovery_time(env: NeonCompare):
     client = env.env.pageserver.http_client()
-    pg_version = PgVersion(client.timeline_detail(env.tenant, env.timeline)["pg_version"])
+    pg_version = PgVersion(str(client.timeline_detail(env.tenant, env.timeline)["pg_version"]))
 
     # Delete the Tenant in the pageserver: this will drop local and remote layers, such that
     # when we "create" the Tenant again, we will replay the WAL from the beginning.

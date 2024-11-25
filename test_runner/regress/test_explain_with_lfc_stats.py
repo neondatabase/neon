@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
+from fixtures.utils import USE_LFC
 
 
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
@@ -16,8 +19,6 @@ def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[
-            "shared_buffers='1MB'",
-            f"neon.file_cache_path='{cache_dir}/file.cache'",
             "neon.max_file_cache_size='128MB'",
             "neon.file_cache_size_limit='64MB'",
         ],

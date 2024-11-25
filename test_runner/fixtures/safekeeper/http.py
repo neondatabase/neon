@@ -13,7 +13,7 @@ from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
-    from typing import Any, Optional, Union
+    from typing import Any
 
 
 # Walreceiver as returned by sk's timeline status endpoint.
@@ -72,7 +72,7 @@ class TermBumpResponse:
 class SafekeeperHttpClient(requests.Session, MetricsGetter):
     HTTPError = requests.HTTPError
 
-    def __init__(self, port: int, auth_token: Optional[str] = None, is_testing_enabled=False):
+    def __init__(self, port: int, auth_token: str | None = None, is_testing_enabled=False):
         super().__init__()
         self.port = port
         self.auth_token = auth_token
@@ -98,7 +98,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         if not self.is_testing_enabled:
             pytest.skip("safekeeper was built without 'testing' feature")
 
-    def configure_failpoints(self, config_strings: Union[tuple[str, str], list[tuple[str, str]]]):
+    def configure_failpoints(self, config_strings: tuple[str, str] | list[tuple[str, str]]):
         self.is_testing_enabled_or_skip()
 
         if isinstance(config_strings, tuple):
@@ -195,7 +195,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json, dict)
         return res_json
 
-    def debug_dump(self, params: Optional[dict[str, str]] = None) -> dict[str, Any]:
+    def debug_dump(self, params: dict[str, str] | None = None) -> dict[str, Any]:
         params = params or {}
         res = self.get(f"http://localhost:{self.port}/v1/debug_dump", params=params)
         res.raise_for_status()
@@ -204,7 +204,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         return res_json
 
     def debug_dump_timeline(
-        self, timeline_id: TimelineId, params: Optional[dict[str, str]] = None
+        self, timeline_id: TimelineId, params: dict[str, str] | None = None
     ) -> Any:
         params = params or {}
         params["timeline_id"] = str(timeline_id)
@@ -285,7 +285,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        term: Optional[int],
+        term: int | None,
     ) -> TermBumpResponse:
         body = {}
         if term is not None:
