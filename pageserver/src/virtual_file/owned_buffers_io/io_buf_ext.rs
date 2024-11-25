@@ -5,6 +5,8 @@ use bytes::{Bytes, BytesMut};
 use std::ops::{Deref, Range};
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
+use super::write::CheapCloneForRead;
+
 /// The true owned equivalent for Rust [`slice`]. Use this for the write path.
 ///
 /// Unlike [`tokio_epoll_uring::Slice`], which we unfortunately inherited from `tokio-uring`,
@@ -29,17 +31,6 @@ where
     }
 }
 
-impl<B> Clone for FullSlice<B>
-where
-    B: IoBuf + Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            slice: self.slice.get_ref().clone().slice_full(),
-        }
-    }
-}
-
 impl<B> Deref for FullSlice<B>
 where
     B: IoBuf,
@@ -51,6 +42,17 @@ where
         assert_eq!(rust_slice.len(), self.slice.bytes_init());
         assert_eq!(rust_slice.len(), self.slice.bytes_total());
         rust_slice
+    }
+}
+
+impl<B> CheapCloneForRead for FullSlice<B>
+where
+    B: IoBuf + CheapCloneForRead,
+{
+    fn cheap_clone(&self) -> Self {
+        Self {
+            slice: self.slice.get_ref().cheap_clone().slice_full(),
+        }
     }
 }
 

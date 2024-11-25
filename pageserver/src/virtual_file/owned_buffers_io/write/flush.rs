@@ -7,7 +7,7 @@ use crate::{
     virtual_file::owned_buffers_io::{io_buf_aligned::IoBufAligned, io_buf_ext::FullSlice},
 };
 
-use super::{Buffer, OwnedAsyncWriter};
+use super::{Buffer, CheapCloneForRead, OwnedAsyncWriter};
 
 /// A handle to the flush task.
 pub struct FlushHandle<Buf, W> {
@@ -110,7 +110,7 @@ impl FlushControl {
 
 impl<Buf, W> FlushHandle<Buf, W>
 where
-    Buf: IoBufAligned + Send + Sync + Clone,
+    Buf: IoBufAligned + Send + Sync + CheapCloneForRead,
     W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
 {
     /// Spawns a new background flush task and obtains a handle.
@@ -148,7 +148,7 @@ where
         let slice = buf.flush();
 
         // Saves a buffer for read while flushing. This also removes reference to the old buffer.
-        self.maybe_flushed = Some(slice.clone());
+        self.maybe_flushed = Some(slice.cheap_clone());
 
         let (request, flush_control) = new_flush_op(slice, offset);
 

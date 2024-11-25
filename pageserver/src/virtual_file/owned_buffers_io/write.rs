@@ -17,6 +17,18 @@ use super::{
 
 pub(crate) use flush::FlushControl;
 
+pub(crate) trait CheapCloneForRead {
+    /// Returns a cheap clone of the buffer.
+    fn cheap_clone(&self) -> Self;
+}
+
+impl CheapCloneForRead for IoBuffer {
+    fn cheap_clone(&self) -> Self {
+        // Cheap clone over an `Arc`.
+        self.clone()
+    }
+}
+
 /// A trait for doing owned-buffer write IO.
 /// Think [`tokio::io::AsyncWrite`] but with owned buffers.
 /// The owned buffers need to be aligned due to Direct IO requirements.
@@ -61,7 +73,7 @@ pub struct BufferedWriter<B: Buffer, W> {
 impl<B, Buf, W> BufferedWriter<B, W>
 where
     B: Buffer<IoBuf = Buf> + Send + 'static,
-    Buf: IoBufAligned + Send + Sync + Clone,
+    Buf: IoBufAligned + Send + Sync + CheapCloneForRead,
     W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
 {
     /// Creates a new buffered writer.
