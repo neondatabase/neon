@@ -1397,7 +1397,7 @@ COPY --from=pg-roaringbitmap-pg-build /pg_roaringbitmap.tar.gz /ext-src
 COPY --from=pg-semver-pg-build /pg_semver.tar.gz /ext-src
 #COPY --from=pg-embedding-pg-build /home/nonroot/pg_embedding-src/ /ext-src
 #COPY --from=wal2json-pg-build /wal2json_2_5.tar.gz /ext-src
-#gp_anon is not supported yet for pg v17 so, don't fail if nothing found
+#pg_anon is not supported yet for pg v17 so, don't fail if nothing found
 COPY --from=pg-anon-pg-build /pg_anon.tar.g? /ext-src
 COPY compute/patches/pg_anon.patch /ext-src
 COPY --from=pg-ivm-build /pg_ivm.tar.gz /ext-src
