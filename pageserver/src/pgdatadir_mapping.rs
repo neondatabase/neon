@@ -202,7 +202,7 @@ impl Timeline {
             Version::Lsn(effective_lsn) => {
                 let pages = smallvec::smallvec![(tag, blknum)];
                 let res = self
-                    .get_rel_page_at_lsn_batched(pages, effective_lsn, ctx)
+                    .get_rel_page_at_lsn_batched(&pages, effective_lsn, ctx)
                     .await;
                 assert_eq!(res.len(), 1);
                 res.into_iter().next().unwrap()
@@ -237,7 +237,7 @@ impl Timeline {
     /// The ordering of the returned vec corresponds to the ordering of `pages`.
     pub(crate) async fn get_rel_page_at_lsn_batched(
         &self,
-        pages: smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
+        pages: &smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
         effective_lsn: Lsn,
         ctx: &RequestContext,
     ) -> Vec<Result<Bytes, PageReconstructError>> {
@@ -251,7 +251,7 @@ impl Timeline {
         let result_slots = result.spare_capacity_mut();
 
         let mut keys_slots: BTreeMap<Key, smallvec::SmallVec<[usize; 1]>> = BTreeMap::default();
-        for (response_slot_idx, (tag, blknum)) in pages.into_iter().enumerate() {
+        for (response_slot_idx, (tag, blknum)) in pages.iter().enumerate() {
             if tag.relnode == 0 {
                 result_slots[response_slot_idx].write(Err(PageReconstructError::Other(
                     RelationError::InvalidRelnode.into(),
@@ -262,7 +262,7 @@ impl Timeline {
             }
 
             let nblocks = match self
-                .get_rel_size(tag, Version::Lsn(effective_lsn), ctx)
+                .get_rel_size(*tag, Version::Lsn(effective_lsn), ctx)
                 .await
             {
                 Ok(nblocks) => nblocks,
@@ -273,7 +273,7 @@ impl Timeline {
                 }
             };
 
-            if blknum >= nblocks {
+            if *blknum >= nblocks {
                 debug!(
                     "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
                     tag, blknum, effective_lsn, nblocks
@@ -283,7 +283,7 @@ impl Timeline {
                 continue;
             }
 
-            let key = rel_block_to_key(tag, blknum);
+            let key = rel_block_to_key(*tag, *blknum);
 
             let key_slots = keys_slots.entry(key).or_default();
             key_slots.push(response_slot_idx);

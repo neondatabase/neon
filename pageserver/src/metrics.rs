@@ -1178,19 +1178,21 @@ pub(crate) mod virtual_file_io_engine {
     });
 }
 
-struct GlobalAndPerTimelineHistogramTimer<'a, 'c> {
+struct GlobalAndPerTimelineHistogramTimer<'a, 'c, I>
+where
+    I: IntoIterator<Item = std::time::Instant> + ExactSizeIterator,
+{
     global_latency_histo: &'a Histogram,
 
     // Optional because not all op types are tracked per-timeline
     per_timeline_latency_histo: Option<&'a Histogram>,
 
     ctx: &'c RequestContext,
-    start: std::time::Instant,
+    starts: I,
     op: SmgrQueryType,
-    count: usize,
 }
 
-impl Drop for GlobalAndPerTimelineHistogramTimer<'_, '_> {
+impl Drop for GlobalAndPerTimelineHistogramTimer<'_, '_, _> {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed();
         let ex_throttled = self
@@ -1392,37 +1394,27 @@ impl SmgrQueryTimePerTimeline {
     ) -> Option<impl Drop + 'a> {
         self.start_timer_many(op, 1, ctx)
     }
-    pub(crate) fn start_timer_many<'c: 'a, 'a>(
+
+    pub(crate) fn start_timer_at<'c: 'a, 'a>(
         &'a self,
         op: SmgrQueryType,
-        count: usize,
+        start: Instant,
         ctx: &'c RequestContext,
     ) -> Option<impl Drop + 'a> {
-        let start = Instant::now();
+        self.start_timer_at_many(op, std::iter::once(start), ctx)
+    }
 
-        self.global_started[op as usize].inc();
-
-        // We subtract time spent throttled from the observed latency.
-        match ctx.micros_spent_throttled.open() {
-            Ok(()) => (),
-            Err(error) => {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<enum_map::EnumMap<SmgrQueryType, RateLimit>>> =
-                    Lazy::new(|| {
-                        Mutex::new(enum_map::EnumMap::from_array(std::array::from_fn(|_| {
-                            RateLimit::new(Duration::from_secs(10))
-                        })))
-                    });
-                let mut guard = LOGGED.lock().unwrap();
-                let rate_limit = &mut guard[op];
-                rate_limit.call(|| {
-                    warn!(?op, error, "error opening micros_spent_throttled; this message is logged at a global rate limit");
-                });
-            }
-        }
-
+    pub(crate) fn start_timer_at_many<'c: 'a, 'a, T>(
+        &'a self,
+        op: SmgrQueryType,
+        starts: T,
+        ctx: &'c RequestContext,
+    ) -> Option<impl Drop + 'a>
+    where
+        T: IntoIterator<Item = Instant> + ExactSizeIterator,
+    {
         let per_timeline_latency_histo = if matches!(op, SmgrQueryType::GetPageAtLsn) {
-            self.per_timeline_getpage_started.inc();
+            self.per_timeline_getpage_started.inc_by(starts.len());
             Some(&self.per_timeline_getpage_latency)
         } else {
             None
@@ -1432,9 +1424,8 @@ impl SmgrQueryTimePerTimeline {
             global_latency_histo: &self.global_latency[op as usize],
             per_timeline_latency_histo,
             ctx,
-            start,
             op,
-            count,
+            starts,
         })
     }
 }

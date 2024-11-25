@@ -536,11 +536,13 @@ impl From<WaitLsnError> for QueryError {
 enum BatchedFeMessage {
     Exists {
         span: Span,
+        received_at: Instant,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamExistsRequest,
     },
     Nblocks {
         span: Span,
+        received_at: Instant,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamNblocksRequest,
     },
@@ -548,15 +550,17 @@ enum BatchedFeMessage {
         span: Span,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         effective_request_lsn: Lsn,
-        pages: smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
+        pages: smallvec::SmallVec<[(RelTag, BlockNumber, Instant); 1]>,
     },
     DbSize {
         span: Span,
+        received_at: Instant,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamDbSizeRequest,
     },
     GetSlruSegment {
         span: Span,
+        received_at: Instant,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamGetSlruSegmentRequest,
     },
@@ -628,6 +632,8 @@ impl PageServerHandler {
             msg = pgb.read_message() => { msg }
         };
 
+        let received_at = Instant::now();
+
         let copy_data_bytes = match msg? {
             Some(FeMessage::CopyData(bytes)) => bytes,
             Some(FeMessage::Terminate) => {
@@ -656,7 +662,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
-                BatchedFeMessage::Exists { span, shard, req }
+                BatchedFeMessage::Exists {
+                    span,
+                    received_at,
+                    shard,
+                    req,
+                }
             }
             PagestreamFeMessage::Nblocks(req) => {
                 let span = tracing::info_span!(parent: parent_span, "handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn);
@@ -664,7 +675,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
-                BatchedFeMessage::Nblocks { span, shard, req }
+                BatchedFeMessage::Nblocks {
+                    span,
+                    received_at,
+                    shard,
+                    req,
+                }
             }
             PagestreamFeMessage::DbSize(req) => {
                 let span = tracing::info_span!(parent: parent_span, "handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn);
@@ -672,7 +688,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
-                BatchedFeMessage::DbSize { span, shard, req }
+                BatchedFeMessage::DbSize {
+                    span,
+                    received_at,
+                    shard,
+                    req,
+                }
             }
             PagestreamFeMessage::GetSlruSegment(req) => {
                 let span = tracing::info_span!(parent: parent_span, "handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn);
@@ -680,7 +701,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
-                BatchedFeMessage::GetSlruSegment { span, shard, req }
+                BatchedFeMessage::GetSlruSegment {
+                    span,
+                    received_at,
+                    shard,
+                    req,
+                }
             }
             PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
                 request_lsn,
@@ -743,7 +769,7 @@ impl PageServerHandler {
                     span,
                     shard,
                     effective_request_lsn,
-                    pages: smallvec::smallvec![(rel, blkno)],
+                    pages: smallvec::smallvec![(rel, blkno, received_at)],
                 }
             }
         };
@@ -830,7 +856,12 @@ impl PageServerHandler {
         // invoke handler function
         let (handler_results, span): (Vec<Result<PagestreamBeMessage, PageStreamError>>, _) =
             match batch {
-                BatchedFeMessage::Exists { span, shard, req } => {
+                BatchedFeMessage::Exists {
+                    span,
+                    received_at: _,
+                    shard,
+                    req,
+                } => {
                     fail::fail_point!("ps::handle-pagerequest-message::exists");
                     (
                         vec![
@@ -841,7 +872,12 @@ impl PageServerHandler {
                         span,
                     )
                 }
-                BatchedFeMessage::Nblocks { span, shard, req } => {
+                BatchedFeMessage::Nblocks {
+                    span,
+                    received_at,
+                    shard,
+                    req,
+                } => {
                     fail::fail_point!("ps::handle-pagerequest-message::nblocks");
                     (
                         vec![
@@ -1409,11 +1445,12 @@ impl PageServerHandler {
         &mut self,
         timeline: &Timeline,
         req: &PagestreamExistsRequest,
+        received_at: Instant,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetRelExists, ctx);
+            .start_timer_at(metrics::SmgrQueryType::GetRelExists, received_at, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
@@ -1439,11 +1476,12 @@ impl PageServerHandler {
         &mut self,
         timeline: &Timeline,
         req: &PagestreamNblocksRequest,
+        received_at: Instant,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetRelSize, ctx);
+            .start_timer_at(metrics::SmgrQueryType::GetRelSize, received_at, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
@@ -1469,11 +1507,14 @@ impl PageServerHandler {
         &mut self,
         timeline: &Timeline,
         req: &PagestreamDbSizeRequest,
+        received_at: Instant,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let _timer = timeline
-            .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetDbSize, ctx);
+        let _timer = timeline.query_metrics.start_timer_at(
+            metrics::SmgrQueryType::GetDbSize,
+            received_at,
+            ctx,
+        );
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
@@ -1500,7 +1541,7 @@ impl PageServerHandler {
         &mut self,
         timeline: &Timeline,
         effective_lsn: Lsn,
-        pages: smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
+        pages: smallvec::SmallVec<[(RelTag, BlockNumber, Instant); 1]>,
         ctx: &RequestContext,
     ) -> Vec<Result<PagestreamBeMessage, PageStreamError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
