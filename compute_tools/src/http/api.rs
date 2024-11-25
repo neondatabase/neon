@@ -20,6 +20,7 @@ use anyhow::Result;
 use hyper::header::CONTENT_TYPE;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use metrics::proto::MetricFamily;
 use metrics::Encoder;
 use metrics::TextEncoder;
 use tokio::task;
@@ -72,10 +73,22 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         (&Method::GET, "/metrics") => {
             debug!("serving /metrics GET request");
 
-            let mut buffer = vec![];
-            let metrics = installed_extensions::collect();
+            // When we call TextEncoder::encode() below, it will immediately
+            // return an error if a metric family has no metrics, so we need to
+            // preemptively filter out metric families with no metrics.
+            let metrics = installed_extensions::collect()
+                .into_iter()
+                .filter(|m| !m.get_metric().is_empty())
+                .collect::<Vec<MetricFamily>>();
+
             let encoder = TextEncoder::new();
-            encoder.encode(&metrics, &mut buffer).unwrap();
+            let mut buffer = vec![];
+
+            if let Err(err) = encoder.encode(&metrics, &mut buffer) {
+                let msg = format!("error handling /metrics request: {err}");
+                error!(msg);
+                return render_json_error(&msg, StatusCode::INTERNAL_SERVER_ERROR);
+            }
 
             match Response::builder()
                 .status(StatusCode::OK)

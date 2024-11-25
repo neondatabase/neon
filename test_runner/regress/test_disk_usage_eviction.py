@@ -5,6 +5,7 @@ import time
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import pytest
@@ -80,7 +81,7 @@ def test_min_resident_size_override_handling(
 
 
 @enum.unique
-class EvictionOrder(str, enum.Enum):
+class EvictionOrder(StrEnum):
     RELATIVE_ORDER_EQUAL = "relative_equal"
     RELATIVE_ORDER_SPARE = "relative_spare"
 

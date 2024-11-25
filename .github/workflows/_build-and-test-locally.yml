@@ -19,8 +19,8 @@ on:
         description: 'debug or release'
         required: true
         type: string
-      pg-versions:
-        description: 'a json array of postgres versions to run regression tests on'
+      test-cfg:
+        description: 'a json object of postgres versions and lfc states to run regression tests on'
         required: true
         type: string
 
@@ -276,14 +276,14 @@ jobs:
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
       fail-fast: false
-      matrix:
-        pg_version: ${{ fromJson(inputs.pg-versions) }}
+      matrix: ${{ fromJSON(format('{{"include":{0}}}', inputs.test-cfg)) }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
 
       - name: Pytest regression tests
+        continue-on-error: ${{ matrix.lfc_state == 'with-lfc' }}
         uses: ./.github/actions/run-python-test-set
         timeout-minutes: 60
         with:
@@ -300,6 +300,7 @@ jobs:
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
+          USE_LFC: ${{ matrix.lfc_state == 'with-lfc' && 'true' || 'false' }}
 
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540
