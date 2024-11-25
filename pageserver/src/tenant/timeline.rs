@@ -2470,6 +2470,7 @@ impl Timeline {
         *guard = Some(WalReceiver::start(
             Arc::clone(self),
             WalReceiverConf {
+                protocol: self.conf.wal_receiver_protocol,
                 wal_connect_timeout,
                 lagging_wal_timeout,
                 max_lsn_wal_lag,
@@ -5896,7 +5897,7 @@ impl<'a> TimelineWriter<'a> {
         batch: SerializedValueBatch,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        if batch.is_empty() {
+        if !batch.has_data() {
             return Ok(());
         }
 
