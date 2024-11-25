@@ -37,7 +37,8 @@ jobs:
     timeout-minutes: 3
     outputs:
       postgres_changes: ${{ steps.postgres_changes.outputs.changes }}
-      rebuild_everything: ${{ steps.files_changed.outputs.rebuild_everything || steps.files_changed.outputs.rebuild_extra }}
+      rebuild_everything: ${{ steps.files_changed.outputs.rebuild_neon_extra || steps.files_changed.outputs.rebuild_macos }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@6ccd57f4c5d15bdc2fef309bd9fb6cc9db2ef1c6 # v4.1.7
