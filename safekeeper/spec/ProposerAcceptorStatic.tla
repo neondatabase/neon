@@ -249,9 +249,9 @@ BecomeLeader(p) ==
         \* We copy all log preceding proposer's term from the max vote node so
         \* make sure it is still on one term with us. This is a model
         \* simplification which can be removed, in impl we fetch WAL on demand
-        \* later. Note though that in case of on demand fetch we must check on
-        \* donor not only term match, but that truncate_wal had already been
-        \* done (if it is not max_vote_acc).
+        \* from safekeeper which has it later. Note though that in case of on
+        \* demand fetch we must check on donor not only term match, but that
+        \* truncate_wal had already been done (if it is not max_vote_acc).
        /\ acc_state[max_vote_acc].term = prop_state[p].term
        /\ prop_state' = [prop_state EXCEPT ![p].state = "leader",
                                            ![p].termHistory = prop_th,
@@ -336,7 +336,7 @@ AppendEntry(p, a) ==
 
 \* LSN where elected proposer p starts writing its records.
 PropStartLsn(p) ==
-    prop_state[p].termHistory[Len(prop_state[p].termHistory)].lsn
+    IF prop_state[p].state = "leader" THEN prop_state[p].termHistory[Len(prop_state[p].termHistory)].lsn ELSE NULL
 
 \* Proposer p commits all entries it can using quorum q. Note that unlike
 \* will62794/logless-reconfig this allows to commit entries from previous terms
@@ -391,6 +391,8 @@ ElectionSafety ==
 \* Single term must never be elected more than once.
 ElectionSafetyFull == \A term \in DOMAIN elected_history: elected_history[term] <= 1
 
+\* Log is expected to be monotonic by <term, lsn> comparison. This is not true
+\* in variants of multi Paxos, but in Raft (and here) it is.
 LogIsMonotonic ==
   \A a \in acceptors:
     \A i \in DOMAIN acc_state[a].wal: \A j \in DOMAIN acc_state[a].wal:
