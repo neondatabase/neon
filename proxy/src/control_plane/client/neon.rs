@@ -134,8 +134,8 @@ impl NeonControlPlaneClient {
                 project_id: body.project_id,
             })
         }
-        .map_err(crate::error::log_error)
-        .instrument(info_span!("http", id = request_id))
+        .inspect_err(|e| tracing::debug!(error = ?e))
+        .instrument(info_span!("do_get_auth_info", request_id))
         .await
     }
 
@@ -193,8 +193,8 @@ impl NeonControlPlaneClient {
 
             Ok(rules)
         }
-        .map_err(crate::error::log_error)
-        .instrument(info_span!("http", id = request_id))
+        .inspect_err(|e| tracing::debug!(error = ?e))
+        .instrument(info_span!("do_get_endpoint_jwks", request_id))
         .await
     }
 
@@ -252,9 +252,9 @@ impl NeonControlPlaneClient {
 
             Ok(node)
         }
-        .map_err(crate::error::log_error)
+        .inspect_err(|e| tracing::debug!(error = ?e))
         // TODO: redo this span stuff
-        .instrument(info_span!("http", id = request_id))
+        .instrument(info_span!("do_wake_compute", request_id))
         .await
     }
 }
