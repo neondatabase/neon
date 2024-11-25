@@ -14,7 +14,7 @@ ASSUME max_entries \in Nat /\ max_term \in Nat
 StateConstraint == \A p \in proposers:
                     /\ prop_state[p].term <= max_term
                     /\ Len(prop_state[p].wal) <= max_entries
-\* All sets of proposers and acceptors and symmetric because we don't take any
+\* Sets of proposers and acceptors are symmetric because we don't take any
 \* actions depending on some concrete proposer/acceptor (like IF p = p1 THEN
 \* ...)
 ProposerAcceptorSymmetry == Permutations(proposers) \union Permutations(acceptors)
