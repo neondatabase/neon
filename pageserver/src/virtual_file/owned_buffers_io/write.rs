@@ -43,19 +43,8 @@ pub trait OwnedAsyncWriter {
 
 /// A wrapper aorund an [`OwnedAsyncWriter`] that uses a [`Buffer`] to batch
 /// small writes into larger writes of size [`Buffer::cap`].
-///
-/// # Passthrough Of Large Writers
-///
-/// Calls to [`BufferedWriter::write_buffered`] that are larger than [`Buffer::cap`]
-/// cause the internal buffer to be flushed prematurely so that the large
-/// buffered write is passed through to the underlying [`OwnedAsyncWriter`].
-///
-/// This pass-through is generally beneficial for throughput, but if
-/// the storage backend of the [`OwnedAsyncWriter`] is a shared resource,
-/// unlimited large writes may cause latency or fairness issues.
-///
-/// In such cases, a different implementation that always buffers in memory
-/// may be preferable.
+// TODO(yuchen): For large write, implementing buffer bypass for aligned parts of the write could be beneficial to throughput,
+// since we would avoid copying majority of the data into the internal buffer.
 pub struct BufferedWriter<B: Buffer, W> {
     writer: Arc<W>,
     /// invariant: always remains Some(buf) except
@@ -134,8 +123,6 @@ where
             .expect("must not use after we returned an error")
     }
 
-    /// TODO(yuchen): For large write, it is possible to implement buffer bypass for aligned parts of the write so that
-    /// we could avoid copying majority of the data into the internal buffer.
     pub async fn write_buffered_borrowed(
         &mut self,
         chunk: &[u8],
