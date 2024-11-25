@@ -1,7 +1,6 @@
-use hyper::{Body, Request, Response, StatusCode, Uri};
-use once_cell::sync::Lazy;
+use hyper::{Body, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Write as _;
 use std::str::FromStr;
@@ -574,14 +573,8 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
     let mut router = endpoint::make_router();
     if conf.http_auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
-            #[allow(clippy::mutable_key_type)]
-            static ALLOWLIST_ROUTES: Lazy<HashSet<Uri>> = Lazy::new(|| {
-                ["/v1/status", "/metrics", "/pprof/profile"]
-                    .iter()
-                    .map(|v| v.parse().unwrap())
-                    .collect()
-            });
-            if ALLOWLIST_ROUTES.contains(request.uri()) {
+            const ALLOWLIST_ROUTES: &[&str] = &["/v1/status", "/metrics", "/profile/cpu"];
+            if ALLOWLIST_ROUTES.contains(&request.uri().path()) {
                 None
             } else {
                 // Option<Arc<SwappableJwtAuth>> is always provided as data below, hence unwrap().

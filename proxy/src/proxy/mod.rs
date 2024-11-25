@@ -268,12 +268,18 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let record_handshake_error = !ctx.has_private_peer_addr();
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
     let do_handshake = handshake(ctx, stream, mode.handshake_tls(tls), record_handshake_error);
+
     let (mut stream, params) =
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
             HandshakeData::Startup(stream, params) => (stream, params),
             HandshakeData::Cancel(cancel_key_data) => {
                 return Ok(cancellation_handler
-                    .cancel_session(cancel_key_data, ctx.session_id())
+                    .cancel_session(
+                        cancel_key_data,
+                        ctx.session_id(),
+                        &ctx.peer_addr(),
+                        config.authentication_config.ip_allowlist_check_enabled,
+                    )
                     .await
                     .map(|()| None)?)
             }

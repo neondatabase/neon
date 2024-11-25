@@ -19,7 +19,8 @@ ahash = { version = "0.8" }
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.7", features = ["ws"] }
 axum-core = { version = "0.4", default-features = false, features = ["tracing"] }
-base64 = { version = "0.21", features = ["alloc"] }
+base64-594e8ee84c453af0 = { package = "base64", version = "0.13", features = ["alloc"] }
+base64-647d43efb71741da = { package = "base64", version = "0.21", features = ["alloc"] }
 base64ct = { version = "1", default-features = false, features = ["std"] }
 bytes = { version = "1", features = ["serde"] }
 camino = { version = "1", default-features = false, features = ["serde1"] }

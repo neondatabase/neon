@@ -115,7 +115,7 @@ pub fn get_installed_extensions_sync(connstr: Url) -> Result<()> {
 
 static INSTALLED_EXTENSIONS: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
-        "installed_extensions",
+        "compute_installed_extensions",
         "Number of databases where the version of extension is installed",
         &["extension_name", "version"]
     )

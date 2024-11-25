@@ -17,7 +17,7 @@ from fixtures.paths import BASE_DIR, COMPUTE_CONFIG_DIR
 
 if TYPE_CHECKING:
     from types import TracebackType
-    from typing import TypedDict
+    from typing import Self, TypedDict
 
     from fixtures.neon_fixtures import NeonEnv
     from fixtures.pg_version import PgVersion
@@ -185,7 +185,7 @@ class SqlExporterRunner:
     def stop(self) -> None:
         raise NotImplementedError()
 
-    def __enter__(self) -> SqlExporterRunner:
+    def __enter__(self) -> Self:
         self.start()
 
         return self
@@ -242,8 +242,7 @@ if SQL_EXPORTER is None:
             self.with_volume_mapping(str(config_file), container_config_file, "z")
             self.with_volume_mapping(str(collector_file), container_collector_file, "z")
 
-        @override
-        def start(self) -> SqlExporterContainer:
+        def start(self) -> Self:
             super().start()
 
             log.info("Waiting for sql_exporter to be ready")

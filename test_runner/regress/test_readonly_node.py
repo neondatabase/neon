@@ -121,7 +121,6 @@ def test_readonly_node(neon_simple_env: NeonEnv):
         )
 
 
-@pytest.mark.skip("See https://github.com/neondatabase/neon/issues/9754")
 def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
     """
     Test static endpoint is protected from GC by acquiring and renewing lsn leases.

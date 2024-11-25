@@ -40,6 +40,7 @@ use pageserver_api::models::TenantSorting;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::TimelineArchivalConfigRequest;
 use pageserver_api::models::TimelineCreateRequestMode;
+use pageserver_api::models::TimelineCreateRequestModeImportPgdata;
 use pageserver_api::models::TimelinesInfoAndOffloaded;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
@@ -81,6 +82,7 @@ use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
+use crate::tenant::timeline::import_pgdata;
 use crate::tenant::timeline::offload::offload_timeline;
 use crate::tenant::timeline::offload::OffloadError;
 use crate::tenant::timeline::CompactFlags;
@@ -126,7 +128,7 @@ pub struct State {
     conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
-    allowlist_routes: Vec<Uri>,
+    allowlist_routes: &'static [&'static str],
     remote_storage: GenericRemoteStorage,
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
@@ -147,16 +149,13 @@ impl State {
         deletion_queue_client: DeletionQueueClient,
         secondary_controller: SecondaryController,
     ) -> anyhow::Result<Self> {
-        let allowlist_routes = [
+        let allowlist_routes = &[
             "/v1/status",
             "/v1/doc",
             "/swagger.yml",
             "/metrics",
             "/profile/cpu",
-        ]
-        .iter()
-        .map(|v| v.parse().unwrap())
-        .collect::<Vec<_>>();
+        ];
         Ok(Self {
             conf,
             tenant_manager,
@@ -582,6 +581,35 @@ async fn timeline_create_handler(
             new_timeline_id,
             ancestor_timeline_id,
             ancestor_start_lsn,
+        }),
+        TimelineCreateRequestMode::ImportPgdata {
+            import_pgdata:
+                TimelineCreateRequestModeImportPgdata {
+                    location,
+                    idempotency_key,
+                },
+        } => tenant::CreateTimelineParams::ImportPgdata(tenant::CreateTimelineParamsImportPgdata {
+            idempotency_key: import_pgdata::index_part_format::IdempotencyKey::new(
+                idempotency_key.0,
+            ),
+            new_timeline_id,
+            location: {
+                use import_pgdata::index_part_format::Location;
+                use pageserver_api::models::ImportPgdataLocation;
+                match location {
+                    #[cfg(feature = "testing")]
+                    ImportPgdataLocation::LocalFs { path } => Location::LocalFs { path },
+                    ImportPgdataLocation::AwsS3 {
+                        region,
+                        bucket,
+                        key,
+                    } => Location::AwsS3 {
+                        region,
+                        bucket,
+                        key,
+                    },
+                }
+            },
         }),
     };
 
@@ -3155,7 +3183,7 @@ pub fn make_router(
     if auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
             let state = get_state(request);
-            if state.allowlist_routes.contains(request.uri()) {
+            if state.allowlist_routes.contains(&request.uri().path()) {
                 None
             } else {
                 state.auth.as_deref()
