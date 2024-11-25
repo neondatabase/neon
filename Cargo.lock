@@ -4182,7 +4182,7 @@ dependencies = [
  "bytes",
  "once_cell",
  "pq_proto",
- "rustls 0.23.16",
+ "rustls 0.23.18",
  "rustls-pemfile 2.1.1",
  "serde",
  "thiserror",
@@ -4518,7 +4518,7 @@ dependencies = [
  "rsa",
  "rstest",
  "rustc-hash",
- "rustls 0.23.16",
+ "rustls 0.23.18",
  "rustls-native-certs 0.8.0",
  "rustls-pemfile 2.1.1",
  "scopeguard",
@@ -5231,9 +5231,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.16"
+version = "0.23.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eee87ff5d9b36712a58574e12e9f0ea80f915a5b0ac518d322b24a465617925e"
+checksum = "9c9cc1d47e243d655ace55ed38201c19ae02c148ae56412ab8750e8f0166ab7f"
 dependencies = [
  "log",
  "once_cell",
@@ -5948,7 +5948,7 @@ dependencies = [
  "once_cell",
  "parking_lot 0.12.1",
  "prost",
- "rustls 0.23.16",
+ "rustls 0.23.18",
  "tokio",
  "tonic",
  "tonic-build",
@@ -6031,7 +6031,7 @@ dependencies = [
  "postgres_ffi",
  "remote_storage",
  "reqwest 0.12.4",
- "rustls 0.23.16",
+ "rustls 0.23.18",
  "rustls-native-certs 0.8.0",
  "serde",
  "serde_json",
@@ -6493,7 +6493,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04fb792ccd6bbcd4bba408eb8a292f70fc4a3589e5d793626f45190e6454b6ab"
 dependencies = [
  "ring",
- "rustls 0.23.16",
+ "rustls 0.23.18",
  "tokio",
  "tokio-postgres",
  "tokio-rustls 0.26.0",
@@ -6527,7 +6527,7 @@ version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c7bc40d0e5a97695bb96e27995cd3a08538541b0a846f65bba7a359f36700d4"
 dependencies = [
- "rustls 0.23.16",
+ "rustls 0.23.18",
  "rustls-pki-types",
  "tokio",
 ]
@@ -6936,7 +6936,7 @@ dependencies = [
  "base64 0.22.1",
  "log",
  "once_cell",
- "rustls 0.23.16",
+ "rustls 0.23.18",
  "rustls-pki-types",
  "url",
  "webpki-roots 0.26.1",
@@ -7598,7 +7598,7 @@ dependencies = [
  "regex-automata 0.4.3",
  "regex-syntax 0.8.2",
  "reqwest 0.12.4",
- "rustls 0.23.16",
+ "rustls 0.23.18",
  "scopeguard",
  "serde",
  "serde_json",
