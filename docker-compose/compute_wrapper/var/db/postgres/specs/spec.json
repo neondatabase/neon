@@ -132,6 +132,11 @@
                 "name": "cron.database",
                 "value": "postgres",
                 "vartype": "string"
+            },
+            {
+                "name": "session_preload_libraries",
+                "value": "anon",
+                "vartype": "string"
             }
         ]
     },

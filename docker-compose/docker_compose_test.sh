@@ -34,6 +34,12 @@ for pg_version in 14 15 16 17; do
     echo "clean up containers if exists"
     cleanup
     PG_TEST_VERSION=$((pg_version < 16 ? 16 : pg_version))
+    # The support of pg_anon not yet added to PG17, so we have to remove the corresponding option
+    if [ $pg_version -eq 17 ]; then
+      SPEC_PATH="compute_wrapper/var/db/postgres/specs"
+      mv $SPEC_PATH/spec.json $SPEC_PATH/spec.bak
+      jq 'del(.cluster.settings[] | select (.name == "session_preload_libraries"))' spec.bak > spec.json
+    fi
     PG_VERSION=$pg_version PG_TEST_VERSION=$PG_TEST_VERSION docker compose --profile test-extensions -f $COMPOSE_FILE up --build -d
 
     echo "wait until the compute is ready. timeout after 60s. "
@@ -69,7 +75,6 @@ for pg_version in 14 15 16 17; do
         TMPDIR=$(mktemp -d)
         # Add support for pg_anon for pg_v16
         if [ $pg_version -ne 17 ]; then
-          docker exec $COMPUTE_CONTAINER_NAME bash -c "psql $PSQL_OPTION -c \"alter system set session_preload_libraries = 'anon'\" && psql $PSQL_OPTION -c 'select pg_reload_conf()'"
           docker cp $TEST_CONTAINER_NAME:/ext-src/pg_anon-src/data $TMPDIR/data
           echo -e '1\t too \t many \t tabs' > $TMPDIR/data/bad.csv
           docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/tmp/tmp_anon_alternate_data
@@ -100,4 +105,8 @@ for pg_version in 14 15 16 17; do
         fi
     fi
     cleanup
+    # The support of pg_anon not yet added to PG17, so we have to remove the corresponding option
+    if [ $pg_version -eq 17 ]; then
+      mv $SPEC_PATH/spec.bak $SPEC_PATH/spec.json
+    fi
 done
