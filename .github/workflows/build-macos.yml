@@ -97,7 +97,7 @@ jobs:
       - name: Get postgres headers
         if: matrix.postgres-version == 'v17'
         run: |
-          make postgres-headers -j$(sysctl -n hw.ncpu)
+          make postgres-headers-${{ matrix.postgres-version }} -j$(sysctl -n hw.ncpu)
 
       - name: Run cargo build (only for v17)
         if: matrix.postgres-version == 'v17'

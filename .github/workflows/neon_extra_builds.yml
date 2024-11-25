@@ -69,8 +69,8 @@ jobs:
       github.ref_name == 'main'
     uses: ./.github/workflows/build-macos.yml
     with:
-      pg_versions: ${{ needs.files-changed.outputs.postgres_changes }}
-      rebuild_everything: ${{ fromJson(needs.files-changed.outputs.rebuild_everything) }}
+      pg_versions: '["v17"]' # ${{ needs.files-changed.outputs.postgres_changes }}
+      rebuild_everything: ${{ fromJSON('false') }} # ${{ fromJson(needs.files-changed.outputs.rebuild_everything) }}
 
   gather-rust-build-stats:
     needs: [ check-permissions, build-build-tools-image, files-changed ]
