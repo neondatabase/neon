@@ -60,19 +60,14 @@ fn new_flush_op<Buf>(slice: FullSlice<Buf>, offset: u64) -> (FlushRequest<Buf>, 
     (request, control)
 }
 
-pub enum FlushStartState {
-    /// The submitted buffer's flush state is not tracked.
-    #[cfg(not(test))]
-    Untracked,
-    /// The submitted buffer has not been flushed to disk.
-    #[cfg(test)]
-    NotStarted(FlushNotStarted),
+/// A handle to a `FlushRequest` that allows unit tests precise control over flush behavior.
+#[cfg(test)]
+pub(crate) struct FlushControl {
+    not_started: FlushNotStarted,
 }
 
-/// A control object that manipulates buffer's flush behehavior.
-pub(crate) struct FlushControl {
-    state: FlushStartState,
-}
+#[cfg(not(test))]
+pub(crate) struct FlushControl;
 
 impl FlushControl {
     #[cfg(test)]
@@ -81,42 +76,34 @@ impl FlushControl {
         done_flush_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Self {
         FlushControl {
-            state: FlushStartState::NotStarted(FlushNotStarted {
+            not_started: FlushNotStarted {
                 ready_to_flush_tx,
                 done_flush_rx,
-            }),
+            },
         }
     }
 
     #[cfg(not(test))]
     fn untracked() -> Self {
-        FlushControl {
-            state: FlushStartState::Untracked,
-        }
+        FlushControl
     }
 
     /// In tests, turn flush control into a not started state.
     #[cfg(test)]
     pub(crate) fn into_not_started(self) -> FlushNotStarted {
-        match self.state {
-            FlushStartState::NotStarted(not_started) => not_started,
-        }
+        self.not_started
     }
 
     /// Release control to the submitted buffer.
     ///
     /// In `cfg(test)` environment, the buffer is guranteed to be flushed to disk after [`FlushControl::release`] is finishes execution.
     pub async fn release(self) {
-        match self.state {
-            #[cfg(not(test))]
-            FlushStartState::Untracked => (),
-            #[cfg(test)]
-            FlushStartState::NotStarted(not_started) => {
-                not_started
-                    .ready_to_flush()
-                    .wait_until_flush_is_done()
-                    .await;
-            }
+        #[cfg(test)]
+        {
+            self.not_started
+                .ready_to_flush()
+                .wait_until_flush_is_done()
+                .await;
         }
     }
 }
