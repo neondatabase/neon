@@ -37,8 +37,11 @@ pub(crate) struct WalBytes {
     pub(crate) wal_start_lsn: Lsn,
     /// End LSN of [`Self::wal`]
     pub(crate) wal_end_lsn: Lsn,
-    /// End LSN of WAL available on the safekeeper
-    pub(crate) commit_lsn: Lsn,
+    /// End LSN of WAL available on the safekeeper.
+    ///
+    /// For pagservers this will be commit LSN,
+    /// while for the compute it will be the flush LSN.
+    pub(crate) available_wal_end_lsn: Lsn,
 }
 
 impl WalReaderStreamBuilder {
@@ -136,7 +139,7 @@ impl WalReaderStreamBuilder {
                     wal,
                     wal_start_lsn: start_pos,
                     wal_end_lsn: start_pos + send_size as u64,
-                    commit_lsn: end_pos
+                    available_wal_end_lsn: end_pos
                 };
 
                 start_pos += send_size as u64;
