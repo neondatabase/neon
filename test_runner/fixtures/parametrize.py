@@ -116,5 +116,6 @@ def pytest_runtest_makereport(*args, **kwargs):
     }.get(os.uname().machine, "UNKNOWN")
     arch = os.getenv("RUNNER_ARCH", uname_m)
     allure.dynamic.parameter("__arch", arch)
+    allure.dynamic.parameter("__lfc", os.getenv("USE_LFC") != "false")
 
     yield

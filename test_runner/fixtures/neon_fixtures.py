@@ -90,10 +90,12 @@ from fixtures.safekeeper.utils import wait_walreceivers_absent
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     COMPONENT_BINARIES,
+    USE_LFC,
     allure_add_grafana_links,
     assert_no_errors,
     get_dir_size,
     print_gc_result,
+    size_to_bytes,
     subprocess_capture,
     wait_until,
 )
@@ -3742,11 +3744,44 @@ class Endpoint(PgProtocol, LogUtils):
         self.pgdata_dir = self.env.repo_dir / path
         self.logfile = self.endpoint_path() / "compute.log"
 
-        config_lines = config_lines or []
-
         # set small 'max_replication_write_lag' to enable backpressure
         # and make tests more stable.
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
+
+        # Delete file cache if it exists (and we're recreating the endpoint)
+        if USE_LFC:
+            if (lfc_path := Path(self.lfc_path())).exists():
+                lfc_path.unlink()
+            else:
+                lfc_path.parent.mkdir(parents=True, exist_ok=True)
+            for line in config_lines:
+                if (
+                    line.find("neon.max_file_cache_size") > -1
+                    or line.find("neon.file_cache_size_limit") > -1
+                ):
+                    m = re.search(r"=\s*(\S+)", line)
+                    assert m is not None, f"malformed config line {line}"
+                    size = m.group(1)
+                    assert size_to_bytes(size) >= size_to_bytes(
+                        "1MB"
+                    ), "LFC size cannot be set less than 1MB"
+            # shared_buffers = 512kB to make postgres use LFC intensively
+            # neon.max_file_cache_size and neon.file_cache size limit are
+            # set to 1MB because small LFC is better for testing (helps to find more problems)
+            config_lines = [
+                "shared_buffers = 512kB",
+                f"neon.file_cache_path = '{self.lfc_path()}'",
+                "neon.max_file_cache_size = 1MB",
+                "neon.file_cache_size_limit = 1MB",
+            ] + config_lines
+        else:
+            for line in config_lines:
+                assert (
+                    line.find("neon.max_file_cache_size") == -1
+                ), "Setting LFC parameters is not allowed when LFC is disabled"
+                assert (
+                    line.find("neon.file_cache_size_limit") == -1
+                ), "Setting LFC parameters is not allowed when LFC is disabled"
 
         self.config(config_lines)
 
@@ -3781,6 +3816,9 @@ class Endpoint(PgProtocol, LogUtils):
             basebackup_request_tries=basebackup_request_tries,
         )
         self._running.release(1)
+        self.log_config_value("shared_buffers")
+        self.log_config_value("neon.max_file_cache_size")
+        self.log_config_value("neon.file_cache_size_limit")
 
         return self
 
@@ -3805,6 +3843,10 @@ class Endpoint(PgProtocol, LogUtils):
     def config_file_path(self) -> Path:
         """Path to the postgresql.conf in the endpoint directory (not the one in pgdata)"""
         return self.endpoint_path() / "postgresql.conf"
+
+    def lfc_path(self) -> Path:
+        """Path to the lfc file"""
+        return self.endpoint_path() / "file_cache" / "file.cache"
 
     def config(self, lines: list[str]) -> Self:
         """
@@ -3984,16 +4026,46 @@ class Endpoint(PgProtocol, LogUtils):
         assert self.pgdata_dir is not None  # please mypy
         return get_dir_size(self.pgdata_dir / "pg_wal") / 1024 / 1024
 
-    def clear_shared_buffers(self, cursor: Any | None = None):
+    def clear_buffers(self, cursor: Any | None = None):
         """
         Best-effort way to clear postgres buffers. Pinned buffers will not be 'cleared.'
-
-        Might also clear LFC.
+        It clears LFC as well by setting neon.file_cache_size_limit to 0 and then returning it to the previous value,
+        if LFC is enabled
         """
         if cursor is not None:
             cursor.execute("select clear_buffer_cache()")
+            if not USE_LFC:
+                return
+            cursor.execute("SHOW neon.file_cache_size_limit")
+            res = cursor.fetchone()
+            assert res, "Cannot get neon.file_cache_size_limit"
+            file_cache_size_limit = res[0]
+            if file_cache_size_limit == 0:
+                return
+            cursor.execute("ALTER SYSTEM SET neon.file_cache_size_limit=0")
+            cursor.execute("SELECT pg_reload_conf()")
+            cursor.execute(f"ALTER SYSTEM SET neon.file_cache_size_limit='{file_cache_size_limit}'")
+            cursor.execute("SELECT pg_reload_conf()")
         else:
             self.safe_psql("select clear_buffer_cache()")
+            if not USE_LFC:
+                return
+            file_cache_size_limit = self.safe_psql_scalar(
+                "SHOW neon.file_cache_size_limit", log_query=False
+            )
+            if file_cache_size_limit == 0:
+                return
+            self.safe_psql("ALTER SYSTEM SET neon.file_cache_size_limit=0")
+            self.safe_psql("SELECT pg_reload_conf()")
+            self.safe_psql(f"ALTER SYSTEM SET neon.file_cache_size_limit='{file_cache_size_limit}'")
+            self.safe_psql("SELECT pg_reload_conf()")
+
+    def log_config_value(self, param):
+        """
+        Writes the config value param to log
+        """
+        res = self.safe_psql_scalar(f"SHOW {param}", log_query=False)
+        log.info("%s = %s", param, res)
 
 
 class EndpointFactory:

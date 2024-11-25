@@ -230,7 +230,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
         return offset
 
     # Insert some records on main branch
-    with env.endpoints.create_start("main") as ep_main:
+    with env.endpoints.create_start("main", config_lines=["shared_buffers=1MB"]) as ep_main:
         with ep_main.cursor() as cur:
             cur.execute("CREATE TABLE t0(v0 int primary key, v1 text)")
         lsn = Lsn(0)
