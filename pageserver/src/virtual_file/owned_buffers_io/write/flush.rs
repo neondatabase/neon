@@ -141,23 +141,14 @@ where
     /// Returns a buffer that completed flushing for re-use, length reset to 0, capacity unchanged.
     /// If `save_buf_for_read` is true, then we save the buffer in `Self::maybe_flushed`, otherwise
     /// clear `maybe_flushed`.
-    pub async fn flush<B>(
-        &mut self,
-        buf: B,
-        offset: u64,
-        save_buf_for_read: bool,
-    ) -> std::io::Result<(B, FlushControl)>
+    pub async fn flush<B>(&mut self, buf: B, offset: u64) -> std::io::Result<(B, FlushControl)>
     where
         B: Buffer<IoBuf = Buf> + Send + 'static,
     {
         let slice = buf.flush();
 
         // Saves a buffer for read while flushing. This also removes reference to the old buffer.
-        self.maybe_flushed = if save_buf_for_read {
-            Some(slice.clone())
-        } else {
-            None
-        };
+        self.maybe_flushed = Some(slice.clone());
 
         let (request, flush_control) = new_flush_op(slice, offset);
 

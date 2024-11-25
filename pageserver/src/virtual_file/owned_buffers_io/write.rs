@@ -101,7 +101,7 @@ where
         mut self,
         ctx: &RequestContext,
     ) -> std::io::Result<(u64, Arc<W>)> {
-        self.flush(true, ctx).await?;
+        self.flush(ctx).await?;
 
         let Self {
             mutable: buf,
@@ -156,28 +156,21 @@ where
                 if let Some(control) = control.take() {
                     control.release().await;
                 }
-                control = self.flush(true, ctx).await?;
+                control = self.flush(ctx).await?;
             }
         }
         Ok((chunk_len, control))
     }
 
     #[must_use = "caller must explcitly check the flush control"]
-    async fn flush(
-        &mut self,
-        save_buf_for_read: bool,
-        _ctx: &RequestContext,
-    ) -> std::io::Result<Option<FlushControl>> {
+    async fn flush(&mut self, _ctx: &RequestContext) -> std::io::Result<Option<FlushControl>> {
         let buf = self.mutable.take().expect("must not use after an error");
         let buf_len = buf.pending();
         if buf_len == 0 {
             self.mutable = Some(buf);
             return Ok(None);
         }
-        let (recycled, flush_control) = self
-            .flush_handle
-            .flush(buf, self.bytes_submitted, save_buf_for_read)
-            .await?;
+        let (recycled, flush_control) = self.flush_handle.flush(buf, self.bytes_submitted).await?;
         self.bytes_submitted += u64::try_from(buf_len).unwrap();
         self.mutable = Some(recycled);
         Ok(Some(flush_control))
