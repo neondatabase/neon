@@ -55,6 +55,9 @@ pub(crate) enum StorageTimeOperation {
 
     #[strum(serialize = "find gc cutoffs")]
     FindGcCutoffs,
+
+    #[strum(serialize = "layer flush wait upload")]
+    LayerFlushWaitUpload,
 }
 
 pub(crate) static STORAGE_TIME_SUM_PER_TIMELINE: Lazy<CounterVec> = Lazy::new(|| {
@@ -2336,6 +2339,7 @@ pub(crate) struct TimelineMetrics {
     shard_id: String,
     timeline_id: String,
     pub flush_time_histo: StorageTimeMetrics,
+    pub flush_wait_upload_time_histo: StorageTimeMetrics,
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
     pub logical_size_histo: StorageTimeMetrics,
@@ -2375,6 +2379,12 @@ impl TimelineMetrics {
         let timeline_id = timeline_id_raw.to_string();
         let flush_time_histo = StorageTimeMetrics::new(
             StorageTimeOperation::LayerFlush,
+            &tenant_id,
+            &shard_id,
+            &timeline_id,
+        );
+        let flush_wait_upload_time_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::LayerFlushWaitUpload,
             &tenant_id,
             &shard_id,
             &timeline_id,
@@ -2516,6 +2526,7 @@ impl TimelineMetrics {
             shard_id,
             timeline_id,
             flush_time_histo,
+            flush_wait_upload_time_histo,
             compact_time_histo,
             create_images_time_histo,
             logical_size_histo,
