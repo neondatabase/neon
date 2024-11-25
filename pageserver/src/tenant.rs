@@ -3215,6 +3215,13 @@ impl Tenant {
             }
         }
 
+        if let ShutdownMode::FreezeAndFlush | ShutdownMode::Flush = shutdown_mode {
+            tracing::info!("Flushing deletion queue");
+            if let Err(e) = self.deletion_queue_client.flush_execute().await {
+                tracing::error!("Failed to flush deletion queue: {e}");
+            }
+        }
+
         // We cancel the Tenant's cancellation token _after_ the timelines have all shut down.  This permits
         // them to continue to do work during their shutdown methods, e.g. flushing data.
         tracing::debug!("Cancelling CancellationToken");
