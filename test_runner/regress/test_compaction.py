@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import enum
 import json
 import time
-from typing import TYPE_CHECKING
+from enum import StrEnum
 
 import pytest
 from fixtures.log_helper import log
@@ -14,10 +13,6 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.utils import skip_in_debug_build, wait_until
 from fixtures.workload import Workload
-
-if TYPE_CHECKING:
-    from typing import Optional
-
 
 AGGRESIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.
@@ -172,7 +167,7 @@ LARGE_STRIPES = 32768
 def test_sharding_compaction(
     neon_env_builder: NeonEnvBuilder,
     stripe_size: int,
-    shard_count: Optional[int],
+    shard_count: int | None,
     gc_compaction: bool,
 ):
     """
@@ -277,7 +272,7 @@ def test_sharding_compaction(
             )
 
 
-class CompactionAlgorithm(str, enum.Enum):
+class CompactionAlgorithm(StrEnum):
     LEGACY = "legacy"
     TIERED = "tiered"
 

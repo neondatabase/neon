@@ -28,7 +28,7 @@ from fixtures.utils import (
 )
 
 if TYPE_CHECKING:
-    from typing import Any, Optional
+    from typing import Any
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
@@ -78,7 +78,7 @@ def populate_branch(
     tenant_id: TenantId,
     ps_http: PageserverHttpClient,
     create_table: bool,
-    expected_sum: Optional[int],
+    expected_sum: int | None,
 ) -> tuple[TimelineId, Lsn]:
     # insert some data
     with pg_cur(endpoint) as cur:

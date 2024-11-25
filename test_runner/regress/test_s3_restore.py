@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
@@ -77,7 +77,7 @@ def test_tenant_s3_restore(
 
     # These sleeps are important because they fend off differences in clocks between us and S3
     time.sleep(4)
-    ts_before_deletion = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    ts_before_deletion = datetime.now(tz=UTC).replace(tzinfo=None)
     time.sleep(4)
 
     assert (
@@ -104,7 +104,7 @@ def test_tenant_s3_restore(
     )
 
     time.sleep(4)
-    ts_after_deletion = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    ts_after_deletion = datetime.now(tz=UTC).replace(tzinfo=None)
     time.sleep(4)
 
     ps_http.tenant_time_travel_remote_storage(

@@ -29,6 +29,7 @@ jsonwebtoken.workspace = true
 nix.workspace = true
 once_cell.workspace = true
 pin-project-lite.workspace = true
+pprof.workspace = true
 regex.workspace = true
 routerify.workspace = true
 serde.workspace = true

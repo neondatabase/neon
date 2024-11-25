@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 import jwt
@@ -37,8 +37,7 @@ class AuthKeys:
         return self.generate_token(scope=TokenScope.TENANT, tenant_id=str(tenant_id))
 
 
-# TODO: Replace with `StrEnum` when we upgrade to python 3.11
-class TokenScope(str, Enum):
+class TokenScope(StrEnum):
     ADMIN = "admin"
     PAGE_SERVER_API = "pageserverapi"
     GENERATIONS_API = "generations_api"

@@ -16,7 +16,8 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.utils import wait_until_all_tenants_state
 
 if TYPE_CHECKING:
-    from typing import Any, Callable, Optional
+    from collections.abc import Callable
+    from typing import Any
 
 
 def ensure_pageserver_ready_for_benchmarking(env: NeonEnv, n_tenants: int):
@@ -46,7 +47,7 @@ def setup_pageserver_with_tenants(
     name: str,
     n_tenants: int,
     setup: Callable[[NeonEnv], tuple[TenantId, TimelineId, dict[str, Any]]],
-    timeout_in_seconds: Optional[int] = None,
+    timeout_in_seconds: int | None = None,
 ) -> NeonEnv:
     """
     Utility function to set up a pageserver with a given number of identical tenants.
