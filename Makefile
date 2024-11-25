@@ -13,12 +13,12 @@ ICU_PREFIX_DIR := /usr/local/icu
 BUILD_TYPE ?= debug
 ifeq ($(BUILD_TYPE),release)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl
-	PG_CFLAGS = -O2 -g3 $(CFLAGS) -DUSE_PREFETCH
+	PG_CFLAGS = -O2 -g3 $(CFLAGS)
 	# Unfortunately, `--profile=...` is a nightly feature
 	CARGO_BUILD_FLAGS += --release
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
-	PG_CFLAGS = -O0 -g3 $(CFLAGS) -DUSE_PREFETCH
+	PG_CFLAGS = -O0 -g3 $(CFLAGS)
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
@@ -38,6 +38,7 @@ ifeq ($(UNAME_S),Linux)
 	# Seccomp BPF is only available for Linux
 	PG_CONFIGURE_OPTS += --with-libseccomp
 else ifeq ($(UNAME_S),Darwin)
+	PG_CFLAGS += -DUSE_PREFETCH
 	ifndef DISABLE_HOMEBREW
 		# macOS with brew-installed openssl requires explicit paths
 		# It can be configured with OPENSSL_PREFIX variable
