@@ -51,11 +51,11 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          echo brew install flex bison openssl protobuf icu4c
+          brew install flex bison openssl protobuf icu4c
 
       - name: Set pg ${{ matrix.postgres-version }} for caching
         id: pg_rev
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-${{ matrix.postgres-version }})
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-${{ matrix.postgres-version }}) | tee -a "${GITHUB_OUTPUT}"
 
       - name: Cache postgres ${{ matrix.postgres-version }} build
         id: cache_pg
