@@ -216,6 +216,7 @@ async fn create_azure_client(
             storage_account: None,
             container_region: remote_storage_azure_region,
             prefix_in_container: Some(format!("test_{millis}_{random:08x}/")),
+            endpoint: None,
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
             max_keys_per_list_response,
         }),
