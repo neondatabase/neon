@@ -606,6 +606,7 @@ impl RemoteTimelineClient {
         layer_file_name: &LayerName,
         layer_metadata: &LayerFileMetadata,
         local_path: &Utf8Path,
+        gate: &utils::sync::gate::Gate,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<u64, DownloadError> {
@@ -625,6 +626,7 @@ impl RemoteTimelineClient {
                 layer_file_name,
                 layer_metadata,
                 local_path,
+                gate,
                 cancel,
                 ctx,
             )

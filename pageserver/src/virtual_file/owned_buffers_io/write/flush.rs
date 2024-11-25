@@ -116,14 +116,19 @@ where
     /// Spawns a new background flush task and obtains a handle.
     ///
     /// Note: The background task so we do not need to explicitly maintain a queue of buffers.
-    pub fn spawn_new<B>(file: Arc<W>, buf: B, ctx: RequestContext) -> Self
+    pub fn spawn_new<B>(
+        file: Arc<W>,
+        buf: B,
+        gate_guard: utils::sync::gate::GateGuard,
+        ctx: RequestContext,
+    ) -> Self
     where
         B: Buffer<IoBuf = Buf> + Send + 'static,
     {
         let (front, back) = duplex::mpsc::channel(2);
 
         let join_handle = tokio::spawn(async move {
-            FlushBackgroundTask::new(back, file, ctx)
+            FlushBackgroundTask::new(back, file, gate_guard, ctx)
                 .run(buf.flush())
                 .await
         });
@@ -201,6 +206,8 @@ pub struct FlushBackgroundTask<Buf, W> {
     /// A writter for persisting data to disk.
     writer: Arc<W>,
     ctx: RequestContext,
+    /// Prevent timeline from shuting down until the flush background task finishes flushing all remaining buffers to disk.
+    _gate_guard: utils::sync::gate::GateGuard,
 }
 
 impl<Buf, W> FlushBackgroundTask<Buf, W>
@@ -212,11 +219,13 @@ where
     fn new(
         channel: duplex::mpsc::Duplex<FullSlice<Buf>, FlushRequest<Buf>>,
         file: Arc<W>,
+        gate_guard: utils::sync::gate::GateGuard,
         ctx: RequestContext,
     ) -> Self {
         FlushBackgroundTask {
             channel,
             writer: file,
+            _gate_guard: gate_guard,
             ctx,
         }
     }

@@ -57,6 +57,7 @@ pub async fn download_layer_file<'a>(
     layer_file_name: &'a LayerName,
     layer_metadata: &'a LayerFileMetadata,
     local_path: &Utf8Path,
+    gate: &utils::sync::gate::Gate,
     cancel: &CancellationToken,
     ctx: &RequestContext,
 ) -> Result<u64, DownloadError> {
@@ -85,7 +86,9 @@ pub async fn download_layer_file<'a>(
     let temp_file_path = path_with_suffix_extension(local_path, TEMP_DOWNLOAD_EXTENSION);
 
     let bytes_amount = download_retry(
-        || async { download_object(storage, &remote_path, &temp_file_path, cancel, ctx).await },
+        || async {
+            download_object(storage, &remote_path, &temp_file_path, gate, cancel, ctx).await
+        },
         &format!("download {remote_path:?}"),
         cancel,
     )
@@ -145,6 +148,7 @@ async fn download_object<'a>(
     storage: &'a GenericRemoteStorage,
     src_path: &RemotePath,
     dst_path: &Utf8PathBuf,
+    gate: &utils::sync::gate::Gate,
     cancel: &CancellationToken,
     #[cfg_attr(target_os = "macos", allow(unused_variables))] ctx: &RequestContext,
 ) -> Result<u64, DownloadError> {
@@ -219,15 +223,16 @@ async fn download_object<'a>(
 
                 pausable_failpoint!("before-downloading-layer-stream-pausable");
 
+                let mut buffered = owned_buffers_io::write::BufferedWriter::<IoBufferMut, _>::new(
+                    destination_file,
+                    || IoBufferMut::with_capacity(super::BUFFER_SIZE),
+                    gate.enter().map_err(|_| DownloadError::Cancelled)?,
+                    ctx,
+                );
+
                 // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
                 // There's chunks_vectored() on the stream.
                 let (bytes_amount, destination_file) = async {
-                    let mut buffered =
-                        owned_buffers_io::write::BufferedWriter::<IoBufferMut, _>::new(
-                            destination_file,
-                            || IoBufferMut::with_capacity(super::BUFFER_SIZE),
-                            ctx,
-                        );
                     while let Some(res) =
                         futures::StreamExt::next(&mut download.download_stream).await
                     {

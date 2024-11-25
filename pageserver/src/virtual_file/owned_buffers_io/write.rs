@@ -79,11 +79,21 @@ where
     /// Creates a new buffered writer.
     ///
     /// The `buf_new` function provides a way to initialize the owned buffers used by this writer.
-    pub fn new(writer: Arc<W>, buf_new: impl Fn() -> B, ctx: &RequestContext) -> Self {
+    pub fn new(
+        writer: Arc<W>,
+        buf_new: impl Fn() -> B,
+        gate_guard: utils::sync::gate::GateGuard,
+        ctx: &RequestContext,
+    ) -> Self {
         Self {
             writer: writer.clone(),
             mutable: Some(buf_new()),
-            flush_handle: FlushHandle::spawn_new(writer, buf_new(), ctx.attached_child()),
+            flush_handle: FlushHandle::spawn_new(
+                writer,
+                buf_new(),
+                gate_guard,
+                ctx.attached_child(),
+            ),
             bytes_submitted: 0,
         }
     }
@@ -315,13 +325,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_all_borrowed_always_goes_through_buffer() -> std::io::Result<()> {
+    async fn test_write_all_borrowed_always_goes_through_buffer() -> anyhow::Result<()> {
         let ctx = test_ctx();
         let ctx = &ctx;
         let recorder = Arc::new(RecorderWriter::default());
+        let gate = utils::sync::gate::Gate::default();
         let mut writer = BufferedWriter::<_, RecorderWriter>::new(
             recorder,
             || IoBufferMut::with_capacity(2),
+            gate.enter()?,
             ctx,
         );
 

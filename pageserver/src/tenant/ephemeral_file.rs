@@ -38,9 +38,9 @@ impl EphemeralFile {
         conf: &PageServerConf,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
-        gate_guard: utils::sync::gate::GateGuard,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
-    ) -> Result<EphemeralFile, io::Error> {
+    ) -> anyhow::Result<EphemeralFile> {
         static NEXT_FILENAME: AtomicU64 = AtomicU64::new(1);
         let filename_disambiguator =
             NEXT_FILENAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -73,9 +73,10 @@ impl EphemeralFile {
             buffered_writer: owned_buffers_io::write::BufferedWriter::new(
                 file,
                 || IoBufferMut::with_capacity(TAIL_SZ),
+                gate.enter()?,
                 ctx,
             ),
-            _gate_guard: gate_guard,
+            _gate_guard: gate.enter()?,
         })
     }
 }
@@ -362,7 +363,7 @@ mod tests {
 
         let gate = utils::sync::gate::Gate::default();
 
-        let file = EphemeralFile::create(conf, tenant_id, timeline_id, gate.enter().unwrap(), &ctx)
+        let file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
             .await
             .unwrap();
 
@@ -393,10 +394,9 @@ mod tests {
 
         let gate = utils::sync::gate::Gate::default();
 
-        let mut file =
-            EphemeralFile::create(conf, tenant_id, timeline_id, gate.enter().unwrap(), &ctx)
-                .await
-                .unwrap();
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
+            .await
+            .unwrap();
 
         let mutable = file.buffered_writer.inspect_mutable();
         let cap = mutable.capacity();
@@ -451,10 +451,9 @@ mod tests {
 
         let gate = utils::sync::gate::Gate::default();
 
-        let mut file =
-            EphemeralFile::create(conf, tenant_id, timeline_id, gate.enter().unwrap(), &ctx)
-                .await
-                .unwrap();
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
+            .await
+            .unwrap();
 
         // mutable buffer and maybe_flushed buffer each has `cap` bytes.
         let cap = file.buffered_writer.inspect_mutable().capacity();
@@ -499,10 +498,9 @@ mod tests {
 
         let gate = utils::sync::gate::Gate::default();
 
-        let mut file =
-            EphemeralFile::create(conf, tenant_id, timeline_id, gate.enter().unwrap(), &ctx)
-                .await
-                .unwrap();
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
+            .await
+            .unwrap();
 
         let mutable = file.buffered_writer.inspect_mutable();
         let cap = mutable.capacity();
