@@ -7,7 +7,7 @@ on:
         description: "Array of the pg versions to build for, for example: ['v14', 'v17']"
         type: string
         default: '[]'
-        required: true
+        required: false
       rebuild_everything:
         description: "If true, rebuild for all versions"
         type: boolean
