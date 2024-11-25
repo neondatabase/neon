@@ -17,7 +17,6 @@ pub struct FlushHandle<Buf, W> {
     pub(super) maybe_flushed: Option<FullSlice<Buf>>,
 }
 
-// TODO(yuchen): special actions in drop to clean up the join handle?
 pub struct FlushHandleInner<Buf, W> {
     /// A bi-directional channel that sends (buffer, offset) for writes,
     /// and receives recyled buffer.
