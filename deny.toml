@@ -27,6 +27,11 @@ yanked = "warn"
 id = "RUSTSEC-2023-0071"
 reason = "the marvin attack only affects private key decryption, not public key signature verification"
 
+[[advisories.ignore]]
+id = "RUSTSEC-2024-0399"
+reason = "0.22.4 is unaffected https://github.com/rustsec/advisory-db/pull/2144"
+crate = "rustls@0.22.4"
+
 # This section is considered when running `cargo deny check licenses`
 # More documentation for the licenses section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
