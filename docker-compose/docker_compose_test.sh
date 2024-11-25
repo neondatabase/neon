@@ -31,6 +31,7 @@ cleanup() {
 }
 
 for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
+    pg_version=${pg_version/v/}
     echo "clean up containers if exists"
     cleanup
     PG_TEST_VERSION=$((pg_version < 16 ? 16 : pg_version))

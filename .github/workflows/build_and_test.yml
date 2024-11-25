@@ -832,7 +832,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [ x64, arm64 ]
-        pg_version: [16, 17]
+        pg_version: [v16, v17]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
