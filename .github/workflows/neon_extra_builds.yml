@@ -37,6 +37,7 @@ jobs:
     timeout-minutes: 3
     outputs:
       postgres_changes: ${{ steps.postgres_changes.outputs.changes }}
+      rebuild_everything: ${{ steps.files_changed.outputs.rebuild_everything || steps.files_changed.outputs.rebuild_extra }}
     steps:
       - name: Checkout
         uses: actions/checkout@6ccd57f4c5d15bdc2fef309bd9fb6cc9db2ef1c6 # v4.1.7
@@ -45,12 +46,18 @@ jobs:
 
       - name: Check for Postgres changes
         uses: dorny/paths-filter@1441771bbfdd59dcd748680ee64ebd8faab1a242  #v3
-        id: postgres_changes
+        id: files_changed
         with:
           token: ${{ github.token }}
           filters: .github/file-filters.yaml
           base: ${{ github.event_name != 'pull_request' && (github.event.merge_group.base_ref || github.ref_name) || '' }}
           ref: ${{ github.event_name != 'pull_request' && (github.event.merge_group.head_ref || github.ref) || '' }}
+
+      - name: Filter out only v-string for build matrix
+        id: postgres_changes
+        run: |
+          v_strings_only_as_json_array=$(echo ${{ steps.files_changed.outputs.chnages }} | jq '.[]|select(test("v\\d+"))' | jq --slurp -c)
+          echo "changes=${v_strings_only_as_json_array}" | tee -a "${GITHUB_OUTPUT}"
 
   check-macos-build:
     needs: [ check-permissions, files-changed ]
