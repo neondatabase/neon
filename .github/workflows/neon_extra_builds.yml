@@ -75,7 +75,7 @@ jobs:
   gather-rust-build-stats:
     needs: [ check-permissions, build-build-tools-image, files-changed ]
     if: |
-      needs.files-changed.outputs.v17 == 'true' && (
+      (needs.files-changed.outputs.v17 == 'true' || needs.files-changed.outputs.rebuild_everything) && (
         contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
         contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
         github.ref_name == 'main'

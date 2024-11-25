@@ -69,7 +69,8 @@ jobs:
           echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
           echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
 
-      - name: Cache cargo deps
+      - name: Cache cargo deps (only for v17)
+        if: matrix.postgres-version == 'v17'
         uses: actions/cache@v4
         with:
           path: |
@@ -82,21 +83,21 @@ jobs:
       - name: Build Postgres ${{ matrix.postgres-version }}
         if: steps.cache_pg.outputs.cache-hit != 'true'
         run: |
-          make postgres-${{ matrix.postgres-version }} -j$(sysctl -n hw.cpu)
+          make postgres-${{ matrix.postgres-version }} -j$(sysctl -n hw.ncpu)
 
       - name: Build Neon Pg Ext ${{ matrix.postgres-version }}
         run: |
-          make "neon-pg-ext-${{ matrix.postgres-version }}" -j$(sysctl -n hw.cpu)
+          make "neon-pg-ext-${{ matrix.postgres-version }}" -j$(sysctl -n hw.ncpu)
 
       - name: Build walproposer-lib (only for v17)
         if: matrix.postgres-version == 'v17'
         run:
-          make walproposer-lib -j$(sysctl -n hw.cpu)
+          make walproposer-lib -j$(sysctl -n hw.ncpu)
 
-      - name: Run cargo build
+      - name: Run cargo build (only for v17)
         if: matrix.postgres-version == 'v17'
         run: PQ_LIB_DIR=$(pwd)/pg_install/${{ matrix.postgres-version }}/lib cargo build --all --release
 
-      - name: Check that no warnings are produced
+      - name: Check that no warnings are produced (only for v17)
         if: matrix.postgres-version == 'v17'
         run: ./run_clippy.sh
