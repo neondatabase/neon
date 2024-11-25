@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use futures::TryFutureExt;
+use futures::{FutureExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, Instrument};
@@ -88,40 +88,37 @@ pub async fn task_main(
                 crate::metrics::Protocol::Tcp,
                 &config.region,
             );
-            let span = ctx.span();
 
-            let startup = Box::pin(
-                handle_client(
-                    config,
-                    backend,
-                    &ctx,
-                    cancellation_handler,
-                    socket,
-                    conn_gauge,
-                )
-                .instrument(span.clone()),
-            );
-            let res = startup.await;
+            let res = handle_client(
+                config,
+                backend,
+                &ctx,
+                cancellation_handler,
+                socket,
+                conn_gauge,
+            )
+            .instrument(ctx.span())
+            .boxed()
+            .await;
 
             match res {
                 Err(e) => {
-                    // todo: log and push to ctx the error kind
                     ctx.set_error_kind(e.get_error_kind());
-                    error!(parent: &span, "per-client task finished with an error: {e:#}");
+                    error!(parent: &ctx.span(), "per-client task finished with an error: {e:#}");
                 }
                 Ok(None) => {
                     ctx.set_success();
                 }
                 Ok(Some(p)) => {
                     ctx.set_success();
-                    ctx.log_connect();
-                    match p.proxy_pass().instrument(span.clone()).await {
+                    let _disconnect = ctx.log_connect();
+                    match p.proxy_pass().await {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
-                            error!(parent: &span, "per-client task finished with an IO error from the client: {e:#}");
+                            error!(?session_id, "per-client task finished with an IO error from the client: {e:#}");
                         }
                         Err(ErrorSource::Compute(e)) => {
-                            error!(parent: &span, "per-client task finished with an IO error from the compute: {e:#}");
+                            error!(?session_id, "per-client task finished with an IO error from the compute: {e:#}");
                         }
                     }
                 }
@@ -219,6 +216,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         client: stream,
         aux: node.aux.clone(),
         compute: node,
+        session_id: ctx.session_id(),
         _req: request_gauge,
         _conn: conn_gauge,
         _cancel: session,

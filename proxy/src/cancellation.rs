@@ -1,7 +1,8 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use pq_proto::CancelKeyData;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -17,9 +18,6 @@ use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::cancellation_publisher::{
     CancellationPublisher, CancellationPublisherMut, RedisPublisherClient,
 };
-use std::net::IpAddr;
-
-use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 pub type CancelMap = Arc<DashMap<CancelKeyData, Option<CancelClosure>>>;
 pub type CancellationHandlerMain = CancellationHandler<Option<Arc<Mutex<RedisPublisherClient>>>>;
