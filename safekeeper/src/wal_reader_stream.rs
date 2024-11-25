@@ -33,6 +33,7 @@ pub(crate) struct WalBytes {
     /// Raw PG WAL
     pub(crate) wal: Bytes,
     /// Start LSN of [`Self::wal`]
+    #[allow(dead_code)]
     pub(crate) wal_start_lsn: Lsn,
     /// End LSN of [`Self::wal`]
     pub(crate) wal_end_lsn: Lsn,

@@ -50,12 +50,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
             tokio::select! {
                 // Get some WAL from the stream and then: decode, interpret and send it
                 wal = stream.next() => {
-                    let WalBytes { wal, wal_start_lsn, wal_end_lsn, commit_lsn } = match wal {
+                    let WalBytes { wal, wal_start_lsn: _, wal_end_lsn, commit_lsn } = match wal {
                         Some(some) => some?,
                         None => { break; }
                     };
 
-                    wal_position = wal_start_lsn;
+                    wal_position = wal_end_lsn;
                     wal_decoder.feed_bytes(&wal);
 
                     let mut records = Vec::new();
