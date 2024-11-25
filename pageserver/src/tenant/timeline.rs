@@ -3843,7 +3843,7 @@ impl Timeline {
                     FlushLayerError::Other(anyhow!(e).into())
                 }
             })?;
-        
+
         wait_upload_timer.stop_and_record();
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
