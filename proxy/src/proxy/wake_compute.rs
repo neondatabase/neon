@@ -1,15 +1,27 @@
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use super::connect_compute::ComputeConnectBackend;
 use crate::config::RetryConfig;
 use crate::context::RequestContext;
-use crate::control_plane::errors::WakeComputeError;
+use crate::control_plane::errors::{ControlPlaneError, WakeComputeError};
 use crate::control_plane::CachedNodeInfo;
 use crate::error::ReportableError;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
 };
 use crate::proxy::retry::{retry_after, should_retry};
+
+// Use macro to retain original callsite.
+macro_rules! log_wake_compute_error {
+    (error = ?$error:expr, $num_retries:expr, retriable = $retriable:literal) => {
+        match $error {
+            WakeComputeError::ControlPlane(ControlPlaneError::Message(_)) => {
+                info!(error = ?$error, num_retries = $num_retries, retriable = $retriable, "couldn't wake compute node")
+            }
+            _ => error!(error = ?$error, num_retries = $num_retries, retriable = $retriable, "couldn't wake compute node"),
+        }
+    };
+}
 
 pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
     num_retries: &mut u32,
@@ -20,7 +32,7 @@ pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
     loop {
         match api.wake_compute(ctx).await {
             Err(e) if !should_retry(&e, *num_retries, config) => {
-                error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
+                log_wake_compute_error!(error = ?e, num_retries, retriable = false);
                 report_error(&e, false);
                 Metrics::get().proxy.retries_metric.observe(
                     RetriesMetricGroup {
@@ -32,7 +44,7 @@ pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
                 return Err(e);
             }
             Err(e) => {
-                warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
+                log_wake_compute_error!(error = ?e, num_retries, retriable = true);
                 report_error(&e, true);
             }
             Ok(n) => {
