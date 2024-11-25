@@ -2,6 +2,12 @@ name: Check neon with MacOS builds
 
 on:
   workflow_call:
+    inputs:
+      pg_versions:
+        description: "Array of the pg versions to build for, for example: ['v14', 'v17']"
+        type: string
+        default: '[]'
+        required: true
 
 env:
   RUST_BACKTRACE: 1
@@ -35,9 +41,8 @@ jobs:
           ref: ${{ github.event_name != 'pull_request' && (github.event.merge_group.head_ref || github.ref) || ''}}
 
   check-macos-build:
-    needs: [ files-changed ]
     if: |
-      needs.files-changed.outputs.postgres_changes != '[]' && (
+      inputs.pg_versions != '[]' && (
         contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
         contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
         github.ref_name == 'main'
@@ -46,7 +51,7 @@ jobs:
     runs-on: macos-15
     strategy:
       matrix:
-        postgres-version: ${{ fromJSON(needs.files-changed.outputs.postgres_changes) }}
+        postgres-version: ${{ fromJSON(inputs.pg_versions) }}
     env:
       # Use release build only, to have less debug info around
       # Hence keeping target/ (and general cache size) smaller
