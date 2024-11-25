@@ -135,7 +135,7 @@ impl NeonControlPlaneClient {
             })
         }
         .inspect_err(|e| tracing::debug!(error = ?e))
-        .instrument(info_span!("do_get_auth_info", request_id))
+        .instrument(info_span!("do_get_auth_info"))
         .await
     }
 
@@ -194,7 +194,7 @@ impl NeonControlPlaneClient {
             Ok(rules)
         }
         .inspect_err(|e| tracing::debug!(error = ?e))
-        .instrument(info_span!("do_get_endpoint_jwks", request_id))
+        .instrument(info_span!("do_get_endpoint_jwks"))
         .await
     }
 
@@ -253,8 +253,7 @@ impl NeonControlPlaneClient {
             Ok(node)
         }
         .inspect_err(|e| tracing::debug!(error = ?e))
-        // TODO: redo this span stuff
-        .instrument(info_span!("do_wake_compute", request_id))
+        .instrument(info_span!("do_wake_compute"))
         .await
     }
 }
