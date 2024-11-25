@@ -38,7 +38,7 @@ for pg_version in 14 15 16 17; do
     if [ $pg_version -eq 17 ]; then
       SPEC_PATH="compute_wrapper/var/db/postgres/specs"
       mv $SPEC_PATH/spec.json $SPEC_PATH/spec.bak
-      jq 'del(.cluster.settings[] | select (.name == "session_preload_libraries"))' spec.bak > spec.json
+      jq 'del(.cluster.settings[] | select (.name == "session_preload_libraries"))' $SPEC_PATH/spec.bak > $SPEC_PATH/spec.json
     fi
     PG_VERSION=$pg_version PG_TEST_VERSION=$PG_TEST_VERSION docker compose --profile test-extensions -f $COMPOSE_FILE up --build -d
 
