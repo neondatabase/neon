@@ -103,14 +103,33 @@ fn get_pg_config(argument: &str, pgbin: &str) -> String {
         .to_string()
 }
 
-pub fn get_pg_version(pgbin: &str) -> String {
+pub fn get_pg_version(pgbin: &str) -> PostgresMajorVersion {
     // pg_config --version returns a (platform specific) human readable string
     // such as "PostgreSQL 15.4". We parse this to v14/v15/v16 etc.
     let human_version = get_pg_config("--version", pgbin);
-    parse_pg_version(&human_version).to_string()
+    parse_pg_version(&human_version)
 }
 
-fn parse_pg_version(human_version: &str) -> &str {
+pub fn get_pg_version_string(pgbin: &str) -> String {
+    match get_pg_version(pgbin) {
+        PostgresMajorVersion::V14 => "v14",
+        PostgresMajorVersion::V15 => "v15",
+        PostgresMajorVersion::V16 => "v16",
+        PostgresMajorVersion::V17 => "v17",
+    }
+    .to_owned()
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PostgresMajorVersion {
+    V14,
+    V15,
+    V16,
+    V17,
+}
+
+fn parse_pg_version(human_version: &str) -> PostgresMajorVersion {
+    use PostgresMajorVersion::*;
     // Normal releases have version strings like "PostgreSQL 15.4". But there
     // are also pre-release versions like "PostgreSQL 17devel" or "PostgreSQL
     // 16beta2" or "PostgreSQL 17rc1". And with the --with-extra-version
@@ -121,10 +140,10 @@ fn parse_pg_version(human_version: &str) -> &str {
         .captures(human_version)
     {
         Some(captures) if captures.len() == 2 => match &captures["major"] {
-            "14" => return "v14",
-            "15" => return "v15",
-            "16" => return "v16",
-            "17" => return "v17",
+            "14" => return V14,
+            "15" => return V15,
+            "16" => return V16,
+            "17" => return V17,
             _ => {}
         },
         _ => {}
@@ -263,24 +282,25 @@ mod tests {
 
     #[test]
     fn test_parse_pg_version() {
-        assert_eq!(parse_pg_version("PostgreSQL 15.4"), "v15");
-        assert_eq!(parse_pg_version("PostgreSQL 15.14"), "v15");
+        use super::PostgresMajorVersion::*;
+        assert_eq!(parse_pg_version("PostgreSQL 15.4"), V15);
+        assert_eq!(parse_pg_version("PostgreSQL 15.14"), V15);
         assert_eq!(
             parse_pg_version("PostgreSQL 15.4 (Ubuntu 15.4-0ubuntu0.23.04.1)"),
-            "v15"
+            V15
         );
 
-        assert_eq!(parse_pg_version("PostgreSQL 14.15"), "v14");
-        assert_eq!(parse_pg_version("PostgreSQL 14.0"), "v14");
+        assert_eq!(parse_pg_version("PostgreSQL 14.15"), V14);
+        assert_eq!(parse_pg_version("PostgreSQL 14.0"), V14);
         assert_eq!(
             parse_pg_version("PostgreSQL 14.9 (Debian 14.9-1.pgdg120+1"),
-            "v14"
+            V14
         );
 
-        assert_eq!(parse_pg_version("PostgreSQL 16devel"), "v16");
-        assert_eq!(parse_pg_version("PostgreSQL 16beta1"), "v16");
-        assert_eq!(parse_pg_version("PostgreSQL 16rc2"), "v16");
-        assert_eq!(parse_pg_version("PostgreSQL 16extra"), "v16");
+        assert_eq!(parse_pg_version("PostgreSQL 16devel"), V16);
+        assert_eq!(parse_pg_version("PostgreSQL 16beta1"), V16);
+        assert_eq!(parse_pg_version("PostgreSQL 16rc2"), V16);
+        assert_eq!(parse_pg_version("PostgreSQL 16extra"), V16);
     }
 
     #[test]
