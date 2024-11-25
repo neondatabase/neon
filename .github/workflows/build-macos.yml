@@ -97,11 +97,11 @@ jobs:
       - name: Get postgres headers
         if: matrix.postgres-version == 'v17'
         run: |
-          make postgres-headers -j$(sysctl hw.ncpu)
+          make postgres-headers -j$(sysctl -n hw.ncpu)
 
       - name: Run cargo build (only for v17)
         if: matrix.postgres-version == 'v17'
-        run: PQ_LIB_DIR=$(pwd)/pg_install/${{ matrix.postgres-version }}/lib cargo build --all --release
+        run: PQ_LIB_DIR=$(pwd)/pg_install/${{ matrix.postgres-version }}/lib cargo build --all --release -j$(sysctl -n hw.ncpu)
 
       - name: Check that no warnings are produced (only for v17)
         if: matrix.postgres-version == 'v17'
