@@ -94,6 +94,11 @@ jobs:
         run:
           make walproposer-lib -j$(sysctl -n hw.ncpu)
 
+      - name: Get postgres headers
+        if: matrix.postgres-version == 'v17'
+        run: |
+          make postgres-headers -j$(sysctl hw.ncpu)
+
       - name: Run cargo build (only for v17)
         if: matrix.postgres-version == 'v17'
         run: PQ_LIB_DIR=$(pwd)/pg_install/${{ matrix.postgres-version }}/lib cargo build --all --release
