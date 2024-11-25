@@ -44,7 +44,6 @@ use utils::{
 };
 
 use crate::auth::check_permission;
-use crate::basebackup;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -62,6 +61,7 @@ use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
+use crate::{basebackup, timed_after_cancellation};
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
@@ -1101,6 +1101,8 @@ impl PageServerHandler {
             protocol_pipelining_mode,
         } = pipelining_config;
 
+        let cancel = self.cancel.clone();
+
         let (requests_tx, mut requests_rx) = tokio::sync::mpsc::channel(1);
         let read_messages = {
             let cancel = self.cancel.child_token();
@@ -1244,8 +1246,23 @@ impl PageServerHandler {
         let executor_res;
         match protocol_pipelining_mode {
             PageServiceProtocolPipeliningMode::ConcurrentFutures => {
-                (read_messages_res, _, executor_res) =
-                    tokio::join!(read_messages, batcher, executor);
+                (read_messages_res, _, executor_res) = {
+                    macro_rules! timed {
+                        ($fut:expr, $what:literal) => {
+                            timed_after_cancellation(
+                                $fut,
+                                $what,
+                                Duration::from_millis(100),
+                                &cancel,
+                            )
+                        };
+                    }
+                    tokio::join!(
+                        timed!(read_messages, "read-messages"),
+                        timed!(batcher, "batcher"),
+                        timed!(executor, "executor"),
+                    )
+                }
             }
             PageServiceProtocolPipeliningMode::Tasks => {
                 // cancelled via sensitivity to self.cancel
