@@ -1387,7 +1387,7 @@ COPY --from=hll-pg-build /hll.tar.gz /ext-src
 COPY --from=plpgsql-check-pg-build /plpgsql_check.tar.gz /ext-src
 #COPY --from=timescaledb-pg-build /timescaledb.tar.gz /ext-src
 COPY --from=pg-hint-plan-pg-build /pg_hint_plan.tar.gz /ext-src
-COPY compute/patches/pg_hint_plan_${PG_VERSION}.patc? /ext-src
+COPY compute/patches/pg_hint_plan_${PG_VERSION}.patch /ext-src
 COPY --from=pg-cron-pg-build /pg_cron.tar.gz /ext-src
 COPY compute/patches/pg_cron.patch /ext-src
 #COPY --from=pg-pgx-ulid-build /home/nonroot/pgx_ulid.tar.gz /ext-src
