@@ -125,6 +125,8 @@ pub struct AzureConfig {
     pub container_region: String,
     /// A "subfolder" in the container, to use the same container separately by multiple remote storage users at once.
     pub prefix_in_container: Option<String>,
+    /// The endpoint to use. Use the default if None.
+    pub endpoint: Option<String>,
     /// Azure has various limits on its API calls, we need not to exceed those.
     /// See [`DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT`] for more details.
     #[serde(default = "default_remote_storage_azure_concurrency_limit")]
@@ -144,6 +146,7 @@ impl Debug for AzureConfig {
             .field("storage_account", &self.storage_account)
             .field("bucket_region", &self.container_region)
             .field("prefix_in_container", &self.prefix_in_container)
+            .field("endpoint", &self.endpoint)
             .field("concurrency_limit", &self.concurrency_limit)
             .field(
                 "max_keys_per_list_response",
@@ -296,6 +299,7 @@ timeout = '5s'";
                     storage_account: None,
                     container_region: "westeurope".into(),
                     prefix_in_container: None,
+                    endpoint: None,
                     concurrency_limit: default_remote_storage_azure_concurrency_limit(),
                     max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
                 }),

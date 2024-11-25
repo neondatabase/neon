@@ -17,6 +17,7 @@ use anyhow::Result;
 use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
 use azure_core::{Continuable, RetryOptions};
 use azure_identity::DefaultAzureCredential;
+use azure_storage::CloudLocation;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
 use azure_storage_blobs::prelude::ClientBuilder;
@@ -70,8 +71,16 @@ impl AzureBlobStorage {
             StorageCredentials::token_credential(Arc::new(token_credential))
         };
 
-        // we have an outer retry
-        let builder = ClientBuilder::new(account, credentials).retry(RetryOptions::none());
+        let location = match &azure_config.endpoint {
+            None => CloudLocation::Public { account },
+            Some(endpoint) => CloudLocation::Custom {
+                account,
+                uri: endpoint.clone(),
+            },
+        };
+        let builder = ClientBuilder::with_location(location, credentials)
+            // we have an outer retry
+            .retry(RetryOptions::none());
 
         let client = builder.container_client(azure_config.container_name.to_owned());
 
