@@ -47,7 +47,7 @@ jobs:
       - name: Checkout submodule vendor/postgres-${{ matrix.postgres-version }}
         run: |
           git submodule init vendor/postgres-${{ matrix.postgres-version }}
-          git submodule update --depth 1
+          git submodule update --depth 2 --recursive
 
       - name: Install build dependencies
         run: |
