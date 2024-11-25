@@ -111,7 +111,7 @@ struct SqlOverHttpArgs {
     sql_over_http_cancel_set_shards: usize,
 
     #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
-    sql_over_http_max_request_size_bytes: u64,
+    sql_over_http_max_request_size_bytes: usize,
 
     #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
     sql_over_http_max_response_size_bytes: usize,
@@ -125,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
 
     Metrics::install(Arc::new(ThreadPoolMetrics::new(0)));
 
+    // TODO: refactor these to use labels
     debug!("Version: {GIT_VERSION}");
     debug!("Build_tag: {BUILD_TAG}");
     let neon_metrics = ::metrics::NeonMetrics::new(::metrics::BuildInfo {

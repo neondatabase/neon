@@ -1229,10 +1229,9 @@ impl<'a> DatadirModification<'a> {
     }
 
     pub(crate) fn has_dirty_data(&self) -> bool {
-        !self
-            .pending_data_batch
+        self.pending_data_batch
             .as_ref()
-            .map_or(true, |b| b.is_empty())
+            .map_or(false, |b| b.has_data())
     }
 
     /// Set the current lsn
@@ -1408,7 +1407,7 @@ impl<'a> DatadirModification<'a> {
             Some(pending_batch) => {
                 pending_batch.extend(batch);
             }
-            None if !batch.is_empty() => {
+            None if batch.has_data() => {
                 self.pending_data_batch = Some(batch);
             }
             None => {
@@ -2276,9 +2275,9 @@ impl<'a> Version<'a> {
 //--- Metadata structs stored in key-value pairs in the repository.
 
 #[derive(Debug, Serialize, Deserialize)]
-struct DbDirectory {
+pub(crate) struct DbDirectory {
     // (spcnode, dbnode) -> (do relmapper and PG_VERSION files exist)
-    dbdirs: HashMap<(Oid, Oid), bool>,
+    pub(crate) dbdirs: HashMap<(Oid, Oid), bool>,
 }
 
 // The format of TwoPhaseDirectory changed in PostgreSQL v17, because the filenames of
@@ -2287,8 +2286,8 @@ struct DbDirectory {
 // "pg_twophsae/0000000A000002E4".
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TwoPhaseDirectory {
-    xids: HashSet<TransactionId>,
+pub(crate) struct TwoPhaseDirectory {
+    pub(crate) xids: HashSet<TransactionId>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2297,12 +2296,12 @@ struct TwoPhaseDirectoryV17 {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
-struct RelDirectory {
+pub(crate) struct RelDirectory {
     // Set of relations that exist. (relfilenode, forknum)
     //
     // TODO: Store it as a btree or radix tree or something else that spans multiple
     // key-value pairs, if you have a lot of relations
-    rels: HashSet<(Oid, u8)>,
+    pub(crate) rels: HashSet<(Oid, u8)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2311,9 +2310,9 @@ struct RelSizeEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
-struct SlruSegmentDirectory {
+pub(crate) struct SlruSegmentDirectory {
     // Set of SLRU segments that exist.
-    segments: HashSet<u32>,
+    pub(crate) segments: HashSet<u32>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, enum_map::Enum)]

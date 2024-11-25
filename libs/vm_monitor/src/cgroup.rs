@@ -218,7 +218,7 @@ impl MemoryStatus {
     fn debug_slice(slice: &[Self]) -> impl '_ + Debug {
         struct DS<'a>(&'a [MemoryStatus]);
 
-        impl<'a> Debug for DS<'a> {
+        impl Debug for DS<'_> {
             fn fmt(&self, f: &mut Formatter) -> fmt::Result {
                 f.debug_struct("[MemoryStatus]")
                     .field(
@@ -233,7 +233,7 @@ impl MemoryStatus {
 
         struct Fields<'a, F>(&'a [MemoryStatus], F);
 
-        impl<'a, F: Fn(&MemoryStatus) -> T, T: Debug> Debug for Fields<'a, F> {
+        impl<F: Fn(&MemoryStatus) -> T, T: Debug> Debug for Fields<'_, F> {
             fn fmt(&self, f: &mut Formatter) -> fmt::Result {
                 f.debug_list().entries(self.0.iter().map(&self.1)).finish()
             }

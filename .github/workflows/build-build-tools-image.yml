@@ -117,7 +117,7 @@ jobs:
 
       - name: Create multi-arch image
         env:
-          DEFAULT_DEBIAN_VERSION: bullseye
+          DEFAULT_DEBIAN_VERSION: bookworm
           IMAGE_TAG: ${{ needs.check-image.outputs.tag }}
         run: |
           for debian_version in bullseye bookworm; do

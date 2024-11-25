@@ -10,9 +10,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use futures::StreamExt;
 use ini::Ini;
 use notify::{RecursiveMode, Watcher};
-use postgres::{Client, Transaction};
 use tokio::io::AsyncBufReadExt;
 use tokio::time::timeout;
 use tokio_postgres::NoTls;
@@ -197,27 +197,34 @@ impl Escaping for PgIdent {
 }
 
 /// Build a list of existing Postgres roles
-pub fn get_existing_roles(xact: &mut Transaction<'_>) -> Result<Vec<Role>> {
-    let postgres_roles = xact
-        .query("SELECT rolname, rolpassword FROM pg_catalog.pg_authid", &[])?
-        .iter()
+pub async fn get_existing_roles_async(client: &tokio_postgres::Client) -> Result<Vec<Role>> {
+    let postgres_roles = client
+        .query_raw::<str, &String, &[String; 0]>(
+            "SELECT rolname, rolpassword FROM pg_catalog.pg_authid",
+            &[],
+        )
+        .await?
+        .filter_map(|row| async { row.ok() })
         .map(|row| Role {
             name: row.get("rolname"),
             encrypted_password: row.get("rolpassword"),
             options: None,
         })
-        .collect();
+        .collect()
+        .await;
 
     Ok(postgres_roles)
 }
 
 /// Build a list of existing Postgres databases
-pub fn get_existing_dbs(client: &mut Client) -> Result<HashMap<String, Database>> {
+pub async fn get_existing_dbs_async(
+    client: &tokio_postgres::Client,
+) -> Result<HashMap<String, Database>> {
     // `pg_database.datconnlimit = -2` means that the database is in the
     // invalid state. See:
     //   https://github.com/postgres/postgres/commit/a4b4cc1d60f7e8ccfcc8ff8cb80c28ee411ad9a9
-    let postgres_dbs: Vec<Database> = client
-        .query(
+    let rowstream = client
+        .query_raw::<str, &String, &[String; 0]>(
             "SELECT
                 datname AS name,
                 datdba::regrole::text AS owner,
@@ -226,8 +233,11 @@ pub fn get_existing_dbs(client: &mut Client) -> Result<HashMap<String, Database>
             FROM
                 pg_catalog.pg_database;",
             &[],
-        )?
-        .iter()
+        )
+        .await?;
+
+    let dbs_map = rowstream
+        .filter_map(|r| async { r.ok() })
         .map(|row| Database {
             name: row.get("name"),
             owner: row.get("owner"),
@@ -235,12 +245,9 @@ pub fn get_existing_dbs(client: &mut Client) -> Result<HashMap<String, Database>
             invalid: row.get("invalid"),
             options: None,
         })
-        .collect();
-
-    let dbs_map = postgres_dbs
-        .iter()
         .map(|db| (db.name.clone(), db.clone()))
-        .collect::<HashMap<_, _>>();
+        .collect::<HashMap<_, _>>()
+        .await;
 
     Ok(dbs_map)
 }

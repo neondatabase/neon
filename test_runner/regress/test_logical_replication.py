@@ -12,7 +12,7 @@ from fixtures.neon_fixtures import (
     logical_replication_sync,
     wait_for_last_flush_lsn,
 )
-from fixtures.utils import wait_until
+from fixtures.utils import USE_LFC, wait_until
 
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import (
@@ -576,7 +576,15 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg: Van
     # We want all data to fit into shared_buffers because later we stop
     # safekeeper and insert more; this shouldn't cause page requests as they
     # will be stuck.
-    sub = env.endpoints.create("subscriber", config_lines=["shared_buffers=128MB"])
+    sub = env.endpoints.create(
+        "subscriber",
+        config_lines=[
+            "neon.max_file_cache_size = 32MB",
+            "neon.file_cache_size_limit = 32MB",
+        ]
+        if USE_LFC
+        else [],
+    )
     sub.start()
 
     with vanilla_pg.cursor() as pcur:

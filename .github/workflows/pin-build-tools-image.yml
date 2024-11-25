@@ -94,7 +94,7 @@ jobs:
 
       - name: Tag build-tools with `${{ env.TO_TAG }}` in Docker Hub, ECR, and ACR
         env:
-          DEFAULT_DEBIAN_VERSION: bullseye
+          DEFAULT_DEBIAN_VERSION: bookworm
         run: |
           for debian_version in bullseye bookworm; do
             tags=()

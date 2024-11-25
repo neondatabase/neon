@@ -83,7 +83,9 @@ where
             }
             wake_these.push(self.heap.pop().unwrap().wake_channel);
         }
-        self.update_status();
+        if !wake_these.is_empty() {
+            self.update_status();
+        }
         wake_these
     }
 

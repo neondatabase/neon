@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import enum
 import json
 import time
-from typing import TYPE_CHECKING
+from enum import StrEnum
 
 import pytest
 from fixtures.log_helper import log
@@ -14,10 +13,6 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.utils import skip_in_debug_build, wait_until
 from fixtures.workload import Workload
-
-if TYPE_CHECKING:
-    from typing import Optional
-
 
 AGGRESIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.
@@ -32,7 +27,8 @@ AGGRESIVE_COMPACTION_TENANT_CONF = {
 
 
 @skip_in_debug_build("only run with release build")
-def test_pageserver_compaction_smoke(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("wal_receiver_protocol", ["vanilla", "interpreted"])
+def test_pageserver_compaction_smoke(neon_env_builder: NeonEnvBuilder, wal_receiver_protocol: str):
     """
     This is a smoke test that compaction kicks in. The workload repeatedly churns
     a small number of rows and manually instructs the pageserver to run compaction
@@ -43,8 +39,8 @@ def test_pageserver_compaction_smoke(neon_env_builder: NeonEnvBuilder):
 
     # Effectively disable the page cache to rely only on image layers
     # to shorten reads.
-    neon_env_builder.pageserver_config_override = """
-page_cache_size=10
+    neon_env_builder.pageserver_config_override = f"""
+page_cache_size=10; wal_receiver_protocol='{wal_receiver_protocol}'
 """
 
     env = neon_env_builder.init_start(initial_tenant_conf=AGGRESIVE_COMPACTION_TENANT_CONF)
@@ -172,7 +168,7 @@ LARGE_STRIPES = 32768
 def test_sharding_compaction(
     neon_env_builder: NeonEnvBuilder,
     stripe_size: int,
-    shard_count: Optional[int],
+    shard_count: int | None,
     gc_compaction: bool,
 ):
     """
@@ -277,7 +273,7 @@ def test_sharding_compaction(
             )
 
 
-class CompactionAlgorithm(str, enum.Enum):
+class CompactionAlgorithm(StrEnum):
     LEGACY = "legacy"
     TIERED = "tiered"
 
