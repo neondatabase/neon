@@ -415,7 +415,10 @@ impl Default for ConfigToml {
             virtual_file_io_mode: None,
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
-            page_service_pipelining: None,
+            page_service_pipelining: Some(PageServicePipeliningConfig {
+                max_batch_size: NonZeroUsize::new(32).unwrap(),
+                protocol_pipelining_mode: PageServiceProtocolPipeliningMode::ConcurrentFutures,
+            }),
         }
     }
 }
