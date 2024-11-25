@@ -97,6 +97,15 @@ pub struct ConfigToml {
     pub control_plane_api: Option<reqwest::Url>,
     pub control_plane_api_token: Option<String>,
     pub control_plane_emergency_mode: bool,
+    /// Unstable feature: subject to change or removal without notice.
+    /// See <https://github.com/neondatabase/neon/pull/9218>.
+    pub import_pgdata_upcall_api: Option<reqwest::Url>,
+    /// Unstable feature: subject to change or removal without notice.
+    /// See <https://github.com/neondatabase/neon/pull/9218>.
+    pub import_pgdata_upcall_api_token: Option<String>,
+    /// Unstable feature: subject to change or removal without notice.
+    /// See <https://github.com/neondatabase/neon/pull/9218>.
+    pub import_pgdata_aws_endpoint_url: Option<reqwest::Url>,
     pub heatmap_upload_concurrency: usize,
     pub secondary_download_concurrency: usize,
     pub virtual_file_io_engine: Option<crate::models::virtual_file::IoEngineKind>,
@@ -109,6 +118,8 @@ pub struct ConfigToml {
     pub virtual_file_io_mode: Option<crate::models::virtual_file::IoMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_sync: Option<bool>,
+    #[serde(with = "humantime_serde")]
+    pub server_side_batch_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -317,6 +328,8 @@ pub mod defaults {
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
+
+    pub const DEFAULT_SERVER_SIDE_BATCH_TIMEOUT: Option<&str> = None;
 }
 
 impl Default for ConfigToml {
@@ -382,6 +395,10 @@ impl Default for ConfigToml {
             control_plane_api_token: (None),
             control_plane_emergency_mode: (false),
 
+            import_pgdata_upcall_api: (None),
+            import_pgdata_upcall_api_token: (None),
+            import_pgdata_aws_endpoint_url: (None),
+
             heatmap_upload_concurrency: (DEFAULT_HEATMAP_UPLOAD_CONCURRENCY),
             secondary_download_concurrency: (DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY),
 
@@ -397,6 +414,8 @@ impl Default for ConfigToml {
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: None,
             virtual_file_io_mode: None,
+            server_side_batch_timeout: DEFAULT_SERVER_SIDE_BATCH_TIMEOUT
+                .map(|duration| humantime::parse_duration(duration).unwrap()),
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
         }

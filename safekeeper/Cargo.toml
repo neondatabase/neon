@@ -30,6 +30,7 @@ once_cell.workspace = true
 parking_lot.workspace = true
 postgres.workspace = true
 postgres-protocol.workspace = true
+pprof.workspace = true
 rand.workspace = true
 regex.workspace = true
 scopeguard.workspace = true

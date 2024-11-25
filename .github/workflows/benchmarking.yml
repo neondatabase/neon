@@ -122,6 +122,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         # Set --sparse-ordering option of pytest-order plugin
         # to ensure tests are running in order of appears in the file.
         # It's important for test_perf_pgbench.py::test_pgbench_remote_* tests
@@ -133,6 +134,7 @@ jobs:
           --ignore test_runner/performance/test_perf_pgvector_queries.py
           --ignore test_runner/performance/test_logical_replication.py
           --ignore test_runner/performance/test_physical_replication.py
+          --ignore test_runner/performance/test_perf_ingest_using_pgcopydb.py
       env:
         BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -149,12 +151,14 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic perf testing: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -210,6 +214,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 5400
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -226,6 +231,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 5400
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -237,11 +243,13 @@ jobs:
       uses: ./.github/actions/allure-report-generate
       with:
         store-test-results-into-db: true
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
+    # Post both success and failure to the Slack channel
     - name: Post to a Slack channel
-      if: ${{ github.event.schedule && failure() }}
+      if: ${{ github.event.schedule }}
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C06T9AMNDQQ" # on-call-compute-staging-stream
@@ -444,6 +452,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_init
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -458,6 +467,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_simple_update
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -472,6 +482,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_select_only
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -488,12 +499,14 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic perf testing on ${{ matrix.platform }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -545,12 +558,12 @@ jobs:
         arch=$(uname -m | sed 's/x86_64/amd64/g' | sed 's/aarch64/arm64/g')
 
         cd /home/nonroot
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-17/libpq5_17.0-1.pgdg110+1_${arch}.deb"
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.4-1.pgdg110+2_${arch}.deb"
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.4-1.pgdg110+2_${arch}.deb"
-        dpkg -x libpq5_17.0-1.pgdg110+1_${arch}.deb pg
-        dpkg -x postgresql-16_16.4-1.pgdg110+2_${arch}.deb pg
-        dpkg -x postgresql-client-16_16.4-1.pgdg110+2_${arch}.deb pg
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-17/libpq5_17.2-1.pgdg110+1_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.6-1.pgdg110+1_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.6-1.pgdg110+1_${arch}.deb"
+        dpkg -x libpq5_17.2-1.pgdg110+1_${arch}.deb pg
+        dpkg -x postgresql-16_16.6-1.pgdg110+1_${arch}.deb pg
+        dpkg -x postgresql-client-16_16.6-1.pgdg110+1_${arch}.deb pg
 
         mkdir -p /tmp/neon/pg_install/v16/bin
         ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench
@@ -598,6 +611,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgvector_indexing
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -612,6 +626,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -621,12 +636,14 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic perf testing on ${{ env.PLATFORM }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -722,6 +739,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 43200 -k test_clickbench
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -734,12 +752,14 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic OLAP perf testing on ${{ matrix.platform }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -836,6 +856,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_tpch
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -846,12 +867,14 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic TPC-H perf testing on ${{ matrix.platform }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -934,6 +957,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_user_examples
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -943,12 +967,14 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic TPC-H perf testing on ${{ matrix.platform }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>

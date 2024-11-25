@@ -185,7 +185,7 @@ pub struct CancelKeyData {
 impl fmt::Display for CancelKeyData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let hi = (self.backend_pid as u64) << 32;
-        let lo = self.cancel_key as u64;
+        let lo = (self.cancel_key as u64) & 0xffffffff;
         let id = hi | lo;
 
         // This format is more compact and might work better for logs.
@@ -1045,5 +1045,14 @@ mod tests {
     fn parse_fe_startup_packet_regression() {
         let data = [0, 0, 0, 7, 0, 0, 0, 0];
         FeStartupPacket::parse(&mut BytesMut::from_iter(data)).unwrap_err();
+    }
+
+    #[test]
+    fn cancel_key_data() {
+        let key = CancelKeyData {
+            backend_pid: -1817212860,
+            cancel_key: -1183897012,
+        };
+        assert_eq!(format!("{key}"), "CancelKeyData(93af8844b96f2a4c)");
     }
 }

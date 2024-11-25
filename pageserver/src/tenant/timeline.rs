@@ -4,6 +4,7 @@ pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
 pub(crate) mod handle;
+pub(crate) mod import_pgdata;
 mod init;
 pub mod layer_manager;
 pub(crate) mod logical_size;
@@ -38,6 +39,7 @@ use pageserver_api::{
     shard::{ShardIdentity, ShardNumber, TenantShardId},
 };
 use rand::Rng;
+use remote_storage::DownloadError;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
 use tokio::{
@@ -272,7 +274,7 @@ pub struct Timeline {
 
     /// Remote storage client.
     /// See [`remote_timeline_client`](super::remote_timeline_client) module comment for details.
-    pub remote_client: Arc<RemoteTimelineClient>,
+    pub(crate) remote_client: Arc<RemoteTimelineClient>,
 
     // What page versions do we hold in the repository? If we get a
     // request > last_record_lsn, we need to wait until we receive all
@@ -481,17 +483,27 @@ impl GcInfo {
         &mut self,
         child_id: TimelineId,
         maybe_offloaded: MaybeOffloaded,
-    ) {
-        self.retain_lsns
-            .retain(|i| !(i.1 == child_id && i.2 == maybe_offloaded));
+    ) -> bool {
+        // Remove at most one element. Needed for correctness if there is two live `Timeline` objects referencing
+        // the same timeline. Shouldn't but maybe can occur when Arc's live longer than intended.
+        let mut removed = false;
+        self.retain_lsns.retain(|i| {
+            if removed {
+                return true;
+            }
+            let remove = i.1 == child_id && i.2 == maybe_offloaded;
+            removed |= remove;
+            !remove
+        });
+        removed
     }
 
-    pub(super) fn remove_child_not_offloaded(&mut self, child_id: TimelineId) {
-        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::No);
+    pub(super) fn remove_child_not_offloaded(&mut self, child_id: TimelineId) -> bool {
+        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::No)
     }
 
-    pub(super) fn remove_child_offloaded(&mut self, child_id: TimelineId) {
-        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes);
+    pub(super) fn remove_child_offloaded(&mut self, child_id: TimelineId) -> bool {
+        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes)
     }
 }
 
@@ -762,6 +774,21 @@ pub(crate) enum CompactFlags {
     ForceL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
+}
+
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct CompactRange {
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub start: Key,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub end: Key,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct CompactOptions {
+    pub flags: EnumSet<CompactFlags>,
+    pub compact_range: Option<CompactRange>,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1603,6 +1630,25 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<bool, CompactionError> {
+        self.compact_with_options(
+            cancel,
+            CompactOptions {
+                flags,
+                compact_range: None,
+            },
+            ctx,
+        )
+        .await
+    }
+
+    /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
+    /// compaction tasks.
+    pub(crate) async fn compact_with_options(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        options: CompactOptions,
+        ctx: &RequestContext,
+    ) -> Result<bool, CompactionError> {
         // most likely the cancellation token is from background task, but in tests it could be the
         // request task as well.
 
@@ -1639,7 +1685,7 @@ impl Timeline {
                 self.compact_tiered(cancel, ctx).await?;
                 Ok(false)
             }
-            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
+            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, options, ctx).await,
         }
     }
 
@@ -2040,6 +2086,11 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
     }
 
+    pub(crate) fn is_gc_blocked_by_lsn_lease_deadline(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf.is_gc_blocked_by_lsn_lease_deadline()
+    }
+
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2127,14 +2178,14 @@ impl Timeline {
             )
     }
 
-    pub(super) fn tenant_conf_updated(&self, new_conf: &TenantConfOpt) {
+    pub(super) fn tenant_conf_updated(&self, new_conf: &AttachedTenantConf) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
 
         // The threshold is embedded in the metric. So, we need to update it.
         {
             let new_threshold = Self::get_evictions_low_residence_duration_metric_threshold(
-                new_conf,
+                &new_conf.tenant_conf,
                 &self.conf.default_tenant_conf,
             );
 
@@ -2142,6 +2193,9 @@ impl Timeline {
             let shard_id_str = format!("{}", self.tenant_shard_id.shard_slug());
 
             let timeline_id_str = self.timeline_id.to_string();
+
+            self.remote_client.update_config(&new_conf.location);
+
             self.metrics
                 .evictions_with_low_residence_duration
                 .write()
@@ -2599,6 +2653,7 @@ impl Timeline {
         //
         // NB: generation numbers naturally protect against this because they disambiguate
         //     (1) and (4)
+        // TODO: this is basically a no-op now, should we remove it?
         self.remote_client.schedule_barrier()?;
         // Tenant::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
@@ -2654,20 +2709,23 @@ impl Timeline {
                 {
                     Some(cancel) => cancel.cancel(),
                     None => {
-                        let state = self.current_state();
-                        if matches!(
-                            state,
-                            TimelineState::Broken { .. } | TimelineState::Stopping
-                        ) {
-
-                            // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
-                            // Don't make noise.
-                        } else {
-                            warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
-                            debug_assert!(false);
+                        match self.current_state() {
+                            TimelineState::Broken { .. } | TimelineState::Stopping => {
+                                // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
+                                // Don't make noise.
+                            }
+                            TimelineState::Loading => {
+                                // Import does not return an activated timeline.
+                                info!("discarding priority boost for logical size calculation because timeline is not yet active");
+                            }
+                            TimelineState::Active => {
+                                // activation should be setting the once cell
+                                warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
+                                debug_assert!(false);
+                            }
                         }
                     }
-                };
+                }
             }
         }
 
@@ -4514,7 +4572,10 @@ impl Drop for Timeline {
             // This lock should never be poisoned, but in case it is we do a .map() instead of
             // an unwrap(), to avoid panicking in a destructor and thereby aborting the process.
             if let Ok(mut gc_info) = ancestor.gc_info.write() {
-                gc_info.remove_child_not_offloaded(self.timeline_id)
+                if !gc_info.remove_child_not_offloaded(self.timeline_id) {
+                    tracing::error!(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id,
+                        "Couldn't remove retain_lsn entry from offloaded timeline's parent: already removed");
+                }
             }
         }
     }
@@ -4774,6 +4835,86 @@ impl Timeline {
         Ok(())
     }
 
+    async fn find_gc_time_cutoff(
+        &self,
+        pitr: Duration,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> Result<Option<Lsn>, PageReconstructError> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+        if self.shard_identity.is_shard_zero() {
+            // Shard Zero has SLRU data and can calculate the PITR time -> LSN mapping itself
+            let now = SystemTime::now();
+            let time_range = if pitr == Duration::ZERO {
+                humantime::parse_duration(DEFAULT_PITR_INTERVAL).expect("constant is invalid")
+            } else {
+                pitr
+            };
+
+            // If PITR is so large or `now` is so small that this underflows, we will retain no history (highly unexpected case)
+            let time_cutoff = now.checked_sub(time_range).unwrap_or(now);
+            let timestamp = to_pg_timestamp(time_cutoff);
+
+            let time_cutoff = match self.find_lsn_for_timestamp(timestamp, cancel, ctx).await? {
+                LsnForTimestamp::Present(lsn) => Some(lsn),
+                LsnForTimestamp::Future(lsn) => {
+                    // The timestamp is in the future. That sounds impossible,
+                    // but what it really means is that there hasn't been
+                    // any commits since the cutoff timestamp.
+                    //
+                    // In this case we should use the LSN of the most recent commit,
+                    // which is implicitly the last LSN in the log.
+                    debug!("future({})", lsn);
+                    Some(self.get_last_record_lsn())
+                }
+                LsnForTimestamp::Past(lsn) => {
+                    debug!("past({})", lsn);
+                    None
+                }
+                LsnForTimestamp::NoData(lsn) => {
+                    debug!("nodata({})", lsn);
+                    None
+                }
+            };
+            Ok(time_cutoff)
+        } else {
+            // Shards other than shard zero cannot do timestamp->lsn lookups, and must instead learn their GC cutoff
+            // from shard zero's index.  The index doesn't explicitly tell us the time cutoff, but we may assume that
+            // the point up to which shard zero's last_gc_cutoff has advanced will either be the time cutoff, or a
+            // space cutoff that we would also have respected ourselves.
+            match self
+                .remote_client
+                .download_foreign_index(ShardNumber(0), cancel)
+                .await
+            {
+                Ok((index_part, index_generation, _index_mtime)) => {
+                    tracing::info!("GC loaded shard zero metadata (gen {index_generation:?}): latest_gc_cutoff_lsn: {}",
+                        index_part.metadata.latest_gc_cutoff_lsn());
+                    Ok(Some(index_part.metadata.latest_gc_cutoff_lsn()))
+                }
+                Err(DownloadError::NotFound) => {
+                    // This is unexpected, because during timeline creations shard zero persists to remote
+                    // storage before other shards are called, and during timeline deletion non-zeroth shards are
+                    // deleted before the zeroth one.  However, it should be harmless: if we somehow end up in this
+                    // state, then shard zero should _eventually_ write an index when it GCs.
+                    tracing::warn!("GC couldn't find shard zero's index for timeline");
+                    Ok(None)
+                }
+                Err(e) => {
+                    // TODO: this function should return a different error type than page reconstruct error
+                    Err(PageReconstructError::Other(anyhow::anyhow!(e)))
+                }
+            }
+
+            // TODO: after reading shard zero's GC cutoff, we should validate its generation with the storage
+            // controller.  Otherwise, it is possible that we see the GC cutoff go backwards while shard zero
+            // is going through a migration if we read the old location's index and it has GC'd ahead of the
+            // new location.  This is legal in principle, but problematic in practice because it might result
+            // in a timeline creation succeeding on shard zero ('s new location) but then failing on other shards
+            // because they have GC'd past the branch point.
+        }
+    }
+
     /// Find the Lsns above which layer files need to be retained on
     /// garbage collection.
     ///
@@ -4816,40 +4957,7 @@ impl Timeline {
         // - if PITR interval is set, then this is our cutoff.
         // - if PITR interval is not set, then we do a lookup
         //   based on DEFAULT_PITR_INTERVAL, so that size-based retention does not result in keeping history around permanently on idle databases.
-        let time_cutoff = {
-            let now = SystemTime::now();
-            let time_range = if pitr == Duration::ZERO {
-                humantime::parse_duration(DEFAULT_PITR_INTERVAL).expect("constant is invalid")
-            } else {
-                pitr
-            };
-
-            // If PITR is so large or `now` is so small that this underflows, we will retain no history (highly unexpected case)
-            let time_cutoff = now.checked_sub(time_range).unwrap_or(now);
-            let timestamp = to_pg_timestamp(time_cutoff);
-
-            match self.find_lsn_for_timestamp(timestamp, cancel, ctx).await? {
-                LsnForTimestamp::Present(lsn) => Some(lsn),
-                LsnForTimestamp::Future(lsn) => {
-                    // The timestamp is in the future. That sounds impossible,
-                    // but what it really means is that there hasn't been
-                    // any commits since the cutoff timestamp.
-                    //
-                    // In this case we should use the LSN of the most recent commit,
-                    // which is implicitly the last LSN in the log.
-                    debug!("future({})", lsn);
-                    Some(self.get_last_record_lsn())
-                }
-                LsnForTimestamp::Past(lsn) => {
-                    debug!("past({})", lsn);
-                    None
-                }
-                LsnForTimestamp::NoData(lsn) => {
-                    debug!("nodata({})", lsn);
-                    None
-                }
-            }
-        };
+        let time_cutoff = self.find_gc_time_cutoff(pitr, cancel, ctx).await?;
 
         Ok(match (pitr, time_cutoff) {
             (Duration::ZERO, Some(time_cutoff)) => {

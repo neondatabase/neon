@@ -21,8 +21,6 @@ from fixtures.remote_storage import s3_storage
 from fixtures.utils import skip_in_debug_build
 
 if TYPE_CHECKING:
-    from typing import Optional
-
     from fixtures.neon_fixtures import PgBin
     from pytest import CaptureFixture
 
@@ -48,7 +46,7 @@ def post_checks(env: NeonEnv, test_output_dir: Path, db_name: str, endpoint: End
     data properly.
     """
 
-    ignored_files: Optional[list[str]] = None
+    ignored_files: list[str] | None = None
 
     # Neon handles unlogged relations in a special manner. During a
     # basebackup, we ship the init fork as the main fork. This presents a
@@ -110,12 +108,14 @@ def post_checks(env: NeonEnv, test_output_dir: Path, db_name: str, endpoint: End
 
     check_restored_datadir_content(test_output_dir, env, endpoint, ignored_files=ignored_files)
 
-    # Ensure that compaction works, on a timeline containing all the diversity that postgres regression tests create.
+    # Ensure that compaction/GC works, on a timeline containing all the diversity that postgres regression tests create.
     # There should have been compactions mid-test as well, this final check is in addition those.
     for shard, pageserver in tenant_get_shards(env, env.initial_tenant):
         pageserver.http_client().timeline_checkpoint(
             shard, env.initial_timeline, force_repartition=True, force_image_layer_creation=True
         )
+
+        pageserver.http_client().timeline_gc(shard, env.initial_timeline, None)
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
@@ -129,7 +129,7 @@ def test_pg_regress(
     capsys: CaptureFixture[str],
     base_dir: Path,
     pg_distrib_dir: Path,
-    shard_count: Optional[int],
+    shard_count: int | None,
 ):
     DBNAME = "regression"
 
@@ -203,7 +203,7 @@ def test_isolation(
     capsys: CaptureFixture[str],
     base_dir: Path,
     pg_distrib_dir: Path,
-    shard_count: Optional[int],
+    shard_count: int | None,
 ):
     DBNAME = "isolation_regression"
 
@@ -272,7 +272,7 @@ def test_sql_regress(
     capsys: CaptureFixture[str],
     base_dir: Path,
     pg_distrib_dir: Path,
-    shard_count: Optional[int],
+    shard_count: int | None,
 ):
     DBNAME = "regression"
 

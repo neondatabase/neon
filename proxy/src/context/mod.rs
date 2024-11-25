@@ -8,7 +8,7 @@ use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 use tracing::field::display;
-use tracing::{debug, info, info_span, Span};
+use tracing::{debug, info_span, Span};
 use try_lock::TryLock;
 use uuid::Uuid;
 
@@ -32,15 +32,15 @@ pub(crate) static LOG_CHAN_DISCONNECT: OnceCell<mpsc::WeakUnboundedSender<Reques
 ///
 /// This data should **not** be used for connection logic, only for observability and limiting purposes.
 /// All connection logic should instead use strongly typed state machines, not a bunch of Options.
-pub struct RequestMonitoring(
+pub struct RequestContext(
     /// To allow easier use of the ctx object, we have interior mutability.
     /// I would typically use a RefCell but that would break the `Send` requirements
     /// so we need something with thread-safety. `TryLock` is a cheap alternative
     /// that offers similar semantics to a `RefCell` but with synchronisation.
-    TryLock<RequestMonitoringInner>,
+    TryLock<RequestContextInner>,
 );
 
-struct RequestMonitoringInner {
+struct RequestContextInner {
     pub(crate) conn_info: ConnectionInfo,
     pub(crate) session_id: Uuid,
     pub(crate) protocol: Protocol,
@@ -81,10 +81,10 @@ pub(crate) enum AuthMethod {
     Cleartext,
 }
 
-impl Clone for RequestMonitoring {
+impl Clone for RequestContext {
     fn clone(&self) -> Self {
         let inner = self.0.try_lock().expect("should not deadlock");
-        let new = RequestMonitoringInner {
+        let new = RequestContextInner {
             conn_info: inner.conn_info.clone(),
             session_id: inner.session_id,
             protocol: inner.protocol,
@@ -115,13 +115,14 @@ impl Clone for RequestMonitoring {
     }
 }
 
-impl RequestMonitoring {
+impl RequestContext {
     pub fn new(
         session_id: Uuid,
         conn_info: ConnectionInfo,
         protocol: Protocol,
         region: &'static str,
     ) -> Self {
+        // TODO: be careful with long lived spans
         let span = info_span!(
             "connect_request",
             %protocol,
@@ -131,7 +132,7 @@ impl RequestMonitoring {
             role = tracing::field::Empty,
         );
 
-        let inner = RequestMonitoringInner {
+        let inner = RequestContextInner {
             conn_info,
             session_id,
             protocol,
@@ -167,7 +168,7 @@ impl RequestMonitoring {
         let ip = IpAddr::from([127, 0, 0, 1]);
         let addr = SocketAddr::new(ip, 5432);
         let conn_info = ConnectionInfo { addr, extra: None };
-        RequestMonitoring::new(Uuid::now_v7(), conn_info, Protocol::Tcp, "test")
+        RequestContext::new(Uuid::now_v7(), conn_info, Protocol::Tcp, "test")
     }
 
     pub(crate) fn console_application_name(&self) -> String {
@@ -324,7 +325,7 @@ impl RequestMonitoring {
 }
 
 pub(crate) struct LatencyTimerPause<'a> {
-    ctx: &'a RequestMonitoring,
+    ctx: &'a RequestContext,
     start: tokio::time::Instant,
     waiting_for: Waiting,
 }
@@ -340,7 +341,7 @@ impl Drop for LatencyTimerPause<'_> {
     }
 }
 
-impl RequestMonitoringInner {
+impl RequestContextInner {
     fn set_cold_start_info(&mut self, info: ColdStartInfo) {
         self.cold_start_info = info;
         self.latency_timer.cold_start_info(info);
@@ -384,6 +385,10 @@ impl RequestMonitoringInner {
         } else {
             ConnectOutcome::Failed
         };
+
+        // TODO: get rid of entirely/refactor
+        // check for false positives
+        // AND false negatives
         if let Some(rejected) = self.rejected {
             let ep = self
                 .endpoint_id
@@ -391,7 +396,7 @@ impl RequestMonitoringInner {
                 .map(|x| x.as_str())
                 .unwrap_or_default();
             // This makes sense only if cache is disabled
-            info!(
+            debug!(
                 ?outcome,
                 ?rejected,
                 ?ep,
@@ -425,7 +430,7 @@ impl RequestMonitoringInner {
     }
 }
 
-impl Drop for RequestMonitoringInner {
+impl Drop for RequestContextInner {
     fn drop(&mut self) {
         if self.sender.is_some() {
             self.log_connect();

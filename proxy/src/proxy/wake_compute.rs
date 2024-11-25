@@ -2,7 +2,7 @@ use tracing::{error, info, warn};
 
 use super::connect_compute::ComputeConnectBackend;
 use crate::config::RetryConfig;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::CachedNodeInfo;
 use crate::error::ReportableError;
@@ -13,11 +13,10 @@ use crate::proxy::retry::{retry_after, should_retry};
 
 pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
     num_retries: &mut u32,
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     api: &B,
     config: RetryConfig,
 ) -> Result<CachedNodeInfo, WakeComputeError> {
-    let retry_type = RetryType::WakeCompute;
     loop {
         match api.wake_compute(ctx).await {
             Err(e) if !should_retry(&e, *num_retries, config) => {
@@ -26,7 +25,7 @@ pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
                 Metrics::get().proxy.retries_metric.observe(
                     RetriesMetricGroup {
                         outcome: ConnectOutcome::Failed,
-                        retry_type,
+                        retry_type: RetryType::WakeCompute,
                     },
                     (*num_retries).into(),
                 );
@@ -40,10 +39,12 @@ pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
                 Metrics::get().proxy.retries_metric.observe(
                     RetriesMetricGroup {
                         outcome: ConnectOutcome::Success,
-                        retry_type,
+                        retry_type: RetryType::WakeCompute,
                     },
                     (*num_retries).into(),
                 );
+                // TODO: is this necessary? We have a metric.
+                // TODO: this log line is misleading as "wake_compute" might return cached (and stale) info.
                 info!(?num_retries, "compute node woken up after");
                 return Ok(n);
             }
