@@ -23,7 +23,7 @@ from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
-    from typing import Any, Optional, Union
+    from typing import Any
 
 
 # A tenant configuration that is convenient for generating uploads and deletions
@@ -199,7 +199,7 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
                 # state if it was running attached with a stale generation
                 last_state[pageserver.id] = ("Detached", None)
         else:
-            secondary_conf: Optional[dict[str, Any]] = None
+            secondary_conf: dict[str, Any] | None = None
             if mode == "Secondary":
                 secondary_conf = {"warm": rng.choice([True, False])}
 
@@ -469,7 +469,7 @@ def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
 
 
 def list_elegible_layers(
-    pageserver, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+    pageserver, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId
 ) -> list[Path]:
     """
     The subset of layer filenames that are elegible for secondary download: at time of writing this
@@ -702,7 +702,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         else:
             timeout = int(deadline - now) + 1
             try:
-                wait_until(timeout, 1, lambda: pageserver.assert_log_contains(expression))  # type: ignore
+                wait_until(timeout, 1, lambda: pageserver.assert_log_contains(expression))
             except:
                 log.error(f"Timed out waiting for '{expression}'")
                 raise

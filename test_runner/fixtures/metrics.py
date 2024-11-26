@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING
 
 from prometheus_client.parser import text_string_to_metric_families
 from prometheus_client.samples import Sample
 
 from fixtures.log_helper import log
-
-if TYPE_CHECKING:
-    from typing import Optional
 
 
 class Metrics:
@@ -20,7 +16,7 @@ class Metrics:
         self.metrics = defaultdict(list)
         self.name = name
 
-    def query_all(self, name: str, filter: Optional[dict[str, str]] = None) -> list[Sample]:
+    def query_all(self, name: str, filter: dict[str, str] | None = None) -> list[Sample]:
         filter = filter or {}
         res: list[Sample] = []
 
@@ -32,7 +28,7 @@ class Metrics:
                 pass
         return res
 
-    def query_one(self, name: str, filter: Optional[dict[str, str]] = None) -> Sample:
+    def query_one(self, name: str, filter: dict[str, str] | None = None) -> Sample:
         res = self.query_all(name, filter or {})
         assert len(res) == 1, f"expected single sample for {name} {filter}, found {res}"
         return res[0]
@@ -47,9 +43,7 @@ class MetricsGetter:
     def get_metrics(self) -> Metrics:
         raise NotImplementedError()
 
-    def get_metric_value(
-        self, name: str, filter: Optional[dict[str, str]] = None
-    ) -> Optional[float]:
+    def get_metric_value(self, name: str, filter: dict[str, str] | None = None) -> float | None:
         metrics = self.get_metrics()
         results = metrics.query_all(name, filter=filter)
         if not results:
@@ -59,7 +53,7 @@ class MetricsGetter:
         return results[0].value
 
     def get_metrics_values(
-        self, names: list[str], filter: Optional[dict[str, str]] = None, absence_ok: bool = False
+        self, names: list[str], filter: dict[str, str] | None = None, absence_ok: bool = False
     ) -> dict[str, float]:
         """
         When fetching multiple named metrics, it is more efficient to use this
