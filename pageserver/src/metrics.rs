@@ -457,7 +457,7 @@ pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static FLUSH_WAIT_UPLOAD_TIME: Lazy<GaugeVec> = Lazy::new(|| {
+static FLUSH_WAIT_UPLOAD_TIME: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!(
         "pageserver_flush_wait_upload_seconds",
         "Time spent waiting for preceding uploads during layer flush",
