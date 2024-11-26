@@ -14,12 +14,7 @@ use crate::serialized_batch::{
     ObservedValueMeta, SerializedValueBatch, SerializedValueMeta, ValueMeta,
 };
 
-use crate::models::proto::CompactKey as ProtoCompactKey;
-use crate::models::proto::InterpretedWalRecord as ProtoInterpretedWalRecord;
-use crate::models::proto::InterpretedWalRecords as ProtoInterpretedWalRecords;
-use crate::models::proto::SerializedValueBatch as ProtoSerializedValueBatch;
-use crate::models::proto::ValueMeta as ProtoValueMeta;
-use crate::models::proto::ValueMetaType as ProtoValueMetaType;
+use crate::models::proto;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToWireFormatError {
@@ -99,7 +94,7 @@ impl ToWireFormat for InterpretedWalRecords {
                 Ok(buf.into_inner().freeze())
             }
             InterpretedFormat::Protobuf => {
-                let proto: ProtoInterpretedWalRecords = self.try_into()?;
+                let proto: proto::InterpretedWalRecords = self.try_into()?;
                 let mut buf = BytesMut::new();
                 proto
                     .encode(&mut buf)
@@ -152,7 +147,7 @@ impl FromWireFormat for InterpretedWalRecords {
                 InterpretedWalRecords::des(&decompressed_buf).map_err(FromWireFormatError::Bincode)
             }
             InterpretedFormat::Protobuf => {
-                let proto = ProtoInterpretedWalRecords::decode(decompressed_buf)
+                let proto = proto::InterpretedWalRecords::decode(decompressed_buf)
                     .map_err(|e| FromWireFormatError::Protobuf(e.into()))?;
                 InterpretedWalRecords::try_from(proto)
                     .map_err(|e| FromWireFormatError::Protobuf(e.into()))
@@ -161,23 +156,23 @@ impl FromWireFormat for InterpretedWalRecords {
     }
 }
 
-impl TryFrom<InterpretedWalRecords> for ProtoInterpretedWalRecords {
+impl TryFrom<InterpretedWalRecords> for proto::InterpretedWalRecords {
     type Error = SerializeError;
 
     fn try_from(value: InterpretedWalRecords) -> Result<Self, Self::Error> {
         let records = value
             .records
             .into_iter()
-            .map(ProtoInterpretedWalRecord::try_from)
+            .map(proto::InterpretedWalRecord::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(ProtoInterpretedWalRecords {
+        Ok(proto::InterpretedWalRecords {
             records,
             next_record_lsn: value.next_record_lsn.map(|l| l.0),
         })
     }
 }
 
-impl TryFrom<InterpretedWalRecord> for ProtoInterpretedWalRecord {
+impl TryFrom<InterpretedWalRecord> for proto::InterpretedWalRecord {
     type Error = SerializeError;
 
     fn try_from(value: InterpretedWalRecord) -> Result<Self, Self::Error> {
@@ -190,9 +185,9 @@ impl TryFrom<InterpretedWalRecord> for ProtoInterpretedWalRecord {
             })
             .transpose()?;
 
-        Ok(ProtoInterpretedWalRecord {
+        Ok(proto::InterpretedWalRecord {
             metadata_record,
-            batch: Some(ProtoSerializedValueBatch::from(value.batch)),
+            batch: Some(proto::SerializedValueBatch::from(value.batch)),
             next_record_lsn: value.next_record_lsn.0,
             flush_uncommitted: matches!(value.flush_uncommitted, FlushUncommittedRecords::Yes),
             xid: value.xid,
@@ -200,14 +195,14 @@ impl TryFrom<InterpretedWalRecord> for ProtoInterpretedWalRecord {
     }
 }
 
-impl From<SerializedValueBatch> for ProtoSerializedValueBatch {
+impl From<SerializedValueBatch> for proto::SerializedValueBatch {
     fn from(value: SerializedValueBatch) -> Self {
-        ProtoSerializedValueBatch {
+        proto::SerializedValueBatch {
             raw: value.raw,
             metadata: value
                 .metadata
                 .into_iter()
-                .map(ProtoValueMeta::from)
+                .map(proto::ValueMeta::from)
                 .collect(),
             max_lsn: value.max_lsn.0,
             len: value.len as u64,
@@ -215,20 +210,20 @@ impl From<SerializedValueBatch> for ProtoSerializedValueBatch {
     }
 }
 
-impl From<ValueMeta> for ProtoValueMeta {
+impl From<ValueMeta> for proto::ValueMeta {
     fn from(value: ValueMeta) -> Self {
         match value {
-            ValueMeta::Observed(obs) => ProtoValueMeta {
-                r#type: ProtoValueMetaType::Observed.into(),
-                key: Some(ProtoCompactKey::from(obs.key)),
+            ValueMeta::Observed(obs) => proto::ValueMeta {
+                r#type: proto::ValueMetaType::Observed.into(),
+                key: Some(proto::CompactKey::from(obs.key)),
                 lsn: obs.lsn.0,
                 batch_offset: None,
                 len: None,
                 will_init: None,
             },
-            ValueMeta::Serialized(ser) => ProtoValueMeta {
-                r#type: ProtoValueMetaType::Serialized.into(),
-                key: Some(ProtoCompactKey::from(ser.key)),
+            ValueMeta::Serialized(ser) => proto::ValueMeta {
+                r#type: proto::ValueMetaType::Serialized.into(),
+                key: Some(proto::CompactKey::from(ser.key)),
                 lsn: ser.lsn.0,
                 batch_offset: Some(ser.batch_offset),
                 len: Some(ser.len as u64),
@@ -238,19 +233,19 @@ impl From<ValueMeta> for ProtoValueMeta {
     }
 }
 
-impl From<CompactKey> for ProtoCompactKey {
+impl From<CompactKey> for proto::CompactKey {
     fn from(value: CompactKey) -> Self {
-        ProtoCompactKey {
+        proto::CompactKey {
             high: (value.raw() >> 64) as i64,
             low: value.raw() as i64,
         }
     }
 }
 
-impl TryFrom<ProtoInterpretedWalRecords> for InterpretedWalRecords {
+impl TryFrom<proto::InterpretedWalRecords> for InterpretedWalRecords {
     type Error = TranscodeError;
 
-    fn try_from(value: ProtoInterpretedWalRecords) -> Result<Self, Self::Error> {
+    fn try_from(value: proto::InterpretedWalRecords) -> Result<Self, Self::Error> {
         let records = value
             .records
             .into_iter()
@@ -264,10 +259,10 @@ impl TryFrom<ProtoInterpretedWalRecords> for InterpretedWalRecords {
     }
 }
 
-impl TryFrom<ProtoInterpretedWalRecord> for InterpretedWalRecord {
+impl TryFrom<proto::InterpretedWalRecord> for InterpretedWalRecord {
     type Error = TranscodeError;
 
-    fn try_from(value: ProtoInterpretedWalRecord) -> Result<Self, Self::Error> {
+    fn try_from(value: proto::InterpretedWalRecord) -> Result<Self, Self::Error> {
         let metadata_record = value
             .metadata_record
             .map(|mrec| -> Result<_, DeserializeError> { MetadataRecord::des(&mrec) })
@@ -295,10 +290,10 @@ impl TryFrom<ProtoInterpretedWalRecord> for InterpretedWalRecord {
     }
 }
 
-impl TryFrom<ProtoSerializedValueBatch> for SerializedValueBatch {
+impl TryFrom<proto::SerializedValueBatch> for SerializedValueBatch {
     type Error = TranscodeError;
 
-    fn try_from(value: ProtoSerializedValueBatch) -> Result<Self, Self::Error> {
+    fn try_from(value: proto::SerializedValueBatch) -> Result<Self, Self::Error> {
         let metadata = value
             .metadata
             .into_iter()
@@ -314,29 +309,32 @@ impl TryFrom<ProtoSerializedValueBatch> for SerializedValueBatch {
     }
 }
 
-impl TryFrom<ProtoValueMeta> for ValueMeta {
+impl TryFrom<proto::ValueMeta> for ValueMeta {
     type Error = TranscodeError;
 
-    fn try_from(value: ProtoValueMeta) -> Result<Self, Self::Error> {
-        match ProtoValueMetaType::try_from(value.r#type) {
-            Ok(ProtoValueMetaType::Serialized) => Ok(ValueMeta::Serialized(SerializedValueMeta {
-                key: value
-                    .key
-                    .ok_or_else(|| TranscodeError::BadInput("ValueMeta::key missing".to_string()))?
-                    .into(),
-                lsn: Lsn(value.lsn),
-                batch_offset: value.batch_offset.ok_or_else(|| {
-                    TranscodeError::BadInput("ValueMeta::batch_offset missing".to_string())
-                })?,
-                len: value
-                    .len
-                    .ok_or_else(|| TranscodeError::BadInput("ValueMeta::len missing".to_string()))?
-                    as usize,
-                will_init: value.will_init.ok_or_else(|| {
-                    TranscodeError::BadInput("ValueMeta::will_init missing".to_string())
-                })?,
-            })),
-            Ok(ProtoValueMetaType::Observed) => Ok(ValueMeta::Observed(ObservedValueMeta {
+    fn try_from(value: proto::ValueMeta) -> Result<Self, Self::Error> {
+        match proto::ValueMetaType::try_from(value.r#type) {
+            Ok(proto::ValueMetaType::Serialized) => {
+                Ok(ValueMeta::Serialized(SerializedValueMeta {
+                    key: value
+                        .key
+                        .ok_or_else(|| {
+                            TranscodeError::BadInput("ValueMeta::key missing".to_string())
+                        })?
+                        .into(),
+                    lsn: Lsn(value.lsn),
+                    batch_offset: value.batch_offset.ok_or_else(|| {
+                        TranscodeError::BadInput("ValueMeta::batch_offset missing".to_string())
+                    })?,
+                    len: value.len.ok_or_else(|| {
+                        TranscodeError::BadInput("ValueMeta::len missing".to_string())
+                    })? as usize,
+                    will_init: value.will_init.ok_or_else(|| {
+                        TranscodeError::BadInput("ValueMeta::will_init missing".to_string())
+                    })?,
+                }))
+            }
+            Ok(proto::ValueMetaType::Observed) => Ok(ValueMeta::Observed(ObservedValueMeta {
                 key: value
                     .key
                     .ok_or_else(|| TranscodeError::BadInput("ValueMeta::key missing".to_string()))?
@@ -351,8 +349,8 @@ impl TryFrom<ProtoValueMeta> for ValueMeta {
     }
 }
 
-impl From<ProtoCompactKey> for CompactKey {
-    fn from(value: ProtoCompactKey) -> Self {
+impl From<proto::CompactKey> for CompactKey {
+    fn from(value: proto::CompactKey) -> Self {
         (((value.high as i128) << 64) | (value.low as i128)).into()
     }
 }
