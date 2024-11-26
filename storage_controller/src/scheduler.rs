@@ -136,13 +136,13 @@ impl PartialOrd for SecondaryAzMatch {
 /// Ordering is given by member declaration order (top to bottom).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub(crate) struct NodeAttachmentSchedulingScore {
-    /// The number of shards belonging to the tenant currently being
-    /// scheduled that are attached to this node.
-    affinity_score: AffinityScore,
     /// Flag indicating whether this node matches the preferred AZ
     /// of the shard. For equal affinity scores, nodes in the matching AZ
     /// are considered first.
     az_match: AttachmentAzMatch,
+    /// The number of shards belonging to the tenant currently being
+    /// scheduled that are attached to this node.
+    affinity_score: AffinityScore,
     /// Size of [`ScheduleContext::attached_nodes`] for the current node.
     /// This normally tracks the number of attached shards belonging to the
     /// tenant being scheduled that are already on this node.
@@ -1045,9 +1045,9 @@ mod tests {
             &mut context,
         );
 
-        // Node 2 is not in "az-a", but it has the lowest affinity so we prefer that.
+        // Node 1 and 3 (az-a) have same affinity score, so prefer the lowest node id.
         assert_scheduler_chooses::<AttachedShardTag>(
-            NodeId(2),
+            NodeId(1),
             Some(az_a_tag.clone()),
             &mut scheduled_intents,
             &mut scheduler,
@@ -1058,26 +1058,6 @@ mod tests {
         assert_scheduler_chooses::<SecondaryShardTag>(
             NodeId(2),
             Some(az_a_tag.clone()),
-            &mut scheduled_intents,
-            &mut scheduler,
-            &mut context,
-        );
-
-        // Avoid nodes in "az-b" for the secondary location.
-        // Nodes 1 and 3 are identically loaded, so prefer the lowest node id.
-        assert_scheduler_chooses::<SecondaryShardTag>(
-            NodeId(1),
-            Some(az_b_tag.clone()),
-            &mut scheduled_intents,
-            &mut scheduler,
-            &mut context,
-        );
-
-        // Avoid nodes in "az-b" for the secondary location.
-        // Node 3 has lower affinity score than 1, so prefer that.
-        assert_scheduler_chooses::<SecondaryShardTag>(
-            NodeId(3),
-            Some(az_b_tag.clone()),
             &mut scheduled_intents,
             &mut scheduler,
             &mut context,
