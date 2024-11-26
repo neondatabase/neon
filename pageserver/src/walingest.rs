@@ -334,10 +334,10 @@ impl WalIngest {
         // replaying it would fail to find the previous image of the page, because
         // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
         // record if it doesn't.
-        let vm_size = get_relsize(modification, vm_rel, ctx).await?;
+        let (vm_size, vm_exists) = get_relsize(modification, vm_rel, ctx).await?;
         if vm_size == 0 {
             let lsn = modification.lsn;
-            log::info!("ingest_clear_vm_bits: vm_rel {vm_rel} has 0 size at LSN {lsn}, flags={flags} old={old_heap_blkno:?} new={new_heap_blkno:?}");
+            log::info!("ingest_clear_vm_bits: vm_rel {vm_rel} has size={vm_size} exists={vm_exists} at LSN {lsn}, flags={flags} old={old_heap_blkno:?} new={new_heap_blkno:?}");
         }
         if let Some(blknum) = new_vm_blk {
             if blknum >= vm_size {
@@ -576,7 +576,7 @@ impl WalIngest {
                 modification.put_rel_page_image_zero(rel, fsm_physical_page_no)?;
                 fsm_physical_page_no += 1;
             }
-            let nblocks = get_relsize(modification, rel, ctx).await?;
+            let (nblocks, _) = get_relsize(modification, rel, ctx).await?;
             if nblocks > fsm_physical_page_no {
                 // check if something to do: FSM is larger than truncate position
                 self.put_rel_truncation(modification, rel, fsm_physical_page_no, ctx)
@@ -616,7 +616,7 @@ impl WalIngest {
                 )?;
                 vm_page_no += 1;
             }
-            let nblocks = get_relsize(modification, rel, ctx).await?;
+            let (nblocks, _) = get_relsize(modification, rel, ctx).await?;
             if nblocks > vm_page_no {
                 // check if something to do: VM is larger than truncate position
                 self.put_rel_truncation(modification, rel, vm_page_no, ctx)
@@ -1438,20 +1438,22 @@ async fn get_relsize(
     modification: &DatadirModification<'_>,
     rel: RelTag,
     ctx: &RequestContext,
-) -> Result<BlockNumber, PageReconstructError> {
-    let nblocks = if !modification
+) -> Result<(BlockNumber, bool), PageReconstructError> {
+    if !modification
         .tline
         .get_rel_exists(rel, Version::Modified(modification), ctx)
         .await?
     {
-        0
+        Ok((0, false))
     } else {
-        modification
-            .tline
-            .get_rel_size(rel, Version::Modified(modification), ctx)
-            .await?
-    };
-    Ok(nblocks)
+        Ok((
+            modification
+                .tline
+                .get_rel_size(rel, Version::Modified(modification), ctx)
+                .await?,
+            true,
+        ))
+    }
 }
 
 #[allow(clippy::bool_assert_comparison)]
