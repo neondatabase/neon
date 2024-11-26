@@ -7,10 +7,10 @@ use std::str::FromStr;
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::auth::password_hack::parse_endpoint_param;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, SniKind};
 use crate::proxy::NeonOptions;
@@ -86,7 +86,7 @@ pub(crate) fn endpoint_sni(
 
 impl ComputeUserInfoMaybeEndpoint {
     pub(crate) fn parse(
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         params: &StartupMessageParams,
         sni: Option<&str>,
         common_names: Option<&HashSet<String>>,
@@ -147,22 +147,22 @@ impl ComputeUserInfoMaybeEndpoint {
         }
 
         let metrics = Metrics::get();
-        info!(%user, "credentials");
+        debug!(%user, "credentials");
         if sni.is_some() {
-            info!("Connection with sni");
+            debug!("Connection with sni");
             metrics.proxy.accepted_connections_by_sni.inc(SniKind::Sni);
         } else if endpoint.is_some() {
             metrics
                 .proxy
                 .accepted_connections_by_sni
                 .inc(SniKind::NoSni);
-            info!("Connection without sni");
+            debug!("Connection without sni");
         } else {
             metrics
                 .proxy
                 .accepted_connections_by_sni
                 .inc(SniKind::PasswordHack);
-            info!("Connection with password hack");
+            debug!("Connection with password hack");
         }
 
         let options = NeonOptions::parse_params(params);
@@ -260,7 +260,7 @@ mod tests {
     fn parse_bare_minimum() -> anyhow::Result<()> {
         // According to postgresql, only `user` should be required.
         let options = StartupMessageParams::new([("user", "john_doe")]);
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id, None);
@@ -275,7 +275,7 @@ mod tests {
             ("database", "world"), // should be ignored
             ("foo", "bar"),        // should be ignored
         ]);
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id, None);
@@ -290,7 +290,7 @@ mod tests {
         let sni = Some("foo.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let user_info =
             ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.user, "john_doe");
@@ -307,7 +307,7 @@ mod tests {
             ("options", "-ckey=1 project=bar -c geqo=off"),
         ]);
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("bar"));
@@ -322,7 +322,7 @@ mod tests {
             ("options", "-ckey=1 endpoint=bar -c geqo=off"),
         ]);
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("bar"));
@@ -340,7 +340,7 @@ mod tests {
             ),
         ]);
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert!(user_info.endpoint_id.is_none());
@@ -355,7 +355,7 @@ mod tests {
             ("options", "-ckey=1 endpoint=bar project=foo -c geqo=off"),
         ]);
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert!(user_info.endpoint_id.is_none());
@@ -370,7 +370,7 @@ mod tests {
         let sni = Some("baz.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let user_info =
             ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.user, "john_doe");
@@ -385,14 +385,14 @@ mod tests {
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.a.com");
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let user_info =
             ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.endpoint_id.as_deref(), Some("p1"));
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.b.com");
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let user_info =
             ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.endpoint_id.as_deref(), Some("p1"));
@@ -408,7 +408,7 @@ mod tests {
         let sni = Some("second.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let err = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())
             .expect_err("should fail");
         match err {
@@ -427,7 +427,7 @@ mod tests {
         let sni = Some("project.localhost");
         let common_names = Some(["example.com".into()].into());
 
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let err = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())
             .expect_err("should fail");
         match err {
@@ -447,7 +447,7 @@ mod tests {
 
         let sni = Some("project.localhost");
         let common_names = Some(["localhost".into()].into());
-        let ctx = RequestMonitoring::test();
+        let ctx = RequestContext::test();
         let user_info =
             ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.endpoint_id.as_deref(), Some("project"));

@@ -5,7 +5,6 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import asyncpg
 import pytest
@@ -14,10 +13,7 @@ from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import getLogger
 from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonEnvBuilder, Safekeeper
 from fixtures.remote_storage import RemoteStorageKind
-
-if TYPE_CHECKING:
-    from typing import Optional
-
+from fixtures.utils import skip_in_debug_build
 
 log = getLogger("root.safekeeper_async")
 
@@ -260,7 +256,7 @@ def test_restarts_frequent_checkpoints(neon_env_builder: NeonEnvBuilder):
 
 
 def endpoint_create_start(
-    env: NeonEnv, branch: str, pgdir_name: Optional[str], allow_multiple: bool = False
+    env: NeonEnv, branch: str, pgdir_name: str | None, allow_multiple: bool = False
 ):
     endpoint = Endpoint(
         env,
@@ -286,7 +282,7 @@ async def exec_compute_query(
     env: NeonEnv,
     branch: str,
     query: str,
-    pgdir_name: Optional[str] = None,
+    pgdir_name: str | None = None,
     allow_multiple: bool = False,
 ):
     with endpoint_create_start(
@@ -602,7 +598,7 @@ async def run_segment_init_failure(env: NeonEnv):
 
     sk = env.safekeepers[0]
     sk_http = sk.http_client()
-    sk_http.configure_failpoints([("sk-write-zeroes", "return")])
+    sk_http.configure_failpoints([("sk-zero-segment", "return")])
     conn = await ep.connect_async()
     ep.safe_psql("select pg_switch_wal()")  # jump to the segment boundary
     # next insertion should hang until failpoint is disabled.
@@ -626,8 +622,12 @@ async def run_segment_init_failure(env: NeonEnv):
 # Test (injected) failure during WAL segment init.
 # https://github.com/neondatabase/neon/issues/6401
 # https://github.com/neondatabase/neon/issues/6402
-def test_segment_init_failure(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("wal_receiver_protocol", ["vanilla", "interpreted"])
+def test_segment_init_failure(neon_env_builder: NeonEnvBuilder, wal_receiver_protocol: str):
     neon_env_builder.num_safekeepers = 1
+    neon_env_builder.pageserver_config_override = (
+        f"wal_receiver_protocol = '{wal_receiver_protocol}'"
+    )
     env = neon_env_builder.init_start()
 
     asyncio.run(run_segment_init_failure(env))
@@ -704,7 +704,7 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Pat
         # invalid, to make them unavailable to the endpoint.  We use
         # ports 10, 11 and 12 to simulate unavailable safekeepers.
         config = toml.load(test_output_dir / "repo" / "config")
-        for i, (_sk, active) in enumerate(zip(env.safekeepers, active_sk)):
+        for i, (_sk, active) in enumerate(zip(env.safekeepers, active_sk, strict=False)):
             if active:
                 config["safekeepers"][i]["pg_port"] = env.safekeepers[i].port.pg
             else:
@@ -760,10 +760,8 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Pat
 # The test takes more than default 5 minutes on Postgres 16,
 # see https://github.com/neondatabase/neon/issues/5305
 @pytest.mark.timeout(600)
+@skip_in_debug_build("times out in debug builds")
 def test_wal_lagging(neon_env_builder: NeonEnvBuilder, test_output_dir: Path, build_type: str):
-    if build_type == "debug":
-        pytest.skip("times out in debug builds")
-
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 

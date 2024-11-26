@@ -14,11 +14,11 @@ use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres_rustls::MakeRustlsConnect;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::auth::parse_endpoint_param;
 use crate::cancellation::CancelClosure;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::messages::MetricsAuxInfo;
@@ -135,13 +135,13 @@ impl ConnCfg {
     /// Apply startup message params to the connection config.
     pub(crate) fn set_startup_params(&mut self, params: &StartupMessageParams) {
         // Only set `user` if it's not present in the config.
-        // Web auth flow takes username from the console's response.
+        // Console redirect auth flow takes username from the console's response.
         if let (None, Some(user)) = (self.get_user(), params.get("user")) {
             self.user(user);
         }
 
         // Only set `dbname` if it's not present in the config.
-        // Web auth flow takes dbname from the console's response.
+        // Console redirect auth flow takes dbname from the console's response.
         if let (None, Some(dbname)) = (self.get_dbname(), params.get("database")) {
             self.dbname(dbname);
         }
@@ -213,7 +213,7 @@ impl ConnCfg {
         };
 
         let connect_once = |host, port| {
-            info!("trying to connect to compute node at {host}:{port}");
+            debug!("trying to connect to compute node at {host}:{port}");
             connect_with_timeout(host, port).and_then(|socket| async {
                 let socket_addr = socket.peer_addr()?;
                 // This prevents load balancer from severing the connection.
@@ -286,7 +286,7 @@ impl ConnCfg {
     /// Connect to a corresponding compute node.
     pub(crate) async fn connect(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         allow_self_signed_compute: bool,
         aux: MetricsAuxInfo,
         timeout: Duration,
@@ -328,6 +328,7 @@ impl ConnCfg {
         tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
         let stream = connection.stream.into_inner();
 
+        // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
         info!(
             cold_start_info = ctx.cold_start_info().as_str(),
             "connected to compute node at {host} ({socket_addr}) sslmode={:?}",
@@ -341,7 +342,7 @@ impl ConnCfg {
 
         // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
         // Yet another reason to rework the connection establishing code.
-        let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token());
+        let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token(), vec![]);
 
         let connection = PostgresConnection {
             stream,

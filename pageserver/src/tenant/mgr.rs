@@ -1719,10 +1719,11 @@ impl TenantManager {
                     parent_layers.push(relative_path.to_owned());
                 }
             }
-            debug_assert!(
-                !parent_layers.is_empty(),
-                "shutdown cannot empty the layermap"
-            );
+
+            if parent_layers.is_empty() {
+                tracing::info!("Ancestor shard has no resident layer to hard link");
+            }
+
             (parent_timelines, parent_layers)
         };
 
@@ -1959,7 +1960,7 @@ impl TenantManager {
             attempt.before_reset_tenant();
 
             let (_guard, progress) = utils::completion::channel();
-            match tenant.shutdown(progress, ShutdownMode::Hard).await {
+            match tenant.shutdown(progress, ShutdownMode::Flush).await {
                 Ok(()) => {
                     slot_guard.drop_old_value().expect("it was just shutdown");
                 }

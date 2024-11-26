@@ -32,7 +32,7 @@ pub(crate) type Result<T> = std::result::Result<T, AuthError>;
 #[derive(Debug, Error)]
 pub(crate) enum AuthError {
     #[error(transparent)]
-    Web(#[from] backend::WebAuthError),
+    ConsoleRedirect(#[from] backend::ConsoleRedirectError),
 
     #[error(transparent)]
     GetAuthInfo(#[from] control_plane::errors::GetAuthInfoError),
@@ -115,7 +115,7 @@ impl AuthError {
 impl UserFacingError for AuthError {
     fn to_string_client(&self) -> String {
         match self {
-            Self::Web(e) => e.to_string_client(),
+            Self::ConsoleRedirect(e) => e.to_string_client(),
             Self::GetAuthInfo(e) => e.to_string_client(),
             Self::Sasl(e) => e.to_string_client(),
             Self::PasswordFailed(_) => self.to_string(),
@@ -135,7 +135,7 @@ impl UserFacingError for AuthError {
 impl ReportableError for AuthError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
-            Self::Web(e) => e.get_error_kind(),
+            Self::ConsoleRedirect(e) => e.get_error_kind(),
             Self::GetAuthInfo(e) => e.get_error_kind(),
             Self::Sasl(e) => e.get_error_kind(),
             Self::PasswordFailed(_) => crate::error::ErrorKind::User,

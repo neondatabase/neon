@@ -8,14 +8,14 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use tokio::time::Instant;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
 use crate::auth::backend::ComputeUserInfo;
 use crate::cache::endpoints::EndpointsCache;
 use crate::cache::project_info::ProjectInfoCacheImpl;
 use crate::config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions};
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::{
     errors, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, ControlPlaneApi, NodeInfoCache,
 };
@@ -41,7 +41,7 @@ pub enum ControlPlaneClient {
 impl ControlPlaneApi for ControlPlaneClient {
     async fn get_role_secret(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError> {
         match self {
@@ -57,7 +57,7 @@ impl ControlPlaneApi for ControlPlaneClient {
 
     async fn get_allowed_ips_and_secret(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
         match self {
@@ -71,7 +71,7 @@ impl ControlPlaneApi for ControlPlaneClient {
 
     async fn get_endpoint_jwks(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         endpoint: EndpointId,
     ) -> Result<Vec<AuthRule>, errors::GetEndpointJwksError> {
         match self {
@@ -85,7 +85,7 @@ impl ControlPlaneApi for ControlPlaneClient {
 
     async fn wake_compute(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError> {
         match self {
@@ -214,7 +214,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         self.metrics
             .semaphore_acquire_seconds
             .observe(now.elapsed().as_secs_f64());
-        info!("acquired permit {:?}", now.elapsed().as_secs_f64());
+        debug!("acquired permit {:?}", now.elapsed().as_secs_f64());
         Ok(WakeComputePermit { permit: permit? })
     }
 
@@ -271,7 +271,7 @@ impl WakeComputePermit {
 impl FetchAuthRules for ControlPlaneClient {
     async fn fetch_auth_rules(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         endpoint: EndpointId,
     ) -> Result<Vec<AuthRule>, FetchAuthRulesError> {
         self.get_endpoint_jwks(ctx, endpoint)

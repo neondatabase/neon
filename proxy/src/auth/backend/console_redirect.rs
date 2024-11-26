@@ -6,9 +6,10 @@ use tokio_postgres::config::SslMode;
 use tracing::{info, info_span};
 
 use super::ComputeCredentialKeys;
+use crate::auth::IpPattern;
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::{ReportableError, UserFacingError};
 use crate::proxy::connect_compute::ComputeConnectBackend;
@@ -16,7 +17,7 @@ use crate::stream::PqStream;
 use crate::{auth, compute, waiters};
 
 #[derive(Debug, Error)]
-pub(crate) enum WebAuthError {
+pub(crate) enum ConsoleRedirectError {
     #[error(transparent)]
     WaiterRegister(#[from] waiters::RegisterError),
 
@@ -32,13 +33,13 @@ pub struct ConsoleRedirectBackend {
     console_uri: reqwest::Url,
 }
 
-impl UserFacingError for WebAuthError {
+impl UserFacingError for ConsoleRedirectError {
     fn to_string_client(&self) -> String {
         "Internal error".to_string()
     }
 }
 
-impl ReportableError for WebAuthError {
+impl ReportableError for ConsoleRedirectError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
             Self::WaiterRegister(_) => crate::error::ErrorKind::Service,
@@ -71,13 +72,13 @@ impl ConsoleRedirectBackend {
 
     pub(crate) async fn authenticate(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         auth_config: &'static AuthenticationConfig,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-    ) -> auth::Result<ConsoleRedirectNodeInfo> {
+    ) -> auth::Result<(ConsoleRedirectNodeInfo, Option<Vec<IpPattern>>)> {
         authenticate(ctx, auth_config, &self.console_uri, client)
             .await
-            .map(ConsoleRedirectNodeInfo)
+            .map(|(node_info, ip_allowlist)| (ConsoleRedirectNodeInfo(node_info), ip_allowlist))
     }
 }
 
@@ -87,7 +88,7 @@ pub struct ConsoleRedirectNodeInfo(pub(super) NodeInfo);
 impl ComputeConnectBackend for ConsoleRedirectNodeInfo {
     async fn wake_compute(
         &self,
-        _ctx: &RequestMonitoring,
+        _ctx: &RequestContext,
     ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         Ok(Cached::new_uncached(self.0.clone()))
     }
@@ -98,12 +99,12 @@ impl ComputeConnectBackend for ConsoleRedirectNodeInfo {
 }
 
 async fn authenticate(
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     auth_config: &'static AuthenticationConfig,
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<NodeInfo> {
-    ctx.set_auth_method(crate::context::AuthMethod::Web);
+) -> auth::Result<(NodeInfo, Option<Vec<IpPattern>>)> {
+    ctx.set_auth_method(crate::context::AuthMethod::ConsoleRedirect);
 
     // registering waiter can fail if we get unlucky with rng.
     // just try again.
@@ -116,7 +117,7 @@ async fn authenticate(
         }
     };
 
-    let span = info_span!("web", psql_session_id = &psql_session_id);
+    let span = info_span!("console_redirect", psql_session_id = &psql_session_id);
     let greeting = hello_message(link_uri, &psql_session_id);
 
     // Give user a URL to spawn a new database.
@@ -127,14 +128,16 @@ async fn authenticate(
         .write_message(&Be::NoticeResponse(&greeting))
         .await?;
 
-    // Wait for web console response (see `mgmt`).
+    // Wait for console response via control plane (see `mgmt`).
     info!(parent: &span, "waiting for console's reply...");
-    let db_info = tokio::time::timeout(auth_config.webauth_confirmation_timeout, waiter)
+    let db_info = tokio::time::timeout(auth_config.console_redirect_confirmation_timeout, waiter)
         .await
         .map_err(|_elapsed| {
-            auth::AuthError::confirmation_timeout(auth_config.webauth_confirmation_timeout.into())
+            auth::AuthError::confirmation_timeout(
+                auth_config.console_redirect_confirmation_timeout.into(),
+            )
         })?
-        .map_err(WebAuthError::from)?;
+        .map_err(ConsoleRedirectError::from)?;
 
     if auth_config.ip_allowlist_check_enabled {
         if let Some(allowed_ips) = &db_info.allowed_ips {
@@ -174,9 +177,12 @@ async fn authenticate(
         config.password(password.as_ref());
     }
 
-    Ok(NodeInfo {
-        config,
-        aux: db_info.aux,
-        allow_self_signed_compute: false, // caller may override
-    })
+    Ok((
+        NodeInfo {
+            config,
+            aux: db_info.aux,
+            allow_self_signed_compute: false, // caller may override
+        },
+        db_info.allowed_ips,
+    ))
 }

@@ -10,10 +10,15 @@ use super::tenant::{PageReconstructError, Timeline};
 use crate::aux_file;
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
-use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
+use crate::span::{
+    debug_assert_current_span_has_tenant_and_timeline_id,
+    debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
+};
+use crate::tenant::timeline::GetVectoredError;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
+use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::key::{
     dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range, rel_size_to_key,
@@ -24,12 +29,13 @@ use pageserver_api::key::{
 use pageserver_api::keyspace::SparseKeySpace;
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
+use pageserver_api::shard::ShardIdentity;
 use pageserver_api::value::Value;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{Oid, RepOriginId, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{hash_map, BTreeMap, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
@@ -38,12 +44,13 @@ use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::pausable_failpoint;
 use utils::{bin_ser::BeSer, lsn::Lsn};
+use wal_decoder::serialized_batch::SerializedValueBatch;
 
 /// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
 pub const MAX_AUX_FILE_DELTAS: usize = 1024;
 
 /// Max number of aux-file-related delta layers. The compaction will create a new image layer once this threshold is reached.
-pub const MAX_AUX_FILE_V2_DELTAS: usize = 64;
+pub const MAX_AUX_FILE_V2_DELTAS: usize = 16;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
@@ -170,12 +177,11 @@ impl Timeline {
             tline: self,
             pending_lsns: Vec::new(),
             pending_metadata_pages: HashMap::new(),
-            pending_data_pages: Vec::new(),
-            pending_zero_data_pages: Default::default(),
+            pending_data_batch: None,
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
             pending_directory_entries: Vec::new(),
-            pending_bytes: 0,
+            pending_metadata_bytes: 0,
             lsn,
         }
     }
@@ -192,26 +198,195 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
-        if tag.relnode == 0 {
-            return Err(PageReconstructError::Other(
-                RelationError::InvalidRelnode.into(),
-            ));
+        match version {
+            Version::Lsn(effective_lsn) => {
+                let pages = smallvec::smallvec![(tag, blknum)];
+                let res = self
+                    .get_rel_page_at_lsn_batched(pages, effective_lsn, ctx)
+                    .await;
+                assert_eq!(res.len(), 1);
+                res.into_iter().next().unwrap()
+            }
+            Version::Modified(modification) => {
+                if tag.relnode == 0 {
+                    return Err(PageReconstructError::Other(
+                        RelationError::InvalidRelnode.into(),
+                    ));
+                }
+
+                let nblocks = self.get_rel_size(tag, version, ctx).await?;
+                if blknum >= nblocks {
+                    debug!(
+                        "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
+                        tag,
+                        blknum,
+                        version.get_lsn(),
+                        nblocks
+                    );
+                    return Ok(ZERO_PAGE.clone());
+                }
+
+                let key = rel_block_to_key(tag, blknum);
+                modification.get(key, ctx).await
+            }
+        }
+    }
+
+    /// Like [`Self::get_rel_page_at_lsn`], but returns a batch of pages.
+    ///
+    /// The ordering of the returned vec corresponds to the ordering of `pages`.
+    pub(crate) async fn get_rel_page_at_lsn_batched(
+        &self,
+        pages: smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
+        effective_lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Vec<Result<Bytes, PageReconstructError>> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
+        let mut slots_filled = 0;
+        let page_count = pages.len();
+
+        // Would be nice to use smallvec here but it doesn't provide the spare_capacity_mut() API.
+        let mut result = Vec::with_capacity(pages.len());
+        let result_slots = result.spare_capacity_mut();
+
+        let mut keys_slots: BTreeMap<Key, smallvec::SmallVec<[usize; 1]>> = BTreeMap::default();
+        for (response_slot_idx, (tag, blknum)) in pages.into_iter().enumerate() {
+            if tag.relnode == 0 {
+                result_slots[response_slot_idx].write(Err(PageReconstructError::Other(
+                    RelationError::InvalidRelnode.into(),
+                )));
+
+                slots_filled += 1;
+                continue;
+            }
+
+            let nblocks = match self
+                .get_rel_size(tag, Version::Lsn(effective_lsn), ctx)
+                .await
+            {
+                Ok(nblocks) => nblocks,
+                Err(err) => {
+                    result_slots[response_slot_idx].write(Err(err));
+                    slots_filled += 1;
+                    continue;
+                }
+            };
+
+            if blknum >= nblocks {
+                debug!(
+                    "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
+                    tag, blknum, effective_lsn, nblocks
+                );
+                result_slots[response_slot_idx].write(Ok(ZERO_PAGE.clone()));
+                slots_filled += 1;
+                continue;
+            }
+
+            let key = rel_block_to_key(tag, blknum);
+
+            let key_slots = keys_slots.entry(key).or_default();
+            key_slots.push(response_slot_idx);
         }
 
-        let nblocks = self.get_rel_size(tag, version, ctx).await?;
-        if blknum >= nblocks {
-            debug!(
-                "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
-                tag,
-                blknum,
-                version.get_lsn(),
-                nblocks
-            );
-            return Ok(ZERO_PAGE.clone());
+        let keyspace = {
+            // add_key requires monotonicity
+            let mut acc = KeySpaceAccum::new();
+            for key in keys_slots
+                .keys()
+                // in fact it requires strong monotonicity
+                .dedup()
+            {
+                acc.add_key(*key);
+            }
+            acc.to_keyspace()
+        };
+
+        match self.get_vectored(keyspace, effective_lsn, ctx).await {
+            Ok(results) => {
+                for (key, res) in results {
+                    let mut key_slots = keys_slots.remove(&key).unwrap().into_iter();
+                    let first_slot = key_slots.next().unwrap();
+
+                    for slot in key_slots {
+                        let clone = match &res {
+                            Ok(buf) => Ok(buf.clone()),
+                            Err(err) => Err(match err {
+                                PageReconstructError::Cancelled => {
+                                    PageReconstructError::Cancelled
+                                }
+
+                                x @ PageReconstructError::Other(_) |
+                                x @ PageReconstructError::AncestorLsnTimeout(_) |
+                                x @ PageReconstructError::WalRedo(_) |
+                                x @ PageReconstructError::MissingKey(_) => {
+                                    PageReconstructError::Other(anyhow::anyhow!("there was more than one request for this key in the batch, error logged once: {x:?}"))
+                                },
+                            }),
+                        };
+
+                        result_slots[slot].write(clone);
+                        slots_filled += 1;
+                    }
+
+                    result_slots[first_slot].write(res);
+                    slots_filled += 1;
+                }
+            }
+            Err(err) => {
+                // this cannot really happen because get_vectored only errors globally on invalid LSN or too large batch size
+                // (We enforce the max batch size outside of this function, in the code that constructs the batch request.)
+                for slot in keys_slots.values().flatten() {
+                    // this whole `match` is a lot like `From<GetVectoredError> for PageReconstructError`
+                    // but without taking ownership of the GetVectoredError
+                    let err = match &err {
+                        GetVectoredError::Cancelled => {
+                            Err(PageReconstructError::Cancelled)
+                        }
+                        // TODO: restructure get_vectored API to make this error per-key
+                        GetVectoredError::MissingKey(err) => {
+                            Err(PageReconstructError::Other(anyhow::anyhow!("whole vectored get request failed because one or more of the requested keys were missing: {err:?}")))
+                        }
+                        // TODO: restructure get_vectored API to make this error per-key
+                        GetVectoredError::GetReadyAncestorError(err) => {
+                            Err(PageReconstructError::Other(anyhow::anyhow!("whole vectored get request failed because one or more key required ancestor that wasn't ready: {err:?}")))
+                        }
+                        // TODO: restructure get_vectored API to make this error per-key
+                        GetVectoredError::Other(err) => {
+                            Err(PageReconstructError::Other(
+                                anyhow::anyhow!("whole vectored get request failed: {err:?}"),
+                            ))
+                        }
+                        // TODO: we can prevent this error class by moving this check into the type system
+                        GetVectoredError::InvalidLsn(e) => {
+                            Err(anyhow::anyhow!("invalid LSN: {e:?}").into())
+                        }
+                        // NB: this should never happen in practice because we limit MAX_GET_VECTORED_KEYS
+                        // TODO: we can prevent this error class by moving this check into the type system
+                        GetVectoredError::Oversized(err) => {
+                            Err(anyhow::anyhow!(
+                                "batching oversized: {err:?}"
+                            )
+                            .into())
+                        }
+                    };
+
+                    result_slots[*slot].write(err);
+                }
+
+                slots_filled += keys_slots.values().map(|slots| slots.len()).sum::<usize>();
+            }
+        };
+
+        assert_eq!(slots_filled, page_count);
+        // SAFETY:
+        // 1. `result` and any of its uninint members are not read from until this point
+        // 2. The length below is tracked at run-time and matches the number of requested pages.
+        unsafe {
+            result.set_len(page_count);
         }
 
-        let key = rel_block_to_key(tag, blknum);
-        version.get(self, key, ctx).await
+        result
     }
 
     // Get size of a database in blocks
@@ -1025,21 +1200,14 @@ pub struct DatadirModification<'a> {
 
     /// Data writes, ready to be flushed into an ephemeral layer. See [`Self::is_data_key`] for
     /// which keys are stored here.
-    pending_data_pages: Vec<(CompactKey, Lsn, usize, Value)>,
-
-    // Sometimes during ingest, for example when extending a relation, we would like to write a zero page.  However,
-    // if we encounter a write from postgres in the same wal record, we will drop this entry.
-    //
-    // Unlike other 'pending' fields, this does not last until the next call to commit(): it is flushed
-    // at the end of each wal record, and all these writes implicitly are at lsn Self::lsn
-    pending_zero_data_pages: HashSet<CompactKey>,
+    pending_data_batch: Option<SerializedValueBatch>,
 
     /// For special "directory" keys that store key-value maps, track the size of the map
     /// if it was updated in this modification.
     pending_directory_entries: Vec<(DirectoryKind, usize)>,
 
-    /// An **approximation** of how large our EphemeralFile write will be when committed.
-    pending_bytes: usize,
+    /// An **approximation** of how many metadata bytes will be written to the EphemeralFile.
+    pending_metadata_bytes: usize,
 }
 
 impl<'a> DatadirModification<'a> {
@@ -1054,11 +1222,16 @@ impl<'a> DatadirModification<'a> {
     }
 
     pub(crate) fn approx_pending_bytes(&self) -> usize {
-        self.pending_bytes
+        self.pending_data_batch
+            .as_ref()
+            .map_or(0, |b| b.buffer_size())
+            + self.pending_metadata_bytes
     }
 
-    pub(crate) fn has_dirty_data_pages(&self) -> bool {
-        (!self.pending_data_pages.is_empty()) || (!self.pending_zero_data_pages.is_empty())
+    pub(crate) fn has_dirty_data(&self) -> bool {
+        self.pending_data_batch
+            .as_ref()
+            .map_or(false, |b| b.has_data())
     }
 
     /// Set the current lsn
@@ -1069,9 +1242,6 @@ impl<'a> DatadirModification<'a> {
             lsn,
             self.lsn
         );
-
-        // If we are advancing LSN, then state from previous wal record should have been flushed.
-        assert!(self.pending_zero_data_pages.is_empty());
 
         if lsn > self.lsn {
             self.pending_lsns.push(self.lsn);
@@ -1144,6 +1314,107 @@ impl<'a> DatadirModification<'a> {
             b"checkpoint_file contents do not matter",
         ))
         .context("put_checkpoint_file")?;
+        Ok(())
+    }
+
+    /// Creates a relation if it is not already present.
+    /// Returns the current size of the relation
+    pub(crate) async fn create_relation_if_required(
+        &mut self,
+        rel: RelTag,
+        ctx: &RequestContext,
+    ) -> Result<u32, PageReconstructError> {
+        // Get current size and put rel creation if rel doesn't exist
+        //
+        // NOTE: we check the cache first even though get_rel_exists and get_rel_size would
+        //       check the cache too. This is because eagerly checking the cache results in
+        //       less work overall and 10% better performance. It's more work on cache miss
+        //       but cache miss is rare.
+        if let Some(nblocks) = self.tline.get_cached_rel_size(&rel, self.get_lsn()) {
+            Ok(nblocks)
+        } else if !self
+            .tline
+            .get_rel_exists(rel, Version::Modified(self), ctx)
+            .await?
+        {
+            // create it with 0 size initially, the logic below will extend it
+            self.put_rel_creation(rel, 0, ctx)
+                .await
+                .context("Relation Error")?;
+            Ok(0)
+        } else {
+            self.tline
+                .get_rel_size(rel, Version::Modified(self), ctx)
+                .await
+        }
+    }
+
+    /// Given a block number for a relation (which represents a newly written block),
+    /// the previous block count of the relation, and the shard info, find the gaps
+    /// that were created by the newly written block if any.
+    fn find_gaps(
+        rel: RelTag,
+        blkno: u32,
+        previous_nblocks: u32,
+        shard: &ShardIdentity,
+    ) -> Option<KeySpace> {
+        let mut key = rel_block_to_key(rel, blkno);
+        let mut gap_accum = None;
+
+        for gap_blkno in previous_nblocks..blkno {
+            key.field6 = gap_blkno;
+
+            if shard.get_shard_number(&key) != shard.number {
+                continue;
+            }
+
+            gap_accum
+                .get_or_insert_with(KeySpaceAccum::new)
+                .add_key(key);
+        }
+
+        gap_accum.map(|accum| accum.to_keyspace())
+    }
+
+    pub async fn ingest_batch(
+        &mut self,
+        mut batch: SerializedValueBatch,
+        // TODO(vlad): remove this argument and replace the shard check with is_key_local
+        shard: &ShardIdentity,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let mut gaps_at_lsns = Vec::default();
+
+        for meta in batch.metadata.iter() {
+            let (rel, blkno) = Key::from_compact(meta.key()).to_rel_block()?;
+            let new_nblocks = blkno + 1;
+
+            let old_nblocks = self.create_relation_if_required(rel, ctx).await?;
+            if new_nblocks > old_nblocks {
+                self.put_rel_extend(rel, new_nblocks, ctx).await?;
+            }
+
+            if let Some(gaps) = Self::find_gaps(rel, blkno, old_nblocks, shard) {
+                gaps_at_lsns.push((gaps, meta.lsn()));
+            }
+        }
+
+        if !gaps_at_lsns.is_empty() {
+            batch.zero_gaps(gaps_at_lsns);
+        }
+
+        match self.pending_data_batch.as_mut() {
+            Some(pending_batch) => {
+                pending_batch.extend(batch);
+            }
+            None if batch.has_data() => {
+                self.pending_data_batch = Some(batch);
+            }
+            None => {
+                // Nothing to initialize the batch with
+            }
+        }
+
         Ok(())
     }
 
@@ -1229,8 +1500,13 @@ impl<'a> DatadirModification<'a> {
                 self.lsn
             );
         }
-        self.pending_zero_data_pages.insert(key.to_compact());
-        self.pending_bytes += ZERO_PAGE.len();
+
+        let batch = self
+            .pending_data_batch
+            .get_or_insert_with(SerializedValueBatch::default);
+
+        batch.put(key.to_compact(), Value::Image(ZERO_PAGE.clone()), self.lsn);
+
         Ok(())
     }
 
@@ -1248,17 +1524,14 @@ impl<'a> DatadirModification<'a> {
                 self.lsn
             );
         }
-        self.pending_zero_data_pages.insert(key.to_compact());
-        self.pending_bytes += ZERO_PAGE.len();
-        Ok(())
-    }
 
-    /// Call this at the end of each WAL record.
-    pub(crate) fn on_record_end(&mut self) {
-        let pending_zero_data_pages = std::mem::take(&mut self.pending_zero_data_pages);
-        for key in pending_zero_data_pages {
-            self.put_data(key, Value::Image(ZERO_PAGE.clone()));
-        }
+        let batch = self
+            .pending_data_batch
+            .get_or_insert_with(SerializedValueBatch::default);
+
+        batch.put(key.to_compact(), Value::Image(ZERO_PAGE.clone()), self.lsn);
+
+        Ok(())
     }
 
     /// Store a relmapper file (pg_filenode.map) in the repository
@@ -1750,12 +2023,17 @@ impl<'a> DatadirModification<'a> {
         let mut writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
-        let pending_data_pages = std::mem::take(&mut self.pending_data_pages);
+        if let Some(batch) = self.pending_data_batch.take() {
+            tracing::debug!(
+                "Flushing batch with max_lsn={}. Last record LSN is {}",
+                batch.max_lsn,
+                self.tline.get_last_record_lsn()
+            );
 
-        // This bails out on first error without modifying pending_updates.
-        // That's Ok, cf this function's doc comment.
-        writer.put_batch(pending_data_pages, ctx).await?;
-        self.pending_bytes = 0;
+            // This bails out on first error without modifying pending_updates.
+            // That's Ok, cf this function's doc comment.
+            writer.put_batch(batch, ctx).await?;
+        }
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
@@ -1775,9 +2053,6 @@ impl<'a> DatadirModification<'a> {
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
-        // Commit should never be called mid-wal-record
-        assert!(self.pending_zero_data_pages.is_empty());
-
         let mut writer = self.tline.writer().await;
 
         let pending_nblocks = self.pending_nblocks;
@@ -1785,21 +2060,49 @@ impl<'a> DatadirModification<'a> {
 
         // Ordering: the items in this batch do not need to be in any global order, but values for
         // a particular Key must be in Lsn order relative to one another.  InMemoryLayer relies on
-        // this to do efficient updates to its index.
-        let mut write_batch = std::mem::take(&mut self.pending_data_pages);
+        // this to do efficient updates to its index.  See [`wal_decoder::serialized_batch`] for
+        // more details.
 
-        write_batch.extend(
-            self.pending_metadata_pages
+        let metadata_batch = {
+            let pending_meta = self
+                .pending_metadata_pages
                 .drain()
                 .flat_map(|(key, values)| {
                     values
                         .into_iter()
                         .map(move |(lsn, value_size, value)| (key, lsn, value_size, value))
-                }),
-        );
+                })
+                .collect::<Vec<_>>();
 
-        if !write_batch.is_empty() {
-            writer.put_batch(write_batch, ctx).await?;
+            if pending_meta.is_empty() {
+                None
+            } else {
+                Some(SerializedValueBatch::from_values(pending_meta))
+            }
+        };
+
+        let data_batch = self.pending_data_batch.take();
+
+        let maybe_batch = match (data_batch, metadata_batch) {
+            (Some(mut data), Some(metadata)) => {
+                data.extend(metadata);
+                Some(data)
+            }
+            (Some(data), None) => Some(data),
+            (None, Some(metadata)) => Some(metadata),
+            (None, None) => None,
+        };
+
+        if let Some(batch) = maybe_batch {
+            tracing::debug!(
+                "Flushing batch with max_lsn={}. Last record LSN is {}",
+                batch.max_lsn,
+                self.tline.get_last_record_lsn()
+            );
+
+            // This bails out on first error without modifying pending_updates.
+            // That's Ok, cf this function's doc comment.
+            writer.put_batch(batch, ctx).await?;
         }
 
         if !self.pending_deletions.is_empty() {
@@ -1809,6 +2112,9 @@ impl<'a> DatadirModification<'a> {
 
         self.pending_lsns.push(self.lsn);
         for pending_lsn in self.pending_lsns.drain(..) {
+            // TODO(vlad): pretty sure the comment below is not valid anymore
+            // and we can call finish write with the latest LSN
+            //
             // Ideally, we should be able to call writer.finish_write() only once
             // with the highest LSN. However, the last_record_lsn variable in the
             // timeline keeps track of the latest LSN and the immediate previous LSN
@@ -1824,14 +2130,14 @@ impl<'a> DatadirModification<'a> {
             writer.update_directory_entries_count(kind, count as u64);
         }
 
-        self.pending_bytes = 0;
+        self.pending_metadata_bytes = 0;
 
         Ok(())
     }
 
     pub(crate) fn len(&self) -> usize {
         self.pending_metadata_pages.len()
-            + self.pending_data_pages.len()
+            + self.pending_data_batch.as_ref().map_or(0, |b| b.len())
             + self.pending_deletions.len()
     }
 
@@ -1873,11 +2179,10 @@ impl<'a> DatadirModification<'a> {
             // modifications before ingesting DB create operations, which are the only kind that reads
             // data pages during ingest.
             if cfg!(debug_assertions) {
-                for (dirty_key, _, _, _) in &self.pending_data_pages {
-                    debug_assert!(&key.to_compact() != dirty_key);
-                }
-
-                debug_assert!(!self.pending_zero_data_pages.contains(&key.to_compact()))
+                assert!(!self
+                    .pending_data_batch
+                    .as_ref()
+                    .map_or(false, |b| b.updates_key(&key)));
             }
         }
 
@@ -1895,18 +2200,10 @@ impl<'a> DatadirModification<'a> {
     }
 
     fn put_data(&mut self, key: CompactKey, val: Value) {
-        let val_serialized_size = val.serialized_size().unwrap() as usize;
-
-        // If this page was previously zero'd in the same WalRecord, then drop the previous zero page write.  This
-        // is an optimization that avoids persisting both the zero page generated by us (e.g. during a relation extend),
-        // and the subsequent postgres-originating write
-        if self.pending_zero_data_pages.remove(&key) {
-            self.pending_bytes -= ZERO_PAGE.len();
-        }
-
-        self.pending_bytes += val_serialized_size;
-        self.pending_data_pages
-            .push((key, self.lsn, val_serialized_size, val))
+        let batch = self
+            .pending_data_batch
+            .get_or_insert_with(SerializedValueBatch::default);
+        batch.put(key, val, self.lsn);
     }
 
     fn put_metadata(&mut self, key: CompactKey, val: Value) {
@@ -1914,10 +2211,10 @@ impl<'a> DatadirModification<'a> {
         // Replace the previous value if it exists at the same lsn
         if let Some((last_lsn, last_value_ser_size, last_value)) = values.last_mut() {
             if *last_lsn == self.lsn {
-                // Update the pending_bytes contribution from this entry, and update the serialized size in place
-                self.pending_bytes -= *last_value_ser_size;
+                // Update the pending_metadata_bytes contribution from this entry, and update the serialized size in place
+                self.pending_metadata_bytes -= *last_value_ser_size;
                 *last_value_ser_size = val.serialized_size().unwrap() as usize;
-                self.pending_bytes += *last_value_ser_size;
+                self.pending_metadata_bytes += *last_value_ser_size;
 
                 // Use the latest value, this replaces any earlier write to the same (key,lsn), such as much
                 // have been generated by synthesized zero page writes prior to the first real write to a page.
@@ -1927,8 +2224,12 @@ impl<'a> DatadirModification<'a> {
         }
 
         let val_serialized_size = val.serialized_size().unwrap() as usize;
-        self.pending_bytes += val_serialized_size;
+        self.pending_metadata_bytes += val_serialized_size;
         values.push((self.lsn, val_serialized_size, val));
+
+        if key == CHECKPOINT_KEY.to_compact() {
+            tracing::debug!("Checkpoint key added to pending with size {val_serialized_size}");
+        }
     }
 
     fn delete(&mut self, key_range: Range<Key>) {
@@ -1974,9 +2275,9 @@ impl<'a> Version<'a> {
 //--- Metadata structs stored in key-value pairs in the repository.
 
 #[derive(Debug, Serialize, Deserialize)]
-struct DbDirectory {
+pub(crate) struct DbDirectory {
     // (spcnode, dbnode) -> (do relmapper and PG_VERSION files exist)
-    dbdirs: HashMap<(Oid, Oid), bool>,
+    pub(crate) dbdirs: HashMap<(Oid, Oid), bool>,
 }
 
 // The format of TwoPhaseDirectory changed in PostgreSQL v17, because the filenames of
@@ -1985,8 +2286,8 @@ struct DbDirectory {
 // "pg_twophsae/0000000A000002E4".
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TwoPhaseDirectory {
-    xids: HashSet<TransactionId>,
+pub(crate) struct TwoPhaseDirectory {
+    pub(crate) xids: HashSet<TransactionId>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1995,12 +2296,12 @@ struct TwoPhaseDirectoryV17 {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
-struct RelDirectory {
+pub(crate) struct RelDirectory {
     // Set of relations that exist. (relfilenode, forknum)
     //
     // TODO: Store it as a btree or radix tree or something else that spans multiple
     // key-value pairs, if you have a lot of relations
-    rels: HashSet<(Oid, u8)>,
+    pub(crate) rels: HashSet<(Oid, u8)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2009,9 +2310,9 @@ struct RelSizeEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
-struct SlruSegmentDirectory {
+pub(crate) struct SlruSegmentDirectory {
     // Set of SLRU segments that exist.
-    segments: HashSet<u32>,
+    pub(crate) segments: HashSet<u32>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, enum_map::Enum)]
@@ -2037,7 +2338,11 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 #[cfg(test)]
 mod tests {
     use hex_literal::hex;
-    use utils::id::TimelineId;
+    use pageserver_api::{models::ShardParameters, shard::ShardStripeSize};
+    use utils::{
+        id::TimelineId,
+        shard::{ShardCount, ShardNumber},
+    };
 
     use super::*;
 
@@ -2089,6 +2394,93 @@ mod tests {
         assert_eq!(readback, expect_1008);
 
         Ok(())
+    }
+
+    #[test]
+    fn gap_finding() {
+        let rel = RelTag {
+            spcnode: 1663,
+            dbnode: 208101,
+            relnode: 2620,
+            forknum: 0,
+        };
+        let base_blkno = 1;
+
+        let base_key = rel_block_to_key(rel, base_blkno);
+        let before_base_key = rel_block_to_key(rel, base_blkno - 1);
+
+        let shard = ShardIdentity::unsharded();
+
+        let mut previous_nblocks = 0;
+        for i in 0..10 {
+            let crnt_blkno = base_blkno + i;
+            let gaps = DatadirModification::find_gaps(rel, crnt_blkno, previous_nblocks, &shard);
+
+            previous_nblocks = crnt_blkno + 1;
+
+            if i == 0 {
+                // The first block we write is 1, so we should find the gap.
+                assert_eq!(gaps.unwrap(), KeySpace::single(before_base_key..base_key));
+            } else {
+                assert!(gaps.is_none());
+            }
+        }
+
+        // This is an update to an already existing block. No gaps here.
+        let update_blkno = 5;
+        let gaps = DatadirModification::find_gaps(rel, update_blkno, previous_nblocks, &shard);
+        assert!(gaps.is_none());
+
+        // This is an update past the current end block.
+        let after_gap_blkno = 20;
+        let gaps = DatadirModification::find_gaps(rel, after_gap_blkno, previous_nblocks, &shard);
+
+        let gap_start_key = rel_block_to_key(rel, previous_nblocks);
+        let after_gap_key = rel_block_to_key(rel, after_gap_blkno);
+        assert_eq!(
+            gaps.unwrap(),
+            KeySpace::single(gap_start_key..after_gap_key)
+        );
+    }
+
+    #[test]
+    fn sharded_gap_finding() {
+        let rel = RelTag {
+            spcnode: 1663,
+            dbnode: 208101,
+            relnode: 2620,
+            forknum: 0,
+        };
+
+        let first_blkno = 6;
+
+        // This shard will get the even blocks
+        let shard = ShardIdentity::from_params(
+            ShardNumber(0),
+            &ShardParameters {
+                count: ShardCount(2),
+                stripe_size: ShardStripeSize(1),
+            },
+        );
+
+        // Only keys belonging to this shard are considered as gaps.
+        let mut previous_nblocks = 0;
+        let gaps =
+            DatadirModification::find_gaps(rel, first_blkno, previous_nblocks, &shard).unwrap();
+        assert!(!gaps.ranges.is_empty());
+        for gap_range in gaps.ranges {
+            let mut k = gap_range.start;
+            while k != gap_range.end {
+                assert_eq!(shard.get_shard_number(&k), shard.number);
+                k = k.next();
+            }
+        }
+
+        previous_nblocks = first_blkno;
+
+        let update_blkno = 2;
+        let gaps = DatadirModification::find_gaps(rel, update_blkno, previous_nblocks, &shard);
+        assert!(gaps.is_none());
     }
 
     /*

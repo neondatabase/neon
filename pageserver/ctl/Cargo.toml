@@ -18,7 +18,6 @@ postgres_ffi.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-toml_edit.workspace = true
 utils.workspace = true
 svg_fmt.workspace = true
 workspace_hack.workspace = true

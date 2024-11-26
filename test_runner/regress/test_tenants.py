@@ -369,11 +369,15 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
     - Bad response codes during shutdown (e.g. returning 500 instead of 503)
     - Issues where a tenant is still starting up while we receive a request for it
     - Issues with interrupting/resuming tenant/timeline creation in shutdown
+    - Issues with a timeline is not created successfully because of restart.
     """
     env = neon_env_builder.init_configs()
     env.start()
     tenant_id: TenantId = env.initial_tenant
     timeline_id = env.initial_timeline
+
+    # At this point, the initial tenant/timeline might not have been created successfully,
+    # and this is the case we want to test.
 
     # Multiple creation requests which race will generate this error on the pageserver
     # and storage controller respectively
@@ -427,7 +431,7 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
             env.pageserver.start()
 
             for f in futs:
-                f.result(timeout=10)
+                f.result(timeout=30)
 
     # The tenant should end up active
     wait_until_tenant_active(env.pageserver.http_client(), tenant_id, iterations=10, period=1)

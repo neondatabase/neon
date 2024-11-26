@@ -54,7 +54,7 @@ def test_read_validation(neon_simple_env: NeonEnv):
 
             log.info("Clear buffer cache to ensure no stale pages are brought into the cache")
 
-            endpoint.clear_shared_buffers(cursor=c)
+            endpoint.clear_buffers(cursor=c)
 
             cache_entries = query_scalar(
                 c, f"select count(*) from pg_buffercache where relfilenode = {relfilenode}"

@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
@@ -13,9 +12,6 @@ from fixtures.neon_fixtures import (
     NeonPageserver,
 )
 from fixtures.pageserver.utils import wait_timeline_detail_404
-
-if TYPE_CHECKING:
-    from typing import Optional
 
 
 @pytest.mark.parametrize("sharded", [True, False])
@@ -89,7 +85,7 @@ def wait_for_another_gc_round():
 @dataclass
 class ScrollableLog:
     pageserver: NeonPageserver
-    offset: Optional[LogCursor]
+    offset: LogCursor | None
 
     def assert_log_contains(self, what: str):
         msg, offset = self.pageserver.assert_log_contains(what, offset=self.offset)

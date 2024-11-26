@@ -10,6 +10,10 @@ default = []
 testing = []
 
 [dependencies]
+base64.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+aws-sdk-kms.workspace = true
 anyhow.workspace = true
 camino.workspace = true
 chrono.workspace = true
@@ -18,13 +22,17 @@ clap.workspace = true
 flate2.workspace = true
 futures.workspace = true
 hyper0 = { workspace = true, features = ["full"] }
+metrics.workspace = true
 nix.workspace = true
 notify.workspace = true
 num_cpus.workspace = true
+once_cell.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 postgres.workspace = true
 regex.workspace = true
+serde.workspace = true
+serde_with.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
 tar.workspace = true
@@ -39,7 +47,9 @@ tracing-subscriber.workspace = true
 tracing-utils.workspace = true
 thiserror.workspace = true
 url.workspace = true
+prometheus.workspace = true
 
+postgres_initdb.workspace = true
 compute_api.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true

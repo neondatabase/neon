@@ -944,6 +944,9 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                         pg_auth_type: AuthType::Trust,
                         http_auth_type: AuthType::Trust,
                         other: Default::default(),
+                        // Typical developer machines use disks with slow fsync, and we don't care
+                        // about data integrity: disable disk syncs.
+                        no_sync: true,
                     }
                 })
                 .collect(),
@@ -1150,6 +1153,7 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
                 timeline_info.timeline_id
             );
         }
+        // TODO: rename to import-basebackup-plus-wal
         TimelineCmd::Import(args) => {
             let tenant_id = get_tenant_id(args.tenant_id, env)?;
             let timeline_id = args.timeline_id;

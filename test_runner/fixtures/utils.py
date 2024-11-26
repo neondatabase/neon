@@ -8,10 +8,10 @@ import subprocess
 import tarfile
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlencode
 
 import allure
@@ -25,10 +25,11 @@ from fixtures.pageserver.common_types import (
     parse_delta_layer,
     parse_image_layer,
 )
+from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from typing import IO, Optional
+    from typing import IO
 
     from fixtures.common_types import TimelineId
     from fixtures.neon_fixtures import PgBin
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
 
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
+
 COMPONENT_BINARIES = {
     "storage_controller": ("storage_controller",),
     "storage_broker": ("storage_broker",),
@@ -55,6 +57,10 @@ VERSIONS_COMBINATIONS = (
 )
 # fmt: on
 
+# If the environment variable USE_LFC is set and its value is "false", then LFC is disabled for tests.
+# If it is not set or set to a value not equal to "false", LFC is enabled by default.
+USE_LFC = os.environ.get("USE_LFC") != "false"
+
 
 def subprocess_capture(
     capture_dir: Path,
@@ -64,10 +70,10 @@ def subprocess_capture(
     echo_stderr: bool = False,
     echo_stdout: bool = False,
     capture_stdout: bool = False,
-    timeout: Optional[float] = None,
+    timeout: float | None = None,
     with_command_header: bool = True,
     **popen_kwargs: Any,
-) -> tuple[str, Optional[str], int]:
+) -> tuple[str, str | None, int]:
     """Run a process and bifurcate its output to files and the `log` logger
 
     stderr and stdout are always captured in files.  They are also optionally
@@ -493,8 +499,14 @@ def scan_log_for_errors(input: Iterable[str], allowed_errors: list[str]) -> list
 
             # It's an ERROR or WARN. Is it in the allow-list?
             for a in allowed_errors:
-                if re.match(a, line):
-                    break
+                try:
+                    if re.match(a, line):
+                        break
+                # We can switch `re.error` with `re.PatternError` after 3.13
+                # https://docs.python.org/3/library/re.html#re.PatternError
+                except re.error:
+                    log.error(f"Invalid regex: '{a}'")
+                    raise
             else:
                 errors.append((lineno, line))
     return errors
@@ -519,7 +531,7 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str
     This is essentially:
 
     lines=$(comm -3 \
-        <(mkdir left && cd left && tar xf "$left" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        <(mkdir left  && cd left  && tar xf "$left"  && find . -type f -print0 | xargs sha256sum | sort -k2) \
         <(mkdir right && cd right && tar xf "$right" && find . -type f -print0 | xargs sha256sum | sort -k2) \
         | wc -l)
     [ "$lines" = "0" ]
@@ -528,7 +540,7 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str
     """
     started_at = time.time()
 
-    def hash_extracted(reader: Optional[IO[bytes]]) -> bytes:
+    def hash_extracted(reader: IO[bytes] | None) -> bytes:
         assert reader is not None
         digest = sha256(usedforsecurity=False)
         while True:
@@ -555,7 +567,7 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str
 
     mismatching: set[str] = set()
 
-    for left_tuple, right_tuple in zip(left_list, right_list):
+    for left_tuple, right_tuple in zip(left_list, right_list, strict=False):
         left_path, left_hash = left_tuple
         right_path, right_hash = right_tuple
         assert (
@@ -587,7 +599,7 @@ class PropagatingThread(threading.Thread):
             self.exc = e
 
     @override
-    def join(self, timeout: Optional[float] = None) -> Any:
+    def join(self, timeout: float | None = None) -> Any:
         super().join(timeout)
         if self.exc:
             raise self.exc
@@ -643,3 +655,64 @@ def allpairs_versions():
         )
         ids.append(f"combination_{''.join(cur_id)}")
     return {"argnames": "combination", "argvalues": tuple(argvalues), "ids": ids}
+
+
+def size_to_bytes(hr_size: str) -> int:
+    """
+    Gets human-readable size from postgresql.conf (e.g. 512kB, 10MB)
+    returns size in bytes
+    """
+    units = {"B": 1, "kB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4, "PB": 1024**5}
+    match = re.search(r"^\'?(\d+)\s*([kMGTP]?B)?\'?$", hr_size)
+    assert match is not None, f'"{hr_size}" is not a well-formatted human-readable size'
+    number, unit = match.groups()
+
+    if unit:
+        amp = units[unit]
+    else:
+        amp = 8192
+    return int(number) * amp
+
+
+def skip_on_postgres(version: PgVersion, reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is version,
+        reason=reason,
+    )
+
+
+def xfail_on_postgres(version: PgVersion, reason: str):
+    return pytest.mark.xfail(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is version,
+        reason=reason,
+    )
+
+
+def run_only_on_default_postgres(reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is not PgVersion.DEFAULT,
+        reason=reason,
+    )
+
+
+def run_only_on_postgres(versions: Iterable[PgVersion], reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) not in versions,
+        reason=reason,
+    )
+
+
+def skip_in_debug_build(reason: str):
+    return pytest.mark.skipif(
+        os.getenv("BUILD_TYPE", "debug") == "debug",
+        reason=reason,
+    )
+
+
+def skip_on_ci(reason: str):
+    # `CI` variable is always set to `true` on GitHub
+    # Ref: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/store-information-in-variables#default-environment-variables
+    return pytest.mark.skipif(
+        os.getenv("CI", "false") == "true",
+        reason=reason,
+    )

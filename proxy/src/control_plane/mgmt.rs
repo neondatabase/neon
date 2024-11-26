@@ -24,8 +24,8 @@ pub(crate) fn notify(psql_session_id: &str, msg: ComputeReady) -> Result<(), wai
     CPLANE_WAITERS.notify(psql_session_id, msg)
 }
 
-/// Console management API listener task.
-/// It spawns console response handlers needed for the web auth.
+/// Management API listener task.
+/// It spawns management response handlers needed for the console redirect auth flow.
 pub async fn task_main(listener: TcpListener) -> anyhow::Result<Infallible> {
     scopeguard::defer! {
         info!("mgmt has shut down");
@@ -43,13 +43,13 @@ pub async fn task_main(listener: TcpListener) -> anyhow::Result<Infallible> {
 
         tokio::task::spawn(
             async move {
-                info!("serving a new console management API connection");
+                info!("serving a new management API connection");
 
                 // these might be long running connections, have a separate logging for cancelling
                 // on shutdown and other ways of stopping.
                 let cancelled = scopeguard::guard(tracing::Span::current(), |span| {
                     let _e = span.entered();
-                    info!("console management API task cancelled");
+                    info!("management API task cancelled");
                 });
 
                 if let Err(e) = handle_connection(socket).await {

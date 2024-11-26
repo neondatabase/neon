@@ -7,7 +7,6 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import fixtures.utils
 import pytest
@@ -27,10 +26,6 @@ from fixtures.pageserver.utils import (
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
 from fixtures.workload import Workload
-
-if TYPE_CHECKING:
-    from typing import Optional
-
 
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.
@@ -385,7 +380,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
 
 
 def dump_differs(
-    first: Path, second: Path, output: Path, allowed_diffs: Optional[list[str]] = None
+    first: Path, second: Path, output: Path, allowed_diffs: list[str] | None = None
 ) -> bool:
     """
     Runs diff(1) command on two SQL dumps and write the output to the given output file.

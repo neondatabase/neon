@@ -54,6 +54,8 @@ enum Command {
         node_kind: NodeKind,
         #[arg(short, long, default_value_t=TraversingDepth::Tenant)]
         depth: TraversingDepth,
+        #[arg(short, long, default_value=None)]
+        tenant_id_prefix: Option<String>,
         #[arg(short, long, default_value_t = String::from("garbage.json"))]
         output_path: String,
     },
@@ -140,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
         "{}_{}_{}_{}.log",
         std::env::args().next().unwrap(),
         command_log_name,
-        bucket_config.bucket,
+        bucket_config.bucket_name().unwrap_or("nobucket"),
         chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
     ));
 
@@ -191,13 +193,7 @@ async fn main() -> anyhow::Result<()> {
                     // Strictly speaking an empty bucket is a valid bucket, but if someone ran the
                     // scrubber they were likely expecting to scan something, and if we see no timelines
                     // at all then it's likely due to some configuration issues like a bad prefix
-                    bail!(
-                        "No timelines found in bucket {} prefix {}",
-                        bucket_config.bucket,
-                        bucket_config
-                            .prefix_in_bucket
-                            .unwrap_or("<none>".to_string())
-                    );
+                    bail!("No timelines found in {}", bucket_config.desc_str());
                 }
                 Ok(())
             } else {
@@ -215,10 +211,19 @@ async fn main() -> anyhow::Result<()> {
         Command::FindGarbage {
             node_kind,
             depth,
+            tenant_id_prefix,
             output_path,
         } => {
             let console_config = ConsoleConfig::from_env()?;
-            find_garbage(bucket_config, console_config, depth, node_kind, output_path).await
+            find_garbage(
+                bucket_config,
+                console_config,
+                depth,
+                node_kind,
+                tenant_id_prefix,
+                output_path,
+            )
+            .await
         }
         Command::PurgeGarbage {
             input_path,
@@ -396,13 +401,7 @@ pub async fn scan_pageserver_metadata_cmd(
                 // Strictly speaking an empty bucket is a valid bucket, but if someone ran the
                 // scrubber they were likely expecting to scan something, and if we see no timelines
                 // at all then it's likely due to some configuration issues like a bad prefix
-                tracing::error!(
-                    "No timelines found in bucket {} prefix {}",
-                    bucket_config.bucket,
-                    bucket_config
-                        .prefix_in_bucket
-                        .unwrap_or("<none>".to_string())
-                );
+                tracing::error!("No timelines found in {}", bucket_config.desc_str());
                 if exit_code {
                     std::process::exit(1);
                 }

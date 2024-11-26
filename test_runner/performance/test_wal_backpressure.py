@@ -17,7 +17,8 @@ from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, flush_ep_to_pageserver
 from performance.test_perf_pgbench import get_durations_matrix, get_scales_matrix
 
 if TYPE_CHECKING:
-    from typing import Any, Callable
+    from collections.abc import Callable
+    from typing import Any
 
 
 @pytest.fixture(params=["vanilla", "neon_off", "neon_on"])

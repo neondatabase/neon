@@ -5,7 +5,7 @@ import json
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -36,11 +36,12 @@ from fixtures.pageserver.utils import (
     remote_storage_delete_key,
     timeline_delete_wait_completed,
 )
-from fixtures.pg_version import PgVersion, run_only_on_default_postgres
+from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.storage_controller_proxy import StorageControllerProxy
 from fixtures.utils import (
+    run_only_on_default_postgres,
     run_pg_bench_small,
     subprocess_capture,
     wait_until,
@@ -55,7 +56,7 @@ from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
-    from typing import Any, Optional, Union
+    from typing import Any
 
 
 def get_node_shard_counts(env: NeonEnv, tenant_ids):
@@ -592,7 +593,7 @@ def test_storage_controller_compute_hook(
 
     # Initial notification from tenant creation
     assert len(notifications) == 1
-    expect: dict[str, Union[list[dict[str, int]], str, None, int]] = {
+    expect: dict[str, list[dict[str, int]] | str | None | int] = {
         "tenant_id": str(env.initial_tenant),
         "stripe_size": None,
         "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
@@ -707,7 +708,7 @@ def test_storage_controller_stuck_compute_hook(
 
     # Initial notification from tenant creation
     assert len(notifications) == 1
-    expect: dict[str, Union[list[dict[str, int]], str, None, int]] = {
+    expect: dict[str, list[dict[str, int]] | str | None | int] = {
         "tenant_id": str(env.initial_tenant),
         "stripe_size": None,
         "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
@@ -1047,7 +1048,7 @@ def test_storage_controller_s3_time_travel_recovery(
     )
 
     time.sleep(4)
-    ts_before_disaster = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    ts_before_disaster = datetime.now(tz=UTC).replace(tzinfo=None)
     time.sleep(4)
 
     # Simulate a "disaster": delete some random files from remote storage for one of the shards
@@ -1071,7 +1072,7 @@ def test_storage_controller_s3_time_travel_recovery(
         pass
 
     time.sleep(4)
-    ts_after_disaster = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    ts_after_disaster = datetime.now(tz=UTC).replace(tzinfo=None)
     time.sleep(4)
 
     # Do time travel recovery
@@ -1237,6 +1238,7 @@ def test_storage_controller_tenant_deletion(
     # Assert attachments all have local content
     for shard_id in shard_ids:
         pageserver = env.get_tenant_pageserver(shard_id)
+        assert pageserver is not None
         assert pageserver.tenant_dir(shard_id).exists()
 
     # Assert all shards have some content in remote storage
@@ -2272,7 +2274,7 @@ def test_storage_controller_node_deletion(
 @pytest.mark.parametrize("shard_count", [None, 2])
 def test_storage_controller_metadata_health(
     neon_env_builder: NeonEnvBuilder,
-    shard_count: Optional[int],
+    shard_count: int | None,
 ):
     """
     Create three tenants A, B, C.
@@ -2492,14 +2494,14 @@ def start_env(env: NeonEnv, storage_controller_port: int):
         for pageserver in env.pageservers:
             futs.append(
                 executor.submit(
-                    lambda ps=pageserver: ps.start(timeout_in_seconds=timeout_in_seconds)
+                    lambda ps=pageserver: ps.start(timeout_in_seconds=timeout_in_seconds)  # type: ignore[misc]
                 )
             )
 
         for safekeeper in env.safekeepers:
             futs.append(
                 executor.submit(
-                    lambda sk=safekeeper: sk.start(timeout_in_seconds=timeout_in_seconds)
+                    lambda sk=safekeeper: sk.start(timeout_in_seconds=timeout_in_seconds)  # type: ignore[misc]
                 )
             )
 
@@ -2745,6 +2747,7 @@ def test_storage_controller_validate_during_migration(neon_env_builder: NeonEnvB
 
     # Upload but don't compact
     origin_pageserver = env.get_tenant_pageserver(tenant_id)
+    assert origin_pageserver is not None
     dest_ps_id = [p.id for p in env.pageservers if p.id != origin_pageserver.id][0]
     origin_pageserver.http_client().timeline_checkpoint(
         tenant_id, timeline_id, wait_until_uploaded=True, compact=False

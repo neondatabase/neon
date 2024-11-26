@@ -38,6 +38,7 @@ use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::postgres_client::PostgresClientProtocol;
 
 use self::connection_manager::ConnectionManagerStatus;
 
@@ -45,6 +46,7 @@ use super::Timeline;
 
 #[derive(Clone)]
 pub struct WalReceiverConf {
+    pub protocol: PostgresClientProtocol,
     /// The timeout on the connection to safekeeper for WAL streaming.
     pub wal_connect_timeout: Duration,
     /// The timeout to use to determine when the current connection is "stale" and reconnect to the other one.

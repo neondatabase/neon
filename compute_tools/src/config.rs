@@ -73,6 +73,19 @@ pub fn write_postgres_conf(
         )?;
     }
 
+    // Locales
+    if cfg!(target_os = "macos") {
+        writeln!(file, "lc_messages='C'")?;
+        writeln!(file, "lc_monetary='C'")?;
+        writeln!(file, "lc_time='C'")?;
+        writeln!(file, "lc_numeric='C'")?;
+    } else {
+        writeln!(file, "lc_messages='C.UTF-8'")?;
+        writeln!(file, "lc_monetary='C.UTF-8'")?;
+        writeln!(file, "lc_time='C.UTF-8'")?;
+        writeln!(file, "lc_numeric='C.UTF-8'")?;
+    }
+
     match spec.mode {
         ComputeMode::Primary => {}
         ComputeMode::Static(lsn) => {
@@ -103,7 +116,7 @@ pub fn write_postgres_conf(
                 vartype: "enum".to_owned(),
             };
 
-            write!(file, "{}", opt.to_pg_setting())?;
+            writeln!(file, "{}", opt.to_pg_setting())?;
         }
     }
 

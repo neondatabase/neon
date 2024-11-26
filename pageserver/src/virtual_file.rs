@@ -175,10 +175,16 @@ impl VirtualFile {
     }
 
     pub async fn sync_all(&self) -> Result<(), Error> {
+        if SYNC_MODE.load(std::sync::atomic::Ordering::Relaxed) == SyncMode::UnsafeNoSync as u8 {
+            return Ok(());
+        }
         self.inner.sync_all().await
     }
 
     pub async fn sync_data(&self) -> Result<(), Error> {
+        if SYNC_MODE.load(std::sync::atomic::Ordering::Relaxed) == SyncMode::UnsafeNoSync as u8 {
+            return Ok(());
+        }
         self.inner.sync_data().await
     }
 
@@ -230,6 +236,27 @@ impl VirtualFile {
         ctx: &RequestContext,
     ) -> (FullSlice<Buf>, Result<usize, Error>) {
         self.inner.write_all(buf, ctx).await
+    }
+}
+
+/// Indicates whether to enable fsync, fdatasync, or O_SYNC/O_DSYNC when writing
+/// files. Switching this off is unsafe and only used for testing on machines
+/// with slow drives.
+#[repr(u8)]
+pub enum SyncMode {
+    Sync,
+    UnsafeNoSync,
+}
+
+impl TryFrom<u8> for SyncMode {
+    type Error = u8;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(match value {
+            v if v == (SyncMode::Sync as u8) => SyncMode::Sync,
+            v if v == (SyncMode::UnsafeNoSync as u8) => SyncMode::UnsafeNoSync,
+            x => return Err(x),
+        })
     }
 }
 
@@ -1332,12 +1359,13 @@ impl OpenFiles {
 /// server startup.
 ///
 #[cfg(not(test))]
-pub fn init(num_slots: usize, engine: IoEngineKind, mode: IoMode) {
+pub fn init(num_slots: usize, engine: IoEngineKind, mode: IoMode, sync_mode: SyncMode) {
     if OPEN_FILES.set(OpenFiles::new(num_slots)).is_err() {
         panic!("virtual_file::init called twice");
     }
     set_io_mode(mode);
     io_engine::init(engine);
+    SYNC_MODE.store(sync_mode as u8, std::sync::atomic::Ordering::Relaxed);
     crate::metrics::virtual_file_descriptor_cache::SIZE_MAX.set(num_slots as u64);
 }
 
@@ -1379,6 +1407,9 @@ pub(crate) fn set_io_mode(mode: IoMode) {
 pub(crate) fn get_io_mode() -> IoMode {
     IoMode::try_from(IO_MODE.load(Ordering::Relaxed)).unwrap()
 }
+
+static SYNC_MODE: AtomicU8 = AtomicU8::new(SyncMode::Sync as u8);
+
 #[cfg(test)]
 mod tests {
     use crate::context::DownloadBehavior;
