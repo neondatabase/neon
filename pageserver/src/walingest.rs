@@ -335,6 +335,10 @@ impl WalIngest {
         // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
         // record if it doesn't.
         let vm_size = get_relsize(modification, vm_rel, ctx).await?;
+        if vm_size == 0 {
+            let lsn = modification.lsn;
+            log::info!("ingest_clear_vm_bits: vm_rel {vm_rel} has 0 size at LSN {lsn}, flags={flags} old={old_heap_blkno:?} new={new_heap_blkno:?}");
+        }
         if let Some(blknum) = new_vm_blk {
             if blknum >= vm_size {
                 new_vm_blk = None;

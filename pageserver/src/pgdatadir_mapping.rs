@@ -1022,7 +1022,7 @@ pub struct DatadirModification<'a> {
     pub tline: &'a Timeline,
 
     /// Current LSN of the modification
-    lsn: Lsn,
+    pub lsn: Lsn,
 
     // The modifications are not applied directly to the underlying key-value store.
     // The put-functions add the modifications here, and they are flushed to the
