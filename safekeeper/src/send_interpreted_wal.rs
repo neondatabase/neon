@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use anyhow::Context;
-use bytes::Bytes;
 use futures::StreamExt;
 use pageserver_api::shard::ShardIdentity;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend};
@@ -39,12 +38,6 @@ struct Batch {
     records: InterpretedWalRecords,
 }
 
-struct SerializedBatch {
-    wal_end_lsn: Lsn,
-    available_wal_end_lsn: Lsn,
-    buf: Bytes,
-}
-
 impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
     /// Send interpreted WAL to a receiver.
     /// Stops when an error occurs or the receiver is caught up and there's no active compute.
@@ -63,23 +56,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
         keepalive_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         keepalive_ticker.reset();
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<Batch>(2);
-        let batches_stream =
-            tokio_stream::wrappers::ReceiverStream::new(rx).then(|batch| async move {
-                let buf: Result<Bytes, CopyStreamHandlerEnd> = batch
-                    .records
-                    .to_wire(self.format, self.compression)
-                    .await
-                    .with_context(|| "Failed to serialize interpreted WAL")
-                    .map_err(CopyStreamHandlerEnd::from);
-
-                Result::<_, CopyStreamHandlerEnd>::Ok(SerializedBatch {
-                    wal_end_lsn: batch.wal_end_lsn,
-                    available_wal_end_lsn: batch.available_wal_end_lsn,
-                    buf: buf?,
-                })
-            });
-        let mut batches_stream = std::pin::pin!(batches_stream);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Batch>(2);
 
         loop {
             tokio::select! {
@@ -125,11 +102,18 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
                     tx.send(Batch {wal_end_lsn, available_wal_end_lsn, records: batch}).await.unwrap();
                 },
                 // For a previously interpreted batch, serialize it and push it down the wire.
-                encoded_batch = batches_stream.next() => {
-                    let SerializedBatch {wal_end_lsn, available_wal_end_lsn, buf } = match encoded_batch {
-                        Some(ser_batch) => ser_batch?,
+                batch = rx.recv() => {
+                    let batch = match batch {
+                        Some(b) => b,
                         None => { break; }
                     };
+
+                    let buf = batch
+                        .records
+                        .to_wire(self.format, self.compression)
+                        .await
+                        .with_context(|| "Failed to serialize interpreted WAL")
+                        .map_err(CopyStreamHandlerEnd::from)?;
 
                     // Reset the keep alive ticker since we are sending something
                     // over the wire now.
@@ -137,8 +121,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
 
                     self.pgb
                         .write_message(&BeMessage::InterpretedWalRecords(InterpretedWalRecordsBody {
-                            streaming_lsn: wal_end_lsn.0,
-                            commit_lsn: available_wal_end_lsn.0,
+                            streaming_lsn: batch.wal_end_lsn.0,
+                            commit_lsn: batch.available_wal_end_lsn.0,
                             data: &buf,
                         })).await?;
                 }
