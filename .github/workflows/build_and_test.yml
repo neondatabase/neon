@@ -832,6 +832,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [ x64, arm64 ]
+        pg_version: [v16, v17]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
@@ -869,8 +870,11 @@ jobs:
           fi
 
       - name: Verify docker-compose example and test extensions
-        timeout-minutes: 40
-        run: env TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
+        timeout-minutes: 20
+        env:
+          TAG: ${{needs.tag.outputs.build-tag}}
+          TEST_VERSION_ONLY: ${{ matrix.pg_version }}
+        run: ./docker-compose/docker_compose_test.sh
 
       - name: Print logs and clean up
         if: always()
