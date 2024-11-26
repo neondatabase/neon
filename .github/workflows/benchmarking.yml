@@ -541,7 +541,7 @@ jobs:
 
     runs-on: ${{ matrix.RUNNER }}
     container:
-      image: neondatabase/build-tools:pinned
+      image: neondatabase/build-tools:pinned-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -558,12 +558,12 @@ jobs:
         arch=$(uname -m | sed 's/x86_64/amd64/g' | sed 's/aarch64/arm64/g')
 
         cd /home/nonroot
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-17/libpq5_17.2-1.pgdg110+1_${arch}.deb"
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.6-1.pgdg110+1_${arch}.deb"
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.6-1.pgdg110+1_${arch}.deb"
-        dpkg -x libpq5_17.2-1.pgdg110+1_${arch}.deb pg
-        dpkg -x postgresql-16_16.6-1.pgdg110+1_${arch}.deb pg
-        dpkg -x postgresql-client-16_16.6-1.pgdg110+1_${arch}.deb pg
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-17/libpq5_17.2-1.pgdg120+1_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.6-1.pgdg120+1_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.6-1.pgdg120+1_${arch}.deb"
+        dpkg -x libpq5_17.2-1.pgdg120+1_${arch}.deb pg
+        dpkg -x postgresql-16_16.6-1.pgdg120+1_${arch}.deb pg
+        dpkg -x postgresql-client-16_16.6-1.pgdg120+1_${arch}.deb pg
 
         mkdir -p /tmp/neon/pg_install/v16/bin
         ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench

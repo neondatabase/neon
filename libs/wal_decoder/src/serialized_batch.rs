@@ -496,11 +496,16 @@ impl SerializedValueBatch {
         }
     }
 
-    /// Checks if the batch is empty
-    ///
-    /// A batch is empty when it contains no serialized values.
-    /// Note that it may still contain observed values.
+    /// Checks if the batch contains any serialized or observed values
     pub fn is_empty(&self) -> bool {
+        !self.has_data() && self.metadata.is_empty()
+    }
+
+    /// Checks if the batch contains data
+    ///
+    /// Note that if this returns false, it may still contain observed values or
+    /// a metadata record.
+    pub fn has_data(&self) -> bool {
         let empty = self.raw.is_empty();
 
         if cfg!(debug_assertions) && empty {
@@ -510,7 +515,7 @@ impl SerializedValueBatch {
                 .all(|meta| matches!(meta, ValueMeta::Observed(_))));
         }
 
-        empty
+        !empty
     }
 
     /// Returns the number of values serialized in the batch

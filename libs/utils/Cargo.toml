@@ -33,6 +33,7 @@ pprof.workspace = true
 regex.workspace = true
 routerify.workspace = true
 serde.workspace = true
+serde_with.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
 thiserror.workspace = true
