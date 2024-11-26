@@ -2,6 +2,7 @@
 
 # Usage: ./modelcheck.sh <config_file> <spec_file>, e.g.
 # ./modelcheck.sh models/MCProposerAcceptorStatic_p2_a3_t3_l3.cfg MCProposerAcceptorStatic.tla
+# ./modelcheck.sh models/MCProposerAcceptorReconfig_p2_a3_t3_l3_c3.cfg MCProposerAcceptorReconfig.tla
 CONFIG=$1
 SPEC=$2
 
