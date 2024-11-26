@@ -284,6 +284,7 @@ pub mod defaults {
     use crate::models::ImageCompressionAlgorithm;
 
     pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
+    use utils::postgres_client;
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "300 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
@@ -333,7 +334,10 @@ pub mod defaults {
     pub const DEFAULT_SERVER_SIDE_BATCH_TIMEOUT: Option<&str> = None;
 
     pub const DEFAULT_WAL_RECEIVER_PROTOCOL: utils::postgres_client::PostgresClientProtocol =
-        utils::postgres_client::PostgresClientProtocol::Vanilla;
+        utils::postgres_client::PostgresClientProtocol::Interpreted {
+            format: utils::postgres_client::InterpretedFormat::Protobuf,
+            compression: Some(utils::postgres_client::Compression::Zstd { level: 1 }),
+        };
 }
 
 impl Default for ConfigToml {

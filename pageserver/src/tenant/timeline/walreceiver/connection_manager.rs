@@ -535,6 +535,7 @@ impl ConnectionManagerState {
         let node_id = new_sk.safekeeper_id;
         let connect_timeout = self.conf.wal_connect_timeout;
         let ingest_batch_size = self.conf.ingest_batch_size;
+        let protocol = self.conf.protocol;
         let timeline = Arc::clone(&self.timeline);
         let ctx = ctx.detached_child(
             TaskKind::WalReceiverConnectionHandler,
@@ -548,6 +549,7 @@ impl ConnectionManagerState {
 
                 let res = super::walreceiver_connection::handle_walreceiver_connection(
                     timeline,
+                    protocol,
                     new_sk.wal_source_connconf,
                     events_sender,
                     cancellation.clone(),
@@ -991,7 +993,7 @@ impl ConnectionManagerState {
                     PostgresClientProtocol::Vanilla => {
                         (None, None, None)
                     },
-                    PostgresClientProtocol::Interpreted => {
+                    PostgresClientProtocol::Interpreted { .. } => {
                         let shard_identity = self.timeline.get_shard_identity();
                         (
                             Some(shard_identity.number.0),

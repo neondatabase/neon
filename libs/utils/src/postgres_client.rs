@@ -7,40 +7,31 @@ use postgres_connection::{parse_host_port, PgConnectionConfig};
 
 use crate::id::TenantTimelineId;
 
-/// Postgres client protocol types
-#[derive(
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    strum_macros::EnumString,
-    strum_macros::Display,
-    serde_with::DeserializeFromStr,
-    serde_with::SerializeDisplay,
-    Debug,
-)]
-#[strum(serialize_all = "kebab-case")]
-#[repr(u8)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InterpretedFormat {
+    Bincode,
+    Protobuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Compression {
+    Zstd { level: i8 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "args")]
+#[serde(rename_all = "kebab-case")]
 pub enum PostgresClientProtocol {
     /// Usual Postgres replication protocol
     Vanilla,
     /// Custom shard-aware protocol that replicates interpreted records.
     /// Used to send wal from safekeeper to pageserver.
-    Interpreted,
-}
-
-impl TryFrom<u8> for PostgresClientProtocol {
-    type Error = u8;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        Ok(match value {
-            v if v == (PostgresClientProtocol::Vanilla as u8) => PostgresClientProtocol::Vanilla,
-            v if v == (PostgresClientProtocol::Interpreted as u8) => {
-                PostgresClientProtocol::Interpreted
-            }
-            x => return Err(x),
-        })
-    }
+    Interpreted {
+        format: InterpretedFormat,
+        compression: Option<Compression>,
+    },
 }
 
 pub struct ConnectionConfigArgs<'a> {
@@ -63,7 +54,10 @@ impl<'a> ConnectionConfigArgs<'a> {
             "-c".to_owned(),
             format!("timeline_id={}", self.ttid.timeline_id),
             format!("tenant_id={}", self.ttid.tenant_id),
-            format!("protocol={}", self.protocol as u8),
+            format!(
+                "protocol={}",
+                serde_json::to_string(&self.protocol).unwrap()
+            ),
         ];
 
         if self.shard_number.is_some() {

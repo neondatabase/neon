@@ -123,17 +123,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                     // https://github.com/neondatabase/neon/pull/2433#discussion_r970005064
                     match opt.split_once('=') {
                         Some(("protocol", value)) => {
-                            let raw_value = value
-                                .parse::<u8>()
-                                .with_context(|| format!("Failed to parse {value} as protocol"))?;
-
-                            self.protocol = Some(
-                                PostgresClientProtocol::try_from(raw_value).map_err(|_| {
-                                    QueryError::Other(anyhow::anyhow!(
-                                        "Unexpected client protocol type: {raw_value}"
-                                    ))
-                                })?,
-                            );
+                            self.protocol =
+                                Some(serde_json::from_str(value).with_context(|| {
+                                    format!("Failed to parse {value} as protocol")
+                                })?);
                         }
                         Some(("ztenantid", value)) | Some(("tenant_id", value)) => {
                             self.tenant_id = Some(value.parse().with_context(|| {
@@ -180,7 +173,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                             )));
                         }
                     }
-                    PostgresClientProtocol::Interpreted => {
+                    PostgresClientProtocol::Interpreted { .. } => {
                         match (shard_count, shard_number, shard_stripe_size) {
                             (Some(count), Some(number), Some(stripe_size)) => {
                                 let params = ShardParameters {
