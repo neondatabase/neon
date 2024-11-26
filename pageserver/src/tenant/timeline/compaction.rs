@@ -80,6 +80,8 @@ pub struct GcCompactionJobDescription {
     retain_lsns_below_horizon: Vec<Lsn>,
     /// Maximum layer LSN processed in this compaction
     max_layer_lsn: Lsn,
+    /// Minimum layer LSN processed in this compaction
+    min_layer_lsn: Lsn,
     /// Only compact layers overlapping with this range
     compaction_key_range: Range<Key>,
     /// When partial compaction is enabled, these layers need to be rewritten to ensure no overlap.
@@ -2001,11 +2003,27 @@ impl Timeline {
                 info!("no layers to compact with gc: no historic layers below gc_cutoff, gc_cutoff={}", gc_cutoff);
                 return Ok(());
             };
+            let Some(min_layer_lsn) = layers
+                .iter_historic_layers()
+                .filter(|desc| {
+                    if let Some(compact_above_lsn) = options.compact_above_lsn {
+                        desc.get_lsn_range().end > compact_above_lsn // strictly larger than compact_above_lsn
+                    } else {
+                        true
+                    }
+                })
+                .map(|desc| desc.get_lsn_range().start)
+                .min()
+            else {
+                info!("no layers to compact with gc: no historic layers above compact_above_lsn, compact_above_lsn={}", options.compact_above_lsn.unwrap_or_default());
+                return Ok(());
+            };
             // Then, pick all the layers that are below the max_layer_lsn. This is to ensure we can pick all single-key
             // layers to compact.
             let mut rewrite_layers = Vec::new();
             for desc in layers.iter_historic_layers() {
                 if desc.get_lsn_range().end <= max_layer_lsn
+                    && desc.get_lsn_range().start >= min_layer_lsn
                     && overlaps_with(&desc.get_key_range(), &compaction_key_range)
                 {
                     // If the layer overlaps with the compaction key range, we need to read it to obtain all keys within the range,
@@ -2029,13 +2047,20 @@ impl Timeline {
                 selected_layers,
                 gc_cutoff,
                 retain_lsns_below_horizon,
+                min_layer_lsn,
                 max_layer_lsn,
                 compaction_key_range,
                 rewrite_layers,
             }
         };
-        let lowest_retain_lsn = if self.ancestor_timeline.is_some() {
-            Lsn(self.ancestor_lsn.0 + 1)
+        let (has_data_below, lowest_retain_lsn) = if options.compact_above_lsn.is_some() {
+            // If we only compact above some LSN, we should get the history from the current branch below the specified LSN.
+            // We use job_desc.min_layer_lsn as if it's the lowest branch point.
+            (true, job_desc.min_layer_lsn)
+        } else if self.ancestor_timeline.is_some() {
+            // In theory, we can also use min_layer_lsn here, but using ancestor LSN makes sure the delta layers cover the
+            // LSN ranges all the way to the ancestor timeline.
+            (true, self.ancestor_lsn)
         } else {
             let res = job_desc
                 .retain_lsns_below_horizon
@@ -2053,17 +2078,19 @@ impl Timeline {
                         .unwrap_or(job_desc.gc_cutoff)
                 );
             }
-            res
+            (false, res)
         };
         info!(
-            "picked {} layers for compaction ({} layers need rewriting) with max_layer_lsn={} gc_cutoff={} lowest_retain_lsn={}, key_range={}..{}",
+            "picked {} layers for compaction ({} layers need rewriting) with max_layer_lsn={} min_layer_lsn={} gc_cutoff={} lowest_retain_lsn={}, key_range={}..{}, has_data_below={}",
             job_desc.selected_layers.len(),
             job_desc.rewrite_layers.len(),
             job_desc.max_layer_lsn,
+            job_desc.min_layer_lsn,
             job_desc.gc_cutoff,
             lowest_retain_lsn,
             job_desc.compaction_key_range.start,
-            job_desc.compaction_key_range.end
+            job_desc.compaction_key_range.end,
+            has_data_below,
         );
 
         for layer in &job_desc.selected_layers {
@@ -2133,7 +2160,7 @@ impl Timeline {
 
         // Only create image layers when there is no ancestor branches. TODO: create covering image layer
         // when some condition meet.
-        let mut image_layer_writer = if self.ancestor_timeline.is_none() {
+        let mut image_layer_writer = if !has_data_below {
             Some(
                 SplitImageLayerWriter::new(
                     self.conf,
@@ -2166,7 +2193,8 @@ impl Timeline {
         }
         let mut delta_layer_rewriters = HashMap::<Arc<PersistentLayerKey>, RewritingLayers>::new();
 
-        /// Returns None if there is no ancestor branch. Throw an error when the key is not found.
+        /// Returns None if there is no data below the lowest_retain_lsn (either no ancestor branch, or above_lsn is not specified).
+        /// Throw an error when the key is not found.
         ///
         /// Currently, we always get the ancestor image for each key in the child branch no matter whether the image
         /// is needed for reconstruction. This should be fixed in the future.
@@ -2174,17 +2202,19 @@ impl Timeline {
         /// Furthermore, we should do vectored get instead of a single get, or better, use k-merge for ancestor
         /// images.
         async fn get_ancestor_image(
-            tline: &Arc<Timeline>,
+            this_tline: &Arc<Timeline>,
             key: Key,
             ctx: &RequestContext,
+            has_data_below: bool,
+            history_lsn_point: Lsn,
         ) -> anyhow::Result<Option<(Key, Lsn, Bytes)>> {
-            if tline.ancestor_timeline.is_none() {
+            if !has_data_below {
                 return Ok(None);
             };
             // This function is implemented as a get of the current timeline at ancestor LSN, therefore reusing
             // as much existing code as possible.
-            let img = tline.get(key, tline.ancestor_lsn, ctx).await?;
-            Ok(Some((key, tline.ancestor_lsn, img)))
+            let img = this_tline.get(key, history_lsn_point, ctx).await?;
+            Ok(Some((key, history_lsn_point, img)))
         }
 
         // Actually, we can decide not to write to the image layer at all at this point because
@@ -2268,7 +2298,8 @@ impl Timeline {
                         job_desc.gc_cutoff,
                         &job_desc.retain_lsns_below_horizon,
                         COMPACTION_DELTA_THRESHOLD,
-                        get_ancestor_image(self, *last_key, ctx).await?,
+                        get_ancestor_image(self, *last_key, ctx, has_data_below, lowest_retain_lsn)
+                            .await?,
                     )
                     .await?;
                 retention
@@ -2297,7 +2328,7 @@ impl Timeline {
                 job_desc.gc_cutoff,
                 &job_desc.retain_lsns_below_horizon,
                 COMPACTION_DELTA_THRESHOLD,
-                get_ancestor_image(self, last_key, ctx).await?,
+                get_ancestor_image(self, last_key, ctx, has_data_below, lowest_retain_lsn).await?,
             )
             .await?;
         retention

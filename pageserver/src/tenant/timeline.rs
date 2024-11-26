@@ -782,18 +782,7 @@ pub(crate) enum CompactFlags {
 pub(crate) struct CompactRequest {
     pub compact_range: Option<CompactRange>,
     pub compact_below_lsn: Option<Lsn>,
-    /// Whether the compaction job should be scheduled.
-    #[serde(default)]
-    pub scheduled: bool,
-    /// Whether the compaction job should be split across key ranges.
-    #[serde(default)]
-    pub sub_compaction: bool,
-}
-
-#[serde_with::serde_as]
-#[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct CompactRange {
-    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub compact_above_lsn: Option<Lsn>,
     pub start: Key,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub end: Key,
@@ -817,6 +806,9 @@ pub(crate) struct CompactOptions {
     /// If set, the compaction will only compact the LSN below this value.
     /// This option is only used by GC compaction.
     pub compact_below_lsn: Option<Lsn>,
+    /// If set, the compaction will only compact the LSN above this value.
+    /// This option is only used by GC compaction.
+    pub compact_above_lsn: Option<Lsn>,
     /// Enable sub-compaction (split compaction job across key ranges).
     /// This option is only used by GC compaction.
     pub sub_compaction: bool,
@@ -1643,6 +1635,7 @@ impl Timeline {
                 flags,
                 compact_range: None,
                 compact_below_lsn: None,
+                compact_above_lsn: None,
                 sub_compaction: false,
             },
             ctx,
