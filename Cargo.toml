@@ -78,6 +78,7 @@ comfy-table = "7.1"
 const_format = "0.2"
 crc32c = "0.6"
 dashmap = { version = "5.5.0", features = ["raw-api"] }
+diatomic-waker = { version = "0.2.3" }
 either = "1.8"
 enum-map = "2.4.2"
 enumset = "1.0.12"
