@@ -195,20 +195,23 @@ Init ==
 \* Actions
 \********************************************************************************
 
-\* Proposer loses all state.
+RestartProposerWithTerm(p, new_term) ==
+    /\ prop_state' = [prop_state EXCEPT ![p].state = "campaign",
+                                        ![p].term = new_term,
+                                        ![p].votes = EmptyF,
+                                        ![p].termHistory = << >>,
+                                        ![p].wal = << >>,
+                                        ![p].nextSendLsn = EmptyF]
+    /\ UNCHANGED <<acc_state, committed, elected_history>>
+
+\* Proposer p loses all state, restarting.
 \* For simplicity (and to reduct state space), we assume it immediately gets
 \* current state from quorum q of acceptors determining the term he will request
 \* to vote for.
 RestartProposer(p, q) ==
     /\ Quorum(q)
     /\ LET new_term == Maximum({acc_state[a].term : a \in q}) + 1 IN
-           /\ prop_state' = [prop_state EXCEPT ![p].state = "campaign",
-                                               ![p].term = new_term,
-                                               ![p].votes = EmptyF,
-                                               ![p].termHistory = << >>,
-                                               ![p].wal = << >>,
-                                               ![p].nextSendLsn = EmptyF]
-           /\ UNCHANGED <<acc_state, committed, elected_history>>
+           RestartProposerWithTerm(p, new_term)
 
 \* Term history of acceptor a's WAL: the one saved truncated to contain only <=
 \* local FlushLsn entries.

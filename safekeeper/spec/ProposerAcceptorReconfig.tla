@@ -38,8 +38,8 @@ IsConfig(c) ==
 TypeOk ==
     /\ PAS!TypeOk
     /\ \A p \in proposers:
-      \/ prop_conf[p] = NULL
-      \/ IsConfig(prop_conf[p])
+           \/ prop_conf[p] = NULL
+           \/ IsConfig(prop_conf[p])
     /\ \A a \in acceptors: IsConfig(acc_conf[a])
     /\ IsConfig(conf_store)
 
@@ -52,12 +52,22 @@ Init ==
   /\ prop_conf = [p \in proposers |-> NULL]
   /\ \E init_members \in SUBSET acceptors:
        LET init_conf == [generation |-> 1, members |-> init_members, newMembers |-> NULL] IN
-         /\ acc_conf = [a \in acceptors |-> init_conf]
-         /\ conf_store = init_conf
+           /\ acc_conf = [a \in acceptors |-> init_conf]
+           /\ conf_store = init_conf
 
 \********************************************************************************
 \* Actions
 \********************************************************************************
+
+\* Proposer p loses all state, restarting.
+\* In the static spec we bump restarted proposer term to max of some quorum + 1
+\* so that it has chance to win election. With reconfigurations it's harder
+\* to calculate such a term, so keep it simple and take random acceptor one
+\* + 1.
+RestartProposer(p) ==
+    /\ \E a \in acceptors: PAS!RestartProposerWithTerm(p, acc_state[a].term + 1)
+    /\ prop_conf' = [prop_conf EXCEPT ![p] = NULL]
+    /\ UNCHANGED <<acc_conf, conf_store>>
 
 \* Do CAS on the conf store, starting change into the new_members conf.
 StartChange(new_members) ==
@@ -72,7 +82,7 @@ StartChange(new_members) ==
 
 Next ==
   \/ \E new_members \in SUBSET acceptors: StartChange(new_members)
-\*   \/ \E q \in Quorums: \E p \in proposers: RestartProposer(p, q)
+  \/ \E p \in proposers: RestartProposer(p)
 \*   \/ \E p \in proposers: \E a \in acceptors: Vote(p, a)
 \*   \/ \E p \in proposers: BecomeLeader(p)
 \*   \/ \E p \in proposers: \E a \in acceptors: UpdateTerm(p, a)
