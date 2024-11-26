@@ -19,7 +19,14 @@ from fixtures.neon_fixtures import NeonEnvBuilder
         "wal_record_crossing_segment_followed_by_small_one",
     ],
 )
-def test_crafted_wal_end(neon_env_builder: NeonEnvBuilder, wal_type: str):
+@pytest.mark.parametrize("wal_receiver_protocol", ["vanilla", "interpreted"])
+def test_crafted_wal_end(
+    neon_env_builder: NeonEnvBuilder, wal_type: str, wal_receiver_protocol: str
+):
+    neon_env_builder.pageserver_config_override = (
+        f"wal_receiver_protocol = '{wal_receiver_protocol}'"
+    )
+
     env = neon_env_builder.init_start()
     env.create_branch("test_crafted_wal_end")
     env.pageserver.allowed_errors.extend(

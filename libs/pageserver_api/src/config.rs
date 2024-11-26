@@ -18,7 +18,7 @@ use std::{
     str::FromStr,
     time::Duration,
 };
-use utils::logging::LogFormat;
+use utils::{logging::LogFormat, postgres_client::PostgresClientProtocol};
 
 use crate::models::ImageCompressionAlgorithm;
 use crate::models::LsnLease;
@@ -120,6 +120,7 @@ pub struct ConfigToml {
     pub no_sync: Option<bool>,
     #[serde(with = "humantime_serde")]
     pub server_side_batch_timeout: Option<Duration>,
+    pub wal_receiver_protocol: PostgresClientProtocol,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -330,6 +331,9 @@ pub mod defaults {
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
 
     pub const DEFAULT_SERVER_SIDE_BATCH_TIMEOUT: Option<&str> = None;
+
+    pub const DEFAULT_WAL_RECEIVER_PROTOCOL: utils::postgres_client::PostgresClientProtocol =
+        utils::postgres_client::PostgresClientProtocol::Vanilla;
 }
 
 impl Default for ConfigToml {
@@ -418,6 +422,7 @@ impl Default for ConfigToml {
                 .map(|duration| humantime::parse_duration(duration).unwrap()),
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
+            wal_receiver_protocol: DEFAULT_WAL_RECEIVER_PROTOCOL,
         }
     }
 }

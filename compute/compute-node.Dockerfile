@@ -3,7 +3,7 @@ ARG REPOSITORY=neondatabase
 ARG IMAGE=build-tools
 ARG TAG=pinned
 ARG BUILD_TAG
-ARG DEBIAN_VERSION=bullseye
+ARG DEBIAN_VERSION=bookworm
 ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
 
 #########################################################################################

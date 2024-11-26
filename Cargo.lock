@@ -4133,7 +4133,7 @@ dependencies = [
 [[package]]
 name = "postgres"
 version = "0.19.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#a130197713830a0ea0004b539b1f51a66b4c3e18"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#2a2a7c56930dd5ad60676ce6da92e1cbe6fb3ef5"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -4146,7 +4146,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#a130197713830a0ea0004b539b1f51a66b4c3e18"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#2a2a7c56930dd5ad60676ce6da92e1cbe6fb3ef5"
 dependencies = [
  "base64 0.20.0",
  "byteorder",
@@ -4165,7 +4165,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#a130197713830a0ea0004b539b1f51a66b4c3e18"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#2a2a7c56930dd5ad60676ce6da92e1cbe6fb3ef5"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -5364,6 +5364,7 @@ dependencies = [
  "itertools 0.10.5",
  "metrics",
  "once_cell",
+ "pageserver_api",
  "parking_lot 0.12.1",
  "postgres",
  "postgres-protocol",
@@ -5395,6 +5396,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "utils",
+ "wal_decoder",
  "walproposer",
  "workspace_hack",
 ]
@@ -6466,7 +6468,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.7"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#a130197713830a0ea0004b539b1f51a66b4c3e18"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#2a2a7c56930dd5ad60676ce6da92e1cbe6fb3ef5"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -7021,6 +7023,7 @@ dependencies = [
  "serde_assert",
  "serde_json",
  "serde_path_to_error",
+ "serde_with",
  "signal-hook",
  "strum",
  "strum_macros",
