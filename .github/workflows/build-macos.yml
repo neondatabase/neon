@@ -49,6 +49,12 @@ jobs:
           git submodule init vendor/postgres-${{ matrix.postgres-version }}
           git submodule update --depth 2 --recursive
 
+      - name: Checkout extra v16 submodule vendor/postgres-${{ matrix.postgres-version }}
+        if: matrix.postgres-version == 'v17'
+        run: |
+          git submodule init vendor/postgres-v16
+          git submodule update --depth 2 --recursive
+
       - name: Install build dependencies
         run: |
           brew install flex bison openssl protobuf icu4c
@@ -70,7 +76,7 @@ jobs:
           echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
 
       - name: Cache cargo deps (only for v17)
-        if: matrix.postgres-version == 'v16'
+        if: matrix.postgres-version == 'v17'
         uses: actions/cache@v4
         with:
           path: |
@@ -89,20 +95,20 @@ jobs:
         run: |
           make "neon-pg-ext-${{ matrix.postgres-version }}" -j$(sysctl -n hw.ncpu)
 
+      - name: Get postgres headers v16
+        if: matrix.postgres-version == 'v17'
+        run: |
+          make postgres-headers-v16 -j$(sysctl -n hw.ncpu)
+
       - name: Build walproposer-lib (only for v17)
         if: matrix.postgres-version == 'v17'
         run:
           make walproposer-lib -j$(sysctl -n hw.ncpu)
 
-      - name: Get postgres headers
-        if: matrix.postgres-version == 'v16'
-        run: |
-          make postgres-headers-${{ matrix.postgres-version }} -j$(sysctl -n hw.ncpu)
-
-      - name: Run cargo build (only for v16)
-        if: matrix.postgres-version == 'v16'
+      - name: Run cargo build (only for v17)
+        if: matrix.postgres-version == 'v17'
         run: PQ_LIB_DIR=$(pwd)/pg_install/${{ matrix.postgres-version }}/lib cargo build --all --release -j$(sysctl -n hw.ncpu)
 
-      - name: Check that no warnings are produced (only for v16)
-        if: matrix.postgres-version == 'v16'
+      - name: Check that no warnings are produced (only for v17)
+        if: matrix.postgres-version == 'v17'
         run: ./run_clippy.sh
