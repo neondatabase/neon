@@ -59,7 +59,7 @@ pub enum FlushUncommittedRecords {
 pub struct InterpretedWalRecords {
     pub records: Vec<InterpretedWalRecord>,
     // Start LSN of the next record after the batch.
-    // Note that said record may belong to the current shard.
+    // Note that said record may not belong to the current shard.
     pub next_record_lsn: Option<Lsn>,
 }
 
