@@ -2036,15 +2036,23 @@ async fn timeline_compact_handler(
         parse_query_param::<_, bool>(&request, "wait_until_scheduled_compaction_done")?
             .unwrap_or(false);
 
+    let sub_compaction = compact_request
+        .as_ref()
+        .map(|r| r.sub_compaction)
+        .unwrap_or(false);
     let options = CompactOptions {
         compact_range: compact_request
             .as_ref()
             .and_then(|r| r.compact_range.clone()),
         compact_below_lsn: compact_request.as_ref().and_then(|r| r.compact_below_lsn),
         flags,
+        sub_compaction,
     };
 
-    let scheduled = compact_request.map(|r| r.scheduled).unwrap_or(false);
+    let scheduled = compact_request
+        .as_ref()
+        .map(|r| r.scheduled)
+        .unwrap_or(false);
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);

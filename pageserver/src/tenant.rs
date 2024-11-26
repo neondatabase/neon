@@ -49,6 +49,7 @@ use timeline::import_pgdata;
 use timeline::offload::offload_timeline;
 use timeline::CompactFlags;
 use timeline::CompactOptions;
+use timeline::CompactionError;
 use timeline::ShutdownMode;
 use tokio::io::BufReader;
 use tokio::sync::watch;
@@ -2987,10 +2988,16 @@ impl Tenant {
                 if has_pending_l0_compaction_task {
                     Some(true)
                 } else {
-                    let has_pending_scheduled_compaction_task;
+                    let mut has_pending_scheduled_compaction_task;
                     let next_scheduled_compaction_task = {
                         let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
                         if let Some(tline_pending_tasks) = guard.get_mut(timeline_id) {
+                            if !tline_pending_tasks.is_empty() {
+                                info!(
+                                    "{} tasks left in the compaction schedule queue",
+                                    tline_pending_tasks.len()
+                                );
+                            }
                             let next_task = tline_pending_tasks.pop_front();
                             has_pending_scheduled_compaction_task = !tline_pending_tasks.is_empty();
                             next_task
@@ -3007,6 +3014,32 @@ impl Tenant {
                             .contains(CompactFlags::EnhancedGcBottomMostCompaction)
                         {
                             warn!("ignoring scheduled compaction task: scheduled task must be gc compaction: {:?}", next_scheduled_compaction_task.options);
+                        } else if next_scheduled_compaction_task.options.sub_compaction {
+                            info!("running scheduled enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs");
+                            let jobs = timeline
+                                .gc_compaction_split_jobs(next_scheduled_compaction_task.options)
+                                .await
+                                .map_err(CompactionError::Other)?;
+                            if jobs.is_empty() {
+                                info!("no jobs to run, skipping scheduled compaction task");
+                            } else {
+                                has_pending_scheduled_compaction_task = true;
+                                let jobs_len = jobs.len();
+                                let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
+                                let tline_pending_tasks = guard.entry(*timeline_id).or_default();
+                                for (idx, job) in jobs.into_iter().enumerate() {
+                                    tline_pending_tasks.push_back(ScheduledCompactionTask {
+                                        options: job,
+                                        result_tx: if idx == jobs_len - 1 {
+                                            // The last compaction job sends the completion signal
+                                            next_scheduled_compaction_task.result_tx.take()
+                                        } else {
+                                            None
+                                        },
+                                    });
+                                }
+                                info!("scheduled enhanced gc bottom-most compaction with sub-compaction, split into {} jobs", jobs_len);
+                            }
                         } else {
                             let _ = timeline
                                 .compact_with_options(
@@ -9244,7 +9277,7 @@ mod tests {
                 CompactOptions {
                     flags: dryrun_flags,
                     compact_range: None,
-                    compact_below_lsn: None,
+                    ..Default::default()
                 },
                 &ctx,
             )
@@ -9481,7 +9514,7 @@ mod tests {
                 CompactOptions {
                     flags: dryrun_flags,
                     compact_range: None,
-                    compact_below_lsn: None,
+                    ..Default::default()
                 },
                 &ctx,
             )
@@ -9973,7 +10006,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_range: Some((get_key(0)..get_key(2)).into()),
-                    compact_below_lsn: None,
+                    ..Default::default()
                 },
                 &ctx,
             )
@@ -10020,7 +10053,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_range: Some((get_key(2)..get_key(4)).into()),
-                    compact_below_lsn: None,
+                    ..Default::default()
                 },
                 &ctx,
             )
@@ -10072,7 +10105,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_range: Some((get_key(4)..get_key(9)).into()),
-                    compact_below_lsn: None,
+                    ..Default::default()
                 },
                 &ctx,
             )
@@ -10123,7 +10156,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_range: Some((get_key(9)..get_key(10)).into()),
-                    compact_below_lsn: None,
+                    ..Default::default()
                 },
                 &ctx,
             )
@@ -10179,7 +10212,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_range: Some((get_key(0)..get_key(10)).into()),
-                    compact_below_lsn: None,
+                    ..Default::default()
                 },
                 &ctx,
             )

@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use super::layer_manager::LayerManager;
 use super::{
-    CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, ImageLayerCreationMode,
-    RecordedDuration, Timeline,
+    CompactFlags, CompactOptions, CompactRange, CreateImageLayersError, DurationRecorder,
+    ImageLayerCreationMode, RecordedDuration, Timeline,
 };
 
 use anyhow::{anyhow, bail, Context};
@@ -1751,6 +1751,103 @@ impl Timeline {
         Ok(())
     }
 
+    /// Split a gc-compaction job into multiple compaction jobs. Optimally, this function should return a vector of
+    /// `GcCompactionJobDesc`. But we want to keep it simple on the tenant scheduling side without exposing too much
+    /// ad-hoc information about gc compaction itself.
+    pub(crate) async fn gc_compaction_split_jobs(
+        self: &Arc<Self>,
+        options: CompactOptions,
+    ) -> anyhow::Result<Vec<CompactOptions>> {
+        if !options.sub_compaction {
+            return Ok(vec![options]);
+        }
+        let compact_range = options.compact_range.clone().unwrap_or(CompactRange {
+            start: Key::MIN,
+            end: Key::MAX,
+        });
+        let compact_lsn = if let Some(compact_lsn) = options.compact_below_lsn {
+            compact_lsn
+        } else {
+            let gc_info = self.gc_info.read().unwrap();
+            gc_info.cutoffs.select_min() // use the real gc cutoff
+        };
+        let mut compact_jobs = Vec::new();
+        // For now, we simply use the key partitioning information; we should do a more fine-grained partitioning
+        // by estimating the amount of files read for a compaction job. We should also partition on LSN.
+        let partition = self.partitioning.lock().await;
+        let ((dense_ks, sparse_ks), _) = &*partition;
+        // Truncate the key range to be within user specified compaction range.
+        fn truncate_to(
+            source_start: &Key,
+            source_end: &Key,
+            target_start: &Key,
+            target_end: &Key,
+        ) -> Option<(Key, Key)> {
+            let start = source_start.max(target_start);
+            let end = source_end.min(target_end);
+            if start < end {
+                Some((*start, *end))
+            } else {
+                None
+            }
+        }
+        let mut split_key_ranges = Vec::new();
+        for partition in &dense_ks.parts {
+            for range in partition.ranges.iter() {
+                let Some((start, end)) = truncate_to(
+                    &range.start,
+                    &range.end,
+                    &compact_range.start,
+                    &compact_range.end,
+                ) else {
+                    continue;
+                };
+                split_key_ranges.push((start, end));
+            }
+        }
+        for partition in &sparse_ks.parts {
+            for range in partition.0.ranges.iter() {
+                let Some((start, end)) = truncate_to(
+                    &range.start,
+                    &range.end,
+                    &compact_range.start,
+                    &compact_range.end,
+                ) else {
+                    continue;
+                };
+                split_key_ranges.push((start, end));
+            }
+        }
+        let guard = self.layers.read().await;
+        let layer_map = guard.layer_map()?;
+        let mut current_start = None;
+        // Split compaction job to about 2GB each
+        const GC_COMPACT_MAX_SIZE_MB: u64 = 4 * 1024; // 2GB, TODO: should be configuration in the future
+        let ranges_num = split_key_ranges.len();
+        for (idx, (start, end)) in split_key_ranges.into_iter().enumerate() {
+            if current_start.is_none() {
+                current_start = Some(start);
+            }
+            let start = current_start.unwrap();
+            let res = layer_map.range_search(start..end, compact_lsn);
+            let total_size = res.found.keys().map(|x| x.layer.file_size()).sum::<u64>();
+            if total_size > GC_COMPACT_MAX_SIZE_MB * 1024 * 1024 || ranges_num == idx + 1 {
+                let mut compact_options = options.clone();
+                debug!(
+                    "splitting compaction job: {}..{}, estimated_size={}",
+                    start, end, total_size
+                );
+                compact_options.compact_range = Some(CompactRange { start, end });
+                compact_options.compact_below_lsn = Some(compact_lsn);
+                compact_options.sub_compaction = false;
+                compact_jobs.push(compact_options);
+                current_start = Some(end);
+            }
+        }
+        drop(guard);
+        Ok(compact_jobs)
+    }
+
     /// An experimental compaction building block that combines compaction with garbage collection.
     ///
     /// The current implementation picks all delta + image layers that are below or intersecting with
@@ -1773,6 +1870,36 @@ impl Timeline {
         options: CompactOptions,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        if options.sub_compaction {
+            info!("running enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs");
+            let jobs = self.gc_compaction_split_jobs(options).await?;
+            let jobs_len = jobs.len();
+            for (idx, job) in jobs.into_iter().enumerate() {
+                info!(
+                    "running enhanced gc bottom-most compaction, sub-compaction {}/{}",
+                    idx + 1,
+                    jobs_len
+                );
+                self.compact_with_gc_inner(cancel, job, ctx).await?;
+            }
+            if jobs_len == 0 {
+                info!("no jobs to run, skipping gc bottom-most compaction");
+            }
+            return Ok(());
+        }
+        self.compact_with_gc_inner(cancel, options, ctx).await
+    }
+
+    async fn compact_with_gc_inner(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        options: CompactOptions,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        assert!(
+            !options.sub_compaction,
+            "sub-compaction should be handled by the outer function"
+        );
         // Block other compaction/GC tasks from running for now. GC-compaction could run along
         // with legacy compaction tasks in the future. Always ensure the lock order is compaction -> gc.
         // Note that we already acquired the compaction lock when the outer `compact` function gets called.
