@@ -327,6 +327,25 @@ impl WalIngest {
         let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
         let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
 
+        // Only apply the writes if this shard owns either of the VM pages. These WAL records are
+        // broadcast to all shards, but should only be applied on the relevant ones. See:
+        // https://github.com/neondatabase/neon/issues/9855
+        //
+        // TODO: we should differentiate on old_vm_blk and new_vm_blk since we may only own one of
+        // them, but this is no worse than the old behavior where we applied all records, and will
+        // avoid the performance penalty of the relsize cache miss and DbDir deserialization.
+        //
+        // TODO: consider filtering this during decoding, and avoid the broadcast.
+        let old_is_local = old_vm_blk
+            .map(|blk| self.shard.is_key_local(&rel_block_to_key(vm_rel, blk)))
+            .unwrap_or_default();
+        let new_is_local = new_vm_blk
+            .map(|blk| self.shard.is_key_local(&rel_block_to_key(vm_rel, blk)))
+            .unwrap_or_default();
+        if !old_is_local && !new_is_local {
+            return Ok(());
+        }
+
         // Sometimes, Postgres seems to create heap WAL records with the
         // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
         // not set. In fact, it's possible that the VM page does not exist at all.
