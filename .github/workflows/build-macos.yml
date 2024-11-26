@@ -49,10 +49,10 @@ jobs:
           git submodule init vendor/postgres-${{ matrix.postgres-version }}
           git submodule update --depth 2 --recursive
 
-      - name: Checkout extra v16 submodule vendor/postgres-${{ matrix.postgres-version }}
+      - name: Checkout all submodule vendor/postgres-${{ matrix.postgres-version }}
         if: matrix.postgres-version == 'v17'
         run: |
-          git submodule init vendor/postgres-v16
+          git submodule init
           git submodule update --depth 2 --recursive
 
       - name: Install build dependencies
@@ -95,10 +95,10 @@ jobs:
         run: |
           make "neon-pg-ext-${{ matrix.postgres-version }}" -j$(sysctl -n hw.ncpu)
 
-      - name: Get postgres headers v16
+      - name: Get postgres headers
         if: matrix.postgres-version == 'v17'
         run: |
-          make postgres-headers-v16 -j$(sysctl -n hw.ncpu)
+          make postgres-headers -j$(sysctl -n hw.ncpu)
 
       - name: Build walproposer-lib (only for v17)
         if: matrix.postgres-version == 'v17'
