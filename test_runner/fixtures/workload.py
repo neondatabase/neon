@@ -53,7 +53,7 @@ class Workload:
         self._endpoint: Endpoint | None = None
         self._endpoint_opts = endpoint_opts or {}
 
-    def reconfigure(self):
+    def reconfigure(self) -> None:
         """
         Request the endpoint to reconfigure based on location reported by storage controller
         """
@@ -94,9 +94,10 @@ class Workload:
     def __del__(self):
         self.stop()
 
-    def init(self, pageserver_id: int | None = None):
+    def init(self, pageserver_id: int | None = None, allow_recreate=False):
         endpoint = self.endpoint(pageserver_id)
-
+        if allow_recreate:
+            endpoint.safe_psql(f"DROP TABLE IF EXISTS {self.table};")
         endpoint.safe_psql(f"CREATE TABLE {self.table} (id INTEGER PRIMARY KEY, val text);")
         endpoint.safe_psql("CREATE EXTENSION IF NOT EXISTS neon_test_utils;")
         last_flush_lsn_upload(
@@ -192,7 +193,7 @@ class Workload:
 
     def validate(self, pageserver_id: int | None = None):
         endpoint = self.endpoint(pageserver_id)
-        endpoint.clear_shared_buffers()
+        endpoint.clear_buffers()
         result = endpoint.safe_psql(f"SELECT COUNT(*) FROM {self.table}")
 
         log.info(f"validate({self.expect_rows}): {result}")

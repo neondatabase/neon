@@ -562,6 +562,9 @@ pub enum BeMessage<'a> {
         options: &'a [&'a str],
     },
     KeepAlive(WalSndKeepAlive),
+    /// Batch of interpreted, shard filtered WAL records,
+    /// ready for the pageserver to ingest
+    InterpretedWalRecords(InterpretedWalRecordsBody<'a>),
 }
 
 /// Common shorthands.
@@ -670,6 +673,25 @@ pub struct WalSndKeepAlive {
     pub wal_end: u64, // current end of WAL on the server
     pub timestamp: i64,
     pub request_reply: bool,
+}
+
+/// Batch of interpreted WAL records used in the interpreted
+/// safekeeper to pageserver protocol.
+///
+/// Note that the pageserver uses the RawInterpretedWalRecordsBody
+/// counterpart of this from the neondatabase/rust-postgres repo.
+/// If you're changing this struct, you likely need to change its
+/// twin as well.
+#[derive(Debug)]
+pub struct InterpretedWalRecordsBody<'a> {
+    /// End of raw WAL in [`Self::data`]
+    pub streaming_lsn: u64,
+    /// Current end of WAL on the server
+    pub commit_lsn: u64,
+    /// Start LSN of the next record in PG WAL.
+    /// Is 0 if the portion of PG WAL did not contain any records.
+    pub next_record_lsn: u64,
+    pub data: &'a [u8],
 }
 
 pub static HELLO_WORLD_ROW: BeMessage = BeMessage::DataRow(&[Some(b"hello world")]);
@@ -995,6 +1017,20 @@ impl BeMessage<'_> {
                     }
                     Ok(())
                 })?
+            }
+
+            BeMessage::InterpretedWalRecords(rec) => {
+                // We use the COPY_DATA_TAG for our custom message
+                // since this tag is interpreted as raw bytes.
+                buf.put_u8(b'd');
+                write_body(buf, |buf| {
+                    buf.put_u8(b'0'); // matches INTERPRETED_WAL_RECORD_TAG in postgres-protocol
+                                      // dependency
+                    buf.put_u64(rec.streaming_lsn);
+                    buf.put_u64(rec.commit_lsn);
+                    buf.put_u64(rec.next_record_lsn);
+                    buf.put_slice(rec.data);
+                });
             }
         }
         Ok(())

@@ -66,6 +66,7 @@ def pytest_generate_tests(metafunc: Metafunc):
 
     metafunc.parametrize("build_type", build_types)
 
+    pg_versions: list[PgVersion]
     if (v := os.getenv("DEFAULT_PG_VERSION")) is None:
         pg_versions = [version for version in PgVersion if version != PgVersion.NOT_SET]
     else:
@@ -115,5 +116,6 @@ def pytest_runtest_makereport(*args, **kwargs):
     }.get(os.uname().machine, "UNKNOWN")
     arch = os.getenv("RUNNER_ARCH", uname_m)
     allure.dynamic.parameter("__arch", arch)
+    allure.dynamic.parameter("__lfc", os.getenv("USE_LFC") != "false")
 
     yield

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS results (
     duration     INT NOT NULL,
     flaky        BOOLEAN NOT NULL,
     arch         arch DEFAULT 'X64',
+    lfc          BOOLEAN DEFAULT false NOT NULL,
     build_type   TEXT NOT NULL,
     pg_version   INT NOT NULL,
     run_id       BIGINT NOT NULL,
@@ -54,6 +55,7 @@ class Row:
     duration: int
     flaky: bool
     arch: str
+    lfc: bool
     build_type: str
     pg_version: int
     run_id: int
@@ -132,6 +134,7 @@ def ingest_test_result(
             if p["name"].startswith("__")
         }
         arch = parameters.get("arch", "UNKNOWN").strip("'")
+        lfc = parameters.get("lfc", "False") == "True"
 
         build_type, pg_version, unparametrized_name = parse_test_name(test["name"])
         labels = {label["name"]: label["value"] for label in test["labels"]}
@@ -145,6 +148,7 @@ def ingest_test_result(
             duration=test["time"]["duration"],
             flaky=test["flaky"] or test["retriesStatusChange"],
             arch=arch,
+            lfc=lfc,
             build_type=build_type,
             pg_version=pg_version,
             run_id=run_id,

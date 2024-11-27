@@ -65,6 +65,18 @@ pub struct InterpretedWalRecord {
     pub xid: TransactionId,
 }
 
+impl InterpretedWalRecord {
+    /// Checks if the WAL record is empty
+    ///
+    /// An empty interpreted WAL record has no data or metadata and does not have to be sent to the
+    /// pageserver.
+    pub fn is_empty(&self) -> bool {
+        self.batch.is_empty()
+            && self.metadata_record.is_none()
+            && matches!(self.flush_uncommitted, FlushUncommittedRecords::No)
+    }
+}
+
 /// The interpreted part of the Postgres WAL record which requires metadata
 /// writes to the underlying storage engine.
 #[derive(Serialize, Deserialize)]

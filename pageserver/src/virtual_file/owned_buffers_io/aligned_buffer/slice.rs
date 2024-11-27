@@ -19,7 +19,7 @@ impl<'a, const N: usize, const A: usize> AlignedSlice<'a, N, ConstAlign<A>> {
     }
 }
 
-impl<'a, const N: usize, A: Alignment> Deref for AlignedSlice<'a, N, A> {
+impl<const N: usize, A: Alignment> Deref for AlignedSlice<'_, N, A> {
     type Target = [u8; N];
 
     fn deref(&self) -> &Self::Target {
@@ -27,13 +27,13 @@ impl<'a, const N: usize, A: Alignment> Deref for AlignedSlice<'a, N, A> {
     }
 }
 
-impl<'a, const N: usize, A: Alignment> DerefMut for AlignedSlice<'a, N, A> {
+impl<const N: usize, A: Alignment> DerefMut for AlignedSlice<'_, N, A> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.buf
     }
 }
 
-impl<'a, const N: usize, A: Alignment> AsRef<[u8; N]> for AlignedSlice<'a, N, A> {
+impl<const N: usize, A: Alignment> AsRef<[u8; N]> for AlignedSlice<'_, N, A> {
     fn as_ref(&self) -> &[u8; N] {
         self.buf
     }

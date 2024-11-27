@@ -61,7 +61,7 @@ from fixtures.utils import (
 )
 
 if TYPE_CHECKING:
-    from typing import Any
+    from typing import Any, Self
 
 
 def wait_lsn_force_checkpoint(
@@ -1460,7 +1460,7 @@ class SafekeeperEnv:
         self.tenant_id: TenantId | None = None
         self.timeline_id: TimelineId | None = None
 
-    def init(self) -> SafekeeperEnv:
+    def init(self) -> Self:
         assert self.postgres is None, "postgres is already initialized"
         assert self.safekeepers is None, "safekeepers are already initialized"
 
@@ -1541,7 +1541,7 @@ class SafekeeperEnv:
             log.info(f"Killing safekeeper with pid {pid}")
             os.kill(pid, signal.SIGKILL)
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -2446,7 +2446,7 @@ def test_broker_discovery(neon_env_builder: NeonEnvBuilder):
         # generate some data to commit WAL on safekeepers
         endpoint.safe_psql("insert into t select generate_series(1,100), 'action'")
         # clear the buffers
-        endpoint.clear_shared_buffers()
+        endpoint.clear_buffers()
         # read data to fetch pages from pageserver
         endpoint.safe_psql("select sum(i) from t")
 

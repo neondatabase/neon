@@ -57,6 +57,10 @@ VERSIONS_COMBINATIONS = (
 )
 # fmt: on
 
+# If the environment variable USE_LFC is set and its value is "false", then LFC is disabled for tests.
+# If it is not set or set to a value not equal to "false", LFC is enabled by default.
+USE_LFC = os.environ.get("USE_LFC") != "false"
+
 
 def subprocess_capture(
     capture_dir: Path,
@@ -653,6 +657,23 @@ def allpairs_versions():
     return {"argnames": "combination", "argvalues": tuple(argvalues), "ids": ids}
 
 
+def size_to_bytes(hr_size: str) -> int:
+    """
+    Gets human-readable size from postgresql.conf (e.g. 512kB, 10MB)
+    returns size in bytes
+    """
+    units = {"B": 1, "kB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4, "PB": 1024**5}
+    match = re.search(r"^\'?(\d+)\s*([kMGTP]?B)?\'?$", hr_size)
+    assert match is not None, f'"{hr_size}" is not a well-formatted human-readable size'
+    number, unit = match.groups()
+
+    if unit:
+        amp = units[unit]
+    else:
+        amp = 8192
+    return int(number) * amp
+
+
 def skip_on_postgres(version: PgVersion, reason: str):
     return pytest.mark.skipif(
         PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is version,
@@ -670,6 +691,13 @@ def xfail_on_postgres(version: PgVersion, reason: str):
 def run_only_on_default_postgres(reason: str):
     return pytest.mark.skipif(
         PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is not PgVersion.DEFAULT,
+        reason=reason,
+    )
+
+
+def run_only_on_postgres(versions: Iterable[PgVersion], reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) not in versions,
         reason=reason,
     )
 

@@ -121,7 +121,6 @@ def test_readonly_node(neon_simple_env: NeonEnv):
         )
 
 
-@pytest.mark.skip("See https://github.com/neondatabase/neon/issues/9754")
 def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
     """
     Test static endpoint is protected from GC by acquiring and renewing lsn leases.
@@ -231,7 +230,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
         return offset
 
     # Insert some records on main branch
-    with env.endpoints.create_start("main") as ep_main:
+    with env.endpoints.create_start("main", config_lines=["shared_buffers=1MB"]) as ep_main:
         with ep_main.cursor() as cur:
             cur.execute("CREATE TABLE t0(v0 int primary key, v1 text)")
         lsn = Lsn(0)
