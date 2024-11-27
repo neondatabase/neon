@@ -1229,10 +1229,9 @@ impl<'a> DatadirModification<'a> {
     }
 
     pub(crate) fn has_dirty_data(&self) -> bool {
-        !self
-            .pending_data_batch
+        self.pending_data_batch
             .as_ref()
-            .map_or(true, |b| b.is_empty())
+            .map_or(false, |b| b.has_data())
     }
 
     /// Set the current lsn
@@ -1408,7 +1407,7 @@ impl<'a> DatadirModification<'a> {
             Some(pending_batch) => {
                 pending_batch.extend(batch);
             }
-            None if !batch.is_empty() => {
+            None if batch.has_data() => {
                 self.pending_data_batch = Some(batch);
             }
             None => {

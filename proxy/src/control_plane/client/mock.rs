@@ -114,7 +114,7 @@ impl MockControlPlane {
 
             Ok((secret, allowed_ips))
         }
-        .map_err(crate::error::log_error::<GetAuthInfoError>)
+        .inspect_err(|e: &GetAuthInfoError| tracing::error!("{e}"))
         .instrument(info_span!("postgres", url = self.endpoint.as_str()))
         .await?;
         Ok(AuthInfo {

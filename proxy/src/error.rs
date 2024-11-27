@@ -10,12 +10,6 @@ pub(crate) fn io_error(e: impl Into<Box<dyn StdError + Send + Sync>>) -> io::Err
     io::Error::new(io::ErrorKind::Other, e)
 }
 
-/// A small combinator for pluggable error logging.
-pub(crate) fn log_error<E: fmt::Display>(e: E) -> E {
-    tracing::error!("{e}");
-    e
-}
-
 /// Marks errors that may be safely shown to a client.
 /// This trait can be seen as a specialized version of [`ToString`].
 ///

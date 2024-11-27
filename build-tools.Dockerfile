@@ -1,4 +1,4 @@
-ARG DEBIAN_VERSION=bullseye
+ARG DEBIAN_VERSION=bookworm
 
 FROM debian:bookworm-slim AS pgcopydb_builder
 ARG DEBIAN_VERSION

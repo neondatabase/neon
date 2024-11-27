@@ -2470,6 +2470,7 @@ impl Timeline {
         *guard = Some(WalReceiver::start(
             Arc::clone(self),
             WalReceiverConf {
+                protocol: self.conf.wal_receiver_protocol,
                 wal_connect_timeout,
                 lagging_wal_timeout,
                 max_lsn_wal_lag,
@@ -3829,7 +3830,8 @@ impl Timeline {
         };
 
         // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
-        // This makes us refuse ingest until the new layers have been persisted to the remote.
+        // This makes us refuse ingest until the new layers have been persisted to the remote
+        let start = Instant::now();
         self.remote_client
             .wait_completion()
             .await
@@ -3842,6 +3844,8 @@ impl Timeline {
                     FlushLayerError::Other(anyhow!(e).into())
                 }
             })?;
+        let duration = start.elapsed().as_secs_f64();
+        self.metrics.flush_wait_upload_time_gauge_add(duration);
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
@@ -5896,7 +5900,7 @@ impl<'a> TimelineWriter<'a> {
         batch: SerializedValueBatch,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        if batch.is_empty() {
+        if !batch.has_data() {
             return Ok(());
         }
 
