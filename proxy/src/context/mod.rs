@@ -8,7 +8,7 @@ use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 use tracing::field::display;
-use tracing::{debug, info_span, Span};
+use tracing::{debug, error, info_span, Span};
 use try_lock::TryLock;
 use uuid::Uuid;
 
@@ -415,9 +415,11 @@ impl RequestContextInner {
                 });
         }
         if let Some(tx) = self.sender.take() {
-            tx.send(RequestData::from(&*self))
-                .inspect_err(|e| debug!("tx send failed: {e}"))
-                .ok();
+            // If type changes, this error handling needs to be updated.
+            let tx: mpsc::UnboundedSender<RequestData> = tx;
+            if let Err(e) = tx.send(RequestData::from(&*self)) {
+                error!("log_connect channel send failed: {e}");
+            }
         }
     }
 
@@ -426,9 +428,11 @@ impl RequestContextInner {
         // Here we log the length of the session.
         self.disconnect_timestamp = Some(Utc::now());
         if let Some(tx) = self.disconnect_sender.take() {
-            tx.send(RequestData::from(&*self))
-                .inspect_err(|e| debug!("tx send failed: {e}"))
-                .ok();
+            // If type changes, this error handling needs to be updated.
+            let tx: mpsc::UnboundedSender<RequestData> = tx;
+            if let Err(e) = tx.send(RequestData::from(&*self)) {
+                error!("log_disconnect channel send failed: {e}");
+            }
         }
     }
 }
