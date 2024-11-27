@@ -9,6 +9,7 @@ from fixtures.neon_fixtures import (
     wait_for_commit_lsn,
     wait_for_last_flush_lsn,
 )
+from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.pg_version import PgVersion
 
 
@@ -34,6 +35,7 @@ def test_ingest_logical_message(
 
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
+    client = env.pageserver.http_client()
 
     # Ingest data and measure durations.
     start_lsn = Lsn(endpoint.safe_psql("select pg_current_wal_lsn()")[0][0])
@@ -61,12 +63,11 @@ def test_ingest_logical_message(
 
             # Wait for Pageserver.
             log.info("Waiting for Pageserver to catch up")
-            wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+            wait_for_last_record_lsn(client, env.initial_tenant, env.initial_timeline, end_lsn)
 
     # Now that all data is ingested, delete and recreate the tenant in the pageserver. This will
     # reingest all the WAL from the safekeeper without any other constraints. This gives us a
     # baseline of how fast the pageserver can ingest this WAL in isolation.
-    client = env.pageserver.http_client()
     pg_version = PgVersion(
         client.timeline_detail(env.initial_tenant, env.initial_timeline)["pg_version"]
     )
