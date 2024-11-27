@@ -170,7 +170,7 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
             # re-execute the query, it will make GetPage
             # requests. This does not clear the last-written LSN cache
             # so we still remember the LSNs of the pages.
-            secondary.clear_shared_buffers(cursor=s_cur)
+            secondary.clear_buffers(cursor=s_cur)
 
             if pause_apply:
                 s_cur.execute("SELECT pg_wal_replay_pause()")

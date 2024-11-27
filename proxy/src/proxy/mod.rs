@@ -10,7 +10,7 @@ pub(crate) mod wake_compute;
 use std::sync::Arc;
 
 pub use copy_bidirectional::{copy_bidirectional_client_compute, ErrorSource};
-use futures::TryFutureExt;
+use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, StartupMessageParams};
@@ -25,7 +25,7 @@ use self::connect_compute::{connect_to_compute, TcpMechanism};
 use self::passthrough::ProxyPassthrough;
 use crate::cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
 use crate::protocol2::{read_proxy_protocol, ConnectHeader, ConnectionInfo};
@@ -117,48 +117,45 @@ pub async fn task_main(
                 }
             };
 
-            let ctx = RequestMonitoring::new(
+            let ctx = RequestContext::new(
                 session_id,
                 conn_info,
                 crate::metrics::Protocol::Tcp,
                 &config.region,
             );
-            let span = ctx.span();
 
-            let startup = Box::pin(
-                handle_client(
-                    config,
-                    auth_backend,
-                    &ctx,
-                    cancellation_handler,
-                    socket,
-                    ClientMode::Tcp,
-                    endpoint_rate_limiter2,
-                    conn_gauge,
-                )
-                .instrument(span.clone()),
-            );
-            let res = startup.await;
+            let res = handle_client(
+                config,
+                auth_backend,
+                &ctx,
+                cancellation_handler,
+                socket,
+                ClientMode::Tcp,
+                endpoint_rate_limiter2,
+                conn_gauge,
+            )
+            .instrument(ctx.span())
+            .boxed()
+            .await;
 
             match res {
                 Err(e) => {
-                    // todo: log and push to ctx the error kind
                     ctx.set_error_kind(e.get_error_kind());
-                    warn!(parent: &span, "per-client task finished with an error: {e:#}");
+                    warn!(parent: &ctx.span(), "per-client task finished with an error: {e:#}");
                 }
                 Ok(None) => {
                     ctx.set_success();
                 }
                 Ok(Some(p)) => {
                     ctx.set_success();
-                    ctx.log_connect();
-                    match p.proxy_pass().instrument(span.clone()).await {
+                    let _disconnect = ctx.log_connect();
+                    match p.proxy_pass().await {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
-                            warn!(parent: &span, "per-client task finished with an IO error from the client: {e:#}");
+                            warn!(?session_id, "per-client task finished with an IO error from the client: {e:#}");
                         }
                         Err(ErrorSource::Compute(e)) => {
-                            error!(parent: &span, "per-client task finished with an IO error from the compute: {e:#}");
+                            error!(?session_id, "per-client task finished with an IO error from the compute: {e:#}");
                         }
                     }
                 }
@@ -247,14 +244,14 @@ impl ReportableError for ClientRequestError {
 pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
     auth_backend: &'static auth::Backend<'static, ()>,
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     conn_gauge: NumClientConnectionsGuard<'static>,
 ) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
-    info!(
+    debug!(
         protocol = %ctx.protocol(),
         "handling interactive connection from client"
     );
@@ -268,12 +265,18 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let record_handshake_error = !ctx.has_private_peer_addr();
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
     let do_handshake = handshake(ctx, stream, mode.handshake_tls(tls), record_handshake_error);
+
     let (mut stream, params) =
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
             HandshakeData::Startup(stream, params) => (stream, params),
             HandshakeData::Cancel(cancel_key_data) => {
                 return Ok(cancellation_handler
-                    .cancel_session(cancel_key_data, ctx.session_id())
+                    .cancel_session(
+                        cancel_key_data,
+                        ctx.session_id(),
+                        &ctx.peer_addr(),
+                        config.authentication_config.ip_allowlist_check_enabled,
+                    )
                     .await
                     .map(|()| None)?)
             }
@@ -346,6 +349,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         client: stream,
         aux: node.aux.clone(),
         compute: node,
+        session_id: ctx.session_id(),
         _req: request_gauge,
         _conn: conn_gauge,
         _cancel: session,

@@ -77,15 +77,9 @@ jobs:
         shell: bash
         id: build-tag
 
-  check-build-tools-image:
-    needs: [ check-permissions ]
-    uses: ./.github/workflows/check-build-tools-image.yml
-
   build-build-tools-image:
-    needs: [ check-build-tools-image ]
+    needs: [ check-permissions ]
     uses: ./.github/workflows/build-build-tools-image.yml
-    with:
-      image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
     secrets: inherit
 
   check-codestyle-python:
@@ -259,7 +253,14 @@ jobs:
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
       # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
-      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16", "v17"]' || '["v17"]' }}
+      # run without LFC on v17 release only
+      test-cfg: |
+        ${{ matrix.build-type == 'release' && '[{"pg_version":"v14", "lfc_state": "without-lfc"},
+                                                {"pg_version":"v15", "lfc_state": "without-lfc"},
+                                                {"pg_version":"v16", "lfc_state": "without-lfc"},
+                                                {"pg_version":"v17", "lfc_state": "without-lfc"},
+                                                {"pg_version":"v17", "lfc_state": "with-lfc"}]'
+                                           || '[{"pg_version":"v17", "lfc_state": "without-lfc"}]' }}
     secrets: inherit
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking

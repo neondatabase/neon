@@ -58,7 +58,7 @@ use compute_tools::compute::{
     forward_termination_signal, ComputeNode, ComputeState, ParsedSpec, PG_PID,
 };
 use compute_tools::configurator::launch_configurator;
-use compute_tools::extension_server::get_pg_version;
+use compute_tools::extension_server::get_pg_version_string;
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -104,6 +104,11 @@ fn main() -> Result<()> {
 
 fn init() -> Result<(String, clap::ArgMatches)> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
+
+    opentelemetry::global::set_error_handler(|err| {
+        tracing::info!("OpenTelemetry error: {err}");
+    })
+    .expect("global error handler lock poisoned");
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
     thread::spawn(move || {
@@ -321,7 +326,7 @@ fn wait_spec(
         connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
-        pgversion: get_pg_version(pgbin),
+        pgversion: get_pg_version_string(pgbin),
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),

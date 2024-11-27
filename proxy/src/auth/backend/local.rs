@@ -7,7 +7,7 @@ use super::jwt::{AuthRule, FetchAuthRules};
 use crate::auth::backend::jwt::FetchAuthRulesError;
 use crate::compute::ConnCfg;
 use crate::compute_ctl::ComputeCtlApi;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo};
 use crate::control_plane::NodeInfo;
 use crate::http;
@@ -56,7 +56,7 @@ pub static JWKS_ROLE_MAP: ArcSwapOption<EndpointJwksResponse> = ArcSwapOption::c
 impl FetchAuthRules for StaticAuthRules {
     async fn fetch_auth_rules(
         &self,
-        _ctx: &RequestMonitoring,
+        _ctx: &RequestContext,
         _endpoint: EndpointId,
     ) -> Result<Vec<AuthRule>, FetchAuthRulesError> {
         let mappings = JWKS_ROLE_MAP.load();

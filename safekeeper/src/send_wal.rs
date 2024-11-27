@@ -5,12 +5,15 @@ use crate::handler::SafekeeperPostgresHandler;
 use crate::metrics::RECEIVED_PS_FEEDBACKS;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{Term, TermLsn};
+use crate::send_interpreted_wal::InterpretedWalSender;
 use crate::timeline::WalResidentTimeline;
+use crate::wal_reader_stream::WalReaderStreamBuilder;
 use crate::wal_service::ConnectionId;
 use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;
 use anyhow::{bail, Context as AnyhowContext};
 use bytes::Bytes;
+use futures::future::Either;
 use parking_lot::Mutex;
 use postgres_backend::PostgresBackend;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
@@ -22,6 +25,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use utils::failpoint_support;
 use utils::id::TenantTimelineId;
 use utils::pageserver_feedback::PageserverFeedback;
+use utils::postgres_client::PostgresClientProtocol;
 
 use std::cmp::{max, min};
 use std::net::SocketAddr;
@@ -226,7 +230,7 @@ impl WalSenders {
 
     /// Get remote_consistent_lsn reported by the pageserver. Returns None if
     /// client is not pageserver.
-    fn get_ws_remote_consistent_lsn(self: &Arc<WalSenders>, id: WalSenderId) -> Option<Lsn> {
+    pub fn get_ws_remote_consistent_lsn(self: &Arc<WalSenders>, id: WalSenderId) -> Option<Lsn> {
         let shared = self.mutex.lock();
         let slot = shared.get_slot(id);
         match slot.feedback {
@@ -370,6 +374,16 @@ pub struct WalSenderGuard {
     walsenders: Arc<WalSenders>,
 }
 
+impl WalSenderGuard {
+    pub fn id(&self) -> WalSenderId {
+        self.id
+    }
+
+    pub fn walsenders(&self) -> &Arc<WalSenders> {
+        &self.walsenders
+    }
+}
+
 impl Drop for WalSenderGuard {
     fn drop(&mut self) {
         self.walsenders.unregister(self.id);
@@ -440,11 +454,12 @@ impl SafekeeperPostgresHandler {
         }
 
         info!(
-            "starting streaming from {:?}, available WAL ends at {}, recovery={}, appname={:?}",
+            "starting streaming from {:?}, available WAL ends at {}, recovery={}, appname={:?}, protocol={:?}",
             start_pos,
             end_pos,
             matches!(end_watch, EndWatch::Flush(_)),
-            appname
+            appname,
+            self.protocol(),
         );
 
         // switch to copy
@@ -456,19 +471,56 @@ impl SafekeeperPostgresHandler {
         // not synchronized with sends, so this avoids deadlocks.
         let reader = pgb.split().context("START_REPLICATION split")?;
 
-        let mut sender = WalSender {
-            pgb,
-            // should succeed since we're already holding another guard
-            tli: tli.wal_residence_guard().await?,
-            appname,
-            start_pos,
-            end_pos,
-            term,
-            end_watch,
-            ws_guard: ws_guard.clone(),
-            wal_reader,
-            send_buf: vec![0u8; MAX_SEND_SIZE],
+        let send_fut = match self.protocol() {
+            PostgresClientProtocol::Vanilla => {
+                let sender = WalSender {
+                    pgb,
+                    // should succeed since we're already holding another guard
+                    tli: tli.wal_residence_guard().await?,
+                    appname,
+                    start_pos,
+                    end_pos,
+                    term,
+                    end_watch,
+                    ws_guard: ws_guard.clone(),
+                    wal_reader,
+                    send_buf: vec![0u8; MAX_SEND_SIZE],
+                };
+
+                Either::Left(sender.run())
+            }
+            PostgresClientProtocol::Interpreted {
+                format,
+                compression,
+            } => {
+                let pg_version = tli.tli.get_state().await.1.server.pg_version / 10000;
+                let end_watch_view = end_watch.view();
+                let wal_stream_builder = WalReaderStreamBuilder {
+                    tli: tli.wal_residence_guard().await?,
+                    start_pos,
+                    end_pos,
+                    term,
+                    end_watch,
+                    wal_sender_guard: ws_guard.clone(),
+                };
+
+                let sender = InterpretedWalSender {
+                    format,
+                    compression,
+                    pgb,
+                    wal_stream_builder,
+                    end_watch_view,
+                    shard: self.shard.unwrap(),
+                    pg_version,
+                    appname,
+                };
+
+                Either::Right(sender.run())
+            }
         };
+
+        let tli_cancel = tli.cancel.clone();
+
         let mut reply_reader = ReplyReader {
             reader,
             ws_guard: ws_guard.clone(),
@@ -477,8 +529,11 @@ impl SafekeeperPostgresHandler {
 
         let res = tokio::select! {
             // todo: add read|write .context to these errors
-            r = sender.run() => r,
+            r = send_fut => r,
             r = reply_reader.run() => r,
+            _ = tli_cancel.cancelled() => {
+                return Err(CopyStreamHandlerEnd::Cancelled);
+            }
         };
 
         let ws_state = ws_guard
@@ -499,16 +554,22 @@ impl SafekeeperPostgresHandler {
     }
 }
 
+/// TODO(vlad): maybe lift this instead
 /// Walsender streams either up to commit_lsn (normally) or flush_lsn in the
 /// given term (recovery by walproposer or peer safekeeper).
-enum EndWatch {
+#[derive(Clone)]
+pub(crate) enum EndWatch {
     Commit(Receiver<Lsn>),
     Flush(Receiver<TermLsn>),
 }
 
 impl EndWatch {
+    pub(crate) fn view(&self) -> EndWatchView {
+        EndWatchView(self.clone())
+    }
+
     /// Get current end of WAL.
-    fn get(&self) -> Lsn {
+    pub(crate) fn get(&self) -> Lsn {
         match self {
             EndWatch::Commit(r) => *r.borrow(),
             EndWatch::Flush(r) => r.borrow().lsn,
@@ -516,15 +577,44 @@ impl EndWatch {
     }
 
     /// Wait for the update.
-    async fn changed(&mut self) -> anyhow::Result<()> {
+    pub(crate) async fn changed(&mut self) -> anyhow::Result<()> {
         match self {
             EndWatch::Commit(r) => r.changed().await?,
             EndWatch::Flush(r) => r.changed().await?,
         }
         Ok(())
     }
+
+    pub(crate) async fn wait_for_lsn(
+        &mut self,
+        lsn: Lsn,
+        client_term: Option<Term>,
+    ) -> anyhow::Result<Lsn> {
+        loop {
+            let end_pos = self.get();
+            if end_pos > lsn {
+                return Ok(end_pos);
+            }
+            if let EndWatch::Flush(rx) = &self {
+                let curr_term = rx.borrow().term;
+                if let Some(client_term) = client_term {
+                    if curr_term != client_term {
+                        bail!("term changed: requested {}, now {}", client_term, curr_term);
+                    }
+                }
+            }
+            self.changed().await?;
+        }
+    }
 }
 
+pub(crate) struct EndWatchView(EndWatch);
+
+impl EndWatchView {
+    pub(crate) fn get(&self) -> Lsn {
+        self.0.get()
+    }
+}
 /// A half driving sending WAL.
 struct WalSender<'a, IO> {
     pgb: &'a mut PostgresBackend<IO>,
@@ -557,10 +647,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
     /// Send WAL until
     /// - an error occurs
     /// - receiver is caughtup and there is no computes (if streaming up to commit_lsn)
+    /// - timeline's cancellation token fires
     ///
     /// Err(CopyStreamHandlerEnd) is always returned; Result is used only for ?
     /// convenience.
-    async fn run(&mut self) -> Result<(), CopyStreamHandlerEnd> {
+    async fn run(mut self) -> Result<(), CopyStreamHandlerEnd> {
         loop {
             // Wait for the next portion if it is not there yet, or just
             // update our end of WAL available for sending value, we
@@ -601,15 +692,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             };
             let send_buf = &send_buf[..send_size];
 
-            // and send it
-            self.pgb
-                .write_message(&BeMessage::XLogData(XLogDataBody {
-                    wal_start: self.start_pos.0,
-                    wal_end: self.end_pos.0,
-                    timestamp: get_current_timestamp(),
-                    data: send_buf,
-                }))
-                .await?;
+            // and send it, while respecting Timeline::cancel
+            let msg = BeMessage::XLogData(XLogDataBody {
+                wal_start: self.start_pos.0,
+                wal_end: self.end_pos.0,
+                timestamp: get_current_timestamp(),
+                data: send_buf,
+            });
+            self.pgb.write_message(&msg).await?;
 
             if let Some(appname) = &self.appname {
                 if appname == "replica" {
@@ -674,13 +764,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 }
             }
 
-            self.pgb
-                .write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
-                    wal_end: self.end_pos.0,
-                    timestamp: get_current_timestamp(),
-                    request_reply: true,
-                }))
-                .await?;
+            let msg = BeMessage::KeepAlive(WalSndKeepAlive {
+                wal_end: self.end_pos.0,
+                timestamp: get_current_timestamp(),
+                request_reply: true,
+            });
+
+            self.pgb.write_message(&msg).await?;
         }
     }
 
