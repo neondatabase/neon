@@ -15,6 +15,8 @@ extensions = ["pageinspect", "neon_test_utils", "pg_buffercache"]
 #
 # Validation of reading different page versions
 #
+# TODO: remove the next line before merge
+@pytest.mark.repeat(100)
 def test_read_validation(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
