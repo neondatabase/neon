@@ -11,7 +11,7 @@ use crate::aux_file;
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::metrics::{
-    RELSIZE_CACHE_ENTRIES, RELSIZE_CACHE_HITS, RELSIZE_CACHE_MISSES, RELSIZE_CACHE_MISSES_UPDATED,
+    RELSIZE_CACHE_ENTRIES, RELSIZE_CACHE_HITS, RELSIZE_CACHE_MISSES, RELSIZE_CACHE_MISSES_OLD,
 };
 use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
@@ -1135,7 +1135,7 @@ impl Timeline {
                 RELSIZE_CACHE_HITS.inc();
                 return Some(*nblocks);
             }
-            RELSIZE_CACHE_MISSES_UPDATED.inc();
+            RELSIZE_CACHE_MISSES_OLD.inc();
         }
         RELSIZE_CACHE_MISSES.inc();
         None

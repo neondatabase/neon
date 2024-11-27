@@ -674,10 +674,10 @@ pub(crate) static RELSIZE_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static RELSIZE_CACHE_MISSES_UPDATED: Lazy<IntCounter> = Lazy::new(|| {
+pub(crate) static RELSIZE_CACHE_MISSES_OLD: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
-        "pageserver_relsize_cache_misses_updated",
-        "Relation size cache misses where relation update LSN is after lookup LSN",
+        "pageserver_relsize_cache_misses_old",
+        "Relation size cache misses where the lookup LSN is older than the last relation update"
     )
     .expect("failed to define a metric")
 });
