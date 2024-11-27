@@ -34,8 +34,20 @@ def test_ingest_logical_message(
     neon_env_builder.safekeepers_enable_fsync = fsync
 
     env = neon_env_builder.init_start()
-    endpoint = env.endpoints.create_start("main")
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            f"fsync = {fsync}",
+            # Disable backpressure. We don't want to block on pageserver.
+            "max_replication_apply_lag = 0",
+            "max_replication_flush_lag = 0",
+            "max_replication_write_lag = 0",
+        ],
+    )
     client = env.pageserver.http_client()
+
+    # Wait for the timeline to be propagated to the pageserver.
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
 
     # Ingest data and measure durations.
     start_lsn = Lsn(endpoint.safe_psql("select pg_current_wal_lsn()")[0][0])
