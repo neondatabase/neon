@@ -3218,11 +3218,11 @@ impl Tenant {
         if let ShutdownMode::Reload = shutdown_mode {
             tracing::info!("Flushing deletion queue");
             if let Err(e) = self.deletion_queue_client.flush().await {
-                if !matches!(e, DeletionQueueError::ShuttingDown) {
-                    // If the tenant shutdown is caused by pageserver shutdown, the function
-                    // will return a shutdown error. We only print an error if the error is
-                    // during normal shutdown sequence. (i.e., detach tenant)
-                    tracing::error!("Failed to flush deletion queue: {e}");
+                match e {
+                    DeletionQueueError::ShuttingDown => {
+                        // This is the only error we expect for now. In the future, if more error
+                        // variants are added, we should handle them here.
+                    }
                 }
             }
         }
