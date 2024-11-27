@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import closing
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import USE_LFC, query_scalar
