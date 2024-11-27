@@ -50,6 +50,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
     fs_ext, pausable_failpoint,
+    postgres_client::PostgresClientProtocol,
     sync::gate::{Gate, GateGuard},
 };
 use wal_decoder::serialized_batch::SerializedValueBatch;
@@ -2178,6 +2179,21 @@ impl Timeline {
             )
     }
 
+    /// Resolve the effective WAL receiver protocol to use for this tenant.
+    ///
+    /// Priority order is:
+    /// 1. Tenant config override
+    /// 2. Default value for tenant config override
+    /// 3. Pageserver config override
+    /// 4. Pageserver config default
+    pub fn resolve_wal_receiver_protocol(&self) -> PostgresClientProtocol {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .wal_receiver_protocol_override
+            .or(self.conf.default_tenant_conf.wal_receiver_protocol_override)
+            .unwrap_or(self.conf.wal_receiver_protocol)
+    }
+
     pub(super) fn tenant_conf_updated(&self, new_conf: &AttachedTenantConf) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
@@ -2470,7 +2486,7 @@ impl Timeline {
         *guard = Some(WalReceiver::start(
             Arc::clone(self),
             WalReceiverConf {
-                protocol: self.conf.wal_receiver_protocol,
+                protocol: self.resolve_wal_receiver_protocol(),
                 wal_connect_timeout,
                 lagging_wal_timeout,
                 max_lsn_wal_lag,

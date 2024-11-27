@@ -278,6 +278,8 @@ pub struct TenantConfigToml {
     /// Enable auto-offloading of timelines.
     /// (either this flag or the pageserver-global one need to be set)
     pub timeline_offloading: bool,
+
+    pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
 }
 
 pub mod defaults {
@@ -510,6 +512,7 @@ impl Default for TenantConfigToml {
             lsn_lease_length: LsnLease::DEFAULT_LENGTH,
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
             timeline_offloading: false,
+            wal_receiver_protocol_override: None,
         }
     }
 }

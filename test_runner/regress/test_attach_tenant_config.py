@@ -174,6 +174,10 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "lsn_lease_length": "1m",
         "lsn_lease_length_for_ts": "5s",
         "timeline_offloading": True,
+        "wal_receiver_protocol_override": {
+            "type": "interpreted",
+            "args": {"format": "bincode", "compression": {"zstd": {"level": 1}}},
+        },
     }
 
     vps_http = env.storage_controller.pageserver_api()
