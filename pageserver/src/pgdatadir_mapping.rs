@@ -392,7 +392,9 @@ impl Timeline {
         result
     }
 
-    // Get size of a database in blocks
+    /// Get size of a database in blocks. This is only accurate on shard 0. It will undercount on
+    /// other shards, by only accounting for relations the shard has pages for, and only accounting
+    /// for pages up to the highest page number it has stored.
     pub(crate) async fn get_db_size(
         &self,
         spcnode: Oid,
@@ -411,7 +413,10 @@ impl Timeline {
         Ok(total_blocks)
     }
 
-    /// Get size of a relation file
+    /// Get size of a relation file. The relation must exist, otherwise an error is returned.
+    ///
+    /// This is only accurate on shard 0. On other shards, it will return the size up to the highest
+    /// page number stored in the shard.
     pub(crate) async fn get_rel_size(
         &self,
         tag: RelTag,
@@ -447,7 +452,10 @@ impl Timeline {
         Ok(nblocks)
     }
 
-    /// Does relation exist?
+    /// Does the relation exist?
+    ///
+    /// Only shard 0 has a full view of the relations. Other shards only know about relations that
+    /// the shard stores pages for.
     pub(crate) async fn get_rel_exists(
         &self,
         tag: RelTag,
@@ -480,6 +488,9 @@ impl Timeline {
     }
 
     /// Get a list of all existing relations in given tablespace and database.
+    ///
+    /// Only shard 0 has a full view of the relations. Other shards only know about relations that
+    /// the shard stores pages for.
     ///
     /// # Cancel-Safety
     ///
