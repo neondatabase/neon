@@ -26,6 +26,19 @@ CONSTANT NULL
 \* use here and mostly create own versions of them) it doesn't.
 PAS == INSTANCE ProposerAcceptorStatic
 
+\********************************************************************************
+\* Helpers
+\********************************************************************************
+
+\* Does set of acceptors acc_set form the quorum in the member set members?
+Quorum(acc_set, members) ==
+    LET acc_set_in_members == {a \in acc_set: a \in members} IN
+        Cardinality(acc_set_in_members) >= (Cardinality(members) \div 2 + 1)
+
+\********************************************************************************
+\* Type assertion
+\********************************************************************************
+
 \* Is c a valid config?
 IsConfig(c) ==
     /\ DOMAIN c = {"generation", "members", "newMembers"}
@@ -79,6 +92,17 @@ Vote(p, a) ==
     /\ PAS!Vote(p, a)
     /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
 
+\* Proposer p gets elected.
+BecomeLeader(p) ==
+    /\ prop_state[p].state = "campaign"
+    /\ prop_conf[p] /= NULL
+    \* Votes must form quorum in both sets (if the newMembers exists).
+    /\ Quorum(DOMAIN prop_state[p].votes, prop_conf[p].members)
+    /\ \/ prop_conf[p].newMembers = NULL
+       \/ (prop_conf[p].newMembers /= NULL)  /\ (Quorum(DOMAIN prop_state[p].votes, prop_conf[p].newMembers))
+    /\ PAS!DoBecomeLeader(p)
+    /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
+
 \* Do CAS on the conf store, starting change into the new_members conf.
 StartChange(new_members) ==
     \* Possible only if we don't already have the change in progress.
@@ -116,7 +140,7 @@ Next ==
   \/ \E p \in proposers: RestartProposer(p)
   \/ \E p \in proposers: \E a \in acceptors: ProposerBumpConf(p, a)
   \/ \E p \in proposers: \E a \in acceptors: Vote(p, a)
-\*   \/ \E p \in proposers: BecomeLeader(p)
+  \/ \E p \in proposers: BecomeLeader(p)
 \*   \/ \E p \in proposers: \E a \in acceptors: UpdateTerm(p, a)
 \*   \/ \E p \in proposers: \E a \in acceptors: TruncateWal(p, a)
 \*   \/ \E p \in proposers: NewEntry(p)

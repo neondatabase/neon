@@ -233,35 +233,39 @@ Vote(p, a) ==
 \* Get lastLogTerm from term history th.
 LastLogTerm(th) == th[Len(th)].term
 
+\* Workhorse for BecomeLeader.
+\* Assumes the check prop_state[p] votes is quorum has been done *outside*.
+DoBecomeLeader(p) ==
+    LET
+        \* Find acceptor with the highest <last_log_term, lsn> vote.
+        max_vote_acc ==
+             CHOOSE a \in DOMAIN prop_state[p].votes:
+                 LET v == prop_state[p].votes[a]
+                 IN \A v2 \in Range(prop_state[p].votes):
+                        /\ LastLogTerm(v.termHistory) >= LastLogTerm(v2.termHistory)
+                        /\ (LastLogTerm(v.termHistory) = LastLogTerm(v2.termHistory) => v.flushLsn >= v2.flushLsn)
+        max_vote == prop_state[p].votes[max_vote_acc]
+        prop_th == Append(max_vote.termHistory, [term |-> prop_state[p].term, lsn |-> max_vote.flushLsn])
+    IN
+        \* We copy all log preceding proposer's term from the max vote node so
+        \* make sure it is still on one term with us. This is a model
+        \* simplification which can be removed, in impl we fetch WAL on demand
+        \* from safekeeper which has it later. Note though that in case of on
+        \* demand fetch we must check on donor not only term match, but that
+        \* truncate_wal had already been done (if it is not max_vote_acc).
+        /\ acc_state[max_vote_acc].term = prop_state[p].term
+        /\ prop_state' = [prop_state EXCEPT ![p].state = "leader",
+                                            ![p].termHistory = prop_th,
+                                            ![p].wal = acc_state[max_vote_acc].wal
+                         ]
+        /\ elected_history' = Upsert(elected_history, prop_state[p].term, 1, LAMBDA c: c + 1)
+        /\ UNCHANGED <<acc_state, committed>>
+
 \* Proposer p gets elected.
 BecomeLeader(p) ==
   /\ prop_state[p].state = "campaign"
   /\ Quorum(DOMAIN prop_state[p].votes)
-  /\ LET
-         \* Find acceptor with the highest <last_log_term, lsn> vote.
-         max_vote_acc ==
-              CHOOSE a \in DOMAIN prop_state[p].votes:
-                  LET v == prop_state[p].votes[a]
-                  IN \A v2 \in Range(prop_state[p].votes):
-                         /\ LastLogTerm(v.termHistory) >= LastLogTerm(v2.termHistory)
-                         /\ (LastLogTerm(v.termHistory) = LastLogTerm(v2.termHistory) => v.flushLsn >= v2.flushLsn)
-         max_vote == prop_state[p].votes[max_vote_acc]
-         prop_th == Append(max_vote.termHistory, [term |-> prop_state[p].term, lsn |-> max_vote.flushLsn])
-     IN
-         \* We copy all log preceding proposer's term from the max vote node so
-         \* make sure it is still on one term with us. This is a model
-         \* simplification which can be removed, in impl we fetch WAL on demand
-         \* from safekeeper which has it later. Note though that in case of on
-         \* demand fetch we must check on donor not only term match, but that
-         \* truncate_wal had already been done (if it is not max_vote_acc).
-         /\ acc_state[max_vote_acc].term = prop_state[p].term
-         /\ prop_state' = [prop_state EXCEPT ![p].state = "leader",
-                                             ![p].termHistory = prop_th,
-                                             ![p].wal = acc_state[max_vote_acc].wal
-                          ]
-         /\ elected_history' = Upsert(elected_history, prop_state[p].term, 1, LAMBDA c: c + 1)
-         /\ UNCHANGED <<acc_state, committed>>
-
+  /\ DoBecomeLeader(p)
 
 \* Acceptor a learns about elected proposer p's term. In impl it matches to
 \* VoteRequest/VoteResponse exchange when leader is already elected and is not
