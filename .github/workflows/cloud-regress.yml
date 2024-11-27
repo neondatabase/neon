@@ -87,7 +87,7 @@ jobs:
           pg_version: ${{ matrix.pg-version }}
           extra_params: -m remote_cluster
         env:
-          BENCHMARK_CONNSTR: ${{ matrix.pg-version == 17 && secrets.PG_REGRESS_CONNSTR || secrets.PG_REGRESS_CONNSTR_17 }}
+          BENCHMARK_CONNSTR: ${{ matrix.pg-version == 17 && secrets.PG_REGRESS_CONNSTR_17 || secrets.PG_REGRESS_CONNSTR }}
 
       - name: Create Allure report
         id: create-allure-report
