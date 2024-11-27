@@ -13,7 +13,7 @@ use tokio_util::codec::{BytesCodec, FramedRead};
 use tracing::warn;
 
 use crate::compute::ComputeNode;
-use crate::pg_helpers::{get_existing_dbs_async, get_existing_roles_async};
+use crate::pg_helpers::{connstr_for_db, get_existing_dbs_async, get_existing_roles_async};
 
 pub async fn get_dbs_and_roles(compute: &Arc<ComputeNode>) -> anyhow::Result<CatalogObjects> {
     let connstr = compute.connstr.clone();
@@ -60,8 +60,7 @@ pub async fn get_database_schema(
     let pgbin = &compute.pgbin;
     let basepath = Path::new(pgbin).parent().unwrap();
     let pgdump = basepath.join("pg_dump");
-    let mut connstr = compute.connstr.clone();
-    connstr.set_path(dbname);
+    let connstr = connstr_for_db(&compute.connstr, dbname);
     let mut cmd = Command::new(pgdump)
         .arg("--schema-only")
         .arg(connstr.as_str())

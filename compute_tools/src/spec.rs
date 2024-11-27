@@ -1,14 +1,13 @@
+use crate::config;
+use crate::migration::MigrationRunner;
+use crate::params::PG_HBA_ALL_MD5;
+use crate::pg_helpers::*;
 use anyhow::{anyhow, bail, Result};
 use postgres::Client;
 use reqwest::StatusCode;
 use std::fs::File;
 use std::path::Path;
 use tracing::{error, info, instrument, warn};
-
-use crate::config;
-use crate::migration::MigrationRunner;
-use crate::params::PG_HBA_ALL_MD5;
-use crate::pg_helpers::*;
 
 use compute_api::responses::{ControlPlaneComputeStatus, ControlPlaneSpecResponse};
 use compute_api::spec::ComputeSpec;

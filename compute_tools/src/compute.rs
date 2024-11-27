@@ -36,7 +36,7 @@ use remote_storage::{DownloadError, RemotePath};
 use tokio::spawn;
 use url::Url;
 
-use crate::installed_extensions::get_installed_extensions_sync;
+use crate::installed_extensions::get_installed_extensions;
 use crate::local_proxy;
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -931,7 +931,7 @@ impl ComputeNode {
                 RenameAndDeleteDatabases,
                 CreateAndAlterDatabases,
             ] {
-                debug!("Applying phase {:?}", &phase);
+                info!("Applying phase {:?}", &phase);
                 apply_operations(
                     spec.clone(),
                     ctx.clone(),
@@ -942,6 +942,7 @@ impl ComputeNode {
                 .await?;
             }
 
+            info!("Applying RunInEachDatabase phase");
             let concurrency_token = Arc::new(tokio::sync::Semaphore::new(concurrency));
 
             let db_processes = spec
@@ -955,20 +956,20 @@ impl ComputeNode {
                     let spec = spec.clone();
                     let ctx = ctx.clone();
                     let jwks_roles = jwks_roles.clone();
-                    let mut url = url.as_ref().clone();
+                    let url = url.as_ref().clone();
                     let concurrency_token = concurrency_token.clone();
                     let db = db.clone();
 
                     debug!("Applying per-database phases for Database {:?}", &db);
 
+                    let mut url = Arc::new(url);
                     match &db {
                         DB::SystemDB => {}
                         DB::UserDB(db) => {
-                            url.set_path(db.name.as_str());
+                            url = Arc::new(connstr_for_db(&url, &db.name));
                         }
                     }
 
-                    let url = Arc::new(url);
                     let fut = Self::apply_spec_sql_db(
                         spec.clone(),
                         url,
@@ -1362,7 +1363,17 @@ impl ComputeNode {
 
             let connstr = self.connstr.clone();
             thread::spawn(move || {
-                get_installed_extensions_sync(connstr).context("get_installed_extensions")
+                let res = get_installed_extensions(&connstr);
+                match res {
+                    Ok(extensions) => {
+                        info!(
+                            "[NEON_EXT_STAT] {}",
+                            serde_json::to_string(&extensions)
+                                .expect("failed to serialize extensions list")
+                        );
+                    }
+                    Err(err) => error!("could not get installed extensions: {err:?}"),
+                }
             });
         }
 

@@ -542,3 +542,20 @@ async fn handle_postgres_logs_async(stderr: tokio::process::ChildStderr) -> Resu
 
     Ok(())
 }
+
+/// Take a connection string and swap the database name in it.
+/// We use `set_path()` to replace the database name in the connection string.
+/// It automatically does url-safe encoding if path is not already encoded, but
+/// it does it as per the URL standard, which assumes that tabs can be safely
+/// removed from the path without changing the meaning of the URL. See, e.g.,
+/// <https://url.spec.whatwg.org/#concept-basic-url-parser>.
+///
+/// Yet, this is not true for Postgres, where it's completely valid to have
+/// trailing tabs in the database name. Here, we first encode the database name
+/// and then swap it in the connection string.
+pub fn connstr_for_db(connstr: &url::Url, dbname: &str) -> url::Url {
+    let mut connstr = connstr.clone();
+    let encoded: String = url::form_urlencoded::byte_serialize(dbname.as_bytes()).collect();
+    connstr.set_path(&encoded);
+    connstr
+}
