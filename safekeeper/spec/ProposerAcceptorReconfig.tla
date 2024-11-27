@@ -29,6 +29,7 @@ PAS == INSTANCE ProposerAcceptorStatic
 \* Is c a valid config?
 IsConfig(c) ==
     /\ DOMAIN c = {"generation", "members", "newMembers"}
+    \* Unique id of the configuration.
     /\ c.generation \in Nat
     /\ c.members \in SUBSET acceptors
     \* newMembers is NULL when it is not a joint conf.
@@ -66,8 +67,17 @@ Init ==
 \* + 1.
 RestartProposer(p) ==
     /\ \E a \in acceptors: PAS!RestartProposerWithTerm(p, acc_state[a].term + 1)
+    \* Reset conf to NULL; ProposerBumpConf will communicate it before voting can start.
     /\ prop_conf' = [prop_conf EXCEPT ![p] = NULL]
     /\ UNCHANGED <<acc_conf, conf_store>>
+
+\* Acceptor a immediately votes for proposer p.
+Vote(p, a) ==
+    \* Configuration must be the same.
+    /\ prop_conf[p] /= NULL
+    /\ prop_conf[p].generation = acc_conf[a].generation
+    /\ PAS!Vote(p, a)
+    /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
 
 \* Do CAS on the conf store, starting change into the new_members conf.
 StartChange(new_members) ==
@@ -76,6 +86,27 @@ StartChange(new_members) ==
     /\ conf_store' = [generation |-> conf_store.generation + 1, members |-> conf_store.members, newMembers |-> new_members]
     /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, prop_conf, acc_conf>>
 
+\* Proposer p adopts higher conf from acceptor a.
+ProposerBumpConf(p, a) ==
+    \* It happens when either p doesn't have conf at all yet or it is lower than a's.
+    /\ \/ prop_conf[p] = NULL
+       \* TLA+ disjunction evaluation doesn't short-circuit for a good reason:
+       \* https://groups.google.com/g/tlaplus/c/U6tOJ4dsjVM/m/UdOznPCVBwAJ
+       \* so repeat the null check.
+       \/ (prop_conf[p] /= NULL) /\ (acc_conf[a].generation > prop_conf[p].generation)
+       \* When conf is bumped before proposer is elected we reset its state
+       \* (preserving config and doing inc on term to have a chance for
+       \* succeeding election) because some of the votes already collected could
+       \* have been from non-members of updated conf. Resetting is simpler than
+       \* figuring out these.
+    /\ IF prop_state[p].state = "campaign" THEN
+           PAS!RestartProposerWithTerm(p, prop_state[p].term + 1)
+        \* Otherwise we allow to bump conf without restart.
+       ELSE UNCHANGED <<prop_state>>
+    /\ prop_conf' = [prop_conf EXCEPT ![p] = acc_conf[a]]
+    /\ UNCHANGED <<acc_state, committed, elected_history, acc_conf, conf_store>>
+
+
 \*******************************************************************************
 \* Final spec
 \*******************************************************************************
@@ -83,7 +114,8 @@ StartChange(new_members) ==
 Next ==
   \/ \E new_members \in SUBSET acceptors: StartChange(new_members)
   \/ \E p \in proposers: RestartProposer(p)
-\*   \/ \E p \in proposers: \E a \in acceptors: Vote(p, a)
+  \/ \E p \in proposers: \E a \in acceptors: ProposerBumpConf(p, a)
+  \/ \E p \in proposers: \E a \in acceptors: Vote(p, a)
 \*   \/ \E p \in proposers: BecomeLeader(p)
 \*   \/ \E p \in proposers: \E a \in acceptors: UpdateTerm(p, a)
 \*   \/ \E p \in proposers: \E a \in acceptors: TruncateWal(p, a)
