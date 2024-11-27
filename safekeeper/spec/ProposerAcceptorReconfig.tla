@@ -22,8 +22,7 @@ CONSTANT NULL
 \* Import ProposerAcceptorStatic under PAS.
 \*
 \* Note that all vars and consts are named the same and thus substituted
-\* implicitly. For some operators this makes sense and for some (which we don'
-\* use here and mostly create own versions of them) it doesn't.
+\* implicitly.
 PAS == INSTANCE ProposerAcceptorStatic
 
 \********************************************************************************
@@ -51,9 +50,7 @@ IsConfig(c) ==
 
 TypeOk ==
     /\ PAS!TypeOk
-    /\ \A p \in proposers:
-           \/ prop_conf[p] = NULL
-           \/ IsConfig(prop_conf[p])
+    /\ \A p \in proposers: IsConfig(prop_conf[p])
     /\ \A a \in acceptors: IsConfig(acc_conf[a])
     /\ IsConfig(conf_store)
 
@@ -63,9 +60,10 @@ TypeOk ==
 
 Init ==
   /\ PAS!Init
-  /\ prop_conf = [p \in proposers |-> NULL]
   /\ \E init_members \in SUBSET acceptors:
        LET init_conf == [generation |-> 1, members |-> init_members, newMembers |-> NULL] IN
+           \* refer to RestartProposer why it is not NULL
+           /\ prop_conf = [p \in proposers |-> init_conf]
            /\ acc_conf = [a \in acceptors |-> init_conf]
            /\ conf_store = init_conf
 
@@ -73,35 +71,81 @@ Init ==
 \* Actions
 \********************************************************************************
 
-\* Proposer p loses all state, restarting.
-\* In the static spec we bump restarted proposer term to max of some quorum + 1
-\* so that it has chance to win election. With reconfigurations it's harder
-\* to calculate such a term, so keep it simple and take random acceptor one
-\* + 1.
+\* Proposer p loses all state, restarting. In the static spec we bump restarted
+\* proposer term to max of some quorum + 1 which is a minimal term which can win
+\* election. With reconfigurations it's harder to calculate such a term, so keep
+\* it simple and take random acceptor one + 1.
+\*
+\* Also make proposer to adopt configuration of another random acceptor. In the
+\* impl proposer starts with NULL configuration until handshake with first
+\* acceptor. Removing this NULL special case makes the spec a bit simpler.
 RestartProposer(p) ==
     /\ \E a \in acceptors: PAS!RestartProposerWithTerm(p, acc_state[a].term + 1)
-    \* Reset conf to NULL; ProposerBumpConf will communicate it before voting can start.
-    /\ prop_conf' = [prop_conf EXCEPT ![p] = NULL]
+    /\ \E a \in acceptors: prop_conf' = [prop_conf EXCEPT ![p] = acc_conf[a]]
     /\ UNCHANGED <<acc_conf, conf_store>>
 
 \* Acceptor a immediately votes for proposer p.
 Vote(p, a) ==
     \* Configuration must be the same.
-    /\ prop_conf[p] /= NULL
     /\ prop_conf[p].generation = acc_conf[a].generation
+    \* And a is expected be a member of it. This is likely redundant as long as
+    \* becoming leader checks membership (though vote also contributes to max
+    \* <term, lsn> calculation).
+    /\ \/ a \in prop_conf[p].members
+       \/ (prop_conf[p].newMembers /= NULL) /\ (a \in prop_conf[p].newMembers)
     /\ PAS!Vote(p, a)
     /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
 
 \* Proposer p gets elected.
 BecomeLeader(p) ==
     /\ prop_state[p].state = "campaign"
-    /\ prop_conf[p] /= NULL
     \* Votes must form quorum in both sets (if the newMembers exists).
     /\ Quorum(DOMAIN prop_state[p].votes, prop_conf[p].members)
     /\ \/ prop_conf[p].newMembers = NULL
+       \* TLA+ disjunction evaluation doesn't short-circuit for a good reason:
+       \* https://groups.google.com/g/tlaplus/c/U6tOJ4dsjVM/m/UdOznPCVBwAJ
+       \* so repeat the null check.
        \/ (prop_conf[p].newMembers /= NULL)  /\ (Quorum(DOMAIN prop_state[p].votes, prop_conf[p].newMembers))
     /\ PAS!DoBecomeLeader(p)
     /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
+
+UpdateTerm(p, a) ==
+    /\ PAS!UpdateTerm(p, a)
+    /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
+
+TruncateWal(p, a) ==
+    /\ prop_state[p].state = "leader"
+    \* Configuration must be the same.
+    /\ prop_conf[p].generation = acc_conf[a].generation
+    /\ PAS!TruncateWal(p, a)
+    /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
+
+NewEntry(p) ==
+    /\ PAS!NewEntry(p)
+    /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
+
+AppendEntry(p, a) ==
+    /\ prop_state[p].state = "leader"
+    \* Configuration must be the same.
+    /\ prop_conf[p].generation = acc_conf[a].generation
+    /\ PAS!AppendEntry(p, a)
+    /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
+
+\* Proposer p adopts higher conf from acceptor a.
+ProposerBumpConf(p, a) ==
+    \* p's conf is lower than a's.
+    /\ (acc_conf[a].generation > prop_conf[p].generation)
+    \* We allow to seamlessly bump conf only when proposer is already elected.
+    \* If it isn't, some of the votes already collected could have been from
+    \* non-members of updated conf. It is easier (both here and in the impl) to
+    \* restart instead of figuring and removing these out.
+    \*
+    \* So if proposer is in 'campaign' in the impl we would restart preserving
+    \* conf and increasing term. In the spec this transition is already covered
+    \* by more a generic RestartProposer, so we don't specify it here.
+    /\ prop_state[p].state = "leader"
+    /\ prop_conf' = [prop_conf EXCEPT ![p] = acc_conf[a]]
+    /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, acc_conf, conf_store>>
 
 \* Do CAS on the conf store, starting change into the new_members conf.
 StartChange(new_members) ==
@@ -110,42 +154,21 @@ StartChange(new_members) ==
     /\ conf_store' = [generation |-> conf_store.generation + 1, members |-> conf_store.members, newMembers |-> new_members]
     /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, prop_conf, acc_conf>>
 
-\* Proposer p adopts higher conf from acceptor a.
-ProposerBumpConf(p, a) ==
-    \* It happens when either p doesn't have conf at all yet or it is lower than a's.
-    /\ \/ prop_conf[p] = NULL
-       \* TLA+ disjunction evaluation doesn't short-circuit for a good reason:
-       \* https://groups.google.com/g/tlaplus/c/U6tOJ4dsjVM/m/UdOznPCVBwAJ
-       \* so repeat the null check.
-       \/ (prop_conf[p] /= NULL) /\ (acc_conf[a].generation > prop_conf[p].generation)
-       \* When conf is bumped before proposer is elected we reset its state
-       \* (preserving config and doing inc on term to have a chance for
-       \* succeeding election) because some of the votes already collected could
-       \* have been from non-members of updated conf. Resetting is simpler than
-       \* figuring out these.
-    /\ IF prop_state[p].state = "campaign" THEN
-           PAS!RestartProposerWithTerm(p, prop_state[p].term + 1)
-        \* Otherwise we allow to bump conf without restart.
-       ELSE UNCHANGED <<prop_state>>
-    /\ prop_conf' = [prop_conf EXCEPT ![p] = acc_conf[a]]
-    /\ UNCHANGED <<acc_state, committed, elected_history, acc_conf, conf_store>>
-
-
 \*******************************************************************************
 \* Final spec
 \*******************************************************************************
 
 Next ==
-  \/ \E new_members \in SUBSET acceptors: StartChange(new_members)
   \/ \E p \in proposers: RestartProposer(p)
-  \/ \E p \in proposers: \E a \in acceptors: ProposerBumpConf(p, a)
   \/ \E p \in proposers: \E a \in acceptors: Vote(p, a)
   \/ \E p \in proposers: BecomeLeader(p)
-\*   \/ \E p \in proposers: \E a \in acceptors: UpdateTerm(p, a)
-\*   \/ \E p \in proposers: \E a \in acceptors: TruncateWal(p, a)
-\*   \/ \E p \in proposers: NewEntry(p)
-\*   \/ \E p \in proposers: \E a \in acceptors: AppendEntry(p, a)
+  \/ \E p \in proposers: \E a \in acceptors: UpdateTerm(p, a)
+  \/ \E p \in proposers: \E a \in acceptors: TruncateWal(p, a)
+  \/ \E p \in proposers: NewEntry(p)
+  \/ \E p \in proposers: \E a \in acceptors: AppendEntry(p, a)
 \*   \/ \E q \in Quorums: \E p \in proposers: CommitEntries(p, q)
+  \/ \E p \in proposers: \E a \in acceptors: ProposerBumpConf(p, a)
+  \/ \E new_members \in SUBSET acceptors: StartChange(new_members)
 
 Spec == Init /\ [][Next]_<<prop_state, acc_state, committed, elected_history, prop_conf, acc_conf, conf_store>>
 
@@ -166,5 +189,10 @@ LogSafety == PAS!LogSafety
 \********************************************************************************
 
 CommittedNotTruncated == PAS!CommittedNotTruncated
+
+MaxTerm == PAS!MaxTerm
+\* MaxTerm == \A p \in proposers: prop_state[p].term <= 1
+
+MaxAccWalLen == PAS!MaxAccWalLen
 
 ====

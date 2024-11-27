@@ -294,10 +294,11 @@ FindHighestCommonPoint(prop_th, acc_th, acc_flush_lsn) ==
     IN
         [term |-> last_common_term, lsn |-> Min(acc_common_term_end, prop_common_term_end)]
 
-\* Elected proposer p immediately truncates WAL (and term history) of acceptor a
-\* before starting streaming. Establishes nextSendLsn for a.
+\* Elected proposer p immediately truncates WAL (and sets term history) of
+\* acceptor a before starting streaming. Establishes nextSendLsn for a.
 \*
-\* In impl this happens at each reconnection, here we also allow to do it multiple times.
+\* In impl this happens at each reconnection, here we also allow to do it
+\* multiple times.
 TruncateWal(p, a) ==
     /\ prop_state[p].state = "leader"
     /\ acc_state[a].term = prop_state[p].term
