@@ -10,6 +10,9 @@ use super::tenant::{PageReconstructError, Timeline};
 use crate::aux_file;
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
+use crate::metrics::{
+    RELSIZE_CACHE_ENTRIES, RELSIZE_CACHE_HITS, RELSIZE_CACHE_MISSES, RELSIZE_CACHE_MISSES_OLD,
+};
 use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
@@ -1129,9 +1132,12 @@ impl Timeline {
         let rel_size_cache = self.rel_size_cache.read().unwrap();
         if let Some((cached_lsn, nblocks)) = rel_size_cache.map.get(tag) {
             if lsn >= *cached_lsn {
+                RELSIZE_CACHE_HITS.inc();
                 return Some(*nblocks);
             }
+            RELSIZE_CACHE_MISSES_OLD.inc();
         }
+        RELSIZE_CACHE_MISSES.inc();
         None
     }
 
@@ -1156,6 +1162,7 @@ impl Timeline {
             }
             hash_map::Entry::Vacant(entry) => {
                 entry.insert((lsn, nblocks));
+                RELSIZE_CACHE_ENTRIES.inc();
             }
         }
     }
@@ -1163,13 +1170,17 @@ impl Timeline {
     /// Store cached relation size
     pub fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        rel_size_cache.map.insert(tag, (lsn, nblocks));
+        if rel_size_cache.map.insert(tag, (lsn, nblocks)).is_none() {
+            RELSIZE_CACHE_ENTRIES.inc();
+        }
     }
 
     /// Remove cached relation size
     pub fn remove_cached_rel_size(&self, tag: &RelTag) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        rel_size_cache.map.remove(tag);
+        if rel_size_cache.map.remove(tag).is_some() {
+            RELSIZE_CACHE_ENTRIES.dec();
+        }
     }
 }
 
