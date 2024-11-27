@@ -220,6 +220,11 @@ impl AzureBlobStorage {
         let started_at = ScopeGuard::into_inner(started_at);
         let outcome = match &download {
             Ok(_) => AttemptOutcome::Ok,
+            // At this level in the stack 404 and 304 responses do not indicate an error.
+            // There's expected cases when a blob may not exist or hasn't been modified since
+            // the last get (e.g. probing for timeline indices and heatmap downloads).
+            // Callers should handle errors if they are unexpected.
+            Err(DownloadError::NotFound | DownloadError::Unmodified) => AttemptOutcome::Ok,
             Err(_) => AttemptOutcome::Err,
         };
         crate::metrics::BUCKET_METRICS
