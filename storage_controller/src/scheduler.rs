@@ -902,7 +902,14 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use pageserver_api::{controller_api::NodeAvailability, models::utilization::test_utilization};
+    use pageserver_api::{
+        controller_api::NodeAvailability, models::utilization::test_utilization,
+        shard::ShardIdentity,
+    };
+    use utils::{
+        id::TenantId,
+        shard::{ShardCount, ShardNumber, TenantShardId},
+    };
 
     use super::*;
 
@@ -1168,6 +1175,179 @@ mod tests {
 
         for mut intent in scheduled_intents {
             intent.clear(&mut scheduler);
+        }
+    }
+
+    use test_log::test;
+
+    #[test]
+    /// Reproducer for https://github.com/neondatabase/neon/issues/8969 -- a case where
+    /// having an odd number of nodes can cause instability when scheduling even numbers of
+    /// shards with secondaries
+    fn odd_nodes_stability() {
+        let az_tag = AvailabilityZone("az-a".to_string());
+
+        let nodes = test_utils::make_test_nodes(
+            5,
+            &[
+                az_tag.clone(),
+                az_tag.clone(),
+                az_tag.clone(),
+                az_tag.clone(),
+                az_tag.clone(),
+            ],
+        );
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        // Need to keep these alive because they contribute to shard counts via RAII
+        let mut scheduled_shards = Vec::new();
+
+        let mut context = ScheduleContext::default();
+
+        fn schedule_shard(
+            tenant_shard_id: TenantShardId,
+            expect_attached: NodeId,
+            expect_secondary: NodeId,
+            scheduled_shards: &mut Vec<TenantShard>,
+            scheduler: &mut Scheduler,
+            context: &mut ScheduleContext,
+        ) {
+            let shard_identity = ShardIdentity::new(
+                tenant_shard_id.shard_number,
+                tenant_shard_id.shard_count,
+                pageserver_api::shard::ShardStripeSize(1),
+            )
+            .unwrap();
+            let mut shard = TenantShard::new(
+                tenant_shard_id,
+                shard_identity,
+                pageserver_api::controller_api::PlacementPolicy::Attached(1),
+            );
+
+            shard.schedule(scheduler, context).unwrap();
+
+            assert_eq!(shard.intent.get_attached().unwrap(), expect_attached);
+            assert_eq!(
+                shard.intent.get_secondary().first().unwrap(),
+                &expect_secondary
+            );
+
+            scheduled_shards.push(shard);
+        }
+
+        let tenant_id = TenantId::generate();
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(0),
+                shard_count: ShardCount(8),
+            },
+            NodeId(1),
+            NodeId(2),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(1),
+                shard_count: ShardCount(8),
+            },
+            NodeId(3),
+            NodeId(4),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(2),
+                shard_count: ShardCount(8),
+            },
+            NodeId(5),
+            NodeId(2),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(3),
+                shard_count: ShardCount(8),
+            },
+            NodeId(4),
+            NodeId(1),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(4),
+                shard_count: ShardCount(8),
+            },
+            NodeId(3),
+            NodeId(5),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(5),
+                shard_count: ShardCount(8),
+            },
+            NodeId(2),
+            NodeId(1),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(6),
+                shard_count: ShardCount(8),
+            },
+            NodeId(4),
+            NodeId(5),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(7),
+                shard_count: ShardCount(8),
+            },
+            NodeId(3),
+            NodeId(1),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        // Assert that the optimizer suggests nochanges, i.e. our initial scheduling was stable.
+        for shard in &scheduled_shards {
+            assert_eq!(shard.optimize_attachment(&mut scheduler, &context), None);
+        }
+
+        for mut shard in scheduled_shards {
+            shard.intent.clear(&mut scheduler);
         }
     }
 }
