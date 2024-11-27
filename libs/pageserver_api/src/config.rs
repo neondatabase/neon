@@ -18,7 +18,7 @@ use std::{
     str::FromStr,
     time::Duration,
 };
-use utils::logging::LogFormat;
+use utils::{logging::LogFormat, postgres_client::PostgresClientProtocol};
 
 use crate::models::ImageCompressionAlgorithm;
 use crate::models::LsnLease;
@@ -97,6 +97,15 @@ pub struct ConfigToml {
     pub control_plane_api: Option<reqwest::Url>,
     pub control_plane_api_token: Option<String>,
     pub control_plane_emergency_mode: bool,
+    /// Unstable feature: subject to change or removal without notice.
+    /// See <https://github.com/neondatabase/neon/pull/9218>.
+    pub import_pgdata_upcall_api: Option<reqwest::Url>,
+    /// Unstable feature: subject to change or removal without notice.
+    /// See <https://github.com/neondatabase/neon/pull/9218>.
+    pub import_pgdata_upcall_api_token: Option<String>,
+    /// Unstable feature: subject to change or removal without notice.
+    /// See <https://github.com/neondatabase/neon/pull/9218>.
+    pub import_pgdata_aws_endpoint_url: Option<reqwest::Url>,
     pub heatmap_upload_concurrency: usize,
     pub secondary_download_concurrency: usize,
     pub virtual_file_io_engine: Option<crate::models::virtual_file::IoEngineKind>,
@@ -111,6 +120,7 @@ pub struct ConfigToml {
     pub no_sync: Option<bool>,
     #[serde(with = "humantime_serde")]
     pub server_side_batch_timeout: Option<Duration>,
+    pub wal_receiver_protocol: PostgresClientProtocol,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -321,6 +331,9 @@ pub mod defaults {
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
 
     pub const DEFAULT_SERVER_SIDE_BATCH_TIMEOUT: Option<&str> = None;
+
+    pub const DEFAULT_WAL_RECEIVER_PROTOCOL: utils::postgres_client::PostgresClientProtocol =
+        utils::postgres_client::PostgresClientProtocol::Vanilla;
 }
 
 impl Default for ConfigToml {
@@ -386,6 +399,10 @@ impl Default for ConfigToml {
             control_plane_api_token: (None),
             control_plane_emergency_mode: (false),
 
+            import_pgdata_upcall_api: (None),
+            import_pgdata_upcall_api_token: (None),
+            import_pgdata_aws_endpoint_url: (None),
+
             heatmap_upload_concurrency: (DEFAULT_HEATMAP_UPLOAD_CONCURRENCY),
             secondary_download_concurrency: (DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY),
 
@@ -405,6 +422,7 @@ impl Default for ConfigToml {
                 .map(|duration| humantime::parse_duration(duration).unwrap()),
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
+            wal_receiver_protocol: DEFAULT_WAL_RECEIVER_PROTOCOL,
         }
     }
 }

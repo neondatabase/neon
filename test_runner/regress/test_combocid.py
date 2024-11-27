@@ -5,12 +5,7 @@ from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
 
 def do_combocid_op(neon_env_builder: NeonEnvBuilder, op):
     env = neon_env_builder.init_start()
-    endpoint = env.endpoints.create_start(
-        "main",
-        config_lines=[
-            "shared_buffers='1MB'",
-        ],
-    )
+    endpoint = env.endpoints.create_start("main")
 
     conn = endpoint.connect()
     cur = conn.cursor()
@@ -36,7 +31,7 @@ def do_combocid_op(neon_env_builder: NeonEnvBuilder, op):
 
     # Clear the cache, so that we exercise reconstructing the pages
     # from WAL
-    endpoint.clear_shared_buffers()
+    endpoint.clear_buffers()
 
     # Check that the cursor opened earlier still works. If the
     # combocids are not restored correctly, it won't.
@@ -65,12 +60,7 @@ def test_combocid_lock(neon_env_builder: NeonEnvBuilder):
 
 def test_combocid_multi_insert(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
-    endpoint = env.endpoints.create_start(
-        "main",
-        config_lines=[
-            "shared_buffers='1MB'",
-        ],
-    )
+    endpoint = env.endpoints.create_start("main")
 
     conn = endpoint.connect()
     cur = conn.cursor()
@@ -98,7 +88,7 @@ def test_combocid_multi_insert(neon_env_builder: NeonEnvBuilder):
     cur.execute("delete from t")
     # Clear the cache, so that we exercise reconstructing the pages
     # from WAL
-    endpoint.clear_shared_buffers()
+    endpoint.clear_buffers()
 
     # Check that the cursor opened earlier still works. If the
     # combocids are not restored correctly, it won't.

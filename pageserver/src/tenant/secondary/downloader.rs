@@ -242,6 +242,19 @@ impl SecondaryDetail {
         }
     }
 
+    #[cfg(feature = "testing")]
+    pub(crate) fn total_resident_size(&self) -> u64 {
+        self.timelines
+            .values()
+            .map(|tl| {
+                tl.on_disk_layers
+                    .values()
+                    .map(|v| v.metadata.file_size)
+                    .sum::<u64>()
+            })
+            .sum::<u64>()
+    }
+
     pub(super) fn evict_layer(
         &mut self,
         name: LayerName,
@@ -763,24 +776,7 @@ impl<'a> TenantDownloader<'a> {
         }
 
         // Metrics consistency check in testing builds
-        if cfg!(feature = "testing") {
-            let detail = self.secondary_state.detail.lock().unwrap();
-            let resident_size = detail
-                .timelines
-                .values()
-                .map(|tl| {
-                    tl.on_disk_layers
-                        .values()
-                        .map(|v| v.metadata.file_size)
-                        .sum::<u64>()
-                })
-                .sum::<u64>();
-            assert_eq!(
-                resident_size,
-                self.secondary_state.resident_size_metric.get()
-            );
-        }
-
+        self.secondary_state.validate_metrics();
         // Only update last_etag after a full successful download: this way will not skip
         // the next download, even if the heatmap's actual etag is unchanged.
         self.secondary_state.detail.lock().unwrap().last_download = Some(DownloadSummary {

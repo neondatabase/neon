@@ -240,8 +240,6 @@ async fn download_object<'a>(
                             Ok(chunk) => chunk,
                             Err(e) => return Err(e),
                         };
-                        // TODO(yuchen): might have performance issue when using borrowed version?
-                        // Problem: input is Bytes, does not satisify IO alignment requirement.
                         buffered.write_buffered_borrowed(&chunk, ctx).await?;
                     }
                     let inner = buffered.flush_and_into_inner(ctx).await?;
@@ -716,7 +714,7 @@ where
     .and_then(|x| x)
 }
 
-async fn download_retry_forever<T, O, F>(
+pub(crate) async fn download_retry_forever<T, O, F>(
     op: O,
     description: &str,
     cancel: &CancellationToken,

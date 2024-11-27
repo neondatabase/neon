@@ -29,6 +29,7 @@ pub mod receive_wal;
 pub mod recovery;
 pub mod remove_wal;
 pub mod safekeeper;
+pub mod send_interpreted_wal;
 pub mod send_wal;
 pub mod state;
 pub mod timeline;
@@ -38,6 +39,7 @@ pub mod timeline_manager;
 pub mod timelines_set;
 pub mod wal_backup;
 pub mod wal_backup_partial;
+pub mod wal_reader_stream;
 pub mod wal_service;
 pub mod wal_storage;
 

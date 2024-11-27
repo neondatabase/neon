@@ -1,13 +1,8 @@
 from __future__ import annotations
 
-import enum
-from typing import TYPE_CHECKING
+from enum import StrEnum
 
 from typing_extensions import override
-
-if TYPE_CHECKING:
-    from typing import Optional
-
 
 """
 This fixture is used to determine which version of Postgres to use for tests.
@@ -15,8 +10,7 @@ This fixture is used to determine which version of Postgres to use for tests.
 
 
 # Inherit PgVersion from str rather than int to make it easier to pass as a command-line argument
-# TODO: use enum.StrEnum for Python >= 3.11
-class PgVersion(str, enum.Enum):
+class PgVersion(StrEnum):
     V14 = "14"
     V15 = "15"
     V16 = "16"
@@ -34,7 +28,6 @@ class PgVersion(str, enum.Enum):
     def __repr__(self) -> str:
         return f"'{self.value}'"
 
-    # Make this explicit for Python 3.11 compatibility, which changes the behavior of enums
     @override
     def __str__(self) -> str:
         return self.value
@@ -47,16 +40,18 @@ class PgVersion(str, enum.Enum):
 
     @classmethod
     @override
-    def _missing_(cls, value: object) -> Optional[PgVersion]:
-        known_values = {v.value for _, v in cls.__members__.items()}
+    def _missing_(cls, value: object) -> PgVersion | None:
+        if not isinstance(value, str):
+            return None
 
-        # Allow passing version as a string with "v" prefix (e.g. "v14")
-        if isinstance(value, str) and value.lower().startswith("v") and value[1:] in known_values:
-            return cls(value[1:])
-        # Allow passing version as an int (e.g. 15 or 150002, both will be converted to PgVersion.V15)
-        elif isinstance(value, int) and str(value)[:2] in known_values:
-            return cls(str(value)[:2])
+        known_values = set(cls.__members__.values())
 
-        # Make mypy happy
-        # See https://github.com/python/mypy/issues/3974
+        # Allow passing version as v-prefixed string (e.g. "v14")
+        if value.lower().startswith("v") and (v := value[1:]) in known_values:
+            return cls(v)
+
+        # Allow passing version as an int (i.e. both "15" and "150002" matches PgVersion.V15)
+        if value.isdigit() and (v := value[:2]) in known_values:
+            return cls(v)
+
         return None

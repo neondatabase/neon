@@ -14,7 +14,7 @@ use super::super::messages::{ControlPlaneErrorMessage, GetRoleSecret, WakeComput
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::ComputeUserInfo;
 use crate::cache::Cached;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::caches::ApiCaches;
 use crate::control_plane::errors::{
     ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
@@ -65,7 +65,7 @@ impl NeonControlPlaneClient {
 
     async fn do_get_auth_info(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         if !self
@@ -73,6 +73,8 @@ impl NeonControlPlaneClient {
             .endpoints_cache
             .is_valid(ctx, &user_info.endpoint.normalize())
         {
+            // TODO: refactor this because it's weird
+            // this is a failure to authenticate but we return Ok.
             info!("endpoint is not valid, skipping the request");
             return Ok(AuthInfo::default());
         }
@@ -92,7 +94,7 @@ impl NeonControlPlaneClient {
                 ])
                 .build()?;
 
-            info!(url = request.url().as_str(), "sending http request");
+            debug!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
             let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
@@ -104,10 +106,12 @@ impl NeonControlPlaneClient {
                 // TODO(anna): retry
                 Err(e) => {
                     return if e.get_reason().is_not_found() {
+                        // TODO: refactor this because it's weird
+                        // this is a failure to authenticate but we return Ok.
                         Ok(AuthInfo::default())
                     } else {
                         Err(e.into())
-                    }
+                    };
                 }
             };
 
@@ -130,14 +134,14 @@ impl NeonControlPlaneClient {
                 project_id: body.project_id,
             })
         }
-        .map_err(crate::error::log_error)
-        .instrument(info_span!("http", id = request_id))
+        .inspect_err(|e| tracing::debug!(error = ?e))
+        .instrument(info_span!("do_get_auth_info"))
         .await
     }
 
     async fn do_get_endpoint_jwks(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         endpoint: EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         if !self
@@ -163,7 +167,7 @@ impl NeonControlPlaneClient {
                 .build()
                 .map_err(GetEndpointJwksError::RequestBuild)?;
 
-            info!(url = request.url().as_str(), "sending http request");
+            debug!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
             let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
             let response = self
@@ -189,14 +193,14 @@ impl NeonControlPlaneClient {
 
             Ok(rules)
         }
-        .map_err(crate::error::log_error)
-        .instrument(info_span!("http", id = request_id))
+        .inspect_err(|e| tracing::debug!(error = ?e))
+        .instrument(info_span!("do_get_endpoint_jwks"))
         .await
     }
 
     async fn do_wake_compute(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
         let request_id = ctx.session_id().to_string();
@@ -220,7 +224,7 @@ impl NeonControlPlaneClient {
 
             let request = request_builder.build()?;
 
-            info!(url = request.url().as_str(), "sending http request");
+            debug!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
             let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
@@ -248,8 +252,8 @@ impl NeonControlPlaneClient {
 
             Ok(node)
         }
-        .map_err(crate::error::log_error)
-        .instrument(info_span!("http", id = request_id))
+        .inspect_err(|e| tracing::debug!(error = ?e))
+        .instrument(info_span!("do_wake_compute"))
         .await
     }
 }
@@ -258,7 +262,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         let normalized_ep = &user_info.endpoint.normalize();
@@ -292,7 +296,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
 
     async fn get_allowed_ips_and_secret(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         let normalized_ep = &user_info.endpoint.normalize();
@@ -334,7 +338,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
     #[tracing::instrument(skip_all)]
     async fn get_endpoint_jwks(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         endpoint: EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         self.do_get_endpoint_jwks(ctx, endpoint).await
@@ -343,7 +347,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         let key = user_info.endpoint_cache_key();
@@ -375,6 +379,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
         // after getting back a permit - it's possible the cache was filled
         // double check
         if permit.should_check_cache() {
+            // TODO: if there is something in the cache, mark the permit as success.
             check_cache!();
         }
 
