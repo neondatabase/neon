@@ -28,6 +28,7 @@ jobs:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
     strategy:
+      fail-fast: false
       matrix:
         pg-version: [16, 17]
 
