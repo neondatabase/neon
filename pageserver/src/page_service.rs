@@ -1136,6 +1136,9 @@ impl PageServerHandler {
         // - Case 2: If the Reading stage is waiting on its downstream (send to Batching),
         //   it follows that Batching is waiting for Executor.
         //   Executor will observe self.cancel when it sends the response, and exit with Err(QueryError::Shutdown).
+        // - Case 3: the Executor stage observes self.cancel and exits with Err() while the Reading
+        //   stage is waiting for a message from the client. If no message from the client arrives,
+        //   the Reading stage will never exit.
         //
         // In either case, a task exits, which makes the other tasks in the pipeline exit.
         //
