@@ -3769,10 +3769,10 @@ class Endpoint(PgProtocol, LogUtils):
             # neon.max_file_cache_size and neon.file_cache size limit are
             # set to 1MB because small LFC is better for testing (helps to find more problems)
             config_lines = [
-                "shared_buffers = 512kB",
+                "shared_buffers = 128kB",
                 f"neon.file_cache_path = '{self.lfc_path()}'",
-                "neon.max_file_cache_size = 1MB",
-                "neon.file_cache_size_limit = 1MB",
+                "neon.max_file_cache_size = 128MB",
+                "neon.file_cache_size_limit = 128MB",
             ] + config_lines
         else:
             for line in config_lines:
