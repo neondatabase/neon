@@ -2973,9 +2973,20 @@ index cb0e05a2f1..b11492bd31 100644
  GRANT SELECT, INSERT ON itest8 TO regress_identity_user1;
  SET ROLE regress_identity_user1;
 diff --git a/src/test/regress/sql/inherit.sql b/src/test/regress/sql/inherit.sql
-index 51251b0e51..049da76ee4 100644
+index 51251b0e51..3492f1cfef 100644
 --- a/src/test/regress/sql/inherit.sql
 +++ b/src/test/regress/sql/inherit.sql
+@@ -770,8 +770,8 @@ drop table cnullparent cascade;
+ --
+ -- Mixed ownership inheritance tree
+ --
+-create role regress_alice;
+-create role regress_bob;
++create role regress_alice password NEON_PASSWORD_PLACEHOLDER;
++create role regress_bob password NEON_PASSWORD_PLACEHOLDER;
+ grant all on schema public to regress_alice, regress_bob;
+ grant regress_alice to regress_bob;
+ set session authorization regress_alice;
 @@ -1031,7 +1031,7 @@ create index on permtest_parent (left(c, 3));
  insert into permtest_parent
    select 1, 'a', left(fipshash(i::text), 5) from generate_series(0, 100) i;
@@ -3143,7 +3154,7 @@ index 165a2e175f..08d7096e2c 100644
  SELECT * FROM stud_emp_copy;
  
 diff --git a/src/test/regress/sql/misc_functions.sql b/src/test/regress/sql/misc_functions.sql
-index 76470fcb3f..871e6c072c 100644
+index 76470fcb3f..09746de223 100644
 --- a/src/test/regress/sql/misc_functions.sql
 +++ b/src/test/regress/sql/misc_functions.sql
 @@ -82,7 +82,7 @@ SELECT pg_log_backend_memory_contexts(pg_backend_pid());
@@ -3164,6 +3175,28 @@ index 76470fcb3f..871e6c072c 100644
  -- Not available by default.
  SELECT has_function_privilege('regress_slot_dir_funcs',
    'pg_ls_logicalsnapdir()', 'EXECUTE');
+@@ -252,7 +252,7 @@ FROM pg_walfile_name_offset('0/0'::pg_lsn + :segment_size - 1),
+      pg_split_walfile_name(file_name);
+ 
+ -- pg_current_logfile
+-CREATE ROLE regress_current_logfile;
++CREATE ROLE regress_current_logfile PASSWORD NEON_PASSWORD_PLACEHOLDER;
+ -- not available by default
+ SELECT has_function_privilege('regress_current_logfile',
+   'pg_current_logfile()', 'EXECUTE');
+diff --git a/src/test/regress/sql/multirangetypes.sql b/src/test/regress/sql/multirangetypes.sql
+index 41d5524285..373be031a2 100644
+--- a/src/test/regress/sql/multirangetypes.sql
++++ b/src/test/regress/sql/multirangetypes.sql
+@@ -704,7 +704,7 @@ drop type textrange2;
+ -- Multiranges don't have their own ownership or permissions.
+ --
+ create type textrange1 as range(subtype=text, multirange_type_name=multitextrange1, collation="C");
+-create role regress_multirange_owner;
++create role regress_multirange_owner password NEON_PASSWORD_PLACEHOLDER;
+ 
+ alter type multitextrange1 owner to regress_multirange_owner;  -- fail
+ alter type textrange1 owner to regress_multirange_owner;
 diff --git a/src/test/regress/sql/object_address.sql b/src/test/regress/sql/object_address.sql
 index 1a6c61f49d..1c31ac6a53 100644
 --- a/src/test/regress/sql/object_address.sql
@@ -3178,9 +3211,29 @@ index 1a6c61f49d..1c31ac6a53 100644
  -- Test generic object addressing/identification functions
  CREATE SCHEMA addr_nsp;
 diff --git a/src/test/regress/sql/password.sql b/src/test/regress/sql/password.sql
-index bb82aa4aa2..d946ae9629 100644
+index bb82aa4aa2..7424c91b10 100644
 --- a/src/test/regress/sql/password.sql
 +++ b/src/test/regress/sql/password.sql
+@@ -10,13 +10,13 @@ SET password_encryption = 'scram-sha-256'; -- ok
+ 
+ -- consistency of password entries
+ SET password_encryption = 'md5';
+-CREATE ROLE regress_passwd1;
+-ALTER ROLE regress_passwd1 PASSWORD 'role_pwd1';
+-CREATE ROLE regress_passwd2;
+-ALTER ROLE regress_passwd2 PASSWORD 'role_pwd2';
++CREATE ROLE regress_passwd1 PASSWORD NEON_PASSWORD_PLACEHOLDER;
++ALTER ROLE regress_passwd1 PASSWORD NEON_PASSWORD_PLACEHOLDER;
++CREATE ROLE regress_passwd2 PASSWORD NEON_PASSWORD_PLACEHOLDER;
++ALTER ROLE regress_passwd2 PASSWORD NEON_PASSWORD_PLACEHOLDER;
+ SET password_encryption = 'scram-sha-256';
+-CREATE ROLE regress_passwd3 PASSWORD 'role_pwd3';
+-CREATE ROLE regress_passwd4 PASSWORD NULL;
++CREATE ROLE regress_passwd3 PASSWORD NEON_PASSWORD_PLACEHOLDER;
++CREATE ROLE regress_passwd4 PASSWORD NEON_PASSWORD_PLACEHOLDER;
+ 
+ -- check list of created entries
+ --
 @@ -44,14 +44,14 @@ ALTER ROLE regress_passwd2_new RENAME TO regress_passwd2;
  SET password_encryption = 'md5';
  
@@ -3199,7 +3252,7 @@ index bb82aa4aa2..d946ae9629 100644
  CREATE ROLE regress_passwd5 PASSWORD 'md5e73a4b11df52a6068f8b39f90be36023';
  
 diff --git a/src/test/regress/sql/privileges.sql b/src/test/regress/sql/privileges.sql
-index 5880bc018d..cf57905127 100644
+index 5880bc018d..27aa952b18 100644
 --- a/src/test/regress/sql/privileges.sql
 +++ b/src/test/regress/sql/privileges.sql
 @@ -24,18 +24,18 @@ RESET client_min_messages;
@@ -3327,6 +3380,19 @@ index 5880bc018d..cf57905127 100644
  CREATE SCHEMA regress_roleoption;
  GRANT CREATE, USAGE ON SCHEMA regress_roleoption TO PUBLIC;
  GRANT regress_roleoption_donor TO regress_roleoption_protagonist WITH INHERIT TRUE, SET FALSE;
+@@ -1926,9 +1926,9 @@ DROP ROLE regress_roleoption_donor;
+ DROP ROLE regress_roleoption_recipient;
+ 
+ -- MAINTAIN
+-CREATE ROLE regress_no_maintain;
+-CREATE ROLE regress_maintain;
+-CREATE ROLE regress_maintain_all IN ROLE pg_maintain;
++CREATE ROLE regress_no_maintain PASSWORD NEON_PASSWORD_PLACEHOLDER;
++CREATE ROLE regress_maintain PASSWORD NEON_PASSWORD_PLACEHOLDER;
++CREATE ROLE regress_maintain_all IN ROLE pg_maintain PASSWORD NEON_PASSWORD_PLACEHOLDER;
+ CREATE TABLE maintain_test (a INT);
+ CREATE INDEX ON maintain_test (a);
+ GRANT MAINTAIN ON maintain_test TO regress_maintain;
 diff --git a/src/test/regress/sql/psql.sql b/src/test/regress/sql/psql.sql
 index 3b3c6f6e29..b09d6231f8 100644
 --- a/src/test/regress/sql/psql.sql
