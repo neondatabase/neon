@@ -4,63 +4,45 @@ Run the regression tests on the cloud instance of Neon
 
 from __future__ import annotations
 
+import os
+from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-import psycopg2
 import pytest
 from fixtures.log_helper import log
+from fixtures.neon_api import NeonAPI
 from fixtures.neon_fixtures import RemotePostgres
 from fixtures.pg_version import PgVersion
+from fixtures.utils import PgConnectParam
 
 
 @pytest.fixture
-def setup(remote_pg: RemotePostgres):
+def setup(neon_api: NeonAPI):
     """
     Setup and teardown of the tests
     """
-    with psycopg2.connect(remote_pg.connstr()) as conn:
-        with conn.cursor() as cur:
-            log.info("Creating the extension")
-            cur.execute("CREATE EXTENSION IF NOT EXISTS regress_so")
-            conn.commit()
-            # TODO: Migrate to branches and remove this code
-            log.info("Looking for subscriptions in the regress database")
-            cur.execute(
-                "SELECT subname FROM pg_catalog.pg_subscription WHERE "
-                "subdbid = (SELECT oid FROM pg_catalog.pg_database WHERE datname='regression');"
-            )
-            if cur.rowcount > 0:
-                with psycopg2.connect(
-                    dbname="regression",
-                    host=remote_pg.default_options["host"],
-                    user=remote_pg.default_options["user"],
-                    password=remote_pg.default_options["password"],
-                ) as regress_conn:
-                    with regress_conn.cursor() as regress_cur:
-                        for sub in cur:
-                            regress_cur.execute(f"ALTER SUBSCRIPTION {sub[0]} DISABLE")
-                            regress_cur.execute(
-                                f"ALTER SUBSCRIPTION {sub[0]} SET (slot_name = NONE)"
-                            )
-                            regress_cur.execute(f"DROP SUBSCRIPTION {sub[0]}")
-                        regress_conn.commit()
+    project = os.getenv("PROJECT_ID")
+    assert project is not None, "PROJECT_ID undefined"
+    branches = neon_api.get_branches(project)
+    log.info("Branches: %s", branches)
+    primary_branch_id = None
+    for branch in branches["branches"]:
+        if branch["primary"]:
+            primary_branch_id = branch["id"]
+            break
+    assert primary_branch_id is not None, "Cannot get the primary branch"
+    current_branch_id = neon_api.create_branch_with_endpoint(
+        project, primary_branch_id, datetime.now().strftime("test-%y%m%d%H%M")
+    )["branch"]["id"]
+    uri = neon_api.get_connection_uri(project, current_branch_id)["uri"]
+    log.info("Branch ID: %s", current_branch_id)
 
-    yield
-    # TODO: Migrate to branches and remove this code
-    log.info("Looking for extra roles...")
-    with psycopg2.connect(remote_pg.connstr()) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT rolname FROM pg_catalog.pg_roles WHERE oid > 16384 AND rolname <> 'neondb_owner'"
-            )
-            roles: list[Any] = []
-            for role in cur:
-                log.info("Role found: %s", role[0])
-                roles.append(role[0])
-            for role in roles:
-                cur.execute(f"DROP ROLE {role}")
-            conn.commit()
+    pgconn = PgConnectParam(uri)
+
+    yield pgconn
+
+    log.info("Delete branch %s", current_branch_id)
+    neon_api.delete_branch(project, current_branch_id)
 
 
 @pytest.mark.timeout(7200)
@@ -81,15 +63,6 @@ def test_cloud_regress(
     )
     test_path = base_dir / f"vendor/postgres-{pg_version.v_prefixed}/src/test/regress"
 
-    env_vars = {
-        "PGHOST": remote_pg.default_options["host"],
-        "PGPORT": str(
-            remote_pg.default_options["port"] if "port" in remote_pg.default_options else 5432
-        ),
-        "PGUSER": remote_pg.default_options["user"],
-        "PGPASSWORD": remote_pg.default_options["password"],
-        "PGDATABASE": remote_pg.default_options["dbname"],
-    }
     regress_cmd = [
         str(regress_bin),
         f"--inputdir={test_path}",
@@ -99,4 +72,4 @@ def test_cloud_regress(
         f"--schedule={test_path}/parallel_schedule",
         "--max-connections=5",
     ]
-    remote_pg.pg_bin.run(regress_cmd, env=env_vars, cwd=test_output_dir)
+    remote_pg.pg_bin.run(regress_cmd, env=setup.env_vars(), cwd=test_output_dir)

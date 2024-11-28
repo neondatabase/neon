@@ -36,7 +36,6 @@ if TYPE_CHECKING:
 
     WaitUntilRet = TypeVar("WaitUntilRet")
 
-
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 
 COMPONENT_BINARIES = {
@@ -716,3 +715,79 @@ def skip_on_ci(reason: str):
         os.getenv("CI", "false") == "true",
         reason=reason,
     )
+
+
+class PgConnectParam:
+    def __init__(self, uri: str | None = None):
+        self.host: str | None = None
+        self.port: str = "5432"
+        self.user: str = "neondb_owner"
+        self.password: str | None = None
+        self.database: str = "neondb"
+        self.params: dict[str, str] = {}
+        if uri is not None:
+            self.import_uri(uri)
+
+    def import_uri(self, uri):
+        match = re.search(r"^postgres(?:ql)?://(.+@)?([\d\-.:\w]+)?(/\w[\w\d]*)?(\?.*)?$", uri)
+        assert match is not None, "Invalid URI"
+        userspec, hostspec, dbname, paramspec = match.groups()
+        if userspec is not None:
+            userspec = userspec[:-1]
+            match = re.search(r"^(\w[\w\d]*)(:.+)?$", userspec)
+            assert match is not None, "Invalid userspec"
+            user, password = match.groups()
+            self.user = user
+            self.password = password[1:]
+        if hostspec is not None:
+            match = re.search(r"^([\w\-\d.]+)(:[\d+])?$", hostspec)
+            assert match is not None, f"Invalid hostspec: {hostspec}"
+            host, port = match.groups()
+            self.host = host
+            if port is not None:
+                self.port = port[1:]
+        if dbname is not None:
+            dbname = dbname[1:]
+            self.database = dbname
+        params = {}
+        if paramspec is not None:
+            paramspec = paramspec[1:]
+            for param in paramspec.split("&"):
+                k, v = param.split("=")
+                params[k] = v
+        for attr in ("host", "port", "user", "password"):
+            if attr in params:
+                setattr(self, attr, params[attr])
+                del params[attr]
+        self.params = params
+
+    def env_vars(self) -> dict[str, str]:
+        env = {}
+        if self.host:
+            env["PGHOST"] = self.host
+        env["PGUSER"] = self.user
+        if self.port:
+            env["PGPORT"] = self.port
+        env["PGDATABASE"] = self.database
+        if self.password:
+            env["PGPASSWORD"] = self.password
+        if "sslmode" in self.params:
+            env["PGSSLMODE"] = self.params["sslmode"]
+        return env
+
+    def get_uri(self) -> str:
+        uri: list[str] = ["postgresql://"]
+        if self.user:
+            uri.append(self.user)
+        if self.password:
+            uri.append(f":{self.password}")
+        if self.user:
+            uri.append("@")
+        if self.host:
+            uri.append(self.host)
+        if self.port:
+            uri.append(f":{self.port}")
+        uri.append(f"/{self.database}")
+        if self.params:
+            uri.extend(["?", "&".join([f"{k}={v}" for k, v in self.params.items()])])
+        return "".join(uri)

@@ -1,14 +1,16 @@
 name: Cloud Regression Test
 on:
-  schedule:
-    # * is a special character in YAML so you have to quote this string
-    #          ┌───────────── minute (0 - 59)
-    #          │ ┌───────────── hour (0 - 23)
-    #          │ │ ┌───────────── day of the month (1 - 31)
-    #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
-    #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    - cron:  '45 1 * * *' # run once a day, timezone is utc
   workflow_dispatch: # adds ability to run this manually
+    inputs:
+      project-id:
+        description: Project ID
+        required: true
+        type: string
+      pg-version:
+        description: PostgreSQL version
+        required: false
+        default: 16
+        type: string
 
 defaults:
   run:
@@ -27,10 +29,6 @@ jobs:
       BUILD_TYPE: remote
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
-    strategy:
-      fail-fast: false
-      matrix:
-        pg-version: [16, 17]
 
     runs-on: us-east-2
     container:
@@ -44,7 +42,7 @@ jobs:
 
       - name: Patch the test
         env:
-          PG_VERSION: ${{matrix.pg-version}}
+          PG_VERSION: ${{inputs.pg-version}}
         run: |
           cd "vendor/postgres-v${PG_VERSION}"
           patch -p1 < "../../compute/patches/cloud_regress_pg${PG_VERSION}.patch"
@@ -60,7 +58,7 @@ jobs:
       - name: Change tests according to the generated password
         env:
           DBPASS: ${{ steps.pwgen.outputs.DBPASS }}
-          PG_VERSION: ${{matrix.pg-version}}
+          PG_VERSION: ${{inputs.pg-version}}
         run: |
           cd vendor/postgres-v"${PG_VERSION}"/src/test/regress
           for fname in sql/*.sql expected/*.out; do
@@ -84,10 +82,11 @@ jobs:
         with:
           build_type: ${{ env.BUILD_TYPE }}
           test_selection: cloud_regress
-          pg_version: ${{ matrix.pg-version }}
+          pg_version: ${{ inputs.pg-version }}
           extra_params: -m remote_cluster
         env:
-          BENCHMARK_CONNSTR: ${{ matrix.pg-version == 17 && secrets.PG_REGRESS_CONNSTR_17 || secrets.PG_REGRESS_CONNSTR }}
+          PROJECT_ID: ${{inputs.project-id}}
+          NEON_API_KEY: ${{secrets.NEON_STAGING_API_KEY}}
 
       - name: Create Allure report
         id: create-allure-report
@@ -95,7 +94,7 @@ jobs:
         uses: ./.github/actions/allure-report-generate
 
       - name: Post to a Slack channel
-        if: ${{ github.event.schedule && failure() }}
+        if: false
         uses: slackapi/slack-github-action@v1
         with:
           channel-id: "C033QLM5P7D" # on-call-staging-stream
