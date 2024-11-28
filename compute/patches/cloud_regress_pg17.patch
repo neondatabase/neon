@@ -775,9 +775,20 @@ index f14bfccfb1..bbb2092df9 100644
  GRANT SELECT, INSERT ON itest8 TO regress_identity_user1;
  SET ROLE regress_identity_user1;
 diff --git a/src/test/regress/expected/inherit.out b/src/test/regress/expected/inherit.out
-index 85240a9b0b..bd618e4b21 100644
+index 85240a9b0b..5294f7557d 100644
 --- a/src/test/regress/expected/inherit.out
 +++ b/src/test/regress/expected/inherit.out
+@@ -2055,8 +2055,8 @@ NOTICE:  drop cascades to table cnullchild
+ --
+ -- Mixed ownership inheritance tree
+ --
+-create role regress_alice;
+-create role regress_bob;
++create role regress_alice password NEON_PASSWORD_PLACEHOLDER;
++create role regress_bob password NEON_PASSWORD_PLACEHOLDER;
+ grant all on schema public to regress_alice, regress_bob;
+ grant regress_alice to regress_bob;
+ set session authorization regress_alice;
 @@ -2789,7 +2789,7 @@ create index on permtest_parent (left(c, 3));
  insert into permtest_parent
    select 1, 'a', left(fipshash(i::text), 5) from generate_series(0, 100) i;
@@ -981,9 +992,27 @@ index fc42d418bf..e38f517574 100644
  CREATE SCHEMA addr_nsp;
  SET search_path TO 'addr_nsp';
 diff --git a/src/test/regress/expected/password.out b/src/test/regress/expected/password.out
-index 924d6e001d..cc984ffa02 100644
+index 924d6e001d..1a9978daad 100644
 --- a/src/test/regress/expected/password.out
 +++ b/src/test/regress/expected/password.out
+@@ -12,12 +12,12 @@ SET password_encryption = 'md5'; -- ok
+ SET password_encryption = 'scram-sha-256'; -- ok
+ -- consistency of password entries
+ SET password_encryption = 'md5';
+-CREATE ROLE regress_passwd1;
+-ALTER ROLE regress_passwd1 PASSWORD 'role_pwd1';
+-CREATE ROLE regress_passwd2;
+-ALTER ROLE regress_passwd2 PASSWORD 'role_pwd2';
++CREATE ROLE regress_passwd1 PASSWORD NEON_PASSWORD_PLACEHOLDER;
++ALTER ROLE regress_passwd1 PASSWORD NEON_PASSWORD_PLACEHOLDER;
++CREATE ROLE regress_passwd2 PASSWORD NEON_PASSWORD_PLACEHOLDER;
++ALTER ROLE regress_passwd2 PASSWORD NEON_PASSWORD_PLACEHOLDER;
+ SET password_encryption = 'scram-sha-256';
+-CREATE ROLE regress_passwd3 PASSWORD 'role_pwd3';
++CREATE ROLE regress_passwd3 PASSWORD NEON_PASSWORD_PLACEHOLDER;
+ CREATE ROLE regress_passwd4 PASSWORD NULL;
+ -- check list of created entries
+ --
 @@ -32,10 +32,10 @@ SELECT rolname, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+
      ORDER BY rolname, rolpassword;
       rolname     |                rolpassword_masked                 
@@ -1117,7 +1146,7 @@ index 924d6e001d..cc984ffa02 100644
  SELECT rolname, rolpassword
      FROM pg_authid
 diff --git a/src/test/regress/expected/privileges.out b/src/test/regress/expected/privileges.out
-index 1296da0d57..e261e95eef 100644
+index 1296da0d57..f43fffa44c 100644
 --- a/src/test/regress/expected/privileges.out
 +++ b/src/test/regress/expected/privileges.out
 @@ -20,19 +20,19 @@ SELECT lo_unlink(oid) FROM pg_largeobject_metadata WHERE oid >= 1000 AND oid < 3
@@ -1263,6 +1292,19 @@ index 1296da0d57..e261e95eef 100644
  CREATE SCHEMA regress_roleoption;
  GRANT CREATE, USAGE ON SCHEMA regress_roleoption TO PUBLIC;
  GRANT regress_roleoption_donor TO regress_roleoption_protagonist WITH INHERIT TRUE, SET FALSE;
+@@ -2995,9 +2999,9 @@ DROP ROLE regress_roleoption_protagonist;
+ DROP ROLE regress_roleoption_donor;
+ DROP ROLE regress_roleoption_recipient;
+ -- MAINTAIN
+-CREATE ROLE regress_no_maintain;
+-CREATE ROLE regress_maintain;
+-CREATE ROLE regress_maintain_all IN ROLE pg_maintain;
++CREATE ROLE regress_no_maintain PASSWORD NEON_PASSWORD_PLACEHOLDER;
++CREATE ROLE regress_maintain PASSWORD NEON_PASSWORD_PLACEHOLDER;
++CREATE ROLE regress_maintain_all IN ROLE pg_maintain PASSWORD NEON_PASSWORD_PLACEHOLDER;
+ CREATE TABLE maintain_test (a INT);
+ CREATE INDEX ON maintain_test (a);
+ GRANT MAINTAIN ON maintain_test TO regress_maintain;
 diff --git a/src/test/regress/expected/psql.out b/src/test/regress/expected/psql.out
 index 3bbe4c5f97..e742a46a63 100644
 --- a/src/test/regress/expected/psql.out
@@ -3211,10 +3253,10 @@ index 1a6c61f49d..1c31ac6a53 100644
  -- Test generic object addressing/identification functions
  CREATE SCHEMA addr_nsp;
 diff --git a/src/test/regress/sql/password.sql b/src/test/regress/sql/password.sql
-index bb82aa4aa2..7424c91b10 100644
+index bb82aa4aa2..b158427f29 100644
 --- a/src/test/regress/sql/password.sql
 +++ b/src/test/regress/sql/password.sql
-@@ -10,13 +10,13 @@ SET password_encryption = 'scram-sha-256'; -- ok
+@@ -10,12 +10,12 @@ SET password_encryption = 'scram-sha-256'; -- ok
  
  -- consistency of password entries
  SET password_encryption = 'md5';
@@ -3228,12 +3270,10 @@ index bb82aa4aa2..7424c91b10 100644
 +ALTER ROLE regress_passwd2 PASSWORD NEON_PASSWORD_PLACEHOLDER;
  SET password_encryption = 'scram-sha-256';
 -CREATE ROLE regress_passwd3 PASSWORD 'role_pwd3';
--CREATE ROLE regress_passwd4 PASSWORD NULL;
 +CREATE ROLE regress_passwd3 PASSWORD NEON_PASSWORD_PLACEHOLDER;
-+CREATE ROLE regress_passwd4 PASSWORD NEON_PASSWORD_PLACEHOLDER;
+ CREATE ROLE regress_passwd4 PASSWORD NULL;
  
  -- check list of created entries
- --
 @@ -44,14 +44,14 @@ ALTER ROLE regress_passwd2_new RENAME TO regress_passwd2;
  SET password_encryption = 'md5';
  
