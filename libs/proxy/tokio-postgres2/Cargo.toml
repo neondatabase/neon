@@ -11,19 +11,17 @@ keywords = ["database", "postgres", "postgresql", "sql", "async"]
 categories = ["database"]
 
 [dependencies]
-async-trait = "0.1"
-bytes = "1.0"
+async-trait.workspace = true
+bytes.workspace = true
 byteorder = "1.0"
-fallible-iterator = "0.2"
-futures-channel = { version = "0.3", features = ["sink"] }
-futures-util = { version = "0.3", features = ["sink"] }
+fallible-iterator.workspace = true
+futures-util = { workspace = true }
 log = "0.4"
-parking_lot = "0.12"
+parking_lot.workspace = true
 percent-encoding = "2.0"
-pin-project-lite = "0.2"
+pin-project-lite.workspace = true
 phf = "0.11"
 postgres-protocol2 = { version = "0.6.4", path = "../postgres-protocol2" }
 postgres-types2 = { version = "0.2.4", path = "../postgres-types2" }
-socket2 = { version = "0.5", features = ["all"] }
-tokio = { version = "1.0", features = ["io-util", "time", "net"] }
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio = { workspace = true, features = ["io-util", "time", "net"] }
+tokio-util = { workspace = true, features = ["codec"] }

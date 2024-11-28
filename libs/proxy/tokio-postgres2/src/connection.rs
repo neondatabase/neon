@@ -1,13 +1,10 @@
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
-// use crate::copy_both::CopyBothReceiver;
-// use crate::copy_in::CopyInReceiver;
 use crate::error::DbError;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::{AsyncMessage, Error, Notification};
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use futures_channel::mpsc;
-use futures_util::{ready, stream::FusedStream, Sink, Stream, StreamExt};
+use futures_util::{ready, Sink, Stream};
 use log::{info, trace};
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
@@ -16,7 +13,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
+use tokio_util::sync::PollSender;
 
 pub enum RequestMessages {
     Single(FrontendMessage),
@@ -28,7 +27,7 @@ pub struct Request {
 }
 
 pub struct Response {
-    sender: mpsc::Sender<BackendMessages>,
+    sender: PollSender<BackendMessages>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -145,9 +144,9 @@ where
                 },
             };
 
-            match response.sender.poll_ready(cx) {
+            match response.sender.poll_reserve(cx) {
                 Poll::Ready(Ok(())) => {
-                    let _ = response.sender.start_send(messages);
+                    let _ = response.sender.send_item(messages);
                     if !request_complete {
                         self.responses.push_front(response);
                     }
@@ -177,15 +176,15 @@ where
             return Poll::Ready(Some(messages));
         }
 
-        if self.receiver.is_terminated() {
+        if self.receiver.is_closed() {
             return Poll::Ready(None);
         }
 
-        match self.receiver.poll_next_unpin(cx) {
+        match self.receiver.poll_recv(cx) {
             Poll::Ready(Some(request)) => {
                 trace!("polled new request");
                 self.responses.push_back(Response {
-                    sender: request.sender,
+                    sender: PollSender::new(request.sender),
                 });
                 Poll::Ready(Some(request.messages))
             }

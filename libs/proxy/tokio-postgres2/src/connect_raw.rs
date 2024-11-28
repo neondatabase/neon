@@ -6,13 +6,13 @@ use crate::tls::{TlsConnect, TlsStream};
 use crate::{Client, Connection, Error};
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use futures_channel::mpsc;
 use futures_util::{ready, Sink, SinkExt, Stream, TryStreamExt};
 use postgres_protocol2::authentication;
 use postgres_protocol2::authentication::sasl;
 use postgres_protocol2::authentication::sasl::ScramSha256;
 use postgres_protocol2::message::backend::{AuthenticationSaslBody, Message};
 use postgres_protocol2::message::frontend;
+use tokio::sync::mpsc;
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::pin::Pin;
@@ -104,7 +104,7 @@ where
     authenticate(&mut stream, config).await?;
     let (process_id, secret_key, parameters) = read_info(&mut stream).await?;
 
-    let (sender, receiver) = mpsc::unbounded();
+    let (sender, receiver) = mpsc::unbounded_channel();
     let client = Client::new(sender, config.ssl_mode, process_id, secret_key);
     let connection = Connection::new(stream.inner, stream.delayed, parameters, receiver);
 

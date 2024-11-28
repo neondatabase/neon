@@ -16,8 +16,7 @@ use crate::{
 };
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use futures_channel::mpsc;
-use futures_util::{future, ready, StreamExt, TryStreamExt};
+use futures_util::{future, ready, TryStreamExt};
 use parking_lot::Mutex;
 use postgres_protocol2::message::{backend::Message, frontend};
 use postgres_types2::BorrowToSql;
@@ -25,6 +24,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use tokio::sync::mpsc;
 
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -43,7 +43,7 @@ impl Responses {
                 None => {}
             }
 
-            match ready!(self.receiver.poll_next_unpin(cx)) {
+            match ready!(self.receiver.poll_recv(cx)) {
                 Some(messages) => self.cur = messages,
                 None => return Poll::Ready(Err(Error::closed())),
             }
@@ -87,9 +87,7 @@ impl InnerClient {
     pub fn send(&self, messages: RequestMessages) -> Result<Responses, Error> {
         let (sender, receiver) = mpsc::channel(1);
         let request = Request { messages, sender };
-        self.sender
-            .unbounded_send(request)
-            .map_err(|_| Error::closed())?;
+        self.sender.send(request).map_err(|_| Error::closed())?;
 
         Ok(Responses {
             receiver,
@@ -472,11 +470,6 @@ impl Client {
     /// In that case, all future queries will fail.
     pub fn is_closed(&self) -> bool {
         self.inner.sender.is_closed()
-    }
-
-    #[doc(hidden)]
-    pub fn __private_api_close(&mut self) {
-        self.inner.sender.close_channel()
     }
 }
 
