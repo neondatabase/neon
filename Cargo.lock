@@ -4170,8 +4170,8 @@ dependencies = [
 
 [[package]]
 name = "postgres"
-version = "0.19.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#00940fcdb57a8e99e805297b75839e7c4c7b1796"
+version = "0.19.9"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon-rebase1#a88729d425754cb64423aa7140caac9f1cc9bb2a"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -4183,10 +4183,10 @@ dependencies = [
 
 [[package]]
 name = "postgres-protocol"
-version = "0.6.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#00940fcdb57a8e99e805297b75839e7c4c7b1796"
+version = "0.6.7"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon-rebase1#a88729d425754cb64423aa7140caac9f1cc9bb2a"
 dependencies = [
- "base64 0.20.0",
+ "base64 0.22.1",
  "byteorder",
  "bytes",
  "fallible-iterator",
@@ -4197,7 +4197,6 @@ dependencies = [
  "rand 0.8.5",
  "sha2",
  "stringprep",
- "tokio",
 ]
 
 [[package]]
@@ -4218,8 +4217,8 @@ dependencies = [
 
 [[package]]
 name = "postgres-types"
-version = "0.2.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#00940fcdb57a8e99e805297b75839e7c4c7b1796"
+version = "0.2.8"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon-rebase1#a88729d425754cb64423aa7140caac9f1cc9bb2a"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -6542,8 +6541,8 @@ dependencies = [
 
 [[package]]
 name = "tokio-postgres"
-version = "0.7.7"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#00940fcdb57a8e99e805297b75839e7c4c7b1796"
+version = "0.7.12"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon-rebase1#a88729d425754cb64423aa7140caac9f1cc9bb2a"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -6558,9 +6557,11 @@ dependencies = [
  "pin-project-lite",
  "postgres-protocol",
  "postgres-types",
+ "rand 0.8.5",
  "socket2",
  "tokio",
  "tokio-util",
+ "whoami",
 ]
 
 [[package]]
