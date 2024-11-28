@@ -17,20 +17,16 @@ TARGET_RUNTIME = 30
 @dataclass
 class PageServicePipeliningConfig:
     max_batch_size: int
-    protocol_pipelining_mode: str
 
 
-PROTOCOL_PIPELINING_MODES = ["concurrent-futures", "tasks"]
 
 NON_BATCHABLE: list[Optional[PageServicePipeliningConfig]] = [None]
 for max_batch_size in [1, 32]:
-    for protocol_pipelining_mode in PROTOCOL_PIPELINING_MODES:
-        NON_BATCHABLE.append(PageServicePipeliningConfig(max_batch_size, protocol_pipelining_mode))
+    NON_BATCHABLE.append(PageServicePipeliningConfig(max_batch_size))
 
 BATCHABLE: list[Optional[PageServicePipeliningConfig]] = [None]
 for max_batch_size in [1, 2, 4, 8, 16, 32]:
-    for protocol_pipelining_mode in PROTOCOL_PIPELINING_MODES:
-        BATCHABLE.append(PageServicePipeliningConfig(max_batch_size, protocol_pipelining_mode))
+    BATCHABLE.append(PageServicePipeliningConfig(max_batch_size))
 
 
 @pytest.mark.parametrize(
