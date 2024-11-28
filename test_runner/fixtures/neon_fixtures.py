@@ -3934,6 +3934,35 @@ class Endpoint(PgProtocol, LogUtils):
             log.info(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
+    def respec_deep(self, **kwargs: Any) -> None:
+        """
+        Update the endpoint.json file taking into account nested keys.
+        It does one level deep update. Should enough for most cases.
+        Distinct method from respec() to do not break existing functionality.
+        NOTE: This method also updates the spec.json file, not endpoint.json.
+        We need it because neon_local also writes to spec.json, so intended
+        use-case is i) start endpoint with some config, ii) respec_deep(),
+        iii) call reconfigure() to apply the changes.
+        """
+        config_path = os.path.join(self.endpoint_path(), "spec.json")
+        with open(config_path) as f:
+            data_dict: dict[str, Any] = json.load(f)
+
+        log.info("Current compute spec: %s", json.dumps(data_dict, indent=4))
+
+        for key, value in kwargs.items():
+            if isinstance(value, dict):
+                if key not in data_dict:
+                    data_dict[key] = value
+                else:
+                    data_dict[key] = {**data_dict[key], **value}
+            else:
+                data_dict[key] = value
+
+        with open(config_path, "w") as file:
+            log.info("Updating compute spec to: %s", json.dumps(data_dict, indent=4))
+            json.dump(data_dict, file, indent=4)
+
     # Please note: Migrations only run if pg_skip_catalog_updates is false
     def wait_for_migrations(self, num_migrations: int = 11):
         with self.cursor() as cur:
