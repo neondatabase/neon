@@ -6,37 +6,22 @@
 #![doc(html_root_url = "https://docs.rs/postgres-types/0.2")]
 #![warn(clippy::all, rust_2018_idioms, missing_docs)]
 
-use arrayvec::ArrayVec;
 use fallible_iterator::FallibleIterator;
 use postgres_protocol2::types;
 use std::any::type_name;
-use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
-use std::hash::BuildHasher;
-use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::type_gen::{Inner, Other};
 
 #[doc(inline)]
 pub use postgres_protocol2::Oid;
 
-// #[doc(inline)]
-// pub use pg_lsn::PgLsn;
-
-// pub use crate::special::{Date, Timestamp};
 use bytes::BytesMut;
-
-// Number of seconds from 1970-01-01 to 2000-01-01
-const TIME_SEC_CONVERSION: u64 = 946_684_800;
-const USEC_PER_SEC: u64 = 1_000_000;
-const NSEC_PER_USEC: u64 = 1_000;
 
 /// Generates a simple implementation of `ToSql::accepts` which accepts the
 /// types passed to it.
-#[macro_export]
 macro_rules! accepts {
     ($($expected:ident),+) => (
         fn accepts(ty: &$crate::Type) -> bool {
@@ -48,7 +33,6 @@ macro_rules! accepts {
 /// Generates an implementation of `ToSql::to_sql_checked`.
 ///
 /// All `ToSql` implementations should use this macro.
-#[macro_export]
 macro_rules! to_sql_checked {
     () => {
         fn to_sql_checked(
@@ -254,74 +238,6 @@ impl fmt::Display for WrongFormat {
 }
 
 /// A trait for types that can be created from a Postgres value.
-///
-/// # Types
-///
-/// The following implementations are provided by this crate, along with the
-/// corresponding Postgres types:
-///
-/// | Rust type                         | Postgres type(s)                              |
-/// |-----------------------------------|-----------------------------------------------|
-/// | `bool`                            | BOOL                                          |
-/// | `i8`                              | "char"                                        |
-/// | `i16`                             | SMALLINT, SMALLSERIAL                         |
-/// | `i32`                             | INT, SERIAL                                   |
-/// | `u32`                             | OID                                           |
-/// | `i64`                             | BIGINT, BIGSERIAL                             |
-/// | `f32`                             | REAL                                          |
-/// | `f64`                             | DOUBLE PRECISION                              |
-/// | `&str`/`String`                   | VARCHAR, CHAR(n), TEXT, CITEXT, NAME, UNKNOWN |
-/// |                                   | LTREE, LQUERY, LTXTQUERY                      |
-/// | `&[u8]`/`Vec<u8>`                 | BYTEA                                         |
-/// | `HashMap<String, Option<String>>` | HSTORE                                        |
-/// | `SystemTime`                      | TIMESTAMP, TIMESTAMP WITH TIME ZONE           |
-/// | `IpAddr`                          | INET                                          |
-///
-/// In addition, some implementations are provided for types in third party
-/// crates. These are disabled by default; to opt into one of these
-/// implementations, activate the Cargo feature corresponding to the crate's
-/// name prefixed by `with-`. For example, the `with-serde_json-1` feature enables
-/// the implementation for the `serde_json::Value` type.
-///
-/// | Rust type                       | Postgres type(s)                    |
-/// |---------------------------------|-------------------------------------|
-/// | `chrono::NaiveDateTime`         | TIMESTAMP                           |
-/// | `chrono::DateTime<Utc>`         | TIMESTAMP WITH TIME ZONE            |
-/// | `chrono::DateTime<Local>`       | TIMESTAMP WITH TIME ZONE            |
-/// | `chrono::DateTime<FixedOffset>` | TIMESTAMP WITH TIME ZONE            |
-/// | `chrono::NaiveDate`             | DATE                                |
-/// | `chrono::NaiveTime`             | TIME                                |
-/// | `time::PrimitiveDateTime`       | TIMESTAMP                           |
-/// | `time::OffsetDateTime`          | TIMESTAMP WITH TIME ZONE            |
-/// | `time::Date`                    | DATE                                |
-/// | `time::Time`                    | TIME                                |
-/// | `eui48::MacAddress`             | MACADDR                             |
-/// | `geo_types::Point<f64>`         | POINT                               |
-/// | `geo_types::Rect<f64>`          | BOX                                 |
-/// | `geo_types::LineString<f64>`    | PATH                                |
-/// | `serde_json::Value`             | JSON, JSONB                         |
-/// | `uuid::Uuid`                    | UUID                                |
-/// | `bit_vec::BitVec`               | BIT, VARBIT                         |
-/// | `eui48::MacAddress`             | MACADDR                             |
-/// | `cidr::InetCidr`                | CIDR                                |
-/// | `cidr::InetAddr`                | INET                                |
-/// | `smol_str::SmolStr`             | VARCHAR, CHAR(n), TEXT, CITEXT,     |
-/// |                                 | NAME, UNKNOWN, LTREE, LQUERY,       |
-/// |                                 | LTXTQUERY                           |
-///
-/// # Nullability
-///
-/// In addition to the types listed above, `FromSql` is implemented for
-/// `Option<T>` where `T` implements `FromSql`. An `Option<T>` represents a
-/// nullable Postgres value.
-///
-/// # Arrays
-///
-/// `FromSql` is implemented for `Vec<T>`, `Box<[T]>` and `[T; N]` where `T`
-/// implements `FromSql`, and corresponds to one-dimensional Postgres arrays.
-///
-/// **Note:** the impl for arrays only exist when the Cargo feature `array-impls`
-/// is enabled.
 pub trait FromSql<'a>: Sized {
     /// Creates a new value of this type from a buffer of data of the specified
     /// Postgres `Type` in its binary format.
@@ -405,91 +321,9 @@ impl<'a, T: FromSql<'a>> FromSql<'a> for Vec<T> {
     }
 }
 
-impl<'a, T: FromSql<'a>, const N: usize> FromSql<'a> for [T; N] {
-    fn from_sql(ty: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn Error + Sync + Send>> {
-        let member_type = match *ty.kind() {
-            Kind::Array(ref member) => member,
-            _ => panic!("expected array type"),
-        };
-
-        let array = types::array_from_sql(raw)?;
-        if array.dimensions().count()? > 1 {
-            return Err("array contains too many dimensions".into());
-        }
-
-        let mut values = array.values();
-        let mut out = ArrayVec::<T, N>::new();
-        loop {
-            let Some(v) = values.next()? else { break };
-            if out.try_push(T::from_sql_nullable(member_type, v)?).is_err() {
-                return Err(format!(
-                    "excess elements in array (expected {}, got more than that)",
-                    N,
-                )
-                .into());
-            }
-        }
-
-        match out.into_inner() {
-            Ok(arr) => Ok(arr),
-            Err(out) => Err(format!(
-                "too few elements in array (expected {}, got {})",
-                N,
-                out.len()
-            )
-            .into()),
-        }
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        match *ty.kind() {
-            Kind::Array(ref inner) => T::accepts(inner),
-            _ => false,
-        }
-    }
-}
-
-impl<'a, T: FromSql<'a>> FromSql<'a> for Box<[T]> {
-    fn from_sql(ty: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn Error + Sync + Send>> {
-        Vec::<T>::from_sql(ty, raw).map(Vec::into_boxed_slice)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        Vec::<T>::accepts(ty)
-    }
-}
-
-impl<'a> FromSql<'a> for Vec<u8> {
-    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Vec<u8>, Box<dyn Error + Sync + Send>> {
-        Ok(types::bytea_from_sql(raw).to_owned())
-    }
-
-    accepts!(BYTEA);
-}
-
-impl<'a> FromSql<'a> for &'a [u8] {
-    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<&'a [u8], Box<dyn Error + Sync + Send>> {
-        Ok(types::bytea_from_sql(raw))
-    }
-
-    accepts!(BYTEA);
-}
-
 impl<'a> FromSql<'a> for String {
     fn from_sql(ty: &Type, raw: &'a [u8]) -> Result<String, Box<dyn Error + Sync + Send>> {
         <&str as FromSql>::from_sql(ty, raw).map(ToString::to_string)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        <&str as FromSql>::accepts(ty)
-    }
-}
-
-impl<'a> FromSql<'a> for Box<str> {
-    fn from_sql(ty: &Type, raw: &'a [u8]) -> Result<Box<str>, Box<dyn Error + Sync + Send>> {
-        <&str as FromSql>::from_sql(ty, raw)
-            .map(ToString::to_string)
-            .map(String::into_boxed_str)
     }
 
     fn accepts(ty: &Type) -> bool {
@@ -535,65 +369,8 @@ macro_rules! simple_from {
     }
 }
 
-simple_from!(bool, bool_from_sql, BOOL);
 simple_from!(i8, char_from_sql, CHAR);
-simple_from!(i16, int2_from_sql, INT2);
-simple_from!(i32, int4_from_sql, INT4);
 simple_from!(u32, oid_from_sql, OID);
-simple_from!(i64, int8_from_sql, INT8);
-simple_from!(f32, float4_from_sql, FLOAT4);
-simple_from!(f64, float8_from_sql, FLOAT8);
-
-impl<'a, S> FromSql<'a> for HashMap<String, Option<String>, S>
-where
-    S: Default + BuildHasher,
-{
-    fn from_sql(
-        _: &Type,
-        raw: &'a [u8],
-    ) -> Result<HashMap<String, Option<String>, S>, Box<dyn Error + Sync + Send>> {
-        types::hstore_from_sql(raw)?
-            .map(|(k, v)| Ok((k.to_owned(), v.map(str::to_owned))))
-            .collect()
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        ty.name() == "hstore"
-    }
-}
-
-impl<'a> FromSql<'a> for SystemTime {
-    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<SystemTime, Box<dyn Error + Sync + Send>> {
-        let time = types::timestamp_from_sql(raw)?;
-        let epoch = UNIX_EPOCH + Duration::from_secs(TIME_SEC_CONVERSION);
-
-        let negative = time < 0;
-        let time = time.unsigned_abs();
-
-        let secs = time / USEC_PER_SEC;
-        let nsec = (time % USEC_PER_SEC) * NSEC_PER_USEC;
-        let offset = Duration::new(secs, nsec as u32);
-
-        let time = if negative {
-            epoch - offset
-        } else {
-            epoch + offset
-        };
-
-        Ok(time)
-    }
-
-    accepts!(TIMESTAMP, TIMESTAMPTZ);
-}
-
-impl<'a> FromSql<'a> for IpAddr {
-    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<IpAddr, Box<dyn Error + Sync + Send>> {
-        let inet = types::inet_from_sql(raw)?;
-        Ok(inet.addr())
-    }
-
-    accepts!(INET);
-}
 
 /// An enum representing the nullability of a Postgres value.
 pub enum IsNull {

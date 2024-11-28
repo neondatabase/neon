@@ -1,17 +1,10 @@
 [package]
 name = "postgres-types2"
-version = "0.2.4"
-authors = ["Steven Fackler <sfackler@gmail.com>"]
+version = "0.1.0"
 edition = "2018"
 license = "MIT/Apache-2.0"
-description = "Conversions between Rust and Postgres values"
-repository = "https://github.com/sfackler/rust-postgres"
-readme = "../README.md"
-keywords = ["database", "postgres", "postgresql", "sql"]
-categories = ["database"]
 
 [dependencies]
-bytes = "1.0"
-fallible-iterator = "0.2"
-postgres-protocol2 = { version = "0.6.4", path = "../postgres-protocol2" }
-arrayvec = "0.7"
+bytes.workspace = true
+fallible-iterator.workspace = true
+postgres-protocol2 = { path = "../postgres-protocol2" }

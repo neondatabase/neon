@@ -1,19 +1,13 @@
 [package]
 name = "tokio-postgres2"
-version = "0.7.7"
-authors = ["Steven Fackler <sfackler@gmail.com>"]
+version = "0.1.0"
 edition = "2018"
 license = "MIT/Apache-2.0"
-description = "A native, asynchronous PostgreSQL client"
-repository = "https://github.com/sfackler/rust-postgres"
-readme = "../README.md"
-keywords = ["database", "postgres", "postgresql", "sql", "async"]
-categories = ["database"]
 
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
-byteorder = "1.0"
+byteorder.workspace = true
 fallible-iterator.workspace = true
 futures-util = { workspace = true }
 log = "0.4"
@@ -21,7 +15,7 @@ parking_lot.workspace = true
 percent-encoding = "2.0"
 pin-project-lite.workspace = true
 phf = "0.11"
-postgres-protocol2 = { version = "0.6.4", path = "../postgres-protocol2" }
-postgres-types2 = { version = "0.2.4", path = "../postgres-types2" }
+postgres-protocol2 = { path = "../postgres-protocol2" }
+postgres-types2 = { path = "../postgres-types2" }
 tokio = { workspace = true, features = ["io-util", "time", "net"] }
 tokio-util = { workspace = true, features = ["codec"] }

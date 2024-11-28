@@ -24,13 +24,13 @@ const PGSQL_AF_INET6: u8 = 3;
 
 /// Serializes a `BOOL` value.
 #[inline]
-pub fn bool_to_sql(v: bool, buf: &mut BytesMut) {
+fn bool_to_sql(v: bool, buf: &mut BytesMut) {
     buf.put_u8(v as u8);
 }
 
 /// Deserializes a `BOOL` value.
 #[inline]
-pub fn bool_from_sql(buf: &[u8]) -> Result<bool, StdBox<dyn Error + Sync + Send>> {
+fn bool_from_sql(buf: &[u8]) -> Result<bool, StdBox<dyn Error + Sync + Send>> {
     if buf.len() != 1 {
         return Err("invalid buffer size".into());
     }
@@ -40,13 +40,13 @@ pub fn bool_from_sql(buf: &[u8]) -> Result<bool, StdBox<dyn Error + Sync + Send>
 
 /// Serializes a `BYTEA` value.
 #[inline]
-pub fn bytea_to_sql(v: &[u8], buf: &mut BytesMut) {
+fn bytea_to_sql(v: &[u8], buf: &mut BytesMut) {
     buf.put_slice(v);
 }
 
 /// Deserializes a `BYTEA value.
 #[inline]
-pub fn bytea_from_sql(buf: &[u8]) -> &[u8] {
+fn bytea_from_sql(buf: &[u8]) -> &[u8] {
     buf
 }
 
@@ -64,7 +64,7 @@ pub fn text_from_sql(buf: &[u8]) -> Result<&str, StdBox<dyn Error + Sync + Send>
 
 /// Serializes a `"char"` value.
 #[inline]
-pub fn char_to_sql(v: i8, buf: &mut BytesMut) {
+fn char_to_sql(v: i8, buf: &mut BytesMut) {
     buf.put_i8(v);
 }
 
@@ -80,13 +80,13 @@ pub fn char_from_sql(mut buf: &[u8]) -> Result<i8, StdBox<dyn Error + Sync + Sen
 
 /// Serializes an `INT2` value.
 #[inline]
-pub fn int2_to_sql(v: i16, buf: &mut BytesMut) {
+fn int2_to_sql(v: i16, buf: &mut BytesMut) {
     buf.put_i16(v);
 }
 
 /// Deserializes an `INT2` value.
 #[inline]
-pub fn int2_from_sql(mut buf: &[u8]) -> Result<i16, StdBox<dyn Error + Sync + Send>> {
+fn int2_from_sql(mut buf: &[u8]) -> Result<i16, StdBox<dyn Error + Sync + Send>> {
     let v = buf.read_i16::<BigEndian>()?;
     if !buf.is_empty() {
         return Err("invalid buffer size".into());
@@ -96,13 +96,13 @@ pub fn int2_from_sql(mut buf: &[u8]) -> Result<i16, StdBox<dyn Error + Sync + Se
 
 /// Serializes an `INT4` value.
 #[inline]
-pub fn int4_to_sql(v: i32, buf: &mut BytesMut) {
+fn int4_to_sql(v: i32, buf: &mut BytesMut) {
     buf.put_i32(v);
 }
 
 /// Deserializes an `INT4` value.
 #[inline]
-pub fn int4_from_sql(mut buf: &[u8]) -> Result<i32, StdBox<dyn Error + Sync + Send>> {
+fn int4_from_sql(mut buf: &[u8]) -> Result<i32, StdBox<dyn Error + Sync + Send>> {
     let v = buf.read_i32::<BigEndian>()?;
     if !buf.is_empty() {
         return Err("invalid buffer size".into());
@@ -128,13 +128,13 @@ pub fn oid_from_sql(mut buf: &[u8]) -> Result<Oid, StdBox<dyn Error + Sync + Sen
 
 /// Serializes an `INT8` value.
 #[inline]
-pub fn int8_to_sql(v: i64, buf: &mut BytesMut) {
+fn int8_to_sql(v: i64, buf: &mut BytesMut) {
     buf.put_i64(v);
 }
 
 /// Deserializes an `INT8` value.
 #[inline]
-pub fn int8_from_sql(mut buf: &[u8]) -> Result<i64, StdBox<dyn Error + Sync + Send>> {
+fn int8_from_sql(mut buf: &[u8]) -> Result<i64, StdBox<dyn Error + Sync + Send>> {
     let v = buf.read_i64::<BigEndian>()?;
     if !buf.is_empty() {
         return Err("invalid buffer size".into());
@@ -144,13 +144,13 @@ pub fn int8_from_sql(mut buf: &[u8]) -> Result<i64, StdBox<dyn Error + Sync + Se
 
 /// Serializes a `PG_LSN` value.
 #[inline]
-pub fn lsn_to_sql(v: Lsn, buf: &mut BytesMut) {
+fn lsn_to_sql(v: Lsn, buf: &mut BytesMut) {
     buf.put_u64(v);
 }
 
 /// Deserializes a `PG_LSN` value.
 #[inline]
-pub fn lsn_from_sql(mut buf: &[u8]) -> Result<Lsn, StdBox<dyn Error + Sync + Send>> {
+fn lsn_from_sql(mut buf: &[u8]) -> Result<Lsn, StdBox<dyn Error + Sync + Send>> {
     let v = buf.read_u64::<BigEndian>()?;
     if !buf.is_empty() {
         return Err("invalid buffer size".into());
@@ -160,13 +160,13 @@ pub fn lsn_from_sql(mut buf: &[u8]) -> Result<Lsn, StdBox<dyn Error + Sync + Sen
 
 /// Serializes a `FLOAT4` value.
 #[inline]
-pub fn float4_to_sql(v: f32, buf: &mut BytesMut) {
+fn float4_to_sql(v: f32, buf: &mut BytesMut) {
     buf.put_f32(v);
 }
 
 /// Deserializes a `FLOAT4` value.
 #[inline]
-pub fn float4_from_sql(mut buf: &[u8]) -> Result<f32, StdBox<dyn Error + Sync + Send>> {
+fn float4_from_sql(mut buf: &[u8]) -> Result<f32, StdBox<dyn Error + Sync + Send>> {
     let v = buf.read_f32::<BigEndian>()?;
     if !buf.is_empty() {
         return Err("invalid buffer size".into());
@@ -176,13 +176,13 @@ pub fn float4_from_sql(mut buf: &[u8]) -> Result<f32, StdBox<dyn Error + Sync + 
 
 /// Serializes a `FLOAT8` value.
 #[inline]
-pub fn float8_to_sql(v: f64, buf: &mut BytesMut) {
+fn float8_to_sql(v: f64, buf: &mut BytesMut) {
     buf.put_f64(v);
 }
 
 /// Deserializes a `FLOAT8` value.
 #[inline]
-pub fn float8_from_sql(mut buf: &[u8]) -> Result<f64, StdBox<dyn Error + Sync + Send>> {
+fn float8_from_sql(mut buf: &[u8]) -> Result<f64, StdBox<dyn Error + Sync + Send>> {
     let v = buf.read_f64::<BigEndian>()?;
     if !buf.is_empty() {
         return Err("invalid buffer size".into());
@@ -192,7 +192,7 @@ pub fn float8_from_sql(mut buf: &[u8]) -> Result<f64, StdBox<dyn Error + Sync + 
 
 /// Serializes an `HSTORE` value.
 #[inline]
-pub fn hstore_to_sql<'a, I>(
+fn hstore_to_sql<'a, I>(
     values: I,
     buf: &mut BytesMut,
 ) -> Result<(), StdBox<dyn Error + Sync + Send>>
@@ -231,7 +231,7 @@ fn write_pascal_string(s: &str, buf: &mut BytesMut) -> Result<(), StdBox<dyn Err
 
 /// Deserializes an `HSTORE` value.
 #[inline]
-pub fn hstore_from_sql(
+fn hstore_from_sql(
     mut buf: &[u8],
 ) -> Result<HstoreEntries<'_>, StdBox<dyn Error + Sync + Send>> {
     let count = buf.read_i32::<BigEndian>()?;
@@ -299,7 +299,7 @@ impl<'a> FallibleIterator for HstoreEntries<'a> {
 
 /// Serializes a `VARBIT` or `BIT` value.
 #[inline]
-pub fn varbit_to_sql<I>(
+fn varbit_to_sql<I>(
     len: usize,
     v: I,
     buf: &mut BytesMut,
@@ -319,7 +319,7 @@ where
 
 /// Deserializes a `VARBIT` or `BIT` value.
 #[inline]
-pub fn varbit_from_sql(mut buf: &[u8]) -> Result<Varbit<'_>, StdBox<dyn Error + Sync + Send>> {
+fn varbit_from_sql(mut buf: &[u8]) -> Result<Varbit<'_>, StdBox<dyn Error + Sync + Send>> {
     let len = buf.read_i32::<BigEndian>()?;
     if len < 0 {
         return Err("invalid varbit length: varbit < 0".into());
@@ -344,19 +344,19 @@ pub struct Varbit<'a> {
 impl<'a> Varbit<'a> {
     /// Returns the number of bits.
     #[inline]
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.len
     }
 
     /// Determines if the value has no bits.
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.len == 0
     }
 
     /// Returns the bits as a slice of bytes.
     #[inline]
-    pub fn bytes(&self) -> &'a [u8] {
+    fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
 }
@@ -365,7 +365,7 @@ impl<'a> Varbit<'a> {
 ///
 /// The value should represent the number of microseconds since midnight, January 1st, 2000.
 #[inline]
-pub fn timestamp_to_sql(v: i64, buf: &mut BytesMut) {
+fn timestamp_to_sql(v: i64, buf: &mut BytesMut) {
     buf.put_i64(v);
 }
 
@@ -373,7 +373,7 @@ pub fn timestamp_to_sql(v: i64, buf: &mut BytesMut) {
 ///
 /// The value represents the number of microseconds since midnight, January 1st, 2000.
 #[inline]
-pub fn timestamp_from_sql(mut buf: &[u8]) -> Result<i64, StdBox<dyn Error + Sync + Send>> {
+fn timestamp_from_sql(mut buf: &[u8]) -> Result<i64, StdBox<dyn Error + Sync + Send>> {
     let v = buf.read_i64::<BigEndian>()?;
     if !buf.is_empty() {
         return Err("invalid message length: timestamp not drained".into());
@@ -385,7 +385,7 @@ pub fn timestamp_from_sql(mut buf: &[u8]) -> Result<i64, StdBox<dyn Error + Sync
 ///
 /// The value should represent the number of days since January 1st, 2000.
 #[inline]
-pub fn date_to_sql(v: i32, buf: &mut BytesMut) {
+fn date_to_sql(v: i32, buf: &mut BytesMut) {
     buf.put_i32(v);
 }
 
@@ -393,7 +393,7 @@ pub fn date_to_sql(v: i32, buf: &mut BytesMut) {
 ///
 /// The value represents the number of days since January 1st, 2000.
 #[inline]
-pub fn date_from_sql(mut buf: &[u8]) -> Result<i32, StdBox<dyn Error + Sync + Send>> {
+fn date_from_sql(mut buf: &[u8]) -> Result<i32, StdBox<dyn Error + Sync + Send>> {
     let v = buf.read_i32::<BigEndian>()?;
     if !buf.is_empty() {
         return Err("invalid message length: date not drained".into());
@@ -405,7 +405,7 @@ pub fn date_from_sql(mut buf: &[u8]) -> Result<i32, StdBox<dyn Error + Sync + Se
 ///
 /// The value should represent the number of microseconds since midnight.
 #[inline]
-pub fn time_to_sql(v: i64, buf: &mut BytesMut) {
+fn time_to_sql(v: i64, buf: &mut BytesMut) {
     buf.put_i64(v);
 }
 
@@ -413,7 +413,7 @@ pub fn time_to_sql(v: i64, buf: &mut BytesMut) {
 ///
 /// The value represents the number of microseconds since midnight.
 #[inline]
-pub fn time_from_sql(mut buf: &[u8]) -> Result<i64, StdBox<dyn Error + Sync + Send>> {
+fn time_from_sql(mut buf: &[u8]) -> Result<i64, StdBox<dyn Error + Sync + Send>> {
     let v = buf.read_i64::<BigEndian>()?;
     if !buf.is_empty() {
         return Err("invalid message length: time not drained".into());
@@ -423,13 +423,13 @@ pub fn time_from_sql(mut buf: &[u8]) -> Result<i64, StdBox<dyn Error + Sync + Se
 
 /// Serializes a `MACADDR` value.
 #[inline]
-pub fn macaddr_to_sql(v: [u8; 6], buf: &mut BytesMut) {
+fn macaddr_to_sql(v: [u8; 6], buf: &mut BytesMut) {
     buf.put_slice(&v);
 }
 
 /// Deserializes a `MACADDR` value.
 #[inline]
-pub fn macaddr_from_sql(buf: &[u8]) -> Result<[u8; 6], StdBox<dyn Error + Sync + Send>> {
+fn macaddr_from_sql(buf: &[u8]) -> Result<[u8; 6], StdBox<dyn Error + Sync + Send>> {
     if buf.len() != 6 {
         return Err("invalid message length: macaddr length mismatch".into());
     }
@@ -440,13 +440,13 @@ pub fn macaddr_from_sql(buf: &[u8]) -> Result<[u8; 6], StdBox<dyn Error + Sync +
 
 /// Serializes a `UUID` value.
 #[inline]
-pub fn uuid_to_sql(v: [u8; 16], buf: &mut BytesMut) {
+fn uuid_to_sql(v: [u8; 16], buf: &mut BytesMut) {
     buf.put_slice(&v);
 }
 
 /// Deserializes a `UUID` value.
 #[inline]
-pub fn uuid_from_sql(buf: &[u8]) -> Result<[u8; 16], StdBox<dyn Error + Sync + Send>> {
+fn uuid_from_sql(buf: &[u8]) -> Result<[u8; 16], StdBox<dyn Error + Sync + Send>> {
     if buf.len() != 16 {
         return Err("invalid message length: uuid size mismatch".into());
     }
@@ -457,7 +457,7 @@ pub fn uuid_from_sql(buf: &[u8]) -> Result<[u8; 16], StdBox<dyn Error + Sync + S
 
 /// Serializes an array value.
 #[inline]
-pub fn array_to_sql<T, I, J, F>(
+fn array_to_sql<T, I, J, F>(
     dimensions: I,
     element_type: Oid,
     elements: J,
@@ -553,13 +553,13 @@ pub struct Array<'a> {
 impl<'a> Array<'a> {
     /// Returns true if there are `NULL` elements.
     #[inline]
-    pub fn has_nulls(&self) -> bool {
+    fn has_nulls(&self) -> bool {
         self.has_nulls
     }
 
     /// Returns the OID of the elements of the array.
     #[inline]
-    pub fn element_type(&self) -> Oid {
+    fn element_type(&self) -> Oid {
         self.element_type
     }
 
@@ -659,12 +659,12 @@ impl<'a> FallibleIterator for ArrayValues<'a> {
 
 /// Serializes an empty range.
 #[inline]
-pub fn empty_range_to_sql(buf: &mut BytesMut) {
+fn empty_range_to_sql(buf: &mut BytesMut) {
     buf.put_u8(RANGE_EMPTY);
 }
 
 /// Serializes a range value.
-pub fn range_to_sql<F, G>(
+fn range_to_sql<F, G>(
     lower: F,
     upper: G,
     buf: &mut BytesMut,
@@ -736,7 +736,7 @@ pub enum RangeBound<T> {
 
 /// Deserializes a range value.
 #[inline]
-pub fn range_from_sql(mut buf: &[u8]) -> Result<Range<'_>, StdBox<dyn Error + Sync + Send>> {
+fn range_from_sql(mut buf: &[u8]) -> Result<Range<'_>, StdBox<dyn Error + Sync + Send>> {
     let tag = buf.read_u8()?;
 
     if tag == RANGE_EMPTY {
@@ -797,14 +797,14 @@ pub enum Range<'a> {
 
 /// Serializes a point value.
 #[inline]
-pub fn point_to_sql(x: f64, y: f64, buf: &mut BytesMut) {
+fn point_to_sql(x: f64, y: f64, buf: &mut BytesMut) {
     buf.put_f64(x);
     buf.put_f64(y);
 }
 
 /// Deserializes a point value.
 #[inline]
-pub fn point_from_sql(mut buf: &[u8]) -> Result<Point, StdBox<dyn Error + Sync + Send>> {
+fn point_from_sql(mut buf: &[u8]) -> Result<Point, StdBox<dyn Error + Sync + Send>> {
     let x = buf.read_f64::<BigEndian>()?;
     let y = buf.read_f64::<BigEndian>()?;
     if !buf.is_empty() {
@@ -823,20 +823,20 @@ pub struct Point {
 impl Point {
     /// Returns the x coordinate of the point.
     #[inline]
-    pub fn x(&self) -> f64 {
+    fn x(&self) -> f64 {
         self.x
     }
 
     /// Returns the y coordinate of the point.
     #[inline]
-    pub fn y(&self) -> f64 {
+    fn y(&self) -> f64 {
         self.y
     }
 }
 
 /// Serializes a box value.
 #[inline]
-pub fn box_to_sql(x1: f64, y1: f64, x2: f64, y2: f64, buf: &mut BytesMut) {
+fn box_to_sql(x1: f64, y1: f64, x2: f64, y2: f64, buf: &mut BytesMut) {
     buf.put_f64(x1);
     buf.put_f64(y1);
     buf.put_f64(x2);
@@ -845,7 +845,7 @@ pub fn box_to_sql(x1: f64, y1: f64, x2: f64, y2: f64, buf: &mut BytesMut) {
 
 /// Deserializes a box value.
 #[inline]
-pub fn box_from_sql(mut buf: &[u8]) -> Result<Box, StdBox<dyn Error + Sync + Send>> {
+fn box_from_sql(mut buf: &[u8]) -> Result<Box, StdBox<dyn Error + Sync + Send>> {
     let x1 = buf.read_f64::<BigEndian>()?;
     let y1 = buf.read_f64::<BigEndian>()?;
     let x2 = buf.read_f64::<BigEndian>()?;
@@ -869,20 +869,20 @@ pub struct Box {
 impl Box {
     /// Returns the upper right corner of the box.
     #[inline]
-    pub fn upper_right(&self) -> Point {
+    fn upper_right(&self) -> Point {
         self.upper_right
     }
 
     /// Returns the lower left corner of the box.
     #[inline]
-    pub fn lower_left(&self) -> Point {
+    fn lower_left(&self) -> Point {
         self.lower_left
     }
 }
 
 /// Serializes a Postgres path.
 #[inline]
-pub fn path_to_sql<I>(
+fn path_to_sql<I>(
     closed: bool,
     points: I,
     buf: &mut BytesMut,
@@ -909,7 +909,7 @@ where
 
 /// Deserializes a Postgres path.
 #[inline]
-pub fn path_from_sql(mut buf: &[u8]) -> Result<Path<'_>, StdBox<dyn Error + Sync + Send>> {
+fn path_from_sql(mut buf: &[u8]) -> Result<Path<'_>, StdBox<dyn Error + Sync + Send>> {
     let closed = buf.read_u8()? != 0;
     let points = buf.read_i32::<BigEndian>()?;
 
@@ -930,13 +930,13 @@ pub struct Path<'a> {
 impl<'a> Path<'a> {
     /// Determines if the path is closed or open.
     #[inline]
-    pub fn closed(&self) -> bool {
+    fn closed(&self) -> bool {
         self.closed
     }
 
     /// Returns an iterator over the points in the path.
     #[inline]
-    pub fn points(&self) -> PathPoints<'a> {
+    fn points(&self) -> PathPoints<'a> {
         PathPoints {
             remaining: self.points,
             buf: self.buf,
@@ -979,7 +979,7 @@ impl<'a> FallibleIterator for PathPoints<'a> {
 
 /// Serializes a Postgres inet.
 #[inline]
-pub fn inet_to_sql(addr: IpAddr, netmask: u8, buf: &mut BytesMut) {
+fn inet_to_sql(addr: IpAddr, netmask: u8, buf: &mut BytesMut) {
     let family = match addr {
         IpAddr::V4(_) => PGSQL_AF_INET,
         IpAddr::V6(_) => PGSQL_AF_INET6,
@@ -1001,7 +1001,7 @@ pub fn inet_to_sql(addr: IpAddr, netmask: u8, buf: &mut BytesMut) {
 
 /// Deserializes a Postgres inet.
 #[inline]
-pub fn inet_from_sql(mut buf: &[u8]) -> Result<Inet, StdBox<dyn Error + Sync + Send>> {
+fn inet_from_sql(mut buf: &[u8]) -> Result<Inet, StdBox<dyn Error + Sync + Send>> {
     let family = buf.read_u8()?;
     let netmask = buf.read_u8()?;
     buf.read_u8()?; // is_cidr
@@ -1049,13 +1049,13 @@ pub struct Inet {
 impl Inet {
     /// Returns the IP address.
     #[inline]
-    pub fn addr(&self) -> IpAddr {
+    fn addr(&self) -> IpAddr {
         self.addr
     }
 
     /// Returns the netmask.
     #[inline]
-    pub fn netmask(&self) -> u8 {
+    fn netmask(&self) -> u8 {
         self.netmask
     }
 }

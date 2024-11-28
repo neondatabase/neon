@@ -4164,7 +4164,7 @@ dependencies = [
 
 [[package]]
 name = "postgres-protocol2"
-version = "0.6.4"
+version = "0.1.0"
 dependencies = [
  "base64 0.20.0",
  "byteorder",
@@ -4192,9 +4192,8 @@ dependencies = [
 
 [[package]]
 name = "postgres-types2"
-version = "0.2.4"
+version = "0.1.0"
 dependencies = [
- "arrayvec",
  "bytes",
  "fallible-iterator",
  "postgres-protocol2",
@@ -6531,7 +6530,7 @@ dependencies = [
 
 [[package]]
 name = "tokio-postgres2"
-version = "0.7.7"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "byteorder",
