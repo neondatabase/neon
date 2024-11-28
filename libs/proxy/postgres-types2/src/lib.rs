@@ -8,9 +8,8 @@
 
 use arrayvec::ArrayVec;
 use fallible_iterator::FallibleIterator;
-use postgres_protocol2::types::{self, ArrayDimension};
+use postgres_protocol2::types;
 use std::any::type_name;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
@@ -605,70 +604,6 @@ pub enum IsNull {
 }
 
 /// A trait for types that can be converted into Postgres values.
-///
-/// # Types
-///
-/// The following implementations are provided by this crate, along with the
-/// corresponding Postgres types:
-///
-/// | Rust type                         | Postgres type(s)                     |
-/// |-----------------------------------|--------------------------------------|
-/// | `bool`                            | BOOL                                 |
-/// | `i8`                              | "char"                               |
-/// | `i16`                             | SMALLINT, SMALLSERIAL                |
-/// | `i32`                             | INT, SERIAL                          |
-/// | `u32`                             | OID                                  |
-/// | `i64`                             | BIGINT, BIGSERIAL                    |
-/// | `f32`                             | REAL                                 |
-/// | `f64`                             | DOUBLE PRECISION                     |
-/// | `&str`/`String`                   | VARCHAR, CHAR(n), TEXT, CITEXT, NAME |
-/// |                                   | LTREE, LQUERY, LTXTQUERY             |
-/// | `&[u8]`/`Vec<u8>`/`[u8; N]`       | BYTEA                                |
-/// | `HashMap<String, Option<String>>` | HSTORE                               |
-/// | `SystemTime`                      | TIMESTAMP, TIMESTAMP WITH TIME ZONE  |
-/// | `IpAddr`                          | INET                                 |
-///
-/// In addition, some implementations are provided for types in third party
-/// crates. These are disabled by default; to opt into one of these
-/// implementations, activate the Cargo feature corresponding to the crate's
-/// name prefixed by `with-`. For example, the `with-serde_json-1` feature enables
-/// the implementation for the `serde_json::Value` type.
-///
-/// | Rust type                       | Postgres type(s)                    |
-/// |---------------------------------|-------------------------------------|
-/// | `chrono::NaiveDateTime`         | TIMESTAMP                           |
-/// | `chrono::DateTime<Utc>`         | TIMESTAMP WITH TIME ZONE            |
-/// | `chrono::DateTime<Local>`       | TIMESTAMP WITH TIME ZONE            |
-/// | `chrono::DateTime<FixedOffset>` | TIMESTAMP WITH TIME ZONE            |
-/// | `chrono::NaiveDate`             | DATE                                |
-/// | `chrono::NaiveTime`             | TIME                                |
-/// | `time::PrimitiveDateTime`       | TIMESTAMP                           |
-/// | `time::OffsetDateTime`          | TIMESTAMP WITH TIME ZONE            |
-/// | `time::Date`                    | DATE                                |
-/// | `time::Time`                    | TIME                                |
-/// | `eui48::MacAddress`             | MACADDR                             |
-/// | `geo_types::Point<f64>`         | POINT                               |
-/// | `geo_types::Rect<f64>`          | BOX                                 |
-/// | `geo_types::LineString<f64>`    | PATH                                |
-/// | `serde_json::Value`             | JSON, JSONB                         |
-/// | `uuid::Uuid`                    | UUID                                |
-/// | `bit_vec::BitVec`               | BIT, VARBIT                         |
-/// | `eui48::MacAddress`             | MACADDR                             |
-///
-/// # Nullability
-///
-/// In addition to the types listed above, `ToSql` is implemented for
-/// `Option<T>` where `T` implements `ToSql`. An `Option<T>` represents a
-/// nullable Postgres value.
-///
-/// # Arrays
-///
-/// `ToSql` is implemented for `[u8; N]`, `Vec<T>`, `&[T]`, `Box<[T]>` and `[T; N]`
-/// where `T` implements `ToSql` and `N` is const usize, and corresponds to one-dimensional
-/// Postgres arrays with an index offset of 1.
-///
-/// **Note:** the impl for arrays only exist when the Cargo feature `array-impls`
-/// is enabled.
 pub trait ToSql: fmt::Debug {
     /// Converts the value of `self` into the binary format of the specified
     /// Postgres `Type`, appending it to `out`.
@@ -716,161 +651,7 @@ pub enum Format {
     Binary,
 }
 
-impl<'a, T> ToSql for &'a T
-where
-    T: ToSql,
-{
-    fn to_sql(
-        &self,
-        ty: &Type,
-        out: &mut BytesMut,
-    ) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        (*self).to_sql(ty, out)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        T::accepts(ty)
-    }
-
-    fn encode_format(&self, ty: &Type) -> Format {
-        (*self).encode_format(ty)
-    }
-
-    to_sql_checked!();
-}
-
-impl<T: ToSql> ToSql for Option<T> {
-    fn to_sql(
-        &self,
-        ty: &Type,
-        out: &mut BytesMut,
-    ) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        match *self {
-            Some(ref val) => val.to_sql(ty, out),
-            None => Ok(IsNull::Yes),
-        }
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        <T as ToSql>::accepts(ty)
-    }
-
-    fn encode_format(&self, ty: &Type) -> Format {
-        match self {
-            Some(ref val) => val.encode_format(ty),
-            None => Format::Binary,
-        }
-    }
-
-    to_sql_checked!();
-}
-
-impl<'a, T: ToSql> ToSql for &'a [T] {
-    fn to_sql(&self, ty: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        let member_type = match *ty.kind() {
-            Kind::Array(ref member) => member,
-            _ => panic!("expected array type"),
-        };
-
-        let dimension = ArrayDimension {
-            len: downcast(self.len())?,
-            lower_bound: 1,
-        };
-
-        types::array_to_sql(
-            Some(dimension),
-            member_type.oid(),
-            self.iter(),
-            |e, w| match e.to_sql(member_type, w)? {
-                IsNull::No => Ok(postgres_protocol2::IsNull::No),
-                IsNull::Yes => Ok(postgres_protocol2::IsNull::Yes),
-            },
-            w,
-        )?;
-        Ok(IsNull::No)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        match *ty.kind() {
-            Kind::Array(ref member) => T::accepts(member),
-            _ => false,
-        }
-    }
-
-    to_sql_checked!();
-}
-
-impl<'a> ToSql for &'a [u8] {
-    fn to_sql(&self, _: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        types::bytea_to_sql(self, w);
-        Ok(IsNull::No)
-    }
-
-    accepts!(BYTEA);
-
-    to_sql_checked!();
-}
-
-impl<const N: usize> ToSql for [u8; N] {
-    fn to_sql(&self, _: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        types::bytea_to_sql(&self[..], w);
-        Ok(IsNull::No)
-    }
-
-    accepts!(BYTEA);
-
-    to_sql_checked!();
-}
-
-impl<T: ToSql, const N: usize> ToSql for [T; N] {
-    fn to_sql(&self, ty: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        <&[T] as ToSql>::to_sql(&&self[..], ty, w)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        <&[T] as ToSql>::accepts(ty)
-    }
-
-    to_sql_checked!();
-}
-
-impl<T: ToSql> ToSql for Vec<T> {
-    fn to_sql(&self, ty: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        <&[T] as ToSql>::to_sql(&&**self, ty, w)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        <&[T] as ToSql>::accepts(ty)
-    }
-
-    to_sql_checked!();
-}
-
-impl<T: ToSql> ToSql for Box<[T]> {
-    fn to_sql(&self, ty: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        <&[T] as ToSql>::to_sql(&&**self, ty, w)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        <&[T] as ToSql>::accepts(ty)
-    }
-
-    to_sql_checked!();
-}
-
-impl ToSql for Vec<u8> {
-    fn to_sql(&self, ty: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        <&[u8] as ToSql>::to_sql(&&**self, ty, w)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        <&[u8] as ToSql>::accepts(ty)
-    }
-
-    to_sql_checked!();
-}
-
-impl<'a> ToSql for &'a str {
+impl ToSql for &str {
     fn to_sql(&self, ty: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
         match *ty {
             ref ty if ty.name() == "ltree" => types::ltree_to_sql(self, w),
@@ -899,42 +680,6 @@ impl<'a> ToSql for &'a str {
     to_sql_checked!();
 }
 
-impl<'a> ToSql for Cow<'a, str> {
-    fn to_sql(&self, ty: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        <&str as ToSql>::to_sql(&self.as_ref(), ty, w)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        <&str as ToSql>::accepts(ty)
-    }
-
-    to_sql_checked!();
-}
-
-impl ToSql for String {
-    fn to_sql(&self, ty: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        <&str as ToSql>::to_sql(&&**self, ty, w)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        <&str as ToSql>::accepts(ty)
-    }
-
-    to_sql_checked!();
-}
-
-impl ToSql for Box<str> {
-    fn to_sql(&self, ty: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        <&str as ToSql>::to_sql(&&**self, ty, w)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        <&str as ToSql>::accepts(ty)
-    }
-
-    to_sql_checked!();
-}
-
 macro_rules! simple_to {
     ($t:ty, $f:ident, $($expected:ident),+) => {
         impl ToSql for $t {
@@ -953,77 +698,7 @@ macro_rules! simple_to {
     }
 }
 
-simple_to!(bool, bool_to_sql, BOOL);
-simple_to!(i8, char_to_sql, CHAR);
-simple_to!(i16, int2_to_sql, INT2);
-simple_to!(i32, int4_to_sql, INT4);
 simple_to!(u32, oid_to_sql, OID);
-simple_to!(i64, int8_to_sql, INT8);
-simple_to!(f32, float4_to_sql, FLOAT4);
-simple_to!(f64, float8_to_sql, FLOAT8);
-
-impl<H> ToSql for HashMap<String, Option<String>, H>
-where
-    H: BuildHasher,
-{
-    fn to_sql(&self, _: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        types::hstore_to_sql(
-            self.iter().map(|(k, v)| (&**k, v.as_ref().map(|v| &**v))),
-            w,
-        )?;
-        Ok(IsNull::No)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        ty.name() == "hstore"
-    }
-
-    to_sql_checked!();
-}
-
-impl ToSql for SystemTime {
-    fn to_sql(&self, _: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        let epoch = UNIX_EPOCH + Duration::from_secs(TIME_SEC_CONVERSION);
-
-        let to_usec =
-            |d: Duration| d.as_secs() * USEC_PER_SEC + u64::from(d.subsec_nanos()) / NSEC_PER_USEC;
-
-        let time = match self.duration_since(epoch) {
-            Ok(duration) => to_usec(duration) as i64,
-            Err(e) => -(to_usec(e.duration()) as i64),
-        };
-
-        types::timestamp_to_sql(time, w);
-        Ok(IsNull::No)
-    }
-
-    accepts!(TIMESTAMP, TIMESTAMPTZ);
-
-    to_sql_checked!();
-}
-
-impl ToSql for IpAddr {
-    fn to_sql(&self, _: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        let netmask = match self {
-            IpAddr::V4(_) => 32,
-            IpAddr::V6(_) => 128,
-        };
-        types::inet_to_sql(*self, netmask, w);
-        Ok(IsNull::No)
-    }
-
-    accepts!(INET);
-
-    to_sql_checked!();
-}
-
-fn downcast(len: usize) -> Result<i32, Box<dyn Error + Sync + Send>> {
-    if len > i32::MAX as usize {
-        Err("value too large to transmit".into())
-    } else {
-        Ok(len as i32)
-    }
-}
 
 mod sealed {
     pub trait Sealed {}
@@ -1037,32 +712,6 @@ pub trait BorrowToSql: sealed::Sealed {
     fn borrow_to_sql(&self) -> &dyn ToSql;
 }
 
-impl sealed::Sealed for &dyn ToSql {}
-
-impl BorrowToSql for &dyn ToSql {
-    #[inline]
-    fn borrow_to_sql(&self) -> &dyn ToSql {
-        *self
-    }
-}
-
-impl sealed::Sealed for Box<dyn ToSql + Sync> {}
-
-impl BorrowToSql for Box<dyn ToSql + Sync> {
-    #[inline]
-    fn borrow_to_sql(&self) -> &dyn ToSql {
-        self.as_ref()
-    }
-}
-
-impl sealed::Sealed for Box<dyn ToSql + Sync + Send> {}
-impl BorrowToSql for Box<dyn ToSql + Sync + Send> {
-    #[inline]
-    fn borrow_to_sql(&self) -> &dyn ToSql {
-        self.as_ref()
-    }
-}
-
 impl sealed::Sealed for &(dyn ToSql + Sync) {}
 
 /// In async contexts it is sometimes necessary to have the additional
@@ -1073,17 +722,5 @@ impl BorrowToSql for &(dyn ToSql + Sync) {
     #[inline]
     fn borrow_to_sql(&self) -> &dyn ToSql {
         *self
-    }
-}
-
-impl<T> sealed::Sealed for T where T: ToSql {}
-
-impl<T> BorrowToSql for T
-where
-    T: ToSql,
-{
-    #[inline]
-    fn borrow_to_sql(&self) -> &dyn ToSql {
-        self
     }
 }

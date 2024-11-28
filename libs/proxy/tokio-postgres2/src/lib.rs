@@ -260,6 +260,6 @@ pub enum SimpleQueryMessage {
 
 fn slice_iter<'a>(
     s: &'a [&'a (dyn ToSql + Sync)],
-) -> impl ExactSizeIterator<Item = &'a dyn ToSql> + 'a {
+) -> impl ExactSizeIterator<Item = &'a (dyn ToSql + Sync)> + 'a {
     s.iter().map(|s| *s as _)
 }

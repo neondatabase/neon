@@ -291,7 +291,7 @@ impl ClientInnerCommon<tokio_postgres::Client> {
             self.inner
                 .execute(
                     "select auth.jwt_session_init($1)",
-                    &[&token as &(dyn ToSql + Sync)],
+                    &[&&*token as &(dyn ToSql + Sync)],
                 )
                 .await?;
 
