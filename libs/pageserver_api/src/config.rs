@@ -131,6 +131,14 @@ pub struct DiskUsageEvictionTaskConfig {
 pub struct PageServicePipeliningConfig {
     /// Causes runtime errors if larger than max get_vectored batch size.
     pub max_batch_size: NonZeroUsize,
+    pub protocol_pipelining_mode: PageServiceProtocolPipeliningMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PageServiceProtocolPipeliningMode {
+    ConcurrentFutures,
+    Tasks,
 }
 
 pub mod statvfs {
@@ -409,6 +417,7 @@ impl Default for ConfigToml {
             no_sync: None,
             page_service_pipelining: Some(PageServicePipeliningConfig {
                 max_batch_size: NonZeroUsize::new(32).unwrap(),
+                protocol_pipelining_mode: PageServiceProtocolPipeliningMode::ConcurrentFutures,
             }),
         }
     }

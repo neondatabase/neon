@@ -7,7 +7,7 @@ use bytes::Buf;
 use futures::FutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
-use pageserver_api::config::PageServicePipeliningConfig;
+use pageserver_api::config::{PageServicePipeliningConfig, PageServiceProtocolPipeliningMode};
 use pageserver_api::models::{self, TenantState};
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
@@ -1166,7 +1166,10 @@ impl PageServerHandler {
         //   the `handle_*` function will fail with an error that bubbles up and results in
         //   the Executor stage exiting with Err(QueryError::Shutdown).
 
-        let PageServicePipeliningConfig { max_batch_size } = pipelining_config;
+        let PageServicePipeliningConfig {
+            max_batch_size,
+            protocol_pipelining_mode,
+        } = pipelining_config;
 
         // Cancellation root for the pipeline.
         // If any one stage exits, this gets cancelled.
@@ -1314,8 +1317,26 @@ impl PageServerHandler {
         //
 
         let read_messages_res;
+        let _batcher_res: ();
         let executor_res: Result<(), QueryError>;
-        (read_messages_res, (), executor_res) = tokio::join!(read_messages, batcher, executor);
+        match protocol_pipelining_mode {
+            PageServiceProtocolPipeliningMode::ConcurrentFutures => {
+                (read_messages_res, _batcher_res, executor_res) =
+                    tokio::join!(read_messages, batcher, executor);
+            }
+            PageServiceProtocolPipeliningMode::Tasks => {
+                // These tasks are not tracked anywhere.
+                let read_messages_task = tokio::spawn(read_messages);
+                let batcher_task = tokio::spawn(batcher);
+                let (read_messages_task_res, batcher_task_res, executor_res_) =
+                    tokio::join!(read_messages_task, batcher_task, executor,);
+                (read_messages_res, _batcher_res, executor_res) = (
+                    read_messages_task_res.expect("propagated panic from read_messages"),
+                    batcher_task_res.expect("propagated panic from batcher"),
+                    executor_res_,
+                );
+            }
+        }
 
         (read_messages_res, executor_res)
     }
