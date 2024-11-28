@@ -32,9 +32,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> Handler<IO> for TestHandler {
         _query_string: &str,
     ) -> Result<(), QueryError> {
         pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
-            b"hey",
+            b"column",
         )]))?
-        .write_message_noflush(&BeMessage::DataRow(&[Some("hey".as_bytes())]))?
+        .write_message_noflush(&BeMessage::DataRow(&[Some("data".as_bytes())]))?
         .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         Ok(())
     }
@@ -64,10 +64,17 @@ async fn simple_select() {
         }
     });
 
-    let first_val = &(client.simple_query("SELECT 42;").await.expect("select"))[0];
-    if let SimpleQueryMessage::Row(row) = first_val {
+    let resp = client.simple_query("SELECT 42;").await.expect("select");
+    if let SimpleQueryMessage::RowDescription(desc) = &resp[0] {
+        let first_col = desc[0].name();
+        assert_eq!(first_col, "column");
+    } else {
+        panic!("expected SimpleQueryMessage::RowDescription");
+    }
+
+    if let SimpleQueryMessage::Row(row) = &resp[1] {
         let first_col = row.get(0).expect("first column");
-        assert_eq!(first_col, "hey");
+        assert_eq!(first_col, "data");
     } else {
         panic!("expected SimpleQueryMessage::Row");
     }
@@ -140,10 +147,17 @@ async fn simple_select_ssl() {
         }
     });
 
-    let first_val = &(client.simple_query("SELECT 42;").await.expect("select"))[0];
-    if let SimpleQueryMessage::Row(row) = first_val {
+    let resp = client.simple_query("SELECT 42;").await.expect("select");
+    if let SimpleQueryMessage::RowDescription(desc) = &resp[0] {
+        let first_col = desc[0].name();
+        assert_eq!(first_col, "column");
+    } else {
+        panic!("expected SimpleQueryMessage::RowDescription");
+    }
+
+    if let SimpleQueryMessage::Row(row) = &resp[1] {
         let first_col = row.get(0).expect("first column");
-        assert_eq!(first_col, "hey");
+        assert_eq!(first_col, "data");
     } else {
         panic!("expected SimpleQueryMessage::Row");
     }

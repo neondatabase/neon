@@ -126,7 +126,7 @@ impl PgConnectionConfig {
         // Use `tokio_postgres::Config` instead of `postgres::Config` because
         // the former supports more options to fiddle with later.
         let mut config = tokio_postgres::Config::new();
-        config.host(&self.host().to_string()).port(self.port);
+        config.host(self.host().to_string()).port(self.port);
         if let Some(password) = &self.password {
             config.password(password);
         }
@@ -146,8 +146,7 @@ impl PgConnectionConfig {
             // establishing a new connection.
             #[allow(unstable_name_collisions)]
             config.options(
-                &self
-                    .options
+                self.options
                     .iter()
                     .map(|s| {
                         if s.contains(['\\', ' ']) {

@@ -288,7 +288,7 @@ impl StorageController {
             // But tokio-postgres fork doesn't have this upstream commit:
             // https://github.com/sfackler/rust-postgres/commit/cb609be758f3fb5af537f04b584a2ee0cebd5e79
             // => we should rebase our fork => TODO https://github.com/neondatabase/neon/issues/8399
-            .user(&username())
+            .user(username())
             .dbname(DB_NAME)
             .connect(tokio_postgres::NoTls)
             .await
