@@ -53,7 +53,7 @@ impl Responses {
 }
 
 /// A cache of type info and prepared statements for fetching type info
-/// (corresponding to the queries in the [prepare](prepare) module).
+/// (corresponding to the queries in the [prepare] module).
 #[derive(Default)]
 struct CachedTypeInfo {
     /// A statement for basic information for a type from its

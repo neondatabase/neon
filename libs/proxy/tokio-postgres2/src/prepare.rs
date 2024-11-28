@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-const TYPEINFO_QUERY: &str = "\
+pub(crate) const TYPEINFO_QUERY: &str = "\
 SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid
 FROM pg_catalog.pg_type t
 LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid
@@ -47,7 +47,7 @@ WHERE enumtypid = $1
 ORDER BY oid
 ";
 
-const TYPEINFO_COMPOSITE_QUERY: &str = "\
+pub(crate) const TYPEINFO_COMPOSITE_QUERY: &str = "\
 SELECT attname, atttypid
 FROM pg_catalog.pg_attribute
 WHERE attrelid = $1
