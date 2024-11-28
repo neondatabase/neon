@@ -35,6 +35,8 @@ def test_ingest_insert_bulk(
     VOLUME = 8 * 1024**3
     rows = VOLUME // (size + 64)  # +64 roughly accounts for per-row WAL overhead
 
+    # Change Direct IO modes
+    neon_env_builder.pageserver_virtual_file_io_mode = "direct"
     neon_env_builder.safekeepers_enable_fsync = fsync
     env = neon_env_builder.init_start()
 
@@ -83,7 +85,7 @@ def test_ingest_insert_bulk(
     # reingest all the WAL directly from the safekeeper. This gives us a baseline of how fast the
     # pageserver can ingest this WAL in isolation.
     pg_version = PgVersion(
-        client.timeline_detail(env.initial_tenant, env.initial_timeline)["pg_version"]
+        str(client.timeline_detail(env.initial_tenant, env.initial_timeline)["pg_version"])
     )
     status = env.storage_controller.inspect(tenant_shard_id=env.initial_tenant)
     assert status is not None
