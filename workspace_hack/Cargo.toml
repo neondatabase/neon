@@ -17,7 +17,6 @@ license.workspace = true
 [dependencies]
 ahash = { version = "0.8" }
 anyhow = { version = "1", features = ["backtrace"] }
-arrayvec = { version = "0.7" }
 axum = { version = "0.7", features = ["ws"] }
 axum-core = { version = "0.4", default-features = false, features = ["tracing"] }
 base64-594e8ee84c453af0 = { package = "base64", version = "0.13", features = ["alloc"] }
