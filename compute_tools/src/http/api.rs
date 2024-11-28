@@ -310,6 +310,28 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
+        // handle HEAD method of /installed_extensions route
+        // just log info
+        (&Method::HEAD, route) if route.starts_with("/installed_extensions") => {
+            info!("serving /installed_extensions HEAD request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for extensions request: {:?}",
+                    status
+                );
+                error!(msg);
+                let mut resp = Response::new(Body::from(msg));
+                *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                return resp;
+            }
+
+            let connstr = compute.connstr.clone();
+            // should I rewrite this to not wait for the result?
+            let _ = crate::installed_extensions::get_installed_extensions(connstr).await;
+            Response::new(Body::from("OK"))
+        }
+
         // download extension files from remote extension storage on demand
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);
