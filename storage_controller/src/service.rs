@@ -7055,6 +7055,10 @@ impl Service {
     }
 }
 
+/// When making scheduling decisions, it is useful to have the ScheduleContext for a whole
+/// tenant while considering the individual shards within it.  This iterator is a helper
+/// that gathers all the shards in a tenant and then yields them together with a ScheduleContext
+/// for the tenant.
 struct TenantShardContextIterator<'a> {
     schedule_mode: ScheduleMode,
     inner: std::collections::btree_map::IterMut<'a, TenantShardId, TenantShard>,
@@ -7094,9 +7098,7 @@ impl<'a> Iterator for TenantShardContextIterator<'a> {
             tenant_shards.push(shard);
 
             if tenant_shard_id.shard_number.0 == tenant_shard_id.shard_count.count() - 1 {
-                let tenant_id = tenant_shard_id.tenant_id;
-                let tenant_shards = std::mem::take(&mut tenant_shards);
-                return Some((tenant_id, schedule_context, tenant_shards));
+                return Some((tenant_shard_id.tenant_id, schedule_context, tenant_shards));
             }
         }
     }
