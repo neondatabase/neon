@@ -957,7 +957,7 @@ index 6e816c57f1..6ef45b468e 100644
   name  | age |  location  | salary | manager | gpa | percent 
  -------+-----+------------+--------+---------+-----+---------
 diff --git a/src/test/regress/expected/misc_functions.out b/src/test/regress/expected/misc_functions.out
-index d94056862a..f387f76ba5 100644
+index d94056862a..f8270d8343 100644
 --- a/src/test/regress/expected/misc_functions.out
 +++ b/src/test/regress/expected/misc_functions.out
 @@ -297,7 +297,7 @@ SELECT pg_log_backend_memory_contexts(pid) FROM pg_stat_activity
@@ -978,6 +978,28 @@ index d94056862a..f387f76ba5 100644
  -- Not available by default.
  SELECT has_function_privilege('regress_slot_dir_funcs',
    'pg_ls_logicalsnapdir()', 'EXECUTE');
+@@ -671,7 +671,7 @@ FROM pg_walfile_name_offset('0/0'::pg_lsn + :segment_size - 1),
+ (1 row)
+ 
+ -- pg_current_logfile
+-CREATE ROLE regress_current_logfile;
++CREATE ROLE regress_current_logfile PASSWORD NEON_PASSWORD_PLACEHOLDER;
+ -- not available by default
+ SELECT has_function_privilege('regress_current_logfile',
+   'pg_current_logfile()', 'EXECUTE');
+diff --git a/src/test/regress/expected/multirangetypes.out b/src/test/regress/expected/multirangetypes.out
+index c6363ebeb2..8f43732404 100644
+--- a/src/test/regress/expected/multirangetypes.out
++++ b/src/test/regress/expected/multirangetypes.out
+@@ -3118,7 +3118,7 @@ drop type textrange2;
+ -- Multiranges don't have their own ownership or permissions.
+ --
+ create type textrange1 as range(subtype=text, multirange_type_name=multitextrange1, collation="C");
+-create role regress_multirange_owner;
++create role regress_multirange_owner password NEON_PASSWORD_PLACEHOLDER;
+ alter type multitextrange1 owner to regress_multirange_owner;  -- fail
+ ERROR:  cannot alter multirange type multitextrange1
+ HINT:  You can alter type textrange1, which will alter the multirange type as well.
 diff --git a/src/test/regress/expected/object_address.out b/src/test/regress/expected/object_address.out
 index fc42d418bf..e38f517574 100644
 --- a/src/test/regress/expected/object_address.out
@@ -992,10 +1014,10 @@ index fc42d418bf..e38f517574 100644
  CREATE SCHEMA addr_nsp;
  SET search_path TO 'addr_nsp';
 diff --git a/src/test/regress/expected/password.out b/src/test/regress/expected/password.out
-index 924d6e001d..1a9978daad 100644
+index 924d6e001d..5966531db6 100644
 --- a/src/test/regress/expected/password.out
 +++ b/src/test/regress/expected/password.out
-@@ -12,12 +12,12 @@ SET password_encryption = 'md5'; -- ok
+@@ -12,13 +12,13 @@ SET password_encryption = 'md5'; -- ok
  SET password_encryption = 'scram-sha-256'; -- ok
  -- consistency of password entries
  SET password_encryption = 'md5';
@@ -1009,10 +1031,12 @@ index 924d6e001d..1a9978daad 100644
 +ALTER ROLE regress_passwd2 PASSWORD NEON_PASSWORD_PLACEHOLDER;
  SET password_encryption = 'scram-sha-256';
 -CREATE ROLE regress_passwd3 PASSWORD 'role_pwd3';
+-CREATE ROLE regress_passwd4 PASSWORD NULL;
 +CREATE ROLE regress_passwd3 PASSWORD NEON_PASSWORD_PLACEHOLDER;
- CREATE ROLE regress_passwd4 PASSWORD NULL;
++CREATE ROLE regress_passwd4 PASSWORD NEON_PASSWORD_PLACEHOLDER;
  -- check list of created entries
  --
+ -- The scram secret will look something like:
 @@ -32,10 +32,10 @@ SELECT rolname, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+
      ORDER BY rolname, rolpassword;
       rolname     |                rolpassword_masked                 
@@ -3253,10 +3277,10 @@ index 1a6c61f49d..1c31ac6a53 100644
  -- Test generic object addressing/identification functions
  CREATE SCHEMA addr_nsp;
 diff --git a/src/test/regress/sql/password.sql b/src/test/regress/sql/password.sql
-index bb82aa4aa2..b158427f29 100644
+index bb82aa4aa2..7424c91b10 100644
 --- a/src/test/regress/sql/password.sql
 +++ b/src/test/regress/sql/password.sql
-@@ -10,12 +10,12 @@ SET password_encryption = 'scram-sha-256'; -- ok
+@@ -10,13 +10,13 @@ SET password_encryption = 'scram-sha-256'; -- ok
  
  -- consistency of password entries
  SET password_encryption = 'md5';
@@ -3270,10 +3294,12 @@ index bb82aa4aa2..b158427f29 100644
 +ALTER ROLE regress_passwd2 PASSWORD NEON_PASSWORD_PLACEHOLDER;
  SET password_encryption = 'scram-sha-256';
 -CREATE ROLE regress_passwd3 PASSWORD 'role_pwd3';
+-CREATE ROLE regress_passwd4 PASSWORD NULL;
 +CREATE ROLE regress_passwd3 PASSWORD NEON_PASSWORD_PLACEHOLDER;
- CREATE ROLE regress_passwd4 PASSWORD NULL;
++CREATE ROLE regress_passwd4 PASSWORD NEON_PASSWORD_PLACEHOLDER;
  
  -- check list of created entries
+ --
 @@ -44,14 +44,14 @@ ALTER ROLE regress_passwd2_new RENAME TO regress_passwd2;
  SET password_encryption = 'md5';
  
