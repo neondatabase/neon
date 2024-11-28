@@ -1,7 +1,7 @@
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
-use crate::types::{BorrowToSql, IsNull};
+use crate::types::IsNull;
 use crate::{Column, Error, ReadyForQueryStatus, Row, Statement};
 use bytes::{BufMut, Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
@@ -10,34 +10,28 @@ use log::{debug, log_enabled, Level};
 use pin_project_lite::pin_project;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
-use postgres_types2::{Format, Type};
+use postgres_types2::{Format, ToSql, Type};
 use std::fmt;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-struct BorrowToSqlParamsDebug<'a, T>(&'a [T]);
+struct BorrowToSqlParamsDebug<'a>(&'a [&'a (dyn ToSql + Sync)]);
 
-impl<'a, T> fmt::Debug for BorrowToSqlParamsDebug<'a, T>
-where
-    T: BorrowToSql,
-{
+impl fmt::Debug for BorrowToSqlParamsDebug<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list()
-            .entries(self.0.iter().map(|x| x.borrow_to_sql()))
-            .finish()
+        f.debug_list().entries(self.0.iter()).finish()
     }
 }
 
-pub async fn query<P, I>(
+pub async fn query<'a, I>(
     client: &InnerClient,
     statement: Statement,
     params: I,
 ) -> Result<RowStream, Error>
 where
-    P: BorrowToSql,
-    I: IntoIterator<Item = P>,
+    I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
     I::IntoIter: ExactSizeIterator,
 {
     let buf = if log_enabled!(Level::Debug) {
@@ -163,14 +157,13 @@ where
     })
 }
 
-pub async fn execute<P, I>(
+pub async fn execute<'a, I>(
     client: &InnerClient,
     statement: Statement,
     params: I,
 ) -> Result<u64, Error>
 where
-    P: BorrowToSql,
-    I: IntoIterator<Item = P>,
+    I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
     I::IntoIter: ExactSizeIterator,
 {
     let buf = if log_enabled!(Level::Debug) {
@@ -218,10 +211,9 @@ async fn start(client: &InnerClient, buf: Bytes) -> Result<Responses, Error> {
     Ok(responses)
 }
 
-pub fn encode<P, I>(client: &InnerClient, statement: &Statement, params: I) -> Result<Bytes, Error>
+pub fn encode<'a, I>(client: &InnerClient, statement: &Statement, params: I) -> Result<Bytes, Error>
 where
-    P: BorrowToSql,
-    I: IntoIterator<Item = P>,
+    I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
     I::IntoIter: ExactSizeIterator,
 {
     client.with_buf(|buf| {
@@ -232,15 +224,14 @@ where
     })
 }
 
-pub fn encode_bind<P, I>(
+pub fn encode_bind<'a, I>(
     statement: &Statement,
     params: I,
     portal: &str,
     buf: &mut BytesMut,
 ) -> Result<(), Error>
 where
-    P: BorrowToSql,
-    I: IntoIterator<Item = P>,
+    I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
     I::IntoIter: ExactSizeIterator,
 {
     let param_types = statement.params();
@@ -255,7 +246,7 @@ where
 
     let (param_formats, params): (Vec<_>, Vec<_>) = params
         .zip(param_types.iter())
-        .map(|(p, ty)| (p.borrow_to_sql().encode_format(ty) as i16, p))
+        .map(|(p, ty)| (p.encode_format(ty) as i16, p))
         .unzip();
 
     let params = params.into_iter();
@@ -266,7 +257,7 @@ where
         statement.name(),
         param_formats,
         params.zip(param_types).enumerate(),
-        |(idx, (param, ty)), buf| match param.borrow_to_sql().to_sql_checked(ty, buf) {
+        |(idx, (param, ty)), buf| match param.to_sql_checked(ty, buf) {
             Ok(IsNull::No) => Ok(postgres_protocol2::IsNull::No),
             Ok(IsNull::Yes) => Ok(postgres_protocol2::IsNull::Yes),
             Err(e) => {

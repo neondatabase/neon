@@ -14,9 +14,7 @@
 
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
-use lazy_static::lazy_static;
 use std::io;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod authentication;
 pub mod escape;
@@ -29,11 +27,6 @@ pub type Oid = u32;
 
 /// A Postgres Log Sequence Number (LSN).
 pub type Lsn = u64;
-
-lazy_static! {
-    /// Postgres epoch is 2000-01-01T00:00:00Z
-    pub static ref PG_EPOCH: SystemTime = UNIX_EPOCH + Duration::from_secs(946_684_800);
-}
 
 /// An enum indicating if a value is `NULL` or not.
 pub enum IsNull {

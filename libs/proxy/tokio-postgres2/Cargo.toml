@@ -9,7 +9,7 @@ async-trait.workspace = true
 bytes.workspace = true
 byteorder.workspace = true
 fallible-iterator.workspace = true
-futures-util = { workspace = true }
+futures-util = { workspace = true, features = ["sink"] }
 log = "0.4"
 parking_lot.workspace = true
 percent-encoding = "2.0"

@@ -13,7 +13,7 @@ pub struct Transaction<'a> {
     done: bool,
 }
 
-impl<'a> Drop for Transaction<'a> {
+impl Drop for Transaction<'_> {
     fn drop(&mut self) {
         if self.done {
             return;

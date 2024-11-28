@@ -80,9 +80,9 @@ impl RowIndex for str {
     }
 }
 
-impl<'a, T> Sealed for &'a T where T: ?Sized + Sealed {}
+impl<T> Sealed for &T where T: ?Sized + Sealed {}
 
-impl<'a, T> RowIndex for &'a T
+impl<T> RowIndex for &T
 where
     T: ?Sized + RowIndex,
 {

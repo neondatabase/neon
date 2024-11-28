@@ -476,28 +476,3 @@ macro_rules! simple_to {
 }
 
 simple_to!(u32, oid_to_sql, OID);
-
-mod sealed {
-    pub trait Sealed {}
-}
-
-/// A trait used by clients to abstract over `&dyn ToSql` and `T: ToSql`.
-///
-/// This cannot be implemented outside of this crate.
-pub trait BorrowToSql: sealed::Sealed {
-    /// Returns a reference to `self` as a `ToSql` trait object.
-    fn borrow_to_sql(&self) -> &dyn ToSql;
-}
-
-impl sealed::Sealed for &(dyn ToSql + Sync) {}
-
-/// In async contexts it is sometimes necessary to have the additional
-/// Sync requirement on parameters for queries since this enables the
-/// resulting Futures to be Send, hence usable in, e.g., tokio::spawn.
-/// This instance is provided for those cases.
-impl BorrowToSql for &(dyn ToSql + Sync) {
-    #[inline]
-    fn borrow_to_sql(&self) -> &dyn ToSql {
-        *self
-    }
-}

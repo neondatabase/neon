@@ -35,7 +35,6 @@ impl ChannelBinding {
 /// A constructor of `TlsConnect`ors.
 ///
 /// Requires the `runtime` Cargo feature (enabled by default).
-
 pub trait MakeTlsConnect<S> {
     /// The stream type created by the `TlsConnect` implementation.
     type Stream: TlsStream + Unpin;

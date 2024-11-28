@@ -7,7 +7,6 @@ use crate::connection::{Request, RequestMessages};
 use crate::query::RowStream;
 use crate::simple_query::SimpleQueryStream;
 
-use crate::tls::TlsConnect;
 use crate::types::{Oid, ToSql, Type};
 
 use crate::{
@@ -19,7 +18,6 @@ use fallible_iterator::FallibleIterator;
 use futures_util::{future, ready, TryStreamExt};
 use parking_lot::Mutex;
 use postgres_protocol2::message::{backend::Message, frontend};
-use postgres_types2::BorrowToSql;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -27,7 +25,6 @@ use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
 
 pub struct Responses {
     receiver: mpsc::Receiver<BackendMessages>,
@@ -255,36 +252,10 @@ impl Client {
     /// Panics if the number of parameters provided does not match the number expected.
     ///
     /// [`query`]: #method.query
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # async fn async_main(client: &tokio_postgres::Client) -> Result<(), tokio_postgres::Error> {
-    /// use tokio_postgres::types::ToSql;
-    /// use futures_util::{pin_mut, TryStreamExt};
-    ///
-    /// let params: Vec<String> = vec![
-    ///     "first param".into(),
-    ///     "second param".into(),
-    /// ];
-    /// let mut it = client.query_raw(
-    ///     "SELECT foo FROM bar WHERE biz = $1 AND baz = $2",
-    ///     params,
-    /// ).await?;
-    ///
-    /// pin_mut!(it);
-    /// while let Some(row) = it.try_next().await? {
-    ///     let foo: i32 = row.get("foo");
-    ///     println!("foo: {}", foo);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn query_raw<T, P, I>(&self, statement: &T, params: I) -> Result<RowStream, Error>
+    pub async fn query_raw<'a, T, I>(&self, statement: &T, params: I) -> Result<RowStream, Error>
     where
         T: ?Sized + ToStatement,
-        P: BorrowToSql,
-        I: IntoIterator<Item = P>,
+        I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
         I::IntoIter: ExactSizeIterator,
     {
         let statement = statement.__convert().into_statement(self).await?;
@@ -341,11 +312,10 @@ impl Client {
     /// Panics if the number of parameters provided does not match the number expected.
     ///
     /// [`execute`]: #method.execute
-    pub async fn execute_raw<T, P, I>(&self, statement: &T, params: I) -> Result<u64, Error>
+    pub async fn execute_raw<'a, T, I>(&self, statement: &T, params: I) -> Result<u64, Error>
     where
         T: ?Sized + ToStatement,
-        P: BorrowToSql,
-        I: IntoIterator<Item = P>,
+        I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
         I::IntoIter: ExactSizeIterator,
     {
         let statement = statement.__convert().into_statement(self).await?;
@@ -396,7 +366,7 @@ impl Client {
             done: bool,
         }
 
-        impl<'a> Drop for RollbackIfNotDone<'a> {
+        impl Drop for RollbackIfNotDone<'_> {
             fn drop(&mut self) {
                 if self.done {
                     return;
@@ -447,17 +417,6 @@ impl Client {
             process_id: self.process_id,
             secret_key: self.secret_key,
         }
-    }
-
-    /// Like `cancel_query`, but uses a stream which is already connected to the server rather than opening a new
-    /// connection itself.
-    #[deprecated(since = "0.6.0", note = "use Client::cancel_token() instead")]
-    pub async fn cancel_query_raw<S, T>(&self, stream: S, tls: T) -> Result<(), Error>
-    where
-        S: AsyncRead + AsyncWrite + Unpin,
-        T: TlsConnect<S>,
-    {
-        self.cancel_token().cancel_query_raw(stream, tls).await
     }
 
     /// Query for type information

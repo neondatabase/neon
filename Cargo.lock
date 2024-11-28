@@ -4171,7 +4171,6 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "hmac",
- "lazy_static",
  "md-5",
  "memchr",
  "rand 0.8.5",
