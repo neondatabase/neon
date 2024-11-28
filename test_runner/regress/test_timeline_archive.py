@@ -4,7 +4,6 @@ import json
 import random
 import threading
 import time
-from typing import Optional
 
 import pytest
 import requests
@@ -661,7 +660,7 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
     ],
 )
 def test_timeline_retain_lsn(
-    neon_env_builder: NeonEnvBuilder, with_intermediary: bool, offload_child: Optional[str]
+    neon_env_builder: NeonEnvBuilder, with_intermediary: bool, offload_child: str | None
 ):
     """
     Ensure that retain_lsn functionality for timelines works, both for offloaded and non-offloaded ones

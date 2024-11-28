@@ -29,7 +29,7 @@ jobs:
   trigger_bench_on_ec2_machine_in_eu_central_1:
     runs-on: [ self-hosted, small ]
     container:
-      image: neondatabase/build-tools:pinned
+      image: neondatabase/build-tools:pinned-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}

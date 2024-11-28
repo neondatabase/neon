@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fixtures.common_types import Lsn
@@ -207,7 +207,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
     for i in range(1000):
         cur.execute("INSERT INTO foo VALUES(%s)", (i,))
         # Get the timestamp at UTC
-        after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=timezone.utc)
+        after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=UTC)
         after_lsn = query_scalar(cur, "SELECT pg_current_wal_lsn()")
         tbl.append([i, after_timestamp, after_lsn])
         time.sleep(0.02)
@@ -273,11 +273,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
             )
             log.info("result: %s, after_ts: %s", result, after_timestamp)
 
-            # TODO use fromisoformat once we have Python 3.11+
-            # which has https://github.com/python/cpython/pull/92177
-            timestamp = datetime.strptime(result, "%Y-%m-%dT%H:%M:%S.%f000Z").replace(
-                tzinfo=timezone.utc
-            )
+            timestamp = datetime.fromisoformat(result).replace(tzinfo=UTC)
             assert timestamp < after_timestamp, "after_timestamp after timestamp"
             if i > 1:
                 before_timestamp = tbl[i - step_size][1]

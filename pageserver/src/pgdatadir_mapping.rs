@@ -10,6 +10,9 @@ use super::tenant::{PageReconstructError, Timeline};
 use crate::aux_file;
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
+use crate::metrics::{
+    RELSIZE_CACHE_ENTRIES, RELSIZE_CACHE_HITS, RELSIZE_CACHE_MISSES, RELSIZE_CACHE_MISSES_OLD,
+};
 use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
@@ -389,7 +392,9 @@ impl Timeline {
         result
     }
 
-    // Get size of a database in blocks
+    /// Get size of a database in blocks. This is only accurate on shard 0. It will undercount on
+    /// other shards, by only accounting for relations the shard has pages for, and only accounting
+    /// for pages up to the highest page number it has stored.
     pub(crate) async fn get_db_size(
         &self,
         spcnode: Oid,
@@ -408,7 +413,10 @@ impl Timeline {
         Ok(total_blocks)
     }
 
-    /// Get size of a relation file
+    /// Get size of a relation file. The relation must exist, otherwise an error is returned.
+    ///
+    /// This is only accurate on shard 0. On other shards, it will return the size up to the highest
+    /// page number stored in the shard.
     pub(crate) async fn get_rel_size(
         &self,
         tag: RelTag,
@@ -444,7 +452,10 @@ impl Timeline {
         Ok(nblocks)
     }
 
-    /// Does relation exist?
+    /// Does the relation exist?
+    ///
+    /// Only shard 0 has a full view of the relations. Other shards only know about relations that
+    /// the shard stores pages for.
     pub(crate) async fn get_rel_exists(
         &self,
         tag: RelTag,
@@ -477,6 +488,9 @@ impl Timeline {
     }
 
     /// Get a list of all existing relations in given tablespace and database.
+    ///
+    /// Only shard 0 has a full view of the relations. Other shards only know about relations that
+    /// the shard stores pages for.
     ///
     /// # Cancel-Safety
     ///
@@ -1129,9 +1143,12 @@ impl Timeline {
         let rel_size_cache = self.rel_size_cache.read().unwrap();
         if let Some((cached_lsn, nblocks)) = rel_size_cache.map.get(tag) {
             if lsn >= *cached_lsn {
+                RELSIZE_CACHE_HITS.inc();
                 return Some(*nblocks);
             }
+            RELSIZE_CACHE_MISSES_OLD.inc();
         }
+        RELSIZE_CACHE_MISSES.inc();
         None
     }
 
@@ -1156,6 +1173,7 @@ impl Timeline {
             }
             hash_map::Entry::Vacant(entry) => {
                 entry.insert((lsn, nblocks));
+                RELSIZE_CACHE_ENTRIES.inc();
             }
         }
     }
@@ -1163,13 +1181,17 @@ impl Timeline {
     /// Store cached relation size
     pub fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        rel_size_cache.map.insert(tag, (lsn, nblocks));
+        if rel_size_cache.map.insert(tag, (lsn, nblocks)).is_none() {
+            RELSIZE_CACHE_ENTRIES.inc();
+        }
     }
 
     /// Remove cached relation size
     pub fn remove_cached_rel_size(&self, tag: &RelTag) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        rel_size_cache.map.remove(tag);
+        if rel_size_cache.map.remove(tag).is_some() {
+            RELSIZE_CACHE_ENTRIES.dec();
+        }
     }
 }
 
@@ -1229,10 +1251,9 @@ impl<'a> DatadirModification<'a> {
     }
 
     pub(crate) fn has_dirty_data(&self) -> bool {
-        !self
-            .pending_data_batch
+        self.pending_data_batch
             .as_ref()
-            .map_or(true, |b| b.is_empty())
+            .map_or(false, |b| b.has_data())
     }
 
     /// Set the current lsn
@@ -1408,7 +1429,7 @@ impl<'a> DatadirModification<'a> {
             Some(pending_batch) => {
                 pending_batch.extend(batch);
             }
-            None if !batch.is_empty() => {
+            None if batch.has_data() => {
                 self.pending_data_batch = Some(batch);
             }
             None => {
@@ -2276,9 +2297,9 @@ impl<'a> Version<'a> {
 //--- Metadata structs stored in key-value pairs in the repository.
 
 #[derive(Debug, Serialize, Deserialize)]
-struct DbDirectory {
+pub(crate) struct DbDirectory {
     // (spcnode, dbnode) -> (do relmapper and PG_VERSION files exist)
-    dbdirs: HashMap<(Oid, Oid), bool>,
+    pub(crate) dbdirs: HashMap<(Oid, Oid), bool>,
 }
 
 // The format of TwoPhaseDirectory changed in PostgreSQL v17, because the filenames of
@@ -2287,8 +2308,8 @@ struct DbDirectory {
 // "pg_twophsae/0000000A000002E4".
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TwoPhaseDirectory {
-    xids: HashSet<TransactionId>,
+pub(crate) struct TwoPhaseDirectory {
+    pub(crate) xids: HashSet<TransactionId>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2297,12 +2318,12 @@ struct TwoPhaseDirectoryV17 {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
-struct RelDirectory {
+pub(crate) struct RelDirectory {
     // Set of relations that exist. (relfilenode, forknum)
     //
     // TODO: Store it as a btree or radix tree or something else that spans multiple
     // key-value pairs, if you have a lot of relations
-    rels: HashSet<(Oid, u8)>,
+    pub(crate) rels: HashSet<(Oid, u8)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2311,9 +2332,9 @@ struct RelSizeEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
-struct SlruSegmentDirectory {
+pub(crate) struct SlruSegmentDirectory {
     // Set of SLRU segments that exist.
-    segments: HashSet<u32>,
+    pub(crate) segments: HashSet<u32>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, enum_map::Enum)]

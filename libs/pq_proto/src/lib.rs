@@ -184,9 +184,8 @@ pub struct CancelKeyData {
 
 impl fmt::Display for CancelKeyData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO: this is producing strange results, with 0xffffffff........ always in the logs.
         let hi = (self.backend_pid as u64) << 32;
-        let lo = self.cancel_key as u64;
+        let lo = (self.cancel_key as u64) & 0xffffffff;
         let id = hi | lo;
 
         // This format is more compact and might work better for logs.
@@ -563,6 +562,9 @@ pub enum BeMessage<'a> {
         options: &'a [&'a str],
     },
     KeepAlive(WalSndKeepAlive),
+    /// Batch of interpreted, shard filtered WAL records,
+    /// ready for the pageserver to ingest
+    InterpretedWalRecords(InterpretedWalRecordsBody<'a>),
 }
 
 /// Common shorthands.
@@ -671,6 +673,22 @@ pub struct WalSndKeepAlive {
     pub wal_end: u64, // current end of WAL on the server
     pub timestamp: i64,
     pub request_reply: bool,
+}
+
+/// Batch of interpreted WAL records used in the interpreted
+/// safekeeper to pageserver protocol.
+///
+/// Note that the pageserver uses the RawInterpretedWalRecordsBody
+/// counterpart of this from the neondatabase/rust-postgres repo.
+/// If you're changing this struct, you likely need to change its
+/// twin as well.
+#[derive(Debug)]
+pub struct InterpretedWalRecordsBody<'a> {
+    /// End of raw WAL in [`Self::data`]
+    pub streaming_lsn: u64,
+    /// Current end of WAL on the server
+    pub commit_lsn: u64,
+    pub data: &'a [u8],
 }
 
 pub static HELLO_WORLD_ROW: BeMessage = BeMessage::DataRow(&[Some(b"hello world")]);
@@ -997,6 +1015,19 @@ impl BeMessage<'_> {
                     Ok(())
                 })?
             }
+
+            BeMessage::InterpretedWalRecords(rec) => {
+                // We use the COPY_DATA_TAG for our custom message
+                // since this tag is interpreted as raw bytes.
+                buf.put_u8(b'd');
+                write_body(buf, |buf| {
+                    buf.put_u8(b'0'); // matches INTERPRETED_WAL_RECORD_TAG in postgres-protocol
+                                      // dependency
+                    buf.put_u64(rec.streaming_lsn);
+                    buf.put_u64(rec.commit_lsn);
+                    buf.put_slice(rec.data);
+                });
+            }
         }
         Ok(())
     }
@@ -1046,5 +1077,14 @@ mod tests {
     fn parse_fe_startup_packet_regression() {
         let data = [0, 0, 0, 7, 0, 0, 0, 0];
         FeStartupPacket::parse(&mut BytesMut::from_iter(data)).unwrap_err();
+    }
+
+    #[test]
+    fn cancel_key_data() {
+        let key = CancelKeyData {
+            backend_pid: -1817212860,
+            cancel_key: -1183897012,
+        };
+        assert_eq!(format!("{key}"), "CancelKeyData(93af8844b96f2a4c)");
     }
 }

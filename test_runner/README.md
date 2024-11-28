@@ -113,7 +113,7 @@ The test suite has a Python enum with equal name but different meaning:
 
 ```python
 @enum.unique
-class RemoteStorageKind(str, enum.Enum):
+class RemoteStorageKind(StrEnum):
     LOCAL_FS = "local_fs"
     MOCK_S3 = "mock_s3"
     REAL_S3 = "real_s3"

@@ -428,8 +428,9 @@ async fn main() -> anyhow::Result<()> {
         )?))),
         None => None,
     };
+
     let cancellation_handler = Arc::new(CancellationHandler::<
-        Option<Arc<tokio::sync::Mutex<RedisPublisherClient>>>,
+        Option<Arc<Mutex<RedisPublisherClient>>>,
     >::new(
         cancel_map.clone(),
         redis_publisher,

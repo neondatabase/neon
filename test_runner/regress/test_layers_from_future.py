@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 
+import pytest
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
@@ -19,7 +20,11 @@ from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import query_scalar, wait_until
 
 
-def test_issue_5878(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize(
+    "attach_mode",
+    ["default_generation", "same_generation"],
+)
+def test_issue_5878(neon_env_builder: NeonEnvBuilder, attach_mode: str):
     """
     Regression test for issue https://github.com/neondatabase/neon/issues/5878 .
 
@@ -168,11 +173,32 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     tenant_conf = ps_http.tenant_config(tenant_id)
     generation_before_detach = get_generation_number()
     env.pageserver.tenant_detach(tenant_id)
-    failpoint_name = "before-delete-layer-pausable"
+    failpoint_deletion_queue = "deletion-queue-before-execute-pause"
 
-    ps_http.configure_failpoints((failpoint_name, "pause"))
-    env.pageserver.tenant_attach(tenant_id, tenant_conf.tenant_specific_overrides)
-    generation_after_reattach = get_generation_number()
+    ps_http.configure_failpoints((failpoint_deletion_queue, "pause"))
+
+    if attach_mode == "default_generation":
+        env.pageserver.tenant_attach(tenant_id, tenant_conf.tenant_specific_overrides)
+    elif attach_mode == "same_generation":
+        # Attach with the same generation number -- this is possible with timeline offload and detach ancestor
+        env.pageserver.tenant_attach(
+            tenant_id,
+            tenant_conf.tenant_specific_overrides,
+            generation=generation_before_detach,
+            # We want to avoid the generation bump and don't want to talk with the storcon
+            override_storage_controller_generation=False,
+        )
+    else:
+        raise AssertionError(f"Unknown attach_mode: {attach_mode}")
+
+    # Get it from pageserver API instead of storcon API b/c we might not have attached using the storcon
+    # API if attach_mode == "same_generation"
+    tenant_location = env.pageserver.http_client().tenant_get_location(tenant_id)
+    generation_after_reattach = tenant_location["generation"]
+
+    if attach_mode == "same_generation":
+        # The generation number should be the same as before the detach
+        assert generation_before_detach == generation_after_reattach
     wait_until_tenant_active(ps_http, tenant_id)
 
     # Ensure the IndexPart upload that unlinks the layer file finishes, i.e., doesn't clog the queue.
@@ -182,15 +208,8 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
 
     wait_until(10, 0.5, future_layer_is_gone_from_index_part)
 
-    # NB: the layer file is unlinked index part now, but, because we made the delete
-    # operation stuck, the layer file itself is still in the remote_storage
-    wait_until(
-        10,
-        0.5,
-        lambda: env.pageserver.assert_log_contains(
-            f".*{tenant_id}.*at failpoint.*{failpoint_name}"
-        ),
-    )
+    # We already make deletion stuck here, but we don't necessarily hit the failpoint
+    # because deletions are batched.
     future_layer_path = env.pageserver_remote_storage.remote_layer_path(
         tenant_id, timeline_id, future_layer.to_str(), generation=generation_before_detach
     )
@@ -224,11 +243,13 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
             break
         time.sleep(1)
 
-    # Window has passed, unstuck the delete, let upload queue drain.
+    # Window has passed, unstuck the delete, let deletion queue drain; the upload queue should
+    # have drained because we put these layer deletion operations into the deletion queue and
+    # have consumed the operation from the upload queue.
     log.info("unstuck the DELETE")
-    ps_http.configure_failpoints(("before-delete-layer-pausable", "off"))
-
+    ps_http.configure_failpoints((failpoint_deletion_queue, "off"))
     wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
+    env.pageserver.http_client().deletion_queue_flush(True)
 
     # Examine the resulting S3 state.
     log.info("integrity-check the remote storage")
@@ -247,3 +268,12 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     final_stat = future_layer_path.stat()
     log.info(f"future layer path: {future_layer_path}")
     assert final_stat.st_mtime != pre_stat.st_mtime
+
+    # Ensure no weird errors in the end...
+    wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
+
+    if attach_mode == "same_generation":
+        # we should have detected a race upload and deferred it
+        env.pageserver.assert_log_contains(
+            "waiting for deletion queue flush to complete before uploading layer"
+        )
