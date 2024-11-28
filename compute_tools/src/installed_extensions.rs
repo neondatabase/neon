@@ -10,7 +10,7 @@ use metrics::core::Collector;
 use metrics::{register_uint_gauge_vec, UIntGaugeVec};
 use once_cell::sync::Lazy;
 
-use crate::pg_helpers::connstr_for_db;
+use crate::pg_helpers::postgres_conf_for_db;
 
 /// We don't reuse get_existing_dbs() just for code clarity
 /// and to make database listing query here more explicit.
@@ -47,8 +47,8 @@ pub fn get_installed_extensions(connstr: &url::Url) -> Result<InstalledExtension
 
     let mut extensions_map: HashMap<String, InstalledExtension> = HashMap::new();
     for db in databases.iter() {
-        let db_connstr = connstr_for_db(connstr, db);
-        let mut db_client = Client::connect(db_connstr.as_str(), NoTls)?;
+        let config = postgres_conf_for_db(connstr, db)?;
+        let mut db_client = config.connect(NoTls)?;
         let extensions: Vec<(String, String)> = db_client
             .query(
                 "SELECT extname, extversion FROM pg_catalog.pg_extension;",

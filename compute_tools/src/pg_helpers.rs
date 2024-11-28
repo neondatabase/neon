@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Child;
+use std::str::FromStr;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -13,8 +14,10 @@ use anyhow::{bail, Result};
 use futures::StreamExt;
 use ini::Ini;
 use notify::{RecursiveMode, Watcher};
+use postgres::config::Config;
 use tokio::io::AsyncBufReadExt;
 use tokio::time::timeout;
+use tokio_postgres;
 use tokio_postgres::NoTls;
 use tracing::{debug, error, info, instrument};
 
@@ -553,9 +556,19 @@ async fn handle_postgres_logs_async(stderr: tokio::process::ChildStderr) -> Resu
 /// Yet, this is not true for Postgres, where it's completely valid to have
 /// trailing tabs in the database name. Here, we first encode the database name
 /// and then swap it in the connection string.
+///
+/// XXX: this is still not fully correct, and the only correct way is to use
+/// `conn_config_for_db()` instead.
 pub fn connstr_for_db(connstr: &url::Url, dbname: &str) -> url::Url {
     let mut connstr = connstr.clone();
     let encoded: String = url::form_urlencoded::byte_serialize(dbname.as_bytes()).collect();
     connstr.set_path(&encoded);
     connstr
+}
+
+/// `Postgres::config::Config` handles database names with whitespaces properly.
+pub fn postgres_conf_for_db(connstr: &url::Url, dbname: &str) -> Result<Config> {
+    let mut conf = Config::from_str(connstr.as_str())?;
+    conf.dbname(dbname);
+    Ok(conf)
 }

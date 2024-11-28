@@ -60,6 +60,7 @@ pub async fn get_database_schema(
     let pgbin = &compute.pgbin;
     let basepath = Path::new(pgbin).parent().unwrap();
     let pgdump = basepath.join("pg_dump");
+    // TODO: this will have problems with database names containing whitespaces
     let connstr = connstr_for_db(&compute.connstr, dbname);
     let mut cmd = Command::new(pgdump)
         .arg("--schema-only")
