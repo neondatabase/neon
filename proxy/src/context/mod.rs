@@ -414,6 +414,7 @@ impl RequestContextInner {
                     outcome,
                 });
         }
+
         if let Some(tx) = self.sender.take() {
             // If type changes, this error handling needs to be updated.
             let tx: mpsc::UnboundedSender<RequestData> = tx;

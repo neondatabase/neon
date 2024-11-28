@@ -14,7 +14,7 @@ use rustls::pki_types;
 use tokio::io::DuplexStream;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, NoTls};
-use tokio_postgres_rustls::MakeRustlsConnect;
+use crate::postgres_rustls::MakeRustlsConnect;
 
 use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;

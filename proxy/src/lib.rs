@@ -101,3 +101,4 @@ pub mod types;
 pub mod url;
 pub mod usage_metrics;
 pub mod waiters;
+pub mod postgres_rustls;

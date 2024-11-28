@@ -277,6 +277,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8ab6b55fe97976e46f91ddbed8d147d966475dc29b2032757ba47e02376fbc3"
 
 [[package]]
+name = "atty"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9b39be18770d11421cdb1b9947a45dd3f37e93092cbf377614828a319d5fee8"
+dependencies = [
+ "hermit-abi 0.1.19",
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1167,6 +1178,18 @@ dependencies = [
 
 [[package]]
 name = "clap"
+version = "3.2.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ea181bf566f71cb9a5d17a59e1871af638180a18fb0035c92ae62b705207123"
+dependencies = [
+ "bitflags 1.3.2",
+ "clap_lex 0.2.4",
+ "indexmap 1.9.3",
+ "textwrap",
+]
+
+[[package]]
+name = "clap"
 version = "4.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93aae7a4192245f70fe75dd9157fc7b4a5bf53e88d30bd4396f7d8f9284d5acc"
@@ -1185,7 +1208,7 @@ dependencies = [
  "anstream",
  "anstyle",
  "bitflags 1.3.2",
- "clap_lex",
+ "clap_lex 0.5.0",
  "strsim",
 ]
 
@@ -1199,6 +1222,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.52",
+]
+
+[[package]]
+name = "clap_lex"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2850f2f5a82cbf437dd5af4d49848fbdfc27c157c3d010345776f952765261c5"
+dependencies = [
+ "os_str_bytes",
 ]
 
 [[package]]
@@ -1265,7 +1297,7 @@ dependencies = [
  "camino",
  "cfg-if",
  "chrono",
- "clap",
+ "clap 4.3.0",
  "compute_api",
  "flate2",
  "futures",
@@ -1376,7 +1408,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
- "clap",
+ "clap 4.3.0",
  "comfy-table",
  "compute_api",
  "futures",
@@ -1463,6 +1495,32 @@ dependencies = [
 
 [[package]]
 name = "criterion"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7c76e09c1aae2bc52b3d2f29e13c6572553b30c4aa1b8a49fd70de6412654cb"
+dependencies = [
+ "anes",
+ "atty",
+ "cast",
+ "ciborium",
+ "clap 3.2.25",
+ "criterion-plot",
+ "itertools 0.10.5",
+ "lazy_static",
+ "num-traits",
+ "oorandom",
+ "plotters",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "tinytemplate",
+ "walkdir",
+]
+
+[[package]]
+name = "criterion"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2b12d017a929603d80db1831cd3a24082f8137ce19c69e6447f54f5fc8d692f"
@@ -1470,7 +1528,7 @@ dependencies = [
  "anes",
  "cast",
  "ciborium",
- "clap",
+ "clap 4.3.0",
  "criterion-plot",
  "is-terminal",
  "itertools 0.10.5",
@@ -2473,6 +2531,15 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hermit-abi"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62b467343b94ba476dcb2500d242dadbb39557df889310ac77c5d99100aaac33"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "hermit-abi"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d77f7ec81a6d05a3abb01ab6eb7590f6083d08449fe5a1c8b1e620283546ccb7"
@@ -2877,7 +2944,7 @@ version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f23ff5ef2b80d608d61efee834934d862cd92461afc0560dedf493e4c033738b"
 dependencies = [
- "hermit-abi",
+ "hermit-abi 0.3.3",
  "libc",
  "windows-sys 0.52.0",
 ]
@@ -3448,7 +3515,7 @@ version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4161fcb6d602d4d2081af7c3a45852d875a03dd337a6bfdd6e06407b61342a43"
 dependencies = [
- "hermit-abi",
+ "hermit-abi 0.3.3",
  "libc",
 ]
 
@@ -3622,6 +3689,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "os_str_bytes"
+version = "6.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2355d85b9a3786f481747ced0e0ff2ba35213a1f9bd406ed906554d7af805a1"
+
+[[package]]
 name = "outref"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3666,7 +3739,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
- "clap",
+ "clap 4.3.0",
  "futures",
  "hdrhistogram",
  "humantime",
@@ -3689,7 +3762,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
- "clap",
+ "clap 4.3.0",
  "humantime",
  "pageserver",
  "pageserver_api",
@@ -3718,10 +3791,10 @@ dependencies = [
  "camino",
  "camino-tempfile",
  "chrono",
- "clap",
+ "clap 4.3.0",
  "consumption_metrics",
  "crc32c",
- "criterion",
+ "criterion 0.5.1",
  "either",
  "enum-map",
  "enumset",
@@ -3847,8 +3920,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
- "clap",
- "criterion",
+ "clap 4.3.0",
+ "criterion 0.5.1",
  "futures",
  "hex-literal",
  "itertools 0.10.5",
@@ -4133,7 +4206,7 @@ dependencies = [
 [[package]]
 name = "postgres"
 version = "0.19.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#00940fcdb57a8e99e805297b75839e7c4c7b1796"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#a130197713830a0ea0004b539b1f51a66b4c3e18"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -4163,6 +4236,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "postgres-protocol2"
+version = "0.6.4"
+dependencies = [
+ "base64 0.20.0",
+ "byteorder",
+ "bytes",
+ "fallible-iterator",
+ "hmac",
+ "lazy_static",
+ "md-5",
+ "memchr",
+ "rand 0.8.5",
+ "sha2",
+ "stringprep",
+ "tokio",
+]
+
+[[package]]
 name = "postgres-types"
 version = "0.2.4"
 source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#00940fcdb57a8e99e805297b75839e7c4c7b1796"
@@ -4172,6 +4263,16 @@ dependencies = [
  "postgres-protocol",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "postgres-types2"
+version = "0.2.4"
+dependencies = [
+ "arrayvec",
+ "bytes",
+ "fallible-iterator",
+ "postgres-protocol2",
 ]
 
 [[package]]
@@ -4252,7 +4353,7 @@ dependencies = [
  "aligned-vec",
  "backtrace",
  "cfg-if",
- "criterion",
+ "criterion 0.5.1",
  "findshlibs",
  "inferno",
  "libc",
@@ -4464,7 +4565,7 @@ dependencies = [
  "camino",
  "camino-tempfile",
  "chrono",
- "clap",
+ "clap 4.3.0",
  "compute_api",
  "consumption_metrics",
  "dashmap",
@@ -4536,8 +4637,8 @@ dependencies = [
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
  "tokio",
- "tokio-postgres",
  "tokio-postgres-rustls",
+ "tokio-postgres2",
  "tokio-rustls 0.26.0",
  "tokio-tungstenite",
  "tokio-util",
@@ -5351,9 +5452,9 @@ dependencies = [
  "camino",
  "camino-tempfile",
  "chrono",
- "clap",
+ "clap 4.3.0",
  "crc32c",
- "criterion",
+ "criterion 0.5.1",
  "desim",
  "fail",
  "futures",
@@ -5937,7 +6038,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "bytes",
- "clap",
+ "clap 4.3.0",
  "const_format",
  "futures",
  "futures-core",
@@ -5966,7 +6067,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "chrono",
- "clap",
+ "clap 4.3.0",
  "control_plane",
  "diesel",
  "diesel_migrations",
@@ -6020,7 +6121,7 @@ dependencies = [
  "aws-sdk-s3",
  "camino",
  "chrono",
- "clap",
+ "clap 4.3.0",
  "either",
  "futures",
  "futures-util",
@@ -6055,7 +6156,7 @@ name = "storcon_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "clap",
+ "clap 4.3.0",
  "comfy-table",
  "futures",
  "humantime",
@@ -6273,6 +6374,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "textwrap"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23d434d3f8967a09480fb04132ebe0a3e088c173e6d0ee7897abbdf4eab0f8b9"
+
+[[package]]
 name = "thiserror"
 version = "1.0.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6421,6 +6528,7 @@ dependencies = [
  "libc",
  "mio",
  "num_cpus",
+ "parking_lot 0.12.1",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -6500,6 +6608,31 @@ dependencies = [
  "tokio-postgres",
  "tokio-rustls 0.26.0",
  "x509-certificate",
+]
+
+[[package]]
+name = "tokio-postgres2"
+version = "0.7.7"
+dependencies = [
+ "async-trait",
+ "byteorder",
+ "bytes",
+ "criterion 0.4.0",
+ "env_logger",
+ "fallible-iterator",
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "log",
+ "parking_lot 0.12.1",
+ "percent-encoding",
+ "phf",
+ "pin-project-lite",
+ "postgres-protocol2",
+ "postgres-types2",
+ "socket2",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -6999,7 +7132,7 @@ dependencies = [
  "camino-tempfile",
  "chrono",
  "const_format",
- "criterion",
+ "criterion 0.5.1",
  "fail",
  "futures",
  "git-version",
@@ -7076,7 +7209,7 @@ dependencies = [
  "anyhow",
  "axum",
  "cgroups-rs",
- "clap",
+ "clap 4.3.0",
  "futures",
  "serde",
  "serde_json",
@@ -7106,7 +7239,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino-tempfile",
- "clap",
+ "clap 4.3.0",
  "env_logger",
  "log",
  "postgres",
@@ -7562,7 +7695,7 @@ dependencies = [
  "camino",
  "cc",
  "chrono",
- "clap",
+ "clap 4.3.0",
  "clap_builder",
  "crypto-bigint 0.5.5",
  "der 0.7.8",

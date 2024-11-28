@@ -1,0 +1,26 @@
+[package]
+name = "postgres-protocol2"
+version = "0.6.4"
+authors = ["Steven Fackler <sfackler@gmail.com>"]
+edition = "2018"
+description = "Low level Postgres protocol APIs"
+license = "MIT/Apache-2.0"
+repository = "https://github.com/sfackler/rust-postgres"
+readme = "../README.md"
+
+[dependencies]
+base64 = "0.20"
+byteorder = "1.0"
+bytes = "1.0"
+fallible-iterator = "0.2"
+hmac = "0.12"
+lazy_static = "1.4"
+md-5 = "0.10"
+memchr = "2.0"
+rand = "0.8"
+sha2 = "0.10"
+stringprep = "0.1"
+tokio = { version = "1.0", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["full"] }

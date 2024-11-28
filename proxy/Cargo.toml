@@ -80,8 +80,7 @@ subtle.workspace = true
 thiserror.workspace = true
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl = { workspace = true, features = ["use_std"] }
-tokio-postgres = { workspace = true, features = ["with-serde_json-1"] }
-tokio-postgres-rustls.workspace = true
+tokio-postgres = { package = "tokio-postgres2", path = "../libs/proxy/tokio-postgres2" }
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["signal"] }
