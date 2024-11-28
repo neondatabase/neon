@@ -52,7 +52,9 @@ def test_sharding_smoke(
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
 
     env = neon_env_builder.init_start(
-        initial_tenant_shard_count=shard_count, initial_tenant_shard_stripe_size=stripe_size
+        initial_tenant_shard_count=shard_count,
+        initial_tenant_shard_stripe_size=stripe_size,
+        timeout_in_seconds=30,  # Just 10s is not always enough
     )
     tenant_id = env.initial_tenant
 

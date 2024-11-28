@@ -469,6 +469,7 @@ class NeonEnvBuilder:
         default_remote_storage_if_missing: bool = True,
         initial_tenant_shard_count: int | None = None,
         initial_tenant_shard_stripe_size: int | None = None,
+        timeout_in_seconds: int | None = None,
     ) -> NeonEnv:
         """
         Default way to create and start NeonEnv. Also creates the initial_tenant with root initial_timeline.
@@ -478,7 +479,7 @@ class NeonEnvBuilder:
         Configuring pageserver with remote storage is now the default. There will be a warning if pageserver is created without one.
         """
         env = self.init_configs(default_remote_storage_if_missing=default_remote_storage_if_missing)
-        env.start()
+        env.start(timeout_in_seconds=timeout_in_seconds)
 
         # Prepare the default branch to start the postgres on later.
         # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
