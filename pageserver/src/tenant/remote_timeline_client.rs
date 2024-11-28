@@ -2564,9 +2564,9 @@ pub fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
 }
 
 /// Given the key of a tenant manifest, parse out the generation number
-pub(crate) fn parse_remote_tenant_manifest_path(path: RemotePath) -> Option<Generation> {
+pub fn parse_remote_tenant_manifest_path(path: RemotePath) -> Option<Generation> {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r".+tenant-manifest-([0-9a-f]{8}).json").unwrap());
+    let re = RE.get_or_init(|| Regex::new(r".*tenant-manifest-([0-9a-f]{8}).json").unwrap());
     re.captures(path.get_path().as_str())
         .and_then(|c| c.get(1))
         .and_then(|m| Generation::parse_suffix(m.as_str()))

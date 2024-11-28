@@ -4,17 +4,21 @@ use itertools::Itertools;
 use pageserver::tenant::checks::check_valid_layermap;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
+use pageserver::tenant::remote_timeline_client::manifest::TenantManifest;
 use pageserver_api::shard::ShardIndex;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use utils::generation::Generation;
 use utils::id::TimelineId;
+use utils::shard::TenantShardId;
 
 use crate::cloud_admin_api::BranchData;
 use crate::metadata_stream::stream_listing;
 use crate::{download_object_with_retries, RootTarget, TenantShardTimelineId};
 use futures_util::StreamExt;
-use pageserver::tenant::remote_timeline_client::{parse_remote_index_path, remote_layer_path};
+use pageserver::tenant::remote_timeline_client::{
+    parse_remote_index_path, parse_remote_tenant_manifest_path, remote_layer_path,
+};
 use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::IndexPart;
 use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
@@ -526,4 +530,120 @@ async fn list_timeline_blobs_impl(
         unused_index_keys: index_part_keys,
         unknown_keys,
     }))
+}
+
+pub(crate) struct RemoteTenantManifestInfo {
+    pub(crate) latest_generation: Option<Generation>,
+    pub(crate) manifests: Vec<(Generation, ListingObject)>,
+    #[allow(dead_code)]
+    pub(crate) unknown_keys: Vec<ListingObject>,
+}
+
+/// Returns [`ListTimelineBlobsResult::MissingIndexPart`] if blob data has layer files
+/// but is missing [`IndexPart`], otherwise returns [`ListTimelineBlobsResult::Ready`].
+pub(crate) async fn list_tenant_manifests(
+    remote_client: &GenericRemoteStorage,
+    tenant_id: TenantShardId,
+    root_target: &RootTarget,
+) -> anyhow::Result<RemoteTenantManifestInfo> {
+    let mut errors = Vec::new();
+    let mut unknown_keys = Vec::new();
+
+    let mut tenant_root_target = root_target.tenant_root(&tenant_id);
+    const TENANT_MANIFEST_STEM: &str = "tenant-manifest";
+    tenant_root_target.prefix_in_bucket += TENANT_MANIFEST_STEM;
+    tenant_root_target.delimiter = String::new();
+
+    let mut manifests: Vec<(Generation, ListingObject)> = Vec::new();
+
+    let prefix_str = &tenant_root_target
+        .prefix_in_bucket
+        .strip_prefix("/")
+        .unwrap_or(&tenant_root_target.prefix_in_bucket);
+
+    let mut stream = std::pin::pin!(stream_listing(remote_client, &tenant_root_target));
+    'outer: while let Some(obj) = stream.next().await {
+        let (key, Some(obj)) = obj? else {
+            panic!("ListingObject not specified");
+        };
+
+        let blob_name = key.get_path().as_str().strip_prefix(prefix_str);
+        'err: {
+            // TODO a let chain would be nicer here.
+            let Some(name) = blob_name else {
+                break 'err;
+            };
+            if !name.starts_with("tenant-manifest") {
+                break 'err;
+            }
+            let Ok(path) = RemotePath::from_string(name) else {
+                break 'err;
+            };
+            let Some(generation) = parse_remote_tenant_manifest_path(path) else {
+                break 'err;
+            };
+            tracing::debug!("tenant manifest {key}");
+            manifests.push((generation, obj));
+            continue 'outer;
+        }
+        tracing::info!("Listed an unknown key: {key}");
+        unknown_keys.push(obj);
+    }
+
+    if manifests.is_empty() {
+        tracing::debug!("No manifest for timeline.");
+
+        return Ok(RemoteTenantManifestInfo {
+            latest_generation: None,
+            manifests,
+            unknown_keys,
+        });
+    }
+
+    // Find the manifest with the highest generation
+    let (latest_generation, latest_listing_object) = manifests
+        .iter()
+        .max_by_key(|i| i.0)
+        .map(|(g, obj)| (g.clone(), obj.clone()))
+        .unwrap();
+
+    let manifest_bytes =
+        match download_object_with_retries(remote_client, &latest_listing_object.key).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                // It is possible that the tenant gets deleted in-between we list the objects
+                // and we download the manifest file.
+                errors.push(format!("failed to download tenant-manifest.json: {e}"));
+                return Ok(RemoteTenantManifestInfo {
+                    latest_generation: Some(latest_generation),
+                    manifests,
+                    unknown_keys,
+                });
+            }
+        };
+
+    match TenantManifest::from_json_bytes(&manifest_bytes) {
+        Ok(_manifest) => {
+            return Ok(RemoteTenantManifestInfo {
+                latest_generation: Some(latest_generation),
+                manifests,
+                unknown_keys,
+            });
+        }
+        Err(parse_error) => errors.push(format!(
+            "tenant-manifest.json body parsing error: {parse_error}"
+        )),
+    }
+
+    if errors.is_empty() {
+        errors.push(
+            "Unexpected: no errors did not lead to a successfully parsed blob return".to_string(),
+        );
+    }
+
+    Ok(RemoteTenantManifestInfo {
+        latest_generation: Some(latest_generation),
+        manifests,
+        unknown_keys,
+    })
 }
