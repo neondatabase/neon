@@ -12,12 +12,12 @@ use postgres_protocol2::authentication::sasl;
 use postgres_protocol2::authentication::sasl::ScramSha256;
 use postgres_protocol2::message::backend::{AuthenticationSaslBody, Message};
 use postgres_protocol2::message::frontend;
-use tokio::sync::mpsc;
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 
 pub struct StartupStream<S, T> {

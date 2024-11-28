@@ -1,21 +1,22 @@
-use std::{convert::TryFrom, sync::Arc};
+use std::convert::TryFrom;
+use std::sync::Arc;
 
-use rustls::{pki_types::ServerName, ClientConfig};
+use rustls::pki_types::ServerName;
+use rustls::ClientConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::tls::MakeTlsConnect;
 
 mod private {
-    use std::{
-        future::Future,
-        io,
-        pin::Pin,
-        task::{Context, Poll},
-    };
+    use std::future::Future;
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
     use rustls::pki_types::ServerName;
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
     use tokio_postgres::tls::{ChannelBinding, TlsConnect};
-    use tokio_rustls::{client::TlsStream, TlsConnector};
+    use tokio_rustls::client::TlsStream;
+    use tokio_rustls::TlsConnector;
 
     use crate::config::TlsServerEndPoint;
 
