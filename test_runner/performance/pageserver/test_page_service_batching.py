@@ -19,7 +19,6 @@ class PageServicePipeliningConfig:
     max_batch_size: int
 
 
-
 NON_BATCHABLE: list[Optional[PageServicePipeliningConfig]] = [None]
 for max_batch_size in [1, 32]:
     NON_BATCHABLE.append(PageServicePipeliningConfig(max_batch_size))
@@ -253,10 +252,7 @@ def test_throughput(
 
 PRECISION_CONFIGS: list[Optional[PageServicePipeliningConfig]] = [None]
 for max_batch_size in [1, 32]:
-    for protocol_pipelining_mode in PROTOCOL_PIPELINING_MODES:
-        PRECISION_CONFIGS.append(
-            PageServicePipeliningConfig(max_batch_size, protocol_pipelining_mode)
-        )
+    PRECISION_CONFIGS.append(PageServicePipeliningConfig(max_batch_size))
 
 
 @pytest.mark.parametrize(

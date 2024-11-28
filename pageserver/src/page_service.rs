@@ -1250,7 +1250,7 @@ impl PageServerHandler {
                             .send(Batch::Request(req), |batch, req| match (batch, req) {
                                 (Batch::Request(ref mut batch), Batch::Request(req)) => {
                                     Self::pagestream_do_batch(max_batch_size, batch, req)
-                                        .map_err(|req| Batch::Request(req))
+                                        .map_err(Batch::Request)
                                 }
                                 (Batch::Request(_), x @ Batch::ReadError(_)) => Err(x),
                                 (Batch::ReadError(_), Batch::Request(_) | Batch::ReadError(_)) => {
