@@ -695,7 +695,7 @@ async fn identify_system(client: &Client) -> anyhow::Result<IdentifySystem> {
 
     // extract the row contents into an IdentifySystem struct.
     // written as a closure so I can use ? for Option here.
-    if let Some(SimpleQueryMessage::Row(first_row)) = response.first() {
+    if let Some(SimpleQueryMessage::Row(first_row)) = response.get(1) {
         Ok(IdentifySystem {
             systemid: get_parse(first_row, 0)?,
             timeline: get_parse(first_row, 1)?,

@@ -30,7 +30,8 @@ pub async fn check_writability(compute: &ComputeNode) -> Result<()> {
 
     match client.simple_query(query).await {
         Result::Ok(result) => {
-            if result.len() != 1 {
+            // one extra item for row description
+            if result.len() != 2 {
                 return Err(anyhow::anyhow!(
                     "expected 1 query results, but got {}",
                     result.len()

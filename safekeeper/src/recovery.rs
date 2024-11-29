@@ -339,7 +339,7 @@ async fn recovery_stream(
     let cfg = wal_stream_connection_config(connection_conf_args)?;
     let mut cfg = cfg.to_tokio_postgres_config();
     // It will make safekeeper give out not committed WAL (up to flush_lsn).
-    cfg.application_name(&format!("safekeeper_{}", conf.my_id));
+    cfg.application_name(format!("safekeeper_{}", conf.my_id));
     cfg.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
 
     let connect_timeout = Duration::from_millis(10000);
