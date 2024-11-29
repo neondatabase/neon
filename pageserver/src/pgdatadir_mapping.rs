@@ -203,9 +203,13 @@ impl Timeline {
     ) -> Result<Bytes, PageReconstructError> {
         match version {
             Version::Lsn(effective_lsn) => {
-                let pages = smallvec::smallvec![(tag, blknum)];
+                let pages: smallvec::SmallVec<[_; 1]> = smallvec::smallvec![(tag, blknum)];
                 let res = self
-                    .get_rel_page_at_lsn_batched(&pages, effective_lsn, ctx)
+                    .get_rel_page_at_lsn_batched(
+                        pages.iter().map(|(tag, blknum)| (tag, blknum)),
+                        effective_lsn,
+                        ctx,
+                    )
                     .await;
                 assert_eq!(res.len(), 1);
                 res.into_iter().next().unwrap()
@@ -240,7 +244,7 @@ impl Timeline {
     /// The ordering of the returned vec corresponds to the ordering of `pages`.
     pub(crate) async fn get_rel_page_at_lsn_batched(
         &self,
-        pages: &smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
+        pages: impl Iterator<Item = (&RelTag, &BlockNumber)> + ExactSizeIterator,
         effective_lsn: Lsn,
         ctx: &RequestContext,
     ) -> Vec<Result<Bytes, PageReconstructError>> {
@@ -254,7 +258,7 @@ impl Timeline {
         let result_slots = result.spare_capacity_mut();
 
         let mut keys_slots: BTreeMap<Key, smallvec::SmallVec<[usize; 1]>> = BTreeMap::default();
-        for (response_slot_idx, (tag, blknum)) in pages.iter().enumerate() {
+        for (response_slot_idx, (tag, blknum)) in pages.enumerate() {
             if tag.relnode == 0 {
                 result_slots[response_slot_idx].write(Err(PageReconstructError::Other(
                     RelationError::InvalidRelnode.into(),

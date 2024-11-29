@@ -1216,52 +1216,21 @@ pub(crate) mod virtual_file_io_engine {
     });
 }
 
-struct GlobalAndPerTimelineHistogramTimer<'a, 'c, I>
-where
-    I: IntoIterator<Item = std::time::Instant> + ExactSizeIterator,
-{
-    global_latency_histo: &'a Histogram,
+pub(crate) struct GlobalAndPerTimelineHistogramTimer {
+    global_latency_histo: Histogram,
 
     // Optional because not all op types are tracked per-timeline
-    per_timeline_latency_histo: Option<&'a Histogram>,
+    per_timeline_latency_histo: Option<Histogram>,
 
-    ctx: &'c RequestContext,
-    starts: I,
-    op: SmgrQueryType,
+    start: Instant,
 }
 
-impl Drop for GlobalAndPerTimelineHistogramTimer<'_, '_, _> {
+impl Drop for GlobalAndPerTimelineHistogramTimer {
     fn drop(&mut self) {
-        let elapsed = self.start.elapsed();
-        let ex_throttled = self
-            .ctx
-            .micros_spent_throttled
-            .close_and_checked_sub_from(elapsed);
-        let ex_throttled = match ex_throttled {
-            Ok(res) => res,
-            Err(error) => {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<enum_map::EnumMap<SmgrQueryType, RateLimit>>> =
-                    Lazy::new(|| {
-                        Mutex::new(enum_map::EnumMap::from_array(std::array::from_fn(|_| {
-                            RateLimit::new(Duration::from_secs(10))
-                        })))
-                    });
-                let mut guard = LOGGED.lock().unwrap();
-                let rate_limit = &mut guard[self.op];
-                rate_limit.call(|| {
-                    warn!(op=?self.op, error, "error deducting time spent throttled; this message is logged at a global rate limit");
-                });
-                elapsed
-            }
-        };
-
-        for _ in 0..self.count {
-            self.global_latency_histo
-                .observe(ex_throttled.as_secs_f64());
-            if let Some(per_timeline_getpage_histo) = self.per_timeline_latency_histo {
-                per_timeline_getpage_histo.observe(ex_throttled.as_secs_f64());
-            }
+        let elapsed = self.start.elapsed().as_secs_f64();
+        self.global_latency_histo.observe(elapsed);
+        if let Some(per_timeline_getpage_histo) = &self.per_timeline_latency_histo {
+            per_timeline_getpage_histo.observe(elapsed);
         }
     }
 }
@@ -1425,59 +1394,35 @@ impl SmgrQueryTimePerTimeline {
             per_timeline_getpage_started,
         }
     }
-    pub(crate) fn start_timer<'c: 'a, 'a>(
-        &'a self,
-        op: SmgrQueryType,
-        ctx: &'c RequestContext,
-    ) -> Option<impl Drop + 'a> {
-        self.start_timer_many(op, 1, ctx)
-    }
-
-    pub(crate) fn start_timer_at<'c: 'a, 'a>(
-        &'a self,
+    pub(crate) fn start_timer_at(
+        &self,
         op: SmgrQueryType,
         start: Instant,
-        ctx: &'c RequestContext,
-    ) -> Option<impl Drop + 'a> {
-        self.start_timer_at_many(op, std::iter::once(start), ctx)
-    }
+    ) -> GlobalAndPerTimelineHistogramTimer {
+        self.global_started[op as usize].inc();
 
-    pub(crate) fn start_timer_at_many<'c: 'a, 'a, T>(
-        &'a self,
-        op: SmgrQueryType,
-        starts: T,
-        ctx: &'c RequestContext,
-    ) -> Option<impl Drop + 'a>
-    where
-        T: IntoIterator<Item = Instant> + ExactSizeIterator,
-    {
         let per_timeline_latency_histo = if matches!(op, SmgrQueryType::GetPageAtLsn) {
-            self.per_timeline_getpage_started.inc_by(starts.len());
-            Some(&self.per_timeline_getpage_latency)
+            self.per_timeline_getpage_started.inc();
+            Some(self.per_timeline_getpage_latency.clone())
         } else {
             None
         };
 
-        Some(GlobalAndPerTimelineHistogramTimer {
-            global_latency_histo: &self.global_latency[op as usize],
+        GlobalAndPerTimelineHistogramTimer {
+            global_latency_histo: self.global_latency[op as usize].clone(),
             per_timeline_latency_histo,
-            ctx,
-            op,
-            starts,
-        })
+            start,
+        }
     }
 }
 
 #[cfg(test)]
 mod smgr_query_time_tests {
+    use std::time::Instant;
+
     use pageserver_api::shard::TenantShardId;
     use strum::IntoEnumIterator;
     use utils::id::{TenantId, TimelineId};
-
-    use crate::{
-        context::{DownloadBehavior, RequestContext},
-        task_mgr::TaskKind,
-    };
 
     // Regression test, we used hard-coded string constants before using an enum.
     #[test]
@@ -1522,8 +1467,7 @@ mod smgr_query_time_tests {
             let (pre_global, pre_per_tenant_timeline) = get_counts();
             assert_eq!(pre_per_tenant_timeline, 0);
 
-            let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Download);
-            let timer = metrics.start_timer(*op, &ctx);
+            let timer = metrics.start_timer_at(*op, Instant::now());
             drop(timer);
 
             let (post_global, post_per_tenant_timeline) = get_counts();

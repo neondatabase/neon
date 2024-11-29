@@ -51,7 +51,7 @@ use crate::auth::check_permission;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::metrics::{self};
+use crate::metrics::{self, GlobalAndPerTimelineHistogramTimer};
 use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
 use crate::pgdatadir_mapping::Version;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -540,13 +540,13 @@ impl From<WaitLsnError> for QueryError {
 enum BatchedFeMessage {
     Exists {
         span: Span,
-        received_at: Instant,
+        timer: GlobalAndPerTimelineHistogramTimer,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamExistsRequest,
     },
     Nblocks {
         span: Span,
-        received_at: Instant,
+        timer: GlobalAndPerTimelineHistogramTimer,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamNblocksRequest,
     },
@@ -554,17 +554,17 @@ enum BatchedFeMessage {
         span: Span,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         effective_request_lsn: Lsn,
-        pages: smallvec::SmallVec<[(RelTag, BlockNumber, Instant); 1]>,
+        pages: smallvec::SmallVec<[(RelTag, BlockNumber, GlobalAndPerTimelineHistogramTimer); 1]>,
     },
     DbSize {
         span: Span,
-        received_at: Instant,
+        timer: GlobalAndPerTimelineHistogramTimer,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamDbSizeRequest,
     },
     GetSlruSegment {
         span: Span,
-        received_at: Instant,
+        timer: GlobalAndPerTimelineHistogramTimer,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamGetSlruSegmentRequest,
     },
@@ -666,9 +666,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                let timer = shard
+                    .query_metrics
+                    .start_timer_at(metrics::SmgrQueryType::GetRelExists, received_at);
                 BatchedFeMessage::Exists {
                     span,
-                    received_at,
+                    timer,
                     shard,
                     req,
                 }
@@ -679,9 +682,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                let timer = shard
+                    .query_metrics
+                    .start_timer_at(metrics::SmgrQueryType::GetRelSize, received_at);
                 BatchedFeMessage::Nblocks {
                     span,
-                    received_at,
+                    timer,
                     shard,
                     req,
                 }
@@ -692,9 +698,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                let timer = shard
+                    .query_metrics
+                    .start_timer_at(metrics::SmgrQueryType::GetDbSize, received_at);
                 BatchedFeMessage::DbSize {
                     span,
-                    received_at,
+                    timer,
                     shard,
                     req,
                 }
@@ -705,9 +714,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                let timer = shard
+                    .query_metrics
+                    .start_timer_at(metrics::SmgrQueryType::GetSlruSegment, received_at);
                 BatchedFeMessage::GetSlruSegment {
                     span,
-                    received_at,
+                    timer,
                     shard,
                     req,
                 }
@@ -754,6 +766,14 @@ impl PageServerHandler {
                         return respond_error!(e.into());
                     }
                 };
+
+                // It's important to start the timer before waiting for the LSN
+                // so that the _started counters are incremented before we do
+                // any serious waiting, e.g., for LSNs.
+                let timer = shard
+                    .query_metrics
+                    .start_timer_at(metrics::SmgrQueryType::GetPageAtLsn, received_at);
+
                 let effective_request_lsn = match Self::wait_or_get_last_lsn(
                     &shard,
                     request_lsn,
@@ -773,7 +793,7 @@ impl PageServerHandler {
                     span,
                     shard,
                     effective_request_lsn,
-                    pages: smallvec::smallvec![(rel, blkno, received_at)],
+                    pages: smallvec::smallvec![(rel, blkno, timer)],
                 }
             }
         };
@@ -858,98 +878,112 @@ impl PageServerHandler {
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
         // invoke handler function
-        let (handler_results, span): (Vec<Result<PagestreamBeMessage, PageStreamError>>, _) =
-            match batch {
-                BatchedFeMessage::Exists {
+        let (handler_results, span): (
+            Vec<Result<(PagestreamBeMessage, GlobalAndPerTimelineHistogramTimer), PageStreamError>>,
+            _,
+        ) = match batch {
+            BatchedFeMessage::Exists {
+                span,
+                timer,
+                shard,
+                req,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::exists");
+                (
+                    vec![self
+                        .handle_get_rel_exists_request(&shard, &req, ctx)
+                        .instrument(span.clone())
+                        .await
+                        .map(|msg| (msg, timer))],
                     span,
-                    received_at: _,
-                    shard,
-                    req,
-                } => {
-                    fail::fail_point!("ps::handle-pagerequest-message::exists");
-                    (
-                        vec![
-                            self.handle_get_rel_exists_request(&shard, &req, ctx)
-                                .instrument(span.clone())
-                                .await,
-                        ],
-                        span,
-                    )
-                }
-                BatchedFeMessage::Nblocks {
+                )
+            }
+            BatchedFeMessage::Nblocks {
+                span,
+                timer,
+                shard,
+                req,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::nblocks");
+                (
+                    vec![self
+                        .handle_get_nblocks_request(&shard, &req, ctx)
+                        .instrument(span.clone())
+                        .await
+                        .map(|msg| (msg, timer))],
                     span,
-                    received_at,
-                    shard,
-                    req,
-                } => {
-                    fail::fail_point!("ps::handle-pagerequest-message::nblocks");
-                    (
-                        vec![
-                            self.handle_get_nblocks_request(&shard, &req, ctx)
-                                .instrument(span.clone())
-                                .await,
-                        ],
-                        span,
-                    )
-                }
-                BatchedFeMessage::GetPage {
+                )
+            }
+            BatchedFeMessage::GetPage {
+                span,
+                shard,
+                effective_request_lsn,
+                pages,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::getpage");
+                (
+                    {
+                        let npages = pages.len();
+                        trace!(npages, "handling getpage request");
+                        let res = self
+                            .handle_get_page_at_lsn_request_batched(
+                                &shard,
+                                effective_request_lsn,
+                                pages,
+                                ctx,
+                            )
+                            .instrument(span.clone())
+                            .await;
+                        assert_eq!(res.len(), npages);
+                        res
+                    },
                     span,
-                    shard,
-                    effective_request_lsn,
-                    pages,
-                } => {
-                    fail::fail_point!("ps::handle-pagerequest-message::getpage");
-                    (
-                        {
-                            let npages = pages.len();
-                            trace!(npages, "handling getpage request");
-                            let res = self
-                                .handle_get_page_at_lsn_request_batched(
-                                    &shard,
-                                    effective_request_lsn,
-                                    pages,
-                                    ctx,
-                                )
-                                .instrument(span.clone())
-                                .await;
-                            assert_eq!(res.len(), npages);
-                            res
-                        },
-                        span,
-                    )
-                }
-                BatchedFeMessage::DbSize { span, shard, req } => {
-                    fail::fail_point!("ps::handle-pagerequest-message::dbsize");
-                    (
-                        vec![
-                            self.handle_db_size_request(&shard, &req, ctx)
-                                .instrument(span.clone())
-                                .await,
-                        ],
-                        span,
-                    )
-                }
-                BatchedFeMessage::GetSlruSegment { span, shard, req } => {
-                    fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
-                    (
-                        vec![
-                            self.handle_get_slru_segment_request(&shard, &req, ctx)
-                                .instrument(span.clone())
-                                .await,
-                        ],
-                        span,
-                    )
-                }
-                BatchedFeMessage::RespondError { span, error } => {
-                    // We've already decided to respond with an error, so we don't need to
-                    // call the handler.
-                    (vec![Err(error)], span)
-                }
-            };
+                )
+            }
+            BatchedFeMessage::DbSize {
+                span,
+                timer,
+                shard,
+                req,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::dbsize");
+                (
+                    vec![self
+                        .handle_db_size_request(&shard, &req, ctx)
+                        .instrument(span.clone())
+                        .await
+                        .map(|msg| (msg, timer))],
+                    span,
+                )
+            }
+            BatchedFeMessage::GetSlruSegment {
+                span,
+                timer,
+                shard,
+                req,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
+                (
+                    vec![self
+                        .handle_get_slru_segment_request(&shard, &req, ctx)
+                        .instrument(span.clone())
+                        .await
+                        .map(|msg| (msg, timer))],
+                    span,
+                )
+            }
+            BatchedFeMessage::RespondError { span, error } => {
+                // We've already decided to respond with an error, so we don't need to
+                // call the handler.
+                (vec![Err(error)], span)
+            }
+        };
 
         // Map handler result to protocol behavior.
         // Some handler errors cause exit from pagestream protocol.
         // Other handler errors are sent back as an error message and we stay in pagestream protocol.
+        let mut timers: smallvec::SmallVec<[_; 1]> =
+            smallvec::SmallVec::with_capacity(handler_results.len());
         for handler_result in handler_results {
             let response_msg = match handler_result {
                 Err(e) => match &e {
@@ -980,7 +1014,10 @@ impl PageServerHandler {
                         })
                     }
                 },
-                Ok(response_msg) => response_msg,
+                Ok((response_msg, timer)) => {
+                    timers.push(timer);
+                    response_msg
+                }
             };
 
             // marshal & transmit response message
@@ -997,6 +1034,7 @@ impl PageServerHandler {
                 res?;
             }
         }
+        drop(timers);
         Ok(())
     }
 
@@ -1461,13 +1499,8 @@ impl PageServerHandler {
         &mut self,
         timeline: &Timeline,
         req: &PagestreamExistsRequest,
-        received_at: Instant,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let _timer = timeline
-            .query_metrics
-            .start_timer_at(metrics::SmgrQueryType::GetRelExists, received_at, ctx);
-
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
@@ -1492,13 +1525,8 @@ impl PageServerHandler {
         &mut self,
         timeline: &Timeline,
         req: &PagestreamNblocksRequest,
-        received_at: Instant,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let _timer = timeline
-            .query_metrics
-            .start_timer_at(metrics::SmgrQueryType::GetRelSize, received_at, ctx);
-
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
@@ -1523,15 +1551,8 @@ impl PageServerHandler {
         &mut self,
         timeline: &Timeline,
         req: &PagestreamDbSizeRequest,
-        received_at: Instant,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let _timer = timeline.query_metrics.start_timer_at(
-            metrics::SmgrQueryType::GetDbSize,
-            received_at,
-            ctx,
-        );
-
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
@@ -1557,26 +1578,40 @@ impl PageServerHandler {
         &mut self,
         timeline: &Timeline,
         effective_lsn: Lsn,
-        pages: smallvec::SmallVec<[(RelTag, BlockNumber, Instant); 1]>,
+        requests: smallvec::SmallVec<
+            [(RelTag, BlockNumber, GlobalAndPerTimelineHistogramTimer); 1],
+        >,
         ctx: &RequestContext,
-    ) -> Vec<Result<PagestreamBeMessage, PageStreamError>> {
+    ) -> Vec<Result<(PagestreamBeMessage, GlobalAndPerTimelineHistogramTimer), PageStreamError>>
+    {
         debug_assert_current_span_has_tenant_and_timeline_id();
-        let _timer = timeline.query_metrics.start_timer_many(
-            metrics::SmgrQueryType::GetPageAtLsn,
-            pages.len(),
-            ctx,
-        );
 
-        let pages = timeline
-            .get_rel_page_at_lsn_batched(pages, effective_lsn, ctx)
+        let results = timeline
+            .get_rel_page_at_lsn_batched(
+                requests.iter().map(|(reltag, blkno, _)| (reltag, blkno)),
+                effective_lsn,
+                ctx,
+            )
             .await;
+        assert_eq!(results.len(), requests.len());
 
-        Vec::from_iter(pages.into_iter().map(|page| {
-            page.map(|page| {
-                PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse { page })
-            })
-            .map_err(PageStreamError::from)
-        }))
+        // TODO: avoid creating the new Vec here
+        Vec::from_iter(
+            requests
+                .into_iter()
+                .zip(results.into_iter())
+                .map(|((_, _, timer), res)| {
+                    res.map(|page| {
+                        (
+                            PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse {
+                                page,
+                            }),
+                            timer,
+                        )
+                    })
+                    .map_err(PageStreamError::from)
+                }),
+        )
     }
 
     #[instrument(skip_all, fields(shard_id))]
@@ -1586,10 +1621,6 @@ impl PageServerHandler {
         req: &PagestreamGetSlruSegmentRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let _timer = timeline
-            .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetSlruSegment, ctx);
-
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
