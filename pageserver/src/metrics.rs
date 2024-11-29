@@ -1227,7 +1227,7 @@ pub(crate) struct GlobalAndPerTimelineHistogramTimer<'c> {
     op: SmgrQueryType,
 }
 
-impl<'c> Drop for GlobalAndPerTimelineHistogramTimer<'c> {
+impl Drop for GlobalAndPerTimelineHistogramTimer<'_> {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed();
         let ex_throttled = self
