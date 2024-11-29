@@ -224,7 +224,16 @@ RestartProposer(p) ==
             RestartProposerWithTerm(p, new_term)
 
 \* Term history of acceptor a's WAL: the one saved truncated to contain only <=
-\* local FlushLsn entries.
+\* local FlushLsn entries. Note that FlushLsn is the end LSN of the last entry
+\* (and begin LSN of the next). The mental model for non strict comparison is
+\* that once proposer is elected it immediately writes log record with zero
+\* length. This allows leader to commit existing log without writing any new
+\* entries. For example, assume acceptor has WAL
+\*   1.1, 1.2
+\* written by prop with term 1; its current <last_log_term, flush_lsn>
+\* is <1, 3>. Now prop with term 2 and max vote from this acc is elected.
+\* Once TruncateWAL is done, <last_log_term, flush_lsn> becomes <2, 3>
+\* without any new records explicitly written.
 AcceptorTermHistory(a) ==
     SelectSeq(acc_state[a].termHistory, LAMBDA th_entry: th_entry.lsn <= FlushLsn(a))
 
@@ -243,17 +252,27 @@ Vote(p, a) ==
 \* Get lastLogTerm from term history th.
 LastLogTerm(th) == th[Len(th)].term
 
+\* Compares <term, lsn> pairs: returns true if tl1 >= tl2.
+TermLsnGE(tl1, tl2) ==
+    /\ tl1.term >= tl2.term
+    /\ (tl1.term = tl2.term => tl1.lsn >= tl2.lsn)
+
+\* Choose max <term, lsn> pair in the non empty set of them.
+MaxTermLsn(term_lsn_set) ==
+    CHOOSE max_tl \in term_lsn_set: \A tl \in term_lsn_set: TermLsnGE(max_tl, tl)
+
 \* Workhorse for BecomeLeader.
 \* Assumes the check prop_state[p] votes is quorum has been done *outside*.
 DoBecomeLeader(p) ==
     LET
         \* Find acceptor with the highest <last_log_term, lsn> vote.
         max_vote_acc ==
-             CHOOSE a \in DOMAIN prop_state[p].votes:
-                 LET v == prop_state[p].votes[a]
-                 IN \A v2 \in Range(prop_state[p].votes):
-                        /\ LastLogTerm(v.termHistory) >= LastLogTerm(v2.termHistory)
-                        /\ (LastLogTerm(v.termHistory) = LastLogTerm(v2.termHistory) => v.flushLsn >= v2.flushLsn)
+            CHOOSE a \in DOMAIN prop_state[p].votes:
+                LET a_vote == prop_state[p].votes[a]
+                    a_vote_term_lsn == [term |-> LastLogTerm(a_vote.termHistory), lsn |-> a_vote.flushLsn]
+                    vote_term_lsns == {[term |-> LastLogTerm(v.termHistory), lsn |-> v.flushLsn]: v \in Range(prop_state[p].votes)}
+                IN
+                    a_vote_term_lsn = MaxTermLsn(vote_term_lsns)
         max_vote == prop_state[p].votes[max_vote_acc]
         prop_th == Append(max_vote.termHistory, [term |-> prop_state[p].term, lsn |-> max_vote.flushLsn])
     IN

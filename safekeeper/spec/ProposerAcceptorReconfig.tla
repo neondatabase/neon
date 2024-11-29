@@ -171,6 +171,42 @@ StartChange(new_members) ==
     /\ conf_store' = [generation |-> conf_store.generation + 1, members |-> conf_store.members, newMembers |-> new_members]
     /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, prop_conf, acc_conf>>
 
+\* Acceptor's last_log_term.
+AccLastLogTerm(acc) ==
+    PAS!LastLogTerm(PAS!AcceptorTermHistory(acc))
+
+\* Do CAS on the conf store, transferring joint conf into the newMembers only.
+FinishChange ==
+    \* have joint conf
+    /\ conf_store.newMembers /= NULL
+    \* The conditions for finishing the change are:
+    /\ \E qo \in PAS!AllMinQuorums(conf_store.members):
+           \* 1) Old majority must be aware of the joint conf.
+           /\ \A a \in qo: conf_store.generation = acc_conf[a].generation
+           \* 2) New member set must have log synced, i.e. some majority needs
+           \*    to have <last_log_term, lsn> at least as high as max of some
+           \*    old majority.
+           \* 3) Term must be synced, i.e. some majority of the new set must
+           \*    have term >= than max term of some old majority.
+           \*    This ensures that two leaders are never elected with the same
+           \*    term even after config change (which would be bad unless we treat
+           \*    generation as a part of term which we don't).
+           \* 4) A majority of the new set must be aware of the joint conf.
+           \*    This allows to safely destoy acceptor state if it is not a
+           \*    member of its current conf (which is useful for cleanup after
+           \*    migration as well as for aborts).
+           /\ LET sync_pos == PAS!MaxTermLsn({[term |-> AccLastLogTerm(a), lsn |-> PAS!FlushLsn(a)]: a \in qo})
+                  sync_term == PAS!Maximum({acc_state[a].term: a \in qo})
+              IN
+                  \E qn \in PAS!AllMinQuorums(conf_store.newMembers):
+                      \A a \in qn:
+                          /\ PAS!TermLsnGE([term |-> AccLastLogTerm(a), lsn |-> PAS!FlushLsn(a)], sync_pos)
+                          /\ acc_state[a].term >= sync_term
+                          /\ conf_store.generation = acc_conf[a].generation
+    /\ conf_store' = [generation |-> conf_store.generation + 1, members |-> conf_store.newMembers, newMembers |-> NULL]
+    /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, prop_conf, acc_conf>>
+
+
 \*******************************************************************************
 \* Final spec
 \*******************************************************************************
@@ -186,6 +222,7 @@ Next ==
   \/ \E p \in proposers: CommitEntries(p)
   \/ \E p \in proposers: \E a \in acceptors: ProposerBumpConf(p, a)
   \/ \E new_members \in SUBSET acceptors: StartChange(new_members)
+  \/ FinishChange
 
 Spec == Init /\ [][Next]_<<prop_state, acc_state, committed, elected_history, prop_conf, acc_conf, conf_store>>
 
