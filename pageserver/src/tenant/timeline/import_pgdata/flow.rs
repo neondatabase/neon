@@ -673,17 +673,15 @@ impl ImportTask for ImportSlruBlocksTask {
         let mut file_offset = 0;
         while blknum < end_blk {
             let key = slru_block_to_key(kind, segno, blknum);
-            assert!(
-                !self.shard_identity.is_key_disposable(&key),
-                "SLRU keys need to go into every shard"
-            );
-            let buf = &buf[file_offset..(file_offset + 8192)];
-            file_offset += 8192;
-            layer_writer
-                .put_image(key, Bytes::copy_from_slice(buf), ctx)
-                .await?;
+            if !self.shard_identity.is_key_disposable(&key) {
+                let buf = &buf[file_offset..(file_offset + 8192)];
+                file_offset += 8192;
+                layer_writer
+                    .put_image(key, Bytes::copy_from_slice(buf), ctx)
+                    .await?;
+                nimages += 1;
+            }
             blknum += 1;
-            nimages += 1;
         }
         Ok(nimages)
     }
