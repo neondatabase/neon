@@ -134,7 +134,7 @@ fn try_acquire_lsn_lease(
         let mut client = config.connect(NoTls)?;
         let cmd = format!("lease lsn {} {} {} ", tenant_shard_id, timeline_id, lsn);
         let res = client.simple_query(&cmd)?;
-        let msg = match res.first() {
+        let msg = match res.get(1) {
             Some(msg) => msg,
             None => bail!("empty response"),
         };
