@@ -21,7 +21,7 @@
 //! - Build the image with the following command:
 //!
 //! ```bash
-//! docker buildx build --platform linux/amd64 --build-arg DEBIAN_VERSION=bullseye --build-arg GIT_VERSION=local --build-arg PG_VERSION=v14 --build-arg BUILD_TAG="$(date --iso-8601=s -u)" -t localregistry/compute-node-v14:local -f compute/compute-node.Dockerfile .
+//! docker buildx build --platform linux/amd64 --build-arg DEBIAN_VERSION=bullseye --build-arg GIT_VERSION=local --build-arg PG_VERSION=v14 --build-arg BUILD_TAG="$(date --iso-8601=s -u)" -t localhost:3030/localregistry/compute-node-v14:latest -f compute/compute-node.Dockerfile .
 //! docker push localhost:3030/localregistry/compute-node-v14:latest
 //! ```
 
