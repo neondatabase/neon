@@ -51,7 +51,7 @@ use crate::auth::check_permission;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::metrics::{self, GlobalAndPerTimelineHistogramTimer};
+use crate::metrics::{self, SmgrOpTimer};
 use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
 use crate::pgdatadir_mapping::Version;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -540,13 +540,13 @@ impl From<WaitLsnError> for QueryError {
 enum BatchedFeMessage {
     Exists {
         span: Span,
-        timer: GlobalAndPerTimelineHistogramTimer,
+        timer: SmgrOpTimer,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamExistsRequest,
     },
     Nblocks {
         span: Span,
-        timer: GlobalAndPerTimelineHistogramTimer,
+        timer: SmgrOpTimer,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamNblocksRequest,
     },
@@ -554,17 +554,17 @@ enum BatchedFeMessage {
         span: Span,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         effective_request_lsn: Lsn,
-        pages: smallvec::SmallVec<[(RelTag, BlockNumber, GlobalAndPerTimelineHistogramTimer); 1]>,
+        pages: smallvec::SmallVec<[(RelTag, BlockNumber, SmgrOpTimer); 1]>,
     },
     DbSize {
         span: Span,
-        timer: GlobalAndPerTimelineHistogramTimer,
+        timer: SmgrOpTimer,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamDbSizeRequest,
     },
     GetSlruSegment {
         span: Span,
-        timer: GlobalAndPerTimelineHistogramTimer,
+        timer: SmgrOpTimer,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamGetSlruSegmentRequest,
     },
@@ -668,7 +668,7 @@ impl PageServerHandler {
                     .await?;
                 let timer = shard
                     .query_metrics
-                    .start_timer_at(metrics::SmgrQueryType::GetRelExists, received_at);
+                    .start_smgr_op(metrics::SmgrQueryType::GetRelExists, received_at);
                 BatchedFeMessage::Exists {
                     span,
                     timer,
@@ -684,7 +684,7 @@ impl PageServerHandler {
                     .await?;
                 let timer = shard
                     .query_metrics
-                    .start_timer_at(metrics::SmgrQueryType::GetRelSize, received_at);
+                    .start_smgr_op(metrics::SmgrQueryType::GetRelSize, received_at);
                 BatchedFeMessage::Nblocks {
                     span,
                     timer,
@@ -700,7 +700,7 @@ impl PageServerHandler {
                     .await?;
                 let timer = shard
                     .query_metrics
-                    .start_timer_at(metrics::SmgrQueryType::GetDbSize, received_at);
+                    .start_smgr_op(metrics::SmgrQueryType::GetDbSize, received_at);
                 BatchedFeMessage::DbSize {
                     span,
                     timer,
@@ -716,7 +716,7 @@ impl PageServerHandler {
                     .await?;
                 let timer = shard
                     .query_metrics
-                    .start_timer_at(metrics::SmgrQueryType::GetSlruSegment, received_at);
+                    .start_smgr_op(metrics::SmgrQueryType::GetSlruSegment, received_at);
                 BatchedFeMessage::GetSlruSegment {
                     span,
                     timer,
@@ -772,7 +772,7 @@ impl PageServerHandler {
                 // any serious waiting, e.g., for LSNs.
                 let timer = shard
                     .query_metrics
-                    .start_timer_at(metrics::SmgrQueryType::GetPageAtLsn, received_at);
+                    .start_smgr_op(metrics::SmgrQueryType::GetPageAtLsn, received_at);
 
                 let effective_request_lsn = match Self::wait_or_get_last_lsn(
                     &shard,
@@ -879,7 +879,7 @@ impl PageServerHandler {
     {
         // invoke handler function
         let (handler_results, span): (
-            Vec<Result<(PagestreamBeMessage, GlobalAndPerTimelineHistogramTimer), PageStreamError>>,
+            Vec<Result<(PagestreamBeMessage, SmgrOpTimer), PageStreamError>>,
             _,
         ) = match batch {
             BatchedFeMessage::Exists {
@@ -1578,13 +1578,14 @@ impl PageServerHandler {
         &mut self,
         timeline: &Timeline,
         effective_lsn: Lsn,
-        requests: smallvec::SmallVec<
-            [(RelTag, BlockNumber, GlobalAndPerTimelineHistogramTimer); 1],
-        >,
+        requests: smallvec::SmallVec<[(RelTag, BlockNumber, SmgrOpTimer); 1]>,
         ctx: &RequestContext,
-    ) -> Vec<Result<(PagestreamBeMessage, GlobalAndPerTimelineHistogramTimer), PageStreamError>>
-    {
+    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), PageStreamError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
+
+        timeline
+            .query_metrics
+            .observe_getpage_batch_start(requests.len());
 
         let results = timeline
             .get_rel_page_at_lsn_batched(

@@ -7,6 +7,10 @@ use metrics::{
     IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
+use pageserver_api::config::{
+    PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
+    PageServiceProtocolPipelinedExecutionStrategy,
+};
 use pageserver_api::shard::TenantShardId;
 use postgres_backend::{is_expected_io_error, QueryError};
 use pq_proto::framed::ConnectionError;
@@ -1200,7 +1204,7 @@ pub(crate) mod virtual_file_io_engine {
     });
 }
 
-pub(crate) struct GlobalAndPerTimelineHistogramTimer {
+pub(crate) struct SmgrOpTimer {
     global_latency_histo: Histogram,
 
     // Optional because not all op types are tracked per-timeline
@@ -1209,7 +1213,7 @@ pub(crate) struct GlobalAndPerTimelineHistogramTimer {
     start: Instant,
 }
 
-impl Drop for GlobalAndPerTimelineHistogramTimer {
+impl Drop for SmgrOpTimer {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed().as_secs_f64();
         self.global_latency_histo.observe(elapsed);
@@ -1244,6 +1248,8 @@ pub(crate) struct SmgrQueryTimePerTimeline {
     global_latency: [Histogram; SmgrQueryType::COUNT],
     per_timeline_getpage_started: IntCounter,
     per_timeline_getpage_latency: Histogram,
+    global_batch_size: Histogram,
+    per_timeline_batch_size: Histogram,
 }
 
 static SMGR_QUERY_STARTED_GLOBAL: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -1336,6 +1342,76 @@ static SMGR_QUERY_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static PAGE_SERVICE_BATCH_SIZE_BUCKETS_GLOBAL: Lazy<Vec<f64>> = Lazy::new(|| {
+    (1..=u32::try_from(Timeline::MAX_GET_VECTORED_KEYS).unwrap())
+        .map(|v| v.into())
+        .collect()
+});
+
+static PAGE_SERVICE_BATCH_SIZE_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_page_service_batch_size_global",
+        "Batch size of pageserver page service requests",
+        PAGE_SERVICE_BATCH_SIZE_BUCKETS_GLOBAL.clone(),
+    )
+    .expect("failed to define a metric")
+});
+
+static PAGE_SERVICE_BATCH_SIZE_BUCKETS_PER_TIMELINE: Lazy<Vec<f64>> = Lazy::new(|| {
+    let mut buckets = Vec::new();
+    for i in 0.. {
+        let bucket = 1 << i;
+        if bucket > u32::try_from(Timeline::MAX_GET_VECTORED_KEYS).unwrap() {
+            break;
+        }
+        buckets.push(bucket.into());
+    }
+    buckets
+});
+
+static PAGE_SERVICE_BATCH_SIZE_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_page_service_batch_size",
+        "Batch size of pageserver page service requests",
+        &["tenant_id", "shard_id", "timeline_id"],
+        PAGE_SERVICE_BATCH_SIZE_BUCKETS_PER_TIMELINE.clone()
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_page_service_config_max_batch_size",
+        "Configured maximum batch size for the server-side batching functionality of page_service. \
+         Labels expose more of the configuration parameters.",
+        &["mode", "execution"]
+    )
+    .expect("failed to define a metric")
+});
+
+fn set_page_service_config_max_batch_size(conf: &PageServicePipeliningConfig) {
+    PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE.reset();
+    let (label_values, value) = match conf {
+        PageServicePipeliningConfig::Serial => (["serial", "-"], 1),
+        PageServicePipeliningConfig::Pipelined(PageServicePipeliningConfigPipelined {
+            max_batch_size,
+            execution,
+        }) => {
+            let mode = "pipelined";
+            let execution = match execution {
+                PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures => {
+                    "concurrent-futures"
+                }
+                PageServiceProtocolPipelinedExecutionStrategy::Tasks => "tasks",
+            };
+            ([mode, execution], max_batch_size.get())
+        }
+    };
+    PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE
+        .with_label_values(&label_values)
+        .set(value.try_into().unwrap());
+}
+
 impl SmgrQueryTimePerTimeline {
     pub(crate) fn new(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
         let tenant_id = tenant_shard_id.tenant_id.to_string();
@@ -1371,18 +1447,21 @@ impl SmgrQueryTimePerTimeline {
             ])
             .unwrap();
 
+        let global_batch_size = PAGE_SERVICE_BATCH_SIZE_GLOBAL.clone();
+        let per_timeline_batch_size = PAGE_SERVICE_BATCH_SIZE_PER_TENANT_TIMELINE
+            .get_metric_with_label_values(&[&tenant_id, &shard_slug, &timeline_id])
+            .unwrap();
+
         Self {
             global_started,
             global_latency,
             per_timeline_getpage_latency,
             per_timeline_getpage_started,
+            global_batch_size,
+            per_timeline_batch_size,
         }
     }
-    pub(crate) fn start_timer_at(
-        &self,
-        op: SmgrQueryType,
-        start: Instant,
-    ) -> GlobalAndPerTimelineHistogramTimer {
+    pub(crate) fn start_smgr_op(&self, op: SmgrQueryType, started_at: Instant) -> SmgrOpTimer {
         self.global_started[op as usize].inc();
 
         let per_timeline_latency_histo = if matches!(op, SmgrQueryType::GetPageAtLsn) {
@@ -1392,11 +1471,16 @@ impl SmgrQueryTimePerTimeline {
             None
         };
 
-        GlobalAndPerTimelineHistogramTimer {
+        SmgrOpTimer {
             global_latency_histo: self.global_latency[op as usize].clone(),
             per_timeline_latency_histo,
-            start,
+            start: started_at,
         }
+    }
+
+    pub(crate) fn observe_getpage_batch_start(&self, batch_size: usize) {
+        self.global_batch_size.observe(batch_size as f64);
+        self.per_timeline_batch_size.observe(batch_size as f64);
     }
 }
 
@@ -1451,7 +1535,7 @@ mod smgr_query_time_tests {
             let (pre_global, pre_per_tenant_timeline) = get_counts();
             assert_eq!(pre_per_tenant_timeline, 0);
 
-            let timer = metrics.start_timer_at(*op, Instant::now());
+            let timer = metrics.start_smgr_op(*op, Instant::now());
             drop(timer);
 
             let (post_global, post_per_tenant_timeline) = get_counts();
@@ -2607,6 +2691,11 @@ impl TimelineMetrics {
             shard_id,
             timeline_id,
         ]);
+        let _ = PAGE_SERVICE_BATCH_SIZE_PER_TENANT_TIMELINE.remove_label_values(&[
+            tenant_id,
+            shard_id,
+            timeline_id,
+        ]);
     }
 }
 
@@ -2632,10 +2721,12 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
 use crate::task_mgr::TaskKind;
 use crate::tenant::mgr::TenantSlot;
 use crate::tenant::tasks::BackgroundLoopKind;
+use crate::tenant::Timeline;
 
 /// Maintain a per timeline gauge in addition to the global gauge.
 pub(crate) struct PerTimelineRemotePhysicalSizeGauge {
@@ -3447,7 +3538,9 @@ pub(crate) fn set_tokio_runtime_setup(setup: &str, num_threads: NonZeroUsize) {
         .set(u64::try_from(num_threads.get()).unwrap());
 }
 
-pub fn preinitialize_metrics() {
+pub fn preinitialize_metrics(conf: &'static PageServerConf) {
+    set_page_service_config_max_batch_size(&conf.page_service_pipelining);
+
     // Python tests need these and on some we do alerting.
     //
     // FIXME(4813): make it so that we have no top level metrics as this fn will easily fall out of
@@ -3515,6 +3608,7 @@ pub fn preinitialize_metrics() {
         &WAL_REDO_RECORDS_HISTOGRAM,
         &WAL_REDO_BYTES_HISTOGRAM,
         &WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
+        &PAGE_SERVICE_BATCH_SIZE_GLOBAL,
     ]
     .into_iter()
     .for_each(|h| {

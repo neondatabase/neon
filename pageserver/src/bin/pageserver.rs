@@ -303,7 +303,7 @@ fn start_pageserver(
         pageserver::metrics::tokio_epoll_uring::Collector::new(),
     ))
     .unwrap();
-    pageserver::preinitialize_metrics();
+    pageserver::preinitialize_metrics(conf);
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes
