@@ -1283,12 +1283,6 @@ impl PageServerHandler {
         //
         // Batcher
         //
-
-        let batcher_ctx = ctx.attached_child();
-        let batcher_ctx_ref = &batcher_ctx;
-        let executor_ctx = ctx.attached_child();
-        let executor_ctx_ref = &executor_ctx;
-
         let cancel_batcher = self.cancel.child_token();
         let (mut batch_tx, mut batch_rx) = spsc_fold::channel();
         let read_messages = pipeline_stage!(
@@ -1305,7 +1299,7 @@ impl PageServerHandler {
                             timeline_id,
                             &mut timeline_handles,
                             &cancel_batcher,
-                            batcher_ctx_ref,
+                            ctx,
                             request_span.clone(),
                         )
                         .await;
@@ -1347,7 +1341,7 @@ impl PageServerHandler {
                         return Err(e);
                     }
                 };
-                self.pagesteam_handle_batched_message(pgb_writer, batch, &cancel, executor_ctx_ref)
+                self.pagesteam_handle_batched_message(pgb_writer, batch, &cancel, ctx)
                     .await?;
             }
         });
