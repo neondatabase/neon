@@ -177,6 +177,19 @@ TypeOk ==
 \* Initial
 \********************************************************************************
 
+InitAcc ==
+    [
+        \* There will be no leader in zero term, 1 is the first
+        \* real.
+        term |-> 0,
+        \* Again, leader in term 0 doesn't exist, but we initialize
+        \* term histories with it to always have common point in
+        \* them. Lsn is 1 because TLA+ sequences are indexed from 1
+        \* (we don't want to truncate WAL out of range).
+        termHistory |-> << [term |-> 0, lsn |-> 1] >>,
+        wal |-> << >>
+    ]
+
 Init ==
     /\ prop_state = [p \in proposers |-> [
                         state |-> "campaign",
@@ -186,17 +199,7 @@ Init ==
                         wal |-> << >>,
                         nextSendLsn |-> EmptyF
                     ]]
-    /\ acc_state = [a \in acceptors |-> [
-                       \* There will be no leader in zero term, 1 is the first
-                       \* real.
-                       term |-> 0,
-                       \* Again, leader in term 0 doesn't exist, but we initialize
-                       \* term histories with it to always have common point in
-                       \* them. Lsn is 1 because TLA+ sequences are indexed from 1
-                       \* (we don't want to truncate WAL out of range).
-                       termHistory |-> << [term |-> 0, lsn |-> 1] >>,
-                       wal |-> << >>
-                   ]]
+    /\ acc_state = [a \in acceptors |-> InitAcc]
     /\ committed = {}
     /\ elected_history = EmptyF
 
