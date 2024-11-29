@@ -95,24 +95,16 @@ impl<T: Send> Sender<T> {
                         }
                     }
                 }
-                State::TryFoldFailed => {
-                    unreachable!();
-                }
                 State::SenderWaitsForReceiverToConsume(_data) => {
                     // Really, we shouldn't be polled until receiver has consumed and wakes us.
                     Poll::Pending
                 }
                 State::ReceiverGone => Poll::Ready(Err(SendError::ReceiverGone)),
-                State::SenderGone(_) => {
-                    unreachable!();
-                }
-                State::AllGone => {
-                    unreachable!();
-                }
-                State::SenderDropping => {
-                    unreachable!();
-                }
-                State::ReceiverDropping => {
+                State::SenderGone(_)
+                | State::AllGone
+                | State::SenderDropping
+                | State::ReceiverDropping
+                | State::TryFoldFailed => {
                     unreachable!();
                 }
             }
@@ -131,12 +123,14 @@ impl<T> Drop for Sender<T> {
             State::HasData(data) | State::SenderWaitsForReceiverToConsume(data) => {
                 State::SenderGone(Some(data))
             }
-            State::TryFoldFailed => unreachable!(),
-            State::SenderGone(_) => unreachable!(),
             State::ReceiverGone => State::AllGone,
-            State::AllGone => unreachable!(),
-            State::SenderDropping => unreachable!(),
-            State::ReceiverDropping => unreachable!(),
+            State::TryFoldFailed
+            | State::SenderGone(_)
+            | State::AllGone
+            | State::SenderDropping
+            | State::ReceiverDropping => {
+                unreachable!("unreachable state {:?}", guard.discriminant_str())
+            }
         }
     }
 }
@@ -160,48 +154,22 @@ impl<T: Send> Receiver<T> {
                     }
                     Poll::Pending
                 }
-                guard @ State::HasData(_) => {
-                    let State::HasData(data) = std::mem::replace(guard, State::NoData) else {
-                        unreachable!("this match arm guarantees that the guard is HasData");
-                    };
+                guard @ State::HasData(_)
+                | guard @ State::SenderWaitsForReceiverToConsume(_)
+                | guard @ State::SenderGone(Some(_)) => {
+                    let data = guard
+                        .take_data()
+                        .expect("in these states, data is guaranteed to be present");
                     self.state.wake_sender.notify();
-                    Poll::Ready(Ok(data))
-                }
-                State::TryFoldFailed => {
-                    unreachable!();
-                }
-                guard @ State::SenderWaitsForReceiverToConsume(_) => {
-                    let State::SenderWaitsForReceiverToConsume(data) =
-                        std::mem::replace(guard, State::NoData) else {
-                        unreachable!(
-                            "this match arm guarantees that the guard is SenderWaitsForReceiverToConsume"
-                        );
-                    };
-                    self.state.wake_sender.notify();
-                    Poll::Ready(Ok(data))
-                }
-                guard @ State::SenderGone(Some(_)) => {
-                    let State::SenderGone(Some(data)) =
-                        std::mem::replace(guard, State::SenderGone(None))
-                    else {
-                        unreachable!(
-                            "this match arm guarantees that the guard is SenderGone(Some(_))"
-                        );
-                    };
                     Poll::Ready(Ok(data))
                 }
                 State::SenderGone(None) => Poll::Ready(Err(RecvError::SenderGone)),
-                State::ReceiverGone => {
-                    unreachable!();
-                }
-                State::AllGone => {
-                    unreachable!();
-                }
-                State::SenderDropping => {
-                    unreachable!();
-                }
-                State::ReceiverDropping => {
-                    unreachable!();
+                State::ReceiverGone
+                | State::AllGone
+                | State::SenderDropping
+                | State::ReceiverDropping
+                | State::TryFoldFailed => {
+                    unreachable!("unreachable state {:?}", guard.discriminant_str());
                 }
             }
         })
@@ -217,12 +185,57 @@ impl<T> Drop for Receiver<T> {
         *guard = match std::mem::replace(&mut *guard, State::ReceiverDropping) {
             State::NoData => State::ReceiverGone,
             State::HasData(_) | State::SenderWaitsForReceiverToConsume(_) => State::ReceiverGone,
-            State::TryFoldFailed => unreachable!(),
             State::SenderGone(_) => State::AllGone,
-            State::ReceiverGone => unreachable!(),
-            State::AllGone => unreachable!(),
-            State::SenderDropping => unreachable!(),
-            State::ReceiverDropping => unreachable!(),
+            State::TryFoldFailed
+            | State::ReceiverGone
+            | State::AllGone
+            | State::SenderDropping
+            | State::ReceiverDropping => {
+                unreachable!("unreachable state {:?}", guard.discriminant_str())
+            }
+        }
+    }
+}
+
+impl<T> State<T> {
+    fn take_data(&mut self) -> Option<T> {
+        match self {
+            State::HasData(_) => {
+                let State::HasData(data) = std::mem::replace(self, State::NoData) else {
+                    unreachable!("this match arm guarantees that the state is HasData");
+                };
+                Some(data)
+            }
+            State::SenderWaitsForReceiverToConsume(_) => {
+                let State::SenderWaitsForReceiverToConsume(data) =
+                    std::mem::replace(self, State::NoData)
+                else {
+                    unreachable!(
+                        "this match arm guarantees that the state is SenderWaitsForReceiverToConsume"
+                    );
+                };
+                Some(data)
+            }
+            State::SenderGone(data) => Some(data.take().unwrap()),
+            State::NoData
+            | State::TryFoldFailed
+            | State::ReceiverGone
+            | State::AllGone
+            | State::SenderDropping
+            | State::ReceiverDropping => None,
+        }
+    }
+    fn discriminant_str(&self) -> &'static str {
+        match self {
+            State::NoData => "NoData",
+            State::HasData(_) => "HasData",
+            State::TryFoldFailed => "TryFoldFailed",
+            State::SenderWaitsForReceiverToConsume(_) => "SenderWaitsForReceiverToConsume",
+            State::SenderGone(_) => "SenderGone",
+            State::ReceiverGone => "ReceiverGone",
+            State::AllGone => "AllGone",
+            State::SenderDropping => "SenderDropping",
+            State::ReceiverDropping => "ReceiverDropping",
         }
     }
 }
