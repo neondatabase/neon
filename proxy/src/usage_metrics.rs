@@ -1,5 +1,6 @@
 //! Periodically collect proxy consumption metrics
 //! and push them to a HTTP endpoint.
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::pin::pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -237,6 +238,7 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
             &USAGE_METRICS.endpoints,
             &http_client,
             &config.endpoint,
+            config.backup_metric_collection_config.chunk_size,
             &hostname,
             prev,
             now,
@@ -283,7 +285,6 @@ fn create_event_chunks<'a>(
     now: DateTime<Utc>,
     chunk_size: usize,
 ) -> impl Iterator<Item = EventChunk<'a, Event<Ids, &'static str>>> + 'a {
-    // Split into chunks of 1000 metrics to avoid exceeding the max request size
     metrics_to_send
         .chunks(chunk_size)
         .map(move |chunk| EventChunk {
@@ -308,6 +309,7 @@ async fn collect_metrics_iteration(
     endpoints: &DashMap<Ids, Arc<MetricCounter>, FastHasher>,
     client: &http::ClientWithMiddleware,
     metric_collection_endpoint: &reqwest::Url,
+    outer_chunk_size: usize,
     hostname: &str,
     prev: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -324,26 +326,32 @@ async fn collect_metrics_iteration(
     }
 
     // Send metrics.
-    for chunk in create_event_chunks(&metrics_to_send, hostname, prev, now, CHUNK_SIZE) {
-        let res = client
-            .post(metric_collection_endpoint.clone())
-            .json(&chunk)
-            .send()
-            .await;
+    for chunk in create_event_chunks(&metrics_to_send, hostname, prev, now, outer_chunk_size) {
+        // Split into smaller chunks to avoid exceeding the max request size
+        for subchunk in chunk.events.chunks(CHUNK_SIZE).map(|c| EventChunk {
+            events: Cow::Borrowed(c),
+        }) {
+            let res = client
+                .post(metric_collection_endpoint.clone())
+                .json(&subchunk)
+                .send()
+                .await;
 
-        let res = match res {
-            Ok(x) => x,
-            Err(err) => {
-                error!("failed to send metrics: {:?}", err);
-                continue;
-            }
-        };
+            let res = match res {
+                Ok(x) => x,
+                Err(err) => {
+                    // TODO: retry?
+                    error!("failed to send metrics: {:?}", err);
+                    continue;
+                }
+            };
 
-        if !res.status().is_success() {
-            error!("metrics endpoint refused the sent metrics: {:?}", res);
-            for metric in chunk.events.iter().filter(|e| e.value > (1u64 << 40)) {
-                // Report if the metric value is suspiciously large
-                warn!("potentially abnormal metric value: {:?}", metric);
+            if !res.status().is_success() {
+                error!("metrics endpoint refused the sent metrics: {:?}", res);
+                for metric in subchunk.events.iter().filter(|e| e.value > (1u64 << 40)) {
+                    // Report if the metric value is suspiciously large
+                    warn!("potentially abnormal metric value: {:?}", metric);
+                }
             }
         }
     }
@@ -539,7 +547,16 @@ mod tests {
         let now = Utc::now();
 
         // no counters have been registered
-        collect_metrics_iteration(&metrics.endpoints, &client, &endpoint, "foo", now, now).await;
+        collect_metrics_iteration(
+            &metrics.endpoints,
+            &client,
+            &endpoint,
+            1000,
+            "foo",
+            now,
+            now,
+        )
+        .await;
         let r = std::mem::take(&mut *reports.lock().unwrap());
         assert!(r.is_empty());
 
@@ -551,7 +568,16 @@ mod tests {
         });
 
         // the counter should be observed despite 0 egress
-        collect_metrics_iteration(&metrics.endpoints, &client, &endpoint, "foo", now, now).await;
+        collect_metrics_iteration(
+            &metrics.endpoints,
+            &client,
+            &endpoint,
+            1000,
+            "foo",
+            now,
+            now,
+        )
+        .await;
         let r = std::mem::take(&mut *reports.lock().unwrap());
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].events.len(), 1);
@@ -561,7 +587,16 @@ mod tests {
         counter.record_egress(1);
 
         // egress should be observered
-        collect_metrics_iteration(&metrics.endpoints, &client, &endpoint, "foo", now, now).await;
+        collect_metrics_iteration(
+            &metrics.endpoints,
+            &client,
+            &endpoint,
+            1000,
+            "foo",
+            now,
+            now,
+        )
+        .await;
         let r = std::mem::take(&mut *reports.lock().unwrap());
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].events.len(), 1);
@@ -571,7 +606,16 @@ mod tests {
         drop(counter);
 
         // we do not observe the counter
-        collect_metrics_iteration(&metrics.endpoints, &client, &endpoint, "foo", now, now).await;
+        collect_metrics_iteration(
+            &metrics.endpoints,
+            &client,
+            &endpoint,
+            1000,
+            "foo",
+            now,
+            now,
+        )
+        .await;
         let r = std::mem::take(&mut *reports.lock().unwrap());
         assert!(r.is_empty());
 

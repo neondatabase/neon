@@ -103,6 +103,7 @@ impl<'a> IdempotencyKey<'a> {
     }
 }
 
+/// Split into chunks of 1000 metrics to avoid exceeding the max request size.
 pub const CHUNK_SIZE: usize = 1000;
 
 // Just a wrapper around a slice of events
