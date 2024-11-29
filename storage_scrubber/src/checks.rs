@@ -551,15 +551,15 @@ pub(crate) async fn list_tenant_manifests(
 
     let mut tenant_root_target = root_target.tenant_root(&tenant_id);
     const TENANT_MANIFEST_STEM: &str = "tenant-manifest";
+    let original_prefix = tenant_root_target.prefix_in_bucket.clone();
     tenant_root_target.prefix_in_bucket += TENANT_MANIFEST_STEM;
     tenant_root_target.delimiter = String::new();
 
     let mut manifests: Vec<(Generation, ListingObject)> = Vec::new();
 
-    let prefix_str = &tenant_root_target
-        .prefix_in_bucket
+    let prefix_str = &original_prefix
         .strip_prefix("/")
-        .unwrap_or(&tenant_root_target.prefix_in_bucket);
+        .unwrap_or(&original_prefix);
 
     let mut stream = std::pin::pin!(stream_listing(remote_client, &tenant_root_target));
     'outer: while let Some(obj) = stream.next().await {
