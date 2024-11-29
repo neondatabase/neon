@@ -1,5 +1,9 @@
 ---- MODULE ProposerAcceptorReconfig ----
 
+(*
+    Spec for https://github.com/neondatabase/neon/blob/538e2312a617c65d489d391892c70b2e4d7407b5/docs/rfcs/035-safekeeper-dynamic-membership-change.md
+*)
+
 EXTENDS Integers, Sequences, FiniteSets, TLC
 
 VARIABLES
@@ -148,7 +152,7 @@ CommitEntries(p) ==
     /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
 
 \* Proposer p adopts higher conf from acceptor a.
-ProposerBumpConf(p, a) ==
+ProposerSwitchConf(p, a) ==
     \* p's conf is lower than a's.
     /\ (acc_conf[a].generation > prop_conf[p].generation)
     \* We allow to seamlessly bump conf only when proposer is already elected.
@@ -165,7 +169,7 @@ ProposerBumpConf(p, a) ==
 
 \* Do CAS on the conf store, starting change into the new_members conf.
 StartChange(new_members) ==
-    /\ Cardinality(new_members) >= 1
+    /\ Cardinality(new_members) = 1
     \* Possible only if we don't already have the change in progress.
     /\ conf_store.newMembers = NULL
     /\ conf_store' = [generation |-> conf_store.generation + 1, members |-> conf_store.members, newMembers |-> new_members]
@@ -206,6 +210,27 @@ FinishChange ==
     /\ conf_store' = [generation |-> conf_store.generation + 1, members |-> conf_store.newMembers, newMembers |-> NULL]
     /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, prop_conf, acc_conf>>
 
+\* Do CAS on the conf store, aborting the change in progress.
+AbortChange ==
+    \* have joint conf
+    /\ conf_store.newMembers /= NULL
+    /\ conf_store' = [generation |-> conf_store.generation + 1, members |-> conf_store.members, newMembers |-> NULL]
+    /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, prop_conf, acc_conf>>
+
+\* Acceptor a switches to higher configuration (we model it as taken from the
+\* store, but it can be from proposer/peers as well).
+AccSwitchConf(a) ==
+    /\ acc_conf[a].generation < conf_store.generation
+    /\ acc_conf' = [acc_conf EXCEPT ![a] = conf_store]
+    /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, prop_conf, conf_store>>
+
+\* Nuke all acceptor state if it is not a member of its current conf. Models
+\* cleanup after migration/abort.
+AccReset(a) ==
+    /\ a \notin acc_conf[a].members
+    /\ acc_state' = [acc_state EXCEPT ![a] = PAS!InitAcc]
+    /\ UNCHANGED <<prop_state, committed, elected_history, prop_conf, acc_conf, conf_store>>
+
 
 \*******************************************************************************
 \* Final spec
@@ -220,9 +245,12 @@ Next ==
   \/ \E p \in proposers: NewEntry(p)
   \/ \E p \in proposers: \E a \in acceptors: AppendEntry(p, a)
   \/ \E p \in proposers: CommitEntries(p)
-  \/ \E p \in proposers: \E a \in acceptors: ProposerBumpConf(p, a)
   \/ \E new_members \in SUBSET acceptors: StartChange(new_members)
   \/ FinishChange
+  \/ AbortChange
+  \/ \E p \in proposers: \E a \in acceptors: ProposerSwitchConf(p, a)
+  \/ \E a \in acceptors: AccSwitchConf(a)
+  \/ \E a \in acceptors: AccReset(a)
 
 Spec == Init /\ [][Next]_<<prop_state, acc_state, committed, elected_history, prop_conf, acc_conf, conf_store>>
 
@@ -246,6 +274,13 @@ CommittedNotTruncated == PAS!CommittedNotTruncated
 
 MaxTerm == PAS!MaxTerm
 \* MaxTerm == \A p \in proposers: prop_state[p].term <= 1
+
+MaxStoreConf == conf_store.generation <= 1
+
+\* Check that we ever switch into non joint conf.
+MaxAccConf == ~ \E a \in acceptors:
+    /\ acc_conf[a].generation = 3
+    /\ acc_conf[a].newMembers /= NULL
 
 MaxAccWalLen == PAS!MaxAccWalLen
 
