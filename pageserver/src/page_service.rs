@@ -537,16 +537,16 @@ impl From<WaitLsnError> for QueryError {
     }
 }
 
-enum BatchedFeMessage {
+enum BatchedFeMessage<'c> {
     Exists {
         span: Span,
-        timer: GlobalAndPerTimelineHistogramTimer,
+        timer: GlobalAndPerTimelineHistogramTimer<'c>,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamExistsRequest,
     },
     Nblocks {
         span: Span,
-        timer: GlobalAndPerTimelineHistogramTimer,
+        timer: GlobalAndPerTimelineHistogramTimer<'c>,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamNblocksRequest,
     },
@@ -554,17 +554,17 @@ enum BatchedFeMessage {
         span: Span,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         effective_request_lsn: Lsn,
-        pages: smallvec::SmallVec<[(RelTag, BlockNumber, GlobalAndPerTimelineHistogramTimer); 1]>,
+        pages: smallvec::SmallVec<[(RelTag, BlockNumber, GlobalAndPerTimelineHistogramTimer<'c>); 1]>,
     },
     DbSize {
         span: Span,
-        timer: GlobalAndPerTimelineHistogramTimer,
+        timer: GlobalAndPerTimelineHistogramTimer<'c>,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamDbSizeRequest,
     },
     GetSlruSegment {
         span: Span,
-        timer: GlobalAndPerTimelineHistogramTimer,
+        timer: GlobalAndPerTimelineHistogramTimer<'c>,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         req: models::PagestreamGetSlruSegmentRequest,
     },
@@ -616,7 +616,7 @@ impl PageServerHandler {
         )
     }
 
-    async fn pagestream_read_message<IO>(
+    async fn pagestream_read_message<'c, IO>(
         pgb: &mut PostgresBackendReader<IO>,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -624,7 +624,7 @@ impl PageServerHandler {
         cancel: &CancellationToken,
         ctx: &RequestContext,
         parent_span: Span,
-    ) -> Result<Option<BatchedFeMessage>, QueryError>
+    ) -> Result<Option<BatchedFeMessage<'c>>, QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     {
@@ -668,7 +668,7 @@ impl PageServerHandler {
                     .await?;
                 let timer = shard
                     .query_metrics
-                    .start_timer_at(metrics::SmgrQueryType::GetRelExists, received_at);
+                    .start_timer_at(metrics::SmgrQueryType::GetRelExists, received_at, ctx);
                 BatchedFeMessage::Exists {
                     span,
                     timer,
@@ -684,7 +684,7 @@ impl PageServerHandler {
                     .await?;
                 let timer = shard
                     .query_metrics
-                    .start_timer_at(metrics::SmgrQueryType::GetRelSize, received_at);
+                    .start_timer_at(metrics::SmgrQueryType::GetRelSize, received_at, ctx);
                 BatchedFeMessage::Nblocks {
                     span,
                     timer,
@@ -700,7 +700,7 @@ impl PageServerHandler {
                     .await?;
                 let timer = shard
                     .query_metrics
-                    .start_timer_at(metrics::SmgrQueryType::GetDbSize, received_at);
+                    .start_timer_at(metrics::SmgrQueryType::GetDbSize, received_at, ctx);
                 BatchedFeMessage::DbSize {
                     span,
                     timer,
@@ -716,7 +716,7 @@ impl PageServerHandler {
                     .await?;
                 let timer = shard
                     .query_metrics
-                    .start_timer_at(metrics::SmgrQueryType::GetSlruSegment, received_at);
+                    .start_timer_at(metrics::SmgrQueryType::GetSlruSegment, received_at, ctx);
                 BatchedFeMessage::GetSlruSegment {
                     span,
                     timer,
@@ -772,7 +772,7 @@ impl PageServerHandler {
                 // any serious waiting, e.g., for LSNs.
                 let timer = shard
                     .query_metrics
-                    .start_timer_at(metrics::SmgrQueryType::GetPageAtLsn, received_at);
+                    .start_timer_at(metrics::SmgrQueryType::GetPageAtLsn, received_at, ctx);
 
                 let effective_request_lsn = match Self::wait_or_get_last_lsn(
                     &shard,
@@ -803,11 +803,11 @@ impl PageServerHandler {
     /// Post-condition: `batch` is Some()
     #[instrument(skip_all, level = tracing::Level::TRACE)]
     #[allow(clippy::boxed_local)]
-    fn pagestream_do_batch(
+    fn pagestream_do_batch<'c>(
         max_batch_size: NonZeroUsize,
-        batch: &mut Result<BatchedFeMessage, QueryError>,
-        this_msg: Result<BatchedFeMessage, QueryError>,
-    ) -> Result<(), Result<BatchedFeMessage, QueryError>> {
+        batch: &mut Result<BatchedFeMessage<'c>, QueryError>,
+        this_msg: Result<BatchedFeMessage<'c>, QueryError>,
+    ) -> Result<(), Result<BatchedFeMessage<'c>, QueryError>> {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
         let this_msg = match this_msg {
@@ -867,19 +867,19 @@ impl PageServerHandler {
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all)]
-    async fn pagesteam_handle_batched_message<IO>(
+    async fn pagesteam_handle_batched_message<'c, IO>(
         &mut self,
         pgb_writer: &mut PostgresBackend<IO>,
-        batch: BatchedFeMessage,
+        batch: BatchedFeMessage<'c>,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &'c RequestContext,
     ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
         // invoke handler function
         let (handler_results, span): (
-            Vec<Result<(PagestreamBeMessage, GlobalAndPerTimelineHistogramTimer), PageStreamError>>,
+            Vec<Result<(PagestreamBeMessage, GlobalAndPerTimelineHistogramTimer<'c>), PageStreamError>>,
             _,
         ) = match batch {
             BatchedFeMessage::Exists {
@@ -1574,15 +1574,15 @@ impl PageServerHandler {
     }
 
     #[instrument(skip_all)]
-    async fn handle_get_page_at_lsn_request_batched(
+    async fn handle_get_page_at_lsn_request_batched<'c>(
         &mut self,
         timeline: &Timeline,
         effective_lsn: Lsn,
         requests: smallvec::SmallVec<
-            [(RelTag, BlockNumber, GlobalAndPerTimelineHistogramTimer); 1],
+            [(RelTag, BlockNumber, GlobalAndPerTimelineHistogramTimer<'c>); 1],
         >,
-        ctx: &RequestContext,
-    ) -> Vec<Result<(PagestreamBeMessage, GlobalAndPerTimelineHistogramTimer), PageStreamError>>
+        ctx: &'c RequestContext,
+    ) -> Vec<Result<(PagestreamBeMessage, GlobalAndPerTimelineHistogramTimer<'c>), PageStreamError>>
     {
         debug_assert_current_span_has_tenant_and_timeline_id();
 

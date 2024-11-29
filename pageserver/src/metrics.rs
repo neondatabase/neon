@@ -1216,16 +1216,18 @@ pub(crate) mod virtual_file_io_engine {
     });
 }
 
-pub(crate) struct GlobalAndPerTimelineHistogramTimer {
+pub(crate) struct GlobalAndPerTimelineHistogramTimer<'c> {
     global_latency_histo: Histogram,
 
     // Optional because not all op types are tracked per-timeline
     per_timeline_latency_histo: Option<Histogram>,
 
     start: Instant,
+
+    ctx: &'c RequestContext,
 }
 
-impl Drop for GlobalAndPerTimelineHistogramTimer {
+impl<'c> Drop for GlobalAndPerTimelineHistogramTimer<'c> {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed().as_secs_f64();
         self.global_latency_histo.observe(elapsed);
@@ -1394,11 +1396,12 @@ impl SmgrQueryTimePerTimeline {
             per_timeline_getpage_started,
         }
     }
-    pub(crate) fn start_timer_at(
+    pub(crate) fn start_timer_at<'c>(
         &self,
         op: SmgrQueryType,
         start: Instant,
-    ) -> GlobalAndPerTimelineHistogramTimer {
+        ctx: &'c RequestContext,
+    ) -> GlobalAndPerTimelineHistogramTimer<'c> {
         self.global_started[op as usize].inc();
 
         let per_timeline_latency_histo = if matches!(op, SmgrQueryType::GetPageAtLsn) {
@@ -1412,6 +1415,7 @@ impl SmgrQueryTimePerTimeline {
             global_latency_histo: self.global_latency[op as usize].clone(),
             per_timeline_latency_histo,
             start,
+            ctx,
         }
     }
 }
@@ -1423,6 +1427,8 @@ mod smgr_query_time_tests {
     use pageserver_api::shard::TenantShardId;
     use strum::IntoEnumIterator;
     use utils::id::{TenantId, TimelineId};
+
+    use crate::{context::{DownloadBehavior, RequestContext}, task_mgr::TaskKind};
 
     // Regression test, we used hard-coded string constants before using an enum.
     #[test]
@@ -1467,7 +1473,8 @@ mod smgr_query_time_tests {
             let (pre_global, pre_per_tenant_timeline) = get_counts();
             assert_eq!(pre_per_tenant_timeline, 0);
 
-            let timer = metrics.start_timer_at(*op, Instant::now());
+            let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Download);
+            let timer = metrics.start_timer_at(*op, Instant::now(), &ctx);
             drop(timer);
 
             let (post_global, post_per_tenant_timeline) = get_counts();
