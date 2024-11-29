@@ -10,9 +10,9 @@ use futures_util::{ready, Sink, SinkExt, Stream, TryStreamExt};
 use postgres_protocol2::authentication;
 use postgres_protocol2::authentication::sasl;
 use postgres_protocol2::authentication::sasl::ScramSha256;
-use postgres_protocol2::message::backend::{AuthenticationSaslBody, Message};
+use postgres_protocol2::message::backend::{AuthenticationSaslBody, Message, NoticeResponseBody};
 use postgres_protocol2::message::frontend;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -23,7 +23,7 @@ use tokio_util::codec::Framed;
 pub struct StartupStream<S, T> {
     inner: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
     buf: BackendMessages,
-    delayed: VecDeque<BackendMessage>,
+    delayed_notice: Vec<NoticeResponseBody>,
 }
 
 impl<S, T> Sink<FrontendMessage> for StartupStream<S, T>
@@ -97,7 +97,7 @@ where
             },
         ),
         buf: BackendMessages::empty(),
-        delayed: VecDeque::new(),
+        delayed_notice: Vec::new(),
     };
 
     startup(&mut stream, config).await?;
@@ -106,9 +106,60 @@ where
 
     let (sender, receiver) = mpsc::unbounded_channel();
     let client = Client::new(sender, config.ssl_mode, process_id, secret_key);
-    let connection = Connection::new(stream.inner, stream.delayed, parameters, receiver);
+
+    // delayed notices are always sent as "Async" messages.
+    let delayed = stream
+        .delayed_notice
+        .into_iter()
+        .map(|m| BackendMessage::Async(Message::NoticeResponse(m)))
+        .collect();
+
+    let connection = Connection::new(stream.inner, delayed, parameters, receiver);
 
     Ok((client, connection))
+}
+
+pub struct RawConnection<S, T> {
+    pub stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
+    pub parameters: HashMap<String, String>,
+    pub delayed_notice: Vec<NoticeResponseBody>,
+    pub process_id: i32,
+    pub secret_key: i32,
+}
+
+pub async fn connect_raw2<S, T>(
+    stream: S,
+    tls: T,
+    config: &Config,
+) -> Result<RawConnection<S, T::Stream>, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: TlsConnect<S>,
+{
+    let stream = connect_tls(stream, config.ssl_mode, tls).await?;
+
+    let mut stream = StartupStream {
+        inner: Framed::new(
+            stream,
+            PostgresCodec {
+                max_message_size: config.max_backend_message_size,
+            },
+        ),
+        buf: BackendMessages::empty(),
+        delayed_notice: Vec::new(),
+    };
+
+    startup(&mut stream, config).await?;
+    authenticate(&mut stream, config).await?;
+    let (process_id, secret_key, parameters) = read_info(&mut stream).await?;
+
+    Ok(RawConnection {
+        stream: stream.inner,
+        parameters,
+        delayed_notice: stream.delayed_notice,
+        process_id,
+        secret_key,
+    })
 }
 
 async fn startup<S, T>(stream: &mut StartupStream<S, T>, config: &Config) -> Result<(), Error>
@@ -347,9 +398,7 @@ where
                     body.value().map_err(Error::parse)?.to_string(),
                 );
             }
-            Some(msg @ Message::NoticeResponse(_)) => {
-                stream.delayed.push_back(BackendMessage::Async(msg))
-            }
+            Some(Message::NoticeResponse(body)) => stream.delayed_notice.push(body),
             Some(Message::ReadyForQuery(_)) => return Ok((process_id, secret_key, parameters)),
             Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
             Some(_) => return Err(Error::unexpected_message()),

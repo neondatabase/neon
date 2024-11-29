@@ -565,6 +565,8 @@ pub enum BeMessage<'a> {
     /// Batch of interpreted, shard filtered WAL records,
     /// ready for the pageserver to ingest
     InterpretedWalRecords(InterpretedWalRecordsBody<'a>),
+
+    Raw(u8, Bytes),
 }
 
 /// Common shorthands.
@@ -754,6 +756,10 @@ impl BeMessage<'_> {
     /// one more buffer.
     pub fn write(buf: &mut BytesMut, message: &BeMessage) -> Result<(), ProtocolError> {
         match message {
+            BeMessage::Raw(code, data) => {
+                buf.put_u8(*code);
+                write_body(buf, |b| b.put(&**data))
+            }
             BeMessage::AuthenticationOk => {
                 buf.put_u8(b'R');
                 write_body(buf, |buf| {

@@ -138,7 +138,7 @@ impl InnerClient {
 }
 
 #[derive(Clone)]
-pub(crate) struct SocketConfig {
+pub struct SocketConfig {
     pub host: Host,
     pub port: u16,
     pub connect_timeout: Option<Duration>,

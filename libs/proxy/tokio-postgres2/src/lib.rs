@@ -1,9 +1,10 @@
 //! An asynchronous, pipelined, PostgreSQL client.
-#![warn(rust_2018_idioms, clippy::all, missing_docs)]
+#![warn(rust_2018_idioms, clippy::all)]
 
 pub use crate::cancel_token::CancelToken;
-pub use crate::client::Client;
+pub use crate::client::{Client, SocketConfig};
 pub use crate::config::Config;
+pub use crate::connect_raw::RawConnection;
 pub use crate::connection::Connection;
 use crate::error::DbError;
 pub use crate::error::Error;

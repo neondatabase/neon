@@ -2,6 +2,8 @@
 
 use crate::connect::connect;
 use crate::connect_raw::connect_raw;
+use crate::connect_raw::connect_raw2;
+use crate::connect_raw::RawConnection;
 use crate::tls::MakeTlsConnect;
 use crate::tls::TlsConnect;
 use crate::{Client, Connection, Error};
@@ -498,6 +500,18 @@ impl Config {
         T: TlsConnect<S>,
     {
         connect_raw(stream, tls, self).await
+    }
+
+    pub async fn connect_raw2<S, T>(
+        &self,
+        stream: S,
+        tls: T,
+    ) -> Result<RawConnection<S, T::Stream>, Error>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+        T: TlsConnect<S>,
+    {
+        connect_raw2(stream, tls, self).await
     }
 }
 
