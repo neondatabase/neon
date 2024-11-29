@@ -6013,10 +6013,28 @@ impl Service {
 
         let mut schedule_context = ScheduleContext::default();
 
+        // This function is an efficient place to update lazy statistics, since we are walking
+        // all tenants.
+        let mut pending_reconciles = 0;
+        let mut az_violations = 0;
+
         let mut reconciles_spawned = 0;
         for (tenant_shard_id, shard) in tenants.iter_mut() {
             if tenant_shard_id.is_shard_zero() {
                 schedule_context = ScheduleContext::default();
+            }
+
+            // Accumulate scheduling statistics
+            if let (Some(attached), Some(preferred)) =
+                (shard.intent.get_attached(), shard.preferred_az())
+            {
+                let node_az = nodes
+                    .get(attached)
+                    .expect("Nodes exist if referenced")
+                    .get_availability_zone_id();
+                if node_az != preferred {
+                    az_violations += 1;
+                }
             }
 
             // Skip checking if this shard is already enqueued for reconciliation
@@ -6025,6 +6043,7 @@ impl Service {
                 // callers like reconcile_all_now do not incorrectly get the impression
                 // that the system is in a quiescent state.
                 reconciles_spawned = std::cmp::max(1, reconciles_spawned);
+                pending_reconciles += 1;
                 continue;
             }
 
@@ -6032,10 +6051,23 @@ impl Service {
             // dirty, spawn another rone
             if self.maybe_reconcile_shard(shard, &pageservers).is_some() {
                 reconciles_spawned += 1;
+            } else if shard.delayed_reconcile {
+                // Shard wanted to reconcile but for some reason couldn't.
+                pending_reconciles += 1;
             }
 
             schedule_context.avoid(&shard.intent.all_pageservers());
         }
+
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_schedule_az_violation
+            .set(az_violations as i64);
+
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pending_reconciles
+            .set(pending_reconciles as i64);
 
         reconciles_spawned
     }
