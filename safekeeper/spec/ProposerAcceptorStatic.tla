@@ -18,7 +18,7 @@
 \* - old WAL is immediately copied to proposer on its election, without on-demand fetch later.
 
 \* Some ideas how to break it to play around to get a feeling:
-\* - replace Quorums with BadQuorums.
+\* - replace Quorum with BadQuorum.
 \* - remove 'don't commit entries from previous terms separately' rule in
 \*   CommitEntries and observe figure 8 from the raft paper.
 \*   With p2a3t4l4 32 steps error was found in 1h on 80 cores.
@@ -69,16 +69,25 @@ Upsert(f, k, v, l(_)) ==
 
 \*****************
 
-NumAccs == Cardinality(acceptors)
+\* Does set of acceptors `acc_set` form the quorum in the member set `members`?
+\* Acceptors not from `members` are excluded (matters only for reconfig).
+FormsQuorum(acc_set, members) ==
+    LET acc_set_in_members == {a \in acc_set: a \in members} IN
+        Cardinality(acc_set_in_members) >= (Cardinality(members) \div 2 + 1)
 
-\* does acc_set form the quorum?
-Quorum(acc_set) == Cardinality(acc_set) >= (NumAccs \div 2 + 1)
-\* all quorums of acceptors
-Quorums == {subset \in SUBSET acceptors: Quorum(subset)}
+\* Like FormsQuorum, but for minimal quorum.
+FormsMinQuorum(acc_set, members) ==
+    LET acc_set_in_members == {a \in acc_set: a \in members} IN
+        Cardinality(acc_set_in_members) = (Cardinality(members) \div 2 + 1)
 
-\* For substituting Quorums and seeing what happens.
-BadQuorum(acc_set) == Cardinality(acc_set) >= (NumAccs \div 2)
-BadQuorums == {subset \in SUBSET acceptors: BadQuorum(subset)}
+\* All sets of acceptors forming minimal quorums in the member set `members`.
+AllQuorums(members) == {subset \in SUBSET members: FormsQuorum(subset, members)}
+
+AllMinQuorums(members) == {subset \in SUBSET acceptors: FormsMinQuorum(subset, members)}
+
+\* For substituting Quorum and seeing what happens.
+FormsBadQuorum(acc_set, members) == Cardinality(acc_set) >= (Cardinality(members) \div 2)
+AllBadQuorums(members) == {subset \in SUBSET acceptors: FormsBadQuorum(subset, members)}
 
 \* flushLsn (end of WAL, i.e. index of next entry) of acceptor a.
 FlushLsn(a) == Len(acc_state[a].wal) + 1
@@ -208,10 +217,10 @@ RestartProposerWithTerm(p, new_term) ==
 \* For simplicity (and to reduct state space), we assume it immediately gets
 \* current state from quorum q of acceptors determining the term he will request
 \* to vote for.
-RestartProposer(p, q) ==
-    /\ Quorum(q)
-    /\ LET new_term == Maximum({acc_state[a].term : a \in q}) + 1 IN
-           RestartProposerWithTerm(p, new_term)
+RestartProposer(p) ==
+    \E q \in AllQuorums(acceptors):
+        LET new_term == Maximum({acc_state[a].term : a \in q}) + 1 IN
+            RestartProposerWithTerm(p, new_term)
 
 \* Term history of acceptor a's WAL: the one saved truncated to contain only <=
 \* local FlushLsn entries.
@@ -264,7 +273,7 @@ DoBecomeLeader(p) ==
 \* Proposer p gets elected.
 BecomeLeader(p) ==
   /\ prop_state[p].state = "campaign"
-  /\ Quorum(DOMAIN prop_state[p].votes)
+  /\ FormsQuorum(DOMAIN prop_state[p].votes, acceptors)
   /\ DoBecomeLeader(p)
 
 \* Acceptor a learns about elected proposer p's term. In impl it matches to
@@ -345,12 +354,14 @@ AppendEntry(p, a) ==
 PropStartLsn(p) ==
     IF prop_state[p].state = "leader" THEN prop_state[p].termHistory[Len(prop_state[p].termHistory)].lsn ELSE NULL
 
-\* Proposer p commits all entries it can using quorum q. Note that unlike
-\* will62794/logless-reconfig this allows to commit entries from previous terms
-\* (when conditions for that are met).
-CommitEntries(p, q) ==
-    /\ prop_state[p].state = "leader"
-    /\ \A a \in q:
+\* LSN which can be committed by proposer p using min quorum q (check that q
+\* forms quorum must have been done outside). NULL if there is none.
+QuorumCommitLsn(p, q) ==
+    IF
+        /\ prop_state[p].state = "leader"
+        /\ \A a \in q:
+            \* Without explicit responses to appends this ensures that append
+            \* up to FlushLsn has been accepted.
            /\ acc_state[a].term = prop_state[p].term
              \* nextSendLsn existence means TruncateWal has happened, it ensures
              \* acceptor's WAL (and FlushLsn) are from proper proposer's history.
@@ -358,28 +369,50 @@ CommitEntries(p, q) ==
              \* what we do in the impl (we check flushLsn in AppendResponse, but
              \* AppendRequest is processed only if HandleElected handling was good).
            /\ a \in DOMAIN prop_state[p].nextSendLsn
-    \* Now find the LSN present on all the quorum.
-    /\ LET quorum_lsn == Minimum({FlushLsn(a): a \in q}) IN
-           \* This is the basic Raft rule of not committing entries from previous
-           \* terms except along with current term entry (commit them only when
-           \* quorum recovers, i.e. last_log_term on it reaches leader's term).
-           /\ quorum_lsn >= PropStartLsn(p)
-           /\ committed' = committed \cup {[term |-> prop_state[p].wal[lsn], lsn |-> lsn]: lsn \in 1..(quorum_lsn - 1)}
-           /\ UNCHANGED <<prop_state, acc_state, elected_history>>
+    THEN
+        \* Now find the LSN present on all the quorum.
+        LET quorum_lsn == Minimum({FlushLsn(a): a \in q}) IN
+            \* This is the basic Raft rule of not committing entries from previous
+            \* terms except along with current term entry (commit them only when
+            \* quorum recovers, i.e. last_log_term on it reaches leader's term).
+            IF quorum_lsn >= PropStartLsn(p) THEN
+                quorum_lsn
+            ELSE
+                NULL
+    ELSE
+        NULL
+
+\* Commit all entries on proposer p with record lsn < commit_lsn.
+DoCommitEntries(p, commit_lsn) ==
+    /\ committed' = committed \cup {[term |-> prop_state[p].wal[lsn], lsn |-> lsn]: lsn \in 1..(commit_lsn - 1)}
+    /\ UNCHANGED <<prop_state, acc_state, elected_history>>
+
+\* Proposer p commits all entries it can using some quorum. Note that unlike
+\* will62794/logless-reconfig this allows to commit entries from previous terms
+\* (when conditions for that are met).
+CommitEntries(p) ==
+    /\ prop_state[p].state = "leader"
+    \* Using min quorums here is better because 1) QuorumCommitLsn for
+    \* simplicity checks min across all accs in q. 2) it probably makes
+    \* evaluation faster.
+    /\ \E q \in AllMinQuorums(acceptors):
+           LET commit_lsn == QuorumCommitLsn(p, q) IN
+               /\ commit_lsn /= NULL
+               /\ DoCommitEntries(p, commit_lsn)
 
 \*******************************************************************************
 \* Final spec
 \*******************************************************************************
 
 Next ==
-    \/ \E q \in Quorums: \E p \in proposers: RestartProposer(p, q)
+    \/ \E p \in proposers: RestartProposer(p)
     \/ \E p \in proposers: \E a \in acceptors: Vote(p, a)
     \/ \E p \in proposers: BecomeLeader(p)
     \/ \E p \in proposers: \E a \in acceptors: UpdateTerm(p, a)
     \/ \E p \in proposers: \E a \in acceptors: TruncateWal(p, a)
     \/ \E p \in proposers: NewEntry(p)
     \/ \E p \in proposers: \E a \in acceptors: AppendEntry(p, a)
-    \/ \E q \in Quorums: \E p \in proposers: CommitEntries(p, q)
+    \/ \E p \in proposers: CommitEntries(p)
 
 Spec == Init /\ [][Next]_<<prop_state, acc_state, committed, elected_history>>
 
