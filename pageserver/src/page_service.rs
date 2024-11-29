@@ -7,10 +7,7 @@ use bytes::Buf;
 use futures::FutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
-use pageserver_api::config::{
-    PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
-    PageServiceProtocolPipelinedExecutionStrategy,
-};
+use pageserver_api::config::{PageServicePipeliningConfig, PageServicePipeliningConfigPipelined};
 use pageserver_api::models::{self, TenantState};
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
@@ -1259,10 +1256,7 @@ impl PageServerHandler {
         // the batch that was in flight when the Batcher encountered an error,
         // thereby beahving identical to a serial implementation.
 
-        let PageServicePipeliningConfigPipelined {
-            max_batch_size,
-            execution,
-        } = pipelining_config;
+        let PageServicePipeliningConfigPipelined { max_batch_size } = pipelining_config;
 
         // Macro to _define_ a pipeline stage.
         macro_rules! pipeline_stage {
@@ -1349,15 +1343,7 @@ impl PageServerHandler {
         //
         // Execute the stages.
         //
-
-        match execution {
-            PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures => {
-                tokio::join!(read_messages, executor)
-            }
-            PageServiceProtocolPipelinedExecutionStrategy::Tasks => {
-                todo!()
-            }
-        }
+        tokio::join!(read_messages, executor)
     }
 
     /// Helper function to handle the LSN from client request.

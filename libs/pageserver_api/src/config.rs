@@ -148,14 +148,6 @@ pub enum PageServicePipeliningConfig {
 pub struct PageServicePipeliningConfigPipelined {
     /// Causes runtime errors if larger than max get_vectored batch size.
     pub max_batch_size: NonZeroUsize,
-    pub execution: PageServiceProtocolPipelinedExecutionStrategy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PageServiceProtocolPipelinedExecutionStrategy {
-    ConcurrentFutures,
-    Tasks,
 }
 
 pub mod statvfs {
@@ -445,7 +437,6 @@ impl Default for ConfigToml {
             page_service_pipelining: PageServicePipeliningConfig::Pipelined(
                 PageServicePipeliningConfigPipelined {
                     max_batch_size: NonZeroUsize::new(32).unwrap(),
-                    execution: PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures,
                 },
             ),
         }

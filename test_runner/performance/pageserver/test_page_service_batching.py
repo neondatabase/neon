@@ -27,21 +27,16 @@ class PageServicePipeliningConfigSerial(PageServicePipeliningConfig):
 @dataclass
 class PageServicePipeliningConfigPipelined(PageServicePipeliningConfig):
     max_batch_size: int
-    execution: str
     mode: str = "pipelined"
 
 
-EXECUTION = ["concurrent-futures", "tasks"]
-
 NON_BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
 for max_batch_size in [1, 32]:
-    for execution in EXECUTION:
-        NON_BATCHABLE.append(PageServicePipeliningConfigPipelined(max_batch_size, execution))
+    NON_BATCHABLE.append(PageServicePipeliningConfigPipelined(max_batch_size))
 
 BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
 for max_batch_size in [1, 2, 4, 8, 16, 32]:
-    for execution in EXECUTION:
-        BATCHABLE.append(PageServicePipeliningConfigPipelined(max_batch_size, execution))
+    BATCHABLE.append(PageServicePipeliningConfigPipelined(max_batch_size))
 
 
 @pytest.mark.parametrize(
@@ -264,8 +259,7 @@ def test_throughput(
 
 PRECISION_CONFIGS: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
 for max_batch_size in [1, 32]:
-    for execution in EXECUTION:
-        PRECISION_CONFIGS.append(PageServicePipeliningConfigPipelined(max_batch_size, execution))
+    PRECISION_CONFIGS.append(PageServicePipeliningConfigPipelined(max_batch_size))
 
 
 @pytest.mark.parametrize(
