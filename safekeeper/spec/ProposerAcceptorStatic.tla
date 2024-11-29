@@ -72,22 +72,23 @@ Upsert(f, k, v, l(_)) ==
 \* Does set of acceptors `acc_set` form the quorum in the member set `members`?
 \* Acceptors not from `members` are excluded (matters only for reconfig).
 FormsQuorum(acc_set, members) ==
-    LET acc_set_in_members == {a \in acc_set: a \in members} IN
-        Cardinality(acc_set_in_members) >= (Cardinality(members) \div 2 + 1)
+    Cardinality(acc_set \intersect members) >= (Cardinality(members) \div 2 + 1)
 
 \* Like FormsQuorum, but for minimal quorum.
 FormsMinQuorum(acc_set, members) ==
-    LET acc_set_in_members == {a \in acc_set: a \in members} IN
-        Cardinality(acc_set_in_members) = (Cardinality(members) \div 2 + 1)
+    Cardinality(acc_set \intersect members) = (Cardinality(members) \div 2 + 1)
 
 \* All sets of acceptors forming minimal quorums in the member set `members`.
 AllQuorums(members) == {subset \in SUBSET members: FormsQuorum(subset, members)}
-
 AllMinQuorums(members) == {subset \in SUBSET acceptors: FormsMinQuorum(subset, members)}
 
 \* For substituting Quorum and seeing what happens.
-FormsBadQuorum(acc_set, members) == Cardinality(acc_set) >= (Cardinality(members) \div 2)
+FormsBadQuorum(acc_set, members) ==
+    Cardinality(acc_set \intersect members) >= (Cardinality(members) \div 2)
+FormsMinBadQuorum(acc_set, members) ==
+    Cardinality(acc_set \intersect members) = (Cardinality(members) \div 2)
 AllBadQuorums(members) == {subset \in SUBSET acceptors: FormsBadQuorum(subset, members)}
+AllMinBadQuorums(members) == {subset \in SUBSET acceptors: FormsMinBadQuorum(subset, members)}
 
 \* flushLsn (end of WAL, i.e. index of next entry) of acceptor a.
 FlushLsn(a) == Len(acc_state[a].wal) + 1

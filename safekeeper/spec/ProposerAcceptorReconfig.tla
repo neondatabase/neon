@@ -29,11 +29,6 @@ PAS == INSTANCE ProposerAcceptorStatic
 \* Helpers
 \********************************************************************************
 
-\* Does set of acceptors acc_set form the quorum in the member set members?
-Quorum(acc_set, members) ==
-    LET acc_set_in_members == {a \in acc_set: a \in members} IN
-        Cardinality(acc_set_in_members) >= (Cardinality(members) \div 2 + 1)
-
 \********************************************************************************
 \* Type assertion
 \********************************************************************************
@@ -66,6 +61,7 @@ Init ==
            /\ prop_conf = [p \in proposers |-> init_conf]
            /\ acc_conf = [a \in acceptors |-> init_conf]
            /\ conf_store = init_conf
+           /\ Cardinality(init_members) >= 3
 
 \********************************************************************************
 \* Actions
@@ -100,12 +96,12 @@ Vote(p, a) ==
 BecomeLeader(p) ==
     /\ prop_state[p].state = "campaign"
     \* Votes must form quorum in both sets (if the newMembers exists).
-    /\ Quorum(DOMAIN prop_state[p].votes, prop_conf[p].members)
+    /\ PAS!FormsQuorum(DOMAIN prop_state[p].votes, prop_conf[p].members)
     /\ \/ prop_conf[p].newMembers = NULL
        \* TLA+ disjunction evaluation doesn't short-circuit for a good reason:
        \* https://groups.google.com/g/tlaplus/c/U6tOJ4dsjVM/m/UdOznPCVBwAJ
        \* so repeat the null check.
-       \/ (prop_conf[p].newMembers /= NULL)  /\ (Quorum(DOMAIN prop_state[p].votes, prop_conf[p].newMembers))
+       \/ (prop_conf[p].newMembers /= NULL)  /\ (PAS!FormsQuorum(DOMAIN prop_state[p].votes, prop_conf[p].newMembers))
     /\ PAS!DoBecomeLeader(p)
     /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
 
@@ -131,6 +127,26 @@ AppendEntry(p, a) ==
     /\ PAS!AppendEntry(p, a)
     /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
 
+\* see PAS!CommitEntries for comments.
+CommitEntries(p) ==
+    /\ prop_state[p].state = "leader"
+    /\ \E q1 \in PAS!AllMinQuorums(prop_conf[p].members):
+           LET q1_commit_lsn == PAS!QuorumCommitLsn(p, q1) IN
+               \* Configuration must be the same.
+               /\ \A a \in q1: prop_conf[p].generation = acc_conf[a].generation
+               /\ q1_commit_lsn /= NULL
+               \* We must collect acks from both quorums, if newMembers is present.
+               /\ IF prop_conf[p].newMembers = NULL THEN
+                      PAS!DoCommitEntries(p, q1_commit_lsn)
+                  ELSE
+                      \E q2 \in PAS!AllMinQuorums(prop_conf[p].newMembers):
+                          LET q2_commit_lsn == PAS!QuorumCommitLsn(p, q2) IN
+                              \* Configuration must be the same.
+                              /\ \A a \in q1: prop_conf[p].generation = acc_conf[a].generation
+                              /\ q2_commit_lsn /= NULL
+                              /\ PAS!DoCommitEntries(p, PAS!Min(q1_commit_lsn, q2_commit_lsn))
+    /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
+
 \* Proposer p adopts higher conf from acceptor a.
 ProposerBumpConf(p, a) ==
     \* p's conf is lower than a's.
@@ -149,6 +165,7 @@ ProposerBumpConf(p, a) ==
 
 \* Do CAS on the conf store, starting change into the new_members conf.
 StartChange(new_members) ==
+    /\ Cardinality(new_members) >= 1
     \* Possible only if we don't already have the change in progress.
     /\ conf_store.newMembers = NULL
     /\ conf_store' = [generation |-> conf_store.generation + 1, members |-> conf_store.members, newMembers |-> new_members]
@@ -166,7 +183,7 @@ Next ==
   \/ \E p \in proposers: \E a \in acceptors: TruncateWal(p, a)
   \/ \E p \in proposers: NewEntry(p)
   \/ \E p \in proposers: \E a \in acceptors: AppendEntry(p, a)
-\*   \/ \E q \in Quorums: \E p \in proposers: CommitEntries(p, q)
+  \/ \E p \in proposers: CommitEntries(p)
   \/ \E p \in proposers: \E a \in acceptors: ProposerBumpConf(p, a)
   \/ \E new_members \in SUBSET acceptors: StartChange(new_members)
 
@@ -194,5 +211,7 @@ MaxTerm == PAS!MaxTerm
 \* MaxTerm == \A p \in proposers: prop_state[p].term <= 1
 
 MaxAccWalLen == PAS!MaxAccWalLen
+
+MaxCommitLsn == PAS!MaxCommitLsn
 
 ====
