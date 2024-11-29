@@ -6730,9 +6730,15 @@ impl Service {
     fn fill_node_plan(&self, node_id: NodeId) -> Vec<TenantShardId> {
         let mut locked = self.inner.write().unwrap();
         let fill_requirement = locked.scheduler.compute_fill_requirement(node_id);
+        let (nodes, tenants, _scheduler) = locked.parts_mut();
 
-        let mut tids_by_node = locked
-            .tenants
+        let node_az = nodes
+            .get(&node_id)
+            .expect("Node must exist")
+            .get_availability_zone_id()
+            .clone();
+
+        let mut tids_by_node = tenants
             .iter_mut()
             .filter_map(|(tid, tenant_shard)| {
                 if !matches!(
@@ -6743,6 +6749,25 @@ impl Service {
                     // even exclude Essential, because moving to fill a node is not essential to keeping this
                     // tenant available.
                     return None;
+                }
+
+                // AZ check: when filling nodes after a restart, our intent is to move _back_ the
+                // shards which belong on this node, not to promote shards whose scheduling preference
+                // would be on their currently attached node.  So will avoid promoting shards whose
+                // home AZ doesn't match the AZ of the node we're filling.
+                match tenant_shard.preferred_az() {
+                    None => {
+                        // Shard doesn't have an AZ preference: it is elegible to be moved.
+                    }
+                    Some(az) if az == &node_az => {
+                        // This shard's home AZ is equal to the node we're filling: it is
+                        // elegible to be moved: fall through;
+                    }
+                    Some(_) => {
+                        // This shard's home AZ is somewhere other than the node we're filling:
+                        // do not include it in the fill plan.
+                        return None;
+                    }
                 }
 
                 if tenant_shard.intent.get_secondary().contains(&node_id) {
