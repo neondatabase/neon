@@ -551,7 +551,7 @@ async fn gc_tenant_manifests(
                 remote_client,
                 &min_age,
                 latest_gen,
-                &key,
+                key,
                 mode,
                 &mut gc_summary,
             )
@@ -627,7 +627,7 @@ pub async fn pageserver_physical_gc(
                 .await
                 .map(|stream| {
                     stream
-                        .map_ok(|timeline_id| GcSummaryOrContent::Content(timeline_id))
+                        .map_ok(GcSummaryOrContent::Content)
                         .chain(futures::stream::iter(summaries_from_manifests.into_iter()))
                 })
         }

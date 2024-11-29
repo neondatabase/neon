@@ -612,7 +612,7 @@ pub(crate) async fn list_tenant_manifests(
     let (latest_generation, latest_listing_object) = manifests
         .iter()
         .max_by_key(|i| i.0)
-        .map(|(g, obj)| (g.clone(), obj.clone()))
+        .map(|(g, obj)| (*g, obj.clone()))
         .unwrap();
 
     let manifest_bytes =
