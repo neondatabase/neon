@@ -3,7 +3,7 @@ use crate::config::{self, AuthKeys, Config, ReplicationMode};
 use crate::connect_tls::connect_tls;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::{TlsConnect, TlsStream};
-use crate::{Client, Connection, Error};
+use crate::Error;
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use futures_util::{ready, Sink, SinkExt, Stream, TryStreamExt};
@@ -17,7 +17,6 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 
 pub struct StartupStream<S, T> {
@@ -76,47 +75,6 @@ where
             }
         }
     }
-}
-
-pub async fn connect_raw<S, T>(
-    stream: S,
-    tls: T,
-    config: &Config,
-) -> Result<(Client, Connection<S, T::Stream>), Error>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-    T: TlsConnect<S>,
-{
-    let stream = connect_tls(stream, config.ssl_mode, tls).await?;
-
-    let mut stream = StartupStream {
-        inner: Framed::new(
-            stream,
-            PostgresCodec {
-                max_message_size: config.max_backend_message_size,
-            },
-        ),
-        buf: BackendMessages::empty(),
-        delayed_notice: Vec::new(),
-    };
-
-    startup(&mut stream, config).await?;
-    authenticate(&mut stream, config).await?;
-    let (process_id, secret_key, parameters) = read_info(&mut stream).await?;
-
-    let (sender, receiver) = mpsc::unbounded_channel();
-    let client = Client::new(sender, config.ssl_mode, process_id, secret_key);
-
-    // delayed notices are always sent as "Async" messages.
-    let delayed = stream
-        .delayed_notice
-        .into_iter()
-        .map(|m| BackendMessage::Async(Message::NoticeResponse(m)))
-        .collect();
-
-    let connection = Connection::new(stream.inner, delayed, parameters, receiver);
-
-    Ok((client, connection))
 }
 
 pub struct RawConnection<S, T> {

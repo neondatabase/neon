@@ -208,7 +208,7 @@ async fn handshake_tls_is_enforced_by_proxy() -> anyhow::Result<()> {
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Disable)
-        .connect_raw(server, NoTls)
+        .connect_raw2(server, NoTls)
         .await
         .err() // -> Option<E>
         .context("client shouldn't be able to connect")?;
@@ -233,11 +233,11 @@ async fn handshake_tls() -> anyhow::Result<()> {
         generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = tokio_postgres::Config::new()
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .connect_raw2(server, client_config.make_tls_connect()?)
         .await?;
 
     proxy.await?
@@ -249,12 +249,12 @@ async fn handshake_raw() -> anyhow::Result<()> {
 
     let proxy = tokio::spawn(dummy_proxy(client, None, NoAuth));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = tokio_postgres::Config::new()
         .user("john_doe")
         .dbname("earth")
         .options("project=generic-project-name")
         .ssl_mode(SslMode::Prefer)
-        .connect_raw(server, NoTls)
+        .connect_raw2(server, NoTls)
         .await?;
 
     proxy.await?
@@ -296,13 +296,13 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
         Scram::new(password).await?,
     ));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = tokio_postgres::Config::new()
         .channel_binding(tokio_postgres::config::ChannelBinding::Require)
         .user("user")
         .dbname("db")
         .password(password)
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .connect_raw2(server, client_config.make_tls_connect()?)
         .await?;
 
     proxy.await?
@@ -320,13 +320,13 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
         Scram::new("password").await?,
     ));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = tokio_postgres::Config::new()
         .channel_binding(tokio_postgres::config::ChannelBinding::Disable)
         .user("user")
         .dbname("db")
         .password("password")
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .connect_raw2(server, client_config.make_tls_connect()?)
         .await?;
 
     proxy.await?
@@ -353,7 +353,7 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
         .dbname("db")
         .password(&password) // no password will match the mocked secret
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .connect_raw2(server, client_config.make_tls_connect()?)
         .await
         .err() // -> Option<E>
         .context("client shouldn't be able to connect")?;

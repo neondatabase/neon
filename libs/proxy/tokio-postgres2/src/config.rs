@@ -1,7 +1,6 @@
 //! Connection configuration.
 
 use crate::connect::connect;
-use crate::connect_raw::connect_raw;
 use crate::connect_raw::connect_raw2;
 use crate::connect_raw::RawConnection;
 use crate::tls::MakeTlsConnect;
@@ -487,20 +486,20 @@ impl Config {
         connect(tls, self).await
     }
 
-    /// Connects to a PostgreSQL database over an arbitrary stream.
-    ///
-    /// All of the settings other than `user`, `password`, `dbname`, `options`, and `application_name` name are ignored.
-    pub async fn connect_raw<S, T>(
-        &self,
-        stream: S,
-        tls: T,
-    ) -> Result<(Client, Connection<S, T::Stream>), Error>
-    where
-        S: AsyncRead + AsyncWrite + Unpin,
-        T: TlsConnect<S>,
-    {
-        connect_raw(stream, tls, self).await
-    }
+    // /// Connects to a PostgreSQL database over an arbitrary stream.
+    // ///
+    // /// All of the settings other than `user`, `password`, `dbname`, `options`, and `application_name` name are ignored.
+    // pub async fn connect_raw<S, T>(
+    //     &self,
+    //     stream: S,
+    //     tls: T,
+    // ) -> Result<(Client, Connection<S, T::Stream>), Error>
+    // where
+    //     S: AsyncRead + AsyncWrite + Unpin,
+    //     T: TlsConnect<S>,
+    // {
+    //     connect_raw(stream, tls, self).await
+    // }
 
     pub async fn connect_raw2<S, T>(
         &self,
