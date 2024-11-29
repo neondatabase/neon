@@ -486,6 +486,7 @@ mod tests {
                     upload_storage_class: None,
                 }),
                 timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+                small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT,
             })
         );
         assert_eq!(parquet_upload.parquet_upload_row_group_size, 100);
@@ -545,6 +546,7 @@ mod tests {
                 local_path: tmpdir.to_path_buf(),
             },
             timeout: std::time::Duration::from_secs(120),
+            small_timeout: std::time::Duration::from_secs(30),
         };
         let storage = GenericRemoteStorage::from_config(&remote_storage_config)
             .await
