@@ -304,13 +304,14 @@ async fn collect_metrics_iteration(
 
     // Send metrics.
     for chunk in create_event_chunks(&metrics_to_send, hostname, prev, now, outer_chunk_size) {
-        // TODO: upload concurrently
-
-        upload_main_events_chunked(client, metric_collection_endpoint, &chunk, CHUNK_SIZE).await;
-
-        if let Err(e) = upload_backup_events(storage, &chunk, &path_prefix, &cancel).await {
-            error!("failed to upload consumption events to remote storage: {e:?}");
-        }
+        tokio::join!(
+            upload_main_events_chunked(client, metric_collection_endpoint, &chunk, CHUNK_SIZE),
+            async {
+                if let Err(e) = upload_backup_events(storage, &chunk, &path_prefix, &cancel).await {
+                    error!("failed to upload consumption events to remote storage: {e:?}");
+                }
+            }
+        );
     }
 }
 
