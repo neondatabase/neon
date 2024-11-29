@@ -189,10 +189,6 @@ impl Client {
         &self.inner
     }
 
-    // pub(crate) fn set_socket_config(&mut self, socket_config: SocketConfig) {
-    //     self.socket_config = Some(socket_config);
-    // }
-
     /// Creates a new prepared statement.
     ///
     /// Prepared statements can be executed repeatedly, and may contain query parameters (indicated by `$1`, `$2`, etc),

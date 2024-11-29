@@ -85,7 +85,7 @@ pub struct RawConnection<S, T> {
     pub secret_key: i32,
 }
 
-pub async fn connect_raw2<S, T>(
+pub async fn connect_raw<S, T>(
     stream: S,
     tls: T,
     config: &Config,

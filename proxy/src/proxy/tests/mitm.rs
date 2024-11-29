@@ -164,7 +164,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
         .dbname("db")
         .password("password")
         .ssl_mode(SslMode::Require)
-        .connect_raw2(server, client_config.make_tls_connect()?)
+        .connect_raw(server, client_config.make_tls_connect()?)
         .await?;
 
     proxy.await?
@@ -247,7 +247,7 @@ async fn connect_failure(
         .dbname("db")
         .password("password")
         .ssl_mode(SslMode::Require)
-        .connect_raw2(server, client_config.make_tls_connect()?)
+        .connect_raw(server, client_config.make_tls_connect()?)
         .await
         .err()
         .context("client shouldn't be able to connect")?;

@@ -326,7 +326,7 @@ impl ConnCfg {
 
         // connect_raw() will not use TLS if sslmode is "disable"
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let connection = self.0.connect_raw2(stream, tls).await?;
+        let connection = self.0.connect_raw(stream, tls).await?;
         drop(pause);
 
         let RawConnection {

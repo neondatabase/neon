@@ -1,7 +1,7 @@
 use crate::client::SocketConfig;
 use crate::codec::BackendMessage;
 use crate::config::{Host, TargetSessionAttrs};
-use crate::connect_raw::connect_raw2;
+use crate::connect_raw::connect_raw;
 use crate::connect_socket::connect_socket;
 use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::{Client, Config, Connection, Error, RawConnection, SimpleQueryMessage};
@@ -69,7 +69,7 @@ where
         delayed_notice,
         process_id,
         secret_key,
-    } = connect_raw2(socket, tls, config).await?;
+    } = connect_raw(socket, tls, config).await?;
 
     let socket_config = SocketConfig {
         host: host.clone(),
