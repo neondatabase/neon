@@ -60,7 +60,7 @@ The path of this endpoint data in S3 is initially as follows:
                 <endpoint-id>/
                     pgdata/<file_path_in_pgdatadir>`
 
-For other blob storages an equivalent path can be constructed.
+For other blob storages an equivalent or similar path can be constructed.
 
 ### Reliability, failure modes and corner cases (if relevant)
 Reliability is important, but not critical to the workings of Neon.  The data
@@ -69,8 +69,9 @@ cause of permanent data loss - only operational metadata is stored.
 
 Most, if not all, blob storage services have sufficiently high persistence
 guarantees to cater our need for persistence and uptime. The only concern with
-blob storages is that the latency is higher than local disk, but that's a
-price I think we're willing to pay.
+blob storages is that the access latency is generally higher than local disk,
+but for the object types stored (stats files, cache state, ...) I don't think 
+this will be much of an issue.
 
 ### Interaction/Sequence diagram (if relevant)
 
@@ -242,14 +243,37 @@ Demerits:
    - Shared EBS volumes are a no-go, as you'd have to schedule the endpoint
      with users of the same EBS volumes
    - EBS storage costs are very high
-- S3 bucket/endpoint is unfeasible
-   - AWS limits are much lower than 100s of 1000s of buckets /account
+- S3 bucket per endpoint is unfeasible
+   - AWS limits are much lower than 100s of 1000s of buckets per AWS account.
    - Credentials limited to prefix has same issues as signed URL.
+   - Allocating service accounts takes time (100s of ms), and service accounts
+     are a limited resource, too; so they're not a good candidate to allocate
+     on a per-endpoint basis.
 - Volumes bound by hypervisor are unlikely
    - This requires significant investment and increased software on the
      hypervisor.
    - It is unclear if we can attach volumes after boot, i.e. for pooled
      instances.
+
+### Put the files into a table
+
+Benefits:
+
+ + Mostly already available in PostgreSQL
+
+Demerits:
+
+ - Uses WAL
+   - Can't be used after shutdown checkpoint
+   - Needs a RW endpoint, and table & catalog access to write to this data
+ - Gets hit with DB size limitations
+ - Depending on user acces:
+   - Inaccessible:  
+     The user doesn't have control over database size caused by
+     these systems.
+   - Accessible:  
+     The user can corrupt these files and cause the system to crash while
+     user-corrupted files are present, thus increasing on-call overhead.
 
 ## Definition of Done (if relevant)
 
