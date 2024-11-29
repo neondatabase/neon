@@ -127,6 +127,7 @@ fn main() -> anyhow::Result<()> {
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.virtual_file_io_mode, "starting with virtual_file IO mode");
     info!(?conf.wal_receiver_protocol, "starting with WAL receiver protocol");
+    info!(?conf.page_service_pipelining, "starting with page service pipelining config");
 
     // The tenants directory contains all the pageserver local disk state.
     // Create if not exists and make sure all the contents are durable before proceeding.
