@@ -6,6 +6,7 @@ use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
 use futures::StreamExt;
 use hyper::StatusCode;
+use pageserver_api::controller_api::AvailabilityZone;
 use pageserver_api::shard::{ShardCount, ShardNumber, ShardStripeSize, TenantShardId};
 use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,9 @@ struct UnshardedComputeHookTenant {
     // Which node is this tenant attached to
     node_id: NodeId,
 
+    // The tenant's preferred AZ, so that we may pass this on to the control plane
+    preferred_az: Option<AvailabilityZone>,
+
     // Must hold this lock to send a notification.
     send_lock: Arc<tokio::sync::Mutex<Option<ComputeRemoteState>>>,
 }
@@ -35,6 +39,9 @@ struct ShardedComputeHookTenant {
     stripe_size: ShardStripeSize,
     shard_count: ShardCount,
     shards: Vec<(ShardNumber, NodeId)>,
+
+    // The tenant's preferred AZ, so that we may pass this on to the control plane
+    preferred_az: Option<AvailabilityZone>,
 
     // Must hold this lock to send a notification.  The contents represent
     // the last successfully sent notification, and are used to coalesce multiple
@@ -64,17 +71,24 @@ enum ComputeHookTenant {
 
 impl ComputeHookTenant {
     /// Construct with at least one shard's information
-    fn new(tenant_shard_id: TenantShardId, stripe_size: ShardStripeSize, node_id: NodeId) -> Self {
+    fn new(
+        tenant_shard_id: TenantShardId,
+        stripe_size: ShardStripeSize,
+        preferred_az: Option<AvailabilityZone>,
+        node_id: NodeId,
+    ) -> Self {
         if tenant_shard_id.shard_count.count() > 1 {
             Self::Sharded(ShardedComputeHookTenant {
                 shards: vec![(tenant_shard_id.shard_number, node_id)],
                 stripe_size,
                 shard_count: tenant_shard_id.shard_count,
+                preferred_az,
                 send_lock: Arc::default(),
             })
         } else {
             Self::Unsharded(UnshardedComputeHookTenant {
                 node_id,
+                preferred_az,
                 send_lock: Arc::default(),
             })
         }
@@ -124,11 +138,15 @@ impl ComputeHookTenant {
         &mut self,
         tenant_shard_id: TenantShardId,
         stripe_size: ShardStripeSize,
+        preferred_az: Option<&AvailabilityZone>,
         node_id: NodeId,
     ) {
         match self {
             Self::Unsharded(unsharded_tenant) if tenant_shard_id.shard_count.count() == 1 => {
-                unsharded_tenant.node_id = node_id
+                unsharded_tenant.node_id = node_id;
+                if unsharded_tenant.preferred_az.as_ref() != preferred_az {
+                    unsharded_tenant.preferred_az = preferred_az.cloned();
+                }
             }
             Self::Sharded(sharded_tenant)
                 if sharded_tenant.stripe_size == stripe_size
@@ -146,10 +164,14 @@ impl ComputeHookTenant {
                         .push((tenant_shard_id.shard_number, node_id));
                     sharded_tenant.shards.sort_by_key(|s| s.0)
                 }
+
+                if sharded_tenant.preferred_az.as_ref() != preferred_az {
+                    sharded_tenant.preferred_az = preferred_az.cloned();
+                }
             }
             _ => {
                 // Shard count changed: reset struct.
-                *self = Self::new(tenant_shard_id, stripe_size, node_id);
+                *self = Self::new(tenant_shard_id, stripe_size, preferred_az.cloned(), node_id);
             }
         }
     }
@@ -165,6 +187,7 @@ struct ComputeHookNotifyRequestShard {
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 struct ComputeHookNotifyRequest {
     tenant_id: TenantId,
+    preferred_az: Option<String>,
     stripe_size: Option<ShardStripeSize>,
     shards: Vec<ComputeHookNotifyRequestShard>,
 }
@@ -238,6 +261,10 @@ impl ComputeHookTenant {
                     node_id: unsharded_tenant.node_id,
                 }],
                 stripe_size: None,
+                preferred_az: unsharded_tenant
+                    .preferred_az
+                    .as_ref()
+                    .map(|az| az.0.clone()),
             }),
             Self::Sharded(sharded_tenant)
                 if sharded_tenant.shards.len() == sharded_tenant.shard_count.count() as usize =>
@@ -253,6 +280,7 @@ impl ComputeHookTenant {
                         })
                         .collect(),
                     stripe_size: Some(sharded_tenant.stripe_size),
+                    preferred_az: sharded_tenant.preferred_az.as_ref().map(|az| az.0.clone()),
                 })
             }
             Self::Sharded(sharded_tenant) => {
@@ -363,6 +391,7 @@ impl ComputeHook {
             tenant_id,
             shards,
             stripe_size,
+            preferred_az: _preferred_az,
         } = reconfigure_request;
 
         let compute_pageservers = shards
@@ -508,6 +537,7 @@ impl ComputeHook {
         tenant_shard_id: TenantShardId,
         node_id: NodeId,
         stripe_size: ShardStripeSize,
+        preferred_az: Option<&AvailabilityZone>,
     ) -> MaybeSendResult {
         let mut state_locked = self.state.lock().unwrap();
 
@@ -516,11 +546,12 @@ impl ComputeHook {
             Entry::Vacant(e) => e.insert(ComputeHookTenant::new(
                 tenant_shard_id,
                 stripe_size,
+                preferred_az.cloned(),
                 node_id,
             )),
             Entry::Occupied(e) => {
                 let tenant = e.into_mut();
-                tenant.update(tenant_shard_id, stripe_size, node_id);
+                tenant.update(tenant_shard_id, stripe_size, preferred_az, node_id);
                 tenant
             }
         };
@@ -608,13 +639,19 @@ impl ComputeHook {
     /// if something failed.
     pub(super) fn notify_background(
         self: &Arc<Self>,
-        notifications: Vec<(TenantShardId, NodeId, ShardStripeSize)>,
+        notifications: Vec<(
+            TenantShardId,
+            NodeId,
+            ShardStripeSize,
+            Option<AvailabilityZone>,
+        )>,
         result_tx: tokio::sync::mpsc::Sender<Result<(), (TenantShardId, NotifyError)>>,
         cancel: &CancellationToken,
     ) {
         let mut maybe_sends = Vec::new();
-        for (tenant_shard_id, node_id, stripe_size) in notifications {
-            let maybe_send_result = self.notify_prepare(tenant_shard_id, node_id, stripe_size);
+        for (tenant_shard_id, node_id, stripe_size, preferred_az) in notifications {
+            let maybe_send_result =
+                self.notify_prepare(tenant_shard_id, node_id, stripe_size, preferred_az.as_ref());
             maybe_sends.push((tenant_shard_id, maybe_send_result))
         }
 
@@ -684,9 +721,11 @@ impl ComputeHook {
         tenant_shard_id: TenantShardId,
         node_id: NodeId,
         stripe_size: ShardStripeSize,
+        preferred_az: Option<&AvailabilityZone>,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
-        let maybe_send_result = self.notify_prepare(tenant_shard_id, node_id, stripe_size);
+        let maybe_send_result =
+            self.notify_prepare(tenant_shard_id, node_id, stripe_size, preferred_az);
         self.notify_execute(maybe_send_result, tenant_shard_id, cancel)
             .await
     }
@@ -739,6 +778,7 @@ pub(crate) mod tests {
                 shard_number: ShardNumber(0),
             },
             ShardStripeSize(12345),
+            None,
             NodeId(1),
         );
 
@@ -772,6 +812,7 @@ pub(crate) mod tests {
                 shard_number: ShardNumber(1),
             },
             ShardStripeSize(32768),
+            None,
             NodeId(1),
         );
         assert!(matches!(
@@ -787,6 +828,7 @@ pub(crate) mod tests {
                 shard_number: ShardNumber(0),
             },
             ShardStripeSize(32768),
+            None,
             NodeId(1),
         );
 

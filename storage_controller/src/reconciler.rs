@@ -1,7 +1,7 @@
 use crate::pageserver_client::PageserverClient;
 use crate::persistence::Persistence;
 use crate::service;
-use pageserver_api::controller_api::PlacementPolicy;
+use pageserver_api::controller_api::{AvailabilityZone, PlacementPolicy};
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
@@ -45,6 +45,7 @@ pub(super) struct Reconciler {
     pub(crate) reconciler_config: ReconcilerConfig,
 
     pub(crate) config: TenantConfig,
+    pub(crate) preferred_az: Option<AvailabilityZone>,
 
     /// Observed state from the point of view of the reconciler.
     /// This gets updated as the reconciliation makes progress.
@@ -837,6 +838,7 @@ impl Reconciler {
                     self.tenant_shard_id,
                     node.get_id(),
                     self.shard.stripe_size,
+                    self.preferred_az.as_ref(),
                     &self.cancel,
                 )
                 .await;
