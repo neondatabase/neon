@@ -169,9 +169,11 @@ ProposerSwitchConf(p, a) ==
 
 \* Do CAS on the conf store, starting change into the new_members conf.
 StartChange(new_members) ==
-    /\ Cardinality(new_members) = 1
     \* Possible only if we don't already have the change in progress.
     /\ conf_store.newMembers = NULL
+    /\ Cardinality(new_members) = 1
+    \* Not necessary, but reduces space a bit.
+    /\ new_members /= conf_store.members
     /\ conf_store' = [generation |-> conf_store.generation + 1, members |-> conf_store.members, newMembers |-> new_members]
     /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, prop_conf, acc_conf>>
 
