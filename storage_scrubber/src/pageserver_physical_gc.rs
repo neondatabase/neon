@@ -598,11 +598,15 @@ pub async fn pageserver_physical_gc(
     let accumulator = Arc::new(std::sync::Mutex::new(TenantRefAccumulator::default()));
 
     // Generate a stream of TenantTimelineId
+    enum GcSummaryOrContent<T> {
+        Content(T),
+        GcSummary(GcSummary),
+    }
     let timelines = tenants.map_ok(|tenant_shard_id| {
         let target_ref = &target;
         let remote_client_ref = &remote_client;
         async move {
-            match gc_tenant_manifests(
+            let summaries_from_manifests = match gc_tenant_manifests(
                 remote_client_ref,
                 min_age,
                 target_ref,
@@ -611,10 +615,21 @@ pub async fn pageserver_physical_gc(
             )
             .await
             {
-                Ok(_gc_summary) => {}
-                Err(e) => tracing::warn!("Error in gc_tenant_manifests: {e}"),
-            }
-            stream_tenant_timelines(remote_client_ref, target_ref, tenant_shard_id).await
+                Ok(gc_summary) => vec![Ok(GcSummaryOrContent::<TenantShardTimelineId>::GcSummary(
+                    gc_summary,
+                ))],
+                Err(e) => {
+                    tracing::warn!(%tenant_shard_id, "Error in gc_tenant_manifests: {e}");
+                    Vec::new()
+                }
+            };
+            stream_tenant_timelines(remote_client_ref, target_ref, tenant_shard_id)
+                .await
+                .map(|stream| {
+                    stream
+                        .map_ok(|timeline_id| GcSummaryOrContent::Content(timeline_id))
+                        .chain(futures::stream::iter(summaries_from_manifests.into_iter()))
+                })
         }
     });
     let timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
@@ -667,8 +682,18 @@ pub async fn pageserver_physical_gc(
 
     // Drain futures for per-shard GC, populating accumulator as a side effect
     {
-        let timelines = timelines.map_ok(|ttid| {
-            gc_timeline(&remote_client, &min_age, &target, mode, ttid, &accumulator)
+        let timelines = timelines.map_ok(|summary_or_ttid| match summary_or_ttid {
+            GcSummaryOrContent::Content(ttid) => futures::future::Either::Left(gc_timeline(
+                &remote_client,
+                &min_age,
+                &target,
+                mode,
+                ttid,
+                &accumulator,
+            )),
+            GcSummaryOrContent::GcSummary(gc_summary) => {
+                futures::future::Either::Right(futures::future::ok(gc_summary))
+            }
         });
         let mut timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
 
