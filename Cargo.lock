@@ -4163,6 +4163,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "postgres-protocol2"
+version = "0.1.0"
+dependencies = [
+ "base64 0.20.0",
+ "byteorder",
+ "bytes",
+ "fallible-iterator",
+ "hmac",
+ "md-5",
+ "memchr",
+ "rand 0.8.5",
+ "sha2",
+ "stringprep",
+ "tokio",
+]
+
+[[package]]
 name = "postgres-types"
 version = "0.2.4"
 source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#00940fcdb57a8e99e805297b75839e7c4c7b1796"
@@ -4170,8 +4187,15 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
- "serde",
- "serde_json",
+]
+
+[[package]]
+name = "postgres-types2"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "fallible-iterator",
+ "postgres-protocol2",
 ]
 
 [[package]]
@@ -4501,7 +4525,7 @@ dependencies = [
  "parquet_derive",
  "pbkdf2",
  "pin-project-lite",
- "postgres-protocol",
+ "postgres-protocol2",
  "postgres_backend",
  "pq_proto",
  "prometheus",
@@ -4536,8 +4560,7 @@ dependencies = [
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
  "tokio",
- "tokio-postgres",
- "tokio-postgres-rustls",
+ "tokio-postgres2",
  "tokio-rustls 0.26.0",
  "tokio-tungstenite",
  "tokio-util",
@@ -5386,6 +5409,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "thiserror",
+ "tikv-jemallocator",
  "tokio",
  "tokio-io-timeout",
  "tokio-postgres",
@@ -6421,6 +6445,7 @@ dependencies = [
  "libc",
  "mio",
  "num_cpus",
+ "parking_lot 0.12.1",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -6500,6 +6525,26 @@ dependencies = [
  "tokio-postgres",
  "tokio-rustls 0.26.0",
  "x509-certificate",
+]
+
+[[package]]
+name = "tokio-postgres2"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "byteorder",
+ "bytes",
+ "fallible-iterator",
+ "futures-util",
+ "log",
+ "parking_lot 0.12.1",
+ "percent-encoding",
+ "phf",
+ "pin-project-lite",
+ "postgres-protocol2",
+ "postgres-types2",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -7597,7 +7642,6 @@ dependencies = [
  "num-traits",
  "once_cell",
  "parquet",
- "postgres-types",
  "prettyplease",
  "proc-macro2",
  "prost",
@@ -7622,7 +7666,6 @@ dependencies = [
  "time",
  "time-macros",
  "tokio",
- "tokio-postgres",
  "tokio-rustls 0.26.0",
  "tokio-stream",
  "tokio-util",

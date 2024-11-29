@@ -6,9 +6,10 @@ use std::task::{ready, Poll};
 use futures::future::poll_fn;
 use futures::Future;
 use smallvec::SmallVec;
+use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_postgres::tls::NoTlsStream;
-use tokio_postgres::{AsyncMessage, Socket};
+use tokio_postgres::AsyncMessage;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
 #[cfg(test)]
@@ -57,7 +58,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
-    mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
+    mut connection: tokio_postgres::Connection<TcpStream, NoTlsStream>,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 ) -> Client<C> {
