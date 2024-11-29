@@ -1060,8 +1060,7 @@ impl Timeline {
 
         // start counting after throttle so that throttle time
         // is always less than observation time
-        let throttled = self
-            .timeline_get_throttle
+        self.timeline_get_throttle
             .throttle(ctx, key_count as usize)
             .await;
 
@@ -1076,23 +1075,7 @@ impl Timeline {
 
         if let Some((metric, start)) = start {
             let elapsed = start.elapsed();
-            let ex_throttled = if let Some(throttled) = throttled {
-                elapsed.checked_sub(throttled)
-            } else {
-                Some(elapsed)
-            };
-
-            if let Some(ex_throttled) = ex_throttled {
-                metric.observe(ex_throttled.as_secs_f64());
-            } else {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<RateLimit>> =
-                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-                let mut rate_limit = LOGGED.lock().unwrap();
-                rate_limit.call(|| {
-                    warn!("error deducting time spent throttled; this message is logged at a global rate limit");
-                });
-            }
+            metric.observe(elapsed.as_secs_f64());
         }
 
         res
@@ -1139,8 +1122,7 @@ impl Timeline {
 
         // start counting after throttle so that throttle time
         // is always less than observation time
-        let throttled = self
-            .timeline_get_throttle
+        self.timeline_get_throttle
             // assume scan = 1 quota for now until we find a better way to process this
             .throttle(ctx, 1)
             .await;
@@ -1155,7 +1137,7 @@ impl Timeline {
             .await;
 
         if let Some(recording) = start {
-            recording.observe(throttled);
+            recording.observe();
         }
 
         vectored_res

@@ -244,7 +244,7 @@ impl Timeline {
     /// The ordering of the returned vec corresponds to the ordering of `pages`.
     pub(crate) async fn get_rel_page_at_lsn_batched(
         &self,
-        pages: impl Iterator<Item = (&RelTag, &BlockNumber)> + ExactSizeIterator,
+        pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber)>,
         effective_lsn: Lsn,
         ctx: &RequestContext,
     ) -> Vec<Result<Bytes, PageReconstructError>> {

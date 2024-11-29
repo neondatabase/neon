@@ -12,7 +12,6 @@ use postgres_backend::{is_expected_io_error, QueryError};
 use pq_proto::framed::ConnectionError;
 use strum::{EnumCount, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
-use tracing::warn;
 use utils::id::TimelineId;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
@@ -213,24 +212,9 @@ impl<'a> ScanLatencyOngoingRecording<'a> {
         ScanLatencyOngoingRecording { parent, start }
     }
 
-    pub(crate) fn observe(self, throttled: Option<Duration>) {
+    pub(crate) fn observe(self) {
         let elapsed = self.start.elapsed();
-        let ex_throttled = if let Some(throttled) = throttled {
-            elapsed.checked_sub(throttled)
-        } else {
-            Some(elapsed)
-        };
-        if let Some(ex_throttled) = ex_throttled {
-            self.parent.observe(ex_throttled.as_secs_f64());
-        } else {
-            use utils::rate_limit::RateLimit;
-            static LOGGED: Lazy<Mutex<RateLimit>> =
-                Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-            let mut rate_limit = LOGGED.lock().unwrap();
-            rate_limit.call(|| {
-                warn!("error deducting time spent throttled; this message is logged at a global rate limit");
-            });
-        }
+        self.parent.observe(elapsed.as_secs_f64());
     }
 }
 
@@ -1514,58 +1498,24 @@ pub(crate) static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|
     }
 });
 
-pub(crate) struct BasebackupQueryTimeOngoingRecording<'a, 'c> {
+pub(crate) struct BasebackupQueryTimeOngoingRecording<'a> {
     parent: &'a BasebackupQueryTime,
-    ctx: &'c RequestContext,
     start: std::time::Instant,
 }
 
 impl BasebackupQueryTime {
-    pub(crate) fn start_recording<'c: 'a, 'a>(
-        &'a self,
-        ctx: &'c RequestContext,
-    ) -> BasebackupQueryTimeOngoingRecording<'a, 'a> {
+    pub(crate) fn start_recording(&self) -> BasebackupQueryTimeOngoingRecording<'_> {
         let start = Instant::now();
-        match ctx.micros_spent_throttled.open() {
-            Ok(()) => (),
-            Err(error) => {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<RateLimit>> =
-                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-                let mut rate_limit = LOGGED.lock().unwrap();
-                rate_limit.call(|| {
-                    warn!(error, "error opening micros_spent_throttled; this message is logged at a global rate limit");
-                });
-            }
-        }
         BasebackupQueryTimeOngoingRecording {
             parent: self,
-            ctx,
             start,
         }
     }
 }
 
-impl BasebackupQueryTimeOngoingRecording<'_, '_> {
+impl BasebackupQueryTimeOngoingRecording<'_> {
     pub(crate) fn observe<T>(self, res: &Result<T, QueryError>) {
-        let elapsed = self.start.elapsed();
-        let ex_throttled = self
-            .ctx
-            .micros_spent_throttled
-            .close_and_checked_sub_from(elapsed);
-        let ex_throttled = match ex_throttled {
-            Ok(ex_throttled) => ex_throttled,
-            Err(error) => {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<RateLimit>> =
-                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-                let mut rate_limit = LOGGED.lock().unwrap();
-                rate_limit.call(|| {
-                    warn!(error, "error deducting time spent throttled; this message is logged at a global rate limit");
-                });
-                elapsed
-            }
-        };
+        let elapsed = self.start.elapsed().as_secs_f64();
         // If you want to change categorize of a specific error, also change it in `log_query_error`.
         let metric = match res {
             Ok(_) => &self.parent.ok,
@@ -1576,7 +1526,7 @@ impl BasebackupQueryTimeOngoingRecording<'_, '_> {
             }
             Err(_) => &self.parent.error,
         };
-        metric.observe(ex_throttled.as_secs_f64());
+        metric.observe(elapsed);
     }
 }
 

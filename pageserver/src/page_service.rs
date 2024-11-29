@@ -2121,7 +2121,7 @@ where
                 COMPUTE_COMMANDS_COUNTERS
                     .for_command(ComputeCommandKind::Basebackup)
                     .inc();
-                let metric_recording = metrics::BASEBACKUP_QUERY_TIME.start_recording(&ctx);
+                let metric_recording = metrics::BASEBACKUP_QUERY_TIME.start_recording();
                 let res = async {
                     self.handle_basebackup_request(
                         pgb,
