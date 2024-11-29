@@ -5415,6 +5415,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "thiserror",
+ "tikv-jemallocator",
  "tokio",
  "tokio-io-timeout",
  "tokio-postgres",
