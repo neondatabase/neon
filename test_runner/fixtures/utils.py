@@ -399,6 +399,7 @@ def start_in_background(
 
 def wait_until(
     func: Callable[[], WaitUntilRet],
+    name: str | None = None,
     timeout: float = 20.0,  # seconds
     interval: float = 0.5,  # seconds
     status_interval: float = 1.0,  # seconds
@@ -407,20 +408,22 @@ def wait_until(
     Wait until 'func' returns successfully, without exception. Returns the
     last return value from the function.
     """
-    last_exception = None
+    if name is None:
+        name = getattr(func, "__name__", repr(func))
     deadline = datetime.now() + timedelta(seconds=timeout)
     next_status = datetime.now()
+    last_exception = None
     while datetime.now() <= deadline:
         try:
             return func()
         except Exception as e:
             if datetime.now() >= next_status:
-                log.info("waiting for %s: %s", func, e)
+                log.info("waiting for %s: %s", name, e)
                 next_status = datetime.now() + timedelta(seconds=status_interval)
             last_exception = e
             time.sleep(interval)
             continue
-    raise Exception(f"timed out while waiting for {func}") from last_exception
+    raise Exception(f"timed out while waiting for {name}") from last_exception
 
 
 def assert_eq(a, b) -> None:
