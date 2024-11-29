@@ -374,6 +374,8 @@ async fn upload_backup_events(
         }
     };
 
+    // TODO: This is async compression from Vec to Vec. Rewrite as byte stream.
+    //       Use sync compression in blocking threadpool.
     let data = serde_json::to_vec(chunk).context("serialize metrics")?;
     let mut encoder = GzipEncoder::new(Vec::new());
     encoder.write_all(&data).await.context("compress metrics")?;
