@@ -3,7 +3,7 @@ use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
     register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
-    Counter, CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
+    Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
     IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
@@ -457,6 +457,15 @@ pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static FLUSH_WAIT_UPLOAD_TIME: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "pageserver_flush_wait_upload_seconds",
+        "Time spent waiting for preceding uploads during layer flush",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_last_record_lsn",
@@ -649,6 +658,35 @@ pub(crate) static COMPRESSION_IMAGE_OUTPUT_BYTES: Lazy<IntCounter> = Lazy::new(|
     register_int_counter!(
         "pageserver_compression_image_out_bytes_total",
         "Size of compressed image layer written"
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_relsize_cache_entries",
+        "Number of entries in the relation size cache",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!("pageserver_relsize_cache_hits", "Relation size cache hits",)
+        .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_relsize_cache_misses",
+        "Relation size cache misses",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_CACHE_MISSES_OLD: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_relsize_cache_misses_old",
+        "Relation size cache misses where the lookup LSN is older than the last relation update"
     )
     .expect("failed to define a metric")
 });
@@ -2106,6 +2144,7 @@ pub(crate) struct WalIngestMetrics {
     pub(crate) records_committed: IntCounter,
     pub(crate) records_filtered: IntCounter,
     pub(crate) gap_blocks_zeroed_on_rel_extend: IntCounter,
+    pub(crate) clear_vm_bits_unknown: IntCounterVec,
 }
 
 pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
@@ -2132,6 +2171,12 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMet
     gap_blocks_zeroed_on_rel_extend: register_int_counter!(
         "pageserver_gap_blocks_zeroed_on_rel_extend",
         "Total number of zero gap blocks written on relation extends"
+    )
+    .expect("failed to define a metric"),
+    clear_vm_bits_unknown: register_int_counter_vec!(
+        "pageserver_wal_ingest_clear_vm_bits_unknown",
+        "Number of ignored ClearVmBits operations due to unknown pages/relations",
+        &["entity"],
     )
     .expect("failed to define a metric"),
 });
@@ -2336,6 +2381,7 @@ pub(crate) struct TimelineMetrics {
     shard_id: String,
     timeline_id: String,
     pub flush_time_histo: StorageTimeMetrics,
+    pub flush_wait_upload_time_gauge: Gauge,
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
     pub logical_size_histo: StorageTimeMetrics,
@@ -2379,6 +2425,9 @@ impl TimelineMetrics {
             &shard_id,
             &timeline_id,
         );
+        let flush_wait_upload_time_gauge = FLUSH_WAIT_UPLOAD_TIME
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
         let compact_time_histo = StorageTimeMetrics::new(
             StorageTimeOperation::Compact,
             &tenant_id,
@@ -2516,6 +2565,7 @@ impl TimelineMetrics {
             shard_id,
             timeline_id,
             flush_time_histo,
+            flush_wait_upload_time_gauge,
             compact_time_histo,
             create_images_time_histo,
             logical_size_histo,
@@ -2563,6 +2613,14 @@ impl TimelineMetrics {
         self.resident_physical_size_gauge.get()
     }
 
+    pub(crate) fn flush_wait_upload_time_gauge_add(&self, duration: f64) {
+        self.flush_wait_upload_time_gauge.add(duration);
+        crate::metrics::FLUSH_WAIT_UPLOAD_TIME
+            .get_metric_with_label_values(&[&self.tenant_id, &self.shard_id, &self.timeline_id])
+            .unwrap()
+            .add(duration);
+    }
+
     pub(crate) fn shutdown(&self) {
         let was_shutdown = self
             .shutdown
@@ -2579,6 +2637,7 @@ impl TimelineMetrics {
         let timeline_id = &self.timeline_id;
         let shard_id = &self.shard_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        let _ = FLUSH_WAIT_UPLOAD_TIME.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = STANDBY_HORIZON.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());

@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Child;
+use std::str::FromStr;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -13,8 +14,10 @@ use anyhow::{bail, Result};
 use futures::StreamExt;
 use ini::Ini;
 use notify::{RecursiveMode, Watcher};
+use postgres::config::Config;
 use tokio::io::AsyncBufReadExt;
 use tokio::time::timeout;
+use tokio_postgres;
 use tokio_postgres::NoTls;
 use tracing::{debug, error, info, instrument};
 
@@ -541,4 +544,12 @@ async fn handle_postgres_logs_async(stderr: tokio::process::ChildStderr) -> Resu
     }
 
     Ok(())
+}
+
+/// `Postgres::config::Config` handles database names with whitespaces
+/// and special characters properly.
+pub fn postgres_conf_for_db(connstr: &url::Url, dbname: &str) -> Result<Config> {
+    let mut conf = Config::from_str(connstr.as_str())?;
+    conf.dbname(dbname);
+    Ok(conf)
 }

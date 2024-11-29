@@ -90,10 +90,12 @@ from fixtures.safekeeper.utils import wait_walreceivers_absent
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     COMPONENT_BINARIES,
+    USE_LFC,
     allure_add_grafana_links,
     assert_no_errors,
     get_dir_size,
     print_gc_result,
+    size_to_bytes,
     subprocess_capture,
     wait_until,
 )
@@ -308,6 +310,31 @@ class PgProtocol:
         return self.safe_psql(query, log_query=log_query)[0][0]
 
 
+class PageserverWalReceiverProtocol(StrEnum):
+    VANILLA = "vanilla"
+    INTERPRETED = "interpreted"
+
+    @staticmethod
+    def to_config_key_value(proto) -> tuple[str, dict[str, Any]]:
+        if proto == PageserverWalReceiverProtocol.VANILLA:
+            return (
+                "wal_receiver_protocol",
+                {
+                    "type": "vanilla",
+                },
+            )
+        elif proto == PageserverWalReceiverProtocol.INTERPRETED:
+            return (
+                "wal_receiver_protocol",
+                {
+                    "type": "interpreted",
+                    "args": {"format": "protobuf", "compression": {"zstd": {"level": 1}}},
+                },
+            )
+        else:
+            raise ValueError(f"Unknown protocol type: {proto}")
+
+
 class NeonEnvBuilder:
     """
     Builder object to create a Neon runtime environment
@@ -354,6 +381,7 @@ class NeonEnvBuilder:
         safekeeper_extra_opts: list[str] | None = None,
         storage_controller_port_override: int | None = None,
         pageserver_virtual_file_io_mode: str | None = None,
+        pageserver_wal_receiver_protocol: PageserverWalReceiverProtocol | None = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -406,6 +434,8 @@ class NeonEnvBuilder:
         self.storage_controller_port_override = storage_controller_port_override
 
         self.pageserver_virtual_file_io_mode = pageserver_virtual_file_io_mode
+
+        self.pageserver_wal_receiver_protocol = pageserver_wal_receiver_protocol
 
         assert test_name.startswith(
             "test_"
@@ -1021,6 +1051,7 @@ class NeonEnv:
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
+        self.pageserver_wal_receiver_protocol = config.pageserver_wal_receiver_protocol
 
         # Create the neon_local's `NeonLocalInitConf`
         cfg: dict[str, Any] = {
@@ -1089,6 +1120,13 @@ class NeonEnv:
 
             if self.pageserver_virtual_file_io_mode is not None:
                 ps_cfg["virtual_file_io_mode"] = self.pageserver_virtual_file_io_mode
+
+            if self.pageserver_wal_receiver_protocol is not None:
+                key, value = PageserverWalReceiverProtocol.to_config_key_value(
+                    self.pageserver_wal_receiver_protocol
+                )
+                if key not in ps_cfg:
+                    ps_cfg[key] = value
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
@@ -3742,11 +3780,44 @@ class Endpoint(PgProtocol, LogUtils):
         self.pgdata_dir = self.env.repo_dir / path
         self.logfile = self.endpoint_path() / "compute.log"
 
-        config_lines = config_lines or []
-
         # set small 'max_replication_write_lag' to enable backpressure
         # and make tests more stable.
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
+
+        # Delete file cache if it exists (and we're recreating the endpoint)
+        if USE_LFC:
+            if (lfc_path := Path(self.lfc_path())).exists():
+                lfc_path.unlink()
+            else:
+                lfc_path.parent.mkdir(parents=True, exist_ok=True)
+            for line in config_lines:
+                if (
+                    line.find("neon.max_file_cache_size") > -1
+                    or line.find("neon.file_cache_size_limit") > -1
+                ):
+                    m = re.search(r"=\s*(\S+)", line)
+                    assert m is not None, f"malformed config line {line}"
+                    size = m.group(1)
+                    assert size_to_bytes(size) >= size_to_bytes(
+                        "1MB"
+                    ), "LFC size cannot be set less than 1MB"
+            # shared_buffers = 512kB to make postgres use LFC intensively
+            # neon.max_file_cache_size and neon.file_cache size limit are
+            # set to 1MB because small LFC is better for testing (helps to find more problems)
+            config_lines = [
+                "shared_buffers = 512kB",
+                f"neon.file_cache_path = '{self.lfc_path()}'",
+                "neon.max_file_cache_size = 1MB",
+                "neon.file_cache_size_limit = 1MB",
+            ] + config_lines
+        else:
+            for line in config_lines:
+                assert (
+                    line.find("neon.max_file_cache_size") == -1
+                ), "Setting LFC parameters is not allowed when LFC is disabled"
+                assert (
+                    line.find("neon.file_cache_size_limit") == -1
+                ), "Setting LFC parameters is not allowed when LFC is disabled"
 
         self.config(config_lines)
 
@@ -3781,6 +3852,9 @@ class Endpoint(PgProtocol, LogUtils):
             basebackup_request_tries=basebackup_request_tries,
         )
         self._running.release(1)
+        self.log_config_value("shared_buffers")
+        self.log_config_value("neon.max_file_cache_size")
+        self.log_config_value("neon.file_cache_size_limit")
 
         return self
 
@@ -3805,6 +3879,10 @@ class Endpoint(PgProtocol, LogUtils):
     def config_file_path(self) -> Path:
         """Path to the postgresql.conf in the endpoint directory (not the one in pgdata)"""
         return self.endpoint_path() / "postgresql.conf"
+
+    def lfc_path(self) -> Path:
+        """Path to the lfc file"""
+        return self.endpoint_path() / "file_cache" / "file.cache"
 
     def config(self, lines: list[str]) -> Self:
         """
@@ -3855,6 +3933,35 @@ class Endpoint(PgProtocol, LogUtils):
         with open(config_path, "w") as file:
             log.info(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
+
+    def respec_deep(self, **kwargs: Any) -> None:
+        """
+        Update the endpoint.json file taking into account nested keys.
+        It does one level deep update. Should enough for most cases.
+        Distinct method from respec() to do not break existing functionality.
+        NOTE: This method also updates the spec.json file, not endpoint.json.
+        We need it because neon_local also writes to spec.json, so intended
+        use-case is i) start endpoint with some config, ii) respec_deep(),
+        iii) call reconfigure() to apply the changes.
+        """
+        config_path = os.path.join(self.endpoint_path(), "spec.json")
+        with open(config_path) as f:
+            data_dict: dict[str, Any] = json.load(f)
+
+        log.info("Current compute spec: %s", json.dumps(data_dict, indent=4))
+
+        for key, value in kwargs.items():
+            if isinstance(value, dict):
+                if key not in data_dict:
+                    data_dict[key] = value
+                else:
+                    data_dict[key] = {**data_dict[key], **value}
+            else:
+                data_dict[key] = value
+
+        with open(config_path, "w") as file:
+            log.info("Updating compute spec to: %s", json.dumps(data_dict, indent=4))
+            json.dump(data_dict, file, indent=4)
 
     # Please note: Migrations only run if pg_skip_catalog_updates is false
     def wait_for_migrations(self, num_migrations: int = 11):
@@ -3984,16 +4091,46 @@ class Endpoint(PgProtocol, LogUtils):
         assert self.pgdata_dir is not None  # please mypy
         return get_dir_size(self.pgdata_dir / "pg_wal") / 1024 / 1024
 
-    def clear_shared_buffers(self, cursor: Any | None = None):
+    def clear_buffers(self, cursor: Any | None = None):
         """
         Best-effort way to clear postgres buffers. Pinned buffers will not be 'cleared.'
-
-        Might also clear LFC.
+        It clears LFC as well by setting neon.file_cache_size_limit to 0 and then returning it to the previous value,
+        if LFC is enabled
         """
         if cursor is not None:
             cursor.execute("select clear_buffer_cache()")
+            if not USE_LFC:
+                return
+            cursor.execute("SHOW neon.file_cache_size_limit")
+            res = cursor.fetchone()
+            assert res, "Cannot get neon.file_cache_size_limit"
+            file_cache_size_limit = res[0]
+            if file_cache_size_limit == 0:
+                return
+            cursor.execute("ALTER SYSTEM SET neon.file_cache_size_limit=0")
+            cursor.execute("SELECT pg_reload_conf()")
+            cursor.execute(f"ALTER SYSTEM SET neon.file_cache_size_limit='{file_cache_size_limit}'")
+            cursor.execute("SELECT pg_reload_conf()")
         else:
             self.safe_psql("select clear_buffer_cache()")
+            if not USE_LFC:
+                return
+            file_cache_size_limit = self.safe_psql_scalar(
+                "SHOW neon.file_cache_size_limit", log_query=False
+            )
+            if file_cache_size_limit == 0:
+                return
+            self.safe_psql("ALTER SYSTEM SET neon.file_cache_size_limit=0")
+            self.safe_psql("SELECT pg_reload_conf()")
+            self.safe_psql(f"ALTER SYSTEM SET neon.file_cache_size_limit='{file_cache_size_limit}'")
+            self.safe_psql("SELECT pg_reload_conf()")
+
+    def log_config_value(self, param):
+        """
+        Writes the config value param to log
+        """
+        res = self.safe_psql_scalar(f"SHOW {param}", log_query=False)
+        log.info("%s = %s", param, res)
 
 
 class EndpointFactory:
@@ -4266,6 +4403,10 @@ class Safekeeper(LogUtils):
         flush_lsn = timeline_status.flush_lsn
         log.info(f"sk {self.id} flush LSN: {flush_lsn}")
         return flush_lsn
+
+    def get_commit_lsn(self, tenant_id: TenantId, timeline_id: TimelineId) -> Lsn:
+        timeline_status = self.http_client().timeline_status(tenant_id, timeline_id)
+        return timeline_status.commit_lsn
 
     def pull_timeline(
         self, srcs: list[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId
@@ -4810,6 +4951,33 @@ def wait_for_last_flush_lsn(
 
     # Return the lowest LSN that has been ingested by all shards
     return min(results)
+
+
+def wait_for_commit_lsn(
+    env: NeonEnv,
+    tenant: TenantId,
+    timeline: TimelineId,
+    lsn: Lsn,
+) -> Lsn:
+    # TODO: it would be better to poll this in the compute, but there's no API for it. See:
+    # https://github.com/neondatabase/neon/issues/9758
+    "Wait for the given LSN to be committed on any Safekeeper"
+
+    max_commit_lsn = Lsn(0)
+    for i in range(1000):
+        for sk in env.safekeepers:
+            commit_lsn = sk.get_commit_lsn(tenant, timeline)
+            if commit_lsn >= lsn:
+                log.info(f"{tenant}/{timeline} at commit_lsn {commit_lsn}")
+                return commit_lsn
+            max_commit_lsn = max(max_commit_lsn, commit_lsn)
+
+        if i % 10 == 0:
+            log.info(
+                f"{tenant}/{timeline} waiting for commit_lsn to reach {lsn}, now {max_commit_lsn}"
+            )
+        time.sleep(0.1)
+    raise Exception(f"timed out while waiting for commit_lsn to reach {lsn}, was {max_commit_lsn}")
 
 
 def flush_ep_to_pageserver(

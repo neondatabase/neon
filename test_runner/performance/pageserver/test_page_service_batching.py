@@ -3,7 +3,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Union
+from typing import Any
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
@@ -17,6 +17,7 @@ TARGET_RUNTIME = 30
 @dataclass
 class PageServicePipeliningConfig:
     pass
+
 
 @dataclass
 class PageServicePipeliningConfigSerial(PageServicePipeliningConfig):
@@ -104,7 +105,7 @@ def test_throughput(
     #
     # record perf-related parameters as metrics to simplify processing of results
     #
-    params: dict[str, tuple[Union[float, int], dict[str, Any]]] = {}
+    params: dict[str, tuple[float | int, dict[str, Any]]] = {}
 
     params.update(
         {

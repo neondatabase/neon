@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use futures::TryFutureExt;
+use futures::{FutureExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, Instrument};
@@ -35,6 +35,7 @@ pub async fn task_main(
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
+    let cancellations = tokio_util::task::task_tracker::TaskTracker::new();
 
     while let Some(accept_result) =
         run_until_cancelled(listener.accept(), &cancellation_token).await
@@ -48,6 +49,7 @@ pub async fn task_main(
 
         let session_id = uuid::Uuid::new_v4();
         let cancellation_handler = Arc::clone(&cancellation_handler);
+        let cancellations = cancellations.clone();
 
         debug!(protocol = "tcp", %session_id, "accepted new TCP connection");
 
@@ -88,40 +90,38 @@ pub async fn task_main(
                 crate::metrics::Protocol::Tcp,
                 &config.region,
             );
-            let span = ctx.span();
 
-            let startup = Box::pin(
-                handle_client(
-                    config,
-                    backend,
-                    &ctx,
-                    cancellation_handler,
-                    socket,
-                    conn_gauge,
-                )
-                .instrument(span.clone()),
-            );
-            let res = startup.await;
+            let res = handle_client(
+                config,
+                backend,
+                &ctx,
+                cancellation_handler,
+                socket,
+                conn_gauge,
+                cancellations,
+            )
+            .instrument(ctx.span())
+            .boxed()
+            .await;
 
             match res {
                 Err(e) => {
-                    // todo: log and push to ctx the error kind
                     ctx.set_error_kind(e.get_error_kind());
-                    error!(parent: &span, "per-client task finished with an error: {e:#}");
+                    error!(parent: &ctx.span(), "per-client task finished with an error: {e:#}");
                 }
                 Ok(None) => {
                     ctx.set_success();
                 }
                 Ok(Some(p)) => {
                     ctx.set_success();
-                    ctx.log_connect();
-                    match p.proxy_pass().instrument(span.clone()).await {
+                    let _disconnect = ctx.log_connect();
+                    match p.proxy_pass().await {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
-                            error!(parent: &span, "per-client task finished with an IO error from the client: {e:#}");
+                            error!(?session_id, "per-client task finished with an IO error from the client: {e:#}");
                         }
                         Err(ErrorSource::Compute(e)) => {
-                            error!(parent: &span, "per-client task finished with an IO error from the compute: {e:#}");
+                            error!(?session_id, "per-client task finished with an IO error from the compute: {e:#}");
                         }
                     }
                 }
@@ -130,10 +130,12 @@ pub async fn task_main(
     }
 
     connections.close();
+    cancellations.close();
     drop(listener);
 
     // Drain connections
     connections.wait().await;
+    cancellations.wait().await;
 
     Ok(())
 }
@@ -145,6 +147,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
     conn_gauge: NumClientConnectionsGuard<'static>,
+    cancellations: tokio_util::task::task_tracker::TaskTracker,
 ) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
     debug!(
         protocol = %ctx.protocol(),
@@ -164,15 +167,26 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
             HandshakeData::Startup(stream, params) => (stream, params),
             HandshakeData::Cancel(cancel_key_data) => {
-                return Ok(cancellation_handler
-                    .cancel_session(
-                        cancel_key_data,
-                        ctx.session_id(),
-                        &ctx.peer_addr(),
-                        config.authentication_config.ip_allowlist_check_enabled,
-                    )
-                    .await
-                    .map(|()| None)?)
+                // spawn a task to cancel the session, but don't wait for it
+                cancellations.spawn({
+                    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
+                    let session_id = ctx.session_id();
+                    let peer_ip = ctx.peer_addr();
+                    async move {
+                        drop(
+                            cancellation_handler_clone
+                                .cancel_session(
+                                    cancel_key_data,
+                                    session_id,
+                                    peer_ip,
+                                    config.authentication_config.ip_allowlist_check_enabled,
+                                )
+                                .await,
+                        );
+                    }
+                });
+
+                return Ok(None);
             }
         };
     drop(pause);
@@ -219,6 +233,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         client: stream,
         aux: node.aux.clone(),
         compute: node,
+        session_id: ctx.session_id(),
         _req: request_gauge,
         _conn: conn_gauge,
         _cancel: session,

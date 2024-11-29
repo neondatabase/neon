@@ -46,6 +46,9 @@ workspace-members = [
     "utils",
     "wal_craft",
     "walproposer",
+    "postgres-protocol2",
+    "postgres-types2",
+    "tokio-postgres2",
 ]
 
 # Write out exact versions rather than a semver range. (Defaults to false.)

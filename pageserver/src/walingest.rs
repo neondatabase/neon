@@ -334,14 +334,32 @@ impl WalIngest {
         // replaying it would fail to find the previous image of the page, because
         // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
         // record if it doesn't.
-        let vm_size = get_relsize(modification, vm_rel, ctx).await?;
+        //
+        // TODO: analyze the metrics and tighten this up accordingly. This logic
+        // implicitly assumes that VM pages see explicit WAL writes before
+        // implicit ClearVmBits, and will otherwise silently drop updates.
+        let Some(vm_size) = get_relsize(modification, vm_rel, ctx).await? else {
+            WAL_INGEST
+                .clear_vm_bits_unknown
+                .with_label_values(&["relation"])
+                .inc();
+            return Ok(());
+        };
         if let Some(blknum) = new_vm_blk {
             if blknum >= vm_size {
+                WAL_INGEST
+                    .clear_vm_bits_unknown
+                    .with_label_values(&["new_page"])
+                    .inc();
                 new_vm_blk = None;
             }
         }
         if let Some(blknum) = old_vm_blk {
             if blknum >= vm_size {
+                WAL_INGEST
+                    .clear_vm_bits_unknown
+                    .with_label_values(&["old_page"])
+                    .inc();
                 old_vm_blk = None;
             }
         }
@@ -572,7 +590,8 @@ impl WalIngest {
                 modification.put_rel_page_image_zero(rel, fsm_physical_page_no)?;
                 fsm_physical_page_no += 1;
             }
-            let nblocks = get_relsize(modification, rel, ctx).await?;
+            // TODO: re-examine the None case here wrt. sharding; should we error?
+            let nblocks = get_relsize(modification, rel, ctx).await?.unwrap_or(0);
             if nblocks > fsm_physical_page_no {
                 // check if something to do: FSM is larger than truncate position
                 self.put_rel_truncation(modification, rel, fsm_physical_page_no, ctx)
@@ -612,7 +631,8 @@ impl WalIngest {
                 )?;
                 vm_page_no += 1;
             }
-            let nblocks = get_relsize(modification, rel, ctx).await?;
+            // TODO: re-examine the None case here wrt. sharding; should we error?
+            let nblocks = get_relsize(modification, rel, ctx).await?.unwrap_or(0);
             if nblocks > vm_page_no {
                 // check if something to do: VM is larger than truncate position
                 self.put_rel_truncation(modification, rel, vm_page_no, ctx)
@@ -1430,24 +1450,27 @@ impl WalIngest {
     }
 }
 
+/// Returns the size of the relation as of this modification, or None if the relation doesn't exist.
+///
+/// This is only accurate on shard 0. On other shards, it will return the size up to the highest
+/// page number stored in the shard, or None if the shard does not have any pages for it.
 async fn get_relsize(
     modification: &DatadirModification<'_>,
     rel: RelTag,
     ctx: &RequestContext,
-) -> Result<BlockNumber, PageReconstructError> {
-    let nblocks = if !modification
+) -> Result<Option<BlockNumber>, PageReconstructError> {
+    if !modification
         .tline
         .get_rel_exists(rel, Version::Modified(modification), ctx)
         .await?
     {
-        0
-    } else {
-        modification
-            .tline
-            .get_rel_size(rel, Version::Modified(modification), ctx)
-            .await?
-    };
-    Ok(nblocks)
+        return Ok(None);
+    }
+    modification
+        .tline
+        .get_rel_size(rel, Version::Modified(modification), ctx)
+        .await
+        .map(Some)
 }
 
 #[allow(clippy::bool_assert_comparison)]

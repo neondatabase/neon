@@ -20,7 +20,7 @@
 
 #define LS_MONITOR_CHECK_INTERVAL 10000 /* ms */
 
-static int	logical_replication_max_snap_files = 300;
+static int	logical_replication_max_snap_files = 10000;
 
 /*
  * According to Chi (shyzh), the pageserver _should_ be good with 10 MB worth of
@@ -184,7 +184,7 @@ InitLogicalReplicationMonitor(void)
 							"Maximum allowed logical replication .snap files. When exceeded, slots are dropped until the limit is met. -1 disables the limit.",
 							NULL,
 							&logical_replication_max_snap_files,
-							300, -1, INT_MAX,
+							10000, -1, INT_MAX,
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);

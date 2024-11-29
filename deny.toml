@@ -33,7 +33,6 @@ reason = "the marvin attack only affects private key decryption, not public key 
 [licenses]
 allow = [
     "Apache-2.0",
-    "Artistic-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "CC0-1.0",
@@ -67,7 +66,7 @@ registries = []
 # More documentation about the 'bans' section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
 [bans]
-multiple-versions = "warn"
+multiple-versions = "allow"
 wildcards = "allow"
 highlight = "all"
 workspace-default-features = "allow"

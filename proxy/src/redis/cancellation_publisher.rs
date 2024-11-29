@@ -1,6 +1,6 @@
+use core::net::IpAddr;
 use std::sync::Arc;
 
-use core::net::IpAddr;
 use pq_proto::CancelKeyData;
 use redis::AsyncCommands;
 use tokio::sync::Mutex;

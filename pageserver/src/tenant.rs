@@ -3215,6 +3215,18 @@ impl Tenant {
             }
         }
 
+        if let ShutdownMode::Reload = shutdown_mode {
+            tracing::info!("Flushing deletion queue");
+            if let Err(e) = self.deletion_queue_client.flush().await {
+                match e {
+                    DeletionQueueError::ShuttingDown => {
+                        // This is the only error we expect for now. In the future, if more error
+                        // variants are added, we should handle them here.
+                    }
+                }
+            }
+        }
+
         // We cancel the Tenant's cancellation token _after_ the timelines have all shut down.  This permits
         // them to continue to do work during their shutdown methods, e.g. flushing data.
         tracing::debug!("Cancelling CancellationToken");
@@ -5344,6 +5356,7 @@ pub(crate) mod harness {
                 lsn_lease_length: Some(tenant_conf.lsn_lease_length),
                 lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),
                 timeline_offloading: Some(tenant_conf.timeline_offloading),
+                wal_receiver_protocol_override: tenant_conf.wal_receiver_protocol_override,
             }
         }
     }
