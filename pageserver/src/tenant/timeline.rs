@@ -53,7 +53,7 @@ use utils::{
     postgres_client::PostgresClientProtocol,
     sync::gate::{Gate, GateGuard},
 };
-use wal_decoder::serialized_batch::SerializedValueBatch;
+use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -5919,6 +5919,19 @@ impl<'a> TimelineWriter<'a> {
     ) -> anyhow::Result<()> {
         if !batch.has_data() {
             return Ok(());
+        }
+
+        // In debug builds, assert that we don't write any keys that don't belong to this shard.
+        if cfg!(debug_assertions) {
+            for metadata in &batch.metadata {
+                if let ValueMeta::Serialized(metadata) = metadata {
+                    let key = Key::from_compact(metadata.key);
+                    assert!(
+                        self.shard_identity.is_key_local(&key),
+                        "writing non-local key {key}",
+                    );
+                }
+            }
         }
 
         let batch_max_lsn = batch.max_lsn;
