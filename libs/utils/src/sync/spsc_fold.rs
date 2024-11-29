@@ -115,6 +115,9 @@ impl<T: Send> Sender<T> {
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
+        scopeguard::defer! {
+            self.state.wake_receiver.notify()
+        };
         let Ok(mut guard) = self.state.value.lock() else {
             return;
         };
@@ -179,6 +182,9 @@ impl<T: Send> Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
+        scopeguard::defer! {
+            self.state.wake_sender.notify()
+        };
         let Ok(mut guard) = self.state.value.lock() else {
             return;
         };
@@ -400,5 +406,47 @@ mod tests {
 
         let result = receiver.recv().await;
         assert!(matches!(result, Err(RecvError::SenderGone)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_receiver_drops_after_sender_went_to_sleep() {
+        let (mut sender, receiver) = channel();
+        let state = receiver.state.clone();
+
+        sender.send(23, |_, _| unreachable!()).await.unwrap();
+
+        let send_task = tokio::spawn(async move { sender.send(42, |_, v| Err(v)).await });
+
+        tokio::time::sleep(FOREVER).await;
+
+        assert!(matches!(
+            &*state.value.lock().unwrap(),
+            &State::SenderWaitsForReceiverToConsume(_)
+        ));
+
+        drop(receiver);
+
+        let err = send_task
+            .await
+            .unwrap()
+            .expect_err("should unblock immediately");
+        assert!(matches!(err, SendError::ReceiverGone));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sender_drops_after_receiver_went_to_sleep() {
+        let (sender, mut receiver) = channel::<usize>();
+        let state = sender.state.clone();
+
+        let recv_task = tokio::spawn(async move { receiver.recv().await });
+
+        tokio::time::sleep(FOREVER).await;
+
+        assert!(matches!(&*state.value.lock().unwrap(), &State::NoData));
+
+        drop(sender);
+
+        let err = recv_task.await.unwrap().expect_err("should error");
+        assert!(matches!(err, RecvError::SenderGone));
     }
 }
