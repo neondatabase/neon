@@ -598,7 +598,6 @@ pub async fn pageserver_physical_gc(
     let accumulator = Arc::new(std::sync::Mutex::new(TenantRefAccumulator::default()));
 
     // Generate a stream of TenantTimelineId
-    let tenants = std::pin::pin!(tenants);
     let timelines = tenants.map_ok(|tenant_shard_id| {
         let target_ref = &target;
         let remote_client_ref = &remote_client;
