@@ -338,7 +338,9 @@ impl WalIngest {
         // TODO: analyze the metrics and tighten this up accordingly. This logic
         // implicitly assumes that VM pages see explicit WAL writes before
         // implicit ClearVmBits, and will otherwise silently drop updates.
+        let lsn = modification.lsn;
         let Some(vm_size) = get_relsize(modification, vm_rel, ctx).await? else {
+            log::info!("ingest_clear_vm_bits: vm_rel {vm_rel} does not exist at LSN {lsn}, flags={flags} old={old_heap_blkno:?} new={new_heap_blkno:?}");
             WAL_INGEST
                 .clear_vm_bits_unknown
                 .with_label_values(&["relation"])
@@ -347,6 +349,7 @@ impl WalIngest {
         };
         if let Some(blknum) = new_vm_blk {
             if blknum >= vm_size {
+                log::info!("ingest_clear_vm_bits: vm_rel {vm_rel} block {blknum} missing at LSN {lsn}, flags={flags} old={old_heap_blkno:?} new={new_heap_blkno:?}");
                 WAL_INGEST
                     .clear_vm_bits_unknown
                     .with_label_values(&["new_page"])
@@ -356,6 +359,7 @@ impl WalIngest {
         }
         if let Some(blknum) = old_vm_blk {
             if blknum >= vm_size {
+                log::info!("ingest_clear_vm_bits: vm_rel {vm_rel} block {blknum} missing at LSN {lsn}, flags={flags} old={old_heap_blkno:?} new={new_heap_blkno:?}");
                 WAL_INGEST
                     .clear_vm_bits_unknown
                     .with_label_values(&["old_page"])
