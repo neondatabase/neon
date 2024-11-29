@@ -7,7 +7,10 @@ use bytes::Buf;
 use futures::FutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
-use pageserver_api::config::{PageServicePipeliningConfig, PageServiceProtocolPipeliningMode};
+use pageserver_api::config::{
+    PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
+    PageServiceProtocolPipelinedExecutionStrategy,
+};
 use pageserver_api::models::{self, TenantState};
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
@@ -159,7 +162,7 @@ pub async fn libpq_listener_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     listener: tokio::net::TcpListener,
     auth_type: AuthType,
-    pipelining_config: Option<PageServicePipeliningConfig>,
+    pipelining_config: PageServicePipeliningConfig,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
 ) -> Connections {
@@ -218,7 +221,7 @@ async fn page_service_conn_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
-    pipelining_config: Option<PageServicePipeliningConfig>,
+    pipelining_config: PageServicePipeliningConfig,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
 ) -> ConnectionHandlerResult {
@@ -320,7 +323,7 @@ struct PageServerHandler {
     /// None only while pagestream protocol is being processed.
     timeline_handles: Option<TimelineHandles>,
 
-    pipelining_config: Option<PageServicePipeliningConfig>,
+    pipelining_config: PageServicePipeliningConfig,
 }
 
 struct TimelineHandles {
@@ -571,7 +574,7 @@ impl PageServerHandler {
     pub fn new(
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
-        pipelining_config: Option<PageServicePipeliningConfig>,
+        pipelining_config: PageServicePipeliningConfig,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
     ) -> Self {
@@ -1003,7 +1006,7 @@ impl PageServerHandler {
 
         let request_span = info_span!("request", shard_id = tracing::field::Empty);
         let ((pgb_reader, timeline_handles), result) = match self.pipelining_config.clone() {
-            Some(pipelining_config) => {
+            PageServicePipeliningConfig::Pipelined(pipelining_config) => {
                 self.handle_pagerequests_pipelined(
                     pgb,
                     pgb_reader,
@@ -1016,7 +1019,7 @@ impl PageServerHandler {
                 )
                 .await
             }
-            None => {
+            PageServicePipeliningConfig::Serial => {
                 self.handle_pagerequests_serial(
                     pgb,
                     pgb_reader,
@@ -1104,7 +1107,7 @@ impl PageServerHandler {
         timeline_id: TimelineId,
         mut timeline_handles: TimelineHandles,
         request_span: Span,
-        pipelining_config: PageServicePipeliningConfig,
+        pipelining_config: PageServicePipeliningConfigPipelined,
         ctx: &RequestContext,
     ) -> (
         (PostgresBackendReader<IO>, TimelineHandles),
@@ -1162,9 +1165,9 @@ impl PageServerHandler {
         // the batch that was in flight when the Batcher encountered an error,
         // thereby beahving identical to a serial implementation.
 
-        let PageServicePipeliningConfig {
+        let PageServicePipeliningConfigPipelined {
             max_batch_size,
-            protocol_pipelining_mode,
+            execution,
         } = pipelining_config;
 
         // Macro to _define_ a pipeline stage.
@@ -1285,11 +1288,11 @@ impl PageServerHandler {
         // Execute the stages.
         //
 
-        match protocol_pipelining_mode {
-            PageServiceProtocolPipeliningMode::ConcurrentFutures => {
+        match execution {
+            PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures => {
                 tokio::join!(read_messages, executor)
             }
-            PageServiceProtocolPipeliningMode::Tasks => {
+            PageServiceProtocolPipelinedExecutionStrategy::Tasks => {
                 // These tasks are not tracked anywhere.
                 let read_messages_task = tokio::spawn(read_messages);
                 let (read_messages_task_res, executor_res_) =

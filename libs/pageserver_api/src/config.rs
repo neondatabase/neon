@@ -109,7 +109,7 @@ pub struct ConfigToml {
     pub virtual_file_io_mode: Option<crate::models::virtual_file::IoMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_sync: Option<bool>,
-    pub page_service_pipelining: Option<PageServicePipeliningConfig>,
+    pub page_service_pipelining: PageServicePipeliningConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -127,16 +127,23 @@ pub struct DiskUsageEvictionTaskConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
 #[serde(deny_unknown_fields)]
-pub struct PageServicePipeliningConfig {
+pub enum PageServicePipeliningConfig {
+    Serial,
+    Pipelined(PageServicePipeliningConfigPipelined),
+}
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageServicePipeliningConfigPipelined {
     /// Causes runtime errors if larger than max get_vectored batch size.
     pub max_batch_size: NonZeroUsize,
-    pub protocol_pipelining_mode: PageServiceProtocolPipeliningMode,
+    pub execution: PageServiceProtocolPipelinedExecutionStrategy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum PageServiceProtocolPipeliningMode {
+pub enum PageServiceProtocolPipelinedExecutionStrategy {
     ConcurrentFutures,
     Tasks,
 }
@@ -415,10 +422,12 @@ impl Default for ConfigToml {
             virtual_file_io_mode: None,
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
-            page_service_pipelining: Some(PageServicePipeliningConfig {
-                max_batch_size: NonZeroUsize::new(32).unwrap(),
-                protocol_pipelining_mode: PageServiceProtocolPipeliningMode::ConcurrentFutures,
-            }),
+            page_service_pipelining: PageServicePipeliningConfig::Pipelined(
+                PageServicePipeliningConfigPipelined {
+                    max_batch_size: NonZeroUsize::new(32).unwrap(),
+                    execution: PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures,
+                },
+            ),
         }
     }
 }

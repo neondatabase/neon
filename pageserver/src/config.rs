@@ -183,7 +183,7 @@ pub struct PageServerConf {
     /// Optionally disable disk syncs (unsafe!)
     pub no_sync: bool,
 
-    pub page_service_pipelining: Option<pageserver_api::config::PageServicePipeliningConfig>,
+    pub page_service_pipelining: pageserver_api::config::PageServicePipeliningConfig,
 }
 
 /// Token for authentication to safekeepers
