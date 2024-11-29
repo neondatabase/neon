@@ -235,9 +235,7 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.tenant_attach(tenant_id)
     wait_until(
-        number_of_iterations=5,
-        interval=1,
-        func=lambda: assert_tenant_state(http_client, tenant_id, "Active"),
+        lambda: assert_tenant_state(http_client, tenant_id, "Active"),
     )
 
     env.config_tenant(tenant_id, {"gc_horizon": "1000000"})

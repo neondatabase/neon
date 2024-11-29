@@ -385,7 +385,7 @@ def test_pageserver_compaction_circuit_breaker(neon_env_builder: NeonEnvBuilder)
 
     # Wait for enough failures to break the circuit breaker
     # This wait is fairly long because we back off on compaction failures, so 5 retries takes ~30s
-    wait_until(60, 1, assert_broken)
+    wait_until(assert_broken, timeout=60)
 
     # Sleep for a while, during which time we expect that compaction will _not_ be retried
     time.sleep(10)

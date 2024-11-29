@@ -118,17 +118,13 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
         # the latest WAL yet, when the `timeline_detail` API is first called.
         # See: https://github.com/neondatabase/neon/issues/1768.
         lsn = wait_until(
-            number_of_iterations=5,
-            interval=1,
-            func=lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, None),
+            lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, None),
         )
 
         # Make a DB modification then expect getting a new WAL receiver's data.
         endpoint.safe_psql("INSERT INTO t VALUES (1, 'hey')")
         wait_until(
-            number_of_iterations=5,
-            interval=1,
-            func=lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, lsn),
+            lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, lsn),
         )
 
 

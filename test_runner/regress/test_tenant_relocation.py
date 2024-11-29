@@ -298,11 +298,7 @@ def test_tenant_relocation(
         destination_ps.tenant_attach(tenant_id)
 
         # wait for tenant to finish attaching
-        wait_until(
-            number_of_iterations=10,
-            interval=1,
-            func=lambda: assert_tenant_state(destination_http, tenant_id, "Active"),
-        )
+        wait_until(lambda: assert_tenant_state(destination_http, tenant_id, "Active"))
 
         check_timeline_attached(
             destination_http,
