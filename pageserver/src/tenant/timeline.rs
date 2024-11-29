@@ -4,6 +4,7 @@ pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
 pub(crate) mod handle;
+pub(crate) mod import_pgdata;
 mod init;
 pub mod layer_manager;
 pub(crate) mod logical_size;
@@ -2085,6 +2086,11 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
     }
 
+    pub(crate) fn is_gc_blocked_by_lsn_lease_deadline(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf.is_gc_blocked_by_lsn_lease_deadline()
+    }
+
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2647,6 +2653,7 @@ impl Timeline {
         //
         // NB: generation numbers naturally protect against this because they disambiguate
         //     (1) and (4)
+        // TODO: this is basically a no-op now, should we remove it?
         self.remote_client.schedule_barrier()?;
         // Tenant::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
@@ -2702,20 +2709,23 @@ impl Timeline {
                 {
                     Some(cancel) => cancel.cancel(),
                     None => {
-                        let state = self.current_state();
-                        if matches!(
-                            state,
-                            TimelineState::Broken { .. } | TimelineState::Stopping
-                        ) {
-
-                            // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
-                            // Don't make noise.
-                        } else {
-                            warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
-                            debug_assert!(false);
+                        match self.current_state() {
+                            TimelineState::Broken { .. } | TimelineState::Stopping => {
+                                // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
+                                // Don't make noise.
+                            }
+                            TimelineState::Loading => {
+                                // Import does not return an activated timeline.
+                                info!("discarding priority boost for logical size calculation because timeline is not yet active");
+                            }
+                            TimelineState::Active => {
+                                // activation should be setting the once cell
+                                warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
+                                debug_assert!(false);
+                            }
                         }
                     }
-                };
+                }
             }
         }
 

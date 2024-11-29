@@ -1243,7 +1243,7 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
 
 #########################################################################################
 #
-# Compile and run the Neon-specific `compute_ctl` binary
+# Compile and run the Neon-specific `compute_ctl` and `fast_import` binaries
 #
 #########################################################################################
 FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools
@@ -1264,6 +1264,7 @@ RUN cd compute_tools && mold -run cargo build --locked --profile release-line-de
 FROM debian:$DEBIAN_FLAVOR AS compute-tools-image
 
 COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
 
 #########################################################################################
 #
@@ -1458,6 +1459,7 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
 
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
 COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
 
 # pgbouncer and its config
 COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
@@ -1532,6 +1534,25 @@ RUN apt update && \
         $VERSION_INSTALLS && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
+
+# s5cmd 2.2.2 from https://github.com/peak/s5cmd/releases/tag/v2.2.2
+# used by fast_import
+ARG TARGETARCH
+ADD https://github.com/peak/s5cmd/releases/download/v2.2.2/s5cmd_2.2.2_linux_$TARGETARCH.deb /tmp/s5cmd.deb
+RUN set -ex; \
+    \
+    # Determine the expected checksum based on TARGETARCH
+    if [ "${TARGETARCH}" = "amd64" ]; then \
+        CHECKSUM="392c385320cd5ffa435759a95af77c215553d967e4b1c0fffe52e4f14c29cf85"; \
+    elif [ "${TARGETARCH}" = "arm64" ]; then \
+        CHECKSUM="939bee3cf4b5604ddb00e67f8c157b91d7c7a5b553d1fbb6890fad32894b7b46"; \
+    else \
+        echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
+    fi; \
+    \
+    # Compute and validate the checksum
+    echo "${CHECKSUM}  /tmp/s5cmd.deb" | sha256sum -c -
+RUN dpkg -i /tmp/s5cmd.deb && rm /tmp/s5cmd.deb
 
 ENV LANG=en_US.utf8
 USER postgres

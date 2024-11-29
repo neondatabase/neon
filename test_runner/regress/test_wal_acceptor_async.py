@@ -5,7 +5,6 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import asyncpg
 import pytest
@@ -15,10 +14,6 @@ from fixtures.log_helper import getLogger
 from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonEnvBuilder, Safekeeper
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import skip_in_debug_build
-
-if TYPE_CHECKING:
-    from typing import Optional
-
 
 log = getLogger("root.safekeeper_async")
 
@@ -261,7 +256,7 @@ def test_restarts_frequent_checkpoints(neon_env_builder: NeonEnvBuilder):
 
 
 def endpoint_create_start(
-    env: NeonEnv, branch: str, pgdir_name: Optional[str], allow_multiple: bool = False
+    env: NeonEnv, branch: str, pgdir_name: str | None, allow_multiple: bool = False
 ):
     endpoint = Endpoint(
         env,
@@ -287,7 +282,7 @@ async def exec_compute_query(
     env: NeonEnv,
     branch: str,
     query: str,
-    pgdir_name: Optional[str] = None,
+    pgdir_name: str | None = None,
     allow_multiple: bool = False,
 ):
     with endpoint_create_start(
@@ -705,7 +700,7 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Pat
         # invalid, to make them unavailable to the endpoint.  We use
         # ports 10, 11 and 12 to simulate unavailable safekeepers.
         config = toml.load(test_output_dir / "repo" / "config")
-        for i, (_sk, active) in enumerate(zip(env.safekeepers, active_sk)):
+        for i, (_sk, active) in enumerate(zip(env.safekeepers, active_sk, strict=False)):
             if active:
                 config["safekeepers"][i]["pg_port"] = env.safekeepers[i].port.pg
             else:

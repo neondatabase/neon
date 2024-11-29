@@ -1,7 +1,6 @@
-use hyper::{Body, Request, Response, StatusCode, Uri};
-use once_cell::sync::Lazy;
+use hyper::{Body, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Write as _;
 use std::str::FromStr;
@@ -14,7 +13,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, Instrument};
 use utils::failpoint_support::failpoints_handler;
-use utils::http::endpoint::{prometheus_metrics_handler, request_span, ChannelWriter};
+use utils::http::endpoint::{
+    profile_cpu_handler, prometheus_metrics_handler, request_span, ChannelWriter,
+};
 use utils::http::request::parse_query_param;
 
 use postgres_ffi::WAL_SEGMENT_SIZE;
@@ -572,14 +573,8 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
     let mut router = endpoint::make_router();
     if conf.http_auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
-            #[allow(clippy::mutable_key_type)]
-            static ALLOWLIST_ROUTES: Lazy<HashSet<Uri>> = Lazy::new(|| {
-                ["/v1/status", "/metrics"]
-                    .iter()
-                    .map(|v| v.parse().unwrap())
-                    .collect()
-            });
-            if ALLOWLIST_ROUTES.contains(request.uri()) {
+            const ALLOWLIST_ROUTES: &[&str] = &["/v1/status", "/metrics", "/profile/cpu"];
+            if ALLOWLIST_ROUTES.contains(&request.uri().path()) {
                 None
             } else {
                 // Option<Arc<SwappableJwtAuth>> is always provided as data below, hence unwrap().
@@ -598,6 +593,7 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .data(Arc::new(conf))
         .data(auth)
         .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
+        .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
         .get("/v1/status", |r| request_span(r, status_handler))
         .put("/v1/failpoints", |r| {
             request_span(r, move |r| async {

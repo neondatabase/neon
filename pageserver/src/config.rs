@@ -144,6 +144,10 @@ pub struct PageServerConf {
     /// JWT token for use with the control plane API.
     pub control_plane_api_token: Option<SecretString>,
 
+    pub import_pgdata_upcall_api: Option<Url>,
+    pub import_pgdata_upcall_api_token: Option<SecretString>,
+    pub import_pgdata_aws_endpoint_url: Option<Url>,
+
     /// If true, pageserver will make best-effort to operate without a control plane: only
     /// for use in major incidents.
     pub control_plane_emergency_mode: bool,
@@ -326,6 +330,9 @@ impl PageServerConf {
             control_plane_api,
             control_plane_api_token,
             control_plane_emergency_mode,
+            import_pgdata_upcall_api,
+            import_pgdata_upcall_api_token,
+            import_pgdata_aws_endpoint_url,
             heatmap_upload_concurrency,
             secondary_download_concurrency,
             ingest_batch_size,
@@ -380,6 +387,9 @@ impl PageServerConf {
             image_compression,
             timeline_offloading,
             ephemeral_bytes_per_memory_kb,
+            import_pgdata_upcall_api,
+            import_pgdata_upcall_api_token: import_pgdata_upcall_api_token.map(SecretString::from),
+            import_pgdata_aws_endpoint_url,
             page_service_pipelining,
 
             // ------------------------------------------------------------
