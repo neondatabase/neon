@@ -2606,7 +2606,7 @@ def test_s3_eviction(
         assert n_evicted  # make mypy happy
         assert int(n_evicted) == n_timelines
 
-    wait_until(all_evicted)
+    wait_until(all_evicted, timeout=30)
     # restart should preserve the metric value
     sk.stop().start()
     wait_until(all_evicted)
