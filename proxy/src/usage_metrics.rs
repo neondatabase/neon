@@ -292,15 +292,7 @@ async fn collect_metrics_iteration(
     }
 
     let cancel = CancellationToken::new();
-    let path_prefix = format!(
-        "year={year:04}/month={month:02}/day={day:02}/{hour:02}:{minute:02}:{second:02}Z",
-        year = now.year(),
-        month = now.month(),
-        day = now.day(),
-        hour = now.hour(),
-        minute = now.minute(),
-        second = now.second(),
-    );
+    let path_prefix = create_remote_path_prefix(now);
 
     // Send metrics.
     for chunk in create_event_chunks(&metrics_to_send, hostname, prev, now, outer_chunk_size) {
@@ -313,6 +305,18 @@ async fn collect_metrics_iteration(
             }
         );
     }
+}
+
+fn create_remote_path_prefix(now: DateTime<Utc>) -> String {
+    format!(
+        "year={year:04}/month={month:02}/day={day:02}/{hour:02}:{minute:02}:{second:02}Z",
+        year = now.year(),
+        month = now.month(),
+        day = now.day(),
+        hour = now.hour(),
+        minute = now.minute(),
+        second = now.second(),
+    )
 }
 
 async fn upload_main_events_chunked(
@@ -404,9 +408,12 @@ async fn upload_backup_events(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::BufReader;
     use std::sync::{Arc, Mutex};
 
     use anyhow::Error;
+    use camino_tempfile::tempdir;
     use chrono::Utc;
     use consumption_metrics::{Event, EventChunk};
     use http_body_util::BodyExt;
@@ -415,6 +422,7 @@ mod tests {
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
+    use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
     use tokio::net::TcpListener;
     use url::Url;
 
@@ -460,12 +468,28 @@ mod tests {
         let endpoint = Url::parse(&format!("http://{addr}")).unwrap();
         let now = Utc::now();
 
+        let storage_test_dir = tempdir().unwrap();
+        let local_fs_path = storage_test_dir.path().join("usage_metrics");
+        fs::create_dir_all(&local_fs_path).unwrap();
+        let storage = GenericRemoteStorage::from_config(&RemoteStorageConfig {
+            storage: RemoteStorageKind::LocalFs {
+                local_path: local_fs_path.clone(),
+            },
+            timeout: Duration::from_secs(10),
+            small_timeout: Duration::from_secs(1),
+        })
+        .await
+        .unwrap();
+
+        let mut pushed_chunks: Vec<Report> = Vec::new();
+        let mut stored_chunks: Vec<Report> = Vec::new();
+
         // no counters have been registered
         collect_metrics_iteration(
             &metrics.endpoints,
             &client,
             &endpoint,
-            None,
+            Some(&storage),
             1000,
             "foo",
             now,
@@ -487,7 +511,7 @@ mod tests {
             &metrics.endpoints,
             &client,
             &endpoint,
-            None,
+            Some(&storage),
             1000,
             "foo",
             now,
@@ -498,6 +522,7 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].events.len(), 1);
         assert_eq!(r[0].events[0].value, 0);
+        pushed_chunks.extend(r);
 
         // record egress
         counter.record_egress(1);
@@ -507,7 +532,7 @@ mod tests {
             &metrics.endpoints,
             &client,
             &endpoint,
-            None,
+            Some(&storage),
             1000,
             "foo",
             now,
@@ -518,6 +543,7 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].events.len(), 1);
         assert_eq!(r[0].events[0].value, 1);
+        pushed_chunks.extend(r);
 
         // release counter
         drop(counter);
@@ -527,7 +553,7 @@ mod tests {
             &metrics.endpoints,
             &client,
             &endpoint,
-            None,
+            Some(&storage),
             1000,
             "foo",
             now,
@@ -539,5 +565,26 @@ mod tests {
 
         // counter is unregistered
         assert!(metrics.endpoints.is_empty());
+
+        let path_prefix = create_remote_path_prefix(now);
+        for entry in walkdir::WalkDir::new(&local_fs_path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = local_fs_path.join(&path_prefix).to_string();
+            if entry.path().to_str().unwrap().starts_with(&path) {
+                let chunk = serde_json::from_reader(flate2::bufread::GzDecoder::new(
+                    BufReader::new(fs::File::open(entry.into_path()).unwrap()),
+                ))
+                .unwrap();
+                stored_chunks.push(chunk);
+            }
+        }
+        storage_test_dir.close().ok();
+
+        // sort by first event's idempotency key because the order of files is nondeterministic
+        pushed_chunks.sort_by_cached_key(|c| c.events[0].idempotency_key.clone());
+        stored_chunks.sort_by_cached_key(|c| c.events[0].idempotency_key.clone());
+        assert_eq!(pushed_chunks, stored_chunks);
     }
 }
