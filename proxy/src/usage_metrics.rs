@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Timelike, Utc};
@@ -327,31 +327,39 @@ async fn collect_metrics_iteration(
 
     // Send metrics.
     for chunk in create_event_chunks(&metrics_to_send, hostname, prev, now, outer_chunk_size) {
-        // Split into smaller chunks to avoid exceeding the max request size
-        for subchunk in chunk.events.chunks(CHUNK_SIZE).map(|c| EventChunk {
-            events: Cow::Borrowed(c),
-        }) {
-            let res = client
-                .post(metric_collection_endpoint.clone())
-                .json(&subchunk)
-                .send()
-                .await;
+        upload_main_events_chunked(client, metric_collection_endpoint, &chunk).await;
+    }
+}
 
-            let res = match res {
-                Ok(x) => x,
-                Err(err) => {
-                    // TODO: retry?
-                    error!("failed to send metrics: {:?}", err);
-                    continue;
-                }
-            };
+async fn upload_main_events_chunked(
+    client: &http::ClientWithMiddleware,
+    metric_collection_endpoint: &reqwest::Url,
+    chunk: &EventChunk<'_, Event<Ids, &str>>,
+) {
+    // Split into smaller chunks to avoid exceeding the max request size
+    for subchunk in chunk.events.chunks(CHUNK_SIZE).map(|c| EventChunk {
+        events: Cow::Borrowed(c),
+    }) {
+        let res = client
+            .post(metric_collection_endpoint.clone())
+            .json(&subchunk)
+            .send()
+            .await;
 
-            if !res.status().is_success() {
-                error!("metrics endpoint refused the sent metrics: {:?}", res);
-                for metric in subchunk.events.iter().filter(|e| e.value > (1u64 << 40)) {
-                    // Report if the metric value is suspiciously large
-                    warn!("potentially abnormal metric value: {:?}", metric);
-                }
+        let res = match res {
+            Ok(x) => x,
+            Err(err) => {
+                // TODO: retry?
+                error!("failed to send metrics: {:?}", err);
+                continue;
+            }
+        };
+
+        if !res.status().is_success() {
+            error!("metrics endpoint refused the sent metrics: {:?}", res);
+            for metric in subchunk.events.iter().filter(|e| e.value > (1u64 << 40)) {
+                // Report if the metric value is suspiciously large
+                warn!("potentially abnormal metric value: {:?}", metric);
             }
         }
     }
@@ -416,6 +424,8 @@ async fn collect_metrics_backup_iteration(
     let minute = now.minute();
     let second = now.second();
     let cancel = CancellationToken::new();
+    let path_prefix =
+        format!("year={year:04}/month={month:02}/day={day:02}/{hour:02}:{minute:02}:{second:02}Z");
 
     info!("starting collect_metrics_backup_iteration");
 
@@ -427,22 +437,7 @@ async fn collect_metrics_backup_iteration(
 
     // Send metrics.
     for chunk in create_event_chunks(&metrics_to_send, hostname, prev, now, chunk_size) {
-        let real_now = Utc::now();
-        let id = uuid::Uuid::new_v7(Timestamp::from_unix(
-            NoContext,
-            real_now.second().into(),
-            real_now.nanosecond(),
-        ));
-        let path = format!("year={year:04}/month={month:02}/day={day:02}/{hour:02}:{minute:02}:{second:02}Z_{id}.json.gz");
-        let remote_path = match RemotePath::from_string(&path) {
-            Ok(remote_path) => remote_path,
-            Err(e) => {
-                error!("failed to create remote path from str {path}: {:?}", e);
-                continue;
-            }
-        };
-
-        let res = upload_events_chunk(storage, chunk, &remote_path, &cancel).await;
+        let res = upload_backup_events(storage, &chunk, &path_prefix, &cancel).await;
 
         if let Err(e) = res {
             error!(
@@ -453,17 +448,32 @@ async fn collect_metrics_backup_iteration(
     }
 }
 
-async fn upload_events_chunk(
+async fn upload_backup_events(
     storage: Option<&GenericRemoteStorage>,
-    chunk: EventChunk<'_, Event<Ids, &'static str>>,
-    remote_path: &RemotePath,
+    chunk: &EventChunk<'_, Event<Ids, &'static str>>,
+    path_prefix: &str,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     let Some(storage) = storage else {
-        error!("no remote storage configured");
+        warn!("no remote storage configured");
         return Ok(());
     };
-    let data = serde_json::to_vec(&chunk).context("serialize metrics")?;
+
+    let real_now = Utc::now();
+    let id = uuid::Uuid::new_v7(Timestamp::from_unix(
+        NoContext,
+        real_now.second().into(),
+        real_now.nanosecond(),
+    ));
+    let path = format!("{path_prefix}_{id}.json.gz");
+    let remote_path = match RemotePath::from_string(&path) {
+        Ok(remote_path) => remote_path,
+        Err(e) => {
+            bail!("failed to create remote path from str {path}: {:?}", e);
+        }
+    };
+
+    let data = serde_json::to_vec(chunk).context("serialize metrics")?;
     let mut encoder = GzipEncoder::new(Vec::new());
     encoder.write_all(&data).await.context("compress metrics")?;
     encoder.shutdown().await.context("compress metrics")?;
@@ -472,7 +482,7 @@ async fn upload_events_chunk(
         || async {
             let stream = futures::stream::once(futures::future::ready(Ok(compressed_data.clone())));
             storage
-                .upload(stream, compressed_data.len(), remote_path, None, cancel)
+                .upload(stream, compressed_data.len(), &remote_path, None, cancel)
                 .await
         },
         TimeoutOrCancel::caused_by_cancel,
