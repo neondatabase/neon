@@ -539,13 +539,18 @@ pub(crate) struct RemoteTenantManifestInfo {
     pub(crate) unknown_keys: Vec<ListingObject>,
 }
 
+pub(crate) struct ListTenantManifestResult {
+    pub(crate) errors: Vec<String>,
+    pub(crate) manifest_info: RemoteTenantManifestInfo,
+}
+
 /// Returns [`ListTimelineBlobsResult::MissingIndexPart`] if blob data has layer files
 /// but is missing [`IndexPart`], otherwise returns [`ListTimelineBlobsResult::Ready`].
 pub(crate) async fn list_tenant_manifests(
     remote_client: &GenericRemoteStorage,
     tenant_id: TenantShardId,
     root_target: &RootTarget,
-) -> anyhow::Result<RemoteTenantManifestInfo> {
+) -> anyhow::Result<ListTenantManifestResult> {
     let mut errors = Vec::new();
     let mut unknown_keys = Vec::new();
 
@@ -593,10 +598,13 @@ pub(crate) async fn list_tenant_manifests(
     if manifests.is_empty() {
         tracing::debug!("No manifest for timeline.");
 
-        return Ok(RemoteTenantManifestInfo {
-            latest_generation: None,
-            manifests,
-            unknown_keys,
+        return Ok(ListTenantManifestResult {
+            errors,
+            manifest_info: RemoteTenantManifestInfo {
+                latest_generation: None,
+                manifests,
+                unknown_keys,
+            },
         });
     }
 
@@ -614,20 +622,26 @@ pub(crate) async fn list_tenant_manifests(
                 // It is possible that the tenant gets deleted in-between we list the objects
                 // and we download the manifest file.
                 errors.push(format!("failed to download tenant-manifest.json: {e}"));
-                return Ok(RemoteTenantManifestInfo {
-                    latest_generation: Some(latest_generation),
-                    manifests,
-                    unknown_keys,
+                return Ok(ListTenantManifestResult {
+                    errors,
+                    manifest_info: RemoteTenantManifestInfo {
+                        latest_generation: Some(latest_generation),
+                        manifests,
+                        unknown_keys,
+                    },
                 });
             }
         };
 
     match TenantManifest::from_json_bytes(&manifest_bytes) {
         Ok(_manifest) => {
-            return Ok(RemoteTenantManifestInfo {
-                latest_generation: Some(latest_generation),
-                manifests,
-                unknown_keys,
+            return Ok(ListTenantManifestResult {
+                errors,
+                manifest_info: RemoteTenantManifestInfo {
+                    latest_generation: Some(latest_generation),
+                    manifests,
+                    unknown_keys,
+                },
             });
         }
         Err(parse_error) => errors.push(format!(
@@ -641,9 +655,12 @@ pub(crate) async fn list_tenant_manifests(
         );
     }
 
-    Ok(RemoteTenantManifestInfo {
-        latest_generation: Some(latest_generation),
-        manifests,
-        unknown_keys,
+    Ok(ListTenantManifestResult {
+        errors,
+        manifest_info: RemoteTenantManifestInfo {
+            latest_generation: Some(latest_generation),
+            manifests,
+            unknown_keys,
+        },
     })
 }

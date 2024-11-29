@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::checks::{list_tenant_manifests, list_timeline_blobs, BlobDataParseResult};
+use crate::checks::{
+    list_tenant_manifests, list_timeline_blobs, BlobDataParseResult, ListTenantManifestResult,
+};
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
 use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId, MAX_RETRIES};
 use futures_util::{StreamExt, TryStreamExt};
@@ -527,29 +529,37 @@ async fn gc_tenant_manifests(
     tenant_shard_id: TenantShardId,
 ) -> anyhow::Result<GcSummary> {
     let mut gc_summary = GcSummary::default();
-    let mut remote_manifest_info =
-        list_tenant_manifests(remote_client, tenant_shard_id, target).await?;
-    let Some(latest_gen) = remote_manifest_info.latest_generation else {
-        return Ok(gc_summary);
-    };
-    remote_manifest_info
-        .manifests
-        .sort_by_key(|(generation, _obj)| *generation);
-    // skip the two latest generations (they don't neccessarily have to be 1 apart from each other)
-    let candidates = remote_manifest_info.manifests.iter().rev().skip(2);
-    for (_generation, key) in candidates {
-        maybe_delete_tenant_manifest(
-            remote_client,
-            &min_age,
-            latest_gen,
-            &key,
-            mode,
-            &mut gc_summary,
-        )
-        .instrument(
-            info_span!("maybe_delete_tenant_manifest", %tenant_shard_id, ?latest_gen, %key.key),
-        )
-        .await;
+    let ListTenantManifestResult {
+        errors,
+        mut manifest_info,
+    } = list_tenant_manifests(remote_client, tenant_shard_id, target).await?;
+    if errors.is_empty() {
+        for error in errors {
+            tracing::warn!(%tenant_shard_id, "list_tenant_manifests: {error}");
+        }
+    } else {
+        let Some(latest_gen) = manifest_info.latest_generation else {
+            return Ok(gc_summary);
+        };
+        manifest_info
+            .manifests
+            .sort_by_key(|(generation, _obj)| *generation);
+        // skip the two latest generations (they don't neccessarily have to be 1 apart from each other)
+        let candidates = manifest_info.manifests.iter().rev().skip(2);
+        for (_generation, key) in candidates {
+            maybe_delete_tenant_manifest(
+                remote_client,
+                &min_age,
+                latest_gen,
+                &key,
+                mode,
+                &mut gc_summary,
+            )
+            .instrument(
+                info_span!("maybe_delete_tenant_manifest", %tenant_shard_id, ?latest_gen, %key.key),
+            )
+            .await;
+        }
     }
     Ok(gc_summary)
 }
