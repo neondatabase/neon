@@ -226,8 +226,8 @@ def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_en
 def test_physical_replication_config_mismatch_max_locks_per_transaction(neon_simple_env: NeonEnv):
     """
     Test for primary and replica with different configuration settings (max_locks_per_transaction).
-    In  conjunction with different number of max_connections at primary and standby it "cause out of shared memory"
-    error if primary obtain larger number of locks.
+    In  conjunction with different number of max_connections at primary and standby it can cause "out of shared memory"
+    error if the primary obtains more AccessExclusiveLocks than the standby can hold.
     """
     env = neon_simple_env
     primary = env.endpoints.create_start(
