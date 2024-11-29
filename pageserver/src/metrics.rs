@@ -1222,17 +1222,40 @@ pub(crate) struct GlobalAndPerTimelineHistogramTimer<'c> {
     // Optional because not all op types are tracked per-timeline
     per_timeline_latency_histo: Option<Histogram>,
 
-    start: Instant,
-
     ctx: &'c RequestContext,
+    start: std::time::Instant,
+    op: SmgrQueryType,
 }
 
 impl<'c> Drop for GlobalAndPerTimelineHistogramTimer<'c> {
     fn drop(&mut self) {
-        let elapsed = self.start.elapsed().as_secs_f64();
-        self.global_latency_histo.observe(elapsed);
+        let elapsed = self.start.elapsed();
+        let ex_throttled = self
+            .ctx
+            .micros_spent_throttled
+            .close_and_checked_sub_from(elapsed);
+        let ex_throttled = match ex_throttled {
+            Ok(res) => res,
+            Err(error) => {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<enum_map::EnumMap<SmgrQueryType, RateLimit>>> =
+                    Lazy::new(|| {
+                        Mutex::new(enum_map::EnumMap::from_array(std::array::from_fn(|_| {
+                            RateLimit::new(Duration::from_secs(10))
+                        })))
+                    });
+                let mut guard = LOGGED.lock().unwrap();
+                let rate_limit = &mut guard[self.op];
+                rate_limit.call(|| {
+                    warn!(op=?self.op, error, "error deducting time spent throttled; this message is logged at a global rate limit");
+                });
+                elapsed
+            }
+        };
+        self.global_latency_histo
+            .observe(ex_throttled.as_secs_f64());
         if let Some(per_timeline_getpage_histo) = &self.per_timeline_latency_histo {
-            per_timeline_getpage_histo.observe(elapsed);
+            per_timeline_getpage_histo.observe(ex_throttled.as_secs_f64());
         }
     }
 }
@@ -1416,6 +1439,7 @@ impl SmgrQueryTimePerTimeline {
             per_timeline_latency_histo,
             start,
             ctx,
+            op,
         }
     }
 }
@@ -1428,7 +1452,10 @@ mod smgr_query_time_tests {
     use strum::IntoEnumIterator;
     use utils::id::{TenantId, TimelineId};
 
-    use crate::{context::{DownloadBehavior, RequestContext}, task_mgr::TaskKind};
+    use crate::{
+        context::{DownloadBehavior, RequestContext},
+        task_mgr::TaskKind,
+    };
 
     // Regression test, we used hard-coded string constants before using an enum.
     #[test]
