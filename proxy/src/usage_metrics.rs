@@ -58,54 +58,20 @@ trait MetricCounterReporter {
 }
 
 #[derive(Debug)]
-struct MetricBackupCounter {
-    transmitted: AtomicU64,
-    opened_connections: AtomicUsize,
-}
-
-impl MetricCounterRecorder for MetricBackupCounter {
-    fn record_egress(&self, bytes: u64) {
-        self.transmitted.fetch_add(bytes, Ordering::AcqRel);
-    }
-
-    fn record_connection(&self, count: usize) {
-        self.opened_connections.fetch_add(count, Ordering::AcqRel);
-    }
-}
-
-impl MetricCounterReporter for MetricBackupCounter {
-    fn get_metrics(&mut self) -> (u64, usize) {
-        (
-            *self.transmitted.get_mut(),
-            *self.opened_connections.get_mut(),
-        )
-    }
-    fn move_metrics(&self) -> (u64, usize) {
-        (
-            self.transmitted.swap(0, Ordering::AcqRel),
-            self.opened_connections.swap(0, Ordering::AcqRel),
-        )
-    }
-}
-
-#[derive(Debug)]
 pub(crate) struct MetricCounter {
     transmitted: AtomicU64,
     opened_connections: AtomicUsize,
-    backup: Arc<MetricBackupCounter>,
 }
 
 impl MetricCounterRecorder for MetricCounter {
     /// Record that some bytes were sent from the proxy to the client
     fn record_egress(&self, bytes: u64) {
-        self.transmitted.fetch_add(bytes, Ordering::AcqRel);
-        self.backup.record_egress(bytes);
+        self.transmitted.fetch_add(bytes, Ordering::Relaxed);
     }
 
     /// Record that some connections were opened
     fn record_connection(&self, count: usize) {
-        self.opened_connections.fetch_add(count, Ordering::AcqRel);
-        self.backup.record_connection(count);
+        self.opened_connections.fetch_add(count, Ordering::Relaxed);
     }
 }
 
@@ -118,8 +84,8 @@ impl MetricCounterReporter for MetricCounter {
     }
     fn move_metrics(&self) -> (u64, usize) {
         (
-            self.transmitted.swap(0, Ordering::AcqRel),
-            self.opened_connections.swap(0, Ordering::AcqRel),
+            self.transmitted.swap(0, Ordering::Relaxed),
+            self.opened_connections.swap(0, Ordering::Relaxed),
         )
     }
 }
@@ -172,26 +138,11 @@ type FastHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 #[derive(Default)]
 pub(crate) struct Metrics {
     endpoints: DashMap<Ids, Arc<MetricCounter>, FastHasher>,
-    backup_endpoints: DashMap<Ids, Arc<MetricBackupCounter>, FastHasher>,
 }
 
 impl Metrics {
     /// Register a new byte metrics counter for this endpoint
     pub(crate) fn register(&self, ids: Ids) -> Arc<MetricCounter> {
-        let backup = if let Some(entry) = self.backup_endpoints.get(&ids) {
-            entry.clone()
-        } else {
-            self.backup_endpoints
-                .entry(ids.clone())
-                .or_insert_with(|| {
-                    Arc::new(MetricBackupCounter {
-                        transmitted: AtomicU64::new(0),
-                        opened_connections: AtomicUsize::new(0),
-                    })
-                })
-                .clone()
-        };
-
         let entry = if let Some(entry) = self.endpoints.get(&ids) {
             entry.clone()
         } else {
@@ -201,7 +152,6 @@ impl Metrics {
                     Arc::new(MetricCounter {
                         transmitted: AtomicU64::new(0),
                         opened_connections: AtomicUsize::new(0),
-                        backup: backup.clone(),
                     })
                 })
                 .clone()
