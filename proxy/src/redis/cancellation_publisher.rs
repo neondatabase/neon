@@ -1,3 +1,4 @@
+use core::net::IpAddr;
 use std::sync::Arc;
 
 use pq_proto::CancelKeyData;
@@ -15,6 +16,7 @@ pub trait CancellationPublisherMut: Send + Sync + 'static {
         &mut self,
         cancel_key_data: CancelKeyData,
         session_id: Uuid,
+        peer_addr: IpAddr,
     ) -> anyhow::Result<()>;
 }
 
@@ -24,6 +26,7 @@ pub trait CancellationPublisher: Send + Sync + 'static {
         &self,
         cancel_key_data: CancelKeyData,
         session_id: Uuid,
+        peer_addr: IpAddr,
     ) -> anyhow::Result<()>;
 }
 
@@ -32,6 +35,7 @@ impl CancellationPublisher for () {
         &self,
         _cancel_key_data: CancelKeyData,
         _session_id: Uuid,
+        _peer_addr: IpAddr,
     ) -> anyhow::Result<()> {
         Ok(())
     }
@@ -42,8 +46,10 @@ impl<P: CancellationPublisher> CancellationPublisherMut for P {
         &mut self,
         cancel_key_data: CancelKeyData,
         session_id: Uuid,
+        peer_addr: IpAddr,
     ) -> anyhow::Result<()> {
-        <P as CancellationPublisher>::try_publish(self, cancel_key_data, session_id).await
+        <P as CancellationPublisher>::try_publish(self, cancel_key_data, session_id, peer_addr)
+            .await
     }
 }
 
@@ -52,9 +58,10 @@ impl<P: CancellationPublisher> CancellationPublisher for Option<P> {
         &self,
         cancel_key_data: CancelKeyData,
         session_id: Uuid,
+        peer_addr: IpAddr,
     ) -> anyhow::Result<()> {
         if let Some(p) = self {
-            p.try_publish(cancel_key_data, session_id).await
+            p.try_publish(cancel_key_data, session_id, peer_addr).await
         } else {
             Ok(())
         }
@@ -66,10 +73,11 @@ impl<P: CancellationPublisherMut> CancellationPublisher for Arc<Mutex<P>> {
         &self,
         cancel_key_data: CancelKeyData,
         session_id: Uuid,
+        peer_addr: IpAddr,
     ) -> anyhow::Result<()> {
         self.lock()
             .await
-            .try_publish(cancel_key_data, session_id)
+            .try_publish(cancel_key_data, session_id, peer_addr)
             .await
     }
 }
@@ -97,11 +105,13 @@ impl RedisPublisherClient {
         &mut self,
         cancel_key_data: CancelKeyData,
         session_id: Uuid,
+        peer_addr: IpAddr,
     ) -> anyhow::Result<()> {
         let payload = serde_json::to_string(&Notification::Cancel(CancelSession {
             region_id: Some(self.region_id.clone()),
             cancel_key_data,
             session_id,
+            peer_addr: Some(peer_addr),
         }))?;
         let _: () = self.client.publish(PROXY_CHANNEL_NAME, payload).await?;
         Ok(())
@@ -120,13 +130,14 @@ impl RedisPublisherClient {
         &mut self,
         cancel_key_data: CancelKeyData,
         session_id: Uuid,
+        peer_addr: IpAddr,
     ) -> anyhow::Result<()> {
         // TODO: review redundant error duplication logs.
         if !self.limiter.check() {
             tracing::info!("Rate limit exceeded. Skipping cancellation message");
             return Err(anyhow::anyhow!("Rate limit exceeded"));
         }
-        match self.publish(cancel_key_data, session_id).await {
+        match self.publish(cancel_key_data, session_id, peer_addr).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 tracing::error!("failed to publish a message: {e}");
@@ -134,7 +145,7 @@ impl RedisPublisherClient {
         }
         tracing::info!("Publisher is disconnected. Reconnectiong...");
         self.try_connect().await?;
-        self.publish(cancel_key_data, session_id).await
+        self.publish(cancel_key_data, session_id, peer_addr).await
     }
 }
 
@@ -143,9 +154,13 @@ impl CancellationPublisherMut for RedisPublisherClient {
         &mut self,
         cancel_key_data: CancelKeyData,
         session_id: Uuid,
+        peer_addr: IpAddr,
     ) -> anyhow::Result<()> {
         tracing::info!("publishing cancellation key to Redis");
-        match self.try_publish_internal(cancel_key_data, session_id).await {
+        match self
+            .try_publish_internal(cancel_key_data, session_id, peer_addr)
+            .await
+        {
             Ok(()) => {
                 tracing::debug!("cancellation key successfuly published to Redis");
                 Ok(())

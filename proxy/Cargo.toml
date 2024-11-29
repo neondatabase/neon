@@ -55,6 +55,7 @@ parquet.workspace = true
 parquet_derive.workspace = true
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
+postgres-protocol = { package = "postgres-protocol2", path = "../libs/proxy/postgres-protocol2" }
 pq_proto.workspace = true
 prometheus.workspace = true
 rand.workspace = true
@@ -80,8 +81,7 @@ subtle.workspace = true
 thiserror.workspace = true
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl = { workspace = true, features = ["use_std"] }
-tokio-postgres = { workspace = true, features = ["with-serde_json-1"] }
-tokio-postgres-rustls.workspace = true
+tokio-postgres = { package = "tokio-postgres2", path = "../libs/proxy/tokio-postgres2" }
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["signal"] }
@@ -96,7 +96,6 @@ utils.workspace = true
 uuid.workspace = true
 rustls-native-certs.workspace = true
 x509-parser.workspace = true
-postgres-protocol.workspace = true
 redis.workspace = true
 zerocopy.workspace = true
 
@@ -117,6 +116,5 @@ tokio-tungstenite.workspace = true
 pbkdf2 = { workspace = true, features = ["simple", "std"] }
 rcgen.workspace = true
 rstest.workspace = true
-tokio-postgres-rustls.workspace = true
 walkdir.workspace = true
 rand_distr = "0.4"

@@ -7,7 +7,10 @@ use bytes::Buf;
 use futures::FutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
-use pageserver_api::config::{PageServicePipeliningConfig, PageServiceProtocolPipeliningMode};
+use pageserver_api::config::{
+    PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
+    PageServiceProtocolPipelinedExecutionStrategy,
+};
 use pageserver_api::models::{self, TenantState};
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
@@ -36,6 +39,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::sync::spsc_fold;
 use utils::{
     auth::{Claims, Scope, SwappableJwtAuth},
     id::{TenantId, TimelineId},
@@ -44,7 +48,6 @@ use utils::{
 };
 
 use crate::auth::check_permission;
-use crate::basebackup;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -62,6 +65,7 @@ use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
+use crate::{basebackup, timed_after_cancellation};
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
@@ -158,7 +162,7 @@ pub async fn libpq_listener_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     listener: tokio::net::TcpListener,
     auth_type: AuthType,
-    pipelining_config: Option<PageServicePipeliningConfig>,
+    pipelining_config: PageServicePipeliningConfig,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
 ) -> Connections {
@@ -217,7 +221,7 @@ async fn page_service_conn_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
-    pipelining_config: Option<PageServicePipeliningConfig>,
+    pipelining_config: PageServicePipeliningConfig,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
 ) -> ConnectionHandlerResult {
@@ -319,7 +323,7 @@ struct PageServerHandler {
     /// None only while pagestream protocol is being processed.
     timeline_handles: Option<TimelineHandles>,
 
-    pipelining_config: Option<PageServicePipeliningConfig>,
+    pipelining_config: PageServicePipeliningConfig,
 }
 
 struct TimelineHandles {
@@ -574,7 +578,7 @@ impl PageServerHandler {
     pub fn new(
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
-        pipelining_config: Option<PageServicePipeliningConfig>,
+        pipelining_config: PageServicePipeliningConfig,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
     ) -> Self {
@@ -620,7 +624,7 @@ impl PageServerHandler {
         cancel: &CancellationToken,
         ctx: &RequestContext,
         parent_span: Span,
-    ) -> Result<Option<Box<BatchedFeMessage>>, QueryError>
+    ) -> Result<Option<BatchedFeMessage>, QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     {
@@ -722,7 +726,7 @@ impl PageServerHandler {
                             span,
                             error: $error,
                         };
-                        Ok(Some(Box::new(error)))
+                        Ok(Some(error))
                     }};
                 }
 
@@ -773,7 +777,7 @@ impl PageServerHandler {
                 }
             }
         };
-        Ok(Some(Box::new(batched_msg)))
+        Ok(Some(batched_msg))
     }
 
     /// Post-condition: `batch` is Some()
@@ -781,26 +785,25 @@ impl PageServerHandler {
     #[allow(clippy::boxed_local)]
     fn pagestream_do_batch(
         max_batch_size: NonZeroUsize,
-        batch: &mut Option<Box<BatchedFeMessage>>,
-        this_msg: Box<BatchedFeMessage>,
-    ) -> Option<Box<BatchedFeMessage>> {
+        batch: &mut Result<BatchedFeMessage, QueryError>,
+        this_msg: Result<BatchedFeMessage, QueryError>,
+    ) -> Result<(), Result<BatchedFeMessage, QueryError>> {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
-        match (batch.as_deref_mut(), *this_msg) {
-            // nothing batched yet
-            (None, this_msg) => {
-                *batch = Some(Box::new(this_msg));
-                None
-            }
+        let this_msg = match this_msg {
+            Ok(this_msg) => this_msg,
+            Err(e) => return Err(Err(e)),
+        };
+
+        match (&mut *batch, this_msg) {
             // something batched already, let's see if we can add this message to the batch
             (
-                Some(BatchedFeMessage::GetPage {
+                Ok(BatchedFeMessage::GetPage {
                     span: _,
                     shard: accum_shard,
                     pages: ref mut accum_pages,
                     effective_request_lsn: accum_lsn,
                 }),
-                // would be nice to have box pattern here
                 BatchedFeMessage::GetPage {
                     span: _,
                     shard: this_shard,
@@ -833,12 +836,12 @@ impl PageServerHandler {
             {
                 // ok to batch
                 accum_pages.extend(this_pages);
-                None
+                Ok(())
             }
             // something batched already but this message is unbatchable
-            (Some(_), this_msg) => {
+            (_, this_msg) => {
                 // by default, don't continue batching
-                Some(Box::new(this_msg)) // TODO: avoid re-box
+                Err(Ok(this_msg))
             }
         }
     }
@@ -848,6 +851,7 @@ impl PageServerHandler {
         &mut self,
         pgb_writer: &mut PostgresBackend<IO>,
         batch: BatchedFeMessage,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<(), QueryError>
     where
@@ -984,7 +988,7 @@ impl PageServerHandler {
         }
         tokio::select! {
             biased;
-            _ = self.cancel.cancelled() => {
+            _ = cancel.cancelled() => {
                 // We were requested to shut down.
                 info!("shutdown request received in page handler");
                 return Err(QueryError::Shutdown)
@@ -1041,8 +1045,8 @@ impl PageServerHandler {
             .expect("implementation error: timeline_handles should not be locked");
 
         let request_span = info_span!("request", shard_id = tracing::field::Empty);
-        let (pgb_reader, timeline_handles) = match self.pipelining_config.clone() {
-            Some(pipelining_config) => {
+        let ((pgb_reader, timeline_handles), result) = match self.pipelining_config.clone() {
+            PageServicePipeliningConfig::Pipelined(pipelining_config) => {
                 self.handle_pagerequests_pipelined(
                     pgb,
                     pgb_reader,
@@ -1055,7 +1059,7 @@ impl PageServerHandler {
                 )
                 .await
             }
-            None => {
+            PageServicePipeliningConfig::Serial => {
                 self.handle_pagerequests_serial(
                     pgb,
                     pgb_reader,
@@ -1067,7 +1071,7 @@ impl PageServerHandler {
                 )
                 .await
             }
-        }?;
+        };
 
         debug!("pagestream subprotocol shut down cleanly");
 
@@ -1077,7 +1081,7 @@ impl PageServerHandler {
         let replaced = self.timeline_handles.replace(timeline_handles);
         assert!(replaced.is_none());
 
-        Ok(())
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1090,33 +1094,50 @@ impl PageServerHandler {
         mut timeline_handles: TimelineHandles,
         request_span: Span,
         ctx: &RequestContext,
-    ) -> Result<(PostgresBackendReader<IO>, TimelineHandles), QueryError>
+    ) -> (
+        (PostgresBackendReader<IO>, TimelineHandles),
+        Result<(), QueryError>,
+    )
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     {
-        loop {
+        let cancel = self.cancel.clone();
+        let err = loop {
             let msg = Self::pagestream_read_message(
                 &mut pgb_reader,
                 tenant_id,
                 timeline_id,
                 &mut timeline_handles,
-                &self.cancel,
+                &cancel,
                 ctx,
                 request_span.clone(),
             )
-            .await?;
+            .await;
+            let msg = match msg {
+                Ok(msg) => msg,
+                Err(e) => break e,
+            };
             let msg = match msg {
                 Some(msg) => msg,
                 None => {
                     debug!("pagestream subprotocol end observed");
-                    return Ok((pgb_reader, timeline_handles));
+                    return ((pgb_reader, timeline_handles), Ok(()));
                 }
             };
-            self.pagesteam_handle_batched_message(pgb_writer, *msg, ctx)
-                .await?;
-        }
+            let err = self
+                .pagesteam_handle_batched_message(pgb_writer, msg, &cancel, ctx)
+                .await;
+            match err {
+                Ok(()) => {}
+                Err(e) => break e,
+            }
+        };
+        ((pgb_reader, timeline_handles), Err(err))
     }
 
+    /// # Cancel-Safety
+    ///
+    /// May leak tokio tasks if not polled to completion.
     #[allow(clippy::too_many_arguments)]
     async fn handle_pagerequests_pipelined<IO>(
         &mut self,
@@ -1126,184 +1147,174 @@ impl PageServerHandler {
         timeline_id: TimelineId,
         mut timeline_handles: TimelineHandles,
         request_span: Span,
-        pipelining_config: PageServicePipeliningConfig,
+        pipelining_config: PageServicePipeliningConfigPipelined,
         ctx: &RequestContext,
-    ) -> Result<(PostgresBackendReader<IO>, TimelineHandles), QueryError>
+    ) -> (
+        (PostgresBackendReader<IO>, TimelineHandles),
+        Result<(), QueryError>,
+    )
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     {
-        let PageServicePipeliningConfig {
+        //
+        // Pipelined pagestream handling consists of
+        // - a Batcher that reads requests off the wire and
+        //   and batches them if possible,
+        // - an Executor that processes the batched requests.
+        //
+        // The batch is built up inside an `spsc_fold` channel,
+        // shared betwen Batcher (Sender) and Executor (Receiver).
+        //
+        // The Batcher continously folds client requests into the batch,
+        // while the Executor can at any time take out what's in the batch
+        // in order to process it.
+        // This means the next batch builds up while the Executor
+        // executes the last batch.
+        //
+        // CANCELLATION
+        //
+        // We run both Batcher and Executor futures to completion before
+        // returning from this function.
+        //
+        // If Executor exits first, it signals cancellation to the Batcher
+        // via a CancellationToken that is child of `self.cancel`.
+        // If Batcher exits first, it signals cancellation to the Executor
+        // by dropping the spsc_fold channel Sender.
+        //
+        // CLEAN SHUTDOWN
+        //
+        // Clean shutdown means that the client ends the COPYBOTH session.
+        // In response to such a client message, the Batcher exits.
+        // The Executor continues to run, draining the spsc_fold channel.
+        // Once drained, the spsc_fold recv will fail with a distinct error
+        // indicating that the sender disconnected.
+        // The Executor exits with Ok(()) in response to that error.
+        //
+        // Server initiated shutdown is not clean shutdown, but instead
+        // is an error Err(QueryError::Shutdown) that is propagated through
+        // error propagation.
+        //
+        // ERROR PROPAGATION
+        //
+        // When the Batcher encounter an error, it sends it as a value
+        // through the spsc_fold channel and exits afterwards.
+        // When the Executor observes such an error in the channel,
+        // it exits returning that error value.
+        //
+        // This design ensures that the Executor stage will still process
+        // the batch that was in flight when the Batcher encountered an error,
+        // thereby beahving identical to a serial implementation.
+
+        let PageServicePipeliningConfigPipelined {
             max_batch_size,
-            protocol_pipelining_mode,
+            execution,
         } = pipelining_config;
 
-        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::channel(1);
-        let read_messages = {
-            let cancel = self.cancel.child_token();
+        // Macro to _define_ a pipeline stage.
+        macro_rules! pipeline_stage {
+            ($name:literal, $cancel:expr, $make_fut:expr) => {{
+                let cancel: CancellationToken = $cancel;
+                let stage_fut = $make_fut(cancel.clone());
+                async move {
+                    scopeguard::defer! {
+                        debug!("exiting");
+                    }
+                    timed_after_cancellation(stage_fut, $name, Duration::from_millis(100), &cancel)
+                        .await
+                }
+                .instrument(tracing::info_span!($name))
+            }};
+        }
+
+        //
+        // Batcher
+        //
+
+        let cancel_batcher = self.cancel.child_token();
+        let (mut batch_tx, mut batch_rx) = spsc_fold::channel();
+        let read_messages = pipeline_stage!(
+            "read_messages",
+            cancel_batcher.clone(),
+            move |cancel_batcher| {
+                let ctx = ctx.attached_child();
+                async move {
+                    let mut pgb_reader = pgb_reader;
+                    let mut exit = false;
+                    while !exit {
+                        let read_res = Self::pagestream_read_message(
+                            &mut pgb_reader,
+                            tenant_id,
+                            timeline_id,
+                            &mut timeline_handles,
+                            &cancel_batcher,
+                            &ctx,
+                            request_span.clone(),
+                        )
+                        .await;
+                        let Some(read_res) = read_res.transpose() else {
+                            debug!("client-initiated shutdown");
+                            break;
+                        };
+                        exit |= read_res.is_err();
+                        let could_send = batch_tx
+                            .send(read_res, |batch, res| {
+                                Self::pagestream_do_batch(max_batch_size, batch, res)
+                            })
+                            .await;
+                        exit |= could_send.is_err();
+                    }
+                    (pgb_reader, timeline_handles)
+                }
+            }
+        );
+
+        //
+        // Executor
+        //
+
+        let executor = pipeline_stage!("executor", self.cancel.clone(), move |cancel| {
             let ctx = ctx.attached_child();
             async move {
-                scopeguard::defer! {
-                    debug!("exiting");
-                }
-                let mut pgb_reader = pgb_reader;
+                let _cancel_batcher = cancel_batcher.drop_guard();
                 loop {
-                    let msg = Self::pagestream_read_message(
-                        &mut pgb_reader,
-                        tenant_id,
-                        timeline_id,
-                        &mut timeline_handles,
-                        &cancel,
-                        &ctx,
-                        request_span.clone(),
-                    )
-                    .await?;
-                    let msg = match msg {
-                        Some(msg) => msg,
-                        None => {
-                            debug!("pagestream subprotocol end observed");
-                            break;
+                    let maybe_batch = batch_rx.recv().await;
+                    let batch = match maybe_batch {
+                        Ok(batch) => batch,
+                        Err(spsc_fold::RecvError::SenderGone) => {
+                            debug!("upstream gone");
+                            return Ok(());
                         }
                     };
-                    match requests_tx.send(msg).await {
-                        Ok(()) => {}
-                        Err(tokio::sync::mpsc::error::SendError(_)) => {
-                            debug!("downstream is gone");
-                            break;
+                    let batch = match batch {
+                        Ok(batch) => batch,
+                        Err(e) => {
+                            return Err(e);
                         }
-                    }
-                }
-                Ok((pgb_reader, timeline_handles))
-            }
-        }
-        .instrument(tracing::info_span!("read_messages"));
-
-        enum BatchState {
-            Building(Option<Box<BatchedFeMessage>>),
-            UpstreamDead(Option<Box<BatchedFeMessage>>),
-        }
-        impl BatchState {
-            fn must_building_mut(&mut self) -> &mut Option<Box<BatchedFeMessage>> {
-                match self {
-                    Self::Building(maybe_batch) => maybe_batch,
-                    Self::UpstreamDead(_) => panic!("upstream dead"),
-                }
-            }
-        }
-        let (batch_tx, mut batch_rx) = tokio::sync::watch::channel(Arc::new(
-            std::sync::Mutex::new(BatchState::Building(None)),
-        ));
-        let notify_batcher = Arc::new(tokio::sync::Notify::new());
-        let batcher = {
-            let notify_batcher = notify_batcher.clone();
-            async move {
-                scopeguard::defer! {
-                    debug!("exiting");
-                }
-                loop {
-                    let maybe_req = requests_rx.recv().await;
-                    let Some(req) = maybe_req else {
-                        batch_tx.send_modify(|pending_batch| {
-                            let mut guard = pending_batch.lock().unwrap();
-                            match &mut *guard {
-                                BatchState::Building(batch) => {
-                                    *guard = BatchState::UpstreamDead(batch.take());
-                                }
-                                BatchState::UpstreamDead(_) => panic!("twice"),
-                            }
-                        });
-                        break;
                     };
-                    // don't read new requests before this one has been processed
-                    let mut req = Some(req);
-                    loop {
-                        let mut wait_notified = None;
-                        let batched = batch_tx.send_if_modified(|pending_batch| {
-                            let mut guard = pending_batch.lock().unwrap();
-                            let building = guard.must_building_mut();
-                            match Self::pagestream_do_batch(
-                                max_batch_size,
-                                building,
-                                req.take().unwrap(),
-                            ) {
-                                Some(req_was_not_batched) => {
-                                    req.replace(req_was_not_batched);
-                                    wait_notified = Some(notify_batcher.notified());
-                                    false
-                                }
-                                None => true,
-                            }
-                        });
-                        if batched {
-                            break;
-                        } else {
-                            wait_notified.unwrap().await;
-                        }
-                    }
+                    self.pagesteam_handle_batched_message(pgb_writer, batch, &cancel, &ctx)
+                        .await?;
                 }
             }
-        }
-        .instrument(tracing::info_span!("batcher"));
+        });
 
-        let executor = async {
-            let mut stop = false;
-            while !stop {
-                match batch_rx.changed().await {
-                    Ok(()) => {}
-                    Err(_) => {
-                        debug!("batch_rx observed disconnection of batcher");
-                    }
-                };
-                let maybe_batch = {
-                    let borrow = batch_rx.borrow();
-                    let mut guard = borrow.lock().unwrap();
-                    match &mut *guard {
-                        BatchState::Building(maybe_batch) => maybe_batch.take(),
-                        BatchState::UpstreamDead(maybe_batch) => {
-                            debug!("upstream dead");
-                            stop = true;
-                            maybe_batch.take()
-                        }
-                    }
-                };
-                let Some(batch) = maybe_batch else {
-                    break;
-                };
-                notify_batcher.notify_one();
-                debug!("processing batch");
-                self.pagesteam_handle_batched_message(pgb_writer, *batch, ctx)
-                    .await?;
-            }
-            Ok(())
-        };
+        //
+        // Execute the stages.
+        //
 
-        let read_messages_res;
-        let executor_res;
-        match protocol_pipelining_mode {
-            PageServiceProtocolPipeliningMode::ConcurrentFutures => {
-                (read_messages_res, _, executor_res) =
-                    tokio::join!(read_messages, batcher, executor);
+        match execution {
+            PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures => {
+                tokio::join!(read_messages, executor)
             }
-            PageServiceProtocolPipeliningMode::Tasks => {
-                // cancelled via sensitivity to self.cancel
-                let read_messages_task = tokio::task::spawn(read_messages);
-                // cancelled when it observes read_messages_task disconnect the channel
-                let batcher_task = tokio::task::spawn(batcher);
-                executor_res = executor.await;
-                read_messages_res = read_messages_task
-                    .await
-                    .context("read_messages task panicked, check logs for details")?;
-                let _: () = batcher_task
-                    .await
-                    .context("batcher task panicked, check logs for details")?;
+            PageServiceProtocolPipelinedExecutionStrategy::Tasks => {
+                // These tasks are not tracked anywhere.
+                let read_messages_task = tokio::spawn(read_messages);
+                let (read_messages_task_res, executor_res_) =
+                    tokio::join!(read_messages_task, executor,);
+                (
+                    read_messages_task_res.expect("propagated panic from read_messages"),
+                    executor_res_,
+                )
             }
-        }
-
-        match (read_messages_res, executor_res) {
-            (Err(e), _) | (_, Err(e)) => {
-                let e: QueryError = e;
-                Err(e)
-            }
-            (Ok((pgb_reader, timeline_handles)), Ok(())) => Ok((pgb_reader, timeline_handles)),
         }
     }
 
@@ -1349,21 +1360,26 @@ impl PageServerHandler {
             ));
         }
 
-        if request_lsn < **latest_gc_cutoff_lsn {
+        // Check explicitly for INVALID just to get a less scary error message if the request is obviously bogus
+        if request_lsn == Lsn::INVALID {
+            return Err(PageStreamError::BadRequest(
+                "invalid LSN(0) in request".into(),
+            ));
+        }
+
+        // Clients should only read from recent LSNs on their timeline, or from locations holding an LSN lease.
+        //
+        // We may have older data available, but we make a best effort to detect this case and return an error,
+        // to distinguish a misbehaving client (asking for old LSN) from a storage issue (data missing at a legitimate LSN).
+        if request_lsn < **latest_gc_cutoff_lsn && !timeline.is_gc_blocked_by_lsn_lease_deadline() {
             let gc_info = &timeline.gc_info.read().unwrap();
             if !gc_info.leases.contains_key(&request_lsn) {
-                // The requested LSN is below gc cutoff and is not guarded by a lease.
-
-                // Check explicitly for INVALID just to get a less scary error message if the
-                // request is obviously bogus
-                return Err(if request_lsn == Lsn::INVALID {
-                    PageStreamError::BadRequest("invalid LSN(0) in request".into())
-                } else {
+                return Err(
                     PageStreamError::BadRequest(format!(
                         "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
                         request_lsn, **latest_gc_cutoff_lsn
                     ).into())
-                });
+                );
             }
         }
 

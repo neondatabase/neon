@@ -2,6 +2,17 @@ name: Build build-tools image
 
 on:
   workflow_call:
+    inputs:
+      archs:
+        description: "Json array of architectures to build"
+        # Default values are set in `check-image` job, `set-variables` step
+        type: string
+        required: false
+      debians:
+        description: "Json array of Debian versions to build"
+        # Default values are set in `check-image` job, `set-variables` step
+        type: string
+        required: false
     outputs:
       image-tag:
         description: "build-tools tag"
@@ -32,25 +43,37 @@ jobs:
   check-image:
     runs-on: ubuntu-22.04
     outputs:
-      tag: ${{ steps.get-build-tools-tag.outputs.image-tag }}
-      found: ${{ steps.check-image.outputs.found }}
+      archs: ${{ steps.set-variables.outputs.archs }}
+      debians: ${{ steps.set-variables.outputs.debians }}
+      tag: ${{ steps.set-variables.outputs.image-tag }}
+      everything: ${{ steps.set-more-variables.outputs.everything }}
+      found: ${{ steps.set-more-variables.outputs.found }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get build-tools image tag for the current commit
-        id: get-build-tools-tag
+      - name: Set variables
+        id: set-variables
         env:
+          ARCHS: ${{ inputs.archs || '["x64","arm64"]' }}
+          DEBIANS: ${{ inputs.debians || '["bullseye","bookworm"]' }}
           IMAGE_TAG: |
             ${{ hashFiles('build-tools.Dockerfile',
                           '.github/workflows/build-build-tools-image.yml') }}
         run: |
-          echo "image-tag=${IMAGE_TAG}" | tee -a $GITHUB_OUTPUT
+          echo "archs=${ARCHS}"           | tee -a ${GITHUB_OUTPUT}
+          echo "debians=${DEBIANS}"       | tee -a ${GITHUB_OUTPUT}
+          echo "image-tag=${IMAGE_TAG}"   | tee -a ${GITHUB_OUTPUT}
 
-      - name: Check if such tag found in the registry
-        id: check-image
+      - name: Set more variables
+        id: set-more-variables
         env:
-          IMAGE_TAG: ${{ steps.get-build-tools-tag.outputs.image-tag }}
+          IMAGE_TAG: ${{ steps.set-variables.outputs.image-tag }}
+          EVERYTHING: |
+            ${{ contains(fromJson(steps.set-variables.outputs.archs), 'x64') &&
+                contains(fromJson(steps.set-variables.outputs.archs), 'arm64') &&
+                contains(fromJson(steps.set-variables.outputs.debians), 'bullseye') &&
+                contains(fromJson(steps.set-variables.outputs.debians), 'bookworm') }}
         run: |
           if docker manifest inspect neondatabase/build-tools:${IMAGE_TAG}; then
             found=true
@@ -58,8 +81,8 @@ jobs:
             found=false
           fi
 
-          echo "found=${found}" | tee -a $GITHUB_OUTPUT
-
+          echo "everything=${EVERYTHING}" | tee -a ${GITHUB_OUTPUT}
+          echo "found=${found}"           | tee -a ${GITHUB_OUTPUT}
 
   build-image:
     needs: [ check-image ]
@@ -67,8 +90,8 @@ jobs:
 
     strategy:
       matrix:
-        debian-version: [ bullseye, bookworm ]
-        arch: [ x64, arm64 ]
+        arch: ${{ fromJson(needs.check-image.outputs.archs) }}
+        debian: ${{ fromJson(needs.check-image.outputs.debians) }}
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
@@ -99,11 +122,11 @@ jobs:
           push: true
           pull: true
           build-args: |
-            DEBIAN_VERSION=${{ matrix.debian-version }}
-          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.debian-version }}-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.debian-version, matrix.arch) || '' }}
+            DEBIAN_VERSION=${{ matrix.debian }}
+          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.debian }}-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.debian, matrix.arch) || '' }}
           tags: |
-            neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian-version }}-${{ matrix.arch }}
+            neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
 
   merge-images:
     needs: [ check-image, build-image ]
@@ -117,16 +140,22 @@ jobs:
 
       - name: Create multi-arch image
         env:
-          DEFAULT_DEBIAN_VERSION: bullseye
+          DEFAULT_DEBIAN_VERSION: bookworm
+          ARCHS: ${{ join(fromJson(needs.check-image.outputs.archs), ' ') }}
+          DEBIANS: ${{ join(fromJson(needs.check-image.outputs.debians), ' ') }}
+          EVERYTHING: ${{ needs.check-image.outputs.everything }}
           IMAGE_TAG: ${{ needs.check-image.outputs.tag }}
         run: |
-          for debian_version in bullseye bookworm; do
-            tags=("-t" "neondatabase/build-tools:${IMAGE_TAG}-${debian_version}")
-            if [ "${debian_version}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
+          for debian in ${DEBIANS}; do
+            tags=("-t" "neondatabase/build-tools:${IMAGE_TAG}-${debian}")
+
+            if [ "${EVERYTHING}" == "true" ] && [ "${debian}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
               tags+=("-t" "neondatabase/build-tools:${IMAGE_TAG}")
             fi
 
-            docker buildx imagetools create "${tags[@]}" \
-                                              neondatabase/build-tools:${IMAGE_TAG}-${debian_version}-x64 \
-                                              neondatabase/build-tools:${IMAGE_TAG}-${debian_version}-arm64
+            for arch in ${ARCHS}; do
+              tags+=("neondatabase/build-tools:${IMAGE_TAG}-${debian}-${arch}")
+            done
+
+            docker buildx imagetools create "${tags[@]}"
           done

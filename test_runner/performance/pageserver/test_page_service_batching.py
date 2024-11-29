@@ -3,7 +3,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
@@ -16,21 +16,32 @@ TARGET_RUNTIME = 30
 
 @dataclass
 class PageServicePipeliningConfig:
+    pass
+
+
+@dataclass
+class PageServicePipeliningConfigSerial(PageServicePipeliningConfig):
+    mode: str = "serial"
+
+
+@dataclass
+class PageServicePipeliningConfigPipelined(PageServicePipeliningConfig):
     max_batch_size: int
-    protocol_pipelining_mode: str
+    execution: str
+    mode: str = "pipelined"
 
 
-PROTOCOL_PIPELINING_MODES = ["concurrent-futures", "tasks"]
+EXECUTION = ["concurrent-futures", "tasks"]
 
-NON_BATCHABLE: list[Optional[PageServicePipeliningConfig]] = [None]
+NON_BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
 for max_batch_size in [1, 32]:
-    for protocol_pipelining_mode in PROTOCOL_PIPELINING_MODES:
-        NON_BATCHABLE.append(PageServicePipeliningConfig(max_batch_size, protocol_pipelining_mode))
+    for execution in EXECUTION:
+        NON_BATCHABLE.append(PageServicePipeliningConfigPipelined(max_batch_size, execution))
 
-BATCHABLE: list[Optional[PageServicePipeliningConfig]] = [None]
+BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
 for max_batch_size in [1, 2, 4, 8, 16, 32]:
-    for protocol_pipelining_mode in PROTOCOL_PIPELINING_MODES:
-        BATCHABLE.append(PageServicePipeliningConfig(max_batch_size, protocol_pipelining_mode))
+    for execution in EXECUTION:
+        BATCHABLE.append(PageServicePipeliningConfigPipelined(max_batch_size, execution))
 
 
 @pytest.mark.parametrize(
@@ -45,7 +56,7 @@ for max_batch_size in [1, 2, 4, 8, 16, 32]:
                 TARGET_RUNTIME,
                 1,
                 128,
-                f"not batchable {dataclasses.asdict(config) if config else None}",
+                f"not batchable {dataclasses.asdict(config)}",
             )
             for config in NON_BATCHABLE
         ],
@@ -57,7 +68,7 @@ for max_batch_size in [1, 2, 4, 8, 16, 32]:
                 TARGET_RUNTIME,
                 100,
                 128,
-                f"batchable {dataclasses.asdict(config) if config else None}",
+                f"batchable {dataclasses.asdict(config)}",
             )
             for config in BATCHABLE
         ],
@@ -67,7 +78,7 @@ def test_throughput(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     tablesize_mib: int,
-    pipelining_config: None | PageServicePipeliningConfig,
+    pipelining_config: PageServicePipeliningConfig,
     target_runtime: int,
     effective_io_concurrency: int,
     readhead_buffer_size: int,
@@ -94,25 +105,23 @@ def test_throughput(
     #
     # record perf-related parameters as metrics to simplify processing of results
     #
-    params: dict[str, tuple[Union[float, int], dict[str, Any]]] = {}
+    params: dict[str, tuple[float | int, dict[str, Any]]] = {}
 
     params.update(
         {
             "tablesize_mib": (tablesize_mib, {"unit": "MiB"}),
-            "pipelining_enabled": (1 if pipelining_config else 0, {}),
             # target_runtime is just a polite ask to the workload to run for this long
             "effective_io_concurrency": (effective_io_concurrency, {}),
             "readhead_buffer_size": (readhead_buffer_size, {}),
             # name is not a metric, we just use it to identify the test easily in the `test_...[...]`` notation
         }
     )
-    if pipelining_config:
-        params.update(
-            {
-                f"pipelining_config.{k}": (v, {})
-                for k, v in dataclasses.asdict(pipelining_config).items()
-            }
-        )
+    params.update(
+        {
+            f"pipelining_config.{k}": (v, {})
+            for k, v in dataclasses.asdict(pipelining_config).items()
+        }
+    )
 
     log.info("params: %s", params)
 
@@ -224,8 +233,6 @@ def test_throughput(
 
     env.pageserver.patch_config_toml_nonrecursive(
         {"page_service_pipelining": dataclasses.asdict(pipelining_config)}
-        if pipelining_config is not None
-        else {}
     )
     env.pageserver.restart()
     metrics = workload()
@@ -255,23 +262,21 @@ def test_throughput(
     )
 
 
-PRECISION_CONFIGS: list[Optional[PageServicePipeliningConfig]] = [None]
+PRECISION_CONFIGS: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
 for max_batch_size in [1, 32]:
-    for protocol_pipelining_mode in PROTOCOL_PIPELINING_MODES:
-        PRECISION_CONFIGS.append(
-            PageServicePipeliningConfig(max_batch_size, protocol_pipelining_mode)
-        )
+    for execution in EXECUTION:
+        PRECISION_CONFIGS.append(PageServicePipeliningConfigPipelined(max_batch_size, execution))
 
 
 @pytest.mark.parametrize(
     "pipelining_config,name",
-    [(config, f"{dataclasses.asdict(config) if config else None}") for config in PRECISION_CONFIGS],
+    [(config, f"{dataclasses.asdict(config)}") for config in PRECISION_CONFIGS],
 )
 def test_latency(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
-    pipelining_config: Optional[PageServicePipeliningConfig],
+    pipelining_config: PageServicePipeliningConfig,
     name: str,
 ):
     """

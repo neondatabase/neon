@@ -398,7 +398,7 @@ async fn upload_parquet(
     .err();
 
     if let Some(err) = maybe_err {
-        tracing::warn!(%id, %err, "failed to upload request data");
+        tracing::error!(%id, error = ?err, "failed to upload request data");
     }
 
     Ok(buffer.writer())

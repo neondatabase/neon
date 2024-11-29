@@ -6,10 +6,12 @@ import random
 import threading
 import time
 
+import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.utils import query_scalar
+from fixtures.utils import USE_LFC, query_scalar
 
 
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_local_file_cache_unlink(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
@@ -19,8 +21,6 @@ def test_local_file_cache_unlink(neon_env_builder: NeonEnvBuilder):
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[
-            "shared_buffers='1MB'",
-            f"neon.file_cache_path='{cache_dir}/file.cache'",
             "neon.max_file_cache_size='64MB'",
             "neon.file_cache_size_limit='10MB'",
         ],

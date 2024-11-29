@@ -99,11 +99,15 @@ def test_installed_extensions(neon_simple_env: NeonEnv):
     res = client.metrics()
     info("Metrics: %s", res)
     m = parse_metrics(res)
-    neon_m = m.query_all("installed_extensions", {"extension_name": "neon", "version": "1.2"})
+    neon_m = m.query_all(
+        "compute_installed_extensions", {"extension_name": "neon", "version": "1.2"}
+    )
     assert len(neon_m) == 1
     for sample in neon_m:
         assert sample.value == 2
-    neon_m = m.query_all("installed_extensions", {"extension_name": "neon", "version": "1.3"})
+    neon_m = m.query_all(
+        "compute_installed_extensions", {"extension_name": "neon", "version": "1.3"}
+    )
     assert len(neon_m) == 1
     for sample in neon_m:
         assert sample.value == 1
@@ -116,7 +120,7 @@ def test_installed_extensions(neon_simple_env: NeonEnv):
         try:
             res = client.metrics()
             timeout = -1
-            if len(parse_metrics(res).query_all("installed_extensions")) < 4:
+            if len(parse_metrics(res).query_all("compute_installed_extensions")) < 4:
                 # Assume that not all metrics that are collected yet
                 time.sleep(1)
                 timeout -= 1
@@ -128,17 +132,21 @@ def test_installed_extensions(neon_simple_env: NeonEnv):
             continue
 
         assert (
-            len(parse_metrics(res).query_all("installed_extensions")) >= 4
+            len(parse_metrics(res).query_all("compute_installed_extensions")) >= 4
         ), "Not all metrics are collected"
 
         info("After restart metrics: %s", res)
         m = parse_metrics(res)
-        neon_m = m.query_all("installed_extensions", {"extension_name": "neon", "version": "1.2"})
+        neon_m = m.query_all(
+            "compute_installed_extensions", {"extension_name": "neon", "version": "1.2"}
+        )
         assert len(neon_m) == 1
         for sample in neon_m:
             assert sample.value == 1
 
-        neon_m = m.query_all("installed_extensions", {"extension_name": "neon", "version": "1.3"})
+        neon_m = m.query_all(
+            "compute_installed_extensions", {"extension_name": "neon", "version": "1.3"}
+        )
         assert len(neon_m) == 1
         for sample in neon_m:
             assert sample.value == 1

@@ -8,7 +8,7 @@ use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 use tracing::field::display;
-use tracing::{debug, info_span, Span};
+use tracing::{debug, error, info_span, Span};
 use try_lock::TryLock;
 use uuid::Uuid;
 
@@ -272,11 +272,14 @@ impl RequestContext {
         this.success = true;
     }
 
-    pub fn log_connect(&self) {
-        self.0
-            .try_lock()
-            .expect("should not deadlock")
-            .log_connect();
+    pub fn log_connect(self) -> DisconnectLogger {
+        let mut this = self.0.into_inner();
+        this.log_connect();
+
+        // close current span.
+        this.span = Span::none();
+
+        DisconnectLogger(this)
     }
 
     pub(crate) fn protocol(&self) -> Protocol {
@@ -411,10 +414,13 @@ impl RequestContextInner {
                     outcome,
                 });
         }
+
         if let Some(tx) = self.sender.take() {
-            tx.send(RequestData::from(&*self))
-                .inspect_err(|e| debug!("tx send failed: {e}"))
-                .ok();
+            // If type changes, this error handling needs to be updated.
+            let tx: mpsc::UnboundedSender<RequestData> = tx;
+            if let Err(e) = tx.send(RequestData::from(&*self)) {
+                error!("log_connect channel send failed: {e}");
+            }
         }
     }
 
@@ -423,9 +429,11 @@ impl RequestContextInner {
         // Here we log the length of the session.
         self.disconnect_timestamp = Some(Utc::now());
         if let Some(tx) = self.disconnect_sender.take() {
-            tx.send(RequestData::from(&*self))
-                .inspect_err(|e| debug!("tx send failed: {e}"))
-                .ok();
+            // If type changes, this error handling needs to be updated.
+            let tx: mpsc::UnboundedSender<RequestData> = tx;
+            if let Err(e) = tx.send(RequestData::from(&*self)) {
+                error!("log_disconnect channel send failed: {e}");
+            }
         }
     }
 }
@@ -434,8 +442,14 @@ impl Drop for RequestContextInner {
     fn drop(&mut self) {
         if self.sender.is_some() {
             self.log_connect();
-        } else {
-            self.log_disconnect();
         }
+    }
+}
+
+pub struct DisconnectLogger(RequestContextInner);
+
+impl Drop for DisconnectLogger {
+    fn drop(&mut self) {
+        self.0.log_disconnect();
     }
 }
