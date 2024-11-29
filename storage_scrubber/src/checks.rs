@@ -128,7 +128,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
 
                     let layer_names = index_part.layer_metadata.keys().cloned().collect_vec();
                     if let Some(err) = check_valid_layermap(&layer_names) {
-                        result.errors.push(format!(
+                        result.warnings.push(format!(
                             "index_part.json contains invalid layer map structure: {err}"
                         ));
                     }

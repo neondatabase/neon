@@ -14,6 +14,7 @@ use remote_storage::{RemotePath, RemoteStorageConfig};
 use std::env;
 use storage_broker::Uri;
 use utils::logging::SecretString;
+use utils::postgres_client::PostgresClientProtocol;
 
 use once_cell::sync::OnceCell;
 use reqwest::Url;
@@ -190,6 +191,8 @@ pub struct PageServerConf {
     /// Maximum amount of time for which a get page request request
     /// might be held up for request merging.
     pub server_side_batch_timeout: Option<Duration>,
+
+    pub wal_receiver_protocol: PostgresClientProtocol,
 }
 
 /// Token for authentication to safekeepers
@@ -350,6 +353,7 @@ impl PageServerConf {
             server_side_batch_timeout,
             tenant_config,
             no_sync,
+            wal_receiver_protocol,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -393,6 +397,7 @@ impl PageServerConf {
             import_pgdata_upcall_api,
             import_pgdata_upcall_api_token: import_pgdata_upcall_api_token.map(SecretString::from),
             import_pgdata_aws_endpoint_url,
+            wal_receiver_protocol,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling

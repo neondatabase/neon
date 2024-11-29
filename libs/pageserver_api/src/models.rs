@@ -23,6 +23,7 @@ use utils::{
     completion,
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
+    postgres_client::PostgresClientProtocol,
     serde_system_time,
 };
 
@@ -352,6 +353,7 @@ pub struct TenantConfig {
     pub lsn_lease_length: Option<String>,
     pub lsn_lease_length_for_ts: Option<String>,
     pub timeline_offloading: Option<bool>,
+    pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
 }
 
 /// The policy for the aux file storage.

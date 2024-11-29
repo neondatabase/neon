@@ -28,6 +28,7 @@ hyper0.workspace = true
 futures.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
+pageserver_api.workspace = true
 postgres.workspace = true
 postgres-protocol.workspace = true
 pprof.workspace = true
@@ -58,6 +59,7 @@ sd-notify.workspace = true
 storage_broker.workspace = true
 tokio-stream.workspace = true
 utils.workspace = true
+wal_decoder.workspace = true
 
 workspace_hack.workspace = true
 
