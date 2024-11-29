@@ -1427,6 +1427,25 @@ impl SmgrQueryTimePerTimeline {
     ) -> GlobalAndPerTimelineHistogramTimer<'c> {
         self.global_started[op as usize].inc();
 
+        // We subtract time spent throttled from the observed latency.
+        match ctx.micros_spent_throttled.open() {
+            Ok(()) => (),
+            Err(error) => {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<enum_map::EnumMap<SmgrQueryType, RateLimit>>> =
+                    Lazy::new(|| {
+                        Mutex::new(enum_map::EnumMap::from_array(std::array::from_fn(|_| {
+                            RateLimit::new(Duration::from_secs(10))
+                        })))
+                    });
+                let mut guard = LOGGED.lock().unwrap();
+                let rate_limit = &mut guard[op];
+                rate_limit.call(|| {
+                    warn!(?op, error, "error opening micros_spent_throttled; this message is logged at a global rate limit");
+                });
+            }
+        }
+
         let per_timeline_latency_histo = if matches!(op, SmgrQueryType::GetPageAtLsn) {
             self.per_timeline_getpage_started.inc();
             Some(self.per_timeline_getpage_latency.clone())
