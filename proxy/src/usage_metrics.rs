@@ -2,7 +2,6 @@
 //! and push them to a HTTP endpoint.
 use std::borrow::Cow;
 use std::convert::Infallible;
-use std::pin::pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +13,6 @@ use chrono::{DateTime, Datelike, Timelike, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use futures::future::select;
 use once_cell::sync::Lazy;
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use serde::{Deserialize, Serialize};
@@ -24,7 +22,7 @@ use tracing::{error, info, instrument, trace, warn};
 use utils::backoff;
 use uuid::{NoContext, Timestamp};
 
-use crate::config::{MetricBackupCollectionConfig, MetricCollectionConfig};
+use crate::config::MetricCollectionConfig;
 use crate::context::parquet::{FAILED_UPLOAD_MAX_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD};
 use crate::http;
 use crate::intern::{BranchIdInt, EndpointIdInt};
@@ -228,6 +226,21 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
     );
     let hostname = hostname::get()?.as_os_str().to_string_lossy().into_owned();
 
+    // Even if the remote storage is not configured, we still want to clear the metrics.
+    let storage = if let Some(config) = config
+        .backup_metric_collection_config
+        .remote_storage_config
+        .as_ref()
+    {
+        Some(
+            GenericRemoteStorage::from_config(config)
+                .await
+                .context("remote storage init")?,
+        )
+    } else {
+        None
+    };
+
     let mut prev = Utc::now();
     let mut ticker = tokio::time::interval(config.interval);
     loop {
@@ -238,6 +251,7 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
             &USAGE_METRICS.endpoints,
             &http_client,
             &config.endpoint,
+            storage.as_ref(),
             config.backup_metric_collection_config.chunk_size,
             &hostname,
             prev,
@@ -309,6 +323,7 @@ async fn collect_metrics_iteration(
     endpoints: &DashMap<Ids, Arc<MetricCounter>, FastHasher>,
     client: &http::ClientWithMiddleware,
     metric_collection_endpoint: &reqwest::Url,
+    storage: Option<&GenericRemoteStorage>,
     outer_chunk_size: usize,
     hostname: &str,
     prev: DateTime<Utc>,
@@ -325,9 +340,26 @@ async fn collect_metrics_iteration(
         trace!("no new metrics to send");
     }
 
+    let cancel = CancellationToken::new();
+    let path_prefix = format!(
+        "year={year:04}/month={month:02}/day={day:02}/{hour:02}:{minute:02}:{second:02}Z",
+        year = now.year(),
+        month = now.month(),
+        day = now.day(),
+        hour = now.hour(),
+        minute = now.minute(),
+        second = now.second(),
+    );
+
     // Send metrics.
     for chunk in create_event_chunks(&metrics_to_send, hostname, prev, now, outer_chunk_size) {
+        // TODO: upload concurrently
+
         upload_main_events_chunked(client, metric_collection_endpoint, &chunk).await;
+
+        if let Err(e) = upload_backup_events(storage, &chunk, &path_prefix, &cancel).await {
+            error!("failed to upload consumption events to remote storage: {e:?}");
+        }
     }
 }
 
@@ -361,89 +393,6 @@ async fn upload_main_events_chunked(
                 // Report if the metric value is suspiciously large
                 warn!("potentially abnormal metric value: {:?}", metric);
             }
-        }
-    }
-}
-
-pub async fn task_backup(
-    backup_config: &MetricBackupCollectionConfig,
-    cancellation_token: CancellationToken,
-) -> anyhow::Result<()> {
-    info!("metrics backup config: {backup_config:?}");
-    scopeguard::defer! {
-        info!("metrics backup has shut down");
-    }
-    // Even if the remote storage is not configured, we still want to clear the metrics.
-    let storage = if let Some(config) = backup_config.remote_storage_config.as_ref() {
-        Some(
-            GenericRemoteStorage::from_config(config)
-                .await
-                .context("remote storage init")?,
-        )
-    } else {
-        None
-    };
-    let mut ticker = tokio::time::interval(backup_config.interval);
-    let mut prev = Utc::now();
-    let hostname = hostname::get()?.as_os_str().to_string_lossy().into_owned();
-    loop {
-        select(pin!(ticker.tick()), pin!(cancellation_token.cancelled())).await;
-        let now = Utc::now();
-        collect_metrics_backup_iteration(
-            &USAGE_METRICS.backup_endpoints,
-            storage.as_ref(),
-            &hostname,
-            prev,
-            now,
-            backup_config.chunk_size,
-        )
-        .await;
-
-        prev = now;
-        if cancellation_token.is_cancelled() {
-            info!("metrics backup has been cancelled");
-            break;
-        }
-    }
-    Ok(())
-}
-
-#[instrument(skip_all)]
-async fn collect_metrics_backup_iteration(
-    endpoints: &DashMap<Ids, Arc<MetricBackupCounter>, FastHasher>,
-    storage: Option<&GenericRemoteStorage>,
-    hostname: &str,
-    prev: DateTime<Utc>,
-    now: DateTime<Utc>,
-    chunk_size: usize,
-) {
-    let year = now.year();
-    let month = now.month();
-    let day = now.day();
-    let hour = now.hour();
-    let minute = now.minute();
-    let second = now.second();
-    let cancel = CancellationToken::new();
-    let path_prefix =
-        format!("year={year:04}/month={month:02}/day={day:02}/{hour:02}:{minute:02}:{second:02}Z");
-
-    info!("starting collect_metrics_backup_iteration");
-
-    let metrics_to_send = collect_and_clear_metrics(endpoints);
-
-    if metrics_to_send.is_empty() {
-        trace!("no new metrics to send");
-    }
-
-    // Send metrics.
-    for chunk in create_event_chunks(&metrics_to_send, hostname, prev, now, chunk_size) {
-        let res = upload_backup_events(storage, &chunk, &path_prefix, &cancel).await;
-
-        if let Err(e) = res {
-            error!(
-                "failed to upload consumption events to remote storage: {:?}",
-                e
-            );
         }
     }
 }
@@ -561,6 +510,7 @@ mod tests {
             &metrics.endpoints,
             &client,
             &endpoint,
+            None,
             1000,
             "foo",
             now,
@@ -582,6 +532,7 @@ mod tests {
             &metrics.endpoints,
             &client,
             &endpoint,
+            None,
             1000,
             "foo",
             now,
@@ -601,6 +552,7 @@ mod tests {
             &metrics.endpoints,
             &client,
             &endpoint,
+            None,
             1000,
             "foo",
             now,
@@ -620,6 +572,7 @@ mod tests {
             &metrics.endpoints,
             &client,
             &endpoint,
+            None,
             1000,
             "foo",
             now,
@@ -631,13 +584,5 @@ mod tests {
 
         // counter is unregistered
         assert!(metrics.endpoints.is_empty());
-
-        collect_metrics_backup_iteration(&metrics.backup_endpoints, None, "foo", now, now, 1000)
-            .await;
-        assert!(!metrics.backup_endpoints.is_empty());
-        collect_metrics_backup_iteration(&metrics.backup_endpoints, None, "foo", now, now, 1000)
-            .await;
-        // backup counter is unregistered after the second iteration
-        assert!(metrics.backup_endpoints.is_empty());
     }
 }
