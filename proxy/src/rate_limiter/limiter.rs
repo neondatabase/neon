@@ -14,13 +14,13 @@ use tracing::info;
 
 use crate::intern::EndpointIdInt;
 
-pub(crate) struct GlobalRateLimiter {
+pub struct GlobalRateLimiter {
     data: Vec<RateBucket>,
     info: Vec<RateBucketInfo>,
 }
 
 impl GlobalRateLimiter {
-    pub(crate) fn new(info: Vec<RateBucketInfo>) -> Self {
+    pub fn new(info: Vec<RateBucketInfo>) -> Self {
         Self {
             data: vec![
                 RateBucket {
@@ -34,7 +34,7 @@ impl GlobalRateLimiter {
     }
 
     /// Check that number of connections is below `max_rps` rps.
-    pub(crate) fn check(&mut self) -> bool {
+    pub fn check(&mut self) -> bool {
         let now = Instant::now();
 
         let should_allow_request = self
@@ -135,6 +135,19 @@ impl RateBucketInfo {
         Self::new(500, Duration::from_secs(1)),
         Self::new(300, Duration::from_secs(60)),
         Self::new(200, Duration::from_secs(600)),
+    ];
+
+    /// All of these are per endpoint-maskedip pair.
+    /// Context: 4096 rounds of pbkdf2 take about 1ms of cpu time to execute (1 milli-cpu-second or 1mcpus).
+    ///
+    /// First bucket: 1000mcpus total per endpoint-ip pair
+    /// * 4096000 requests per second with 1 hash rounds.
+    /// * 1000 requests per second with 4096 hash rounds.
+    /// * 6.8 requests per second with 600000 hash rounds.
+    pub const DEFAULT_AUTH_SET: [Self; 3] = [
+        Self::new(1000 * 4096, Duration::from_secs(1)),
+        Self::new(600 * 4096, Duration::from_secs(60)),
+        Self::new(300 * 4096, Duration::from_secs(600)),
     ];
 
     pub fn rps(&self) -> f64 {

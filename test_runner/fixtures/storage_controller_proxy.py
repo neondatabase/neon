@@ -13,14 +13,14 @@ from werkzeug.wrappers.response import Response
 from fixtures.log_helper import log
 
 if TYPE_CHECKING:
-    from typing import Any, Optional
+    from typing import Any
 
 
 class StorageControllerProxy:
     def __init__(self, server: HTTPServer):
         self.server: HTTPServer = server
         self.listen: str = f"http://{server.host}:{server.port}"
-        self.routing_to: Optional[str] = None
+        self.routing_to: str | None = None
 
     def route_to(self, storage_controller_api: str):
         self.routing_to = storage_controller_api

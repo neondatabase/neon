@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
@@ -82,7 +80,7 @@ def expect_updated_msg_lsn(
     client: PageserverHttpClient,
     tenant_id: TenantId,
     timeline_id: TimelineId,
-    prev_msg_lsn: Optional[Lsn],
+    prev_msg_lsn: Lsn | None,
 ) -> Lsn:
     timeline_details = client.timeline_detail(tenant_id, timeline_id=timeline_id)
 

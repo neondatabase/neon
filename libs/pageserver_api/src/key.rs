@@ -229,6 +229,18 @@ impl Key {
     }
 }
 
+impl CompactKey {
+    pub fn raw(&self) -> i128 {
+        self.0
+    }
+}
+
+impl From<i128> for CompactKey {
+    fn from(value: i128) -> Self {
+        Self(value)
+    }
+}
+
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

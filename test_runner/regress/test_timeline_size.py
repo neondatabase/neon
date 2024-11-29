@@ -7,7 +7,6 @@ import time
 from collections import defaultdict
 from contextlib import closing
 from pathlib import Path
-from typing import Optional
 
 import psycopg2.errors
 import psycopg2.extras
@@ -668,7 +667,7 @@ def test_tenant_physical_size(neon_env_builder: NeonEnvBuilder):
 class TimelinePhysicalSizeValues:
     api_current_physical: int
     prometheus_resident_physical: float
-    prometheus_remote_physical: Optional[float] = None
+    prometheus_remote_physical: float | None = None
     python_timelinedir_layerfiles_physical: int
     layer_map_file_size_sum: int
 

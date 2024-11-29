@@ -623,6 +623,8 @@ paths:
                 existing_initdb_timeline_id:
                   type: string
                   format: hex
+                import_pgdata:
+                  $ref: "#/components/schemas/TimelineCreateRequestImportPgdata"
       responses:
         "201":
           description: Timeline was created, or already existed with matching parameters
@@ -979,6 +981,34 @@ components:
           $ref: "#/components/schemas/TenantConfig"
         effective_config:
           $ref: "#/components/schemas/TenantConfig"
+    TimelineCreateRequestImportPgdata:
+      type: object
+      required:
+        - location
+        - idempotency_key
+      properties:
+        idempotency_key:
+          type: string
+        location:
+          $ref: "#/components/schemas/TimelineCreateRequestImportPgdataLocation"
+    TimelineCreateRequestImportPgdataLocation:
+      type: object
+      properties:
+        AwsS3:
+          $ref: "#/components/schemas/TimelineCreateRequestImportPgdataLocationAwsS3"
+    TimelineCreateRequestImportPgdataLocationAwsS3:
+      type: object
+      properties:
+        region:
+          type: string
+        bucket:
+          type: string
+        key:
+          type: string
+      required:
+        - region
+        - bucket
+        - key
     TimelineInfo:
       type: object
       required:

@@ -6,9 +6,10 @@ use std::task::{ready, Poll};
 use futures::future::poll_fn;
 use futures::Future;
 use smallvec::SmallVec;
+use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_postgres::tls::NoTlsStream;
-use tokio_postgres::{AsyncMessage, Socket};
+use tokio_postgres::AsyncMessage;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
 #[cfg(test)]
@@ -19,7 +20,8 @@ use {
 };
 
 use super::conn_pool_lib::{
-    Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, GlobalConnPool,
+    Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, EndpointConnPool,
+    GlobalConnPool,
 };
 use crate::context::RequestContext;
 use crate::control_plane::messages::MetricsAuxInfo;
@@ -52,11 +54,11 @@ impl fmt::Display for ConnInfo {
 }
 
 pub(crate) fn poll_client<C: ClientInnerExt>(
-    global_pool: Arc<GlobalConnPool<C>>,
+    global_pool: Arc<GlobalConnPool<C, EndpointConnPool<C>>>,
     ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
-    mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
+    mut connection: tokio_postgres::Connection<TcpStream, NoTlsStream>,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 ) -> Client<C> {
@@ -167,6 +169,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     Client::new(inner, conn_info, pool_clone)
 }
 
+#[derive(Clone)]
 pub(crate) struct ClientDataRemote {
     session: tokio::sync::watch::Sender<uuid::Uuid>,
     cancel: CancellationToken,
@@ -243,7 +246,7 @@ mod tests {
             },
             cancel_set: CancelSet::new(0),
             client_conn_threshold: u64::MAX,
-            max_request_size_bytes: u64::MAX,
+            max_request_size_bytes: usize::MAX,
             max_response_size_bytes: usize::MAX,
         }));
         let pool = GlobalConnPool::new(config);

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import random
 from contextlib import closing
-from typing import Optional
 
 import pytest
 from fixtures.log_helper import log
@@ -156,7 +155,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
 @pytest.mark.timeout(540)
 @pytest.mark.parametrize("shard_count", [None, 4])
 @skip_in_debug_build("times out in debug builds")
-def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]):
+def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     # same rationale as with the immediate stop; we might leave orphan layers behind.
     neon_env_builder.disable_scrub_on_exit()
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())

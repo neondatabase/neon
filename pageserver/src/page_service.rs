@@ -1068,21 +1068,26 @@ impl PageServerHandler {
             ));
         }
 
-        if request_lsn < **latest_gc_cutoff_lsn {
+        // Check explicitly for INVALID just to get a less scary error message if the request is obviously bogus
+        if request_lsn == Lsn::INVALID {
+            return Err(PageStreamError::BadRequest(
+                "invalid LSN(0) in request".into(),
+            ));
+        }
+
+        // Clients should only read from recent LSNs on their timeline, or from locations holding an LSN lease.
+        //
+        // We may have older data available, but we make a best effort to detect this case and return an error,
+        // to distinguish a misbehaving client (asking for old LSN) from a storage issue (data missing at a legitimate LSN).
+        if request_lsn < **latest_gc_cutoff_lsn && !timeline.is_gc_blocked_by_lsn_lease_deadline() {
             let gc_info = &timeline.gc_info.read().unwrap();
             if !gc_info.leases.contains_key(&request_lsn) {
-                // The requested LSN is below gc cutoff and is not guarded by a lease.
-
-                // Check explicitly for INVALID just to get a less scary error message if the
-                // request is obviously bogus
-                return Err(if request_lsn == Lsn::INVALID {
-                    PageStreamError::BadRequest("invalid LSN(0) in request".into())
-                } else {
+                return Err(
                     PageStreamError::BadRequest(format!(
                         "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
                         request_lsn, **latest_gc_cutoff_lsn
                     ).into())
-                });
+                );
             }
         }
 

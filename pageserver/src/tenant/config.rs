@@ -19,6 +19,7 @@ use serde_json::Value;
 use std::num::NonZeroU64;
 use std::time::Duration;
 use utils::generation::Generation;
+use utils::postgres_client::PostgresClientProtocol;
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) enum AttachmentMode {
@@ -353,6 +354,9 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub timeline_offloading: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
 }
 
 impl TenantConfOpt {
@@ -418,6 +422,9 @@ impl TenantConfOpt {
             timeline_offloading: self
                 .lazy_slru_download
                 .unwrap_or(global_conf.timeline_offloading),
+            wal_receiver_protocol_override: self
+                .wal_receiver_protocol_override
+                .or(global_conf.wal_receiver_protocol_override),
         }
     }
 }
@@ -472,6 +479,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             lsn_lease_length: value.lsn_lease_length.map(humantime),
             lsn_lease_length_for_ts: value.lsn_lease_length_for_ts.map(humantime),
             timeline_offloading: value.timeline_offloading,
+            wal_receiver_protocol_override: value.wal_receiver_protocol_override,
         }
     }
 }

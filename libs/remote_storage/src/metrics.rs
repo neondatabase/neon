@@ -176,7 +176,9 @@ pub(crate) struct BucketMetrics {
 
 impl Default for BucketMetrics {
     fn default() -> Self {
-        let buckets = [0.01, 0.10, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0];
+        // first bucket 100 microseconds to count requests that do not need to wait at all
+        // and get a permit immediately
+        let buckets = [0.0001, 0.01, 0.10, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0];
 
         let req_seconds = register_histogram_vec!(
             "remote_storage_s3_request_seconds",

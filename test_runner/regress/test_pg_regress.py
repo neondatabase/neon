@@ -21,8 +21,6 @@ from fixtures.remote_storage import s3_storage
 from fixtures.utils import skip_in_debug_build
 
 if TYPE_CHECKING:
-    from typing import Optional
-
     from fixtures.neon_fixtures import PgBin
     from pytest import CaptureFixture
 
@@ -48,7 +46,7 @@ def post_checks(env: NeonEnv, test_output_dir: Path, db_name: str, endpoint: End
     data properly.
     """
 
-    ignored_files: Optional[list[str]] = None
+    ignored_files: list[str] | None = None
 
     # Neon handles unlogged relations in a special manner. During a
     # basebackup, we ship the init fork as the main fork. This presents a
@@ -131,7 +129,7 @@ def test_pg_regress(
     capsys: CaptureFixture[str],
     base_dir: Path,
     pg_distrib_dir: Path,
-    shard_count: Optional[int],
+    shard_count: int | None,
 ):
     DBNAME = "regression"
 
@@ -205,7 +203,7 @@ def test_isolation(
     capsys: CaptureFixture[str],
     base_dir: Path,
     pg_distrib_dir: Path,
-    shard_count: Optional[int],
+    shard_count: int | None,
 ):
     DBNAME = "isolation_regression"
 
@@ -274,7 +272,7 @@ def test_sql_regress(
     capsys: CaptureFixture[str],
     base_dir: Path,
     pg_distrib_dir: Path,
-    shard_count: Optional[int],
+    shard_count: int | None,
 ):
     DBNAME = "regression"
 

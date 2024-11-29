@@ -10,6 +10,7 @@ use camino_tempfile::tempfile;
 use criterion::{criterion_group, criterion_main, BatchSize, Bencher, Criterion};
 use itertools::Itertools as _;
 use postgres_ffi::v17::wal_generator::{LogicalMessageGenerator, WalGenerator};
+use pprof::criterion::{Output, PProfProfiler};
 use safekeeper::receive_wal::{self, WalAcceptor};
 use safekeeper::safekeeper::{
     AcceptorProposerMessage, AppendRequest, AppendRequestHeader, ProposerAcceptorMessage,
@@ -24,8 +25,9 @@ const GB: usize = 1024 * MB;
 
 // Register benchmarks with Criterion.
 criterion_group!(
-    benches,
-    bench_process_msg,
+    name = benches;
+    config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+    targets = bench_process_msg,
     bench_wal_acceptor,
     bench_wal_acceptor_throughput,
     bench_file_write

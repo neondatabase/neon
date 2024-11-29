@@ -12,8 +12,8 @@ use tracing::field::display;
 use tracing::{debug, info};
 
 use super::conn_pool::poll_client;
-use super::conn_pool_lib::{Client, ConnInfo, GlobalConnPool};
-use super::http_conn_pool::{self, poll_http2_client, Send};
+use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
+use super::http_conn_pool::{self, poll_http2_client, HttpConnPool, Send};
 use super::local_conn_pool::{self, LocalConnPool, EXT_NAME, EXT_SCHEMA, EXT_VERSION};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
@@ -36,9 +36,10 @@ use crate::rate_limiter::EndpointRateLimiter;
 use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
 
 pub(crate) struct PoolingBackend {
-    pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool<Send>>,
+    pub(crate) http_conn_pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
     pub(crate) local_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
-    pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
+    pub(crate) pool:
+        Arc<GlobalConnPool<tokio_postgres::Client, EndpointConnPool<tokio_postgres::Client>>>,
 
     pub(crate) config: &'static ProxyConfig,
     pub(crate) auth_backend: &'static crate::auth::Backend<'static, ()>,
@@ -167,10 +168,10 @@ impl PoolingBackend {
         force_new: bool,
     ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
         let maybe_client = if force_new {
-            info!("pool: pool is disabled");
+            debug!("pool: pool is disabled");
             None
         } else {
-            info!("pool: looking for an existing connection");
+            debug!("pool: looking for an existing connection");
             self.pool.get(ctx, &conn_info)?
         };
 
@@ -204,14 +205,14 @@ impl PoolingBackend {
         ctx: &RequestContext,
         conn_info: ConnInfo,
     ) -> Result<http_conn_pool::Client<Send>, HttpConnError> {
-        info!("pool: looking for an existing connection");
+        debug!("pool: looking for an existing connection");
         if let Ok(Some(client)) = self.http_conn_pool.get(ctx, &conn_info) {
             return Ok(client);
         }
 
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
-        info!(%conn_id, "pool: opening a new connection '{conn_info}'");
+        debug!(%conn_id, "pool: opening a new connection '{conn_info}'");
         let backend = self.auth_backend.as_ref().map(|()| ComputeCredentials {
             info: ComputeUserInfo {
                 user: conn_info.user_info.user.clone(),
@@ -332,7 +333,7 @@ impl PoolingBackend {
             debug!("setting up backend session state");
 
             // initiates the auth session
-            if let Err(e) = client.query("select auth.init()", &[]).await {
+            if let Err(e) = client.execute("select auth.init()", &[]).await {
                 discard.discard();
                 return Err(e.into());
             }
@@ -474,7 +475,7 @@ impl ShouldRetryWakeCompute for LocalProxyConnError {
 }
 
 struct TokioMechanism {
-    pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
+    pool: Arc<GlobalConnPool<tokio_postgres::Client, EndpointConnPool<tokio_postgres::Client>>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 
@@ -524,7 +525,7 @@ impl ConnectMechanism for TokioMechanism {
 }
 
 struct HyperMechanism {
-    pool: Arc<http_conn_pool::GlobalConnPool<Send>>,
+    pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 

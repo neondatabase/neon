@@ -134,8 +134,8 @@ impl NeonControlPlaneClient {
                 project_id: body.project_id,
             })
         }
-        .map_err(crate::error::log_error)
-        .instrument(info_span!("http", id = request_id))
+        .inspect_err(|e| tracing::debug!(error = ?e))
+        .instrument(info_span!("do_get_auth_info"))
         .await
     }
 
@@ -193,8 +193,8 @@ impl NeonControlPlaneClient {
 
             Ok(rules)
         }
-        .map_err(crate::error::log_error)
-        .instrument(info_span!("http", id = request_id))
+        .inspect_err(|e| tracing::debug!(error = ?e))
+        .instrument(info_span!("do_get_endpoint_jwks"))
         .await
     }
 
@@ -252,9 +252,8 @@ impl NeonControlPlaneClient {
 
             Ok(node)
         }
-        .map_err(crate::error::log_error)
-        // TODO: redo this span stuff
-        .instrument(info_span!("http", id = request_id))
+        .inspect_err(|e| tracing::debug!(error = ?e))
+        .instrument(info_span!("do_wake_compute"))
         .await
     }
 }
@@ -380,6 +379,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
         // after getting back a permit - it's possible the cache was filled
         // double check
         if permit.should_check_cache() {
+            // TODO: if there is something in the cache, mark the permit as success.
             check_cache!();
         }
 

@@ -111,15 +111,6 @@ pub(crate) struct SecondaryTenant {
     pub(super) heatmap_total_size_metric: UIntGauge,
 }
 
-impl Drop for SecondaryTenant {
-    fn drop(&mut self) {
-        let tenant_id = self.tenant_shard_id.tenant_id.to_string();
-        let shard_id = format!("{}", self.tenant_shard_id.shard_slug());
-        let _ = SECONDARY_RESIDENT_PHYSICAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
-        let _ = SECONDARY_HEATMAP_TOTAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
-    }
-}
-
 impl SecondaryTenant {
     pub(crate) fn new(
         tenant_shard_id: TenantShardId,
@@ -167,6 +158,13 @@ impl SecondaryTenant {
 
         // Wait for any secondary downloader work to complete
         self.gate.close().await;
+
+        self.validate_metrics();
+
+        let tenant_id = self.tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", self.tenant_shard_id.shard_slug());
+        let _ = SECONDARY_RESIDENT_PHYSICAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
+        let _ = SECONDARY_HEATMAP_TOTAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
     }
 
     pub(crate) fn set_config(&self, config: &SecondaryLocationConfig) {
@@ -253,6 +251,20 @@ impl SecondaryTenant {
         })
         .await
         .expect("secondary eviction should not have panicked");
+    }
+
+    /// Exhaustive check that incrementally updated metrics match the actual state.
+    #[cfg(feature = "testing")]
+    fn validate_metrics(&self) {
+        let detail = self.detail.lock().unwrap();
+        let resident_size = detail.total_resident_size();
+
+        assert_eq!(resident_size, self.resident_size_metric.get());
+    }
+
+    #[cfg(not(feature = "testing"))]
+    fn validate_metrics(&self) {
+        // No-op in non-testing builds
     }
 }
 
