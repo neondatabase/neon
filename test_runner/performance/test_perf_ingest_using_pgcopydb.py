@@ -60,7 +60,7 @@ def build_pgcopydb_command(pgcopydb_filter_file: Path, test_output_dir: Path):
         "--no-acl",
         "--skip-db-properties",
         "--table-jobs",
-        "6,
+        "6",
         "--index-jobs",
         "6",
         "--restore-jobs",
