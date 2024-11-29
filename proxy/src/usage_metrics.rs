@@ -268,6 +268,7 @@ fn create_event_chunks<'a>(
         })
 }
 
+#[expect(clippy::too_many_arguments)]
 #[instrument(skip_all)]
 async fn collect_metrics_iteration(
     endpoints: &DashMap<Ids, Arc<MetricCounter>, FastHasher>,
@@ -305,7 +306,7 @@ async fn collect_metrics_iteration(
     for chunk in create_event_chunks(&metrics_to_send, hostname, prev, now, outer_chunk_size) {
         // TODO: upload concurrently
 
-        upload_main_events_chunked(client, metric_collection_endpoint, &chunk).await;
+        upload_main_events_chunked(client, metric_collection_endpoint, &chunk, CHUNK_SIZE).await;
 
         if let Err(e) = upload_backup_events(storage, &chunk, &path_prefix, &cancel).await {
             error!("failed to upload consumption events to remote storage: {e:?}");
@@ -317,9 +318,10 @@ async fn upload_main_events_chunked(
     client: &http::ClientWithMiddleware,
     metric_collection_endpoint: &reqwest::Url,
     chunk: &EventChunk<'_, Event<Ids, &str>>,
+    subchunk_size: usize,
 ) {
     // Split into smaller chunks to avoid exceeding the max request size
-    for subchunk in chunk.events.chunks(CHUNK_SIZE).map(|c| EventChunk {
+    for subchunk in chunk.events.chunks(subchunk_size).map(|c| EventChunk {
         events: Cow::Borrowed(c),
     }) {
         let res = client
