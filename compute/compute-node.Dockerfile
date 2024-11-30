@@ -109,6 +109,7 @@ RUN cd postgres && \
 #
 #########################################################################################
 FROM build-deps AS postgis-build
+ARG DEBIAN_VERSION
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 RUN apt update && \
@@ -125,12 +126,12 @@ RUN apt update && \
 # and also we must check backward compatibility with older versions of PostGIS.
 #
 # Use new version only for v17
-RUN case "${PG_VERSION}" in \
-    "v17") \
+RUN case "${DEBIAN_VERSION}" in \
+    "bookworm") \
         export SFCGAL_VERSION=1.4.1 \
         export SFCGAL_CHECKSUM=1800c8a26241588f11cddcf433049e9b9aea902e923414d2ecef33a3295626c3 \
     ;; \
-    "v14" | "v15" | "v16") \
+    "bullseye") \
         export SFCGAL_VERSION=1.3.10 \
         export SFCGAL_CHECKSUM=4e39b3b2adada6254a7bdba6d297bb28e1a9835a9f879b74f37e2dab70203232 \
     ;; \
