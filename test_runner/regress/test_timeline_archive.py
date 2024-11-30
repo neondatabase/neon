@@ -935,7 +935,7 @@ def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
     # Sleep some amount larger than min_age_secs
     time.sleep(3)
 
-    # Ensure that min_age_secs has an effect
+    # Ensure that min_age_secs has a deletion impeding effect
     gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=3600, mode="full")
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] == 0

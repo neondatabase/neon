@@ -533,7 +533,7 @@ async fn gc_tenant_manifests(
         errors,
         mut manifest_info,
     } = list_tenant_manifests(remote_client, tenant_shard_id, target).await?;
-    if errors.is_empty() {
+    if !errors.is_empty() {
         for error in errors {
             tracing::warn!(%tenant_shard_id, "list_tenant_manifests: {error}");
         }
