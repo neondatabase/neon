@@ -231,6 +231,8 @@ FROM build-deps AS plv8-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+COPY compute/patches/plv8-3.1.10.patch /plv8-3.1.10.patch
+
 RUN apt update && \
     apt install --no-install-recommends -y ninja-build python3-dev libncurses5 binutils clang
 
@@ -242,8 +244,6 @@ RUN apt update && \
 #
 # Use new version only for v17
 # because since v3.2, plv8 doesn't include plcoffee and plls extensions
-ENV PLV8_TAG=v3.2.3
-
 RUN case "${PG_VERSION}" in \
     "v17") \
         export PLV8_TAG=v3.2.3 \
@@ -258,8 +258,9 @@ RUN case "${PG_VERSION}" in \
     git clone --recurse-submodules --depth 1 --branch ${PLV8_TAG} https://github.com/plv8/plv8.git plv8-src && \
     tar -czf plv8.tar.gz --exclude .git plv8-src && \
     cd plv8-src && \
+    if [[ "${PG_VERSION}" < "v17" ]]; then patch -p1 < /plv8-3.1.10.patch; fi && \
     # generate and copy upgrade scripts
-    mkdir -p upgrade && ./generate_upgrade.sh 3.1.10 && \
+    mkdir -p upgrade && ./generate_upgrade.sh ${PLV8_TAG#v} && \
     cp upgrade/* /usr/local/pgsql/share/extension/ && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
