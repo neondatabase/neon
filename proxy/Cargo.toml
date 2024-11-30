@@ -112,6 +112,7 @@ workspace_hack.workspace = true
 [dev-dependencies]
 camino-tempfile.workspace = true
 fallible-iterator.workspace = true
+flate2.workspace = true
 tokio-tungstenite.workspace = true
 pbkdf2 = { workspace = true, features = ["simple", "std"] }
 rcgen.workspace = true

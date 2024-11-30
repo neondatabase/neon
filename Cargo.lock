@@ -4501,6 +4501,7 @@ dependencies = [
  "ecdsa 0.16.9",
  "env_logger",
  "fallible-iterator",
+ "flate2",
  "framed-websockets",
  "futures",
  "hashbrown 0.14.5",
