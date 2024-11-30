@@ -417,7 +417,7 @@ async fn maybe_delete_tenant_manifest(
         }
         Some(Err(e)) => {
             tracing::warn!("Failed to delete tenant manifest: {e}");
-            summary.tenant_manifests_deleted += 1;
+            summary.remote_storage_errors += 1;
         }
     }
 }
