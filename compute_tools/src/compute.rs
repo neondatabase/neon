@@ -20,8 +20,9 @@ use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use nix::unistd::Pid;
+use postgres;
 use postgres::error::SqlState;
-use postgres::{Client, NoTls};
+use postgres::NoTls;
 use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -58,6 +59,10 @@ pub static PG_PID: AtomicU32 = AtomicU32::new(0);
 pub struct ComputeNode {
     // Url type maintains proper escaping
     pub connstr: url::Url,
+    // We connect to Postgres from many different places, so build configs once
+    // and reuse them where needed.
+    pub conn_conf: postgres::config::Config,
+    pub tokio_conn_conf: tokio_postgres::config::Config,
     pub pgdata: String,
     pub pgbin: String,
     pub pgversion: String,
@@ -800,10 +805,10 @@ impl ComputeNode {
     /// version. In the future, it may upgrade all 3rd-party extensions.
     #[instrument(skip_all)]
     pub fn post_apply_config(&self) -> Result<()> {
-        let connstr = self.connstr.clone();
+        let conf = self.get_conn_conf(Some("compute_ctl:post_apply_config"));
         thread::spawn(move || {
             let func = || {
-                let mut client = Client::connect(connstr.as_str(), NoTls)?;
+                let mut client = conf.connect(NoTls)?;
                 handle_neon_extension_upgrade(&mut client)
                     .context("handle_neon_extension_upgrade")?;
                 Ok::<_, anyhow::Error>(())
@@ -815,12 +820,27 @@ impl ComputeNode {
         Ok(())
     }
 
+    pub fn get_conn_conf(&self, application_name: Option<&str>) -> postgres::Config {
+        let mut conf = self.conn_conf.clone();
+        if let Some(application_name) = application_name {
+            conf.application_name(application_name);
+        }
+        conf
+    }
+
+    pub fn get_tokio_conn_conf(&self, application_name: Option<&str>) -> tokio_postgres::Config {
+        let mut conf = self.tokio_conn_conf.clone();
+        if let Some(application_name) = application_name {
+            conf.application_name(application_name);
+        }
+        conf
+    }
+
     async fn get_maintenance_client(
         conf: &tokio_postgres::Config,
     ) -> Result<tokio_postgres::Client> {
         let mut conf = conf.clone();
-
-        conf.application_name("apply_config");
+        conf.application_name("compute_ctl:apply_config");
 
         let (client, conn) = match conf.connect(NoTls).await {
             // If connection fails, it may be the old node with `zenith_admin` superuser.
@@ -837,6 +857,7 @@ impl ComputeNode {
                         e
                     );
                     let mut zenith_admin_conf = postgres::config::Config::from(conf.clone());
+                    zenith_admin_conf.application_name("compute_ctl:apply_config");
                     zenith_admin_conf.user("zenith_admin");
 
                     let mut client =
@@ -1134,8 +1155,7 @@ impl ComputeNode {
     /// Do initial configuration of the already started Postgres.
     #[instrument(skip_all)]
     pub fn apply_config(&self, compute_state: &ComputeState) -> Result<()> {
-        let mut conf = tokio_postgres::Config::from_str(self.connstr.as_str()).unwrap();
-        conf.application_name("apply_config");
+        let conf = self.get_tokio_conn_conf(Some("compute_ctl:apply_config"));
 
         let conf = Arc::new(conf);
         let spec = Arc::new(
@@ -1161,7 +1181,7 @@ impl ComputeNode {
         thread::spawn(move || {
             let conf = conf.as_ref().clone();
             let mut conf = postgres::config::Config::from(conf);
-            conf.application_name("migrations");
+            conf.application_name("compute_ctl:migrations");
 
             let mut client = conf.connect(NoTls)?;
             handle_migrations(&mut client).context("apply_config handle_migrations")
@@ -1369,9 +1389,9 @@ impl ComputeNode {
             }
             self.post_apply_config()?;
 
-            let connstr = self.connstr.clone();
+            let conf = self.get_conn_conf(None);
             thread::spawn(move || {
-                let res = get_installed_extensions(&connstr);
+                let res = get_installed_extensions(conf);
                 match res {
                     Ok(extensions) => {
                         info!(
@@ -1510,7 +1530,8 @@ impl ComputeNode {
     /// Select `pg_stat_statements` data and return it as a stringified JSON
     pub async fn collect_insights(&self) -> String {
         let mut result_rows: Vec<String> = Vec::new();
-        let connect_result = tokio_postgres::connect(self.connstr.as_str(), NoTls).await;
+        let conf = self.get_tokio_conn_conf(Some("compute_ctl:collect_insights"));
+        let connect_result = conf.connect(NoTls).await;
         let (client, connection) = connect_result.unwrap();
         tokio::spawn(async move {
             if let Err(e) = connection.await {
@@ -1636,10 +1657,9 @@ LIMIT 100",
         privileges: &[Privilege],
         role_name: &PgIdent,
     ) -> Result<()> {
-        use tokio_postgres::config::Config;
         use tokio_postgres::NoTls;
 
-        let mut conf = Config::from_str(self.connstr.as_str()).unwrap();
+        let mut conf = self.get_tokio_conn_conf(Some("compute_ctl:set_role_grants"));
         conf.dbname(db_name);
 
         let (db_client, conn) = conf
@@ -1676,10 +1696,9 @@ LIMIT 100",
         db_name: &PgIdent,
         ext_version: ExtVersion,
     ) -> Result<ExtVersion> {
-        use tokio_postgres::config::Config;
         use tokio_postgres::NoTls;
 
-        let mut conf = Config::from_str(self.connstr.as_str()).unwrap();
+        let mut conf = self.get_tokio_conn_conf(Some("compute_ctl:install_extension"));
         conf.dbname(db_name);
 
         let (db_client, conn) = conf

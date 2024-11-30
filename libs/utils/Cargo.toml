@@ -46,6 +46,7 @@ tracing.workspace = true
 tracing-error.workspace = true
 tracing-subscriber = { workspace = true, features = ["json", "registry"] }
 rand.workspace = true
+scopeguard.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 url.workspace = true

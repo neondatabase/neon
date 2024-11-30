@@ -838,6 +838,7 @@ mod test {
                 local_path: remote_fs_dir.clone(),
             },
             timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+            small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT,
         };
         let storage = GenericRemoteStorage::from_config(&storage_config)
             .await
