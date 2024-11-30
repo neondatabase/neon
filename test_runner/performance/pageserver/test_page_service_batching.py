@@ -11,36 +11,95 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
 from fixtures.utils import humantime_to_ms
 
-TARGET_RUNTIME = 60
+TARGET_RUNTIME = 30
 
 
-@pytest.mark.skip("See https://github.com/neondatabase/neon/pull/9820#issue-2675856095")
+@dataclass
+class PageServicePipeliningConfig:
+    pass
+
+
+@dataclass
+class PageServicePipeliningConfigSerial(PageServicePipeliningConfig):
+    mode: str = "serial"
+
+
+@dataclass
+class PageServicePipeliningConfigPipelined(PageServicePipeliningConfig):
+    max_batch_size: int
+    execution: str
+    mode: str = "pipelined"
+
+
+EXECUTION = ["concurrent-futures", "tasks"]
+
+NON_BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
+for max_batch_size in [1, 32]:
+    for execution in EXECUTION:
+        NON_BATCHABLE.append(PageServicePipeliningConfigPipelined(max_batch_size, execution))
+
+BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
+for max_batch_size in [1, 2, 4, 8, 16, 32]:
+    for execution in EXECUTION:
+        BATCHABLE.append(PageServicePipeliningConfigPipelined(max_batch_size, execution))
+
+
 @pytest.mark.parametrize(
-    "tablesize_mib, batch_timeout, target_runtime, effective_io_concurrency, readhead_buffer_size, name",
+    "tablesize_mib, pipelining_config, target_runtime, effective_io_concurrency, readhead_buffer_size, name",
     [
-        # the next 4 cases demonstrate how not-batchable workloads suffer from batching timeout
-        (50, None, TARGET_RUNTIME, 1, 128, "not batchable no batching"),
-        (50, "10us", TARGET_RUNTIME, 1, 128, "not batchable 10us timeout"),
-        (50, "1ms", TARGET_RUNTIME, 1, 128, "not batchable 1ms timeout"),
-        # the next 4 cases demonstrate how batchable workloads benefit from batching
-        (50, None, TARGET_RUNTIME, 100, 128, "batchable no batching"),
-        (50, "10us", TARGET_RUNTIME, 100, 128, "batchable 10us timeout"),
-        (50, "100us", TARGET_RUNTIME, 100, 128, "batchable 100us timeout"),
-        (50, "1ms", TARGET_RUNTIME, 100, 128, "batchable 1ms timeout"),
+        # non-batchable workloads
+        # (A separate benchmark will consider latency).
+        *[
+            (
+                50,
+                config,
+                TARGET_RUNTIME,
+                1,
+                128,
+                f"not batchable {dataclasses.asdict(config)}",
+            )
+            for config in NON_BATCHABLE
+        ],
+        # batchable workloads should show throughput and CPU efficiency improvements
+        *[
+            (
+                50,
+                config,
+                TARGET_RUNTIME,
+                100,
+                128,
+                f"batchable {dataclasses.asdict(config)}",
+            )
+            for config in BATCHABLE
+        ],
     ],
 )
-def test_getpage_merge_smoke(
+def test_throughput(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     tablesize_mib: int,
-    batch_timeout: str | None,
+    pipelining_config: PageServicePipeliningConfig,
     target_runtime: int,
     effective_io_concurrency: int,
     readhead_buffer_size: int,
     name: str,
 ):
     """
-    Do a bunch of sequential scans and ensure that the pageserver does some merging.
+    Do a bunch of sequential scans with varying compute and pipelining configurations.
+    Primary performance metrics are the achieved batching factor and throughput (wall clock time).
+    Resource utilization is also interesting - we currently measure CPU time.
+
+    The test is a fixed-runtime based type of test (target_runtime).
+    Hence, the results are normalized to the number of iterations completed within target runtime.
+
+    If the compute doesn't provide pipeline depth (effective_io_concurrency=1),
+    performance should be about identical in all configurations.
+    Pipelining can still yield improvements in these scenarios because it parses the
+    next request while the current one is still being executed.
+
+    If the compute provides pipeline depth (effective_io_concurrency=100), then
+    pipelining configs, especially with max_batch_size>1 should yield dramatic improvements
+    in all performance metrics.
     """
 
     #
@@ -51,14 +110,16 @@ def test_getpage_merge_smoke(
     params.update(
         {
             "tablesize_mib": (tablesize_mib, {"unit": "MiB"}),
-            "batch_timeout": (
-                -1 if batch_timeout is None else 1e3 * humantime_to_ms(batch_timeout),
-                {"unit": "us"},
-            ),
             # target_runtime is just a polite ask to the workload to run for this long
             "effective_io_concurrency": (effective_io_concurrency, {}),
             "readhead_buffer_size": (readhead_buffer_size, {}),
-            # name is not a metric
+            # name is not a metric, we just use it to identify the test easily in the `test_...[...]`` notation
+        }
+    )
+    params.update(
+        {
+            f"pipelining_config.{k}": (v, {})
+            for k, v in dataclasses.asdict(pipelining_config).items()
         }
     )
 
@@ -170,7 +231,9 @@ def test_getpage_merge_smoke(
         after = get_metrics()
         return (after - before).normalize(iters - 1)
 
-    env.pageserver.patch_config_toml_nonrecursive({"server_side_batch_timeout": batch_timeout})
+    env.pageserver.patch_config_toml_nonrecursive(
+        {"page_service_pipelining": dataclasses.asdict(pipelining_config)}
+    )
     env.pageserver.restart()
     metrics = workload()
 
@@ -199,23 +262,30 @@ def test_getpage_merge_smoke(
     )
 
 
-@pytest.mark.skip("See https://github.com/neondatabase/neon/pull/9820#issue-2675856095")
+PRECISION_CONFIGS: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
+for max_batch_size in [1, 32]:
+    for execution in EXECUTION:
+        PRECISION_CONFIGS.append(PageServicePipeliningConfigPipelined(max_batch_size, execution))
+
+
 @pytest.mark.parametrize(
-    "batch_timeout", [None, "10us", "20us", "50us", "100us", "200us", "500us", "1ms"]
+    "pipelining_config,name",
+    [(config, f"{dataclasses.asdict(config)}") for config in PRECISION_CONFIGS],
 )
-def test_timer_precision(
+def test_latency(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
-    batch_timeout: str | None,
+    pipelining_config: PageServicePipeliningConfig,
+    name: str,
 ):
     """
-    Determine the batching timeout precision (mean latency) and tail latency impact.
+    Measure the latency impact of pipelining in an un-batchable workloads.
 
-    The baseline is `None`; an ideal batching timeout implementation would increase
-    the mean latency by exactly `batch_timeout`.
+    An ideal implementation should not increase average or tail latencies for such workloads.
 
-    That is not the case with the current implementation, will be addressed in future changes.
+    We don't have support in pagebench to create queue depth yet.
+    => https://github.com/neondatabase/neon/issues/9837
     """
 
     #
@@ -223,7 +293,8 @@ def test_timer_precision(
     #
 
     def patch_ps_config(ps_config):
-        ps_config["server_side_batch_timeout"] = batch_timeout
+        if pipelining_config is not None:
+            ps_config["page_service_pipelining"] = dataclasses.asdict(pipelining_config)
 
     neon_env_builder.pageserver_config_override = patch_ps_config
 
