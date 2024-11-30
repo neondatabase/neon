@@ -14,6 +14,9 @@ ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
 FROM debian:$DEBIAN_FLAVOR AS build-deps
 ARG DEBIAN_VERSION
 
+# Use strict mode for bash to catch errors early
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
 RUN case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):
       # The h3_pg extension needs a cmake 3.20+, but Debian bullseye has 3.18.
