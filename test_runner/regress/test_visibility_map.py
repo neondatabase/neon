@@ -32,6 +32,9 @@ def test_visibility_map(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         connstr = endpoint.connstr(dbname=dbname)
         # pgbench -i will automatically vacuum the tables. This creates the visibility map.
         pg_bin.run(["pgbench", "-i", "-s", "10", connstr])
+        # Freeze the tuples to set the initial frozen bit.
+        endpoint.safe_psql("vacuum freeze", connstr=connstr)
+        # Run pgbench.
         pg_bin.run(["pgbench", "-c", "32", "-j", "8", "-T", "10", connstr])
 
     # Restart the endpoint to flush the compute page cache. We want to make sure we read VM pages
@@ -41,24 +44,31 @@ def test_visibility_map(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     # Check that the visibility map matches the heap contents for pg_accounts (the main table).
     for dbname in dbnames:
-        log.info(f"Checking VM visibility for {dbname}")
+        log.info(f"Checking visibility map for {dbname}")
         with endpoint.cursor(dbname=dbname) as cur:
             cur.execute("create extension pg_visibility")
+
             cur.execute("select count(*) from pg_check_visible('pgbench_accounts')")
             row = cur.fetchone()
             assert row is not None
             assert row[0] == 0, f"{row[0]} inconsistent VM pages (visible)"
 
-    # Freeze the tuples and check that the freeze bit is set correctly.
-    for dbname in dbnames:
-        log.info(f"Checking VM frozen for {dbname}")
-        with endpoint.cursor(dbname=dbname) as cur:
             cur.execute("select count(*) from pg_check_frozen('pgbench_accounts')")
             row = cur.fetchone()
             assert row is not None
             assert row[0] == 0, f"{row[0]} inconsistent VM pages (frozen)"
 
-            cur.execute("vacuum freeze pgbench_accounts")
+    # Vacuum and freeze the tables, and check that the visibility map is still accurate.
+    for dbname in dbnames:
+        log.info(f"Vacuuming and checking visibility map for {dbname}")
+        with endpoint.cursor(dbname=dbname) as cur:
+            cur.execute("vacuum freeze")
+
+            cur.execute("select count(*) from pg_check_visible('pgbench_accounts')")
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == 0, f"{row[0]} inconsistent VM pages (visible)"
+
             cur.execute("select count(*) from pg_check_frozen('pgbench_accounts')")
             row = cur.fetchone()
             assert row is not None
