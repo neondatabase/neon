@@ -6109,7 +6109,7 @@ impl Service {
         // How many candidate optimizations we will generate, before evaluating them for readniess: setting
         // this higher than the execution limit gives us a chance to execute some work even if the first
         // few optimizations we find are not ready.
-        const MAX_OPTIMIZATIONS_PLAN_PER_PASS: usize = 8;
+        const MAX_OPTIMIZATIONS_PLAN_PER_PASS: usize = 2;
 
         let mut work = Vec::new();
         let mut locked = self.inner.write().unwrap();
