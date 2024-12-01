@@ -6247,6 +6247,14 @@ impl Service {
                             > DOWNLOAD_FRESHNESS_THRESHOLD
                     {
                         tracing::info!("Skipping migration of {tenant_shard_id} to {node} because secondary isn't ready: {progress:?}");
+
+                        #[cfg(feature = "testing")]
+                        if progress.heatmap_mtime.is_none() {
+                            // No heatmap might mean the attached location has never uploaded one, or that
+                            // the secondary download hasn't happened yet.  This is relatively unusual in the field,
+                            // but fairly common in tests.
+                            self.kick_secondary_download(tenant_shard_id).await;
+                        }
                     } else {
                         // Location looks ready: proceed
                         tracing::info!(
@@ -6259,6 +6267,58 @@ impl Service {
         }
 
         validated_work
+    }
+
+    /// Some aspects of scheduling optimisation wait for secondary locations to be warm.  This
+    /// happens on multi-minute timescales in the field, which is fine because optimisation is meant
+    /// to be a lazy background thing. However, when testing, it is not practical to wait around, so
+    /// we have this helper to move things along faster.
+    #[cfg(feature = "testing")]
+    async fn kick_secondary_download(&self, tenant_shard_id: TenantShardId) {
+        let (attached_node, secondary_node) = {
+            let locked = self.inner.read().unwrap();
+            let Some(shard) = locked.tenants.get(&tenant_shard_id) else {
+                return;
+            };
+            let (Some(attached), Some(secondary)) = (
+                shard.intent.get_attached(),
+                shard.intent.get_secondary().first(),
+            ) else {
+                return;
+            };
+            (
+                locked.nodes.get(&attached).unwrap().clone(),
+                locked.nodes.get(&secondary).unwrap().clone(),
+            )
+        };
+
+        // Make remote API calls to upload + download heatmaps: we ignore errors because this is just
+        // a 'kick' to let scheduling optimisation run more promptly.
+        attached_node
+            .with_client_retries(
+                |client| async move { client.tenant_heatmap_upload(tenant_shard_id).await },
+                &self.config.jwt_token,
+                3,
+                10,
+                SHORT_RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await;
+
+        secondary_node
+            .with_client_retries(
+                |client| async move {
+                    client
+                        .tenant_secondary_download(tenant_shard_id, Some(Duration::from_secs(1)))
+                        .await
+                },
+                &self.config.jwt_token,
+                3,
+                10,
+                SHORT_RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await;
     }
 
     /// Look for shards which are oversized and in need of splitting
