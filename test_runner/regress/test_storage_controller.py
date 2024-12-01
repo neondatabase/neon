@@ -2253,12 +2253,7 @@ def test_storage_controller_node_deletion(
             assert victim.id not in shard["node_secondary"]
 
     # Reconciles running during deletion should all complete
-    # FIXME: this currently doesn't work because the deletion schedules shards without a proper ScheduleContext, resulting
-    # in states that background_reconcile wants to optimize, but can't proceed with migrations yet because this is a short3
-    # test that hasn't uploaded any heatmaps for secondaries.
-    # In the interim, just do a reconcile_all to enable the consistency check.
-    # env.storage_controller.reconcile_until_idle()
-    env.storage_controller.reconcile_all()
+    env.storage_controller.reconcile_until_idle()
 
     # Controller should pass its own consistency checks
     env.storage_controller.consistency_check()
@@ -2267,7 +2262,6 @@ def test_storage_controller_node_deletion(
     env.storage_controller.stop()
     env.storage_controller.start()
     assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
-    env.storage_controller.reconcile_all()  # FIXME: workaround for optimizations happening on startup, see FIXME above.
     env.storage_controller.consistency_check()
 
 
