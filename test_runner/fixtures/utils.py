@@ -422,7 +422,6 @@ def wait_until(
                 next_status = datetime.now() + timedelta(seconds=status_interval)
             last_exception = e
             time.sleep(interval)
-            continue
     raise Exception(f"timed out while waiting for {name}") from last_exception
 
 
