@@ -14,6 +14,9 @@ ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
 FROM debian:$DEBIAN_FLAVOR AS build-deps
 ARG DEBIAN_VERSION
 
+# Use strict mode for bash to catch errors early
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
 RUN case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):
       # The h3_pg extension needs a cmake 3.20+, but Debian bullseye has 3.18.
@@ -106,6 +109,7 @@ RUN cd postgres && \
 #
 #########################################################################################
 FROM build-deps AS postgis-build
+ARG DEBIAN_VERSION
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 RUN apt update && \
@@ -122,12 +126,12 @@ RUN apt update && \
 # and also we must check backward compatibility with older versions of PostGIS.
 #
 # Use new version only for v17
-RUN case "${PG_VERSION}" in \
-    "v17") \
+RUN case "${DEBIAN_VERSION}" in \
+    "bookworm") \
         export SFCGAL_VERSION=1.4.1 \
         export SFCGAL_CHECKSUM=1800c8a26241588f11cddcf433049e9b9aea902e923414d2ecef33a3295626c3 \
     ;; \
-    "v14" | "v15" | "v16") \
+    "bullseye") \
         export SFCGAL_VERSION=1.3.10 \
         export SFCGAL_CHECKSUM=4e39b3b2adada6254a7bdba6d297bb28e1a9835a9f879b74f37e2dab70203232 \
     ;; \
@@ -228,6 +232,8 @@ FROM build-deps AS plv8-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+COPY compute/patches/plv8-3.1.10.patch /plv8-3.1.10.patch
+
 RUN apt update && \
     apt install --no-install-recommends -y ninja-build python3-dev libncurses5 binutils clang
 
@@ -239,8 +245,6 @@ RUN apt update && \
 #
 # Use new version only for v17
 # because since v3.2, plv8 doesn't include plcoffee and plls extensions
-ENV PLV8_TAG=v3.2.3
-
 RUN case "${PG_VERSION}" in \
     "v17") \
         export PLV8_TAG=v3.2.3 \
@@ -255,8 +259,9 @@ RUN case "${PG_VERSION}" in \
     git clone --recurse-submodules --depth 1 --branch ${PLV8_TAG} https://github.com/plv8/plv8.git plv8-src && \
     tar -czf plv8.tar.gz --exclude .git plv8-src && \
     cd plv8-src && \
+    if [[ "${PG_VERSION}" < "v17" ]]; then patch -p1 < /plv8-3.1.10.patch; fi && \
     # generate and copy upgrade scripts
-    mkdir -p upgrade && ./generate_upgrade.sh 3.1.10 && \
+    mkdir -p upgrade && ./generate_upgrade.sh ${PLV8_TAG#v} && \
     cp upgrade/* /usr/local/pgsql/share/extension/ && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \

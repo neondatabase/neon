@@ -9,7 +9,8 @@ use crate::compute::ComputeNode;
 #[instrument(skip_all)]
 pub async fn check_writability(compute: &ComputeNode) -> Result<()> {
     // Connect to the database.
-    let (client, connection) = tokio_postgres::connect(compute.connstr.as_str(), NoTls).await?;
+    let conf = compute.get_tokio_conn_conf(Some("compute_ctl:availability_checker"));
+    let (client, connection) = conf.connect(NoTls).await?;
     if client.is_closed() {
         return Err(anyhow!("connection to postgres closed"));
     }

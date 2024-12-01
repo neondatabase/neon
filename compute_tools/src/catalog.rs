@@ -6,7 +6,6 @@ use tokio::{
     process::Command,
     spawn,
 };
-use tokio_postgres::connect;
 use tokio_stream::{self as stream, StreamExt};
 use tokio_util::codec::{BytesCodec, FramedRead};
 use tracing::warn;
@@ -16,10 +15,8 @@ use crate::pg_helpers::{get_existing_dbs_async, get_existing_roles_async, postgr
 use compute_api::responses::CatalogObjects;
 
 pub async fn get_dbs_and_roles(compute: &Arc<ComputeNode>) -> anyhow::Result<CatalogObjects> {
-    let connstr = compute.connstr.clone();
-
-    let (client, connection): (tokio_postgres::Client, _) =
-        connect(connstr.as_str(), NoTls).await?;
+    let conf = compute.get_tokio_conn_conf(Some("compute_ctl:get_dbs_and_roles"));
+    let (client, connection): (tokio_postgres::Client, _) = conf.connect(NoTls).await?;
 
     spawn(async move {
         if let Err(e) = connection.await {
