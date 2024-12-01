@@ -313,6 +313,7 @@ pub(crate) struct ObservedStateLocation {
     /// we know that we might have some state on this node.
     pub(crate) conf: Option<LocationConfig>,
 }
+
 pub(crate) struct ReconcilerWaiter {
     // For observability purposes, remember the ID of the shard we're
     // waiting for.
@@ -474,6 +475,7 @@ impl TenantShard {
         tenant_shard_id: TenantShardId,
         shard: ShardIdentity,
         policy: PlacementPolicy,
+        preferred_az_id: Option<AvailabilityZone>,
     ) -> Self {
         metrics::METRICS_REGISTRY
             .metrics_group
@@ -497,7 +499,7 @@ impl TenantShard {
             last_error: Arc::default(),
             pending_compute_notification: false,
             scheduling_policy: ShardSchedulingPolicy::default(),
-            preferred_az_id: None,
+            preferred_az_id,
         }
     }
 
@@ -734,7 +736,15 @@ impl TenantShard {
         // other shards from the same tenant on it, then skip doing any scheduling calculations.
 
         let attached = (*self.intent.get_attached())?;
-        let schedule_context = schedule_context.project_detach(attached);
+        tracing::info!(
+            "Initially: attached {attached} ({:?} vs {:?}), in context {schedule_context:?}",
+            scheduler.get_node_az(&attached),
+            self.preferred_az_id.as_ref()
+        );
+
+        // Construct a schedule context that excludes locations belonging to
+        // this shard: this simulates removing and re-scheduling the shard
+        let schedule_context = schedule_context.project_detach(self);
 
         // Look for a lower-scoring location to attach to
         let Ok(candidate_node) = scheduler.schedule_shard::<AttachedShardTag>(
@@ -789,16 +799,16 @@ impl TenantShard {
                 // migrating for utilization requires a separate high level view of the system to
                 // e.g. prioritize moving larger or smaller tenants, rather than arbitrarily
                 // moving things around in the order that we hit this function.
-                let candidate_score = candidate_score.disregard_utilization();
-                let candidate_score = candidate_score.project_attachment();
+                let candidate_score = candidate_score.for_optimization();
+                let current_score = current_score.for_optimization();
 
-                let current_score = current_score.disregard_utilization();
-
-                if candidate_score < current_score && current_score.different(&candidate_score) {
+                if candidate_score < current_score {
                     tracing::info!("Found a lower scoring location!  {candidate_score:?} is better than {current_score:?}");
                 } else {
                     // The candidate node is no better than our current location, so don't migrate
-                    tracing::debug!("Candidate node {candidate_node} is no better than our current location {attached}");
+                    tracing::debug!(
+                        "Candidate node {candidate_node} is no better than our current location {attached} (candidate {candidate_score:?} vs attached {current_score:?})",
+                    );
                     return None;
                 }
             }
@@ -947,14 +957,14 @@ impl TenantShard {
             ) {
                 Some(current_score) => {
                     // Disregard utilization: we don't want to thrash around based on disk utilization
-                    let current_score = current_score.disregard_utilization();
-                    let candidate_score = candidate_score.disregard_utilization();
+                    let current_score = current_score.for_optimization();
+                    let candidate_score = candidate_score.for_optimization();
 
-                    if candidate_score < current_score && current_score.different(&candidate_score)
-                    {
+                    if candidate_score < current_score {
                         tracing::info!(
-                        "Identified optimization({}): replace secondary {secondary}->{candidate_node} (current secondaries {:?})  Candidate {:?} < current {:?} ",
+                        "Identified optimization({}, home AZ {:?}): replace secondary {secondary}->{candidate_node} (current secondaries {:?})  Candidate {:?} < current {:?} ",
                         self.tenant_shard_id,
+                        self.preferred_az_id,
                         self.intent.get_secondary(),
                         candidate_score,
                         current_score
@@ -1677,6 +1687,7 @@ pub(crate) mod tests {
             )
             .unwrap(),
             policy,
+            None,
         )
     }
 
@@ -1712,6 +1723,7 @@ pub(crate) mod tests {
                     )
                     .unwrap(),
                     policy.clone(),
+                    None,
                 );
 
                 if let Some(az) = &preferred_az {
@@ -1857,18 +1869,27 @@ pub(crate) mod tests {
     #[test]
     /// Simple case: moving attachment to somewhere better where we already have a secondary
     fn optimize_attachment_simple() -> anyhow::Result<()> {
-        let nodes = make_test_nodes(3, &[]);
+        let nodes = make_test_nodes(
+            3,
+            &[
+                AvailabilityZone("az-a".to_string()),
+                AvailabilityZone("az-b".to_string()),
+                AvailabilityZone("az-c".to_string()),
+            ],
+        );
         let mut scheduler = Scheduler::new(nodes.values());
 
         let mut shard_a = make_test_tenant_shard(PlacementPolicy::Attached(1));
+        shard_a.preferred_az_id = Some(AvailabilityZone("az-a".to_string()));
         let mut shard_b = make_test_tenant_shard(PlacementPolicy::Attached(1));
+        shard_b.preferred_az_id = Some(AvailabilityZone("az-a".to_string()));
 
         // Initially: both nodes attached on shard 1, and both have secondary locations
         // on different nodes.
-        shard_a.intent.set_attached(&mut scheduler, Some(NodeId(1)));
-        shard_a.intent.push_secondary(&mut scheduler, NodeId(2));
+        shard_a.intent.set_attached(&mut scheduler, Some(NodeId(2)));
+        shard_a.intent.push_secondary(&mut scheduler, NodeId(1));
         shard_b.intent.set_attached(&mut scheduler, Some(NodeId(1)));
-        shard_b.intent.push_secondary(&mut scheduler, NodeId(3));
+        shard_b.intent.push_secondary(&mut scheduler, NodeId(2));
 
         fn make_schedule_context(shard_a: &TenantShard, shard_b: &TenantShard) -> ScheduleContext {
             let mut schedule_context = ScheduleContext::default();
@@ -1886,8 +1907,8 @@ pub(crate) mod tests {
             Some(ScheduleOptimization {
                 sequence: shard_a.sequence,
                 action: ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
-                    old_attached_node_id: NodeId(1),
-                    new_attached_node_id: NodeId(2)
+                    old_attached_node_id: NodeId(2),
+                    new_attached_node_id: NodeId(1)
                 })
             })
         );
@@ -2016,6 +2037,87 @@ pub(crate) mod tests {
 
         shard_a.intent.clear(&mut scheduler);
         shard_b.intent.clear(&mut scheduler);
+
+        Ok(())
+    }
+
+    #[test]
+    /// Check that multi-step migration works when moving to somewhere that is only better by
+    /// 1 AffinityScore -- this ensures that we don't have a bug like the intermediate secondary
+    /// counting toward the affinity score such that it prevents the rest of the migration from happening.
+    fn optimize_attachment_marginal() -> anyhow::Result<()> {
+        let nodes = make_test_nodes(2, &[]);
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        // Multi-sharded tenant, we will craft a situation where affinity
+        // scores differ only slightly
+        let mut shards = make_test_tenant(PlacementPolicy::Attached(1), ShardCount::new(4), None);
+
+        // 1 attached on node 1
+        shards[0]
+            .intent
+            .set_attached(&mut scheduler, Some(NodeId(1)));
+        // 2 attached and one secondary on node 2
+        shards[1]
+            .intent
+            .set_attached(&mut scheduler, Some(NodeId(2)));
+        shards[2]
+            .intent
+            .set_attached(&mut scheduler, Some(NodeId(2)));
+        shards[1].intent.push_secondary(&mut scheduler, NodeId(2));
+
+        fn make_schedule_context(shards: &Vec<TenantShard>) -> ScheduleContext {
+            let mut schedule_context = ScheduleContext::default();
+            for shard in shards {
+                schedule_context.avoid(&shard.intent.all_pageservers());
+                if let Some(attached) = shard.intent.get_attached() {
+                    schedule_context.push_attached(*attached);
+                }
+            }
+            schedule_context
+        }
+
+        let schedule_context = make_schedule_context(&shards);
+        let optimization_a_prepare =
+            shards[2].optimize_attachment(&mut scheduler, &schedule_context);
+        assert_eq!(
+            optimization_a_prepare,
+            Some(ScheduleOptimization {
+                sequence: shards[2].sequence,
+                action: ScheduleOptimizationAction::CreateSecondary(NodeId(1))
+            })
+        );
+        shards[2].apply_optimization(&mut scheduler, optimization_a_prepare.unwrap());
+
+        let schedule_context = make_schedule_context(&shards);
+        let optimization_a_migrate =
+            shards[2].optimize_attachment(&mut scheduler, &schedule_context);
+        assert_eq!(
+            optimization_a_migrate,
+            Some(ScheduleOptimization {
+                sequence: shards[2].sequence,
+                action: ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                    old_attached_node_id: NodeId(2),
+                    new_attached_node_id: NodeId(1)
+                })
+            })
+        );
+        shards[2].apply_optimization(&mut scheduler, optimization_a_migrate.unwrap());
+
+        // let schedule_context = make_schedule_context(&shard_a, &shard_b);
+        // let optimization_a_cleanup = shard_a.optimize_attachment(&mut scheduler, &schedule_context);
+        // assert_eq!(
+        //     optimization_a_cleanup,
+        //     Some(ScheduleOptimization {
+        //         sequence: shard_a.sequence,
+        //         action: ScheduleOptimizationAction::RemoveSecondary(NodeId(1))
+        //     })
+        // );
+        // shard_a.apply_optimization(&mut scheduler, optimization_a_cleanup.unwrap());
+
+        for mut shard in shards {
+            shard.intent.clear(&mut scheduler);
+        }
 
         Ok(())
     }
