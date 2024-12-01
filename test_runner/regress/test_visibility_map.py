@@ -33,7 +33,7 @@ def test_visibility_map(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         # pgbench -i will automatically vacuum the tables. This creates the visibility map.
         pg_bin.run(["pgbench", "-i", "-s", "10", connstr])
         # Freeze the tuples to set the initial frozen bit.
-        endpoint.safe_psql("vacuum freeze", connstr=connstr)
+        endpoint.safe_psql("vacuum freeze", dbname=dbname)
         # Run pgbench.
         pg_bin.run(["pgbench", "-c", "32", "-j", "8", "-T", "10", connstr])
 
