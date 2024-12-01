@@ -1,14 +1,8 @@
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
 
-#
-# Test UNLOGGED tables/relations. Postgres copies init fork contents to main
-# fork to reset them during recovery. In Neon, pageserver directly sends init
-# fork contents as main fork during basebackup.
-#
 
-
-def test_check_visibility_map(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
+def test_visibility_map(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     """
     Runs pgbench across a few databases on a sharded tenant, then performs a visibility map
     consistency check. Regression test for https://github.com/neondatabase/neon/issues/9914.
