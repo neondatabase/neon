@@ -15,6 +15,9 @@
 #include "access/subtrans.h"
 #include "access/twophase.h"
 #include "access/xlog.h"
+#if PG_MAJORVERSION_NUM >= 15
+#include "access/xlogrecovery.h"
+#endif
 #include "replication/logical.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
@@ -431,6 +434,16 @@ _PG_init(void)
 
 	restore_running_xacts_callback = RestoreRunningXactsFromClog;
 
+
+	DefineCustomBoolVariable(
+							"neon.allow_replica_misconfig",
+							"Allow replica startup when some critical GUCs have smaller value than on primary node",
+							NULL,
+							&allowReplicaMisconfig,
+							true,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
 
 	DefineCustomEnumVariable(
 							"neon.running_xacts_overflow_policy",
