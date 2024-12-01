@@ -439,6 +439,8 @@ readahead_buffer_resize(int newsize, void *extra)
 	newPState->ring_unused = newsize;
 	newPState->ring_receive = newsize;
 	newPState->ring_flush = newsize;
+	newPState->max_shard_no = MyPState->max_shard_no;
+	memcpy(newPState->shard_bitmap, MyPState->shard_bitmap, sizeof(MyPState->shard_bitmap));
 
 	/*
 	 * Copy over the prefetches.
@@ -495,7 +497,11 @@ readahead_buffer_resize(int newsize, void *extra)
 
 	for (; end >= MyPState->ring_last && end != UINT64_MAX; end -= 1)
 	{
-		prefetch_set_unused(end);
+		PrefetchRequest *slot = GetPrfSlot(end);
+		if (slot->status == PRFS_RECEIVED)
+		{
+			pfree(slot->response);
+		}
 	}
 
 	prfh_destroy(MyPState->prf_hash);
@@ -944,6 +950,9 @@ Retry:
 		Assert(entry == NULL);
 		Assert(slot == NULL);
 
+		/* There should be no buffer overflow */
+		Assert(MyPState->ring_last + readahead_buffer_size >= MyPState->ring_unused);
+
 		/*
 		 * If the prefetch queue is full, we need to make room by clearing the
 		 * oldest slot. If the oldest slot holds a buffer that was already
@@ -958,7 +967,7 @@ Retry:
 		 * a prefetch request kind of goes against the principles of
 		 * prefetching)
 		 */
-		if (MyPState->ring_last + readahead_buffer_size - 1 == MyPState->ring_unused)
+		if (MyPState->ring_last + readahead_buffer_size == MyPState->ring_unused)
 		{
 			uint64		cleanup_index = MyPState->ring_last;
 
