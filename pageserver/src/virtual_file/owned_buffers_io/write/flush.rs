@@ -124,7 +124,8 @@ where
     where
         B: Buffer<IoBuf = Buf> + Send + 'static,
     {
-        let (front, back) = duplex::mpsc::channel(2);
+        // It is fine to buffer up to only 1 message. We only 1 message in-flight at a time.
+        let (front, back) = duplex::mpsc::channel(1);
 
         let join_handle = tokio::spawn(async move {
             FlushBackgroundTask::new(back, file, gate_guard, ctx)
