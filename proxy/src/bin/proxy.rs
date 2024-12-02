@@ -3,14 +3,6 @@ use std::pin::pin;
 use std::sync::Arc;
 
 use anyhow::bail;
-use aws_config::environment::EnvironmentVariableCredentialsProvider;
-use aws_config::imds::credentials::ImdsCredentialsProvider;
-use aws_config::meta::credentials::CredentialsProviderChain;
-use aws_config::meta::region::RegionProviderChain;
-use aws_config::profile::ProfileFileCredentialsProvider;
-use aws_config::provider_config::ProviderConfig;
-use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
-use aws_config::Region;
 use futures::future::Either;
 use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
@@ -314,39 +306,7 @@ async fn main() -> anyhow::Result<()> {
     };
     info!("Using region: {}", args.aws_region);
 
-    let region_provider =
-        RegionProviderChain::default_provider().or_else(Region::new(args.aws_region.clone()));
-    let provider_conf =
-        ProviderConfig::without_region().with_region(region_provider.region().await);
-    let aws_credentials_provider = {
-        // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
-        CredentialsProviderChain::first_try("env", EnvironmentVariableCredentialsProvider::new())
-            // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
-            .or_else(
-                "profile-sso",
-                ProfileFileCredentialsProvider::builder()
-                    .configure(&provider_conf)
-                    .build(),
-            )
-            // uses "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
-            // needed to access remote extensions bucket
-            .or_else(
-                "token",
-                WebIdentityTokenCredentialsProvider::builder()
-                    .configure(&provider_conf)
-                    .build(),
-            )
-            // uses imds v2
-            .or_else("imds", ImdsCredentialsProvider::builder().build())
-    };
-    let elasticache_credentials_provider = Arc::new(elasticache::CredentialsProvider::new(
-        elasticache::AWSIRSAConfig::new(
-            args.aws_region.clone(),
-            args.redis_cluster_name,
-            args.redis_user_id,
-        ),
-        aws_credentials_provider,
-    ));
+    // TODO: untangle the config args
     let regional_redis_client = match (args.redis_auth_type.as_str(), &args.redis_notifications) {
         ("plain", redis_url) => match redis_url {
             None => {
@@ -361,7 +321,12 @@ async fn main() -> anyhow::Result<()> {
                 ConnectionWithCredentialsProvider::new_with_credentials_provider(
                     host.to_string(),
                     port,
-                    elasticache_credentials_provider.clone(),
+                    elasticache::CredentialsProvider::new(
+                        args.aws_region,
+                        args.redis_cluster_name,
+                        args.redis_user_id,
+                    )
+                    .await,
                 ),
             ),
             (None, None) => {
