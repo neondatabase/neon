@@ -30,6 +30,7 @@ pub struct Throttle<M: Metric> {
 }
 
 pub struct Inner {
+    enabled: bool,
     rate_limiter: Arc<RateLimiter>,
 }
 
@@ -73,7 +74,7 @@ where
     }
     fn new_inner(config: Config) -> Inner {
         let Config {
-            task_kinds: _,
+            enabled,
             initial,
             refill_interval,
             refill_amount,
@@ -92,6 +93,7 @@ where
         let rate_limiter = RateLimiter::with_initial_tokens(config, f64::from(initial_tokens));
 
         Inner {
+            enabled: enabled.is_enabled(),
             rate_limiter: Arc::new(rate_limiter),
         }
     }
@@ -122,6 +124,10 @@ where
 
     pub async fn throttle(&self, key_count: usize) -> Option<Duration> {
         let inner = self.inner.load_full(); // clones the `Inner` Arc
+
+        if !inner.enabled {
+            return None;
+        }
 
         let start = std::time::Instant::now();
 
