@@ -340,7 +340,6 @@ impl Flow {
             debug!(%p, segno=%segno, %size, %start_key, %end_key, "scheduling SLRU segment");
             self.tasks
                 .push(AnyImportTask::SlruBlocks(ImportSlruBlocksTask::new(
-                    *self.timeline.get_shard_identity(),
                     start_key..end_key,
                     &p,
                     self.storage.clone(),
@@ -634,21 +633,14 @@ impl ImportTask for ImportRelBlocksTask {
 }
 
 struct ImportSlruBlocksTask {
-    shard_identity: ShardIdentity,
     key_range: Range<Key>,
     path: RemotePath,
     storage: RemoteStorageWrapper,
 }
 
 impl ImportSlruBlocksTask {
-    fn new(
-        shard_identity: ShardIdentity,
-        key_range: Range<Key>,
-        path: &RemotePath,
-        storage: RemoteStorageWrapper,
-    ) -> Self {
+    fn new(key_range: Range<Key>, path: &RemotePath, storage: RemoteStorageWrapper) -> Self {
         ImportSlruBlocksTask {
-            shard_identity,
             key_range,
             path: path.clone(),
             storage,
