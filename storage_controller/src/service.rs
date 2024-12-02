@@ -6291,8 +6291,8 @@ impl Service {
                 return;
             };
             (
-                locked.nodes.get(&attached).unwrap().clone(),
-                locked.nodes.get(&secondary).unwrap().clone(),
+                locked.nodes.get(attached).unwrap().clone(),
+                locked.nodes.get(secondary).unwrap().clone(),
             )
         };
 
