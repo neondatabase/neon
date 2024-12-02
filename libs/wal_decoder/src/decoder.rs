@@ -100,7 +100,7 @@ impl MetadataRecord {
                 Self::decode_xlog_record(&mut buf, decoded, next_record_lsn)?
             }
             pg_constants::RM_LOGICALMSG_ID => {
-                Self::decode_logical_message_record(&mut buf, shard, decoded)?
+                Self::decode_logical_message_record(&mut buf, decoded)?
             }
             pg_constants::RM_STANDBY_ID => Self::decode_standby_record(&mut buf, decoded)?,
             pg_constants::RM_REPLORIGIN_ID => Self::decode_replorigin_record(&mut buf, decoded)?,
@@ -112,30 +112,38 @@ impl MetadataRecord {
         };
 
         // Next, filter the metadata record by shard.
-
-        // Route VM page updates to the shards that own them. VM pages are stored in the VM fork
-        // of the main relation. These are sharded and managed just like regular relation pages.
-        // See: https://github.com/neondatabase/neon/issues/9855
-        if let Some(
-            MetadataRecord::Heapam(HeapamRecord::ClearVmBits(ref mut clear_vm_bits))
-            | MetadataRecord::Neonrmgr(NeonrmgrRecord::ClearVmBits(ref mut clear_vm_bits)),
-        ) = metadata_record
-        {
-            let is_local_vm_page = |heap_blk| {
-                let vm_blk = pg_constants::HEAPBLK_TO_MAPBLOCK(heap_blk);
-                shard.is_key_local(&rel_block_to_key(clear_vm_bits.vm_rel, vm_blk))
-            };
-            // Send the old and new VM page updates to their respective shards.
-            clear_vm_bits.old_heap_blkno = clear_vm_bits
-                .old_heap_blkno
-                .filter(|&blkno| is_local_vm_page(blkno));
-            clear_vm_bits.new_heap_blkno = clear_vm_bits
-                .new_heap_blkno
-                .filter(|&blkno| is_local_vm_page(blkno));
-            // If neither VM page belongs to this shard, discard the record.
-            if clear_vm_bits.old_heap_blkno.is_none() && clear_vm_bits.new_heap_blkno.is_none() {
-                metadata_record = None
+        match metadata_record {
+            Some(
+                MetadataRecord::Heapam(HeapamRecord::ClearVmBits(ref mut clear_vm_bits))
+                | MetadataRecord::Neonrmgr(NeonrmgrRecord::ClearVmBits(ref mut clear_vm_bits)),
+            ) => {
+                // Route VM page updates to the shards that own them. VM pages are stored in the VM fork
+                // of the main relation. These are sharded and managed just like regular relation pages.
+                // See: https://github.com/neondatabase/neon/issues/9855
+                let is_local_vm_page = |heap_blk| {
+                    let vm_blk = pg_constants::HEAPBLK_TO_MAPBLOCK(heap_blk);
+                    shard.is_key_local(&rel_block_to_key(clear_vm_bits.vm_rel, vm_blk))
+                };
+                // Send the old and new VM page updates to their respective shards.
+                clear_vm_bits.old_heap_blkno = clear_vm_bits
+                    .old_heap_blkno
+                    .filter(|&blkno| is_local_vm_page(blkno));
+                clear_vm_bits.new_heap_blkno = clear_vm_bits
+                    .new_heap_blkno
+                    .filter(|&blkno| is_local_vm_page(blkno));
+                // If neither VM page belongs to this shard, discard the record.
+                if clear_vm_bits.old_heap_blkno.is_none() && clear_vm_bits.new_heap_blkno.is_none()
+                {
+                    metadata_record = None
+                }
             }
+            Some(MetadataRecord::LogicalMessage(LogicalMessageRecord::Put(_))) => {
+                // Filter LogicalMessage records (AUX files) to only be stored on shard zero
+                if !shard.is_shard_zero() {
+                    metadata_record = None;
+                }
+            }
+            _ => {}
         }
 
         Ok(metadata_record)
@@ -866,7 +874,6 @@ impl MetadataRecord {
 
     fn decode_logical_message_record(
         buf: &mut Bytes,
-        shard: &ShardIdentity,
         decoded: &DecodedWALRecord,
     ) -> anyhow::Result<Option<MetadataRecord>> {
         let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
@@ -882,17 +889,14 @@ impl MetadataRecord {
             }
 
             if let Some(path) = prefix.strip_prefix("neon-file:") {
-                // Only shard 0 stores AUX files
-                if shard.is_shard_zero() {
-                    let buf_size = xlrec.prefix_size + xlrec.message_size;
-                    let buf = Bytes::copy_from_slice(&buf[xlrec.prefix_size..buf_size]);
-                    return Ok(Some(MetadataRecord::LogicalMessage(
-                        LogicalMessageRecord::Put(PutLogicalMessage {
-                            path: path.to_string(),
-                            buf,
-                        }),
-                    )));
-                }
+                let buf_size = xlrec.prefix_size + xlrec.message_size;
+                let buf = Bytes::copy_from_slice(&buf[xlrec.prefix_size..buf_size]);
+                return Ok(Some(MetadataRecord::LogicalMessage(
+                    LogicalMessageRecord::Put(PutLogicalMessage {
+                        path: path.to_string(),
+                        buf,
+                    }),
+                )));
             }
         }
 
