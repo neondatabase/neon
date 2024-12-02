@@ -27,7 +27,7 @@ jobs:
   ingest:
     strategy:
       matrix:
-        target_project: [new_empty_project]  
+        target_project: [new_empty_project, large_existing_project]  
     permissions:
       contents: write
       statuses: write
