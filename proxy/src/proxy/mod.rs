@@ -69,6 +69,7 @@ pub async fn task_main(
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
+    let cancellations = tokio_util::task::task_tracker::TaskTracker::new();
 
     while let Some(accept_result) =
         run_until_cancelled(listener.accept(), &cancellation_token).await
@@ -82,6 +83,7 @@ pub async fn task_main(
 
         let session_id = uuid::Uuid::new_v4();
         let cancellation_handler = Arc::clone(&cancellation_handler);
+        let cancellations = cancellations.clone();
 
         debug!(protocol = "tcp", %session_id, "accepted new TCP connection");
         let endpoint_rate_limiter2 = endpoint_rate_limiter.clone();
@@ -133,6 +135,7 @@ pub async fn task_main(
                 ClientMode::Tcp,
                 endpoint_rate_limiter2,
                 conn_gauge,
+                cancellations,
             )
             .instrument(ctx.span())
             .boxed()
@@ -164,10 +167,12 @@ pub async fn task_main(
     }
 
     connections.close();
+    cancellations.close();
     drop(listener);
 
     // Drain connections
     connections.wait().await;
+    cancellations.wait().await;
 
     Ok(())
 }
@@ -250,6 +255,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     conn_gauge: NumClientConnectionsGuard<'static>,
+    cancellations: tokio_util::task::task_tracker::TaskTracker,
 ) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
     debug!(
         protocol = %ctx.protocol(),
@@ -270,15 +276,26 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
             HandshakeData::Startup(stream, params) => (stream, params),
             HandshakeData::Cancel(cancel_key_data) => {
-                return Ok(cancellation_handler
-                    .cancel_session(
-                        cancel_key_data,
-                        ctx.session_id(),
-                        &ctx.peer_addr(),
-                        config.authentication_config.ip_allowlist_check_enabled,
-                    )
-                    .await
-                    .map(|()| None)?)
+                // spawn a task to cancel the session, but don't wait for it
+                cancellations.spawn({
+                    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
+                    let session_id = ctx.session_id();
+                    let peer_ip = ctx.peer_addr();
+                    async move {
+                        drop(
+                            cancellation_handler_clone
+                                .cancel_session(
+                                    cancel_key_data,
+                                    session_id,
+                                    peer_ip,
+                                    config.authentication_config.ip_allowlist_check_enabled,
+                                )
+                                .await,
+                        );
+                    }
+                });
+
+                return Ok(None);
             }
         };
     drop(pause);
@@ -367,11 +384,13 @@ pub(crate) async fn prepare_client_connection<P>(
     // The new token (cancel_key_data) will be sent to the client.
     let cancel_key_data = session.enable_query_cancellation(node.cancel_closure.clone());
 
+    // Forward all deferred notices to the client.
+    for notice in &node.delayed_notice {
+        stream.write_message_noflush(&Be::Raw(b'N', notice.as_bytes()))?;
+    }
+
     // Forward all postgres connection params to the client.
-    // Right now the implementation is very hacky and inefficent (ideally,
-    // we don't need an intermediate hashmap), but at least it should be correct.
     for (name, value) in &node.params {
-        // TODO: Theoretically, this could result in a big pile of params...
         stream.write_message_noflush(&Be::ParameterStatus {
             name: name.as_bytes(),
             value: value.as_bytes(),

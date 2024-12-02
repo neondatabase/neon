@@ -3215,6 +3215,18 @@ impl Tenant {
             }
         }
 
+        if let ShutdownMode::Reload = shutdown_mode {
+            tracing::info!("Flushing deletion queue");
+            if let Err(e) = self.deletion_queue_client.flush().await {
+                match e {
+                    DeletionQueueError::ShuttingDown => {
+                        // This is the only error we expect for now. In the future, if more error
+                        // variants are added, we should handle them here.
+                    }
+                }
+            }
+        }
+
         // We cancel the Tenant's cancellation token _after_ the timelines have all shut down.  This permits
         // them to continue to do work during their shutdown methods, e.g. flushing data.
         tracing::debug!("Cancelling CancellationToken");
@@ -5411,6 +5423,7 @@ pub(crate) mod harness {
                     local_path: remote_fs_dir.clone(),
                 },
                 timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+                small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT,
             };
             let remote_storage = GenericRemoteStorage::from_config(&config).await.unwrap();
             let deletion_queue = MockDeletionQueue::new(Some(remote_storage.clone()));

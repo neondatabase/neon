@@ -29,7 +29,9 @@ use crate::tenant::storage_layer::LayerName;
 use crate::tenant::Generation;
 use crate::virtual_file::{on_fatal_io_error, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
-use remote_storage::{DownloadError, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath};
+use remote_storage::{
+    DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,
+};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 use utils::pausable_failpoint;
@@ -353,12 +355,13 @@ pub async fn list_remote_timelines(
 async fn do_download_remote_path_retry_forever(
     storage: &GenericRemoteStorage,
     remote_path: &RemotePath,
+    download_opts: DownloadOpts,
     cancel: &CancellationToken,
 ) -> Result<(Vec<u8>, SystemTime), DownloadError> {
     download_retry_forever(
         || async {
             let download = storage
-                .download(remote_path, &DownloadOpts::default(), cancel)
+                .download(remote_path, &download_opts, cancel)
                 .await?;
 
             let mut bytes = Vec::new();
@@ -385,8 +388,13 @@ async fn do_download_tenant_manifest(
 ) -> Result<(TenantManifest, Generation, SystemTime), DownloadError> {
     let remote_path = remote_tenant_manifest_path(tenant_shard_id, generation);
 
+    let download_opts = DownloadOpts {
+        kind: DownloadKind::Small,
+        ..Default::default()
+    };
+
     let (manifest_bytes, manifest_bytes_mtime) =
-        do_download_remote_path_retry_forever(storage, &remote_path, cancel).await?;
+        do_download_remote_path_retry_forever(storage, &remote_path, download_opts, cancel).await?;
 
     let tenant_manifest = TenantManifest::from_json_bytes(&manifest_bytes)
         .with_context(|| format!("deserialize tenant manifest file at {remote_path:?}"))
@@ -406,8 +414,13 @@ async fn do_download_index_part(
         timeline_id.expect("A timeline ID is always provided when downloading an index");
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
 
+    let download_opts = DownloadOpts {
+        kind: DownloadKind::Small,
+        ..Default::default()
+    };
+
     let (index_part_bytes, index_part_mtime) =
-        do_download_remote_path_retry_forever(storage, &remote_path, cancel).await?;
+        do_download_remote_path_retry_forever(storage, &remote_path, download_opts, cancel).await?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
         .with_context(|| format!("deserialize index part file at {remote_path:?}"))

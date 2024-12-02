@@ -48,6 +48,9 @@ use utils::{
     tcp_listener,
 };
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const PID_FILE_NAME: &str = "safekeeper.pid";
 const ID_FILE_NAME: &str = "safekeeper.id";
 

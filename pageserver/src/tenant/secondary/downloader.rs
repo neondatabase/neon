@@ -49,7 +49,7 @@ use futures::Future;
 use metrics::UIntGauge;
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
-use remote_storage::{DownloadError, DownloadOpts, Etag, GenericRemoteStorage};
+use remote_storage::{DownloadError, DownloadKind, DownloadOpts, Etag, GenericRemoteStorage};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
@@ -946,6 +946,7 @@ impl<'a> TenantDownloader<'a> {
         let cancel = &self.secondary_state.cancel;
         let opts = DownloadOpts {
             etag: prev_etag.cloned(),
+            kind: DownloadKind::Small,
             ..Default::default()
         };
 

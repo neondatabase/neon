@@ -894,10 +894,11 @@ pub(crate) enum ShutdownMode {
     /// While we are flushing, we continue to accept read I/O for LSNs ingested before
     /// the call to [`Timeline::shutdown`].
     FreezeAndFlush,
-    /// Only flush the layers to the remote storage without freezing any open layers. This is the
-    /// mode used by ancestor detach and any other operations that reloads a tenant but not increasing
-    /// the generation number.
-    Flush,
+    /// Only flush the layers to the remote storage without freezing any open layers. Flush the deletion
+    /// queue. This is the mode used by ancestor detach and any other operations that reloads a tenant
+    /// but not increasing the generation number. Note that this mode cannot be used at tenant shutdown,
+    /// as flushing the deletion queue at that time will cause shutdown-in-progress errors.
+    Reload,
     /// Shut down immediately, without waiting for any open layers to flush.
     Hard,
 }
@@ -1818,7 +1819,7 @@ impl Timeline {
             }
         }
 
-        if let ShutdownMode::Flush = mode {
+        if let ShutdownMode::Reload = mode {
             // drain the upload queue
             self.remote_client.shutdown().await;
             if !self.remote_client.no_pending_work() {
