@@ -163,13 +163,14 @@ where
         }
 
         // Wait for an available buffer from the background flush task.
+        // This is the BACKPRESSURE mechanism: if the flush task can't keep up,
+        // then the write path will eventually wait for it here.
         let Some(recycled) = self.inner_mut().channel.recv().await else {
             return self.handle_error().await;
         };
 
         // The only other place that could hold a reference to the recycled buffer
         // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.
-
         let recycled = Buffer::reuse_after_flush(recycled.into_raw_slice().into_inner());
         Ok((recycled, flush_control))
     }
@@ -193,7 +194,7 @@ where
     }
 
     async fn handle_error<T>(&mut self) -> std::io::Result<T> {
-        Err(self.shutdown().await.unwrap_err())
+        Err(self.shutdown().await.expect_err("flush task only disconnects duplex if it exits with an error"))
     }
 }
 
