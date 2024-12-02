@@ -96,12 +96,7 @@ where
     let stream = connect_tls(stream, config.ssl_mode, tls).await?;
 
     let mut stream = StartupStream {
-        inner: Framed::new(
-            stream,
-            PostgresCodec {
-                max_message_size: config.max_backend_message_size,
-            },
-        ),
+        inner: Framed::new(stream, PostgresCodec),
         buf: BackendMessages::empty(),
         delayed_notice: Vec::new(),
     };

@@ -14,16 +14,6 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub use postgres_protocol2::authentication::sasl::ScramKeys;
 use tokio::net::TcpStream;
 
-/// Properties required of a session.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum TargetSessionAttrs {
-    /// No special properties are required.
-    Any,
-    /// The session must allow writes.
-    ReadWrite,
-}
-
 /// TLS configuration.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -73,77 +63,6 @@ pub enum AuthKeys {
 }
 
 /// Connection configuration.
-///
-/// Configuration can be parsed from libpq-style connection strings. These strings come in two formats:
-///
-/// # Key-Value
-///
-/// This format consists of space-separated key-value pairs. Values which are either the empty string or contain
-/// whitespace should be wrapped in `'`. `'` and `\` characters should be backslash-escaped.
-///
-/// ## Keys
-///
-/// * `user` - The username to authenticate with. Required.
-/// * `password` - The password to authenticate with.
-/// * `dbname` - The name of the database to connect to. Defaults to the username.
-/// * `options` - Command line options used to configure the server.
-/// * `application_name` - Sets the `application_name` parameter on the server.
-/// * `sslmode` - Controls usage of TLS. If set to `disable`, TLS will not be used. If set to `prefer`, TLS will be used
-///     if available, but not used otherwise. If set to `require`, TLS will be forced to be used. Defaults to `prefer`.
-/// * `host` - The host to connect to. On Unix platforms, if the host starts with a `/` character it is treated as the
-///     path to the directory containing Unix domain sockets. Otherwise, it is treated as a hostname. Multiple hosts
-///     can be specified, separated by commas. Each host will be tried in turn when connecting. Required if connecting
-///     with the `connect` method.
-/// * `port` - The port to connect to. Multiple ports can be specified, separated by commas. The number of ports must be
-///     either 1, in which case it will be used for all hosts, or the same as the number of hosts. Defaults to 5432 if
-///     omitted or the empty string.
-/// * `connect_timeout` - The time limit in seconds applied to each socket-level connection attempt. Note that hostnames
-///     can resolve to multiple IP addresses, and this limit is applied to each address. Defaults to no timeout.
-/// * `target_session_attrs` - Specifies requirements of the session. If set to `read-write`, the client will check that
-///     the `transaction_read_write` session parameter is set to `on`. This can be used to connect to the primary server
-///     in a database cluster as opposed to the secondary read-only mirrors. Defaults to `all`.
-/// * `channel_binding` - Controls usage of channel binding in the authentication process. If set to `disable`, channel
-///     binding will not be used. If set to `prefer`, channel binding will be used if available, but not used otherwise.
-///     If set to `require`, the authentication process will fail if channel binding is not used. Defaults to `prefer`.
-///
-/// ## Examples
-///
-/// ```not_rust
-/// host=localhost user=postgres connect_timeout=10 keepalives=0
-/// ```
-///
-/// ```not_rust
-/// host=/var/lib/postgresql,localhost port=1234 user=postgres password='password with spaces'
-/// ```
-///
-/// ```not_rust
-/// host=host1,host2,host3 port=1234,,5678 user=postgres target_session_attrs=read-write
-/// ```
-///
-/// # Url
-///
-/// This format resembles a URL with a scheme of either `postgres://` or `postgresql://`. All components are optional,
-/// and the format accepts query parameters for all of the key-value pairs described in the section above. Multiple
-/// host/port pairs can be comma-separated. Unix socket paths in the host section of the URL should be percent-encoded,
-/// as the path component of the URL specifies the database name.
-///
-/// ## Examples
-///
-/// ```not_rust
-/// postgresql://user@localhost
-/// ```
-///
-/// ```not_rust
-/// postgresql://user:password@%2Fvar%2Flib%2Fpostgresql/mydb?connect_timeout=10
-/// ```
-///
-/// ```not_rust
-/// postgresql://user@host1:1234,host2,host3:5678?target_session_attrs=read-write
-/// ```
-///
-/// ```not_rust
-/// postgresql:///mydb?user=user&host=/var/lib/postgresql
-/// ```
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
     pub(crate) host: Host,
@@ -157,10 +76,8 @@ pub struct Config {
     pub(crate) application_name: Option<String>,
     pub(crate) ssl_mode: SslMode,
     pub(crate) connect_timeout: Option<Duration>,
-    pub(crate) target_session_attrs: TargetSessionAttrs,
     pub(crate) channel_binding: ChannelBinding,
     pub(crate) replication_mode: Option<ReplicationMode>,
-    pub(crate) max_backend_message_size: Option<usize>,
 }
 
 impl Config {
@@ -177,10 +94,8 @@ impl Config {
             application_name: None,
             ssl_mode: SslMode::Prefer,
             connect_timeout: None,
-            target_session_attrs: TargetSessionAttrs::Any,
             channel_binding: ChannelBinding::Prefer,
             replication_mode: None,
-            max_backend_message_size: None,
         }
     }
 
@@ -303,23 +218,6 @@ impl Config {
         self.connect_timeout.as_ref()
     }
 
-    /// Sets the requirements of the session.
-    ///
-    /// This can be used to connect to the primary server in a clustered database rather than one of the read-only
-    /// secondary servers. Defaults to `Any`.
-    pub fn target_session_attrs(
-        &mut self,
-        target_session_attrs: TargetSessionAttrs,
-    ) -> &mut Config {
-        self.target_session_attrs = target_session_attrs;
-        self
-    }
-
-    /// Gets the requirements of the session.
-    pub fn get_target_session_attrs(&self) -> TargetSessionAttrs {
-        self.target_session_attrs
-    }
-
     /// Sets the channel binding behavior.
     ///
     /// Defaults to `prefer`.
@@ -342,17 +240,6 @@ impl Config {
     /// Get replication mode.
     pub fn get_replication_mode(&self) -> Option<ReplicationMode> {
         self.replication_mode
-    }
-
-    /// Set limit for backend messages size.
-    pub fn max_backend_message_size(&mut self, max_backend_message_size: usize) -> &mut Config {
-        self.max_backend_message_size = Some(max_backend_message_size);
-        self
-    }
-
-    /// Get limit for backend messages size.
-    pub fn get_max_backend_message_size(&self) -> Option<usize> {
-        self.max_backend_message_size
     }
 
     /// Opens a connection to a PostgreSQL database.
@@ -401,7 +288,6 @@ impl fmt::Debug for Config {
             .field("host", &self.host)
             .field("port", &self.port)
             .field("connect_timeout", &self.connect_timeout)
-            .field("target_session_attrs", &self.target_session_attrs)
             .field("channel_binding", &self.channel_binding)
             .field("replication", &self.replication_mode)
             .finish()
