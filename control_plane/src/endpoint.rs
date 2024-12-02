@@ -310,6 +310,10 @@ impl Endpoint {
         conf.append("wal_log_hints", "off");
         conf.append("max_replication_slots", "10");
         conf.append("hot_standby", "on");
+        // Set to 1MB to both exercise getPage requests/LFC, and still have enough room for
+        // Postgres to operate. Everything smaller might be not enough for Postgres under load,
+        // and can cause errors like 'no unpinned buffers available', see
+        // <https://github.com/neondatabase/neon/issues/9956>
         conf.append("shared_buffers", "1MB");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
