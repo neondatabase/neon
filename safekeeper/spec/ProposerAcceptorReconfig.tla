@@ -65,7 +65,7 @@ Init ==
            /\ prop_conf = [p \in proposers |-> init_conf]
            /\ acc_conf = [a \in acceptors |-> init_conf]
            /\ conf_store = init_conf
-           /\ Cardinality(init_members) >= 3
+           /\ Cardinality(init_members) = Cardinality(acceptors) - 1
 
 \********************************************************************************
 \* Actions
@@ -233,9 +233,15 @@ AccSwitchConf(a) ==
 \* Nuke all acceptor state if it is not a member of its current conf. Models
 \* cleanup after migration/abort.
 AccReset(a) ==
-    /\ a \notin acc_conf[a].members
+    /\ \/ (acc_conf[a].newMembers = NULL) /\ (a \notin acc_conf[a].members)
+       \/ (acc_conf[a].newMembers /= NULL) /\ (a \notin (acc_conf[a].members \union acc_conf[a].newMembers))
     /\ acc_state' = [acc_state EXCEPT ![a] = PAS!InitAcc]
-    /\ UNCHANGED <<prop_state, committed, elected_history, prop_conf, acc_conf, conf_store>>
+    \* Set nextSendLsn to `a` to NULL everywhere. nextSendLsn serves as a mark
+    \* that elected proposer performed TruncateWal on the acceptor, which isn't
+    \* true anymore after state reset. In the impl local deletion is expected to
+    \* terminate all existing connections.
+    /\ prop_state' = [p \in proposers |-> [prop_state[p] EXCEPT !.nextSendLsn[a] = NULL]]
+    /\ UNCHANGED <<committed, elected_history, prop_conf, acc_conf, conf_store>>
 
 
 \*******************************************************************************

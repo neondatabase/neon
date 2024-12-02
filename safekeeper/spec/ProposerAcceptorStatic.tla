@@ -145,10 +145,11 @@ TypeOk ==
         /\ IsWal(prop_state[p].wal)
         \* Map of acceptor -> next lsn to send. It is set when truncate_wal is
         \* done so sending entries is allowed only after that. In the impl TCP
-        \* ensures this ordering.
+        \* ensures this ordering. We use NULL instead of missing value to use
+        \* EXCEPT in AccReset.
         /\ \A a \in DOMAIN prop_state[p].nextSendLsn:
                /\ a \in acceptors
-               /\ prop_state[p].nextSendLsn[a] \in Lsns
+               /\ prop_state[p].nextSendLsn[a] \in Lsns \union {NULL}
     /\ \A a \in acceptors:
            /\ DOMAIN acc_state[a] = {"term", "termHistory", "wal"}
            /\ acc_state[a].term \in Terms
@@ -197,7 +198,7 @@ Init ==
                         votes |-> EmptyF,
                         termHistory |-> << >>,
                         wal |-> << >>,
-                        nextSendLsn |-> EmptyF
+                        nextSendLsn |-> [a \in acceptors |-> NULL]
                     ]]
     /\ acc_state = [a \in acceptors |-> InitAcc]
     /\ committed = {}
@@ -214,7 +215,7 @@ RestartProposerWithTerm(p, new_term) ==
                                         ![p].votes = EmptyF,
                                         ![p].termHistory = << >>,
                                         ![p].wal = << >>,
-                                        ![p].nextSendLsn = EmptyF]
+                                        ![p].nextSendLsn = [a \in acceptors |-> NULL]]
     /\ UNCHANGED <<acc_state, committed, elected_history>>
 
 \* Proposer p loses all state, restarting.
@@ -361,8 +362,8 @@ NewEntry(p) ==
 AppendEntry(p, a) ==
     /\ prop_state[p].state = "leader"
     /\ acc_state[a].term = prop_state[p].term
-    /\ a \in DOMAIN prop_state[p].nextSendLsn \* did TruncateWal
-    /\ prop_state[p].nextSendLsn[a] <= Len(prop_state[p].wal) \* have smth to send
+    /\ prop_state[p].nextSendLsn[a] /= NULL  \* did TruncateWal
+    /\ prop_state[p].nextSendLsn[a] <= Len(prop_state[p].wal)  \* have smth to send
     /\ LET
            send_lsn == prop_state[p].nextSendLsn[a]
            entry == prop_state[p].wal[send_lsn]
@@ -391,7 +392,7 @@ QuorumCommitLsn(p, q) ==
              \* Alternatively we could compare LastLogTerm here, but that's closer to
              \* what we do in the impl (we check flushLsn in AppendResponse, but
              \* AppendRequest is processed only if HandleElected handling was good).
-           /\ a \in DOMAIN prop_state[p].nextSendLsn
+           /\ prop_state[p].nextSendLsn[a] /= NULL
     THEN
         \* Now find the LSN present on all the quorum.
         LET quorum_lsn == Minimum({FlushLsn(a): a \in q}) IN
