@@ -1058,8 +1058,6 @@ impl Timeline {
             .for_task_kind(ctx.task_kind())
             .map(|metric| (metric, Instant::now()));
 
-        // start counting after throttle so that throttle time
-        // is always less than observation time
         self.timeline_get_throttle
             .throttle(ctx, key_count as usize)
             .await;
