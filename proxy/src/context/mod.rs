@@ -57,6 +57,7 @@ struct RequestContextInner {
     application: Option<SmolStr>,
     error_kind: Option<ErrorKind>,
     pub(crate) auth_method: Option<AuthMethod>,
+    jwt_issuer: Option<String>,
     success: bool,
     pub(crate) cold_start_info: ColdStartInfo,
     pg_options: Option<StartupMessageParams>,
@@ -79,6 +80,7 @@ pub(crate) enum AuthMethod {
     ScramSha256,
     ScramSha256Plus,
     Cleartext,
+    Jwt,
 }
 
 impl Clone for RequestContext {
@@ -100,6 +102,7 @@ impl Clone for RequestContext {
             application: inner.application.clone(),
             error_kind: inner.error_kind,
             auth_method: inner.auth_method.clone(),
+            jwt_issuer: inner.jwt_issuer.clone(),
             success: inner.success,
             rejected: inner.rejected,
             cold_start_info: inner.cold_start_info,
@@ -148,6 +151,7 @@ impl RequestContext {
             application: None,
             error_kind: None,
             auth_method: None,
+            jwt_issuer: None,
             success: false,
             rejected: None,
             cold_start_info: ColdStartInfo::Unknown,
@@ -244,6 +248,11 @@ impl RequestContext {
     pub(crate) fn set_auth_method(&self, auth_method: AuthMethod) {
         let mut this = self.0.try_lock().expect("should not deadlock");
         this.auth_method = Some(auth_method);
+    }
+
+    pub(crate) fn set_jwt_issuer(&self, jwt_issuer: String) {
+        let mut this = self.0.try_lock().expect("should not deadlock");
+        this.jwt_issuer = Some(jwt_issuer);
     }
 
     pub fn has_private_peer_addr(&self) -> bool {
