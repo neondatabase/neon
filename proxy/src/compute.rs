@@ -13,7 +13,6 @@ use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::tls::MakeTlsConnect;
-use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{debug, error, info, warn};
 
 use crate::auth::parse_endpoint_param;
@@ -24,6 +23,7 @@ use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
+use crate::postgres_rustls::MakeRustlsConnect;
 use crate::proxy::neon_option;
 use crate::types::Host;
 
@@ -244,7 +244,6 @@ impl ConnCfg {
             let port = ports.get(i).or_else(|| ports.first()).unwrap_or(&5432);
             let host = match host {
                 Host::Tcp(host) => host.as_str(),
-                Host::Unix(_) => continue, // unix sockets are not welcome here
             };
 
             match connect_once(host, *port).await {
@@ -315,7 +314,7 @@ impl ConnCfg {
         };
         let client_config = client_config.with_no_client_auth();
 
-        let mut mk_tls = tokio_postgres_rustls::MakeRustlsConnect::new(client_config);
+        let mut mk_tls = crate::postgres_rustls::MakeRustlsConnect::new(client_config);
         let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
             &mut mk_tls,
             host,
