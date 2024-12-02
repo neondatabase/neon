@@ -2,12 +2,9 @@ use compute_api::responses::{InstalledExtension, InstalledExtensions};
 use metrics::proto::MetricFamily;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use tracing::info;
-use url::Url;
 
 use anyhow::Result;
 use postgres::{Client, NoTls};
-use tokio::task;
 
 use metrics::core::Collector;
 use metrics::{register_uint_gauge_vec, UIntGaugeVec};
@@ -42,75 +39,53 @@ fn list_dbs(client: &mut Client) -> Result<Vec<String>> {
 ///
 /// Same extension can be installed in multiple databases with different versions,
 /// we only keep the highest and lowest version across all databases.
-pub async fn get_installed_extensions(connstr: Url) -> Result<InstalledExtensions> {
-    let mut connstr = connstr.clone();
+pub fn get_installed_extensions(mut conf: postgres::config::Config) -> Result<InstalledExtensions> {
+    conf.application_name("compute_ctl:get_installed_extensions");
+    let mut client = conf.connect(NoTls)?;
 
-    task::spawn_blocking(move || {
-        let mut client = Client::connect(connstr.as_str(), NoTls)?;
-        let databases: Vec<String> = list_dbs(&mut client)?;
+    let databases: Vec<String> = list_dbs(&mut client)?;
 
-        let mut extensions_map: HashMap<String, InstalledExtension> = HashMap::new();
-        for db in databases.iter() {
-            connstr.set_path(db);
-            let mut db_client = Client::connect(connstr.as_str(), NoTls)?;
-            let extensions: Vec<(String, String)> = db_client
-                .query(
-                    "SELECT extname, extversion FROM pg_catalog.pg_extension;",
-                    &[],
-                )?
-                .iter()
-                .map(|row| (row.get("extname"), row.get("extversion")))
-                .collect();
+    let mut extensions_map: HashMap<String, InstalledExtension> = HashMap::new();
+    for db in databases.iter() {
+        conf.dbname(db);
+        let mut db_client = conf.connect(NoTls)?;
+        let extensions: Vec<(String, String)> = db_client
+            .query(
+                "SELECT extname, extversion FROM pg_catalog.pg_extension;",
+                &[],
+            )?
+            .iter()
+            .map(|row| (row.get("extname"), row.get("extversion")))
+            .collect();
 
-            for (extname, v) in extensions.iter() {
-                let version = v.to_string();
+        for (extname, v) in extensions.iter() {
+            let version = v.to_string();
 
-                // increment the number of databases where the version of extension is installed
-                INSTALLED_EXTENSIONS
-                    .with_label_values(&[extname, &version])
-                    .inc();
+            // increment the number of databases where the version of extension is installed
+            INSTALLED_EXTENSIONS
+                .with_label_values(&[extname, &version])
+                .inc();
 
-                extensions_map
-                    .entry(extname.to_string())
-                    .and_modify(|e| {
-                        e.versions.insert(version.clone());
-                        // count the number of databases where the extension is installed
-                        e.n_databases += 1;
-                    })
-                    .or_insert(InstalledExtension {
-                        extname: extname.to_string(),
-                        versions: HashSet::from([version.clone()]),
-                        n_databases: 1,
-                    });
-            }
+            extensions_map
+                .entry(extname.to_string())
+                .and_modify(|e| {
+                    e.versions.insert(version.clone());
+                    // count the number of databases where the extension is installed
+                    e.n_databases += 1;
+                })
+                .or_insert(InstalledExtension {
+                    extname: extname.to_string(),
+                    versions: HashSet::from([version.clone()]),
+                    n_databases: 1,
+                });
         }
+    }
 
-        let res = InstalledExtensions {
-            extensions: extensions_map.values().cloned().collect(),
-        };
+    let res = InstalledExtensions {
+        extensions: extensions_map.into_values().collect(),
+    };
 
-        Ok(res)
-    })
-    .await?
-}
-
-// Gather info about installed extensions
-pub fn get_installed_extensions_sync(connstr: Url) -> Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("failed to create runtime");
-    let result = rt
-        .block_on(crate::installed_extensions::get_installed_extensions(
-            connstr,
-        ))
-        .expect("failed to get installed extensions");
-
-    info!(
-        "[NEON_EXT_STAT] {}",
-        serde_json::to_string(&result).expect("failed to serialize extensions list")
-    );
-    Ok(())
+    Ok(res)
 }
 
 static INSTALLED_EXTENSIONS: Lazy<UIntGaugeVec> = Lazy::new(|| {

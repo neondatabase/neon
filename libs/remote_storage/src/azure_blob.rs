@@ -35,6 +35,7 @@ use utils::backoff;
 use utils::backoff::exponential_backoff_duration_seconds;
 
 use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
+use crate::DownloadKind;
 use crate::{
     config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError,
     DownloadOpts, Listing, ListingMode, ListingObject, RemotePath, RemoteStorage, StorageMetadata,
@@ -49,10 +50,17 @@ pub struct AzureBlobStorage {
     concurrency_limiter: ConcurrencyLimiter,
     // Per-request timeout. Accessible for tests.
     pub timeout: Duration,
+
+    // Alternative timeout used for metadata objects which are expected to be small
+    pub small_timeout: Duration,
 }
 
 impl AzureBlobStorage {
-    pub fn new(azure_config: &AzureConfig, timeout: Duration) -> Result<Self> {
+    pub fn new(
+        azure_config: &AzureConfig,
+        timeout: Duration,
+        small_timeout: Duration,
+    ) -> Result<Self> {
         debug!(
             "Creating azure remote storage for azure container {}",
             azure_config.container_name
@@ -94,6 +102,7 @@ impl AzureBlobStorage {
             max_keys_per_list_response,
             concurrency_limiter: ConcurrencyLimiter::new(azure_config.concurrency_limit.get()),
             timeout,
+            small_timeout,
         })
     }
 
@@ -133,6 +142,7 @@ impl AzureBlobStorage {
     async fn download_for_builder(
         &self,
         builder: GetBlobBuilder,
+        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let kind = RequestKind::Get;
@@ -156,7 +166,7 @@ impl AzureBlobStorage {
                 .map_err(to_download_error);
 
             // apply per request timeout
-            let response = tokio_stream::StreamExt::timeout(response, self.timeout);
+            let response = tokio_stream::StreamExt::timeout(response, timeout);
 
             // flatten
             let response = response.map(|res| match res {
@@ -415,7 +425,7 @@ impl RemoteStorage for AzureBlobStorage {
         let blob_client = self.client.blob_client(self.relative_path_to_name(key));
         let properties_future = blob_client.get_properties().into_future();
 
-        let properties_future = tokio::time::timeout(self.timeout, properties_future);
+        let properties_future = tokio::time::timeout(self.small_timeout, properties_future);
 
         let res = tokio::select! {
             res = properties_future => res,
@@ -521,7 +531,12 @@ impl RemoteStorage for AzureBlobStorage {
             });
         }
 
-        self.download_for_builder(builder, cancel).await
+        let timeout = match opts.kind {
+            DownloadKind::Small => self.small_timeout,
+            DownloadKind::Large => self.timeout,
+        };
+
+        self.download_for_builder(builder, timeout, cancel).await
     }
 
     async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {

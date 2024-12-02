@@ -1736,7 +1736,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         def storage_controller_ready():
             assert self.ready() is True
 
-        wait_until(30, 1, storage_controller_ready)
+        wait_until(storage_controller_ready)
         return time.time() - t1
 
     def attach_hook_issue(
@@ -2574,7 +2574,7 @@ class NeonPageserver(PgProtocol, LogUtils):
             log.info(f"any_unstable={any_unstable}")
             assert not any_unstable
 
-        wait_until(20, 0.5, complete)
+        wait_until(complete)
 
     def __enter__(self) -> Self:
         return self
@@ -3801,12 +3801,11 @@ class Endpoint(PgProtocol, LogUtils):
                     assert size_to_bytes(size) >= size_to_bytes(
                         "1MB"
                     ), "LFC size cannot be set less than 1MB"
-            # shared_buffers = 512kB to make postgres use LFC intensively
-            # neon.max_file_cache_size and neon.file_cache size limit are
-            # set to 1MB because small LFC is better for testing (helps to find more problems)
+            lfc_path_escaped = str(lfc_path).replace("'", "''")
             config_lines = [
-                "shared_buffers = 512kB",
-                f"neon.file_cache_path = '{self.lfc_path()}'",
+                f"neon.file_cache_path = '{lfc_path_escaped}'",
+                # neon.max_file_cache_size and neon.file_cache size limits are
+                # set to 1MB because small LFC is better for testing (helps to find more problems)
                 "neon.max_file_cache_size = 1MB",
                 "neon.file_cache_size_limit = 1MB",
             ] + config_lines
@@ -3934,6 +3933,35 @@ class Endpoint(PgProtocol, LogUtils):
             log.info(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
+    def respec_deep(self, **kwargs: Any) -> None:
+        """
+        Update the endpoint.json file taking into account nested keys.
+        It does one level deep update. Should enough for most cases.
+        Distinct method from respec() to do not break existing functionality.
+        NOTE: This method also updates the spec.json file, not endpoint.json.
+        We need it because neon_local also writes to spec.json, so intended
+        use-case is i) start endpoint with some config, ii) respec_deep(),
+        iii) call reconfigure() to apply the changes.
+        """
+        config_path = os.path.join(self.endpoint_path(), "spec.json")
+        with open(config_path) as f:
+            data_dict: dict[str, Any] = json.load(f)
+
+        log.info("Current compute spec: %s", json.dumps(data_dict, indent=4))
+
+        for key, value in kwargs.items():
+            if isinstance(value, dict):
+                if key not in data_dict:
+                    data_dict[key] = value
+                else:
+                    data_dict[key] = {**data_dict[key], **value}
+            else:
+                data_dict[key] = value
+
+        with open(config_path, "w") as file:
+            log.info("Updating compute spec to: %s", json.dumps(data_dict, indent=4))
+            json.dump(data_dict, file, indent=4)
+
     # Please note: Migrations only run if pg_skip_catalog_updates is false
     def wait_for_migrations(self, num_migrations: int = 11):
         with self.cursor() as cur:
@@ -3943,7 +3971,7 @@ class Endpoint(PgProtocol, LogUtils):
                 migration_id: int = cur.fetchall()[0][0]
                 assert migration_id >= num_migrations
 
-            wait_until(20, 0.5, check_migrations_done)
+            wait_until(check_migrations_done)
 
     # Mock the extension part of spec passed from control plane for local testing
     # endpooint.rs adds content of this file as a part of the spec.json
@@ -4375,6 +4403,10 @@ class Safekeeper(LogUtils):
         log.info(f"sk {self.id} flush LSN: {flush_lsn}")
         return flush_lsn
 
+    def get_commit_lsn(self, tenant_id: TenantId, timeline_id: TimelineId) -> Lsn:
+        timeline_status = self.http_client().timeline_status(tenant_id, timeline_id)
+        return timeline_status.commit_lsn
+
     def pull_timeline(
         self, srcs: list[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId
     ) -> dict[str, Any]:
@@ -4455,12 +4487,10 @@ class Safekeeper(LogUtils):
             )
             assert stat.remote_consistent_lsn >= lsn and stat.backup_lsn >= lsn.segment_lsn()
 
-        # xxx: max wait is long because we might be waiting for reconnection from
-        # pageserver to this safekeeper
-        wait_until(30, 1, are_lsns_advanced)
+        wait_until(are_lsns_advanced)
         client.checkpoint(tenant_id, timeline_id)
         if wait_wal_removal:
-            wait_until(30, 1, are_segments_removed)
+            wait_until(are_segments_removed)
 
     def wait_until_paused(self, failpoint: str):
         msg = f"at failpoint {failpoint}"
@@ -4469,7 +4499,7 @@ class Safekeeper(LogUtils):
             log.info(f"waiting for hitting failpoint {failpoint}")
             self.assert_log_contains(msg)
 
-        wait_until(20, 0.5, paused)
+        wait_until(paused)
 
 
 class NeonBroker(LogUtils):
@@ -4918,6 +4948,33 @@ def wait_for_last_flush_lsn(
 
     # Return the lowest LSN that has been ingested by all shards
     return min(results)
+
+
+def wait_for_commit_lsn(
+    env: NeonEnv,
+    tenant: TenantId,
+    timeline: TimelineId,
+    lsn: Lsn,
+) -> Lsn:
+    # TODO: it would be better to poll this in the compute, but there's no API for it. See:
+    # https://github.com/neondatabase/neon/issues/9758
+    "Wait for the given LSN to be committed on any Safekeeper"
+
+    max_commit_lsn = Lsn(0)
+    for i in range(1000):
+        for sk in env.safekeepers:
+            commit_lsn = sk.get_commit_lsn(tenant, timeline)
+            if commit_lsn >= lsn:
+                log.info(f"{tenant}/{timeline} at commit_lsn {commit_lsn}")
+                return commit_lsn
+            max_commit_lsn = max(max_commit_lsn, commit_lsn)
+
+        if i % 10 == 0:
+            log.info(
+                f"{tenant}/{timeline} waiting for commit_lsn to reach {lsn}, now {max_commit_lsn}"
+            )
+        time.sleep(0.1)
+    raise Exception(f"timed out while waiting for commit_lsn to reach {lsn}, was {max_commit_lsn}")
 
 
 def flush_ep_to_pageserver(
