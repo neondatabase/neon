@@ -17,11 +17,8 @@ const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 // should be handled gracefully.
 fn watch_compute_activity(compute: &ComputeNode) {
     // Suppose that `connstr` doesn't change
-    let mut connstr = compute.connstr.clone();
-    connstr
-        .query_pairs_mut()
-        .append_pair("application_name", "compute_activity_monitor");
-    let connstr = connstr.as_str();
+    let connstr = compute.connstr.clone();
+    let conf = compute.get_conn_conf(Some("compute_ctl:activity_monitor"));
 
     // During startup and configuration we connect to every Postgres database,
     // but we don't want to count this as some user activity. So wait until
@@ -29,7 +26,7 @@ fn watch_compute_activity(compute: &ComputeNode) {
     wait_for_postgres_start(compute);
 
     // Define `client` outside of the loop to reuse existing connection if it's active.
-    let mut client = Client::connect(connstr, NoTls);
+    let mut client = conf.connect(NoTls);
 
     let mut sleep = false;
     let mut prev_active_time: Option<f64> = None;
@@ -57,7 +54,7 @@ fn watch_compute_activity(compute: &ComputeNode) {
                     info!("connection to Postgres is closed, trying to reconnect");
 
                     // Connection is closed, reconnect and try again.
-                    client = Client::connect(connstr, NoTls);
+                    client = conf.connect(NoTls);
                     continue;
                 }
 
@@ -196,7 +193,7 @@ fn watch_compute_activity(compute: &ComputeNode) {
                 debug!("could not connect to Postgres: {}, retrying", e);
 
                 // Establish a new connection and try again.
-                client = Client::connect(connstr, NoTls);
+                client = conf.connect(NoTls);
             }
         }
     }

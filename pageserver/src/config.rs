@@ -188,11 +188,9 @@ pub struct PageServerConf {
     /// Optionally disable disk syncs (unsafe!)
     pub no_sync: bool,
 
-    /// Maximum amount of time for which a get page request request
-    /// might be held up for request merging.
-    pub server_side_batch_timeout: Option<Duration>,
-
     pub wal_receiver_protocol: PostgresClientProtocol,
+
+    pub page_service_pipelining: pageserver_api::config::PageServicePipeliningConfig,
 }
 
 /// Token for authentication to safekeepers
@@ -350,10 +348,10 @@ impl PageServerConf {
             concurrent_tenant_warmup,
             concurrent_tenant_size_logical_size_queries,
             virtual_file_io_engine,
-            server_side_batch_timeout,
             tenant_config,
             no_sync,
             wal_receiver_protocol,
+            page_service_pipelining,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -393,11 +391,11 @@ impl PageServerConf {
             image_compression,
             timeline_offloading,
             ephemeral_bytes_per_memory_kb,
-            server_side_batch_timeout,
             import_pgdata_upcall_api,
             import_pgdata_upcall_api_token: import_pgdata_upcall_api_token.map(SecretString::from),
             import_pgdata_aws_endpoint_url,
             wal_receiver_protocol,
+            page_service_pipelining,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
