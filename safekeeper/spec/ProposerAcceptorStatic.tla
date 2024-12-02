@@ -265,18 +265,21 @@ TermLsnGE(tl1, tl2) ==
 MaxTermLsn(term_lsn_set) ==
     CHOOSE max_tl \in term_lsn_set: \A tl \in term_lsn_set: TermLsnGE(max_tl, tl)
 
+\* Find acceptor with the highest <last_log_term, lsn> vote in proposer p's votes.
+MaxVoteAcc(p) ==
+    CHOOSE a \in DOMAIN prop_state[p].votes:
+        LET a_vote == prop_state[p].votes[a]
+            a_vote_term_lsn == [term |-> LastLogTerm(a_vote.termHistory), lsn |-> a_vote.flushLsn]
+            vote_term_lsns == {[term |-> LastLogTerm(v.termHistory), lsn |-> v.flushLsn]: v \in Range(prop_state[p].votes)}
+        IN
+            a_vote_term_lsn = MaxTermLsn(vote_term_lsns)
+
 \* Workhorse for BecomeLeader.
 \* Assumes the check prop_state[p] votes is quorum has been done *outside*.
 DoBecomeLeader(p) ==
     LET
         \* Find acceptor with the highest <last_log_term, lsn> vote.
-        max_vote_acc ==
-            CHOOSE a \in DOMAIN prop_state[p].votes:
-                LET a_vote == prop_state[p].votes[a]
-                    a_vote_term_lsn == [term |-> LastLogTerm(a_vote.termHistory), lsn |-> a_vote.flushLsn]
-                    vote_term_lsns == {[term |-> LastLogTerm(v.termHistory), lsn |-> v.flushLsn]: v \in Range(prop_state[p].votes)}
-                IN
-                    a_vote_term_lsn = MaxTermLsn(vote_term_lsns)
+        max_vote_acc == MaxVoteAcc(p)
         max_vote == prop_state[p].votes[max_vote_acc]
         prop_th == Append(max_vote.termHistory, [term |-> prop_state[p].term, lsn |-> max_vote.flushLsn])
     IN

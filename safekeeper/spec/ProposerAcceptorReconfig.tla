@@ -65,6 +65,11 @@ Init ==
            /\ prop_conf = [p \in proposers |-> init_conf]
            /\ acc_conf = [a \in acceptors |-> init_conf]
            /\ conf_store = init_conf
+           \* We could start with anything, but to reduce space state start with
+           \* the most reasonable total acceptors - 1 conf size, which e.g.
+           \* makes basic {a1} -> {a2} change in {a1, a2} acceptors and {a1, a2,
+           \* a3} -> {a2, a3, a4} in {a1, a2, a3, a4} acceptors models even in
+           \* the smallest models with single change.
            /\ Cardinality(init_members) = Cardinality(acceptors) - 1
 
 \********************************************************************************
@@ -106,6 +111,11 @@ BecomeLeader(p) ==
        \* https://groups.google.com/g/tlaplus/c/U6tOJ4dsjVM/m/UdOznPCVBwAJ
        \* so repeat the null check.
        \/ (prop_conf[p].newMembers /= NULL)  /\ (PAS!FormsQuorum(DOMAIN prop_state[p].votes, prop_conf[p].newMembers))
+    \* DoBecomeLeader will copy WAL of the highest voter to proposer's WAL, so
+    \* ensure its conf is still the same. In the impl WAL fetching also has to
+    \* check the configuration.
+    /\ prop_conf[p].generation = acc_conf[PAS!MaxVoteAcc(p)].generation
+    /\ \A a \in DOMAIN prop_state[p].votes: prop_conf[p].generation = acc_conf[a].generation
     /\ PAS!DoBecomeLeader(p)
     /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
 
@@ -175,7 +185,6 @@ ProposerSwitchConf(p, a) ==
 StartChange(new_members) ==
     \* Possible only if we don't already have the change in progress.
     /\ conf_store.newMembers = NULL
-    /\ Cardinality(new_members) = 1
     \* Not necessary, but reduces space a bit.
     /\ new_members /= conf_store.members
     /\ conf_store' = [generation |-> conf_store.generation + 1, members |-> conf_store.members, newMembers |-> new_members]
