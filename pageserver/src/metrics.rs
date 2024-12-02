@@ -16,6 +16,7 @@ use postgres_backend::{is_expected_io_error, QueryError};
 use pq_proto::framed::ConnectionError;
 use strum::{EnumCount, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
+use tracing::warn;
 use utils::id::TimelineId;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
@@ -225,7 +226,7 @@ impl<'a> ScanLatencyOngoingRecording<'a> {
 pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| {
     let inner = register_histogram_vec!(
         "pageserver_get_vectored_seconds",
-        "Time spent in get_vectored, excluding time spent in timeline_get_throttle.",
+        "Time spent in get_vectored.",
         &["task_kind"],
         CRITICAL_OP_BUCKETS.into(),
     )
@@ -248,7 +249,7 @@ pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| 
 pub(crate) static SCAN_LATENCY: Lazy<ScanLatency> = Lazy::new(|| {
     let inner = register_histogram_vec!(
         "pageserver_scan_seconds",
-        "Time spent in scan, excluding time spent in timeline_get_throttle.",
+        "Time spent in scan.",
         &["task_kind"],
         CRITICAL_OP_BUCKETS.into(),
     )
@@ -1211,11 +1212,44 @@ pub(crate) struct SmgrOpTimer {
     per_timeline_latency_histo: Option<Histogram>,
 
     start: Instant,
+    throttled: Duration,
+    op: SmgrQueryType,
+}
+
+impl SmgrOpTimer {
+    pub(crate) fn deduct_throttle(&mut self, throttle: &Option<Duration>) {
+        let Some(throttle) = throttle else {
+            return;
+        };
+        self.throttled += *throttle;
+    }
 }
 
 impl Drop for SmgrOpTimer {
     fn drop(&mut self) {
-        let elapsed = self.start.elapsed().as_secs_f64();
+        let elapsed = self.start.elapsed();
+
+        let elapsed = match elapsed.checked_sub(self.throttled) {
+            Some(elapsed) => elapsed,
+            None => {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<enum_map::EnumMap<SmgrQueryType, RateLimit>>> =
+                    Lazy::new(|| {
+                        Mutex::new(enum_map::EnumMap::from_array(std::array::from_fn(|_| {
+                            RateLimit::new(Duration::from_secs(10))
+                        })))
+                    });
+                let mut guard = LOGGED.lock().unwrap();
+                let rate_limit = &mut guard[self.op];
+                rate_limit.call(|| {
+                    warn!(op=?self.op, "implementation error: time spent throttled exceeds total request wall clock time");
+                });
+                elapsed // un-throttled time, more info than just saturating to 0
+            }
+        };
+
+        let elapsed = elapsed.as_secs_f64();
+
         self.global_latency_histo.observe(elapsed);
         if let Some(per_timeline_getpage_histo) = &self.per_timeline_latency_histo {
             per_timeline_getpage_histo.observe(elapsed);
@@ -1475,6 +1509,8 @@ impl SmgrQueryTimePerTimeline {
             global_latency_histo: self.global_latency[op as usize].clone(),
             per_timeline_latency_histo,
             start: started_at,
+            op,
+            throttled: Duration::ZERO,
         }
     }
 
@@ -3283,7 +3319,7 @@ pub(crate) mod tenant_throttling {
     use once_cell::sync::Lazy;
     use utils::shard::TenantShardId;
 
-    use crate::tenant::{self, throttle::Metric};
+    use crate::tenant::{self};
 
     struct GlobalAndPerTenantIntCounter {
         global: IntCounter,
@@ -3302,7 +3338,7 @@ pub(crate) mod tenant_throttling {
         }
     }
 
-    pub(crate) struct TimelineGet {
+    pub(crate) struct Metrics<const KIND: usize> {
         count_accounted_start: GlobalAndPerTenantIntCounter,
         count_accounted_finish: GlobalAndPerTenantIntCounter,
         wait_time: GlobalAndPerTenantIntCounter,
@@ -3375,40 +3411,41 @@ pub(crate) mod tenant_throttling {
         .unwrap()
     });
 
-    const KIND: &str = "timeline_get";
+    const KINDS: &[&str] = &["pagestream"];
+    pub type Pagestream = Metrics<0>;
 
-    impl TimelineGet {
+    impl<const KIND: usize> Metrics<KIND> {
         pub(crate) fn new(tenant_shard_id: &TenantShardId) -> Self {
             let per_tenant_label_values = &[
-                KIND,
+                KINDS[KIND],
                 &tenant_shard_id.tenant_id.to_string(),
                 &tenant_shard_id.shard_slug().to_string(),
             ];
-            TimelineGet {
+            Metrics {
                 count_accounted_start: {
                     GlobalAndPerTenantIntCounter {
-                        global: COUNT_ACCOUNTED_START.with_label_values(&[KIND]),
+                        global: COUNT_ACCOUNTED_START.with_label_values(&[KINDS[KIND]]),
                         per_tenant: COUNT_ACCOUNTED_START_PER_TENANT
                             .with_label_values(per_tenant_label_values),
                     }
                 },
                 count_accounted_finish: {
                     GlobalAndPerTenantIntCounter {
-                        global: COUNT_ACCOUNTED_FINISH.with_label_values(&[KIND]),
+                        global: COUNT_ACCOUNTED_FINISH.with_label_values(&[KINDS[KIND]]),
                         per_tenant: COUNT_ACCOUNTED_FINISH_PER_TENANT
                             .with_label_values(per_tenant_label_values),
                     }
                 },
                 wait_time: {
                     GlobalAndPerTenantIntCounter {
-                        global: WAIT_USECS.with_label_values(&[KIND]),
+                        global: WAIT_USECS.with_label_values(&[KINDS[KIND]]),
                         per_tenant: WAIT_USECS_PER_TENANT
                             .with_label_values(per_tenant_label_values),
                     }
                 },
                 count_throttled: {
                     GlobalAndPerTenantIntCounter {
-                        global: WAIT_COUNT.with_label_values(&[KIND]),
+                        global: WAIT_COUNT.with_label_values(&[KINDS[KIND]]),
                         per_tenant: WAIT_COUNT_PER_TENANT
                             .with_label_values(per_tenant_label_values),
                     }
@@ -3431,15 +3468,17 @@ pub(crate) mod tenant_throttling {
             &WAIT_USECS_PER_TENANT,
             &WAIT_COUNT_PER_TENANT,
         ] {
-            let _ = m.remove_label_values(&[
-                KIND,
-                &tenant_shard_id.tenant_id.to_string(),
-                &tenant_shard_id.shard_slug().to_string(),
-            ]);
+            for kind in KINDS {
+                let _ = m.remove_label_values(&[
+                    kind,
+                    &tenant_shard_id.tenant_id.to_string(),
+                    &tenant_shard_id.shard_slug().to_string(),
+                ]);
+            }
         }
     }
 
-    impl Metric for TimelineGet {
+    impl<const KIND: usize> tenant::throttle::Metric for Metrics<KIND> {
         #[inline(always)]
         fn accounting_start(&self) {
             self.count_accounted_start.inc();
