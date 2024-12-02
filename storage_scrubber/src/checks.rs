@@ -602,6 +602,18 @@ pub(crate) async fn list_tenant_manifests(
             },
         });
     }
+    if !unknown_keys.is_empty() {
+        errors.push(((*prefix_str).to_owned(), "unknown keys listed".to_string()));
+
+        return Ok(ListTenantManifestResult {
+            errors,
+            manifest_info: RemoteTenantManifestInfo {
+                latest_generation: None,
+                manifests,
+                unknown_keys,
+            },
+        });
+    }
 
     // Find the manifest with the highest generation
     let (latest_generation, latest_listing_object) = manifests
