@@ -16,6 +16,7 @@ use postgres_backend::{is_expected_io_error, QueryError};
 use pq_proto::framed::ConnectionError;
 use strum::{EnumCount, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
+use tracing::warn;
 use utils::id::TimelineId;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
@@ -216,9 +217,24 @@ impl<'a> ScanLatencyOngoingRecording<'a> {
         ScanLatencyOngoingRecording { parent, start }
     }
 
-    pub(crate) fn observe(self) {
+    pub(crate) fn observe(self, throttled: Option<Duration>) {
         let elapsed = self.start.elapsed();
-        self.parent.observe(elapsed.as_secs_f64());
+        let ex_throttled = if let Some(throttled) = throttled {
+            elapsed.checked_sub(throttled)
+        } else {
+            Some(elapsed)
+        };
+        if let Some(ex_throttled) = ex_throttled {
+            self.parent.observe(ex_throttled.as_secs_f64());
+        } else {
+            use utils::rate_limit::RateLimit;
+            static LOGGED: Lazy<Mutex<RateLimit>> =
+                Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+            let mut rate_limit = LOGGED.lock().unwrap();
+            rate_limit.call(|| {
+                warn!("error deducting time spent throttled; this message is logged at a global rate limit");
+            });
+        }
     }
 }
 

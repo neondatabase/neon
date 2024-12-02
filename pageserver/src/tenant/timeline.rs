@@ -1058,7 +1058,11 @@ impl Timeline {
             .for_task_kind(ctx.task_kind())
             .map(|metric| (metric, Instant::now()));
 
-        self.timeline_get_throttle
+        // start counting after throttle so that throttle time
+        // is always less than observation time and we don't
+        // underflow when computing `ex_throttled` below.
+        let throttled = self
+            .timeline_get_throttle
             .throttle(ctx, key_count as usize)
             .await;
 
@@ -1073,7 +1077,23 @@ impl Timeline {
 
         if let Some((metric, start)) = start {
             let elapsed = start.elapsed();
-            metric.observe(elapsed.as_secs_f64());
+            let ex_throttled = if let Some(throttled) = throttled {
+                elapsed.checked_sub(throttled)
+            } else {
+                Some(elapsed)
+            };
+
+            if let Some(ex_throttled) = ex_throttled {
+                metric.observe(ex_throttled.as_secs_f64());
+            } else {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                let mut rate_limit = LOGGED.lock().unwrap();
+                rate_limit.call(|| {
+                    warn!("error deducting time spent throttled; this message is logged at a global rate limit");
+                });
+            }
         }
 
         res
@@ -1119,8 +1139,11 @@ impl Timeline {
             .map(ScanLatencyOngoingRecording::start_recording);
 
         // start counting after throttle so that throttle time
-        // is always less than observation time
-        self.timeline_get_throttle
+        // is always less than observation time and we don't
+        // underflow when computing the `ex_throttled` value in
+        // `recording.observe(throttled)` below.
+        let throttled = self
+            .timeline_get_throttle
             // assume scan = 1 quota for now until we find a better way to process this
             .throttle(ctx, 1)
             .await;
@@ -1135,7 +1158,7 @@ impl Timeline {
             .await;
 
         if let Some(recording) = start {
-            recording.observe();
+            recording.observe(throttled);
         }
 
         vectored_res
