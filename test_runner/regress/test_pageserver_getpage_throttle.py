@@ -33,7 +33,7 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
         conf={
             "compaction_period": f"{compaction_period}s",
             "timeline_get_throttle": {
-                "task_kinds": ["PageRequestHandler"],
+                "task_kinds": [],  # this field is ignored as of https://github.com/neondatabase/neon/pull/9962
                 "initial": 0,
                 "refill_interval": "100ms",
                 "refill_amount": int(rate_limit_rps / 10),
@@ -119,7 +119,6 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
         ),
     )
 
-    log.info("the smgr metric includes throttle time")
     smgr_query_seconds_post = ps_http.get_metric_value(smgr_metric_name, smgr_metrics_query)
     assert smgr_query_seconds_post is not None
     throttled_usecs_post = ps_http.get_metric_value(throttle_metric_name, throttle_metrics_query)
@@ -128,13 +127,14 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
     actual_throttled_usecs = throttled_usecs_post - throttled_usecs_pre
     actual_throttled_secs = actual_throttled_usecs / 1_000_000
 
+    log.info("validate that the metric doesn't include throttle wait time")
     assert (
-        pytest.approx(duration_secs, 0.1) == actual_smgr_query_seconds
-    ), "smgr metrics include throttle wait time"
-    smgr_ex_throttle = actual_smgr_query_seconds - actual_throttled_secs
-    assert smgr_ex_throttle > 0
+        duration_secs >= 10 * actual_smgr_query_seconds
+    ), "smgr metrics should not include throttle wait time"
+
+    log.info("validate that the throttling wait time metrics is correct")
     assert (
-        duration_secs > 10 * smgr_ex_throttle
+        pytest.approx(actual_throttled_secs + actual_smgr_query_seconds, 0.1) == duration_secs
     ), "most of the time in this test is spent throttled because the rate-limit's contribution to latency dominates"
 
 
