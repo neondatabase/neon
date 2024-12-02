@@ -1718,6 +1718,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "diatomic-waker"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab03c107fafeb3ee9f5925686dbb7a73bc76e3932abb0d2b365cb64b169cf04c"
+
+[[package]]
 name = "diesel"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4540,6 +4546,7 @@ dependencies = [
  "ecdsa 0.16.9",
  "env_logger",
  "fallible-iterator",
+ "flate2",
  "framed-websockets",
  "futures",
  "hashbrown 0.14.5",
@@ -7090,6 +7097,7 @@ dependencies = [
  "chrono",
  "const_format",
  "criterion",
+ "diatomic-waker",
  "fail",
  "futures",
  "git-version",
@@ -7109,6 +7117,7 @@ dependencies = [
  "rand 0.8.5",
  "regex",
  "routerify",
+ "scopeguard",
  "sentry",
  "serde",
  "serde_assert",
