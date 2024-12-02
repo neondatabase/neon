@@ -192,6 +192,7 @@ tower-service = "0.3.2"
 tracing = "0.1"
 tracing-error = "0.2"
 tracing-opentelemetry = "0.25"
+tracing-serde = "0.1.3"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
 try-lock = "0.2.5"
 twox-hash = { version = "1.6.3", default-features = false }

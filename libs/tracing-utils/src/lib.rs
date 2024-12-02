@@ -21,7 +21,7 @@
 //!         .with_writer(std::io::stderr);
 //!
 //!     // Initialize OpenTelemetry. Exports tracing spans as OpenTelemetry traces
-//!     let otlp_layer = tracing_utils::init_tracing("my_application").await;
+//!     let otlp_layer = tracing_utils::init_tracing("my_application", None::<fn(opentelemetry::global::Error)>).await;
 //!
 //!     // Put it all together
 //!     tracing_subscriber::registry()
@@ -70,19 +70,28 @@ use tracing_subscriber::Layer;
 ///
 /// This doesn't block, but is marked as 'async' to hint that this must be called in
 /// asynchronous execution context.
-pub async fn init_tracing<S>(service_name: &str) -> Option<impl Layer<S>>
+pub async fn init_tracing<S>(
+    service_name: &str,
+    error_handler: Option<impl Fn(opentelemetry::global::Error) + Send + Sync + 'static>,
+) -> Option<impl Layer<S>>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
     if std::env::var("OTEL_SDK_DISABLED") == Ok("true".to_string()) {
         return None;
     };
-    Some(init_tracing_internal(service_name.to_string()))
+    Some(init_tracing_internal(
+        service_name.to_string(),
+        error_handler,
+    ))
 }
 
 /// Like `init_tracing`, but creates a separate tokio Runtime for the tracing
 /// tasks.
-pub fn init_tracing_without_runtime<S>(service_name: &str) -> Option<impl Layer<S>>
+pub fn init_tracing_without_runtime<S>(
+    service_name: &str,
+    error_handler: Option<impl Fn(opentelemetry::global::Error) + Send + Sync + 'static>,
+) -> Option<impl Layer<S>>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
@@ -113,13 +122,24 @@ where
     ));
     let _guard = runtime.enter();
 
-    Some(init_tracing_internal(service_name.to_string()))
+    Some(init_tracing_internal(
+        service_name.to_string(),
+        error_handler,
+    ))
 }
 
-fn init_tracing_internal<S>(service_name: String) -> impl Layer<S>
+fn init_tracing_internal<S>(
+    service_name: String,
+    error_handler: Option<impl Fn(opentelemetry::global::Error) + Send + Sync + 'static>,
+) -> impl Layer<S>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
+    if let Some(error_handler) = error_handler {
+        opentelemetry::global::set_error_handler(error_handler)
+            .expect("could not set opentelemetry error handler");
+    }
+
     // Sets up exporter from the OTEL_EXPORTER_* environment variables.
     let exporter = opentelemetry_otlp::new_exporter().http();
 
