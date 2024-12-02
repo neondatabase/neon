@@ -540,7 +540,7 @@ pub(crate) struct RemoteTenantManifestInfo {
 }
 
 pub(crate) struct ListTenantManifestResult {
-    pub(crate) errors: Vec<String>,
+    pub(crate) errors: Vec<(String, String)>,
     pub(crate) manifest_info: RemoteTenantManifestInfo,
 }
 
@@ -554,11 +554,16 @@ pub(crate) async fn list_tenant_manifests(
     let mut unknown_keys = Vec::new();
 
     let mut tenant_root_target = root_target.tenant_root(&tenant_id);
+    let original_prefix = tenant_root_target.prefix_in_bucket.clone();
     const TENANT_MANIFEST_STEM: &str = "tenant-manifest";
     tenant_root_target.prefix_in_bucket += TENANT_MANIFEST_STEM;
     tenant_root_target.delimiter = String::new();
 
     let mut manifests: Vec<(Generation, ListingObject)> = Vec::new();
+
+    let prefix_str = &original_prefix
+        .strip_prefix("/")
+        .unwrap_or(&original_prefix);
 
     let mut stream = std::pin::pin!(stream_listing(remote_client, &tenant_root_target));
     'outer: while let Some(obj) = stream.next().await {
@@ -611,7 +616,10 @@ pub(crate) async fn list_tenant_manifests(
             Err(e) => {
                 // It is possible that the tenant gets deleted in-between we list the objects
                 // and we download the manifest file.
-                errors.push(format!("failed to download tenant-manifest.json: {e}"));
+                errors.push((
+                    latest_listing_object.key.get_path().as_str().to_owned(),
+                    format!("failed to download tenant-manifest.json: {e}"),
+                ));
                 return Ok(ListTenantManifestResult {
                     errors,
                     manifest_info: RemoteTenantManifestInfo {
@@ -634,15 +642,17 @@ pub(crate) async fn list_tenant_manifests(
                 },
             });
         }
-        Err(parse_error) => errors.push(format!(
-            "tenant-manifest.json body parsing error: {parse_error}"
+        Err(parse_error) => errors.push((
+            latest_listing_object.key.get_path().as_str().to_owned(),
+            format!("tenant-manifest.json body parsing error: {parse_error}"),
         )),
     }
 
     if errors.is_empty() {
-        errors.push(
+        errors.push((
+            (*prefix_str).to_owned(),
             "Unexpected: no errors did not lead to a successfully parsed blob return".to_string(),
-        );
+        ));
     }
 
     Ok(ListTenantManifestResult {
