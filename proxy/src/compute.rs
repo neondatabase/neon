@@ -6,6 +6,7 @@ use std::time::Duration;
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use postgres_protocol::message::backend::NoticeResponseBody;
 use pq_proto::StartupMessageParams;
 use rustls::client::danger::ServerCertVerifier;
 use rustls::crypto::ring;
@@ -13,6 +14,7 @@ use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::tls::MakeTlsConnect;
+use tokio_postgres::{CancelToken, RawConnection};
 use tracing::{debug, error, info, warn};
 
 use crate::auth::parse_endpoint_param;
@@ -277,6 +279,8 @@ pub(crate) struct PostgresConnection {
     pub(crate) cancel_closure: CancelClosure,
     /// Labels for proxy's metrics.
     pub(crate) aux: MetricsAuxInfo,
+    /// Notices received from compute after authenticating
+    pub(crate) delayed_notice: Vec<NoticeResponseBody>,
 
     _guage: NumDbConnectionsGuard<'static>,
 }
@@ -322,10 +326,19 @@ impl ConnCfg {
 
         // connect_raw() will not use TLS if sslmode is "disable"
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (client, connection) = self.0.connect_raw(stream, tls).await?;
+        let connection = self.0.connect_raw(stream, tls).await?;
         drop(pause);
-        tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
-        let stream = connection.stream.into_inner();
+
+        let RawConnection {
+            stream,
+            parameters,
+            delayed_notice,
+            process_id,
+            secret_key,
+        } = connection;
+
+        tracing::Span::current().record("pid", tracing::field::display(process_id));
+        let stream = stream.into_inner();
 
         // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
         info!(
@@ -334,18 +347,23 @@ impl ConnCfg {
             self.0.get_ssl_mode()
         );
 
-        // This is very ugly but as of now there's no better way to
-        // extract the connection parameters from tokio-postgres' connection.
-        // TODO: solve this problem in a more elegant manner (e.g. the new library).
-        let params = connection.parameters;
-
         // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
         // Yet another reason to rework the connection establishing code.
-        let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token(), vec![]);
+        let cancel_closure = CancelClosure::new(
+            socket_addr,
+            CancelToken {
+                socket_config: None,
+                ssl_mode: self.0.get_ssl_mode(),
+                process_id,
+                secret_key,
+            },
+            vec![],
+        );
 
         let connection = PostgresConnection {
             stream,
-            params,
+            params: parameters,
+            delayed_notice,
             cancel_closure,
             aux,
             _guage: Metrics::get().proxy.db_connections.guard(ctx.protocol()),
