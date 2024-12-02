@@ -128,6 +128,10 @@ AppendEntry(p, a) ==
     /\ prop_state[p].state = "leader"
     \* Configuration must be the same.
     /\ prop_conf[p].generation = acc_conf[a].generation
+    \* And a is member of it. Ignoring this likely wouldn't hurt, but not useful
+    \* either.
+    /\ \/ a \in prop_conf[p].members
+       \/ (prop_conf[p].newMembers /= NULL) /\ (a \in prop_conf[p].newMembers)
     /\ PAS!AppendEntry(p, a)
     /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
 
