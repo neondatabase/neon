@@ -839,7 +839,7 @@ def test_timeline_retain_lsn(
 
 def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
     """
-    Test for offloaing / unoffloading across many restarts
+    Test for offloading / unoffloading across many restarts
     """
     remote_storage_kind = s3_storage()
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
