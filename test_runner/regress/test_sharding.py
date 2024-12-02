@@ -836,7 +836,7 @@ def test_sharding_split_stripe_size(
         assert len(notifications) == 3
         assert notifications[2] == expect_after
 
-    wait_until(10, 1, assert_restart_notification)
+    wait_until(assert_restart_notification)
 
 
 # The quantity of data isn't huge, but debug can be _very_ slow, and the things we're
@@ -1025,7 +1025,7 @@ def test_sharding_ingest_gaps(
             assert Lsn(timeline_detail["disk_consistent_lsn"]) >= expect_lsn
 
     # We set a short checkpoint timeout: expect things to get frozen+flushed within that
-    wait_until(checkpoint_interval_secs * 3, 1, assert_all_disk_consistent)
+    wait_until(assert_all_disk_consistent, timeout=3 * checkpoint_interval_secs)
 
     def assert_all_remote_consistent():
         """
@@ -1037,7 +1037,7 @@ def test_sharding_ingest_gaps(
             assert Lsn(timeline_detail["remote_consistent_lsn"]) >= expect_lsn
 
     # We set a short checkpoint timeout: expect things to get frozen+flushed within that
-    wait_until(checkpoint_interval_secs * 3, 1, assert_all_remote_consistent)
+    wait_until(assert_all_remote_consistent, timeout=3 * checkpoint_interval_secs)
 
     workload.validate()
 
@@ -1405,14 +1405,14 @@ def test_sharding_split_failures(
         #   e.g. while waiting for a storage controller to re-attach a parent shard if we failed
         #   inside the pageserver and the storage controller responds by detaching children and attaching
         #   parents concurrently (https://github.com/neondatabase/neon/issues/7148)
-        wait_until(10, 1, lambda: workload.churn_rows(10, upload=False, ingest=False))
+        wait_until(lambda: workload.churn_rows(10, upload=False, ingest=False))
 
         workload.validate()
 
     if failure.fails_forward(env):
         log.info("Fail-forward failure, checking split eventually completes...")
         # A failure type which results in eventual completion of the split
-        wait_until(30, 1, assert_split_done)
+        wait_until(assert_split_done)
     elif failure.can_mitigate():
         log.info("Mitigating failure...")
         # Mitigation phase: we expect to be able to proceed with a successful shard split
@@ -1420,21 +1420,21 @@ def test_sharding_split_failures(
 
         # The split should appear to be rolled back from the point of view of all pageservers
         # apart from the one that is offline
-        wait_until(30, 1, lambda: assert_rolled_back(exclude_ps_id=failure.pageserver_id))
+        wait_until(lambda: assert_rolled_back(exclude_ps_id=failure.pageserver_id))
 
         finish_split()
-        wait_until(30, 1, lambda: assert_split_done(exclude_ps_id=failure.pageserver_id))
+        wait_until(lambda: assert_split_done(exclude_ps_id=failure.pageserver_id))
 
         # Having cleared the failure, everything should converge to a pristine state
         failure.clear(env)
-        wait_until(30, 1, assert_split_done)
+        wait_until(assert_split_done)
     else:
         # Once we restore the faulty pageserver's API to good health, rollback should
         # eventually complete.
         log.info("Clearing failure...")
         failure.clear(env)
 
-        wait_until(30, 1, assert_rolled_back)
+        wait_until(assert_rolled_back)
 
         # Having rolled back, the tenant should be working
         workload.churn_rows(10)

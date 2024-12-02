@@ -24,10 +24,11 @@ use p256::ecdsa::{Signature, SigningKey};
 use parking_lot::RwLock;
 use serde_json::value::RawValue;
 use signature::Signer;
+use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::types::ToSql;
-use tokio_postgres::{AsyncMessage, Socket};
+use tokio_postgres::AsyncMessage;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
@@ -163,7 +164,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
-    mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
+    mut connection: tokio_postgres::Connection<TcpStream, NoTlsStream>,
     key: SigningKey,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
@@ -286,11 +287,11 @@ impl ClientInnerCommon<tokio_postgres::Client> {
             let token = resign_jwt(&local_data.key, payload, local_data.jti)?;
 
             // initiates the auth session
-            self.inner.simple_query("discard all").await?;
+            self.inner.batch_execute("discard all").await?;
             self.inner
-                .query(
+                .execute(
                     "select auth.jwt_session_init($1)",
-                    &[&token as &(dyn ToSql + Sync)],
+                    &[&&*token as &(dyn ToSql + Sync)],
                 )
                 .await?;
 

@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::process::exit;
+use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::{thread, time::Duration};
@@ -322,8 +323,15 @@ fn wait_spec(
     } else {
         spec_set = false;
     }
+    let connstr = Url::parse(connstr).context("cannot parse connstr as a URL")?;
+    let conn_conf = postgres::config::Config::from_str(connstr.as_str())
+        .context("cannot build postgres config from connstr")?;
+    let tokio_conn_conf = tokio_postgres::config::Config::from_str(connstr.as_str())
+        .context("cannot build tokio postgres config from connstr")?;
     let compute_node = ComputeNode {
-        connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
+        connstr,
+        conn_conf,
+        tokio_conn_conf,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
         pgversion: get_pg_version_string(pgbin),

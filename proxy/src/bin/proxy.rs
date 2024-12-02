@@ -517,10 +517,6 @@ async fn main() -> anyhow::Result<()> {
     if let Some(metrics_config) = &config.metric_collection {
         // TODO: Add gc regardles of the metric collection being enabled.
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
-        client_tasks.spawn(usage_metrics::task_backup(
-            &metrics_config.backup_metric_collection_config,
-            cancellation_token.clone(),
-        ));
     }
 
     if let Either::Left(auth::Backend::ControlPlane(api, _)) = &auth_backend {

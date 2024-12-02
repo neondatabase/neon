@@ -227,8 +227,8 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
             ps_http.timeline_offload(tenant_id=tenant_id, timeline_id=leaf_timeline_id)
         assert timeline_offloaded_logged(leaf_timeline_id)
 
-    wait_until(30, 1, leaf_offloaded)
-    wait_until(30, 1, parent_offloaded)
+    wait_until(leaf_offloaded)
+    wait_until(parent_offloaded)
 
     # Offloaded child timelines should still prevent deletion
     with pytest.raises(
@@ -331,7 +331,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
         ps_http.timeline_offload(tenant_id=tenant_id, timeline_id=child_timeline_id)
         assert timeline_offloaded_api(child_timeline_id)
 
-    wait_until(30, 1, child_offloaded)
+    wait_until(child_offloaded)
 
     assert timeline_offloaded_api(child_timeline_id)
     assert not timeline_offloaded_api(root_timeline_id)
