@@ -1507,9 +1507,8 @@ impl<'a> DatadirModification<'a> {
         blknum: BlockNumber,
         img: Bytes,
     ) -> anyhow::Result<()> {
-        if !self.tline.tenant_shard_id.is_shard_zero() {
-            return Ok(());
-        }
+        assert!(self.tline.tenant_shard_id.is_shard_zero());
+
         let key = slru_block_to_key(kind, segno, blknum);
         if !key.is_valid_key_on_write_path() {
             anyhow::bail!(
@@ -1551,9 +1550,7 @@ impl<'a> DatadirModification<'a> {
         segno: u32,
         blknum: BlockNumber,
     ) -> anyhow::Result<()> {
-        if !self.tline.tenant_shard_id.is_shard_zero() {
-            return Ok(());
-        }
+        assert!(self.tline.tenant_shard_id.is_shard_zero());
         let key = slru_block_to_key(kind, segno, blknum);
         if !key.is_valid_key_on_write_path() {
             anyhow::bail!(
@@ -1865,6 +1862,8 @@ impl<'a> DatadirModification<'a> {
         nblocks: BlockNumber,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        assert!(self.tline.tenant_shard_id.is_shard_zero());
+
         // Add it to the directory entry
         let dir_key = slru_dir_to_key(kind);
         let buf = self.get(dir_key, ctx).await?;
@@ -1897,6 +1896,8 @@ impl<'a> DatadirModification<'a> {
         segno: u32,
         nblocks: BlockNumber,
     ) -> anyhow::Result<()> {
+        assert!(self.tline.tenant_shard_id.is_shard_zero());
+
         // Put size
         let size_key = slru_segment_size_to_key(kind, segno);
         let buf = nblocks.to_le_bytes();
