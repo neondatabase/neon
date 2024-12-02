@@ -169,7 +169,7 @@ def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
         )
 
         _, offset = wait_until(
-            20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+            lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
         )
 
         with pytest.raises(ReadTimeout):
@@ -178,8 +178,6 @@ def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
         client.configure_failpoints((failpoint, "off"))
 
         _, offset = wait_until(
-            20,
-            0.5,
             lambda: env.pageserver.assert_log_contains(
                 "Cancelled request finished with an error: Cancelled$", offset
             ),

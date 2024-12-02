@@ -178,11 +178,7 @@ def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
     env.pageserver.start()
     client = env.pageserver.http_client()
 
-    wait_until(
-        number_of_iterations=5,
-        interval=1,
-        func=lambda: assert_tenant_state(client, tenant_id, "Active"),
-    )
+    wait_until(lambda: assert_tenant_state(client, tenant_id, "Active"))
 
     restored_timelines = client.timeline_list(tenant_id)
     assert (
@@ -257,11 +253,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     env.pageserver.start()
     client = env.pageserver.http_client()
 
-    wait_until(
-        number_of_iterations=5,
-        interval=1,
-        func=lambda: assert_tenant_state(client, tenant_id, "Active"),
-    )
+    wait_until(lambda: assert_tenant_state(client, tenant_id, "Active"))
 
     restored_timelines = client.timeline_list(tenant_id)
     assert (

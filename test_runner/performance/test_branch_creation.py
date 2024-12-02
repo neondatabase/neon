@@ -137,7 +137,7 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
     startup_line = "INFO version: git(-env)?:"
 
     # find the first line of the log file so we can find the next start later
-    _, first_start = wait_until(5, 1, lambda: env.pageserver.assert_log_contains(startup_line))
+    _, first_start = wait_until(lambda: env.pageserver.assert_log_contains(startup_line))
 
     # start without gc so we can time compaction with less noise; use shorter
     # period for compaction so it starts earlier
@@ -156,7 +156,7 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
     )
 
     _, second_start = wait_until(
-        5, 1, lambda: env.pageserver.assert_log_contains(startup_line, first_start)
+        lambda: env.pageserver.assert_log_contains(startup_line, first_start),
     )
     env.pageserver.quiesce_tenants()
 
@@ -164,8 +164,6 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
 
     # wait for compaction to complete, which most likely has already done so multiple times
     msg, _ = wait_until(
-        30,
-        1,
         lambda: env.pageserver.assert_log_contains(
             f".*tenant_id={env.initial_tenant}.*: compaction iteration complete.*", second_start
         ),
@@ -205,7 +203,7 @@ def wait_and_record_startup_metrics(
         assert len(matching) == len(expected_labels)
         return matching
 
-    samples = wait_until(10, 1, metrics_are_filled)
+    samples = wait_until(metrics_are_filled)
 
     for sample in samples:
         phase = sample.labels["phase"]
