@@ -839,7 +839,7 @@ def test_timeline_retain_lsn(
 
 def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
     """
-    Test for offloading / unoffloading across many restarts
+    Test for scrubber deleting old generations of manifests
     """
     remote_storage_kind = s3_storage()
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
@@ -865,10 +865,10 @@ def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
         endpoint.safe_psql_many(
             [
                 "CREATE TABLE foo(key serial primary key, t text default 'data_content')",
-                "INSERT INTO foo SELECT FROM generate_series(1,2048)",
+                "INSERT INTO foo SELECT FROM generate_series(1,512)",
             ]
         )
-        sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 500")
+        sum = endpoint.safe_psql("SELECT sum(key) from foo where key % 3 = 2")
         last_flush_lsn_upload(env, endpoint, tenant_id, child_timeline_id)
 
     assert_prefix_not_empty(
@@ -897,7 +897,7 @@ def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
         ps_http.timeline_offload(tenant_id=tenant_id, timeline_id=child_timeline_id)
         assert timeline_offloaded_api(child_timeline_id)
 
-    wait_until(30, 1, child_offloaded)
+    wait_until(child_offloaded)
 
     assert timeline_offloaded_api(child_timeline_id)
     assert not timeline_offloaded_api(root_timeline_id)
@@ -922,7 +922,7 @@ def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
             with env.endpoints.create_start(
                 "test_archived_branch_persisted", tenant_id=tenant_id
             ) as endpoint:
-                sum_again = endpoint.safe_psql("SELECT sum(key) from foo where key < 500")
+                sum_again = endpoint.safe_psql("SELECT sum(key) from foo where key % 3 = 2")
                 assert sum == sum_again
 
         ps_http.timeline_archival_config(
@@ -930,8 +930,7 @@ def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
             child_timeline_id,
             state=TimelineArchivalState.ARCHIVED,
         )
-        wait_until(30, 1, child_offloaded)
-
+        wait_until(child_offloaded)
 
     #
     # Now ensure that scrubber runs will clean up old generations' manifests.

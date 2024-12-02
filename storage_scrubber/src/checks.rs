@@ -544,8 +544,7 @@ pub(crate) struct ListTenantManifestResult {
     pub(crate) manifest_info: RemoteTenantManifestInfo,
 }
 
-/// Returns [`ListTimelineBlobsResult::MissingIndexPart`] if blob data has layer files
-/// but is missing [`IndexPart`], otherwise returns [`ListTimelineBlobsResult::Ready`].
+/// Lists the tenant manifests in remote storage and parses the latest one, returning a [`ListTenantManifestResult`] object.
 pub(crate) async fn list_tenant_manifests(
     remote_client: &GenericRemoteStorage,
     tenant_id: TenantShardId,
@@ -556,15 +555,10 @@ pub(crate) async fn list_tenant_manifests(
 
     let mut tenant_root_target = root_target.tenant_root(&tenant_id);
     const TENANT_MANIFEST_STEM: &str = "tenant-manifest";
-    let original_prefix = tenant_root_target.prefix_in_bucket.clone();
     tenant_root_target.prefix_in_bucket += TENANT_MANIFEST_STEM;
     tenant_root_target.delimiter = String::new();
 
     let mut manifests: Vec<(Generation, ListingObject)> = Vec::new();
-
-    let prefix_str = &original_prefix
-        .strip_prefix("/")
-        .unwrap_or(&original_prefix);
 
     let mut stream = std::pin::pin!(stream_listing(remote_client, &tenant_root_target));
     'outer: while let Some(obj) = stream.next().await {
@@ -572,19 +566,15 @@ pub(crate) async fn list_tenant_manifests(
             panic!("ListingObject not specified");
         };
 
-        let blob_name = key.get_path().as_str().strip_prefix(prefix_str);
         'err: {
             // TODO a let chain would be nicer here.
-            let Some(name) = blob_name else {
+            let Some(name) = key.object_name() else {
                 break 'err;
             };
-            if !name.starts_with("tenant-manifest") {
+            if !name.starts_with(TENANT_MANIFEST_STEM) {
                 break 'err;
             }
-            let Ok(path) = RemotePath::from_string(name) else {
-                break 'err;
-            };
-            let Some(generation) = parse_remote_tenant_manifest_path(path) else {
+            let Some(generation) = parse_remote_tenant_manifest_path(key.clone()) else {
                 break 'err;
             };
             tracing::debug!("tenant manifest {key}");
