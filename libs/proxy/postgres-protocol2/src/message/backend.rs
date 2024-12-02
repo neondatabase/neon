@@ -542,8 +542,8 @@ impl NoticeResponseBody {
         ErrorFields { buf: &self.storage }
     }
 
-    pub fn raw(&self) -> Bytes {
-        self.storage.clone()
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.storage
     }
 }
 

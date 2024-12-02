@@ -566,7 +566,7 @@ pub enum BeMessage<'a> {
     /// ready for the pageserver to ingest
     InterpretedWalRecords(InterpretedWalRecordsBody<'a>),
 
-    Raw(u8, Bytes),
+    Raw(u8, &'a [u8]),
 }
 
 /// Common shorthands.
@@ -758,7 +758,7 @@ impl BeMessage<'_> {
         match message {
             BeMessage::Raw(code, data) => {
                 buf.put_u8(*code);
-                write_body(buf, |b| b.put(&**data))
+                write_body(buf, |b| b.put_slice(data))
             }
             BeMessage::AuthenticationOk => {
                 buf.put_u8(b'R');

@@ -386,7 +386,7 @@ pub(crate) async fn prepare_client_connection<P>(
 
     // Forward all deferred notices to the client.
     for notice in &node.delayed_notice {
-        stream.write_message_noflush(&Be::Raw(b'N', notice.raw()))?;
+        stream.write_message_noflush(&Be::Raw(b'N', notice.as_bytes()))?;
     }
 
     // Forward all postgres connection params to the client.
