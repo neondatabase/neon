@@ -50,9 +50,10 @@ where
     B: IoBuf + CheapCloneForRead,
 {
     fn cheap_clone(&self) -> Self {
-        Self {
-            slice: self.slice.get_ref().cheap_clone().slice_full(),
-        }
+        let bounds = self.slice.bounds();
+        let clone = self.slice.get_ref().cheap_clone();
+        let slice = clone.slice(bounds);
+        Self { slice }
     }
 }
 
