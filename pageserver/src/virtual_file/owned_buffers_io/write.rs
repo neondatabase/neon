@@ -1,7 +1,6 @@
 mod flush;
 use std::sync::Arc;
 
-use bytes::BytesMut;
 use flush::FlushHandle;
 use tokio_epoll_uring::IoBuf;
 
@@ -218,6 +217,10 @@ impl Buffer for IoBufferMut {
     }
 
     fn extend_from_slice(&mut self, other: &[u8]) {
+        if self.len() + other.len() > self.cap() {
+            panic!("Buffer capacity exceeded");
+        }
+
         IoBufferMut::extend_from_slice(self, other);
     }
 
