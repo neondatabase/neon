@@ -37,7 +37,7 @@ def test_logging_event_count(neon_env_builder: NeonEnvBuilder, level: str):
             return
         env.pageserver.assert_log_contains(f".*{msg_id}.*")
 
-    wait_until(10, 0.5, assert_logged)
+    wait_until(assert_logged)
 
     # make sure it's counted
     def assert_metric_value():
@@ -49,4 +49,4 @@ def test_logging_event_count(neon_env_builder: NeonEnvBuilder, level: str):
         log.info("libmetrics_tracing_event_count: %s", val)
         assert val > (before or 0.0)
 
-    wait_until(10, 1, assert_metric_value)
+    wait_until(assert_metric_value)

@@ -13,7 +13,7 @@ from mypy_boto3_s3.type_defs import (
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
-from fixtures.remote_storage import RemoteStorage, RemoteStorageKind, S3Storage
+from fixtures.remote_storage import RemoteStorage, S3Storage
 from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
@@ -269,12 +269,7 @@ def wait_timeline_detail_404(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId | TenantShardId,
     timeline_id: TimelineId,
-    iterations: int,
-    interval: float | None = None,
 ):
-    if interval is None:
-        interval = 0.25
-
     def timeline_is_missing():
         data = {}
         try:
@@ -287,19 +282,17 @@ def wait_timeline_detail_404(
 
         raise RuntimeError(f"Timeline exists state {data.get('state')}")
 
-    wait_until(iterations, interval, func=timeline_is_missing)
+    wait_until(timeline_is_missing)
 
 
 def timeline_delete_wait_completed(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId | TenantShardId,
     timeline_id: TimelineId,
-    iterations: int = 20,
-    interval: float | None = None,
     **delete_args,
 ) -> None:
     pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id, **delete_args)
-    wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id, iterations, interval)
+    wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id)
 
 
 # remote_storage must not be None, but that's easier for callers to make mypy happy
@@ -453,7 +446,3 @@ def many_small_layers_tenant_config() -> dict[str, Any]:
         "checkpoint_distance": 1024**2,
         "image_creation_threshold": 100,
     }
-
-
-def poll_for_remote_storage_iterations(remote_storage_kind: RemoteStorageKind) -> int:
-    return 40 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 15

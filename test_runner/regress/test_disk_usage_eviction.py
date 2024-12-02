@@ -211,7 +211,7 @@ class EvictionEnv:
             pageserver.assert_log_contains(".*running mocked statvfs.*")
 
         # we most likely have already completed multiple runs
-        wait_until(10, 1, statvfs_called)
+        wait_until(statvfs_called)
 
 
 def count_layers_per_tenant(
@@ -772,14 +772,14 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
     )
 
     wait_until(
-        10, 1, lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
+        lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
     )
 
     def less_than_max_usage_pct():
         post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
         assert post_eviction_total_size < 0.33 * total_size, "we requested max 33% usage"
 
-    wait_until(2, 2, less_than_max_usage_pct)
+    wait_until(less_than_max_usage_pct, timeout=5)
 
     # Disk usage candidate collection only takes into account active tenants.
     # However, the statvfs call takes into account the entire tenants directory,
@@ -825,7 +825,7 @@ def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
     )
 
     wait_until(
-        10, 1, lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
+        lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved"),
     )
 
     def more_than_min_avail_bytes_freed():
@@ -834,7 +834,7 @@ def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
             total_size - post_eviction_total_size >= min_avail_bytes
         ), f"we requested at least {min_avail_bytes} worth of free space"
 
-    wait_until(2, 2, more_than_min_avail_bytes_freed)
+    wait_until(more_than_min_avail_bytes_freed, timeout=5)
 
 
 def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
