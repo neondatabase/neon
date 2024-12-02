@@ -53,6 +53,8 @@ impl PoolingBackend {
         user_info: &ComputeUserInfo,
         password: &[u8],
     ) -> Result<ComputeCredentials, AuthError> {
+        ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
+
         let user_info = user_info.clone();
         let backend = self.auth_backend.as_ref().map(|()| user_info.clone());
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
@@ -115,6 +117,8 @@ impl PoolingBackend {
         user_info: &ComputeUserInfo,
         jwt: String,
     ) -> Result<ComputeCredentials, AuthError> {
+        ctx.set_auth_method(crate::context::AuthMethod::Jwt);
+
         match &self.auth_backend {
             crate::auth::Backend::ControlPlane(console, ()) => {
                 self.config
