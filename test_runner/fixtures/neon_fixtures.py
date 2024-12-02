@@ -3801,13 +3801,11 @@ class Endpoint(PgProtocol, LogUtils):
                     assert size_to_bytes(size) >= size_to_bytes(
                         "1MB"
                     ), "LFC size cannot be set less than 1MB"
-            # shared_buffers = 512kB to make postgres use LFC intensively
-            # neon.max_file_cache_size and neon.file_cache size limit are
-            # set to 1MB because small LFC is better for testing (helps to find more problems)
             lfc_path_escaped = str(lfc_path).replace("'", "''")
             config_lines = [
-                "shared_buffers = 512kB",
                 f"neon.file_cache_path = '{lfc_path_escaped}'",
+                # neon.max_file_cache_size and neon.file_cache size limits are
+                # set to 1MB because small LFC is better for testing (helps to find more problems)
                 "neon.max_file_cache_size = 1MB",
                 "neon.file_cache_size_limit = 1MB",
             ] + config_lines
