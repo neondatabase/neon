@@ -1015,6 +1015,8 @@ impl PageServerHandler {
                     }
                 },
                 Ok((response_msg, timer)) => {
+                    // Extending the lifetime of the timers so observations on drop
+                    // include the flush time.
                     timers.push(timer);
                     response_msg
                 }
