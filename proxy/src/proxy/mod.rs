@@ -384,11 +384,13 @@ pub(crate) async fn prepare_client_connection<P>(
     // The new token (cancel_key_data) will be sent to the client.
     let cancel_key_data = session.enable_query_cancellation(node.cancel_closure.clone());
 
+    // Forward all deferred notices to the client.
+    for notice in &node.delayed_notice {
+        stream.write_message_noflush(&Be::Raw(b'N', notice.as_bytes()))?;
+    }
+
     // Forward all postgres connection params to the client.
-    // Right now the implementation is very hacky and inefficent (ideally,
-    // we don't need an intermediate hashmap), but at least it should be correct.
     for (name, value) in &node.params {
-        // TODO: Theoretically, this could result in a big pile of params...
         stream.write_message_noflush(&Be::ParameterStatus {
             name: name.as_bytes(),
             value: value.as_bytes(),

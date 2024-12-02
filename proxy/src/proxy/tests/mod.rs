@@ -233,7 +233,7 @@ async fn handshake_tls() -> anyhow::Result<()> {
         generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = tokio_postgres::Config::new()
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Require)
@@ -249,7 +249,7 @@ async fn handshake_raw() -> anyhow::Result<()> {
 
     let proxy = tokio::spawn(dummy_proxy(client, None, NoAuth));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = tokio_postgres::Config::new()
         .user("john_doe")
         .dbname("earth")
         .options("project=generic-project-name")
@@ -296,7 +296,7 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
         Scram::new(password).await?,
     ));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = tokio_postgres::Config::new()
         .channel_binding(tokio_postgres::config::ChannelBinding::Require)
         .user("user")
         .dbname("db")
@@ -320,7 +320,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
         Scram::new("password").await?,
     ));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = tokio_postgres::Config::new()
         .channel_binding(tokio_postgres::config::ChannelBinding::Disable)
         .user("user")
         .dbname("db")
