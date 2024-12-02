@@ -932,6 +932,11 @@ def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
         )
         wait_until(30, 1, child_offloaded)
 
+
+    #
+    # Now ensure that scrubber runs will clean up old generations' manifests.
+    #
+
     # Sleep some amount larger than min_age_secs
     time.sleep(3)
 
