@@ -15,7 +15,14 @@ from fixtures.neon_fixtures import (
 
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("shard_count", [1, 8, 32])
-@pytest.mark.parametrize("wal_receiver_protocol", ["vanilla", "interpreted"])
+@pytest.mark.parametrize(
+    "wal_receiver_protocol",
+    [
+        "vanilla",
+        "interpreted-bincode-compressed",
+        "interpreted-protobuf-compressed",
+    ],
+)
 def test_sharded_ingest(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
@@ -27,14 +34,42 @@ def test_sharded_ingest(
     and fanning out to a large number of shards on dedicated Pageservers. Comparing the base case
     (shard_count=1) to the sharded case indicates the overhead of sharding.
     """
-    neon_env_builder.pageserver_config_override = (
-        f"wal_receiver_protocol = '{wal_receiver_protocol}'"
-    )
-
     ROW_COUNT = 100_000_000  # about 7 GB of WAL
 
     neon_env_builder.num_pageservers = shard_count
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_configs()
+
+    for ps in env.pageservers:
+        if wal_receiver_protocol == "vanilla":
+            ps.patch_config_toml_nonrecursive(
+                {
+                    "wal_receiver_protocol": {
+                        "type": "vanilla",
+                    }
+                }
+            )
+        elif wal_receiver_protocol == "interpreted-bincode-compressed":
+            ps.patch_config_toml_nonrecursive(
+                {
+                    "wal_receiver_protocol": {
+                        "type": "interpreted",
+                        "args": {"format": "bincode", "compression": {"zstd": {"level": 1}}},
+                    }
+                }
+            )
+        elif wal_receiver_protocol == "interpreted-protobuf-compressed":
+            ps.patch_config_toml_nonrecursive(
+                {
+                    "wal_receiver_protocol": {
+                        "type": "interpreted",
+                        "args": {"format": "protobuf", "compression": {"zstd": {"level": 1}}},
+                    }
+                }
+            )
+        else:
+            raise AssertionError("Test must use explicit wal receiver protocol config")
+
+    env.start()
 
     # Create a sharded tenant and timeline, and migrate it to the respective pageservers. Ensure
     # the storage controller doesn't mess with shard placements.

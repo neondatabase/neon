@@ -688,9 +688,6 @@ pub struct InterpretedWalRecordsBody<'a> {
     pub streaming_lsn: u64,
     /// Current end of WAL on the server
     pub commit_lsn: u64,
-    /// Start LSN of the next record in PG WAL.
-    /// Is 0 if the portion of PG WAL did not contain any records.
-    pub next_record_lsn: u64,
     pub data: &'a [u8],
 }
 
@@ -1028,7 +1025,6 @@ impl BeMessage<'_> {
                                       // dependency
                     buf.put_u64(rec.streaming_lsn);
                     buf.put_u64(rec.commit_lsn);
-                    buf.put_u64(rec.next_record_lsn);
                     buf.put_slice(rec.data);
                 });
             }

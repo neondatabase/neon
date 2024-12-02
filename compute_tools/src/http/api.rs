@@ -295,8 +295,12 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 return Response::new(Body::from(msg));
             }
 
-            let connstr = compute.connstr.clone();
-            let res = crate::installed_extensions::get_installed_extensions(connstr).await;
+            let conf = compute.get_conn_conf(None);
+            let res =
+                task::spawn_blocking(move || installed_extensions::get_installed_extensions(conf))
+                    .await
+                    .unwrap();
+
             match res {
                 Ok(res) => render_json(Body::from(serde_json::to_string(&res).unwrap())),
                 Err(e) => render_json_error(
