@@ -210,33 +210,6 @@ pub trait Buffer {
     fn reuse_after_flush(iobuf: Self::IoBuf) -> Self;
 }
 
-impl Buffer for BytesMut {
-    type IoBuf = BytesMut;
-
-    #[inline(always)]
-    fn cap(&self) -> usize {
-        self.capacity()
-    }
-
-    fn extend_from_slice(&mut self, other: &[u8]) {
-        BytesMut::extend_from_slice(self, other)
-    }
-
-    #[inline(always)]
-    fn pending(&self) -> usize {
-        self.len()
-    }
-
-    fn flush(self) -> FullSlice<BytesMut> {
-        self.slice_len()
-    }
-
-    fn reuse_after_flush(mut iobuf: BytesMut) -> Self {
-        iobuf.clear();
-        iobuf
-    }
-}
-
 impl Buffer for IoBufferMut {
     type IoBuf = IoBuffer;
 
