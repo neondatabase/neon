@@ -14,7 +14,6 @@ use rustls::pki_types;
 use tokio::io::DuplexStream;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, NoTls};
-use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
@@ -29,6 +28,7 @@ use crate::control_plane::{
     self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo, NodeInfoCache,
 };
 use crate::error::ErrorKind;
+use crate::postgres_rustls::MakeRustlsConnect;
 use crate::types::{BranchId, EndpointId, ProjectId};
 use crate::{sasl, scram};
 

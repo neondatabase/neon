@@ -5423,6 +5423,7 @@ pub(crate) mod harness {
                     local_path: remote_fs_dir.clone(),
                 },
                 timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+                small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT,
             };
             let remote_storage = GenericRemoteStorage::from_config(&config).await.unwrap();
             let deletion_queue = MockDeletionQueue::new(Some(remote_storage.clone()));

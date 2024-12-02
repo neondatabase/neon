@@ -333,7 +333,7 @@ impl PoolingBackend {
             debug!("setting up backend session state");
 
             // initiates the auth session
-            if let Err(e) = client.query("select auth.init()", &[]).await {
+            if let Err(e) = client.execute("select auth.init()", &[]).await {
                 discard.discard();
                 return Err(e.into());
             }
