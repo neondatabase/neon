@@ -129,22 +129,23 @@ impl Flow {
         }
 
         // Import SLRUs
-
-        // pg_xact (01:00 keyspace)
-        self.import_slru(SlruKind::Clog, &self.storage.pgdata().join("pg_xact"))
+        if self.timeline.tenant_shard_id.is_shard_zero() {
+            // pg_xact (01:00 keyspace)
+            self.import_slru(SlruKind::Clog, &self.storage.pgdata().join("pg_xact"))
+                .await?;
+            // pg_multixact/members (01:01 keyspace)
+            self.import_slru(
+                SlruKind::MultiXactMembers,
+                &self.storage.pgdata().join("pg_multixact/members"),
+            )
             .await?;
-        // pg_multixact/members (01:01 keyspace)
-        self.import_slru(
-            SlruKind::MultiXactMembers,
-            &self.storage.pgdata().join("pg_multixact/members"),
-        )
-        .await?;
-        // pg_multixact/offsets (01:02 keyspace)
-        self.import_slru(
-            SlruKind::MultiXactOffsets,
-            &self.storage.pgdata().join("pg_multixact/offsets"),
-        )
-        .await?;
+            // pg_multixact/offsets (01:02 keyspace)
+            self.import_slru(
+                SlruKind::MultiXactOffsets,
+                &self.storage.pgdata().join("pg_multixact/offsets"),
+            )
+            .await?;
+        }
 
         // Import pg_twophase.
         // TODO: as empty
@@ -302,6 +303,8 @@ impl Flow {
     }
 
     async fn import_slru(&mut self, kind: SlruKind, path: &RemotePath) -> anyhow::Result<()> {
+        assert!(self.timeline.tenant_shard_id.is_shard_zero());
+
         let segments = self.storage.listfilesindir(path).await?;
         let segments: Vec<(String, u32, usize)> = segments
             .into_iter()
@@ -673,14 +676,12 @@ impl ImportTask for ImportSlruBlocksTask {
         let mut file_offset = 0;
         while blknum < end_blk {
             let key = slru_block_to_key(kind, segno, blknum);
-            if !self.shard_identity.is_key_disposable(&key) {
-                let buf = &buf[file_offset..(file_offset + 8192)];
-                file_offset += 8192;
-                layer_writer
-                    .put_image(key, Bytes::copy_from_slice(buf), ctx)
-                    .await?;
-                nimages += 1;
-            }
+            let buf = &buf[file_offset..(file_offset + 8192)];
+            file_offset += 8192;
+            layer_writer
+                .put_image(key, Bytes::copy_from_slice(buf), ctx)
+                .await?;
+            nimages += 1;
             blknum += 1;
         }
         Ok(nimages)
