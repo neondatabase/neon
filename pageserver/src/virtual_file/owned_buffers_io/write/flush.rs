@@ -175,6 +175,13 @@ where
         Ok((recycled, flush_control))
     }
 
+    async fn handle_error<T>(&mut self) -> std::io::Result<T> {
+        Err(self
+            .shutdown()
+            .await
+            .expect_err("flush task only disconnects duplex if it exits with an error"))
+    }
+
     /// Cleans up the channel, join the flush task.
     pub async fn shutdown(&mut self) -> std::io::Result<Arc<W>> {
         let handle = self
@@ -191,10 +198,6 @@ where
         self.inner
             .as_mut()
             .expect("must not use after we returned an error")
-    }
-
-    async fn handle_error<T>(&mut self) -> std::io::Result<T> {
-        Err(self.shutdown().await.expect_err("flush task only disconnects duplex if it exits with an error"))
     }
 }
 
