@@ -183,7 +183,8 @@ def test_throttle_fair_config_is_settable_but_ignored_in_config_toml(
     """
 
     def set_tenant_config(ps_cfg):
-        ps_cfg["tenant_config"] = {"timeline_get_throttle": throttle_config_with_field_fair_set}
+        tenant_config = ps_cfg.setdefault("tenant_config", {})
+        tenant_config["timeline_get_throttle"] = throttle_config_with_field_fair_set
 
     neon_env_builder.pageserver_config_override = set_tenant_config
     env = neon_env_builder.init_start()
