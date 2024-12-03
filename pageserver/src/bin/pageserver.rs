@@ -681,7 +681,7 @@ fn start_pageserver(
             0,
         )
         .await;
-        Ok(())
+        unreachable!();
     })
 }
 
