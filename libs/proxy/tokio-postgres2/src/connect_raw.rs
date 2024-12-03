@@ -123,16 +123,16 @@ where
     if let Some(user) = &config.user {
         params.push(("user", &**user));
     }
-    if let Some(dbname) = &config.dbname {
+    if let Some(dbname) = &config.get_dbname() {
         params.push(("database", &**dbname));
     }
     if let Some(options) = &config.options {
         params.push(("options", &**options));
     }
-    if let Some(application_name) = &config.application_name {
+    if let Some(application_name) = &config.get_application_name() {
         params.push(("application_name", &**application_name));
     }
-    if let Some(replication_mode) = &config.replication_mode {
+    if let Some(replication_mode) = &config.get_replication_mode() {
         match replication_mode {
             ReplicationMode::Physical => params.push(("replication", "true")),
             ReplicationMode::Logical => params.push(("replication", "database")),

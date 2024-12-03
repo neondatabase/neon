@@ -6,6 +6,7 @@ use crate::connect_raw::RawConnection;
 use crate::tls::MakeTlsConnect;
 use crate::tls::TlsConnect;
 use crate::{Client, Connection, Error};
+use postgres_protocol2::message::frontend::StartupMessageParams;
 use std::fmt;
 use std::str;
 use std::time::Duration;
@@ -71,13 +72,11 @@ pub struct Config {
     pub(crate) user: Option<String>,
     pub(crate) password: Option<Vec<u8>>,
     pub(crate) auth_keys: Option<Box<AuthKeys>>,
-    pub(crate) dbname: Option<String>,
     pub(crate) options: Option<String>,
-    pub(crate) application_name: Option<String>,
     pub(crate) ssl_mode: SslMode,
     pub(crate) connect_timeout: Option<Duration>,
     pub(crate) channel_binding: ChannelBinding,
-    pub(crate) replication_mode: Option<ReplicationMode>,
+    pub(crate) server_settings: StartupMessageParams,
 }
 
 impl Config {
@@ -89,13 +88,14 @@ impl Config {
             user: None,
             password: None,
             auth_keys: None,
-            dbname: None,
+            // dbname: None,
             options: None,
-            application_name: None,
+            // application_name: None,
             ssl_mode: SslMode::Prefer,
             connect_timeout: None,
             channel_binding: ChannelBinding::Prefer,
-            replication_mode: None,
+            // replication_mode: None,
+            server_settings: StartupMessageParams::default(),
         }
     }
 
@@ -104,6 +104,7 @@ impl Config {
     /// Required.
     pub fn user(&mut self, user: &str) -> &mut Config {
         self.user = Some(user.to_string());
+        self.server_settings.insert("user", user).unwrap();
         self
     }
 
@@ -146,14 +147,16 @@ impl Config {
     ///
     /// Defaults to the user.
     pub fn dbname(&mut self, dbname: &str) -> &mut Config {
-        self.dbname = Some(dbname.to_string());
+        self.server_settings
+            .insert("database", dbname)
+            .expect("dbname must not have nulls");
         self
     }
 
     /// Gets the name of the database to connect to, if one has been configured
     /// with the `dbname` method.
     pub fn get_dbname(&self) -> Option<&str> {
-        self.dbname.as_deref()
+        self.server_settings.get("database")
     }
 
     /// Sets command line options used to configure the server.
@@ -170,14 +173,16 @@ impl Config {
 
     /// Sets the value of the `application_name` runtime parameter.
     pub fn application_name(&mut self, application_name: &str) -> &mut Config {
-        self.application_name = Some(application_name.to_string());
+        self.server_settings
+            .insert("application_name", application_name)
+            .expect("dbname must not have nulls");
         self
     }
 
     /// Gets the value of the `application_name` runtime parameter, if it has
     /// been set with the `application_name` method.
     pub fn get_application_name(&self) -> Option<&str> {
-        self.application_name.as_deref()
+        self.server_settings.get("application_name")
     }
 
     /// Sets the SSL configuration.
@@ -233,13 +238,23 @@ impl Config {
 
     /// Set replication mode.
     pub fn replication_mode(&mut self, replication_mode: ReplicationMode) -> &mut Config {
-        self.replication_mode = Some(replication_mode);
+        let value = match replication_mode {
+            ReplicationMode::Physical => "true",
+            ReplicationMode::Logical => "database",
+        };
+        self.server_settings
+            .insert("replication", value)
+            .expect("dbname must not have nulls");
         self
     }
 
     /// Get replication mode.
     pub fn get_replication_mode(&self) -> Option<ReplicationMode> {
-        self.replication_mode
+        match self.server_settings.get("replication") {
+            Some("true") => Some(ReplicationMode::Physical),
+            Some("database") => Some(ReplicationMode::Logical),
+            _ => None,
+        }
     }
 
     /// Opens a connection to a PostgreSQL database.
@@ -281,15 +296,15 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("user", &self.user)
             .field("password", &self.password.as_ref().map(|_| Redaction {}))
-            .field("dbname", &self.dbname)
+            .field("dbname", &self.get_dbname())
             .field("options", &self.options)
-            .field("application_name", &self.application_name)
+            .field("application_name", &self.get_application_name())
             .field("ssl_mode", &self.ssl_mode)
             .field("host", &self.host)
             .field("port", &self.port)
             .field("connect_timeout", &self.connect_timeout)
             .field("channel_binding", &self.channel_binding)
-            .field("replication", &self.replication_mode)
+            .field("replication", &self.get_replication_mode())
             .finish()
     }
 }
