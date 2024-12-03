@@ -6,6 +6,7 @@ use std::time::Duration;
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use postgres_client::config::ReplicationMode;
 use postgres_client::tls::MakeTlsConnect;
 use postgres_client::{CancelToken, RawConnection};
 use postgres_protocol::message::backend::NoticeResponseBody;
@@ -132,48 +133,54 @@ impl ConnCfg {
 
     /// Apply startup message params to the connection config.
     pub(crate) fn set_startup_params(&mut self, params: &StartupMessageParams) {
-        // Only set `user` if it's not present in the config.
-        // Console redirect auth flow takes username from the console's response.
-        if let (None, Some(user)) = (self.get_user(), params.get("user")) {
-            self.user(user);
-        }
-
-        // Only set `dbname` if it's not present in the config.
-        // Console redirect auth flow takes dbname from the console's response.
-        if let (None, Some(dbname)) = (self.get_dbname(), params.get("database")) {
-            self.dbname(dbname);
-        }
-
-        // Don't add `options` if they were only used for specifying a project.
-        // Connection pools don't support `options`, because they affect backend startup.
-        if let Some(options) = filtered_options(params) {
-            self.options(&options);
-        }
-
-        if let Some(app_name) = params.get("application_name") {
-            self.application_name(app_name);
-        }
-
-        // TODO: This is especially ugly...
-        if let Some(replication) = params.get("replication") {
-            use postgres_client::config::ReplicationMode;
-            match replication {
-                "true" | "on" | "yes" | "1" => {
-                    self.replication_mode(ReplicationMode::Physical);
+        let arbitrary_params = false;
+        for (k, v) in params.iter() {
+            match k {
+                // Only set `user` if it's not present in the config.
+                // Console redirect auth flow takes username from the console's response.
+                "user" => {
+                    if self.get_user().is_none() {
+                        self.user(v);
+                    }
                 }
+                // Only set `dbname` if it's not present in the config.
+                // Console redirect auth flow takes dbname from the console's response.
                 "database" => {
-                    self.replication_mode(ReplicationMode::Logical);
+                    if self.get_dbname().is_none() {
+                        self.user(v);
+                    }
                 }
-                _other => {}
+                "options" => {
+                    if let Some(options) = filtered_options(v) {
+                        self.options(&options);
+                    }
+                }
+                "application_name" => {
+                    self.application_name(v);
+                }
+                "replication" => match v {
+                    // TODO: This is especially ugly...
+                    "true" | "on" | "yes" | "1" => {
+                        self.replication_mode(ReplicationMode::Physical);
+                    }
+                    "database" => {
+                        self.replication_mode(ReplicationMode::Logical);
+                    }
+                    _other => {}
+                },
+
+                // TODO: extend the list of the forwarded startup parameters.
+                // Currently, tokio-postgres doesn't allow us to pass
+                // arbitrary parameters, but the ones above are a good start.
+                //
+                // This and the reverse params problem can be better addressed
+                // in a bespoke connection machinery (a new library for that sake).
+                _k if arbitrary_params => {
+                    // self.set_param(k, v)
+                }
+                _ => {}
             }
         }
-
-        // TODO: extend the list of the forwarded startup parameters.
-        // Currently, tokio-postgres doesn't allow us to pass
-        // arbitrary parameters, but the ones above are a good start.
-        //
-        // This and the reverse params problem can be better addressed
-        // in a bespoke connection machinery (a new library for that sake).
     }
 }
 
@@ -347,10 +354,9 @@ impl ConnCfg {
 }
 
 /// Retrieve `options` from a startup message, dropping all proxy-secific flags.
-fn filtered_options(params: &StartupMessageParams) -> Option<String> {
+fn filtered_options(options: &str) -> Option<String> {
     #[allow(unstable_name_collisions)]
-    let options: String = params
-        .options_raw()?
+    let options: String = StartupMessageParams::parse_options_raw(options)
         .filter(|opt| parse_endpoint_param(opt).is_none() && neon_option(opt).is_none())
         .intersperse(" ") // TODO: use impl from std once it's stabilized
         .collect();
@@ -427,27 +433,24 @@ mod tests {
     #[test]
     fn test_filtered_options() {
         // Empty options is unlikely to be useful anyway.
-        let params = StartupMessageParams::new([("options", "")]);
-        assert_eq!(filtered_options(&params), None);
+        let params = "";
+        assert_eq!(filtered_options(params), None);
 
         // It's likely that clients will only use options to specify endpoint/project.
-        let params = StartupMessageParams::new([("options", "project=foo")]);
-        assert_eq!(filtered_options(&params), None);
+        let params = "project=foo";
+        assert_eq!(filtered_options(params), None);
 
         // Same, because unescaped whitespaces are no-op.
-        let params = StartupMessageParams::new([("options", " project=foo ")]);
-        assert_eq!(filtered_options(&params).as_deref(), None);
+        let params = " project=foo ";
+        assert_eq!(filtered_options(params).as_deref(), None);
 
-        let params = StartupMessageParams::new([("options", r"\  project=foo \ ")]);
-        assert_eq!(filtered_options(&params).as_deref(), Some(r"\  \ "));
+        let params = r"\  project=foo \ ";
+        assert_eq!(filtered_options(params).as_deref(), Some(r"\  \ "));
 
-        let params = StartupMessageParams::new([("options", "project = foo")]);
-        assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
+        let params = "project = foo";
+        assert_eq!(filtered_options(params).as_deref(), Some("project = foo"));
 
-        let params = StartupMessageParams::new([(
-            "options",
-            "project = foo neon_endpoint_type:read_write   neon_lsn:0/2",
-        )]);
-        assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
+        let params = "project = foo neon_endpoint_type:read_write   neon_lsn:0/2";
+        assert_eq!(filtered_options(params).as_deref(), Some("project = foo"));
     }
 }
