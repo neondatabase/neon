@@ -566,6 +566,48 @@ async fn gc_tenant_manifests(
     Ok(gc_summary)
 }
 
+async fn gc_timeline(
+    remote_client: &GenericRemoteStorage,
+    min_age: &Duration,
+    target: &RootTarget,
+    mode: GcMode,
+    ttid: TenantShardTimelineId,
+    accumulator: &Arc<std::sync::Mutex<TenantRefAccumulator>>,
+) -> anyhow::Result<GcSummary> {
+    let mut summary = GcSummary::default();
+    let data = list_timeline_blobs(remote_client, ttid, target).await?;
+
+    let (index_part, latest_gen, candidates) = match &data.blob_data {
+        BlobDataParseResult::Parsed {
+            index_part,
+            index_part_generation,
+            s3_layers: _s3_layers,
+        } => (index_part, *index_part_generation, data.unused_index_keys),
+        BlobDataParseResult::Relic => {
+            // Post-deletion tenant location: don't try and GC it.
+            return Ok(summary);
+        }
+        BlobDataParseResult::Incorrect {
+            errors,
+            s3_layers: _,
+        } => {
+            // Our primary purpose isn't to report on bad data, but log this rather than skipping silently
+            tracing::warn!("Skipping timeline {ttid}, bad metadata: {errors:?}");
+            return Ok(summary);
+        }
+    };
+
+    accumulator.lock().unwrap().update(ttid, index_part);
+
+    for key in candidates {
+        maybe_delete_index(remote_client, min_age, latest_gen, &key, mode, &mut summary)
+            .instrument(info_span!("maybe_delete_index", %ttid, ?latest_gen, %key.key))
+            .await;
+    }
+
+    Ok(summary)
+}
+
 /// Physical garbage collection: removing unused S3 objects.
 ///
 /// This is distinct from the garbage collection done inside the pageserver, which operates at a higher level
@@ -636,49 +678,6 @@ pub async fn pageserver_physical_gc(
     });
     let timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
     let timelines = timelines.try_flatten();
-
-    // Generate a stream of S3TimelineBlobData
-    async fn gc_timeline(
-        remote_client: &GenericRemoteStorage,
-        min_age: &Duration,
-        target: &RootTarget,
-        mode: GcMode,
-        ttid: TenantShardTimelineId,
-        accumulator: &Arc<std::sync::Mutex<TenantRefAccumulator>>,
-    ) -> anyhow::Result<GcSummary> {
-        let mut summary = GcSummary::default();
-        let data = list_timeline_blobs(remote_client, ttid, target).await?;
-
-        let (index_part, latest_gen, candidates) = match &data.blob_data {
-            BlobDataParseResult::Parsed {
-                index_part,
-                index_part_generation,
-                s3_layers: _s3_layers,
-            } => (index_part, *index_part_generation, data.unused_index_keys),
-            BlobDataParseResult::Relic => {
-                // Post-deletion tenant location: don't try and GC it.
-                return Ok(summary);
-            }
-            BlobDataParseResult::Incorrect {
-                errors,
-                s3_layers: _,
-            } => {
-                // Our primary purpose isn't to report on bad data, but log this rather than skipping silently
-                tracing::warn!("Skipping timeline {ttid}, bad metadata: {errors:?}");
-                return Ok(summary);
-            }
-        };
-
-        accumulator.lock().unwrap().update(ttid, index_part);
-
-        for key in candidates {
-            maybe_delete_index(remote_client, min_age, latest_gen, &key, mode, &mut summary)
-                .instrument(info_span!("maybe_delete_index", %ttid, ?latest_gen, %key.key))
-                .await;
-        }
-
-        Ok(summary)
-    }
 
     let mut summary = GcSummary::default();
 
