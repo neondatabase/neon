@@ -71,7 +71,6 @@ pub struct Config {
 
     pub(crate) password: Option<Vec<u8>>,
     pub(crate) auth_keys: Option<Box<AuthKeys>>,
-    pub(crate) options: Option<String>,
     pub(crate) ssl_mode: SslMode,
     pub(crate) connect_timeout: Option<Duration>,
     pub(crate) channel_binding: ChannelBinding,
@@ -86,13 +85,9 @@ impl Config {
             port,
             password: None,
             auth_keys: None,
-            // dbname: None,
-            options: None,
-            // application_name: None,
             ssl_mode: SslMode::Prefer,
             connect_timeout: None,
             channel_binding: ChannelBinding::Prefer,
-            // replication_mode: None,
             server_params: StartupMessageParams::default(),
         }
     }
@@ -107,8 +102,8 @@ impl Config {
 
     /// Gets the user to authenticate with, if one has been configured with
     /// the `user` method.
-    pub fn get_user(&self) -> Option<&str> {
-        self.server_params.get("user")
+    pub fn user_is_set(&self) -> bool {
+        self.server_params.get("user").is_some()
     }
 
     /// Sets the password to authenticate with.
@@ -152,20 +147,8 @@ impl Config {
 
     /// Gets the name of the database to connect to, if one has been configured
     /// with the `dbname` method.
-    pub fn get_dbname(&self) -> Option<&str> {
-        self.server_params.get("database")
-    }
-
-    /// Sets command line options used to configure the server.
-    pub fn options(&mut self, options: &str) -> &mut Config {
-        self.options = Some(options.to_string());
-        self
-    }
-
-    /// Gets the command line options used to configure the server, if the
-    /// options have been set with the `options` method.
-    pub fn get_options(&self) -> Option<&str> {
-        self.options.as_deref()
+    pub fn db_is_set(&self) -> bool {
+        self.server_params.get("database").is_some()
     }
 
     pub fn set_param(&mut self, name: &str, value: &str) -> &mut Config {
@@ -264,7 +247,6 @@ impl fmt::Debug for Config {
 
         f.debug_struct("Config")
             .field("password", &self.password.as_ref().map(|_| Redaction {}))
-            .field("options", &self.options)
             .field("ssl_mode", &self.ssl_mode)
             .field("host", &self.host)
             .field("port", &self.port)

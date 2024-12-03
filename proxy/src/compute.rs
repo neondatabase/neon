@@ -138,11 +138,11 @@ impl ConnCfg {
             match k {
                 // Only set `user` if it's not present in the config.
                 // Console redirect auth flow takes username from the console's response.
-                "user" if self.get_user().is_some() => continue,
-                "database" if self.get_dbname().is_some() => continue,
+                "user" if self.user_is_set() => continue,
+                "database" if self.db_is_set() => continue,
                 "options" => {
                     if let Some(options) = filtered_options(v) {
-                        self.options(&options);
+                        self.set_param(k, &options);
                     }
                 }
                 "user" | "database" | "application_name" | "replication" => {
