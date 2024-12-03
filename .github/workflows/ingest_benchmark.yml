@@ -26,6 +26,7 @@ concurrency:
 jobs:
   ingest:
     strategy:
+      fail-fast: false # allow other variants to continue even if one fails
       matrix:
         target_project: [new_empty_project, large_existing_project]  
     permissions:
