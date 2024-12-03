@@ -116,21 +116,18 @@ def test_throughput(
             # name is not a metric, we just use it to identify the test easily in the `test_...[...]`` notation
         }
     )
-    params.update(
-        {
-            f"pipelining_config.{k}": (v, {})
-            for k, v in dataclasses.asdict(pipelining_config).items()
-        }
-    )
+    # For storing configuration as a metric, insert a fake 0 with labels with actual data
+    params.update({"pipelining_config": (0, {"labels": dataclasses.asdict(pipelining_config)})})
 
     log.info("params: %s", params)
 
     for param, (value, kwargs) in params.items():
         zenbenchmark.record(
             param,
-            metric_value=value,
+            metric_value=float(value),
             unit=kwargs.pop("unit", ""),
             report=MetricReport.TEST_PARAM,
+            labels=kwargs.pop("labels", None),
             **kwargs,
         )
 
