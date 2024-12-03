@@ -167,18 +167,18 @@ def test_throughput(
     @dataclass
     class Metrics:
         time: float
-        pageserver_getpage_count: float
-        pageserver_vectored_get_count: float
+        pageserver_batch_size_histo_sum: float
+        pageserver_batch_size_histo_count: float
         compute_getpage_count: float
         pageserver_cpu_seconds_total: float
 
         def __sub__(self, other: "Metrics") -> "Metrics":
             return Metrics(
                 time=self.time - other.time,
-                pageserver_getpage_count=self.pageserver_getpage_count
-                - other.pageserver_getpage_count,
-                pageserver_vectored_get_count=self.pageserver_vectored_get_count
-                - other.pageserver_vectored_get_count,
+                pageserver_batch_size_histo_sum=self.pageserver_batch_size_histo_sum
+                - other.pageserver_batch_size_histo_sum,
+                pageserver_batch_size_histo_count=self.pageserver_batch_size_histo_count
+                - other.pageserver_batch_size_histo_count,
                 compute_getpage_count=self.compute_getpage_count - other.compute_getpage_count,
                 pageserver_cpu_seconds_total=self.pageserver_cpu_seconds_total
                 - other.pageserver_cpu_seconds_total,
@@ -187,8 +187,8 @@ def test_throughput(
         def normalize(self, by) -> "Metrics":
             return Metrics(
                 time=self.time / by,
-                pageserver_getpage_count=self.pageserver_getpage_count / by,
-                pageserver_vectored_get_count=self.pageserver_vectored_get_count / by,
+                pageserver_batch_size_histo_sum=self.pageserver_batch_size_histo_sum / by,
+                pageserver_batch_size_histo_count=self.pageserver_batch_size_histo_count / by,
                 compute_getpage_count=self.compute_getpage_count / by,
                 pageserver_cpu_seconds_total=self.pageserver_cpu_seconds_total / by,
             )
@@ -202,11 +202,11 @@ def test_throughput(
             pageserver_metrics = ps_http.get_metrics()
             return Metrics(
                 time=time.time(),
-                pageserver_getpage_count=pageserver_metrics.query_one(
-                    "pageserver_smgr_query_seconds_count", {"smgr_query_type": "get_page_at_lsn"}
+                pageserver_batch_size_histo_sum=pageserver_metrics.query_one(
+                    "pageserver_page_service_batch_size_sum"
                 ).value,
-                pageserver_vectored_get_count=pageserver_metrics.query_one(
-                    "pageserver_get_vectored_seconds_count", {"task_kind": "PageRequestHandler"}
+                pageserver_batch_size_histo_count=pageserver_metrics.query_one(
+                    "pageserver_page_service_batch_size_count"
                 ).value,
                 compute_getpage_count=compute_getpage_count,
                 pageserver_cpu_seconds_total=pageserver_metrics.query_one(
@@ -243,7 +243,7 @@ def test_throughput(
     # Sanity-checks on the collected data
     #
     # assert that getpage counts roughly match between compute and ps
-    assert metrics.pageserver_getpage_count == pytest.approx(
+    assert metrics.pageserver_batch_size_histo_sum == pytest.approx(
         metrics.compute_getpage_count, rel=0.01
     )
 
@@ -256,7 +256,7 @@ def test_throughput(
 
     zenbenchmark.record(
         "perfmetric.batching_factor",
-        metrics.pageserver_getpage_count / metrics.pageserver_vectored_get_count,
+        metrics.pageserver_batch_size_histo_sum / metrics.pageserver_batch_size_histo_count,
         unit="",
         report=MetricReport.HIGHER_IS_BETTER,
     )
