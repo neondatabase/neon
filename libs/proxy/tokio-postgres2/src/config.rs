@@ -146,6 +146,9 @@ pub enum AuthKeys {
 /// ```
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
+    pub(crate) host: Host,
+    pub(crate) port: u16,
+
     pub(crate) user: Option<String>,
     pub(crate) password: Option<Vec<u8>>,
     pub(crate) auth_keys: Option<Box<AuthKeys>>,
@@ -153,8 +156,6 @@ pub struct Config {
     pub(crate) options: Option<String>,
     pub(crate) application_name: Option<String>,
     pub(crate) ssl_mode: SslMode,
-    pub(crate) host: Vec<Host>,
-    pub(crate) port: Vec<u16>,
     pub(crate) connect_timeout: Option<Duration>,
     pub(crate) target_session_attrs: TargetSessionAttrs,
     pub(crate) channel_binding: ChannelBinding,
@@ -162,16 +163,12 @@ pub struct Config {
     pub(crate) max_backend_message_size: Option<usize>,
 }
 
-impl Default for Config {
-    fn default() -> Config {
-        Config::new()
-    }
-}
-
 impl Config {
     /// Creates a new configuration.
-    pub fn new() -> Config {
+    pub fn new(host: String, port: u16) -> Config {
         Config {
+            host: Host::Tcp(host),
+            port,
             user: None,
             password: None,
             auth_keys: None,
@@ -179,8 +176,6 @@ impl Config {
             options: None,
             application_name: None,
             ssl_mode: SslMode::Prefer,
-            host: vec![],
-            port: vec![],
             connect_timeout: None,
             target_session_attrs: TargetSessionAttrs::Any,
             channel_binding: ChannelBinding::Prefer,
@@ -283,32 +278,14 @@ impl Config {
         self.ssl_mode
     }
 
-    /// Adds a host to the configuration.
-    ///
-    /// Multiple hosts can be specified by calling this method multiple times, and each will be tried in order.
-    pub fn host(&mut self, host: &str) -> &mut Config {
-        self.host.push(Host::Tcp(host.to_string()));
-        self
-    }
-
     /// Gets the hosts that have been added to the configuration with `host`.
-    pub fn get_hosts(&self) -> &[Host] {
+    pub fn get_host(&self) -> &Host {
         &self.host
     }
 
-    /// Adds a port to the configuration.
-    ///
-    /// Multiple ports can be specified by calling this method multiple times. There must either be no ports, in which
-    /// case the default of 5432 is used, a single port, in which it is used for all hosts, or the same number of ports
-    /// as hosts.
-    pub fn port(&mut self, port: u16) -> &mut Config {
-        self.port.push(port);
-        self
-    }
-
     /// Gets the ports that have been added to the configuration with `port`.
-    pub fn get_ports(&self) -> &[u16] {
-        &self.port
+    pub fn get_port(&self) -> u16 {
+        self.port
     }
 
     /// Sets the timeout applied to socket-level connection attempts.
