@@ -44,12 +44,12 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
-        MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability, NodeRegisterRequest,
-        NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy, ShardSchedulingPolicy,
-        ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, TenantCreateRequest,
-        TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
-        TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
-        TenantShardMigrateRequest, TenantShardMigrateResponse,
+        AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
+        NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
+        ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
+        TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard,
+        TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse,
+        TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
     },
     models::{
         SecondaryProgress, TenantConfigRequest, TimelineArchivalConfigRequest,
@@ -468,6 +468,7 @@ struct ShardSplitParams {
     policy: PlacementPolicy,
     config: TenantConfig,
     shard_ident: ShardIdentity,
+    preferred_az_id: Option<AvailabilityZone>,
 }
 
 // When preparing for a shard split, we may either choose to proceed with the split,
@@ -4103,7 +4104,7 @@ impl Service {
             for parent_id in parent_ids {
                 let child_ids = parent_id.split(new_shard_count);
 
-                let (pageserver, generation, policy, parent_ident, config) = {
+                let (pageserver, generation, policy, parent_ident, config, preferred_az) = {
                     let mut old_state = tenants
                         .remove(&parent_id)
                         .expect("It was present, we just split it");
@@ -4122,6 +4123,7 @@ impl Service {
                         old_state.policy.clone(),
                         old_state.shard,
                         old_state.config.clone(),
+                        old_state.preferred_az().cloned(),
                     )
                 };
 
@@ -4154,6 +4156,9 @@ impl Service {
                     };
                     child_state.generation = Some(generation);
                     child_state.config = config.clone();
+                    if let Some(preferred_az) = &preferred_az {
+                        child_state.set_preferred_az(preferred_az.clone());
+                    }
 
                     // The child's TenantShard::splitting is intentionally left at the default value of Idle,
                     // as at this point in the split process we have succeeded and this part is infallible:
@@ -4346,6 +4351,7 @@ impl Service {
         let mut policy = None;
         let mut config = None;
         let mut shard_ident = None;
+        let mut preferred_az_id = None;
         // Validate input, and calculate which shards we will create
         let (old_shard_count, targets) =
             {
@@ -4403,6 +4409,9 @@ impl Service {
                     }
                     if config.is_none() {
                         config = Some(shard.config.clone());
+                    }
+                    if preferred_az_id.is_none() {
+                        preferred_az_id = shard.preferred_az().cloned();
                     }
 
                     if tenant_shard_id.shard_count.count() == split_req.new_shard_count {
@@ -4474,6 +4483,7 @@ impl Service {
             policy,
             config,
             shard_ident,
+            preferred_az_id,
         })))
     }
 
@@ -4496,6 +4506,7 @@ impl Service {
             policy,
             config,
             shard_ident,
+            preferred_az_id,
         } = *params;
 
         // Drop any secondary locations: pageservers do not support splitting these, and in any case the
@@ -4569,7 +4580,7 @@ impl Service {
                     // Scheduling policies and preferred AZ do not carry through to children
                     scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
                         .unwrap(),
-                    preferred_az_id: None,
+                    preferred_az_id: preferred_az_id.as_ref().map(|az| az.0.clone()),
                 });
             }
 
@@ -4688,47 +4699,6 @@ impl Service {
         // Replace all the shards we just split with their children: this phase is infallible.
         let (response, child_locations, waiters) =
             self.tenant_shard_split_commit_inmem(tenant_id, new_shard_count, new_stripe_size);
-
-        // Now that we have scheduled the child shards, attempt to set their preferred AZ
-        // to that of the pageserver they've been attached on.
-        let preferred_azs = {
-            let locked = self.inner.read().unwrap();
-            child_locations
-                .iter()
-                .filter_map(|(tid, node_id, _stripe_size)| {
-                    let az_id = locked
-                        .nodes
-                        .get(node_id)
-                        .map(|n| n.get_availability_zone_id().clone())?;
-
-                    Some((*tid, az_id))
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let updated = self
-            .persistence
-            .set_tenant_shard_preferred_azs(preferred_azs)
-            .await
-            .map_err(|err| {
-                ApiError::InternalServerError(anyhow::anyhow!(
-                    "Failed to persist preferred az ids: {err}"
-                ))
-            });
-
-        match updated {
-            Ok(updated) => {
-                let mut locked = self.inner.write().unwrap();
-                for (tid, az_id) in updated {
-                    if let Some(shard) = locked.tenants.get_mut(&tid) {
-                        shard.set_preferred_az(az_id);
-                    }
-                }
-            }
-            Err(err) => {
-                tracing::warn!("Failed to persist preferred AZs after split: {err}");
-            }
-        }
 
         // Send compute notifications for all the new shards
         let mut failed_notifications = Vec::new();
