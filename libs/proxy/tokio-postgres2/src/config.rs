@@ -69,7 +69,6 @@ pub struct Config {
     pub(crate) host: Host,
     pub(crate) port: u16,
 
-    pub(crate) user: Option<String>,
     pub(crate) password: Option<Vec<u8>>,
     pub(crate) auth_keys: Option<Box<AuthKeys>>,
     pub(crate) options: Option<String>,
@@ -85,7 +84,6 @@ impl Config {
         Config {
             host: Host::Tcp(host),
             port,
-            user: None,
             password: None,
             auth_keys: None,
             // dbname: None,
@@ -103,7 +101,6 @@ impl Config {
     ///
     /// Required.
     pub fn user(&mut self, user: &str) -> &mut Config {
-        self.user = Some(user.to_string());
         self.server_settings.insert("user", user).unwrap();
         self
     }
@@ -111,7 +108,7 @@ impl Config {
     /// Gets the user to authenticate with, if one has been configured with
     /// the `user` method.
     pub fn get_user(&self) -> Option<&str> {
-        self.user.as_deref()
+        self.server_settings.get("user")
     }
 
     /// Sets the password to authenticate with.
@@ -294,7 +291,7 @@ impl fmt::Debug for Config {
         }
 
         f.debug_struct("Config")
-            .field("user", &self.user)
+            .field("user", &self.get_user())
             .field("password", &self.password.as_ref().map(|_| Redaction {}))
             .field("dbname", &self.get_dbname())
             .field("options", &self.options)

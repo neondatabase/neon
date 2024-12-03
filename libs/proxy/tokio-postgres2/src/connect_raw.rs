@@ -1,5 +1,5 @@
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
-use crate::config::{self, AuthKeys, Config, ReplicationMode};
+use crate::config::{self, AuthKeys, Config};
 use crate::connect_tls::connect_tls;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::{TlsConnect, TlsStream};
@@ -119,28 +119,13 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut params = vec![("client_encoding", "UTF8")];
-    if let Some(user) = &config.user {
-        params.push(("user", &**user));
-    }
-    if let Some(dbname) = &config.get_dbname() {
-        params.push(("database", &**dbname));
-    }
-    if let Some(options) = &config.options {
-        params.push(("options", &**options));
-    }
-    if let Some(application_name) = &config.get_application_name() {
-        params.push(("application_name", &**application_name));
-    }
-    if let Some(replication_mode) = &config.get_replication_mode() {
-        match replication_mode {
-            ReplicationMode::Physical => params.push(("replication", "true")),
-            ReplicationMode::Logical => params.push(("replication", "database")),
-        }
-    }
+    let mut params = config.server_settings.clone();
+    params
+        .insert("client_encoding", "UTF8")
+        .expect("value does not contain null");
 
     let mut buf = BytesMut::new();
-    frontend::startup_message(params, &mut buf).map_err(Error::encode)?;
+    frontend::startup_message_cstr(&params, &mut buf).map_err(Error::encode)?;
 
     stream
         .send(FrontendMessage::Raw(buf.freeze()))

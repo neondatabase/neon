@@ -255,23 +255,6 @@ pub fn ssl_request(buf: &mut BytesMut) {
 }
 
 #[inline]
-pub fn startup_message<'a, I>(parameters: I, buf: &mut BytesMut) -> io::Result<()>
-where
-    I: IntoIterator<Item = (&'a str, &'a str)>,
-{
-    write_body(buf, |buf| {
-        // postgres protocol version 3.0(196608) in bigger-endian
-        buf.put_i32(0x00_03_00_00);
-        for (key, value) in parameters {
-            write_cstr(key.as_bytes(), buf)?;
-            write_cstr(value.as_bytes(), buf)?;
-        }
-        buf.put_u8(0);
-        Ok(())
-    })
-}
-
-#[inline]
 pub fn startup_message_cstr(
     parameters: &StartupMessageParams,
     buf: &mut BytesMut,
@@ -287,7 +270,7 @@ pub fn startup_message_cstr(
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StartupMessageParams {
-    params: BytesMut,
+    pub params: BytesMut,
 }
 
 impl StartupMessageParams {
