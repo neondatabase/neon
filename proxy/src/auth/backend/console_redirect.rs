@@ -161,12 +161,8 @@ async fn authenticate(
 
     // This config should be self-contained, because we won't
     // take username or dbname from client's startup message.
-    let mut config = compute::ConnCfg::new();
-    config
-        .host(&db_info.host)
-        .port(db_info.port)
-        .dbname(&db_info.dbname)
-        .user(&db_info.user);
+    let mut config = compute::ConnCfg::new(db_info.host.to_string(), db_info.port);
+    config.dbname(&db_info.dbname).user(&db_info.user);
 
     ctx.set_dbname(db_info.dbname.into());
     ctx.set_user(db_info.user.into());

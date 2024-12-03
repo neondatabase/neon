@@ -158,7 +158,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
         Scram::new("password").await?,
     ));
 
-    let _client_err = postgres_client::Config::new()
+    let _client_err = postgres_client::Config::new("test".to_owned(), 5432)
         .channel_binding(postgres_client::config::ChannelBinding::Disable)
         .user("user")
         .dbname("db")
@@ -241,7 +241,7 @@ async fn connect_failure(
         Scram::new("password").await?,
     ));
 
-    let _client_err = postgres_client::Config::new()
+    let _client_err = postgres_client::Config::new("test".to_owned(), 5432)
         .channel_binding(channel_binding)
         .user("user")
         .dbname("db")

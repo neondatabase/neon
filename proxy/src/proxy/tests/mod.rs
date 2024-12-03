@@ -204,7 +204,7 @@ async fn handshake_tls_is_enforced_by_proxy() -> anyhow::Result<()> {
     let (_, server_config) = generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
-    let client_err = postgres_client::Config::new()
+    let client_err = postgres_client::Config::new("test".to_owned(), 5432)
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Disable)
@@ -233,7 +233,7 @@ async fn handshake_tls() -> anyhow::Result<()> {
         generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
-    let _conn = postgres_client::Config::new()
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Require)
@@ -249,7 +249,7 @@ async fn handshake_raw() -> anyhow::Result<()> {
 
     let proxy = tokio::spawn(dummy_proxy(client, None, NoAuth));
 
-    let _conn = postgres_client::Config::new()
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
         .user("john_doe")
         .dbname("earth")
         .options("project=generic-project-name")
@@ -296,7 +296,7 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
         Scram::new(password).await?,
     ));
 
-    let _conn = postgres_client::Config::new()
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
         .channel_binding(postgres_client::config::ChannelBinding::Require)
         .user("user")
         .dbname("db")
@@ -320,7 +320,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
         Scram::new("password").await?,
     ));
 
-    let _conn = postgres_client::Config::new()
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
         .channel_binding(postgres_client::config::ChannelBinding::Disable)
         .user("user")
         .dbname("db")
@@ -348,7 +348,7 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
         .map(char::from)
         .collect();
 
-    let _client_err = postgres_client::Config::new()
+    let _client_err = postgres_client::Config::new("test".to_owned(), 5432)
         .user("user")
         .dbname("db")
         .password(&password) // no password will match the mocked secret
@@ -546,7 +546,7 @@ impl TestControlPlaneClient for TestConnectMechanism {
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
-        config: compute::ConnCfg::new(),
+        config: compute::ConnCfg::new("test".to_owned(), 5432),
         aux: MetricsAuxInfo {
             endpoint_id: (&EndpointId::from("endpoint")).into(),
             project_id: (&ProjectId::from("project")).into(),
