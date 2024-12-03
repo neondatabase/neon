@@ -396,6 +396,7 @@ async fn create_s3_client(
             upload_storage_class: None,
         }),
         timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+        small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT,
     };
     Ok(Arc::new(
         GenericRemoteStorage::from_config(&remote_storage_config)

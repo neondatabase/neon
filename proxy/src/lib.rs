@@ -88,6 +88,7 @@ pub mod jemalloc;
 pub mod logging;
 pub mod metrics;
 pub mod parse;
+pub mod postgres_rustls;
 pub mod protocol2;
 pub mod proxy;
 pub mod rate_limiter;

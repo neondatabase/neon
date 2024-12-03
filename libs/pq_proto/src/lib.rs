@@ -565,6 +565,8 @@ pub enum BeMessage<'a> {
     /// Batch of interpreted, shard filtered WAL records,
     /// ready for the pageserver to ingest
     InterpretedWalRecords(InterpretedWalRecordsBody<'a>),
+
+    Raw(u8, &'a [u8]),
 }
 
 /// Common shorthands.
@@ -688,9 +690,6 @@ pub struct InterpretedWalRecordsBody<'a> {
     pub streaming_lsn: u64,
     /// Current end of WAL on the server
     pub commit_lsn: u64,
-    /// Start LSN of the next record in PG WAL.
-    /// Is 0 if the portion of PG WAL did not contain any records.
-    pub next_record_lsn: u64,
     pub data: &'a [u8],
 }
 
@@ -757,6 +756,10 @@ impl BeMessage<'_> {
     /// one more buffer.
     pub fn write(buf: &mut BytesMut, message: &BeMessage) -> Result<(), ProtocolError> {
         match message {
+            BeMessage::Raw(code, data) => {
+                buf.put_u8(*code);
+                write_body(buf, |b| b.put_slice(data))
+            }
             BeMessage::AuthenticationOk => {
                 buf.put_u8(b'R');
                 write_body(buf, |buf| {
@@ -1028,7 +1031,6 @@ impl BeMessage<'_> {
                                       // dependency
                     buf.put_u64(rec.streaming_lsn);
                     buf.put_u64(rec.commit_lsn);
-                    buf.put_u64(rec.next_record_lsn);
                     buf.put_slice(rec.data);
                 });
             }

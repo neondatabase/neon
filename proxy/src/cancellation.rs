@@ -99,16 +99,17 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
     /// Try to cancel a running query for the corresponding connection.
     /// If the cancellation key is not found, it will be published to Redis.
     /// check_allowed - if true, check if the IP is allowed to cancel the query
+    /// return Result primarily for tests
     pub(crate) async fn cancel_session(
         &self,
         key: CancelKeyData,
         session_id: Uuid,
-        peer_addr: &IpAddr,
+        peer_addr: IpAddr,
         check_allowed: bool,
     ) -> Result<(), CancelError> {
         // TODO: check for unspecified address is only for backward compatibility, should be removed
         if !peer_addr.is_unspecified() {
-            let subnet_key = match *peer_addr {
+            let subnet_key = match peer_addr {
                 IpAddr::V4(ip) => IpNet::V4(Ipv4Net::new_assert(ip, 24).trunc()), // use defaut mask here
                 IpAddr::V6(ip) => IpNet::V6(Ipv6Net::new_assert(ip, 64).trunc()),
             };
@@ -141,9 +142,11 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
                 return Ok(());
             }
 
-            match self.client.try_publish(key, session_id, *peer_addr).await {
+            match self.client.try_publish(key, session_id, peer_addr).await {
                 Ok(()) => {} // do nothing
                 Err(e) => {
+                    // log it here since cancel_session could be spawned in a task
+                    tracing::error!("failed to publish cancellation key: {key}, error: {e}");
                     return Err(CancelError::IO(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         e.to_string(),
@@ -154,8 +157,10 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
         };
 
         if check_allowed
-            && !check_peer_addr_is_in_list(peer_addr, cancel_closure.ip_allowlist.as_slice())
+            && !check_peer_addr_is_in_list(&peer_addr, cancel_closure.ip_allowlist.as_slice())
         {
+            // log it here since cancel_session could be spawned in a task
+            tracing::warn!("IP is not allowed to cancel the query: {key}");
             return Err(CancelError::IpNotAllowed);
         }
 
@@ -306,7 +311,7 @@ mod tests {
                     cancel_key: 0,
                 },
                 Uuid::new_v4(),
-                &("127.0.0.1".parse().unwrap()),
+                "127.0.0.1".parse().unwrap(),
                 true,
             )
             .await

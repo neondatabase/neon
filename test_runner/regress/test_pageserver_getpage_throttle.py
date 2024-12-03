@@ -81,9 +81,7 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
 
     marker = uuid.uuid4().hex
     ps_http.post_tracing_event("info", marker)
-    _, marker_offset = wait_until(
-        10, 0.5, lambda: env.pageserver.assert_log_contains(marker, offset=None)
-    )
+    _, marker_offset = wait_until(lambda: env.pageserver.assert_log_contains(marker, offset=None))
 
     log.info("run pagebench")
     duration_secs = 10
@@ -103,12 +101,11 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
     log.info("validate that we logged the throttling")
 
     wait_until(
-        10,
-        compaction_period / 10,
         lambda: env.pageserver.assert_log_contains(
             f".*{tenant_id}.*shard was throttled in the last n_seconds.*",
             offset=marker_offset,
         ),
+        timeout=compaction_period,
     )
 
     log.info("validate that the metric doesn't include throttle wait time")

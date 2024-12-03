@@ -9,9 +9,11 @@ use postgres_ffi::{get_current_timestamp, waldecoder::WalStreamDecoder};
 use pq_proto::{BeMessage, InterpretedWalRecordsBody, WalSndKeepAlive};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::MissedTickBehavior;
-use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
-use wal_decoder::models::InterpretedWalRecord;
+use utils::postgres_client::Compression;
+use utils::postgres_client::InterpretedFormat;
+use wal_decoder::models::{InterpretedWalRecord, InterpretedWalRecords};
+use wal_decoder::wire_format::ToWireFormat;
 
 use crate::send_wal::EndWatchView;
 use crate::wal_reader_stream::{WalBytes, WalReaderStreamBuilder};
@@ -20,12 +22,20 @@ use crate::wal_reader_stream::{WalBytes, WalReaderStreamBuilder};
 /// This is used for sending WAL to the pageserver. Said WAL
 /// is pre-interpreted and filtered for the shard.
 pub(crate) struct InterpretedWalSender<'a, IO> {
+    pub(crate) format: InterpretedFormat,
+    pub(crate) compression: Option<Compression>,
     pub(crate) pgb: &'a mut PostgresBackend<IO>,
     pub(crate) wal_stream_builder: WalReaderStreamBuilder,
     pub(crate) end_watch_view: EndWatchView,
     pub(crate) shard: ShardIdentity,
     pub(crate) pg_version: u32,
     pub(crate) appname: Option<String>,
+}
+
+struct Batch {
+    wal_end_lsn: Lsn,
+    available_wal_end_lsn: Lsn,
+    records: InterpretedWalRecords,
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
@@ -46,10 +56,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
         keepalive_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         keepalive_ticker.reset();
 
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Batch>(2);
+
         loop {
             tokio::select! {
-                // Get some WAL from the stream and then: decode, interpret and send it
-                wal = stream.next() => {
+                // Get some WAL from the stream and then: decode, interpret and push it down the
+                // pipeline.
+                wal = stream.next(), if tx.capacity() > 0 => {
                     let WalBytes { wal, wal_start_lsn: _, wal_end_lsn, available_wal_end_lsn } = match wal {
                         Some(some) => some?,
                         None => { break; }
@@ -81,10 +94,26 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
                         }
                     }
 
-                    let mut buf = Vec::new();
-                    records
-                        .ser_into(&mut buf)
-                        .with_context(|| "Failed to serialize interpreted WAL")?;
+                    let batch = InterpretedWalRecords {
+                        records,
+                        next_record_lsn: max_next_record_lsn
+                    };
+
+                    tx.send(Batch {wal_end_lsn, available_wal_end_lsn, records: batch}).await.unwrap();
+                },
+                // For a previously interpreted batch, serialize it and push it down the wire.
+                batch = rx.recv() => {
+                    let batch = match batch {
+                        Some(b) => b,
+                        None => { break; }
+                    };
+
+                    let buf = batch
+                        .records
+                        .to_wire(self.format, self.compression)
+                        .await
+                        .with_context(|| "Failed to serialize interpreted WAL")
+                        .map_err(CopyStreamHandlerEnd::from)?;
 
                     // Reset the keep alive ticker since we are sending something
                     // over the wire now.
@@ -92,13 +121,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
 
                     self.pgb
                         .write_message(&BeMessage::InterpretedWalRecords(InterpretedWalRecordsBody {
-                            streaming_lsn: wal_end_lsn.0,
-                            commit_lsn: available_wal_end_lsn.0,
-                            next_record_lsn: max_next_record_lsn.unwrap_or(Lsn::INVALID).0,
-                            data: buf.as_slice(),
+                            streaming_lsn: batch.wal_end_lsn.0,
+                            commit_lsn: batch.available_wal_end_lsn.0,
+                            data: &buf,
                         })).await?;
                 }
-
                 // Send a periodic keep alive when the connection has been idle for a while.
                 _ = keepalive_ticker.tick() => {
                     self.pgb

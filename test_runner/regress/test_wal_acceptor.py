@@ -2136,7 +2136,7 @@ def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
         # Check that on source no segment files are present
         assert src_sk.list_segments(tenant_id, timeline_id) == []
 
-    wait_until(60, 1, evicted_on_source)
+    wait_until(evicted_on_source, timeout=60)
 
     # Invoke pull_timeline: source should serve snapshot request without promoting anything to local disk,
     # destination should import the control file only & go into evicted mode immediately
@@ -2155,7 +2155,7 @@ def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
 
     # This should be fast, it is a wait_until because eviction state is updated
     # in the background wrt pull_timeline.
-    wait_until(10, 0.1, evicted_on_destination)
+    wait_until(evicted_on_destination, timeout=1.0, interval=0.1)
 
     # Delete the timeline on the source, to prove that deletion works on an
     # evicted timeline _and_ that the final compute test is really not using
@@ -2178,7 +2178,7 @@ def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
         n_evicted = dst_sk.http_client().get_metric_value("safekeeper_evicted_timelines")
         assert n_evicted == 0
 
-    wait_until(10, 1, unevicted_on_dest)
+    wait_until(unevicted_on_dest, interval=0.1, timeout=1.0)
 
 
 # In this test we check for excessive START_REPLICATION and START_WAL_PUSH queries
@@ -2606,10 +2606,10 @@ def test_s3_eviction(
         assert n_evicted  # make mypy happy
         assert int(n_evicted) == n_timelines
 
-    wait_until(60, 0.5, all_evicted)
+    wait_until(all_evicted, timeout=30)
     # restart should preserve the metric value
     sk.stop().start()
-    wait_until(60, 0.5, all_evicted)
+    wait_until(all_evicted)
     # and endpoint start should reduce is
     endpoints[0].start()
 
@@ -2618,7 +2618,7 @@ def test_s3_eviction(
         assert n_evicted  # make mypy happy
         assert int(n_evicted) < n_timelines
 
-    wait_until(60, 0.5, one_unevicted)
+    wait_until(one_unevicted)
 
 
 # Test resetting uploaded partial segment state.
@@ -2666,7 +2666,7 @@ def test_backup_partial_reset(neon_env_builder: NeonEnvBuilder):
         if isinstance(eviction_state, str) and eviction_state == "Present":
             raise Exception("eviction didn't happen yet")
 
-    wait_until(30, 1, evicted)
+    wait_until(evicted)
     # it must have uploaded something
     uploaded_segs = sk.list_uploaded_segments(tenant_id, timeline_id)
     log.info(f"uploaded segments before reset: {uploaded_segs}")
@@ -2763,7 +2763,7 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
 
         raise Exception("Partial segment not uploaded yet")
 
-    source_partial_segment = wait_until(15, 1, source_partial_segment_uploaded)
+    source_partial_segment = wait_until(source_partial_segment_uploaded)
     log.info(
         f"Uploaded segments before pull are {src_sk.list_uploaded_segments(tenant_id, timeline_id)}"
     )
@@ -2787,7 +2787,7 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
         if evictions is None or evictions == 0:
             raise Exception("Eviction did not happen on source safekeeper yet")
 
-    wait_until(30, 1, evicted)
+    wait_until(evicted)
 
     endpoint.start(safekeepers=[2, 3])
 
@@ -2804,7 +2804,7 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
     )
 
     endpoint.safe_psql("insert into t select generate_series(1, 1000), 'pear'")
-    wait_until(15, 1, new_partial_segment_uploaded)
+    wait_until(new_partial_segment_uploaded)
 
     log.info(
         f"Uploaded segments after post-pull ingest are {src_sk.list_uploaded_segments(tenant_id, timeline_id)}"
@@ -2833,4 +2833,4 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
         if unevictions is None or unevictions == 0:
             raise Exception("Uneviction did not happen on source safekeeper yet")
 
-    wait_until(10, 1, unevicted)
+    wait_until(unevicted)
