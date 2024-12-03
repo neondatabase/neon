@@ -436,11 +436,15 @@ impl NeonOptions {
     }
 
     pub(crate) fn is_ephemeral(&self) -> bool {
+        fn parameter_is_not_ephemeral(p: &str) -> bool {
+            p == "proxy_params_compat"
+        }
+
         self.0
             .iter()
-            .filter(|(k, _)| k != "proxy_params_compat")
+            .filter(|(k, _)| !parameter_is_not_ephemeral(k))
             .count()
-            == 0
+            > 0
     }
 
     fn parse_from_iter<'a>(options: impl Iterator<Item = &'a str>) -> Self {

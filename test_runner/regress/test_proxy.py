@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import closing
 import json
 import subprocess
 import time
 import urllib.parse
+from contextlib import closing
 from typing import TYPE_CHECKING
 
 import psycopg2
