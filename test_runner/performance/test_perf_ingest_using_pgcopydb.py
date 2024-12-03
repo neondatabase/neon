@@ -66,7 +66,7 @@ def build_pgcopydb_command(pgcopydb_filter_file: Path, test_output_dir: Path):
         "--restore-jobs",
         "4",
         "--split-tables-larger-than",
-        "5GB",
+        "10GB",
         "--skip-extensions",
         "--use-copy-binary",
         "--filters",

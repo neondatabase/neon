@@ -121,12 +121,12 @@ jobs:
         ${PSQL} "${BENCHMARK_INGEST_TARGET_CONNSTR}" -c "CREATE EXTENSION IF NOT EXISTS neon; CREATE EXTENSION IF NOT EXISTS neon_utils;"
         echo "BENCHMARK_INGEST_TARGET_CONNSTR=${BENCHMARK_INGEST_TARGET_CONNSTR}" >> $GITHUB_ENV
 
-    - name: Sleep for 5 minutes
-      run: |
-        echo "Current time: $(date)"
-        echo "Sleeping for 5 minutes..."
-        sleep $((5 * 60)) 
-        echo "Woke up at: $(date)"
+    # - name: Sleep for 5 minutes
+    #   run: |
+    #     echo "Current time: $(date)"
+    #     echo "Sleeping for 5 minutes..."
+    #     sleep $((5 * 60)) 
+    #     echo "Woke up at: $(date)"
 
     - name: Invoke pgcopydb  
       uses: ./.github/actions/run-python-test-set
