@@ -541,6 +541,10 @@ impl NoticeResponseBody {
     pub fn fields(&self) -> ErrorFields<'_> {
         ErrorFields { buf: &self.storage }
     }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.storage
+    }
 }
 
 pub struct NotificationResponseBody {

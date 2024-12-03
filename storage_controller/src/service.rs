@@ -5158,34 +5158,38 @@ impl Service {
                 *nodes = Arc::new(nodes_mut);
             }
 
-            for (tenant_shard_id, shard) in tenants {
-                if shard.deref_node(node_id) {
-                    // FIXME: we need to build a ScheduleContext that reflects this shard's peers, otherwise
-                    // it won't properly do anti-affinity.
-                    let mut schedule_context = ScheduleContext::default();
+            for (_tenant_id, mut schedule_context, shards) in
+                TenantShardContextIterator::new(tenants, ScheduleMode::Normal)
+            {
+                for shard in shards {
+                    if shard.deref_node(node_id) {
+                        if let Err(e) = shard.schedule(scheduler, &mut schedule_context) {
+                            // TODO: implement force flag to remove a node even if we can't reschedule
+                            // a tenant
+                            tracing::error!(
+                                "Refusing to delete node, shard {} can't be rescheduled: {e}",
+                                shard.tenant_shard_id
+                            );
+                            return Err(e.into());
+                        } else {
+                            tracing::info!(
+                                "Rescheduled shard {} away from node during deletion",
+                                shard.tenant_shard_id
+                            )
+                        }
 
-                    if let Err(e) = shard.schedule(scheduler, &mut schedule_context) {
-                        // TODO: implement force flag to remove a node even if we can't reschedule
-                        // a tenant
-                        tracing::error!("Refusing to delete node, shard {tenant_shard_id} can't be rescheduled: {e}");
-                        return Err(e.into());
-                    } else {
-                        tracing::info!(
-                            "Rescheduled shard {tenant_shard_id} away from node during deletion"
-                        )
+                        self.maybe_reconcile_shard(shard, nodes);
                     }
 
-                    self.maybe_reconcile_shard(shard, nodes);
+                    // Here we remove an existing observed location for the node we're removing, and it will
+                    // not be re-added by a reconciler's completion because we filter out removed nodes in
+                    // process_result.
+                    //
+                    // Note that we update the shard's observed state _after_ calling maybe_reconcile_shard: that
+                    // means any reconciles we spawned will know about the node we're deleting, enabling them
+                    // to do live migrations if it's still online.
+                    shard.observed.locations.remove(&node_id);
                 }
-
-                // Here we remove an existing observed location for the node we're removing, and it will
-                // not be re-added by a reconciler's completion because we filter out removed nodes in
-                // process_result.
-                //
-                // Note that we update the shard's observed state _after_ calling maybe_reconcile_shard: that
-                // means any reconciles we spawned will know about the node we're deleting, enabling them
-                // to do live migrations if it's still online.
-                shard.observed.locations.remove(&node_id);
             }
 
             scheduler.node_remove(node_id);
@@ -6016,14 +6020,33 @@ impl Service {
         let (nodes, tenants, _scheduler) = locked.parts_mut();
         let pageservers = nodes.clone();
 
+        // This function is an efficient place to update lazy statistics, since we are walking
+        // all tenants.
+        let mut pending_reconciles = 0;
+        let mut az_violations = 0;
+
         let mut reconciles_spawned = 0;
         for shard in tenants.values_mut() {
+            // Accumulate scheduling statistics
+            if let (Some(attached), Some(preferred)) =
+                (shard.intent.get_attached(), shard.preferred_az())
+            {
+                let node_az = nodes
+                    .get(attached)
+                    .expect("Nodes exist if referenced")
+                    .get_availability_zone_id();
+                if node_az != preferred {
+                    az_violations += 1;
+                }
+            }
+
             // Skip checking if this shard is already enqueued for reconciliation
             if shard.delayed_reconcile && self.reconciler_concurrency.available_permits() == 0 {
                 // If there is something delayed, then return a nonzero count so that
                 // callers like reconcile_all_now do not incorrectly get the impression
                 // that the system is in a quiescent state.
                 reconciles_spawned = std::cmp::max(1, reconciles_spawned);
+                pending_reconciles += 1;
                 continue;
             }
 
@@ -6031,8 +6054,21 @@ impl Service {
             // dirty, spawn another rone
             if self.maybe_reconcile_shard(shard, &pageservers).is_some() {
                 reconciles_spawned += 1;
+            } else if shard.delayed_reconcile {
+                // Shard wanted to reconcile but for some reason couldn't.
+                pending_reconciles += 1;
             }
         }
+
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_schedule_az_violation
+            .set(az_violations as i64);
+
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pending_reconciles
+            .set(pending_reconciles as i64);
 
         reconciles_spawned
     }
@@ -6247,6 +6283,14 @@ impl Service {
                             > DOWNLOAD_FRESHNESS_THRESHOLD
                     {
                         tracing::info!("Skipping migration of {tenant_shard_id} to {node} because secondary isn't ready: {progress:?}");
+
+                        #[cfg(feature = "testing")]
+                        if progress.heatmap_mtime.is_none() {
+                            // No heatmap might mean the attached location has never uploaded one, or that
+                            // the secondary download hasn't happened yet.  This is relatively unusual in the field,
+                            // but fairly common in tests.
+                            self.kick_secondary_download(tenant_shard_id).await;
+                        }
                     } else {
                         // Location looks ready: proceed
                         tracing::info!(
@@ -6259,6 +6303,58 @@ impl Service {
         }
 
         validated_work
+    }
+
+    /// Some aspects of scheduling optimisation wait for secondary locations to be warm.  This
+    /// happens on multi-minute timescales in the field, which is fine because optimisation is meant
+    /// to be a lazy background thing. However, when testing, it is not practical to wait around, so
+    /// we have this helper to move things along faster.
+    #[cfg(feature = "testing")]
+    async fn kick_secondary_download(&self, tenant_shard_id: TenantShardId) {
+        let (attached_node, secondary_node) = {
+            let locked = self.inner.read().unwrap();
+            let Some(shard) = locked.tenants.get(&tenant_shard_id) else {
+                return;
+            };
+            let (Some(attached), Some(secondary)) = (
+                shard.intent.get_attached(),
+                shard.intent.get_secondary().first(),
+            ) else {
+                return;
+            };
+            (
+                locked.nodes.get(attached).unwrap().clone(),
+                locked.nodes.get(secondary).unwrap().clone(),
+            )
+        };
+
+        // Make remote API calls to upload + download heatmaps: we ignore errors because this is just
+        // a 'kick' to let scheduling optimisation run more promptly.
+        attached_node
+            .with_client_retries(
+                |client| async move { client.tenant_heatmap_upload(tenant_shard_id).await },
+                &self.config.jwt_token,
+                3,
+                10,
+                SHORT_RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await;
+
+        secondary_node
+            .with_client_retries(
+                |client| async move {
+                    client
+                        .tenant_secondary_download(tenant_shard_id, Some(Duration::from_secs(1)))
+                        .await
+                },
+                &self.config.jwt_token,
+                3,
+                10,
+                SHORT_RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await;
     }
 
     /// Look for shards which are oversized and in need of splitting

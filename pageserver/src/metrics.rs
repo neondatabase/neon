@@ -1242,7 +1242,7 @@ impl Drop for SmgrOpTimer {
                 let mut guard = LOGGED.lock().unwrap();
                 let rate_limit = &mut guard[self.op];
                 rate_limit.call(|| {
-                    warn!(op=?self.op, "implementation error: time spent throttled exceeds total request wall clock time");
+                    warn!(op=?self.op, ?elapsed, ?self.throttled, "implementation error: time spent throttled exceeds total request wall clock time");
                 });
                 elapsed // un-throttled time, more info than just saturating to 0
             }
