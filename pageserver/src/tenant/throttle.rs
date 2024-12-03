@@ -2,14 +2,14 @@ use std::{
     str::FromStr,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::{Duration, Instant},
 };
 
 use arc_swap::ArcSwap;
 use enumset::EnumSet;
-use tracing::{error, warn};
+use tracing::error;
 use utils::leaky_bucket::{LeakyBucketConfig, RateLimiter};
 
 use crate::{context::RequestContext, task_mgr::TaskKind};
@@ -162,19 +162,6 @@ where
                 .fetch_add(wait_time.as_micros() as u64, Ordering::Relaxed);
             let observation = Observation { wait_time };
             self.metric.observe_throttling(&observation);
-            match ctx.micros_spent_throttled.add(wait_time) {
-                Ok(res) => res,
-                Err(error) => {
-                    use once_cell::sync::Lazy;
-                    use utils::rate_limit::RateLimit;
-                    static WARN_RATE_LIMIT: Lazy<Mutex<RateLimit>> =
-                        Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-                    let mut guard = WARN_RATE_LIMIT.lock().unwrap();
-                    guard.call(move || {
-                        warn!(error, "error adding time spent throttled; this message is logged at a global rate limit");
-                    });
-                }
-            }
             Some(wait_time)
         } else {
             None

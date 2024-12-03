@@ -4,6 +4,7 @@ import copy
 import json
 import uuid
 
+import pytest
 from anyio import Path
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
@@ -70,14 +71,21 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
 
     log.info("warmup / make sure metrics are present")
     run_pagebench_at_max_speed_and_get_total_requests_completed(2)
-    metrics_query = {
+    smgr_metrics_query = {
         "tenant_id": str(tenant_id),
         "timeline_id": str(timeline_id),
         "smgr_query_type": "get_page_at_lsn",
     }
-    metric_name = "pageserver_smgr_query_seconds_sum"
-    smgr_query_seconds_pre = ps_http.get_metric_value(metric_name, metrics_query)
+    smgr_metric_name = "pageserver_smgr_query_seconds_sum"
+    throttle_metrics_query = {
+        "tenant_id": str(tenant_id),
+    }
+    throttle_metric_name = "pageserver_tenant_throttling_wait_usecs_sum_total"
+
+    smgr_query_seconds_pre = ps_http.get_metric_value(smgr_metric_name, smgr_metrics_query)
     assert smgr_query_seconds_pre is not None
+    throttled_usecs_pre = ps_http.get_metric_value(throttle_metric_name, throttle_metrics_query)
+    assert throttled_usecs_pre is not None
 
     marker = uuid.uuid4().hex
     ps_http.post_tracing_event("info", marker)
@@ -108,14 +116,23 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
         timeout=compaction_period,
     )
 
-    log.info("validate that the metric doesn't include throttle wait time")
-    smgr_query_seconds_post = ps_http.get_metric_value(metric_name, metrics_query)
+    log.info("the smgr metric includes throttle time")
+    smgr_query_seconds_post = ps_http.get_metric_value(smgr_metric_name, smgr_metrics_query)
     assert smgr_query_seconds_post is not None
+    throttled_usecs_post = ps_http.get_metric_value(throttle_metric_name, throttle_metrics_query)
+    assert throttled_usecs_post is not None
     actual_smgr_query_seconds = smgr_query_seconds_post - smgr_query_seconds_pre
+    actual_throttled_usecs = throttled_usecs_post - throttled_usecs_pre
+    actual_throttled_secs = actual_throttled_usecs / 1_000_000
 
     assert (
-        duration_secs >= 10 * actual_smgr_query_seconds
-    ), "smgr metrics should not include throttle wait time"
+        pytest.approx(duration_secs, 0.1) == actual_smgr_query_seconds
+    ), "smgr metrics include throttle wait time"
+    smgr_ex_throttle = actual_smgr_query_seconds - actual_throttled_secs
+    assert smgr_ex_throttle > 0
+    assert (
+        duration_secs > 10 * smgr_ex_throttle
+    ), "most of the time in this test is spent throttled because the rate-limit's contribution to latency dominates"
 
 
 throttle_config_with_field_fair_set = {

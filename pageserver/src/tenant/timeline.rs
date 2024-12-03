@@ -1059,7 +1059,8 @@ impl Timeline {
             .map(|metric| (metric, Instant::now()));
 
         // start counting after throttle so that throttle time
-        // is always less than observation time
+        // is always less than observation time and we don't
+        // underflow when computing `ex_throttled` below.
         let throttled = self
             .timeline_get_throttle
             .throttle(ctx, key_count as usize)
@@ -1138,7 +1139,9 @@ impl Timeline {
             .map(ScanLatencyOngoingRecording::start_recording);
 
         // start counting after throttle so that throttle time
-        // is always less than observation time
+        // is always less than observation time and we don't
+        // underflow when computing the `ex_throttled` value in
+        // `recording.observe(throttled)` below.
         let throttled = self
             .timeline_get_throttle
             // assume scan = 1 quota for now until we find a better way to process this
