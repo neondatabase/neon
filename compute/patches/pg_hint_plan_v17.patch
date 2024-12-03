@@ -1,0 +1,174 @@
+diff --git a/expected/ut-A.out b/expected/ut-A.out
+index e7d68a1..65a056c 100644
+--- a/expected/ut-A.out
++++ b/expected/ut-A.out
+@@ -9,13 +9,16 @@ SET search_path TO public;
+ ----
+ -- No.A-1-1-3
+ CREATE EXTENSION pg_hint_plan;
++LOG:  Sending request to compute_ctl: http://localhost:3080/extension_server/pg_hint_plan
+ -- No.A-1-2-3
+ DROP EXTENSION pg_hint_plan;
+ -- No.A-1-1-4
+ CREATE SCHEMA other_schema;
+ CREATE EXTENSION pg_hint_plan SCHEMA other_schema;
++LOG:  Sending request to compute_ctl: http://localhost:3080/extension_server/pg_hint_plan
+ ERROR:  extension "pg_hint_plan" must be installed in schema "hint_plan"
+ CREATE EXTENSION pg_hint_plan;
++LOG:  Sending request to compute_ctl: http://localhost:3080/extension_server/pg_hint_plan
+ DROP SCHEMA other_schema;
+ ----
+ ---- No. A-5-1 comment pattern
+diff --git a/expected/ut-J.out b/expected/ut-J.out
+index 2fa3c70..314e929 100644
+--- a/expected/ut-J.out
++++ b/expected/ut-J.out
+@@ -789,38 +789,6 @@ NestLoop(st1 st2)
+ MergeJoin(t1 t2)
+ not used hint:
+ duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-NestLoop(st1 st2)
+-MergeJoin(t1 t2)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-NestLoop(st1 st2)
+-MergeJoin(t1 t2)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-NestLoop(st1 st2)
+-MergeJoin(t1 t2)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-NestLoop(st1 st2)
+-MergeJoin(t1 t2)
+-duplication hint:
+ error hint:
+ 
+                                        explain_filter                                        
+diff --git a/expected/ut-S.out b/expected/ut-S.out
+index 0bfcfb8..e75f581 100644
+--- a/expected/ut-S.out
++++ b/expected/ut-S.out
+@@ -4415,34 +4415,6 @@ used hint:
+ IndexScan(ti1 ti1_pred)
+ not used hint:
+ duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(ti1 ti1_pred)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(ti1 ti1_pred)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(ti1 ti1_pred)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(ti1 ti1_pred)
+-duplication hint:
+ error hint:
+ 
+                     explain_filter                     
+diff --git a/expected/ut-W.out b/expected/ut-W.out
+index a09bd34..0ad227c 100644
+--- a/expected/ut-W.out
++++ b/expected/ut-W.out
+@@ -1341,54 +1341,6 @@ IndexScan(ft1)
+ IndexScan(t)
+ Parallel(s1 3 hard)
+ duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(*VALUES*)
+-SeqScan(cte1)
+-IndexScan(ft1)
+-IndexScan(t)
+-Parallel(p1 5 hard)
+-Parallel(s1 3 hard)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(*VALUES*)
+-SeqScan(cte1)
+-IndexScan(ft1)
+-IndexScan(t)
+-Parallel(p1 5 hard)
+-Parallel(s1 3 hard)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(*VALUES*)
+-SeqScan(cte1)
+-IndexScan(ft1)
+-IndexScan(t)
+-Parallel(p1 5 hard)
+-Parallel(s1 3 hard)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(*VALUES*)
+-SeqScan(cte1)
+-IndexScan(ft1)
+-IndexScan(t)
+-Parallel(p1 5 hard)
+-Parallel(s1 3 hard)
+-duplication hint:
+ error hint:
+ 
+                     explain_filter                    
+diff --git a/expected/ut-fdw.out b/expected/ut-fdw.out
+index 017fa4b..98d989b 100644
+--- a/expected/ut-fdw.out
++++ b/expected/ut-fdw.out
+@@ -7,6 +7,7 @@ SET pg_hint_plan.debug_print TO on;
+ SET client_min_messages TO LOG;
+ SET pg_hint_plan.enable_hint TO on;
+ CREATE EXTENSION file_fdw;
++LOG:  Sending request to compute_ctl: http://localhost:3080/extension_server/file_fdw
+ CREATE SERVER file_server FOREIGN DATA WRAPPER file_fdw;
+ CREATE USER MAPPING FOR PUBLIC SERVER file_server;
+ CREATE FOREIGN TABLE ft1 (id int, val int) SERVER file_server OPTIONS (format 'csv', filename :'filename');
