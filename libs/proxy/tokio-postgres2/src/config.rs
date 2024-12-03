@@ -160,9 +160,7 @@ impl Config {
             self.username = true;
         }
 
-        self.server_params
-            .insert(name, value)
-            .expect("name or value must not have null bytes");
+        self.server_params.insert(name, value);
         self
     }
 

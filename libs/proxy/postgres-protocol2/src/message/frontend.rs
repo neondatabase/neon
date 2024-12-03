@@ -272,18 +272,14 @@ pub struct StartupMessageParams {
 
 impl StartupMessageParams {
     /// Set parameter's value by its name.
-    pub fn insert(&mut self, name: &str, value: &str) -> Result<(), io::Error> {
+    pub fn insert(&mut self, name: &str, value: &str) {
         if name.contains('\0') | value.contains('\0') {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "string contains embedded null",
-            ));
+            panic!("startup parameter name or value contained a null")
         }
         self.params.put(name.as_bytes());
         self.params.put_u8(0);
         self.params.put(value.as_bytes());
         self.params.put_u8(0);
-        Ok(())
     }
 }
 
