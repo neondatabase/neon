@@ -835,3 +835,117 @@ def test_timeline_retain_lsn(
         with env.endpoints.create_start("test_archived_branch", tenant_id=tenant_id) as endpoint:
             sum = endpoint.safe_psql("SELECT sum(key) from foo where v < 51200")
             assert sum == pre_branch_sum
+
+
+def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
+    """
+    Test for scrubber deleting old generations of manifests
+    """
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+
+    env = neon_env_builder.init_start()
+    ps_http = env.pageserver.http_client()
+
+    # Turn off gc and compaction loops: we want to issue them manually for better reliability
+    tenant_id, root_timeline_id = env.create_tenant(
+        conf={
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            "checkpoint_distance": f"{1024 ** 2}",
+        }
+    )
+
+    # Create a branch and archive it
+    child_timeline_id = env.create_branch("test_archived_branch_persisted", tenant_id)
+
+    with env.endpoints.create_start(
+        "test_archived_branch_persisted", tenant_id=tenant_id
+    ) as endpoint:
+        endpoint.safe_psql_many(
+            [
+                "CREATE TABLE foo(key serial primary key, t text default 'data_content')",
+                "INSERT INTO foo SELECT FROM generate_series(1,512)",
+            ]
+        )
+        sum = endpoint.safe_psql("SELECT sum(key) from foo where key % 3 = 2")
+        last_flush_lsn_upload(env, endpoint, tenant_id, child_timeline_id)
+
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix=f"tenants/{str(tenant_id)}/",
+    )
+    assert_prefix_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix=f"tenants/{str(tenant_id)}/tenant-manifest",
+    )
+
+    ps_http.timeline_archival_config(
+        tenant_id,
+        child_timeline_id,
+        state=TimelineArchivalState.ARCHIVED,
+    )
+
+    def timeline_offloaded_api(timeline_id: TimelineId) -> bool:
+        # TODO add a proper API to check if a timeline has been offloaded or not
+        return not any(
+            timeline["timeline_id"] == str(timeline_id)
+            for timeline in ps_http.timeline_list(tenant_id=tenant_id)
+        )
+
+    def child_offloaded():
+        ps_http.timeline_offload(tenant_id=tenant_id, timeline_id=child_timeline_id)
+        assert timeline_offloaded_api(child_timeline_id)
+
+    wait_until(child_offloaded)
+
+    assert timeline_offloaded_api(child_timeline_id)
+    assert not timeline_offloaded_api(root_timeline_id)
+
+    # Reboot the pageserver a bunch of times, do unoffloads, offloads
+    for i in range(5):
+        env.pageserver.stop()
+        env.pageserver.start()
+
+        assert timeline_offloaded_api(child_timeline_id)
+        assert not timeline_offloaded_api(root_timeline_id)
+
+        ps_http.timeline_archival_config(
+            tenant_id,
+            child_timeline_id,
+            state=TimelineArchivalState.UNARCHIVED,
+        )
+
+        assert not timeline_offloaded_api(child_timeline_id)
+
+        if i % 2 == 0:
+            with env.endpoints.create_start(
+                "test_archived_branch_persisted", tenant_id=tenant_id
+            ) as endpoint:
+                sum_again = endpoint.safe_psql("SELECT sum(key) from foo where key % 3 = 2")
+                assert sum == sum_again
+
+        ps_http.timeline_archival_config(
+            tenant_id,
+            child_timeline_id,
+            state=TimelineArchivalState.ARCHIVED,
+        )
+        wait_until(child_offloaded)
+
+    #
+    # Now ensure that scrubber runs will clean up old generations' manifests.
+    #
+
+    # Sleep some amount larger than min_age_secs
+    time.sleep(3)
+
+    # Ensure that min_age_secs has a deletion impeding effect
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=3600, mode="full")
+    assert gc_summary["remote_storage_errors"] == 0
+    assert gc_summary["indices_deleted"] == 0
+    assert gc_summary["tenant_manifests_deleted"] == 0
+
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=1, mode="full")
+    assert gc_summary["remote_storage_errors"] == 0
+    assert gc_summary["indices_deleted"] > 0
+    assert gc_summary["tenant_manifests_deleted"] > 0
