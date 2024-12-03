@@ -125,7 +125,7 @@ where
         .expect("value does not contain null");
 
     let mut buf = BytesMut::new();
-    frontend::startup_message_cstr(&params, &mut buf).map_err(Error::encode)?;
+    frontend::startup_message(&params, &mut buf).map_err(Error::encode)?;
 
     stream
         .send(FrontendMessage::Raw(buf.freeze()))

@@ -75,6 +75,9 @@ pub struct Config {
     pub(crate) connect_timeout: Option<Duration>,
     pub(crate) channel_binding: ChannelBinding,
     pub(crate) server_params: StartupMessageParams,
+
+    database: bool,
+    username: bool,
 }
 
 impl Config {
@@ -89,6 +92,9 @@ impl Config {
             connect_timeout: None,
             channel_binding: ChannelBinding::Prefer,
             server_params: StartupMessageParams::default(),
+
+            database: false,
+            username: false,
         }
     }
 
@@ -96,14 +102,13 @@ impl Config {
     ///
     /// Required.
     pub fn user(&mut self, user: &str) -> &mut Config {
-        self.server_params.insert("user", user).unwrap();
-        self
+        self.set_param("user", user)
     }
 
     /// Gets the user to authenticate with, if one has been configured with
     /// the `user` method.
     pub fn user_is_set(&self) -> bool {
-        self.server_params.get("user").is_some()
+        self.username
     }
 
     /// Sets the password to authenticate with.
@@ -139,19 +144,22 @@ impl Config {
     ///
     /// Defaults to the user.
     pub fn dbname(&mut self, dbname: &str) -> &mut Config {
-        self.server_params
-            .insert("database", dbname)
-            .expect("dbname must not have nulls");
-        self
+        self.set_param("database", dbname)
     }
 
     /// Gets the name of the database to connect to, if one has been configured
     /// with the `dbname` method.
     pub fn db_is_set(&self) -> bool {
-        self.server_params.get("database").is_some()
+        self.database
     }
 
     pub fn set_param(&mut self, name: &str, value: &str) -> &mut Config {
+        if name == "database" {
+            self.database = true;
+        } else if name == "user" {
+            self.username = true;
+        }
+
         self.server_params
             .insert(name, value)
             .expect("name or value must not have null bytes");

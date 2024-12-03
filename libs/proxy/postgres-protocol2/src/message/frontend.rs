@@ -255,10 +255,7 @@ pub fn ssl_request(buf: &mut BytesMut) {
 }
 
 #[inline]
-pub fn startup_message_cstr(
-    parameters: &StartupMessageParams,
-    buf: &mut BytesMut,
-) -> io::Result<()> {
+pub fn startup_message(parameters: &StartupMessageParams, buf: &mut BytesMut) -> io::Result<()> {
     write_body(buf, |buf| {
         // postgres protocol version 3.0(196608) in bigger-endian
         buf.put_i32(0x00_03_00_00);
@@ -283,30 +280,10 @@ impl StartupMessageParams {
             ));
         }
         self.params.put(name.as_bytes());
-        self.params.put(&b"\0"[..]);
+        self.params.put_u8(0);
         self.params.put(value.as_bytes());
-        self.params.put(&b"\0"[..]);
+        self.params.put_u8(0);
         Ok(())
-    }
-    pub fn str_iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        let params =
-            std::str::from_utf8(&self.params).expect("should be validated as utf8 already");
-        StrParamsIter(params)
-    }
-    /// Get parameter's value by its name.
-    pub fn get(&self, name: &str) -> Option<&str> {
-        self.str_iter().find_map(|(k, v)| (k == name).then_some(v))
-    }
-}
-
-struct StrParamsIter<'a>(&'a str);
-impl<'a> Iterator for StrParamsIter<'a> {
-    type Item = (&'a str, &'a str);
-    fn next(&mut self) -> Option<Self::Item> {
-        let (key, r) = self.0.split_once('\0')?;
-        let (value, r) = r.split_once('\0')?;
-        self.0 = r;
-        Some((key, value))
     }
 }
 

@@ -55,7 +55,7 @@ async fn proxy_mitm(
 
         // give the end_server the startup parameters
         let mut buf = BytesMut::new();
-        frontend::startup_message_cstr(
+        frontend::startup_message(
             &postgres_protocol::message::frontend::StartupMessageParams {
                 params: startup.params.into(),
             },
