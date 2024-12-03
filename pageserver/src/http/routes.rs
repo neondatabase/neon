@@ -2462,8 +2462,7 @@ async fn secondary_upload_handler(
     state
         .secondary_controller
         .upload_tenant(tenant_shard_id)
-        .await
-        .map_err(ApiError::InternalServerError)?;
+        .await?;
 
     json_response(StatusCode::OK, ())
 }
@@ -2578,7 +2577,7 @@ async fn secondary_download_handler(
         // Edge case: downloads aren't usually fallible: things like a missing heatmap are considered
         // okay.  We could get an error here in the unlikely edge case that the tenant
         // was detached between our check above and executing the download job.
-        Ok(Err(e)) => return Err(ApiError::InternalServerError(e)),
+        Ok(Err(e)) => return Err(e),
         // A timeout is not an error: we have started the download, we're just not done
         // yet.  The caller will get a response body indicating status.
         Err(_) => StatusCode::ACCEPTED,

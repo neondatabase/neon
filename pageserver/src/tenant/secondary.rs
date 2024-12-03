@@ -35,7 +35,7 @@ use remote_storage::GenericRemoteStorage;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
-use utils::{completion::Barrier, id::TimelineId, sync::gate::Gate};
+use utils::{completion::Barrier, http::error::ApiError, id::TimelineId, sync::gate::Gate};
 
 enum DownloadCommand {
     Download(TenantShardId),
@@ -66,7 +66,7 @@ struct CommandRequest<T> {
 }
 
 struct CommandResponse {
-    result: anyhow::Result<()>,
+    result: Result<(), ApiError>,
 }
 
 // Whereas [`Tenant`] represents an attached tenant, this type represents the work
@@ -285,7 +285,7 @@ impl SecondaryController {
         &self,
         queue: &tokio::sync::mpsc::Sender<CommandRequest<T>>,
         payload: T,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ApiError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
         queue
@@ -294,20 +294,18 @@ impl SecondaryController {
                 response_tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("Receiver shut down"))?;
+            .map_err(|_| ApiError::ShuttingDown)?;
 
-        let response = response_rx
-            .await
-            .map_err(|_| anyhow::anyhow!("Request dropped"))?;
+        let response = response_rx.await.map_err(|_| ApiError::ShuttingDown)?;
 
         response.result
     }
 
-    pub async fn upload_tenant(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
+    pub async fn upload_tenant(&self, tenant_shard_id: TenantShardId) -> Result<(), ApiError> {
         self.dispatch(&self.upload_req_tx, UploadCommand::Upload(tenant_shard_id))
             .await
     }
-    pub async fn download_tenant(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
+    pub async fn download_tenant(&self, tenant_shard_id: TenantShardId) -> Result<(), ApiError> {
         self.dispatch(
             &self.download_req_tx,
             DownloadCommand::Download(tenant_shard_id),

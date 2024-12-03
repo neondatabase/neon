@@ -32,7 +32,7 @@ use super::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, Instrument};
-use utils::{backoff, completion::Barrier, yielding_loop::yielding_loop};
+use utils::{backoff, completion::Barrier, http::error::ApiError, yielding_loop::yielding_loop};
 
 pub(super) async fn heatmap_uploader_task(
     tenant_manager: Arc<TenantManager>,
@@ -279,7 +279,7 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
         }.instrument(info_span!(parent: None, "heatmap_upload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))))
     }
 
-    fn on_command(&mut self, command: UploadCommand) -> anyhow::Result<UploadPending> {
+    fn on_command(&mut self, command: UploadCommand) -> Result<UploadPending, ApiError> {
         let tenant_shard_id = command.get_tenant_shard_id();
 
         tracing::info!(
@@ -287,8 +287,7 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
             "Starting heatmap write on command");
         let tenant = self
             .tenant_manager
-            .get_attached_tenant_shard(*tenant_shard_id)
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .get_attached_tenant_shard(*tenant_shard_id)?;
         if !tenant.is_active() {
             return Err(GetTenantError::NotActive(*tenant_shard_id).into());
         }

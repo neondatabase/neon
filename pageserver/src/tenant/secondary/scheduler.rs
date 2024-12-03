@@ -10,7 +10,7 @@ use std::{
 use pageserver_api::shard::TenantShardId;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use utils::{completion::Barrier, yielding_loop::yielding_loop};
+use utils::{completion::Barrier, http::error::ApiError, yielding_loop::yielding_loop};
 
 use super::{CommandRequest, CommandResponse};
 
@@ -112,7 +112,7 @@ where
 
     /// Called when a command is received.  A job will be spawned immediately if the return
     /// value is Some, ignoring concurrency limits and the pending queue.
-    fn on_command(&mut self, cmd: CMD) -> anyhow::Result<PJ>;
+    fn on_command(&mut self, cmd: CMD) -> Result<PJ, ApiError>;
 }
 
 /// [`JobGenerator`] returns this to provide pending jobs, and hints about scheduling

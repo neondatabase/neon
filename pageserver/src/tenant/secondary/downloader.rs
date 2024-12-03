@@ -55,7 +55,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
 use utils::{
     backoff, completion::Barrier, crashsafe::path_with_suffix_extension, failpoint_support, fs_ext,
-    id::TimelineId, pausable_failpoint, serde_system_time,
+    http::error::ApiError, id::TimelineId, pausable_failpoint, serde_system_time,
 };
 
 use super::{
@@ -470,15 +470,17 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         result
     }
 
-    fn on_command(&mut self, command: DownloadCommand) -> anyhow::Result<PendingDownload> {
+    fn on_command(&mut self, command: DownloadCommand) -> Result<PendingDownload, ApiError> {
         let tenant_shard_id = command.get_tenant_shard_id();
 
         let tenant = self
             .tenant_manager
-            .get_secondary_tenant_shard(*tenant_shard_id);
-        let Some(tenant) = tenant else {
-            return Err(anyhow::anyhow!("Not found or not in Secondary mode"));
-        };
+            .get_secondary_tenant_shard(*tenant_shard_id)
+            .ok_or_else(|| {
+                ApiError::NotFound(
+                    anyhow::anyhow!("secondary shard {tenant_shard_id} not found").into(),
+                )
+            })?;
 
         Ok(PendingDownload {
             target_time: None,
