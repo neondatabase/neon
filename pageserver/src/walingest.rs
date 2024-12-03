@@ -1392,6 +1392,10 @@ impl WalIngest {
         img: Bytes,
         ctx: &RequestContext,
     ) -> Result<()> {
+        if !self.shard.is_shard_zero() {
+            return Ok(());
+        }
+
         self.handle_slru_extend(modification, kind, segno, blknum, ctx)
             .await?;
         modification.put_slru_page_image(kind, segno, blknum, img)?;
