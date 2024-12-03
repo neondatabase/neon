@@ -357,8 +357,8 @@ pub struct Tenant {
 
     /// Throttle applied at the top of [`Timeline::get`].
     /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
-    pub(crate) timeline_get_throttle:
-        Arc<throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
+    pub(crate) pagestream_throttle:
+        Arc<throttle::Throttle<crate::metrics::tenant_throttling::Pagestream>>,
 
     /// An ongoing timeline detach concurrency limiter.
     ///
@@ -1678,7 +1678,7 @@ impl Tenant {
                     remote_metadata,
                     TimelineResources {
                         remote_client,
-                        timeline_get_throttle: self.timeline_get_throttle.clone(),
+                        pagestream_throttle: self.pagestream_throttle.clone(),
                         l0_flush_global_state: self.l0_flush_global_state.clone(),
                     },
                     LoadTimelineCause::Attach,
@@ -3835,7 +3835,7 @@ impl Tenant {
         }
     }
 
-    fn get_timeline_get_throttle_config(
+    fn get_pagestream_throttle_config(
         psconf: &'static PageServerConf,
         overrides: &TenantConfOpt,
     ) -> throttle::Config {
@@ -3846,8 +3846,8 @@ impl Tenant {
     }
 
     pub(crate) fn tenant_conf_updated(&self, new_conf: &TenantConfOpt) {
-        let conf = Self::get_timeline_get_throttle_config(self.conf, new_conf);
-        self.timeline_get_throttle.reconfigure(conf)
+        let conf = Self::get_pagestream_throttle_config(self.conf, new_conf);
+        self.pagestream_throttle.reconfigure(conf)
     }
 
     /// Helper function to create a new Timeline struct.
@@ -4009,9 +4009,9 @@ impl Tenant {
             attach_wal_lag_cooldown: Arc::new(std::sync::OnceLock::new()),
             cancel: CancellationToken::default(),
             gate: Gate::default(),
-            timeline_get_throttle: Arc::new(throttle::Throttle::new(
-                Tenant::get_timeline_get_throttle_config(conf, &attached_conf.tenant_conf),
-                crate::metrics::tenant_throttling::TimelineGet::new(&tenant_shard_id),
+            pagestream_throttle: Arc::new(throttle::Throttle::new(
+                Tenant::get_pagestream_throttle_config(conf, &attached_conf.tenant_conf),
+                crate::metrics::tenant_throttling::Metrics::new(&tenant_shard_id),
             )),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
@@ -4909,7 +4909,7 @@ impl Tenant {
     fn build_timeline_resources(&self, timeline_id: TimelineId) -> TimelineResources {
         TimelineResources {
             remote_client: self.build_timeline_remote_client(timeline_id),
-            timeline_get_throttle: self.timeline_get_throttle.clone(),
+            pagestream_throttle: self.pagestream_throttle.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
         }
     }
