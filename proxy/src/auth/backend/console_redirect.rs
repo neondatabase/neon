@@ -49,13 +49,19 @@ impl ReportableError for ConsoleRedirectError {
     }
 }
 
-fn hello_message(redirect_uri: &reqwest::Url, session_id: &str) -> String {
+fn hello_message(
+    redirect_uri: &reqwest::Url,
+    session_id: &str,
+    duration: std::time::Duration,
+) -> String {
+    let formatted_duration = humantime::format_duration(duration).to_string();
     format!(
         concat![
             "Welcome to Neon!\n",
-            "Authenticate by visiting:\n",
+            "Authenticate by visiting (will expire in {duration}):\n",
             "    {redirect_uri}{session_id}\n\n",
         ],
+        duration = formatted_duration,
         redirect_uri = redirect_uri,
         session_id = session_id,
     )
@@ -118,7 +124,11 @@ async fn authenticate(
     };
 
     let span = info_span!("console_redirect", psql_session_id = &psql_session_id);
-    let greeting = hello_message(link_uri, &psql_session_id);
+    let greeting = hello_message(
+        link_uri,
+        &psql_session_id,
+        auth_config.console_redirect_confirmation_timeout,
+    );
 
     // Give user a URL to spawn a new database.
     info!(parent: &span, "sending the auth URL to the user");
