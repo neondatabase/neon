@@ -7,7 +7,6 @@ use crate::Error;
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use futures_util::{ready, Sink, SinkExt, Stream, TryStreamExt};
-use postgres_protocol2::authentication;
 use postgres_protocol2::authentication::sasl;
 use postgres_protocol2::authentication::sasl::ScramSha256;
 use postgres_protocol2::message::backend::{AuthenticationSaslBody, Message, NoticeResponseBody};
@@ -174,25 +173,11 @@ where
 
             authenticate_password(stream, pass).await?;
         }
-        Some(Message::AuthenticationMd5Password(body)) => {
-            can_skip_channel_binding(config)?;
-
-            let user = config
-                .user
-                .as_ref()
-                .ok_or_else(|| Error::config("user missing".into()))?;
-            let pass = config
-                .password
-                .as_ref()
-                .ok_or_else(|| Error::config("password missing".into()))?;
-
-            let output = authentication::md5_hash(user.as_bytes(), pass, body.salt());
-            authenticate_password(stream, output.as_bytes()).await?;
-        }
         Some(Message::AuthenticationSasl(body)) => {
             authenticate_sasl(stream, body, config).await?;
         }
-        Some(Message::AuthenticationKerberosV5)
+        Some(Message::AuthenticationMd5Password)
+        | Some(Message::AuthenticationKerberosV5)
         | Some(Message::AuthenticationScmCredential)
         | Some(Message::AuthenticationGss)
         | Some(Message::AuthenticationSspi) => {

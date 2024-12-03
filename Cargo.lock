@@ -4209,7 +4209,6 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "hmac",
- "md-5",
  "memchr",
  "rand 0.8.5",
  "sha2",
