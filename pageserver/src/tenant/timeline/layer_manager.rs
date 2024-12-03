@@ -213,7 +213,7 @@ impl OpenLayerManager {
             );
 
             let new_layer =
-                InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn, &gate, ctx)
+                InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn, gate, ctx)
                     .await?;
             let layer = Arc::new(new_layer);
 
