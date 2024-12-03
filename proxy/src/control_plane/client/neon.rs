@@ -6,8 +6,8 @@ use std::time::Duration;
 use ::http::header::AUTHORIZATION;
 use ::http::HeaderName;
 use futures::TryFutureExt;
+use postgres_client::config::SslMode;
 use tokio::time::Instant;
-use tokio_postgres::config::SslMode;
 use tracing::{debug, info, info_span, warn, Instrument};
 
 use super::super::messages::{ControlPlaneErrorMessage, GetRoleSecret, WakeCompute};

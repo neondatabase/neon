@@ -4,9 +4,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::TryFutureExt;
+use postgres_client::config::SslMode;
+use postgres_client::Client;
 use thiserror::Error;
-use tokio_postgres::config::SslMode;
-use tokio_postgres::Client;
 use tracing::{error, info, info_span, warn, Instrument};
 
 use crate::auth::backend::jwt::AuthRule;
@@ -29,7 +29,7 @@ use crate::{compute, scram};
 #[derive(Debug, Error)]
 enum MockApiError {
     #[error("Failed to read password: {0}")]
-    PasswordNotSet(tokio_postgres::Error),
+    PasswordNotSet(postgres_client::Error),
 }
 
 impl From<MockApiError> for ControlPlaneError {
@@ -38,8 +38,8 @@ impl From<MockApiError> for ControlPlaneError {
     }
 }
 
-impl From<tokio_postgres::Error> for ControlPlaneError {
-    fn from(e: tokio_postgres::Error) -> Self {
+impl From<postgres_client::Error> for ControlPlaneError {
+    fn from(e: postgres_client::Error) -> Self {
         io_error(e).into()
     }
 }
@@ -71,7 +71,7 @@ impl MockControlPlane {
             // write more code for reopening it if it got closed, which doesn't
             // seem worth it.
             let (client, connection) =
-                tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
+                postgres_client::connect(self.endpoint.as_str(), postgres_client::NoTls).await?;
 
             tokio::spawn(connection);
 
@@ -129,7 +129,7 @@ impl MockControlPlane {
         endpoint: EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         let (client, connection) =
-            tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
+            postgres_client::connect(self.endpoint.as_str(), postgres_client::NoTls).await?;
 
         let connection = tokio::spawn(connection);
 
@@ -185,7 +185,7 @@ impl MockControlPlane {
 async fn get_execute_postgres_query(
     client: &Client,
     query: &str,
-    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    params: &[&(dyn postgres_client::types::ToSql + Sync)],
     idx: &str,
 ) -> Result<Option<String>, GetAuthInfoError> {
     let rows = client.query(query, params).await?;

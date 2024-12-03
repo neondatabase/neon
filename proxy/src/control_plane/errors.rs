@@ -204,7 +204,7 @@ pub enum GetEndpointJwksError {
 
     #[cfg(any(test, feature = "testing"))]
     #[error(transparent)]
-    TokioPostgres(#[from] tokio_postgres::Error),
+    TokioPostgres(#[from] postgres_client::Error),
 
     #[cfg(any(test, feature = "testing"))]
     #[error(transparent)]
