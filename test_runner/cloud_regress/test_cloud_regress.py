@@ -41,6 +41,7 @@ def setup(neon_api: NeonAPI):
     current_cfg = {"settings": {"pg_settings": {}}}
     for k,v in primary_endpoint["settings"]["pg_settings"].items():
         current_cfg["settings"]["pg_settings"][k] = v
+    log.info("Cfg: %s", current_cfg)
     neon_api.configure_endpoint(project_id, current_ep["id"], {"endpoint": current_cfg})
     neon_api.wait_for_operation_to_finish(project_id)
     uri = neon_api.get_connection_uri(project_id, current_branch_id)["uri"]
