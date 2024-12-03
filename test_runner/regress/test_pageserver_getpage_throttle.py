@@ -33,7 +33,9 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
         conf={
             "compaction_period": f"{compaction_period}s",
             "timeline_get_throttle": {
-                "task_kinds": [],  # this field is ignored as of https://github.com/neondatabase/neon/pull/9962
+                "task_kinds": [
+                    "PageRequestHandler"
+                ],  # any non-empty array will do here https://github.com/neondatabase/neon/pull/9962
                 "initial": 0,
                 "refill_interval": "100ms",
                 "refill_amount": int(rate_limit_rps / 10),
