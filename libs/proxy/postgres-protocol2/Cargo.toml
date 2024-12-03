@@ -10,7 +10,6 @@ byteorder.workspace = true
 bytes.workspace = true
 fallible-iterator.workspace = true
 hmac.workspace = true
-md-5 = "0.10"
 memchr = "2.0"
 rand.workspace = true
 sha2.workspace = true

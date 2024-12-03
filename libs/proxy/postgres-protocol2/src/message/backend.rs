@@ -79,7 +79,7 @@ pub enum Message {
     AuthenticationCleartextPassword,
     AuthenticationGss,
     AuthenticationKerberosV5,
-    AuthenticationMd5Password(AuthenticationMd5PasswordBody),
+    AuthenticationMd5Password,
     AuthenticationOk,
     AuthenticationScmCredential,
     AuthenticationSspi,
@@ -191,11 +191,7 @@ impl Message {
                 0 => Message::AuthenticationOk,
                 2 => Message::AuthenticationKerberosV5,
                 3 => Message::AuthenticationCleartextPassword,
-                5 => {
-                    let mut salt = [0; 4];
-                    buf.read_exact(&mut salt)?;
-                    Message::AuthenticationMd5Password(AuthenticationMd5PasswordBody { salt })
-                }
+                5 => Message::AuthenticationMd5Password,
                 6 => Message::AuthenticationScmCredential,
                 7 => Message::AuthenticationGss,
                 8 => Message::AuthenticationGssContinue,

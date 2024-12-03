@@ -37,9 +37,9 @@ use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
 
 pub(crate) struct PoolingBackend {
     pub(crate) http_conn_pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
-    pub(crate) local_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
+    pub(crate) local_pool: Arc<LocalConnPool<postgres_client::Client>>,
     pub(crate) pool:
-        Arc<GlobalConnPool<tokio_postgres::Client, EndpointConnPool<tokio_postgres::Client>>>,
+        Arc<GlobalConnPool<postgres_client::Client, EndpointConnPool<postgres_client::Client>>>,
 
     pub(crate) config: &'static ProxyConfig,
     pub(crate) auth_backend: &'static crate::auth::Backend<'static, ()>,
@@ -170,7 +170,7 @@ impl PoolingBackend {
         conn_info: ConnInfo,
         keys: ComputeCredentials,
         force_new: bool,
-    ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
+    ) -> Result<Client<postgres_client::Client>, HttpConnError> {
         let maybe_client = if force_new {
             debug!("pool: pool is disabled");
             None
@@ -256,7 +256,7 @@ impl PoolingBackend {
         &self,
         ctx: &RequestContext,
         conn_info: ConnInfo,
-    ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
+    ) -> Result<Client<postgres_client::Client>, HttpConnError> {
         if let Some(client) = self.local_pool.get(ctx, &conn_info)? {
             return Ok(client);
         }
@@ -315,7 +315,7 @@ impl PoolingBackend {
             ));
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
+        let (client, connection) = config.connect(postgres_client::NoTls).await?;
         drop(pause);
 
         let pid = client.get_process_id();
@@ -360,7 +360,7 @@ pub(crate) enum HttpConnError {
     #[error("pooled connection closed at inconsistent state")]
     ConnectionClosedAbruptly(#[from] tokio::sync::watch::error::SendError<uuid::Uuid>),
     #[error("could not connection to postgres in compute")]
-    PostgresConnectionError(#[from] tokio_postgres::Error),
+    PostgresConnectionError(#[from] postgres_client::Error),
     #[error("could not connection to local-proxy in compute")]
     LocalProxyConnectionError(#[from] LocalProxyConnError),
     #[error("could not parse JWT payload")]
@@ -479,7 +479,7 @@ impl ShouldRetryWakeCompute for LocalProxyConnError {
 }
 
 struct TokioMechanism {
-    pool: Arc<GlobalConnPool<tokio_postgres::Client, EndpointConnPool<tokio_postgres::Client>>>,
+    pool: Arc<GlobalConnPool<postgres_client::Client, EndpointConnPool<postgres_client::Client>>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 
@@ -489,7 +489,7 @@ struct TokioMechanism {
 
 #[async_trait]
 impl ConnectMechanism for TokioMechanism {
-    type Connection = Client<tokio_postgres::Client>;
+    type Connection = Client<postgres_client::Client>;
     type ConnectError = HttpConnError;
     type Error = HttpConnError;
 
@@ -509,7 +509,7 @@ impl ConnectMechanism for TokioMechanism {
             .connect_timeout(timeout);
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let res = config.connect(tokio_postgres::NoTls).await;
+        let res = config.connect(postgres_client::NoTls).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 

@@ -1,8 +1,8 @@
 use async_trait::async_trait;
+use postgres_client::config::SslMode;
 use pq_proto::BeMessage as Be;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_postgres::config::SslMode;
 use tracing::{info, info_span};
 
 use super::ComputeCredentialKeys;

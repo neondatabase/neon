@@ -6,6 +6,8 @@ use std::time::Duration;
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use postgres_client::tls::MakeTlsConnect;
+use postgres_client::{CancelToken, RawConnection};
 use postgres_protocol::message::backend::NoticeResponseBody;
 use pq_proto::StartupMessageParams;
 use rustls::client::danger::ServerCertVerifier;
@@ -13,8 +15,6 @@ use rustls::crypto::ring;
 use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio_postgres::tls::MakeTlsConnect;
-use tokio_postgres::{CancelToken, RawConnection};
 use tracing::{debug, error, info, warn};
 
 use crate::auth::parse_endpoint_param;
@@ -34,9 +34,9 @@ pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 #[derive(Debug, Error)]
 pub(crate) enum ConnectionError {
     /// This error doesn't seem to reveal any secrets; for instance,
-    /// `tokio_postgres::error::Kind` doesn't contain ip addresses and such.
+    /// `postgres_client::error::Kind` doesn't contain ip addresses and such.
     #[error("{COULD_NOT_CONNECT}: {0}")]
-    Postgres(#[from] tokio_postgres::Error),
+    Postgres(#[from] postgres_client::Error),
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     CouldNotConnect(#[from] io::Error),
@@ -99,13 +99,13 @@ impl ReportableError for ConnectionError {
 }
 
 /// A pair of `ClientKey` & `ServerKey` for `SCRAM-SHA-256`.
-pub(crate) type ScramKeys = tokio_postgres::config::ScramKeys<32>;
+pub(crate) type ScramKeys = postgres_client::config::ScramKeys<32>;
 
 /// A config for establishing a connection to compute node.
-/// Eventually, `tokio_postgres` will be replaced with something better.
+/// Eventually, `postgres_client` will be replaced with something better.
 /// Newtype allows us to implement methods on top of it.
 #[derive(Clone, Default)]
-pub(crate) struct ConnCfg(Box<tokio_postgres::Config>);
+pub(crate) struct ConnCfg(Box<postgres_client::Config>);
 
 /// Creation and initialization routines.
 impl ConnCfg {
@@ -126,7 +126,7 @@ impl ConnCfg {
 
     pub(crate) fn get_host(&self) -> Result<Host, WakeComputeError> {
         match self.0.get_hosts() {
-            [tokio_postgres::config::Host::Tcp(s)] => Ok(s.into()),
+            [postgres_client::config::Host::Tcp(s)] => Ok(s.into()),
             // we should not have multiple address or unix addresses.
             _ => Err(WakeComputeError::BadComputeAddress(
                 "invalid compute address".into(),
@@ -160,7 +160,7 @@ impl ConnCfg {
 
         // TODO: This is especially ugly...
         if let Some(replication) = params.get("replication") {
-            use tokio_postgres::config::ReplicationMode;
+            use postgres_client::config::ReplicationMode;
             match replication {
                 "true" | "on" | "yes" | "1" => {
                     self.replication_mode(ReplicationMode::Physical);
@@ -182,7 +182,7 @@ impl ConnCfg {
 }
 
 impl std::ops::Deref for ConnCfg {
-    type Target = tokio_postgres::Config;
+    type Target = postgres_client::Config;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -199,7 +199,7 @@ impl std::ops::DerefMut for ConnCfg {
 impl ConnCfg {
     /// Establish a raw TCP connection to the compute node.
     async fn connect_raw(&self, timeout: Duration) -> io::Result<(SocketAddr, TcpStream, &str)> {
-        use tokio_postgres::config::Host;
+        use postgres_client::config::Host;
 
         // wrap TcpStream::connect with timeout
         let connect_with_timeout = |host, port| {
@@ -224,7 +224,7 @@ impl ConnCfg {
             })
         };
 
-        // We can't reuse connection establishing logic from `tokio_postgres` here,
+        // We can't reuse connection establishing logic from `postgres_client` here,
         // because it has no means for extracting the underlying socket which we
         // require for our business.
         let mut connection_error = None;
@@ -272,7 +272,7 @@ type RustlsStream = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>
 pub(crate) struct PostgresConnection {
     /// Socket connected to a compute node.
     pub(crate) stream:
-        tokio_postgres::maybe_tls_stream::MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
+        postgres_client::maybe_tls_stream::MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
     /// PostgreSQL connection parameters.
     pub(crate) params: std::collections::HashMap<String, String>,
     /// Query cancellation token.
