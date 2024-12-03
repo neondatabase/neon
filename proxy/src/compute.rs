@@ -131,9 +131,11 @@ impl ConnCfg {
     }
 
     /// Apply startup message params to the connection config.
-    pub(crate) fn set_startup_params(&mut self, params: &StartupMessageParams) {
-        let arbitrary_params = false;
-
+    pub(crate) fn set_startup_params(
+        &mut self,
+        params: &StartupMessageParams,
+        arbitrary_params: bool,
+    ) {
         for (k, v) in params.iter() {
             match k {
                 // Only set `user` if it's not present in the config.
@@ -426,7 +428,7 @@ mod tests {
         let params = "project = foo";
         assert_eq!(filtered_options(params).as_deref(), Some("project = foo"));
 
-        let params = "project = foo neon_endpoint_type:read_write   neon_lsn:0/2";
+        let params = "project = foo neon_endpoint_type:read_write   neon_lsn:0/2 neon_proxy_params_compat:true";
         assert_eq!(filtered_options(params).as_deref(), Some("project = foo"));
     }
 }

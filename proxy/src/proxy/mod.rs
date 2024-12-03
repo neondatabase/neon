@@ -338,9 +338,17 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         }
     };
 
+    let params_compat = match &user_info {
+        auth::Backend::ControlPlane(_, info) => {
+            info.info.options.get("proxy_params_compat").is_some()
+        }
+        auth::Backend::Local(_) => false,
+    };
+
     let mut node = connect_to_compute(
         ctx,
         &TcpMechanism {
+            params_compat,
             params: &params,
             locks: &config.connect_compute_locks,
         },
@@ -415,13 +423,24 @@ impl NeonOptions {
             .map(Self::parse_from_iter)
             .unwrap_or_default()
     }
+
     pub(crate) fn parse_options_raw(options: &str) -> Self {
         Self::parse_from_iter(StartupMessageParams::parse_options_raw(options))
     }
 
+    pub(crate) fn get(&self, key: &str) -> Option<SmolStr> {
+        self.0
+            .iter()
+            .find_map(|(k, v)| (k == key).then_some(v))
+            .cloned()
+    }
+
     pub(crate) fn is_ephemeral(&self) -> bool {
-        // Currently, neon endpoint options are all reserved for ephemeral endpoints.
-        !self.0.is_empty()
+        self.0
+            .iter()
+            .filter(|(k, _)| k != "proxy_params_compat")
+            .count()
+            == 0
     }
 
     fn parse_from_iter<'a>(options: impl Iterator<Item = &'a str>) -> Self {
