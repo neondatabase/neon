@@ -1094,6 +1094,13 @@ class NeonEnv:
                 # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
                 # the pageserver taking a long time to start up due to syncfs flushing other tests' data
                 "no_sync": True,
+                # Batching (https://github.com/neondatabase/neon/issues/9377):
+                # enable batching by default in tests and benchmarks.
+                "page_service_pipelining": {
+                    "mode": "pipelined",
+                    "execution": "concurrent-futures",
+                    "max_batch_size": 32,
+                },
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
