@@ -6,7 +6,6 @@ use std::time::Duration;
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
-use postgres_client::config::ReplicationMode;
 use postgres_client::tls::MakeTlsConnect;
 use postgres_client::{CancelToken, RawConnection};
 use postgres_protocol::message::backend::NoticeResponseBody;
@@ -134,49 +133,26 @@ impl ConnCfg {
     /// Apply startup message params to the connection config.
     pub(crate) fn set_startup_params(&mut self, params: &StartupMessageParams) {
         let arbitrary_params = false;
+
         for (k, v) in params.iter() {
             match k {
                 // Only set `user` if it's not present in the config.
                 // Console redirect auth flow takes username from the console's response.
-                "user" => {
-                    if self.get_user().is_none() {
-                        self.user(v);
-                    }
-                }
-                // Only set `dbname` if it's not present in the config.
-                // Console redirect auth flow takes dbname from the console's response.
-                "database" => {
-                    if self.get_dbname().is_none() {
-                        self.user(v);
-                    }
-                }
+                "user" if self.get_user().is_some() => continue,
+                "database" if self.get_dbname().is_some() => continue,
                 "options" => {
                     if let Some(options) = filtered_options(v) {
                         self.options(&options);
                     }
                 }
-                "application_name" => {
-                    self.application_name(v);
+                "user" | "database" | "application_name" | "replication" => {
+                    self.set_param(k, v);
                 }
-                "replication" => match v {
-                    // TODO: This is especially ugly...
-                    "true" | "on" | "yes" | "1" => {
-                        self.replication_mode(ReplicationMode::Physical);
-                    }
-                    "database" => {
-                        self.replication_mode(ReplicationMode::Logical);
-                    }
-                    _other => {}
-                },
 
-                // TODO: extend the list of the forwarded startup parameters.
-                // Currently, tokio-postgres doesn't allow us to pass
-                // arbitrary parameters, but the ones above are a good start.
-                //
-                // This and the reverse params problem can be better addressed
-                // in a bespoke connection machinery (a new library for that sake).
-                _k if arbitrary_params => {
-                    // self.set_param(k, v)
+                // if we allow arbitrary params, then we forward them through.
+                // this is a flag for a period of backwards compatibility
+                k if arbitrary_params => {
+                    self.set_param(k, v);
                 }
                 _ => {}
             }

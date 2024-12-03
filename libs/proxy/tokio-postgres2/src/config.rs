@@ -75,7 +75,7 @@ pub struct Config {
     pub(crate) ssl_mode: SslMode,
     pub(crate) connect_timeout: Option<Duration>,
     pub(crate) channel_binding: ChannelBinding,
-    pub(crate) server_settings: StartupMessageParams,
+    pub(crate) server_params: StartupMessageParams,
 }
 
 impl Config {
@@ -93,7 +93,7 @@ impl Config {
             connect_timeout: None,
             channel_binding: ChannelBinding::Prefer,
             // replication_mode: None,
-            server_settings: StartupMessageParams::default(),
+            server_params: StartupMessageParams::default(),
         }
     }
 
@@ -101,14 +101,14 @@ impl Config {
     ///
     /// Required.
     pub fn user(&mut self, user: &str) -> &mut Config {
-        self.server_settings.insert("user", user).unwrap();
+        self.server_params.insert("user", user).unwrap();
         self
     }
 
     /// Gets the user to authenticate with, if one has been configured with
     /// the `user` method.
     pub fn get_user(&self) -> Option<&str> {
-        self.server_settings.get("user")
+        self.server_params.get("user")
     }
 
     /// Sets the password to authenticate with.
@@ -144,7 +144,7 @@ impl Config {
     ///
     /// Defaults to the user.
     pub fn dbname(&mut self, dbname: &str) -> &mut Config {
-        self.server_settings
+        self.server_params
             .insert("database", dbname)
             .expect("dbname must not have nulls");
         self
@@ -153,7 +153,7 @@ impl Config {
     /// Gets the name of the database to connect to, if one has been configured
     /// with the `dbname` method.
     pub fn get_dbname(&self) -> Option<&str> {
-        self.server_settings.get("database")
+        self.server_params.get("database")
     }
 
     /// Sets command line options used to configure the server.
@@ -168,18 +168,11 @@ impl Config {
         self.options.as_deref()
     }
 
-    /// Sets the value of the `application_name` runtime parameter.
-    pub fn application_name(&mut self, application_name: &str) -> &mut Config {
-        self.server_settings
-            .insert("application_name", application_name)
-            .expect("dbname must not have nulls");
+    pub fn set_param(&mut self, name: &str, value: &str) -> &mut Config {
+        self.server_params
+            .insert(name, value)
+            .expect("name or value must not have null bytes");
         self
-    }
-
-    /// Gets the value of the `application_name` runtime parameter, if it has
-    /// been set with the `application_name` method.
-    pub fn get_application_name(&self) -> Option<&str> {
-        self.server_settings.get("application_name")
     }
 
     /// Sets the SSL configuration.
@@ -233,27 +226,6 @@ impl Config {
         self.channel_binding
     }
 
-    /// Set replication mode.
-    pub fn replication_mode(&mut self, replication_mode: ReplicationMode) -> &mut Config {
-        let value = match replication_mode {
-            ReplicationMode::Physical => "true",
-            ReplicationMode::Logical => "database",
-        };
-        self.server_settings
-            .insert("replication", value)
-            .expect("dbname must not have nulls");
-        self
-    }
-
-    /// Get replication mode.
-    pub fn get_replication_mode(&self) -> Option<ReplicationMode> {
-        match self.server_settings.get("replication") {
-            Some("true") => Some(ReplicationMode::Physical),
-            Some("database") => Some(ReplicationMode::Logical),
-            _ => None,
-        }
-    }
-
     /// Opens a connection to a PostgreSQL database.
     ///
     /// Requires the `runtime` Cargo feature (enabled by default).
@@ -291,17 +263,14 @@ impl fmt::Debug for Config {
         }
 
         f.debug_struct("Config")
-            .field("user", &self.get_user())
             .field("password", &self.password.as_ref().map(|_| Redaction {}))
-            .field("dbname", &self.get_dbname())
             .field("options", &self.options)
-            .field("application_name", &self.get_application_name())
             .field("ssl_mode", &self.ssl_mode)
             .field("host", &self.host)
             .field("port", &self.port)
             .field("connect_timeout", &self.connect_timeout)
             .field("channel_binding", &self.channel_binding)
-            .field("replication", &self.get_replication_mode())
+            .field("server_params", &self.server_params)
             .finish()
     }
 }

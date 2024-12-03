@@ -119,7 +119,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut params = config.server_settings.clone();
+    let mut params = config.server_params.clone();
     params
         .insert("client_encoding", "UTF8")
         .expect("value does not contain null");
