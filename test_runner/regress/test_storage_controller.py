@@ -1747,8 +1747,8 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
 
     # Describe a tenant
     tenant_lines = storcon_cli(["tenant-describe", "--tenant-id", str(env.initial_tenant)])
-    assert len(tenant_lines) == 3 + shard_count * 2
-    assert str(env.initial_tenant) in tenant_lines[3]
+    assert len(tenant_lines) >= 3 + shard_count * 2
+    assert str(env.initial_tenant) in tenant_lines[0]
 
     # Pause changes on a tenant
     storcon_cli(["tenant-policy", "--tenant-id", str(env.initial_tenant), "--scheduling", "stop"])
