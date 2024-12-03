@@ -19,38 +19,18 @@ pub async fn connect<T>(
 where
     T: MakeTlsConnect<TcpStream>,
 {
-    if config.host.is_empty() {
-        return Err(Error::config("host missing".into()));
+    let hostname = match &config.host {
+        Host::Tcp(host) => host.as_str(),
+    };
+
+    let tls = tls
+        .make_tls_connect(hostname)
+        .map_err(|e| Error::tls(e.into()))?;
+
+    match connect_once(&config.host, config.port, tls, config).await {
+        Ok((client, connection)) => Ok((client, connection)),
+        Err(e) => Err(e),
     }
-
-    if config.port.len() > 1 && config.port.len() != config.host.len() {
-        return Err(Error::config("invalid number of ports".into()));
-    }
-
-    let mut error = None;
-    for (i, host) in config.host.iter().enumerate() {
-        let port = config
-            .port
-            .get(i)
-            .or_else(|| config.port.first())
-            .copied()
-            .unwrap_or(5432);
-
-        let hostname = match host {
-            Host::Tcp(host) => host.as_str(),
-        };
-
-        let tls = tls
-            .make_tls_connect(hostname)
-            .map_err(|e| Error::tls(e.into()))?;
-
-        match connect_once(host, port, tls, config).await {
-            Ok((client, connection)) => return Ok((client, connection)),
-            Err(e) => error = Some(e),
-        }
-    }
-
-    Err(error.unwrap())
 }
 
 async fn connect_once<T>(

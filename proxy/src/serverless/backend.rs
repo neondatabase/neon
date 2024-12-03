@@ -499,7 +499,7 @@ impl ConnectMechanism for TokioMechanism {
         node_info: &CachedNodeInfo,
         timeout: Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
-        let host = node_info.config.get_host()?;
+        let host = node_info.config.get_host();
         let permit = self.locks.get_permit(&host).await?;
 
         let mut config = (*node_info.config).clone();
@@ -549,16 +549,12 @@ impl ConnectMechanism for HyperMechanism {
         node_info: &CachedNodeInfo,
         timeout: Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
-        let host = node_info.config.get_host()?;
+        let host = node_info.config.get_host();
         let permit = self.locks.get_permit(&host).await?;
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
-        let port = *node_info.config.get_ports().first().ok_or_else(|| {
-            HttpConnError::WakeCompute(WakeComputeError::BadComputeAddress(
-                "local-proxy port missing on compute address".into(),
-            ))
-        })?;
+        let port = node_info.config.get_port();
         let res = connect_http2(&host, port, timeout).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
