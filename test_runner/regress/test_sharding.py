@@ -519,6 +519,13 @@ def test_sharding_split_smoke(
     # We will have 2 shards per pageserver once done (including secondaries)
     neon_env_builder.num_pageservers = split_shard_count
 
+    # Two AZs
+    def assign_az(ps_cfg):
+        az = f"az-{(ps_cfg['id'] - 1) % 2}"
+        ps_cfg["availability_zone"] = az
+
+    neon_env_builder.pageserver_config_override = assign_az
+
     # 1MiB stripes: enable getting some meaningful data distribution without
     # writing large quantities of data in this test.  The stripe size is given
     # in number of 8KiB pages.
