@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-testing = []
+testing = ["dep:tokio-postgres"]
 
 [dependencies]
 ahash.workspace = true
@@ -82,6 +82,7 @@ subtle.workspace = true
 thiserror.workspace = true
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl = { workspace = true, features = ["use_std"] }
+tokio-postgres = { workspace = true, optional = true }
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["signal"] }
@@ -119,3 +120,4 @@ rcgen.workspace = true
 rstest.workspace = true
 walkdir.workspace = true
 rand_distr = "0.4"
+tokio-postgres.workspace = true
