@@ -21,9 +21,9 @@ def setup(neon_api: NeonAPI):
     """
     Setup and teardown of the tests
     """
-    project = os.getenv("PROJECT_ID")
-    assert project is not None, "PROJECT_ID undefined"
-    branches = neon_api.get_branches(project)
+    project_id = os.getenv("PROJECT_ID")
+    assert project_id is not None, "PROJECT_ID undefined"
+    branches = neon_api.get_branches(project_id)
     log.info("Branches: %s", branches)
     primary_branch_id = None
     for branch in branches["branches"]:
@@ -31,18 +31,26 @@ def setup(neon_api: NeonAPI):
             primary_branch_id = branch["id"]
             break
     assert primary_branch_id is not None, "Cannot get the primary branch"
-    current_branch_id = neon_api.create_branch_with_endpoint(
-        project, primary_branch_id, datetime.now().strftime("test-%y%m%d%H%M")
-    )["branch"]["id"]
-    uri = neon_api.get_connection_uri(project, current_branch_id)["uri"]
+    primary_endpoint = neon_api.get_endpoints(project_id, primary_branch_id)["endpoints"][0]
+    resp = neon_api.create_branch_with_endpoint(
+        project_id, primary_branch_id, datetime.now().strftime("test-%y%m%d%H%M")
+    )
+    current_branch_id = resp["branch"]["id"]
     log.info("Branch ID: %s", current_branch_id)
+    current_ep = resp["endpoints"][0]
+    current_cfg = {"settings": {"pg_settings": {}}}
+    for k,v in primary_endpoint["settings"]["pg_settings"].items():
+        current_cfg["settings"]["pg_settings"][k] = v
+    neon_api.configure_endpoint(project_id, current_ep["id"], {"endpoint": current_cfg})
+    neon_api.wait_for_operation_to_finish(project_id)
+    uri = neon_api.get_connection_uri(project_id, current_branch_id)["uri"]
 
     pgconn = PgConnectParam(uri)
 
     yield pgconn
 
     log.info("Delete branch %s", current_branch_id)
-    neon_api.delete_branch(project, current_branch_id)
+    neon_api.delete_branch(project_id, current_branch_id)
 
 
 @pytest.mark.timeout(7200)
