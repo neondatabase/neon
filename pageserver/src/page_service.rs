@@ -574,6 +574,41 @@ enum BatchedFeMessage {
     },
 }
 
+impl BatchedFeMessage {
+    async fn throttle(&mut self, cancel: &CancellationToken) -> Result<(), QueryError> {
+        let (shard, tokens, timers) = match self {
+            BatchedFeMessage::Exists { shard, timer, .. }
+            | BatchedFeMessage::Nblocks { shard, timer, .. }
+            | BatchedFeMessage::DbSize { shard, timer, .. }
+            | BatchedFeMessage::GetSlruSegment { shard, timer, .. } => {
+                (
+                    shard,
+                    // 1 token is probably under-estimating because these
+                    // request handlers typically do several Timeline::get calls.
+                    1,
+                    itertools::Either::Left(std::iter::once(timer)),
+                )
+            }
+            BatchedFeMessage::GetPage { shard, pages, .. } => (
+                shard,
+                pages.len(),
+                itertools::Either::Right(pages.iter_mut().map(|(_, _, timer)| timer)),
+            ),
+            BatchedFeMessage::RespondError { .. } => return Ok(()),
+        };
+        let throttled = tokio::select! {
+            throttled = shard.pagestream_throttle.throttle(tokens) => { throttled }
+            _ = cancel.cancelled() => {
+                return Err(QueryError::Shutdown);
+            }
+        };
+        for timer in timers {
+            timer.deduct_throttle(&throttled);
+        }
+        Ok(())
+    }
+}
+
 impl PageServerHandler {
     pub fn new(
         tenant_manager: Arc<TenantManager>,
@@ -1157,13 +1192,18 @@ impl PageServerHandler {
                 Ok(msg) => msg,
                 Err(e) => break e,
             };
-            let msg = match msg {
+            let mut msg = match msg {
                 Some(msg) => msg,
                 None => {
                     debug!("pagestream subprotocol end observed");
                     return ((pgb_reader, timeline_handles), Ok(()));
                 }
             };
+
+            if let Err(cancelled) = msg.throttle(&self.cancel).await {
+                break cancelled;
+            }
+
             let err = self
                 .pagesteam_handle_batched_message(pgb_writer, msg, &cancel, ctx)
                 .await;
@@ -1321,12 +1361,13 @@ impl PageServerHandler {
                             return Ok(());
                         }
                     };
-                    let batch = match batch {
+                    let mut batch = match batch {
                         Ok(batch) => batch,
                         Err(e) => {
                             return Err(e);
                         }
                     };
+                    batch.throttle(&self.cancel).await?;
                     self.pagesteam_handle_batched_message(pgb_writer, batch, &cancel, &ctx)
                         .await?;
                 }
