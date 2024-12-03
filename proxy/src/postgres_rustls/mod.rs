@@ -1,10 +1,10 @@
 use std::convert::TryFrom;
 use std::sync::Arc;
 
+use postgres_client::tls::MakeTlsConnect;
 use rustls::pki_types::ServerName;
 use rustls::ClientConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_postgres::tls::MakeTlsConnect;
 
 mod private {
     use std::future::Future;
@@ -12,9 +12,9 @@ mod private {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
+    use postgres_client::tls::{ChannelBinding, TlsConnect};
     use rustls::pki_types::ServerName;
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-    use tokio_postgres::tls::{ChannelBinding, TlsConnect};
     use tokio_rustls::client::TlsStream;
     use tokio_rustls::TlsConnector;
 
@@ -59,7 +59,7 @@ mod private {
 
     pub struct RustlsStream<S>(TlsStream<S>);
 
-    impl<S> tokio_postgres::tls::TlsStream for RustlsStream<S>
+    impl<S> postgres_client::tls::TlsStream for RustlsStream<S>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {

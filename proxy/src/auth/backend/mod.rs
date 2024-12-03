@@ -11,8 +11,8 @@ pub use console_redirect::ConsoleRedirectBackend;
 pub(crate) use console_redirect::ConsoleRedirectError;
 use ipnet::{Ipv4Net, Ipv6Net};
 use local::LocalBackend;
+use postgres_client::config::AuthKeys;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_postgres::config::AuthKeys;
 use tracing::{debug, info, warn};
 
 use crate::auth::credentials::check_peer_addr_is_in_list;

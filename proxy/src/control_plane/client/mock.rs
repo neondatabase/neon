@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use futures::TryFutureExt;
 use thiserror::Error;
-use tokio_postgres::config::SslMode;
 use tokio_postgres::Client;
 use tracing::{error, info, info_span, warn, Instrument};
 
@@ -165,7 +164,7 @@ impl MockControlPlane {
         config
             .host(self.endpoint.host_str().unwrap_or("localhost"))
             .port(self.endpoint.port().unwrap_or(5432))
-            .ssl_mode(SslMode::Disable);
+            .ssl_mode(postgres_client::config::SslMode::Disable);
 
         let node = NodeInfo {
             config,

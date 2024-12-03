@@ -227,7 +227,7 @@ pub(crate) async fn validate_password_and_exchange(
             };
 
             Ok(sasl::Outcome::Success(ComputeCredentialKeys::AuthKeys(
-                tokio_postgres::config::AuthKeys::ScramSha256(keys),
+                postgres_client::config::AuthKeys::ScramSha256(keys),
             )))
         }
     }
