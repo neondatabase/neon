@@ -1,5 +1,4 @@
 use std::{
-    str::FromStr,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -8,11 +7,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use enumset::EnumSet;
-use tracing::error;
 use utils::leaky_bucket::{LeakyBucketConfig, RateLimiter};
-
-use crate::{context::RequestContext, task_mgr::TaskKind};
 
 /// Throttle for `async` functions.
 ///
@@ -35,7 +30,7 @@ pub struct Throttle<M: Metric> {
 }
 
 pub struct Inner {
-    task_kinds: EnumSet<TaskKind>,
+    enabled: bool,
     rate_limiter: Arc<RateLimiter>,
 }
 
@@ -79,26 +74,12 @@ where
     }
     fn new_inner(config: Config) -> Inner {
         let Config {
-            task_kinds,
+            enabled,
             initial,
             refill_interval,
             refill_amount,
             max,
         } = config;
-        let task_kinds: EnumSet<TaskKind> = task_kinds
-            .iter()
-            .filter_map(|s| match TaskKind::from_str(s) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    // TODO: avoid this failure mode
-                    error!(
-                        "cannot parse task kind, ignoring for rate limiting {}",
-                        utils::error::report_compact_sources(&e)
-                    );
-                    None
-                }
-            })
-            .collect();
 
         // steady rate, we expect `refill_amount` requests per `refill_interval`.
         // dividing gives us the rps.
@@ -112,7 +93,7 @@ where
         let rate_limiter = RateLimiter::with_initial_tokens(config, f64::from(initial_tokens));
 
         Inner {
-            task_kinds,
+            enabled: enabled.is_enabled(),
             rate_limiter: Arc::new(rate_limiter),
         }
     }
@@ -141,11 +122,13 @@ where
         self.inner.load().rate_limiter.steady_rps()
     }
 
-    pub async fn throttle(&self, ctx: &RequestContext, key_count: usize) -> Option<Duration> {
+    pub async fn throttle(&self, key_count: usize) -> Option<Duration> {
         let inner = self.inner.load_full(); // clones the `Inner` Arc
-        if !inner.task_kinds.contains(ctx.task_kind()) {
+
+        if !inner.enabled {
             return None;
-        };
+        }
+
         let start = std::time::Instant::now();
 
         self.metric.accounting_start();
