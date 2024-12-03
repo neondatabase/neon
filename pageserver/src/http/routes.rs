@@ -56,9 +56,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::auth::JwtAuth;
 use utils::failpoint_support::failpoints_handler;
-use utils::http::endpoint::profile_cpu_handler;
-use utils::http::endpoint::prometheus_metrics_handler;
-use utils::http::endpoint::request_span;
+use utils::http::endpoint::{
+    profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
+};
 use utils::http::request::must_parse_query_param;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
@@ -155,6 +155,7 @@ impl State {
             "/swagger.yml",
             "/metrics",
             "/profile/cpu",
+            "/profile/heap",
         ];
         Ok(Self {
             conf,
@@ -3203,6 +3204,7 @@ pub fn make_router(
         .data(state)
         .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
         .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
+        .get("/profile/heap", |r| request_span(r, profile_heap_handler))
         .get("/v1/status", |r| api_handler(r, status_handler))
         .put("/v1/failpoints", |r| {
             testing_api_handler("manage failpoints", r, failpoints_handler)

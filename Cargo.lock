@@ -301,7 +301,7 @@ dependencies = [
  "aws-smithy-types",
  "aws-types",
  "bytes",
- "fastrand 2.0.0",
+ "fastrand 2.2.0",
  "hex",
  "http 0.2.9",
  "hyper 0.14.30",
@@ -341,7 +341,7 @@ dependencies = [
  "aws-smithy-types",
  "aws-types",
  "bytes",
- "fastrand 2.0.0",
+ "fastrand 2.2.0",
  "http 0.2.9",
  "http-body 0.4.5",
  "once_cell",
@@ -417,7 +417,7 @@ dependencies = [
  "aws-smithy-xml",
  "aws-types",
  "bytes",
- "fastrand 2.0.0",
+ "fastrand 2.2.0",
  "hex",
  "hmac",
  "http 0.2.9",
@@ -621,7 +621,7 @@ dependencies = [
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "bytes",
- "fastrand 2.0.0",
+ "fastrand 2.2.0",
  "h2 0.3.26",
  "http 0.2.9",
  "http-body 0.4.5",
@@ -2054,9 +2054,9 @@ dependencies = [
 
 [[package]]
 name = "fastrand"
-version = "2.0.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6999dc1837253364c2ebb0704ba97994bd874e8f195d665c50b7548f6ea92764"
+checksum = "486f806e73c5707928240ddc295403b1b93c96a02038563881c4a2fd84b81ac4"
 
 [[package]]
 name = "ff"
@@ -2913,6 +2913,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49f1f14873335454500d59611f1cf4a4b0f786f9ac11f4312a78e4cf2566695b"
 
 [[package]]
+name = "jemalloc_pprof"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a883828bd6a4b957cd9f618886ff19e5f3ebd34e06ba0e855849e049fef32fb"
+dependencies = [
+ "anyhow",
+ "libc",
+ "mappings",
+ "once_cell",
+ "pprof_util",
+ "tempfile",
+ "tikv-jemalloc-ctl",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "jobserver"
 version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3022,9 +3039,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.150"
+version = "0.2.167"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89d92a4743f9a61002fae18374ed11e7973f530cb3a3255fb354818118b2203c"
+checksum = "09d6582e104315a817dff97f75133544b2e094ee22447d2acf4a74e189ba06fc"
 
 [[package]]
 name = "libloading"
@@ -3044,9 +3061,9 @@ checksum = "4ec2a862134d2a7d32d7983ddcdd1c4923530833c9f2ea1a44fc5fa473989058"
 
 [[package]]
 name = "linux-raw-sys"
-version = "0.4.13"
+version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01cda141df6706de531b6c46c3a33ecca755538219bd484262fa09410c13539c"
+checksum = "78b3ae25bc7c8c38cec158d1f2757ee79e9b3740fbc7ccf0e59e4b08d793fa89"
 
 [[package]]
 name = "linux-raw-sys"
@@ -3077,6 +3094,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3262e75e648fce39813cb56ac41f3c3e3f65217ebf3844d818d1f9398cfb0dc"
 dependencies = [
  "hashbrown 0.14.5",
+]
+
+[[package]]
+name = "mappings"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce9229c438fbf1c333926e2053c4c091feabbd40a1b590ec62710fea2384af9e"
+dependencies = [
+ "anyhow",
+ "libc",
+ "once_cell",
+ "pprof_util",
+ "tracing",
 ]
 
 [[package]]
@@ -3346,6 +3376,7 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b05180d69e3da0e530ba2a1dae5110317e49e3b7f3d41be227dc5f92e49ee7af"
 dependencies = [
+ "num-bigint",
  "num-complex",
  "num-integer",
  "num-iter",
@@ -3434,6 +3465,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0638a1c9d0a3c0914158145bc76cff373a75a627e6ecbfb71cbe6f453a5a19b0"
 dependencies = [
  "autocfg",
+ "num-bigint",
  "num-integer",
  "num-traits",
 ]
@@ -3497,9 +3529,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.18.0"
+version = "1.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd8b5dd2ae5ed71462c540258bedcb51965123ad7e7ccf4b9a8cafaa4a63576d"
+checksum = "1261fe7e33c73b354eab43b1273a57c8f967d0391e80353e51f764ac02cf6775"
 
 [[package]]
 name = "oorandom"
@@ -4296,6 +4328,19 @@ dependencies = [
  "symbolic-demangle",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "pprof_util"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65c568b3f8c1c37886ae07459b1946249e725c315306b03be5632f84c239f781"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "num",
+ "paste",
+ "prost",
 ]
 
 [[package]]
@@ -5220,14 +5265,14 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.38.28"
+version = "0.38.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72e572a5e8ca657d7366229cdde4bd14c4eb5499a9573d4d366fe1b599daa316"
+checksum = "d7f649912bc1495e167a6edee79151c84b1bad49748cb4f1f1167f459f6224f6"
 dependencies = [
  "bitflags 2.4.1",
  "errno",
  "libc",
- "linux-raw-sys 0.4.13",
+ "linux-raw-sys 0.4.14",
  "windows-sys 0.52.0",
 ]
 
@@ -6251,13 +6296,13 @@ dependencies = [
 
 [[package]]
 name = "tempfile"
-version = "3.9.0"
+version = "3.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01ce4141aa927a6d1bd34a041795abd0db1cccba5d5f24b009f694bdf3a1f3fa"
+checksum = "28cce251fcbc87fac86a866eeb0d6c2d536fc16d06f184bb61aeae11aa4cee0c"
 dependencies = [
  "cfg-if",
- "fastrand 2.0.0",
- "redox_syscall 0.4.1",
+ "fastrand 2.2.0",
+ "once_cell",
  "rustix",
  "windows-sys 0.52.0",
 ]
@@ -7058,6 +7103,7 @@ dependencies = [
  "hex-literal",
  "humantime",
  "hyper 0.14.30",
+ "jemalloc_pprof",
  "jsonwebtoken",
  "metrics",
  "nix 0.27.1",
@@ -7644,8 +7690,12 @@ dependencies = [
  "memchr",
  "nix 0.26.4",
  "nom",
+ "num",
  "num-bigint",
+ "num-complex",
  "num-integer",
+ "num-iter",
+ "num-rational",
  "num-traits",
  "once_cell",
  "parquet",
@@ -7669,6 +7719,7 @@ dependencies = [
  "subtle",
  "syn 2.0.90",
  "sync_wrapper 0.1.2",
+ "tikv-jemalloc-ctl",
  "tikv-jemalloc-sys",
  "time",
  "time-macros",
