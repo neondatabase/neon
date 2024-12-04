@@ -212,7 +212,7 @@ def test_tenant_reattach_while_busy(
         nonlocal updates_started, updates_finished, updates_to_perform
 
         # Wait until we have performed some updates
-        wait_until(20, 0.5, lambda: updates_finished > 500)
+        wait_until(lambda: updates_finished > 500)
 
         log.info("Detaching tenant")
         pageserver_http.tenant_detach(tenant_id)
@@ -512,7 +512,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         )
         assert only_int(active) == 0 and only_int(broken) == 1 and only_int(broken_set) == 1
 
-    wait_until(10, 0.5, found_broken)
+    wait_until(found_broken)
 
     client.tenant_detach(env.initial_tenant)
 
@@ -524,7 +524,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         )
         assert only_int(broken) == 0 and len(broken_set) == 0
 
-    wait_until(10, 0.5, found_cleaned_up)
+    wait_until(found_cleaned_up)
 
     env.pageserver.tenant_attach(env.initial_tenant)
 
@@ -536,4 +536,4 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         )
         assert only_int(active) == 1 and len(broken_set) == 0
 
-    wait_until(10, 0.5, found_active)
+    wait_until(found_active)

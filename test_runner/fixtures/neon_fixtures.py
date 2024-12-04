@@ -1095,6 +1095,17 @@ class NeonEnv:
                 # the pageserver taking a long time to start up due to syncfs flushing other tests' data
                 "no_sync": True,
             }
+
+            # Batching (https://github.com/neondatabase/neon/issues/9377):
+            # enable batching by default in tests and benchmarks.
+            # Compat tests are exempt because old versions fail to parse the new config.
+            if not config.compatibility_neon_binpath:
+                ps_cfg["page_service_pipelining"] = {
+                    "mode": "pipelined",
+                    "execution": "concurrent-futures",
+                    "max_batch_size": 32,
+                }
+
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
             if config.pageserver_default_tenant_config_compaction_algorithm is not None:
@@ -1736,7 +1747,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         def storage_controller_ready():
             assert self.ready() is True
 
-        wait_until(30, 1, storage_controller_ready)
+        wait_until(storage_controller_ready)
         return time.time() - t1
 
     def attach_hook_issue(
@@ -2574,7 +2585,7 @@ class NeonPageserver(PgProtocol, LogUtils):
             log.info(f"any_unstable={any_unstable}")
             assert not any_unstable
 
-        wait_until(20, 0.5, complete)
+        wait_until(complete)
 
     def __enter__(self) -> Self:
         return self
@@ -3801,12 +3812,11 @@ class Endpoint(PgProtocol, LogUtils):
                     assert size_to_bytes(size) >= size_to_bytes(
                         "1MB"
                     ), "LFC size cannot be set less than 1MB"
-            # shared_buffers = 512kB to make postgres use LFC intensively
-            # neon.max_file_cache_size and neon.file_cache size limit are
-            # set to 1MB because small LFC is better for testing (helps to find more problems)
+            lfc_path_escaped = str(lfc_path).replace("'", "''")
             config_lines = [
-                "shared_buffers = 512kB",
-                f"neon.file_cache_path = '{self.lfc_path()}'",
+                f"neon.file_cache_path = '{lfc_path_escaped}'",
+                # neon.max_file_cache_size and neon.file_cache size limits are
+                # set to 1MB because small LFC is better for testing (helps to find more problems)
                 "neon.max_file_cache_size = 1MB",
                 "neon.file_cache_size_limit = 1MB",
             ] + config_lines
@@ -3972,7 +3982,7 @@ class Endpoint(PgProtocol, LogUtils):
                 migration_id: int = cur.fetchall()[0][0]
                 assert migration_id >= num_migrations
 
-            wait_until(20, 0.5, check_migrations_done)
+            wait_until(check_migrations_done)
 
     # Mock the extension part of spec passed from control plane for local testing
     # endpooint.rs adds content of this file as a part of the spec.json
@@ -4488,12 +4498,10 @@ class Safekeeper(LogUtils):
             )
             assert stat.remote_consistent_lsn >= lsn and stat.backup_lsn >= lsn.segment_lsn()
 
-        # xxx: max wait is long because we might be waiting for reconnection from
-        # pageserver to this safekeeper
-        wait_until(30, 1, are_lsns_advanced)
+        wait_until(are_lsns_advanced)
         client.checkpoint(tenant_id, timeline_id)
         if wait_wal_removal:
-            wait_until(30, 1, are_segments_removed)
+            wait_until(are_segments_removed)
 
     def wait_until_paused(self, failpoint: str):
         msg = f"at failpoint {failpoint}"
@@ -4502,7 +4510,7 @@ class Safekeeper(LogUtils):
             log.info(f"waiting for hitting failpoint {failpoint}")
             self.assert_log_contains(msg)
 
-        wait_until(20, 0.5, paused)
+        wait_until(paused)
 
 
 class NeonBroker(LogUtils):

@@ -1574,13 +1574,20 @@ pub(crate) mod tests {
         )
     }
 
-    fn make_test_tenant(
+    pub(crate) fn make_test_tenant(
         policy: PlacementPolicy,
         shard_count: ShardCount,
         preferred_az: Option<AvailabilityZone>,
     ) -> Vec<TenantShard> {
-        let tenant_id = TenantId::generate();
+        make_test_tenant_with_id(TenantId::generate(), policy, shard_count, preferred_az)
+    }
 
+    pub(crate) fn make_test_tenant_with_id(
+        tenant_id: TenantId,
+        policy: PlacementPolicy,
+        shard_count: ShardCount,
+        preferred_az: Option<AvailabilityZone>,
+    ) -> Vec<TenantShard> {
         (0..shard_count.count())
             .map(|i| {
                 let shard_number = ShardNumber(i);

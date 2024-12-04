@@ -22,13 +22,13 @@ use indexmap::IndexMap;
 use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
 use p256::ecdsa::{Signature, SigningKey};
 use parking_lot::RwLock;
+use postgres_client::tls::NoTlsStream;
+use postgres_client::types::ToSql;
+use postgres_client::AsyncMessage;
 use serde_json::value::RawValue;
 use signature::Signer;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
-use tokio_postgres::tls::NoTlsStream;
-use tokio_postgres::types::ToSql;
-use tokio_postgres::AsyncMessage;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
@@ -164,7 +164,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
-    mut connection: tokio_postgres::Connection<TcpStream, NoTlsStream>,
+    mut connection: postgres_client::Connection<TcpStream, NoTlsStream>,
     key: SigningKey,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
@@ -280,7 +280,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     )
 }
 
-impl ClientInnerCommon<tokio_postgres::Client> {
+impl ClientInnerCommon<postgres_client::Client> {
     pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), HttpConnError> {
         if let ClientDataEnum::Local(local_data) = &mut self.data {
             local_data.jti += 1;

@@ -669,7 +669,7 @@ jobs:
             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
       - name: Build neon extensions test image
-        if: matrix.version.pg == 'v16'
+        if: matrix.version.pg >= 'v16'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -684,8 +684,7 @@ jobs:
           pull: true
           file: compute/compute-node.Dockerfile
           target: neon-pg-ext-test
-          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           tags: |
             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
@@ -708,7 +707,7 @@ jobs:
           push: true
           pull: true
           file: compute/compute-node.Dockerfile
-          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
+          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-tools-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
           tags: |
             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
@@ -744,7 +743,7 @@ jobs:
                                              neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
       - name: Create multi-arch neon-test-extensions image
-        if: matrix.version.pg == 'v16'
+        if: matrix.version.pg >= 'v16'
         run: |
           docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
                                           -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }} \
@@ -833,6 +832,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [ x64, arm64 ]
+        pg_version: [v16, v17]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
@@ -871,7 +871,10 @@ jobs:
 
       - name: Verify docker-compose example and test extensions
         timeout-minutes: 20
-        run: env TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
+        env:
+          TAG: ${{needs.tag.outputs.build-tag}}
+          TEST_VERSION_ONLY: ${{ matrix.pg_version }}
+        run: ./docker-compose/docker_compose_test.sh
 
       - name: Print logs and clean up
         if: always()

@@ -2,14 +2,13 @@
 
 use crate::connect::connect;
 use crate::connect_raw::connect_raw;
+use crate::connect_raw::RawConnection;
 use crate::tls::MakeTlsConnect;
 use crate::tls::TlsConnect;
 use crate::{Client, Connection, Error};
-use std::borrow::Cow;
+use std::fmt;
 use std::str;
-use std::str::FromStr;
 use std::time::Duration;
-use std::{error, fmt, iter, mem};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub use postgres_protocol2::authentication::sasl::ScramKeys;
@@ -147,6 +146,9 @@ pub enum AuthKeys {
 /// ```
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
+    pub(crate) host: Host,
+    pub(crate) port: u16,
+
     pub(crate) user: Option<String>,
     pub(crate) password: Option<Vec<u8>>,
     pub(crate) auth_keys: Option<Box<AuthKeys>>,
@@ -154,8 +156,6 @@ pub struct Config {
     pub(crate) options: Option<String>,
     pub(crate) application_name: Option<String>,
     pub(crate) ssl_mode: SslMode,
-    pub(crate) host: Vec<Host>,
-    pub(crate) port: Vec<u16>,
     pub(crate) connect_timeout: Option<Duration>,
     pub(crate) target_session_attrs: TargetSessionAttrs,
     pub(crate) channel_binding: ChannelBinding,
@@ -163,16 +163,12 @@ pub struct Config {
     pub(crate) max_backend_message_size: Option<usize>,
 }
 
-impl Default for Config {
-    fn default() -> Config {
-        Config::new()
-    }
-}
-
 impl Config {
     /// Creates a new configuration.
-    pub fn new() -> Config {
+    pub fn new(host: String, port: u16) -> Config {
         Config {
+            host: Host::Tcp(host),
+            port,
             user: None,
             password: None,
             auth_keys: None,
@@ -180,8 +176,6 @@ impl Config {
             options: None,
             application_name: None,
             ssl_mode: SslMode::Prefer,
-            host: vec![],
-            port: vec![],
             connect_timeout: None,
             target_session_attrs: TargetSessionAttrs::Any,
             channel_binding: ChannelBinding::Prefer,
@@ -284,32 +278,14 @@ impl Config {
         self.ssl_mode
     }
 
-    /// Adds a host to the configuration.
-    ///
-    /// Multiple hosts can be specified by calling this method multiple times, and each will be tried in order.
-    pub fn host(&mut self, host: &str) -> &mut Config {
-        self.host.push(Host::Tcp(host.to_string()));
-        self
-    }
-
     /// Gets the hosts that have been added to the configuration with `host`.
-    pub fn get_hosts(&self) -> &[Host] {
+    pub fn get_host(&self) -> &Host {
         &self.host
     }
 
-    /// Adds a port to the configuration.
-    ///
-    /// Multiple ports can be specified by calling this method multiple times. There must either be no ports, in which
-    /// case the default of 5432 is used, a single port, in which it is used for all hosts, or the same number of ports
-    /// as hosts.
-    pub fn port(&mut self, port: u16) -> &mut Config {
-        self.port.push(port);
-        self
-    }
-
     /// Gets the ports that have been added to the configuration with `port`.
-    pub fn get_ports(&self) -> &[u16] {
-        &self.port
+    pub fn get_port(&self) -> u16 {
+        self.port
     }
 
     /// Sets the timeout applied to socket-level connection attempts.
@@ -379,99 +355,6 @@ impl Config {
         self.max_backend_message_size
     }
 
-    fn param(&mut self, key: &str, value: &str) -> Result<(), Error> {
-        match key {
-            "user" => {
-                self.user(value);
-            }
-            "password" => {
-                self.password(value);
-            }
-            "dbname" => {
-                self.dbname(value);
-            }
-            "options" => {
-                self.options(value);
-            }
-            "application_name" => {
-                self.application_name(value);
-            }
-            "sslmode" => {
-                let mode = match value {
-                    "disable" => SslMode::Disable,
-                    "prefer" => SslMode::Prefer,
-                    "require" => SslMode::Require,
-                    _ => return Err(Error::config_parse(Box::new(InvalidValue("sslmode")))),
-                };
-                self.ssl_mode(mode);
-            }
-            "host" => {
-                for host in value.split(',') {
-                    self.host(host);
-                }
-            }
-            "port" => {
-                for port in value.split(',') {
-                    let port = if port.is_empty() {
-                        5432
-                    } else {
-                        port.parse()
-                            .map_err(|_| Error::config_parse(Box::new(InvalidValue("port"))))?
-                    };
-                    self.port(port);
-                }
-            }
-            "connect_timeout" => {
-                let timeout = value
-                    .parse::<i64>()
-                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("connect_timeout"))))?;
-                if timeout > 0 {
-                    self.connect_timeout(Duration::from_secs(timeout as u64));
-                }
-            }
-            "target_session_attrs" => {
-                let target_session_attrs = match value {
-                    "any" => TargetSessionAttrs::Any,
-                    "read-write" => TargetSessionAttrs::ReadWrite,
-                    _ => {
-                        return Err(Error::config_parse(Box::new(InvalidValue(
-                            "target_session_attrs",
-                        ))));
-                    }
-                };
-                self.target_session_attrs(target_session_attrs);
-            }
-            "channel_binding" => {
-                let channel_binding = match value {
-                    "disable" => ChannelBinding::Disable,
-                    "prefer" => ChannelBinding::Prefer,
-                    "require" => ChannelBinding::Require,
-                    _ => {
-                        return Err(Error::config_parse(Box::new(InvalidValue(
-                            "channel_binding",
-                        ))))
-                    }
-                };
-                self.channel_binding(channel_binding);
-            }
-            "max_backend_message_size" => {
-                let limit = value.parse::<usize>().map_err(|_| {
-                    Error::config_parse(Box::new(InvalidValue("max_backend_message_size")))
-                })?;
-                if limit > 0 {
-                    self.max_backend_message_size(limit);
-                }
-            }
-            key => {
-                return Err(Error::config_parse(Box::new(UnknownOption(
-                    key.to_string(),
-                ))));
-            }
-        }
-
-        Ok(())
-    }
-
     /// Opens a connection to a PostgreSQL database.
     ///
     /// Requires the `runtime` Cargo feature (enabled by default).
@@ -485,30 +368,16 @@ impl Config {
         connect(tls, self).await
     }
 
-    /// Connects to a PostgreSQL database over an arbitrary stream.
-    ///
-    /// All of the settings other than `user`, `password`, `dbname`, `options`, and `application_name` name are ignored.
     pub async fn connect_raw<S, T>(
         &self,
         stream: S,
         tls: T,
-    ) -> Result<(Client, Connection<S, T::Stream>), Error>
+    ) -> Result<RawConnection<S, T::Stream>, Error>
     where
         S: AsyncRead + AsyncWrite + Unpin,
         T: TlsConnect<S>,
     {
         connect_raw(stream, tls, self).await
-    }
-}
-
-impl FromStr for Config {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Config, Error> {
-        match UrlParser::parse(s)? {
-            Some(config) => Ok(config),
-            None => Parser::parse(s),
-        }
     }
 }
 
@@ -536,362 +405,5 @@ impl fmt::Debug for Config {
             .field("channel_binding", &self.channel_binding)
             .field("replication", &self.replication_mode)
             .finish()
-    }
-}
-
-#[derive(Debug)]
-struct UnknownOption(String);
-
-impl fmt::Display for UnknownOption {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(fmt, "unknown option `{}`", self.0)
-    }
-}
-
-impl error::Error for UnknownOption {}
-
-#[derive(Debug)]
-struct InvalidValue(&'static str);
-
-impl fmt::Display for InvalidValue {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(fmt, "invalid value for option `{}`", self.0)
-    }
-}
-
-impl error::Error for InvalidValue {}
-
-struct Parser<'a> {
-    s: &'a str,
-    it: iter::Peekable<str::CharIndices<'a>>,
-}
-
-impl<'a> Parser<'a> {
-    fn parse(s: &'a str) -> Result<Config, Error> {
-        let mut parser = Parser {
-            s,
-            it: s.char_indices().peekable(),
-        };
-
-        let mut config = Config::new();
-
-        while let Some((key, value)) = parser.parameter()? {
-            config.param(key, &value)?;
-        }
-
-        Ok(config)
-    }
-
-    fn skip_ws(&mut self) {
-        self.take_while(char::is_whitespace);
-    }
-
-    fn take_while<F>(&mut self, f: F) -> &'a str
-    where
-        F: Fn(char) -> bool,
-    {
-        let start = match self.it.peek() {
-            Some(&(i, _)) => i,
-            None => return "",
-        };
-
-        loop {
-            match self.it.peek() {
-                Some(&(_, c)) if f(c) => {
-                    self.it.next();
-                }
-                Some(&(i, _)) => return &self.s[start..i],
-                None => return &self.s[start..],
-            }
-        }
-    }
-
-    fn eat(&mut self, target: char) -> Result<(), Error> {
-        match self.it.next() {
-            Some((_, c)) if c == target => Ok(()),
-            Some((i, c)) => {
-                let m = format!(
-                    "unexpected character at byte {}: expected `{}` but got `{}`",
-                    i, target, c
-                );
-                Err(Error::config_parse(m.into()))
-            }
-            None => Err(Error::config_parse("unexpected EOF".into())),
-        }
-    }
-
-    fn eat_if(&mut self, target: char) -> bool {
-        match self.it.peek() {
-            Some(&(_, c)) if c == target => {
-                self.it.next();
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn keyword(&mut self) -> Option<&'a str> {
-        let s = self.take_while(|c| match c {
-            c if c.is_whitespace() => false,
-            '=' => false,
-            _ => true,
-        });
-
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
-        }
-    }
-
-    fn value(&mut self) -> Result<String, Error> {
-        let value = if self.eat_if('\'') {
-            let value = self.quoted_value()?;
-            self.eat('\'')?;
-            value
-        } else {
-            self.simple_value()?
-        };
-
-        Ok(value)
-    }
-
-    fn simple_value(&mut self) -> Result<String, Error> {
-        let mut value = String::new();
-
-        while let Some(&(_, c)) = self.it.peek() {
-            if c.is_whitespace() {
-                break;
-            }
-
-            self.it.next();
-            if c == '\\' {
-                if let Some((_, c2)) = self.it.next() {
-                    value.push(c2);
-                }
-            } else {
-                value.push(c);
-            }
-        }
-
-        if value.is_empty() {
-            return Err(Error::config_parse("unexpected EOF".into()));
-        }
-
-        Ok(value)
-    }
-
-    fn quoted_value(&mut self) -> Result<String, Error> {
-        let mut value = String::new();
-
-        while let Some(&(_, c)) = self.it.peek() {
-            if c == '\'' {
-                return Ok(value);
-            }
-
-            self.it.next();
-            if c == '\\' {
-                if let Some((_, c2)) = self.it.next() {
-                    value.push(c2);
-                }
-            } else {
-                value.push(c);
-            }
-        }
-
-        Err(Error::config_parse(
-            "unterminated quoted connection parameter value".into(),
-        ))
-    }
-
-    fn parameter(&mut self) -> Result<Option<(&'a str, String)>, Error> {
-        self.skip_ws();
-        let keyword = match self.keyword() {
-            Some(keyword) => keyword,
-            None => return Ok(None),
-        };
-        self.skip_ws();
-        self.eat('=')?;
-        self.skip_ws();
-        let value = self.value()?;
-
-        Ok(Some((keyword, value)))
-    }
-}
-
-// This is a pretty sloppy "URL" parser, but it matches the behavior of libpq, where things really aren't very strict
-struct UrlParser<'a> {
-    s: &'a str,
-    config: Config,
-}
-
-impl<'a> UrlParser<'a> {
-    fn parse(s: &'a str) -> Result<Option<Config>, Error> {
-        let s = match Self::remove_url_prefix(s) {
-            Some(s) => s,
-            None => return Ok(None),
-        };
-
-        let mut parser = UrlParser {
-            s,
-            config: Config::new(),
-        };
-
-        parser.parse_credentials()?;
-        parser.parse_host()?;
-        parser.parse_path()?;
-        parser.parse_params()?;
-
-        Ok(Some(parser.config))
-    }
-
-    fn remove_url_prefix(s: &str) -> Option<&str> {
-        for prefix in &["postgres://", "postgresql://"] {
-            if let Some(stripped) = s.strip_prefix(prefix) {
-                return Some(stripped);
-            }
-        }
-
-        None
-    }
-
-    fn take_until(&mut self, end: &[char]) -> Option<&'a str> {
-        match self.s.find(end) {
-            Some(pos) => {
-                let (head, tail) = self.s.split_at(pos);
-                self.s = tail;
-                Some(head)
-            }
-            None => None,
-        }
-    }
-
-    fn take_all(&mut self) -> &'a str {
-        mem::take(&mut self.s)
-    }
-
-    fn eat_byte(&mut self) {
-        self.s = &self.s[1..];
-    }
-
-    fn parse_credentials(&mut self) -> Result<(), Error> {
-        let creds = match self.take_until(&['@']) {
-            Some(creds) => creds,
-            None => return Ok(()),
-        };
-        self.eat_byte();
-
-        let mut it = creds.splitn(2, ':');
-        let user = self.decode(it.next().unwrap())?;
-        self.config.user(&user);
-
-        if let Some(password) = it.next() {
-            let password = Cow::from(percent_encoding::percent_decode(password.as_bytes()));
-            self.config.password(password);
-        }
-
-        Ok(())
-    }
-
-    fn parse_host(&mut self) -> Result<(), Error> {
-        let host = match self.take_until(&['/', '?']) {
-            Some(host) => host,
-            None => self.take_all(),
-        };
-
-        if host.is_empty() {
-            return Ok(());
-        }
-
-        for chunk in host.split(',') {
-            let (host, port) = if chunk.starts_with('[') {
-                let idx = match chunk.find(']') {
-                    Some(idx) => idx,
-                    None => return Err(Error::config_parse(InvalidValue("host").into())),
-                };
-
-                let host = &chunk[1..idx];
-                let remaining = &chunk[idx + 1..];
-                let port = if let Some(port) = remaining.strip_prefix(':') {
-                    Some(port)
-                } else if remaining.is_empty() {
-                    None
-                } else {
-                    return Err(Error::config_parse(InvalidValue("host").into()));
-                };
-
-                (host, port)
-            } else {
-                let mut it = chunk.splitn(2, ':');
-                (it.next().unwrap(), it.next())
-            };
-
-            self.host_param(host)?;
-            let port = self.decode(port.unwrap_or("5432"))?;
-            self.config.param("port", &port)?;
-        }
-
-        Ok(())
-    }
-
-    fn parse_path(&mut self) -> Result<(), Error> {
-        if !self.s.starts_with('/') {
-            return Ok(());
-        }
-        self.eat_byte();
-
-        let dbname = match self.take_until(&['?']) {
-            Some(dbname) => dbname,
-            None => self.take_all(),
-        };
-
-        if !dbname.is_empty() {
-            self.config.dbname(&self.decode(dbname)?);
-        }
-
-        Ok(())
-    }
-
-    fn parse_params(&mut self) -> Result<(), Error> {
-        if !self.s.starts_with('?') {
-            return Ok(());
-        }
-        self.eat_byte();
-
-        while !self.s.is_empty() {
-            let key = match self.take_until(&['=']) {
-                Some(key) => self.decode(key)?,
-                None => return Err(Error::config_parse("unterminated parameter".into())),
-            };
-            self.eat_byte();
-
-            let value = match self.take_until(&['&']) {
-                Some(value) => {
-                    self.eat_byte();
-                    value
-                }
-                None => self.take_all(),
-            };
-
-            if key == "host" {
-                self.host_param(value)?;
-            } else {
-                let value = self.decode(value)?;
-                self.config.param(&key, &value)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn host_param(&mut self, s: &str) -> Result<(), Error> {
-        let s = self.decode(s)?;
-        self.config.param("host", &s)
-    }
-
-    fn decode(&self, s: &'a str) -> Result<Cow<'a, str>, Error> {
-        percent_encoding::percent_decode(s.as_bytes())
-            .decode_utf8()
-            .map_err(|e| Error::config_parse(e.into()))
     }
 }
