@@ -108,7 +108,7 @@ typedef enum SKReconfigureState
 	SRS_NONE,
 	/*
 	 * SK host/port config was updated
-	 * Happens when the set of Safekeepers associated with a tenant.  
+	 * Happens when the set of Safekeepers associated with a tenant is modified.  
 	 */
 	SRS_HOST_UPDATED,
 
