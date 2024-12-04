@@ -8,10 +8,8 @@ use crate::page_cache;
 use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
-use crate::virtual_file::owned_buffers_io::util::size_tracking_writer;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
 use crate::virtual_file::{self, owned_buffers_io, IoBufferMut, VirtualFile};
-use bytes::BytesMut;
 use camino::Utf8PathBuf;
 use num_traits::Num;
 use pageserver_api::shard::TenantShardId;
@@ -20,6 +18,7 @@ use tracing::error;
 
 use std::io;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use utils::id::TimelineId;
 
 pub struct EphemeralFile {
@@ -27,10 +26,7 @@ pub struct EphemeralFile {
     _timeline_id: TimelineId,
     page_cache_file_id: page_cache::FileId,
     bytes_written: u64,
-    buffered_writer: owned_buffers_io::write::BufferedWriter<
-        BytesMut,
-        size_tracking_writer::Writer<VirtualFile>,
-    >,
+    buffered_writer: owned_buffers_io::write::BufferedWriter<IoBufferMut, VirtualFile>,
     /// Gate guard is held on as long as we need to do operations in the path (delete on drop)
     _gate_guard: utils::sync::gate::GateGuard,
 }
@@ -42,9 +38,9 @@ impl EphemeralFile {
         conf: &PageServerConf,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
-        gate_guard: utils::sync::gate::GateGuard,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
-    ) -> Result<EphemeralFile, io::Error> {
+    ) -> anyhow::Result<EphemeralFile> {
         static NEXT_FILENAME: AtomicU64 = AtomicU64::new(1);
         let filename_disambiguator =
             NEXT_FILENAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -55,15 +51,17 @@ impl EphemeralFile {
                 "ephemeral-{filename_disambiguator}"
             )));
 
-        let file = VirtualFile::open_with_options(
-            &filename,
-            virtual_file::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true),
-            ctx,
-        )
-        .await?;
+        let file = Arc::new(
+            VirtualFile::open_with_options_v2(
+                &filename,
+                virtual_file::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true),
+                ctx,
+            )
+            .await?,
+        );
 
         let page_cache_file_id = page_cache::next_file_id(); // XXX get rid, we're not page-caching anymore
 
@@ -73,10 +71,12 @@ impl EphemeralFile {
             page_cache_file_id,
             bytes_written: 0,
             buffered_writer: owned_buffers_io::write::BufferedWriter::new(
-                size_tracking_writer::Writer::new(file),
-                BytesMut::with_capacity(TAIL_SZ),
+                file,
+                || IoBufferMut::with_capacity(TAIL_SZ),
+                gate.enter()?,
+                ctx,
             ),
-            _gate_guard: gate_guard,
+            _gate_guard: gate.enter()?,
         })
     }
 }
@@ -85,7 +85,7 @@ impl Drop for EphemeralFile {
     fn drop(&mut self) {
         // unlink the file
         // we are clear to do this, because we have entered a gate
-        let path = self.buffered_writer.as_inner().as_inner().path();
+        let path = self.buffered_writer.as_inner().path();
         let res = std::fs::remove_file(path);
         if let Err(e) = res {
             if e.kind() != std::io::ErrorKind::NotFound {
@@ -132,6 +132,18 @@ impl EphemeralFile {
         srcbuf: &[u8],
         ctx: &RequestContext,
     ) -> std::io::Result<u64> {
+        let (pos, control) = self.write_raw_controlled(srcbuf, ctx).await?;
+        if let Some(control) = control {
+            control.release().await;
+        }
+        Ok(pos)
+    }
+
+    async fn write_raw_controlled(
+        &mut self,
+        srcbuf: &[u8],
+        ctx: &RequestContext,
+    ) -> std::io::Result<(u64, Option<owned_buffers_io::write::FlushControl>)> {
         let pos = self.bytes_written;
 
         let new_bytes_written = pos.checked_add(srcbuf.len().into_u64()).ok_or_else(|| {
@@ -145,9 +157,9 @@ impl EphemeralFile {
         })?;
 
         // Write the payload
-        let nwritten = self
+        let (nwritten, control) = self
             .buffered_writer
-            .write_buffered_borrowed(srcbuf, ctx)
+            .write_buffered_borrowed_controlled(srcbuf, ctx)
             .await?;
         assert_eq!(
             nwritten,
@@ -157,7 +169,7 @@ impl EphemeralFile {
 
         self.bytes_written = new_bytes_written;
 
-        Ok(pos)
+        Ok((pos, control))
     }
 }
 
@@ -168,11 +180,12 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         dst: tokio_epoll_uring::Slice<B>,
         ctx: &'a RequestContext,
     ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
-        let file_size_tracking_writer = self.buffered_writer.as_inner();
-        let flushed_offset = file_size_tracking_writer.bytes_written();
+        let submitted_offset = self.buffered_writer.bytes_submitted();
 
-        let buffer = self.buffered_writer.inspect_buffer();
-        let buffered = &buffer[0..buffer.pending()];
+        let mutable = self.buffered_writer.inspect_mutable();
+        let mutable = &mutable[0..mutable.pending()];
+
+        let maybe_flushed = self.buffered_writer.inspect_maybe_flushed();
 
         let dst_cap = dst.bytes_total().into_u64();
         let end = {
@@ -197,11 +210,42 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
                 }
             }
         }
-        let written_range = Range(start, std::cmp::min(end, flushed_offset));
-        let buffered_range = Range(std::cmp::max(start, flushed_offset), end);
+
+        let (written_range, maybe_flushed_range) = {
+            if maybe_flushed.is_some() {
+                // [       written       ][ maybe_flushed ][    mutable    ]
+                //                        <-   TAIL_SZ   -><-   TAIL_SZ   ->
+                //                                         ^
+                //                                 `submitted_offset`
+                // <++++++ on disk +++++++????????????????>
+                (
+                    Range(
+                        start,
+                        std::cmp::min(end, submitted_offset.saturating_sub(TAIL_SZ as u64)),
+                    ),
+                    Range(
+                        std::cmp::max(start, submitted_offset.saturating_sub(TAIL_SZ as u64)),
+                        std::cmp::min(end, submitted_offset),
+                    ),
+                )
+            } else {
+                // [       written                        ][    mutable    ]
+                //                                         <-   TAIL_SZ   ->
+                //                                         ^
+                //                                 `submitted_offset`
+                // <++++++ on disk +++++++++++++++++++++++>
+                (
+                    Range(start, std::cmp::min(end, submitted_offset)),
+                    // zero len
+                    Range(submitted_offset, u64::MIN),
+                )
+            }
+        };
+
+        let mutable_range = Range(std::cmp::max(start, submitted_offset), end);
 
         let dst = if written_range.len() > 0 {
-            let file: &VirtualFile = file_size_tracking_writer.as_inner();
+            let file: &VirtualFile = self.buffered_writer.as_inner();
             let bounds = dst.bounds();
             let slice = file
                 .read_exact_at(dst.slice(0..written_range.len().into_usize()), start, ctx)
@@ -211,20 +255,44 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
             dst
         };
 
-        let dst = if buffered_range.len() > 0 {
-            let offset_in_buffer = buffered_range
+        let dst = if maybe_flushed_range.len() > 0 {
+            let offset_in_buffer = maybe_flushed_range
                 .0
-                .checked_sub(flushed_offset)
+                .checked_sub(submitted_offset.saturating_sub(TAIL_SZ as u64))
                 .unwrap()
                 .into_usize();
-            let to_copy =
-                &buffered[offset_in_buffer..(offset_in_buffer + buffered_range.len().into_usize())];
+            // Checked previously the buffer is Some.
+            let maybe_flushed = maybe_flushed.unwrap();
+            let to_copy = &maybe_flushed
+                [offset_in_buffer..(offset_in_buffer + maybe_flushed_range.len().into_usize())];
             let bounds = dst.bounds();
             let mut view = dst.slice({
                 let start = written_range.len().into_usize();
                 let end = start
-                    .checked_add(buffered_range.len().into_usize())
+                    .checked_add(maybe_flushed_range.len().into_usize())
                     .unwrap();
+                start..end
+            });
+            view.as_mut_rust_slice_full_zeroed()
+                .copy_from_slice(to_copy);
+            Slice::from_buf_bounds(Slice::into_inner(view), bounds)
+        } else {
+            dst
+        };
+
+        let dst = if mutable_range.len() > 0 {
+            let offset_in_buffer = mutable_range
+                .0
+                .checked_sub(submitted_offset)
+                .unwrap()
+                .into_usize();
+            let to_copy =
+                &mutable[offset_in_buffer..(offset_in_buffer + mutable_range.len().into_usize())];
+            let bounds = dst.bounds();
+            let mut view = dst.slice({
+                let start =
+                    written_range.len().into_usize() + maybe_flushed_range.len().into_usize();
+                let end = start.checked_add(mutable_range.len().into_usize()).unwrap();
                 start..end
             });
             view.as_mut_rust_slice_full_zeroed()
@@ -295,7 +363,7 @@ mod tests {
 
         let gate = utils::sync::gate::Gate::default();
 
-        let file = EphemeralFile::create(conf, tenant_id, timeline_id, gate.enter().unwrap(), &ctx)
+        let file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
             .await
             .unwrap();
 
@@ -326,14 +394,15 @@ mod tests {
 
         let gate = utils::sync::gate::Gate::default();
 
-        let mut file =
-            EphemeralFile::create(conf, tenant_id, timeline_id, gate.enter().unwrap(), &ctx)
-                .await
-                .unwrap();
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
+            .await
+            .unwrap();
 
-        let cap = file.buffered_writer.inspect_buffer().capacity();
+        let mutable = file.buffered_writer.inspect_mutable();
+        let cap = mutable.capacity();
+        let align = mutable.align();
 
-        let write_nbytes = cap + cap / 2;
+        let write_nbytes = cap * 2 + cap / 2;
 
         let content: Vec<u8> = rand::thread_rng()
             .sample_iter(rand::distributions::Standard)
@@ -341,30 +410,39 @@ mod tests {
             .collect();
 
         let mut value_offsets = Vec::new();
-        for i in 0..write_nbytes {
-            let off = file.write_raw(&content[i..i + 1], &ctx).await.unwrap();
+        for range in (0..write_nbytes)
+            .step_by(align)
+            .map(|start| start..(start + align).min(write_nbytes))
+        {
+            let off = file.write_raw(&content[range], &ctx).await.unwrap();
             value_offsets.push(off);
         }
 
-        assert!(file.len() as usize == write_nbytes);
-        for i in 0..write_nbytes {
-            assert_eq!(value_offsets[i], i.into_u64());
-            let buf = IoBufferMut::with_capacity(1);
+        assert_eq!(file.len() as usize, write_nbytes);
+        for (i, range) in (0..write_nbytes)
+            .step_by(align)
+            .map(|start| start..(start + align).min(write_nbytes))
+            .enumerate()
+        {
+            assert_eq!(value_offsets[i], range.start.into_u64());
+            let buf = IoBufferMut::with_capacity(range.len());
             let (buf_slice, nread) = file
-                .read_exact_at_eof_ok(i.into_u64(), buf.slice_full(), &ctx)
+                .read_exact_at_eof_ok(range.start.into_u64(), buf.slice_full(), &ctx)
                 .await
                 .unwrap();
             let buf = buf_slice.into_inner();
-            assert_eq!(nread, 1);
-            assert_eq!(&buf, &content[i..i + 1]);
+            assert_eq!(nread, range.len());
+            assert_eq!(&buf, &content[range]);
         }
 
-        let file_contents =
-            std::fs::read(file.buffered_writer.as_inner().as_inner().path()).unwrap();
-        assert_eq!(file_contents, &content[0..cap]);
+        let file_contents = std::fs::read(file.buffered_writer.as_inner().path()).unwrap();
+        assert!(file_contents == content[0..cap * 2]);
 
-        let buffer_contents = file.buffered_writer.inspect_buffer();
-        assert_eq!(buffer_contents, &content[cap..write_nbytes]);
+        let maybe_flushed_buffer_contents = file.buffered_writer.inspect_maybe_flushed().unwrap();
+        assert_eq!(&maybe_flushed_buffer_contents[..], &content[cap..cap * 2]);
+
+        let mutable_buffer_contents = file.buffered_writer.inspect_mutable();
+        assert_eq!(mutable_buffer_contents, &content[cap * 2..write_nbytes]);
     }
 
     #[tokio::test]
@@ -373,16 +451,16 @@ mod tests {
 
         let gate = utils::sync::gate::Gate::default();
 
-        let mut file =
-            EphemeralFile::create(conf, tenant_id, timeline_id, gate.enter().unwrap(), &ctx)
-                .await
-                .unwrap();
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
+            .await
+            .unwrap();
 
-        let cap = file.buffered_writer.inspect_buffer().capacity();
+        // mutable buffer and maybe_flushed buffer each has `cap` bytes.
+        let cap = file.buffered_writer.inspect_mutable().capacity();
 
         let content: Vec<u8> = rand::thread_rng()
             .sample_iter(rand::distributions::Standard)
-            .take(cap + cap / 2)
+            .take(cap * 2 + cap / 2)
             .collect();
 
         file.write_raw(&content, &ctx).await.unwrap();
@@ -390,23 +468,21 @@ mod tests {
         // assert the state is as this test expects it to be
         assert_eq!(
             &file.load_to_io_buf(&ctx).await.unwrap(),
-            &content[0..cap + cap / 2]
+            &content[0..cap * 2 + cap / 2]
         );
-        let md = file
-            .buffered_writer
-            .as_inner()
-            .as_inner()
-            .path()
-            .metadata()
-            .unwrap();
+        let md = file.buffered_writer.as_inner().path().metadata().unwrap();
         assert_eq!(
             md.len(),
-            cap.into_u64(),
-            "buffered writer does one write if we write 1.5x buffer capacity"
+            2 * cap.into_u64(),
+            "buffered writer requires one write to be flushed if we write 2.5x buffer capacity"
         );
         assert_eq!(
-            &file.buffered_writer.inspect_buffer()[0..cap / 2],
-            &content[cap..cap + cap / 2]
+            &file.buffered_writer.inspect_maybe_flushed().unwrap()[0..cap],
+            &content[cap..cap * 2]
+        );
+        assert_eq!(
+            &file.buffered_writer.inspect_mutable()[0..cap / 2],
+            &content[cap * 2..cap * 2 + cap / 2]
         );
     }
 
@@ -422,19 +498,19 @@ mod tests {
 
         let gate = utils::sync::gate::Gate::default();
 
-        let mut file =
-            EphemeralFile::create(conf, tenant_id, timeline_id, gate.enter().unwrap(), &ctx)
-                .await
-                .unwrap();
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
+            .await
+            .unwrap();
 
-        let cap = file.buffered_writer.inspect_buffer().capacity();
-
+        let mutable = file.buffered_writer.inspect_mutable();
+        let cap = mutable.capacity();
+        let align = mutable.align();
         let content: Vec<u8> = rand::thread_rng()
             .sample_iter(rand::distributions::Standard)
-            .take(cap + cap / 2)
+            .take(cap * 2 + cap / 2)
             .collect();
 
-        file.write_raw(&content, &ctx).await.unwrap();
+        let (_, control) = file.write_raw_controlled(&content, &ctx).await.unwrap();
 
         let test_read = |start: usize, len: usize| {
             let file = &file;
@@ -454,16 +530,38 @@ mod tests {
             }
         };
 
+        let test_read_all_offset_combinations = || {
+            async move {
+                test_read(align, align).await;
+                // border onto edge of file
+                test_read(cap - align, align).await;
+                // read across file and buffer
+                test_read(cap - align, 2 * align).await;
+                // stay from start of maybe flushed buffer
+                test_read(cap, align).await;
+                // completely within maybe flushed buffer
+                test_read(cap + align, align).await;
+                // border onto edge of maybe flushed buffer.
+                test_read(cap * 2 - align, align).await;
+                // read across maybe flushed and mutable buffer
+                test_read(cap * 2 - align, 2 * align).await;
+                // read across three segments
+                test_read(cap - align, cap + 2 * align).await;
+                // completely within mutable buffer
+                test_read(cap * 2 + align, align).await;
+            }
+        };
+
         // completely within the file range
-        assert!(20 < cap, "test assumption");
-        test_read(10, 10).await;
-        // border onto edge of file
-        test_read(cap - 10, 10).await;
-        // read across file and buffer
-        test_read(cap - 10, 20).await;
-        // stay from start of buffer
-        test_read(cap, 10).await;
-        // completely within buffer
-        test_read(cap + 10, 10).await;
+        assert!(align < cap, "test assumption");
+        assert!(cap % align == 0);
+
+        // test reads at different flush stages.
+        let not_started = control.unwrap().into_not_started();
+        test_read_all_offset_combinations().await;
+        let in_progress = not_started.ready_to_flush();
+        test_read_all_offset_combinations().await;
+        in_progress.wait_until_flush_is_done().await;
+        test_read_all_offset_combinations().await;
     }
 }
