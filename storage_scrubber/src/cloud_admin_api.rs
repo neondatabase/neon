@@ -1,3 +1,5 @@
+use std::error::Error as _;
+
 use chrono::{DateTime, Utc};
 use futures::Future;
 use hex::FromHex;
@@ -30,14 +32,18 @@ impl std::fmt::Display for Error {
         match &self.kind {
             ErrorKind::RequestSend(e) => write!(
                 f,
-                "Failed to send a request. Context: {}, error: {}",
-                self.context, e
+                "Failed to send a request. Context: {}, error: {}{}",
+                self.context,
+                e,
+                e.source().map(|e| format!(": {e}")).unwrap_or_default()
             ),
             ErrorKind::BodyRead(e) => {
                 write!(
                     f,
-                    "Failed to read a request body. Context: {}, error: {}",
-                    self.context, e
+                    "Failed to read a request body. Context: {}, error: {}{}",
+                    self.context,
+                    e,
+                    e.source().map(|e| format!(": {e}")).unwrap_or_default()
                 )
             }
             ErrorKind::ResponseStatus(status) => {

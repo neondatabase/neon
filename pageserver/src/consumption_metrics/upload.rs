@@ -1,3 +1,4 @@
+use std::error::Error as _;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -350,7 +351,11 @@ impl std::fmt::Display for UploadError {
 
         match self {
             Rejected(code) => write!(f, "server rejected the metrics with {code}"),
-            Reqwest(e) => write!(f, "request failed: {e}"),
+            Reqwest(e) => write!(
+                f,
+                "request failed: {e}{}",
+                e.source().map(|e| format!(": {e}")).unwrap_or_default()
+            ),
             Cancelled => write!(f, "cancelled"),
         }
     }
