@@ -279,7 +279,10 @@ impl From<TenantStateError> for ApiError {
 impl From<GetTenantError> for ApiError {
     fn from(tse: GetTenantError) -> ApiError {
         match tse {
-            GetTenantError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
+            GetTenantError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {tid}").into()),
+            GetTenantError::ShardNotFound(tid) => {
+                ApiError::NotFound(anyhow!("tenant {tid}").into())
+            }
             GetTenantError::NotActive(_) => {
                 // Why is this not `ApiError::NotFound`?
                 // Because we must be careful to never return 404 for a tenant if it does
@@ -1047,9 +1050,11 @@ async fn timeline_delete_handler(
             match e {
                 // GetTenantError has a built-in conversion to ApiError, but in this context we don't
                 // want to treat missing tenants as 404, to avoid ambiguity with successful deletions.
-                GetTenantError::NotFound(_) => ApiError::PreconditionFailed(
-                    "Requested tenant is missing".to_string().into_boxed_str(),
-                ),
+                GetTenantError::NotFound(_) | GetTenantError::ShardNotFound(_) => {
+                    ApiError::PreconditionFailed(
+                        "Requested tenant is missing".to_string().into_boxed_str(),
+                    )
+                }
                 e => e.into(),
             }
         })?;
