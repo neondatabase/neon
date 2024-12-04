@@ -136,6 +136,9 @@ impl ConnCfg {
         params: &StartupMessageParams,
         arbitrary_params: bool,
     ) {
+        if !arbitrary_params {
+            self.set_param("client_encoding", "UTF8");
+        }
         for (k, v) in params.iter() {
             match k {
                 // Only set `user` if it's not present in the config.

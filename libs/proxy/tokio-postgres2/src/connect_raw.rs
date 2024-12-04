@@ -119,11 +119,8 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut params = config.server_params.clone();
-    params.insert("client_encoding", "UTF8");
-
     let mut buf = BytesMut::new();
-    frontend::startup_message(&params, &mut buf).map_err(Error::encode)?;
+    frontend::startup_message(&config.server_params, &mut buf).map_err(Error::encode)?;
 
     stream
         .send(FrontendMessage::Raw(buf.freeze()))
