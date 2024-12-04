@@ -6,6 +6,7 @@ on:
       - main
       - release
       - release-proxy
+      - release-compute
   pull_request:
 
 defaults:
@@ -70,8 +71,10 @@ jobs:
             echo "tag=release-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
             echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
+            echo "tag=release-compute-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release', 'release-proxy', 'release-compute'"
             echo "tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
           fi
         shell: bash
@@ -513,7 +516,7 @@ jobs:
             })
 
   trigger-e2e-tests:
-    if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' }}
+    if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute' }}
     needs: [ check-permissions, promote-images, tag ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
     secrets: inherit
@@ -934,7 +937,7 @@ jobs:
                                               neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
 
       - name: Configure AWS-prod credentials
-        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: eu-central-1
@@ -943,12 +946,12 @@ jobs:
 
       - name: Login to prod ECR
         uses: docker/login-action@v3
-        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
         with:
           registry: 093970136003.dkr.ecr.eu-central-1.amazonaws.com
 
       - name: Copy all images to prod ECR
-        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
         run: |
           for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16,v17}; do
             docker buildx imagetools create -t 093970136003.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }} \
@@ -968,7 +971,7 @@ jobs:
       tenant_id: ${{ vars.AZURE_TENANT_ID }}
 
   push-to-acr-prod:
-    if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+    if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
     needs: [ tag, promote-images ]
     uses: ./.github/workflows/_push-to-acr.yml
     with:
@@ -1056,7 +1059,7 @@ jobs:
   deploy:
     needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
     # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
-    if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy') && !failure() && !cancelled()
+    if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute') && !failure() && !cancelled()
 
     runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
@@ -1105,13 +1108,15 @@ jobs:
               -f deployProxyAuthBroker=true \
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
+          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
+            gh workflow --repo neondatabase/infra run deploy-compute-dev.yml --ref main -f dockerTag=${{needs.tag.outputs.build-tag}}
           else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main', 'release', 'release-proxy' or 'release-compute'"
             exit 1
           fi
 
       - name: Create git tag
-        if: github.ref_name == 'release' || github.ref_name == 'release-proxy'
+        if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
         uses: actions/github-script@v7
         with:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
