@@ -202,13 +202,14 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
-    def create_branch_with_endpoint(
-        self, project_id: str, parent_id: str, name: str
+    def create_branch(
+        self, project_id: str, parent_id: str, name: str, with_endpoint: bool = False
     ) -> dict[str, Any]:
         data: dict[str, Any] = {
-            "endpoints": [{"type": "read_write"}],
             "branch": {"parent_id": parent_id, "name": name},
         }
+        if with_endpoint:
+            data["endpoints"] = [{"type": "read_write"}]
         resp = self.__request(
             "POST",
             f"/projects/{project_id}/branches",
