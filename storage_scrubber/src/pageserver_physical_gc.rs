@@ -9,6 +9,9 @@ use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
 use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId, MAX_RETRIES};
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
+use pageserver::tenant::remote_timeline_client::manifest::{
+    OffloadedTimelineManifest, TenantManifest,
+};
 use pageserver::tenant::remote_timeline_client::{
     parse_remote_index_path, parse_remote_tenant_manifest_path, remote_layer_path,
 };
@@ -527,7 +530,7 @@ async fn gc_tenant_manifests(
     target: &RootTarget,
     mode: GcMode,
     tenant_shard_id: TenantShardId,
-) -> anyhow::Result<GcSummary> {
+) -> anyhow::Result<(GcSummary, Option<TenantManifest>)> {
     let mut gc_summary = GcSummary::default();
     match list_tenant_manifests(remote_client, tenant_shard_id, target).await? {
         ListTenantManifestResult::WithErrors {
@@ -537,10 +540,11 @@ async fn gc_tenant_manifests(
             for (_key, error) in errors {
                 tracing::warn!(%tenant_shard_id, "list_tenant_manifests: {error}");
             }
+            Ok((gc_summary, None))
         }
         ListTenantManifestResult::NoErrors(mut manifest_info) => {
-            let Some(latest_gen) = manifest_info.latest_generation else {
-                return Ok(gc_summary);
+            let Some((latest_gen, latest_manifest)) = manifest_info.latest_generation else {
+                return Ok((gc_summary, None));
             };
             manifest_info
                 .manifests
@@ -561,9 +565,9 @@ async fn gc_tenant_manifests(
                 )
                 .await;
             }
+            Ok((gc_summary, Some(latest_manifest)))
         }
     }
-    Ok(gc_summary)
 }
 
 async fn gc_timeline(
@@ -573,6 +577,7 @@ async fn gc_timeline(
     mode: GcMode,
     ttid: TenantShardTimelineId,
     accumulator: &Arc<std::sync::Mutex<TenantRefAccumulator>>,
+    tenant_manifest: Arc<Option<TenantManifest>>,
 ) -> anyhow::Result<GcSummary> {
     let mut summary = GcSummary::default();
     let data = list_timeline_blobs(remote_client, ttid, target).await?;
@@ -597,6 +602,17 @@ async fn gc_timeline(
         }
     };
 
+    if let Some(tenant_manifest) = &*tenant_manifest {
+        // TODO: this is O(n^2) in the number of offloaded timelines. Do a hashmap lookup instead.
+        let maybe_offloaded = tenant_manifest
+            .offloaded_timelines
+            .iter()
+            .find(|offloaded_timeline| offloaded_timeline.timeline_id == ttid.timeline_id);
+        if let Some(offloaded) = maybe_offloaded {
+            validate_index_part_with_offloaded(ttid, index_part, offloaded);
+        }
+    }
+
     accumulator.lock().unwrap().update(ttid, index_part);
 
     for key in candidates {
@@ -606,6 +622,27 @@ async fn gc_timeline(
     }
 
     Ok(summary)
+}
+
+fn validate_index_part_with_offloaded(
+    ttid: TenantShardTimelineId,
+    index_part: &IndexPart,
+    offloaded: &OffloadedTimelineManifest,
+) {
+    if let Some(archived_at_index_part) = index_part.archived_at {
+        if archived_at_index_part
+            .signed_duration_since(offloaded.archived_at)
+            .num_seconds()
+            != 0
+        {
+            tracing::warn!(%ttid, "index-part archived_at={} differs from manifest archived_at={}", archived_at_index_part, offloaded.archived_at);
+        }
+    } else {
+        tracing::warn!(%ttid, "Timeline offloaded in manifest but not archived in index-part");
+    }
+    if index_part.metadata.ancestor_timeline() != offloaded.ancestor_timeline_id {
+        tracing::warn!(%ttid, "index-part anestor={:?} differs from manifest ancestor={:?}", index_part.metadata.ancestor_timeline(), offloaded.ancestor_timeline_id);
+    }
 }
 
 /// Physical garbage collection: removing unused S3 objects.
@@ -650,29 +687,38 @@ pub async fn pageserver_physical_gc(
         let target_ref = &target;
         let remote_client_ref = &remote_client;
         async move {
-            let summaries_from_manifests = match gc_tenant_manifests(
+            let gc_manifest_result = gc_tenant_manifests(
                 remote_client_ref,
                 min_age,
                 target_ref,
                 mode,
                 tenant_shard_id,
             )
-            .await
-            {
-                Ok(gc_summary) => vec![Ok(GcSummaryOrContent::<TenantShardTimelineId>::GcSummary(
-                    gc_summary,
-                ))],
+            .await;
+            let (summary_from_manifest, tenant_manifest_opt) = match gc_manifest_result {
+                Ok((gc_summary, tenant_manifest)) => (gc_summary, tenant_manifest),
                 Err(e) => {
                     tracing::warn!(%tenant_shard_id, "Error in gc_tenant_manifests: {e}");
-                    Vec::new()
+                    (GcSummary::default(), None)
                 }
             };
+            let tenant_manifest_arc = Arc::new(tenant_manifest_opt);
+            let summary_from_manifest = Ok(GcSummaryOrContent::<(_, _)>::GcSummary(
+                summary_from_manifest,
+            ));
             stream_tenant_timelines(remote_client_ref, target_ref, tenant_shard_id)
                 .await
                 .map(|stream| {
                     stream
-                        .map_ok(GcSummaryOrContent::Content)
-                        .chain(futures::stream::iter(summaries_from_manifests.into_iter()))
+                        .zip(futures::stream::iter(std::iter::repeat(
+                            tenant_manifest_arc,
+                        )))
+                        .map(|(ttid_res, tenant_manifest_arc)| {
+                            ttid_res.map(move |ttid| {
+                                GcSummaryOrContent::Content((ttid, tenant_manifest_arc))
+                            })
+                        })
+                        .chain(futures::stream::iter([summary_from_manifest].into_iter()))
                 })
         }
     });
@@ -684,14 +730,17 @@ pub async fn pageserver_physical_gc(
     // Drain futures for per-shard GC, populating accumulator as a side effect
     {
         let timelines = timelines.map_ok(|summary_or_ttid| match summary_or_ttid {
-            GcSummaryOrContent::Content(ttid) => futures::future::Either::Left(gc_timeline(
-                &remote_client,
-                &min_age,
-                &target,
-                mode,
-                ttid,
-                &accumulator,
-            )),
+            GcSummaryOrContent::Content((ttid, tenant_manifest_arc)) => {
+                futures::future::Either::Left(gc_timeline(
+                    &remote_client,
+                    &min_age,
+                    &target,
+                    mode,
+                    ttid,
+                    &accumulator,
+                    tenant_manifest_arc,
+                ))
+            }
             GcSummaryOrContent::GcSummary(gc_summary) => {
                 futures::future::Either::Right(futures::future::ok(gc_summary))
             }

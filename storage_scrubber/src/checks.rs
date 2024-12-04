@@ -533,7 +533,7 @@ async fn list_timeline_blobs_impl(
 }
 
 pub(crate) struct RemoteTenantManifestInfo {
-    pub(crate) latest_generation: Option<Generation>,
+    pub(crate) latest_generation: Option<(Generation, TenantManifest)>,
     pub(crate) manifests: Vec<(Generation, ListingObject)>,
 }
 
@@ -592,14 +592,6 @@ pub(crate) async fn list_tenant_manifests(
         unknown_keys.push(obj);
     }
 
-    if manifests.is_empty() {
-        tracing::debug!("No manifest for timeline.");
-
-        return Ok(ListTenantManifestResult::WithErrors {
-            errors,
-            unknown_keys,
-        });
-    }
     if !unknown_keys.is_empty() {
         errors.push(((*prefix_str).to_owned(), "unknown keys listed".to_string()));
 
@@ -607,6 +599,17 @@ pub(crate) async fn list_tenant_manifests(
             errors,
             unknown_keys,
         });
+    }
+
+    if manifests.is_empty() {
+        tracing::debug!("No manifest for timeline.");
+
+        return Ok(ListTenantManifestResult::NoErrors(
+            RemoteTenantManifestInfo {
+                latest_generation: None,
+                manifests,
+            },
+        ));
     }
 
     // Find the manifest with the highest generation
@@ -634,10 +637,10 @@ pub(crate) async fn list_tenant_manifests(
         };
 
     match TenantManifest::from_json_bytes(&manifest_bytes) {
-        Ok(_manifest) => {
+        Ok(manifest) => {
             return Ok(ListTenantManifestResult::NoErrors(
                 RemoteTenantManifestInfo {
-                    latest_generation: Some(latest_generation),
+                    latest_generation: Some((latest_generation, manifest)),
                     manifests,
                 },
             ));
