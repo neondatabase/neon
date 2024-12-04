@@ -158,7 +158,8 @@ impl ShardIdentity {
         key_to_shard_number(self.count, self.stripe_size, key)
     }
 
-    /// Return true if the key should be ingested by this shard
+    /// Return true if the key is stored only on this shard. This does not include
+    /// global keys, see is_key_global().
     ///
     /// Shards must ingest _at least_ keys which return true from this check.
     pub fn is_key_local(&self, key: &Key) -> bool {
@@ -171,7 +172,7 @@ impl ShardIdentity {
     }
 
     /// Return true if the key should be stored on all shards, not just one.
-    fn is_key_global(&self, key: &Key) -> bool {
+    pub fn is_key_global(&self, key: &Key) -> bool {
         if key.is_slru_block_key() || key.is_slru_segment_size_key() || key.is_aux_file_key() {
             // Special keys that are only stored on shard 0
             false

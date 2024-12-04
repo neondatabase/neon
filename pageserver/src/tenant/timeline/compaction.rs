@@ -1174,10 +1174,10 @@ impl Timeline {
                     .await
                     .map_err(CompactionError::Other)?;
             } else {
+                let shard = self.shard_identity.shard_index();
                 let owner = self.shard_identity.get_shard_number(&key);
-                let this = self.shard_identity.shard_index();
                 if cfg!(debug_assertions) {
-                    panic!("found key {key} belonging to shard {owner} on shard {this}");
+                    panic!("key {key} does not belong on shard {shard}, owned by {owner}");
                 }
                 debug!("dropping key {key} during compaction (it belongs on shard {owner})");
             }
@@ -2051,7 +2051,8 @@ impl Timeline {
                 // a whole layer file as handling key spaces (ranges).
                 if cfg!(debug_assertions) {
                     let shard = self.shard_identity.shard_index();
-                    panic!("key {key} does not belong on shard {shard}");
+                    let owner = self.shard_identity.get_shard_number(&key);
+                    panic!("key {key} does not belong on shard {shard}, owned by {owner}");
                 }
                 continue;
             }

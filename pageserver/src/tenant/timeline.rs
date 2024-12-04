@@ -5889,13 +5889,17 @@ impl<'a> TimelineWriter<'a> {
         }
 
         // In debug builds, assert that we don't write any keys that don't belong to this shard.
+        // We don't assert this in release builds, since key ownership policies may change over
+        // time. Stray keys will be removed during compaction.
         if cfg!(debug_assertions) {
             for metadata in &batch.metadata {
                 if let ValueMeta::Serialized(metadata) = metadata {
                     let key = Key::from_compact(metadata.key);
                     assert!(
-                        self.shard_identity.is_key_local(&key),
-                        "writing non-local key {key}",
+                        self.shard_identity.is_key_local(&key)
+                            || self.shard_identity.is_key_global(&key),
+                        "key {key} does not belong on shard {}",
+                        self.shard_identity.shard_index()
                     );
                 }
             }
