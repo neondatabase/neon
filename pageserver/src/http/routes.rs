@@ -390,6 +390,16 @@ impl From<crate::tenant::mgr::DeleteTenantError> for ApiError {
     }
 }
 
+impl From<crate::tenant::secondary::SecondaryTenantError> for ApiError {
+    fn from(ste: crate::tenant::secondary::SecondaryTenantError) -> ApiError {
+        use crate::tenant::secondary::SecondaryTenantError;
+        match ste {
+            SecondaryTenantError::GetTenant(gte) => gte.into(),
+            SecondaryTenantError::ShuttingDown => ApiError::ShuttingDown,
+        }
+    }
+}
+
 // Helper function to construct a TimelineInfo struct for a timeline
 async fn build_timeline_info(
     timeline: &Arc<Timeline>,
@@ -2582,7 +2592,7 @@ async fn secondary_download_handler(
         // Edge case: downloads aren't usually fallible: things like a missing heatmap are considered
         // okay.  We could get an error here in the unlikely edge case that the tenant
         // was detached between our check above and executing the download job.
-        Ok(Err(e)) => return Err(e),
+        Ok(Err(e)) => return Err(e.into()),
         // A timeout is not an error: we have started the download, we're just not done
         // yet.  The caller will get a response body indicating status.
         Err(_) => StatusCode::ACCEPTED,

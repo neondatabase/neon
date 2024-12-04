@@ -35,7 +35,7 @@ use super::{
         self, period_jitter, period_warmup, Completion, JobGenerator, SchedulingResult,
         TenantBackgroundJobs,
     },
-    SecondaryTenant,
+    GetTenantError, SecondaryTenant, SecondaryTenantError,
 };
 
 use crate::tenant::{
@@ -55,7 +55,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
 use utils::{
     backoff, completion::Barrier, crashsafe::path_with_suffix_extension, failpoint_support, fs_ext,
-    http::error::ApiError, id::TimelineId, pausable_failpoint, serde_system_time,
+    id::TimelineId, pausable_failpoint, serde_system_time,
 };
 
 use super::{
@@ -470,17 +470,16 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         result
     }
 
-    fn on_command(&mut self, command: DownloadCommand) -> Result<PendingDownload, ApiError> {
+    fn on_command(
+        &mut self,
+        command: DownloadCommand,
+    ) -> Result<PendingDownload, SecondaryTenantError> {
         let tenant_shard_id = command.get_tenant_shard_id();
 
         let tenant = self
             .tenant_manager
             .get_secondary_tenant_shard(*tenant_shard_id)
-            .ok_or_else(|| {
-                ApiError::NotFound(
-                    anyhow::anyhow!("secondary shard {tenant_shard_id} not found").into(),
-                )
-            })?;
+            .ok_or(GetTenantError::ShardNotFound(*tenant_shard_id))?;
 
         Ok(PendingDownload {
             target_time: None,

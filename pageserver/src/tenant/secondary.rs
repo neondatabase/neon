@@ -22,6 +22,7 @@ use super::{
     mgr::TenantManager,
     span::debug_assert_current_span_has_tenant_id,
     storage_layer::LayerName,
+    GetTenantError,
 };
 
 use crate::metrics::SECONDARY_RESIDENT_PHYSICAL_SIZE;
@@ -35,7 +36,7 @@ use remote_storage::GenericRemoteStorage;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
-use utils::{completion::Barrier, http::error::ApiError, id::TimelineId, sync::gate::Gate};
+use utils::{completion::Barrier, id::TimelineId, sync::gate::Gate};
 
 enum DownloadCommand {
     Download(TenantShardId),
@@ -66,7 +67,21 @@ struct CommandRequest<T> {
 }
 
 struct CommandResponse {
-    result: Result<(), ApiError>,
+    result: Result<(), SecondaryTenantError>,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum SecondaryTenantError {
+    #[error("{0}")]
+    GetTenant(GetTenantError),
+    #[error("shutting down")]
+    ShuttingDown,
+}
+
+impl From<GetTenantError> for SecondaryTenantError {
+    fn from(gte: GetTenantError) -> Self {
+        Self::GetTenant(gte)
+    }
 }
 
 // Whereas [`Tenant`] represents an attached tenant, this type represents the work
@@ -285,7 +300,7 @@ impl SecondaryController {
         &self,
         queue: &tokio::sync::mpsc::Sender<CommandRequest<T>>,
         payload: T,
-    ) -> Result<(), ApiError> {
+    ) -> Result<(), SecondaryTenantError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
         queue
@@ -294,18 +309,26 @@ impl SecondaryController {
                 response_tx,
             })
             .await
-            .map_err(|_| ApiError::ShuttingDown)?;
+            .map_err(|_| SecondaryTenantError::ShuttingDown)?;
 
-        let response = response_rx.await.map_err(|_| ApiError::ShuttingDown)?;
+        let response = response_rx
+            .await
+            .map_err(|_| SecondaryTenantError::ShuttingDown)?;
 
         response.result
     }
 
-    pub async fn upload_tenant(&self, tenant_shard_id: TenantShardId) -> Result<(), ApiError> {
+    pub(crate) async fn upload_tenant(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<(), SecondaryTenantError> {
         self.dispatch(&self.upload_req_tx, UploadCommand::Upload(tenant_shard_id))
             .await
     }
-    pub async fn download_tenant(&self, tenant_shard_id: TenantShardId) -> Result<(), ApiError> {
+    pub(crate) async fn download_tenant(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<(), SecondaryTenantError> {
         self.dispatch(
             &self.download_req_tx,
             DownloadCommand::Download(tenant_shard_id),

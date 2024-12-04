@@ -28,11 +28,11 @@ use super::{
         self, period_jitter, period_warmup, JobGenerator, RunningJob, SchedulingResult,
         TenantBackgroundJobs,
     },
-    CommandRequest, UploadCommand,
+    CommandRequest, SecondaryTenantError, UploadCommand,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, Instrument};
-use utils::{backoff, completion::Barrier, http::error::ApiError, yielding_loop::yielding_loop};
+use utils::{backoff, completion::Barrier, yielding_loop::yielding_loop};
 
 pub(super) async fn heatmap_uploader_task(
     tenant_manager: Arc<TenantManager>,
@@ -279,7 +279,10 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
         }.instrument(info_span!(parent: None, "heatmap_upload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))))
     }
 
-    fn on_command(&mut self, command: UploadCommand) -> Result<UploadPending, ApiError> {
+    fn on_command(
+        &mut self,
+        command: UploadCommand,
+    ) -> Result<UploadPending, SecondaryTenantError> {
         let tenant_shard_id = command.get_tenant_shard_id();
 
         tracing::info!(
