@@ -1177,9 +1177,9 @@ impl Timeline {
                 let owner = self.shard_identity.get_shard_number(&key);
                 let this = self.shard_identity.shard_index();
                 if cfg!(debug_assertions) {
-                    panic!("found key {key} belonging to shard {owner:?} on shard {this}");
+                    panic!("found key {key} belonging to shard {owner} on shard {this}");
                 }
-                debug!("Dropping key {key} during compaction (it belongs on shard {owner:?})");
+                debug!("dropping key {key} during compaction (it belongs on shard {owner})");
             }
 
             if !new_layers.is_empty() {
