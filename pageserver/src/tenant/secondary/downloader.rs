@@ -1183,6 +1183,7 @@ impl<'a> TenantDownloader<'a> {
             &layer.name,
             &layer.metadata,
             &local_path,
+            &self.secondary_state.gate,
             &self.secondary_state.cancel,
             ctx,
         )
