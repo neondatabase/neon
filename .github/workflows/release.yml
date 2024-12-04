@@ -36,7 +36,7 @@ jobs:
 
     uses: ./.github/workflows/_create-release-pr.yml
     with:
-      component-name: 'Storage & Compute'
+      component-name: 'Storage'
       release-branch: 'release'
     secrets:
       ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
