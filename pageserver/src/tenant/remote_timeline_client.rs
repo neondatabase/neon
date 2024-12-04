@@ -2190,6 +2190,14 @@ impl RemoteTimelineClient {
                     upload_queue.clean.1 = Some(task.task_id);
 
                     let lsn = upload_queue.clean.0.metadata.disk_consistent_lsn();
+                    crate::metrics::PROJECTED_REMOTE_CONSISTENT_LSN
+                        .get_metric_with_label_values(&[
+                            &self.tenant_shard_id.tenant_id.to_string(),
+                            &format!("{}", self.tenant_shard_id.shard_slug()),
+                            &self.timeline_id.to_string(),
+                        ])
+                        .unwrap()
+                        .set(lsn.0 as i64);
 
                     if self.generation.is_none() {
                         // Legacy mode: skip validating generation
