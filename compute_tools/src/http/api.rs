@@ -326,9 +326,20 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 return resp;
             }
 
-            let connstr = compute.connstr.clone();
             // should I rewrite this to not wait for the result?
-            let _ = crate::installed_extensions::get_installed_extensions(connstr).await;
+            //let _ = crate::installed_extensions::get_installed_extensions(connstr).await;
+
+            // spwan a task to get installed extensions, but don't wait for the result
+            // since get_installed_extensions is a blocking call call it with spawn_blocking
+            // within an async task
+            let conf = compute.get_conn_conf(None);
+            task::spawn(async move {
+                let _ = task::spawn_blocking(move || {
+                    installed_extensions::get_installed_extensions(conf)
+                })
+                .await;
+            });
+
             Response::new(Body::from("OK"))
         }
 

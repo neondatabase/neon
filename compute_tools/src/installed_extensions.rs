@@ -89,6 +89,11 @@ pub fn get_installed_extensions(mut conf: postgres::config::Config) -> Result<In
         }
     }
 
+    // reset the metric to handle dropped extensions and extension version changes
+    // It creates a race condition - if collector is called before we set the new values
+    // we will have a gap in the metrics. But it's not worth to optimize it further.
+    INSTALLED_EXTENSIONS.reset();
+
     for (key, ext) in extensions_map.iter() {
         let (extname, version, owned_by_superuser) = key;
         let n_databases = ext.n_databases as u64;
@@ -97,6 +102,9 @@ pub fn get_installed_extensions(mut conf: postgres::config::Config) -> Result<In
             .with_label_values(&[extname, version, owned_by_superuser])
             .set(n_databases);
     }
+
+    // log the installed extensions
+    tracing::info!("Installed extensions: {:?}", extensions_map);
 
     Ok(InstalledExtensions {
         extensions: extensions_map.into_values().collect(),

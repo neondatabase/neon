@@ -19,7 +19,7 @@
 #include "extension_server.h" 
 #include "neon_utils.h"
 
-static int	extension_server_port = 0;
+static int extension_server_port = 0;
 
 static download_extension_file_hook_type prev_download_extension_file_hook = NULL;
 
@@ -109,6 +109,7 @@ NeonExtensionProcessUtility(
 		case T_CreateExtensionStmt:
 		case T_AlterExtensionStmt:
 			extension_ddl_occured = true;
+			elog(LOG, "Extension DDL occured");
 			break;
 		case T_DropStmt:
 			{
@@ -116,6 +117,7 @@ NeonExtensionProcessUtility(
 				{
 					case OBJECT_EXTENSION:
 						extension_ddl_occured = true;
+						elog(LOG, "Extension DDL occured");
 						break;
 					default:
 						break;
@@ -171,7 +173,7 @@ neon_send_extension_ddl_event_http()
 	compute_ctl_url = psprintf("http://localhost:%d/installed_extensions",
 							   extension_server_port);
 
-	elog(LOG, "Sending request to compute_ctl: %s", compute_ctl_url);
+	elog(LOG, "Sending ddl event to compute_ctl: %s", compute_ctl_url);
 
 	curl_easy_setopt(handle, CURLOPT_URL, compute_ctl_url);
 
@@ -199,13 +201,23 @@ neon_send_extension_ddl_event_http()
 static void
 NeonExtensionXactCallback(XactEvent event, void *arg)
 {
-	if (event == XACT_EVENT_PRE_COMMIT || event == XACT_EVENT_PARALLEL_PRE_COMMIT)
+	elog(LOG, "NeonExtensionXactCallback: %d", event);
+	/* the handler on the compute_ctl side must be non-blocking
+	 * otherwise, the compute_ctl won't see the data that is not yet committed.
+	 * There is still a chance of the race, because the data becomes visible only after XACT_EVENT_COMMIT
+	 * callback is called. We assume that this is not critical for the monitoring feature and expect that
+	 * compute_ctl will eventually see the data.
+	 */
+	if (event == XACT_EVENT_COMMIT || event == XACT_EVENT_PARALLEL_COMMIT)
 	{
 		if (extension_ddl_occured)
+		{
+			elog(LOG, "Sending extension DDL event to compute_ctl");
 			neon_send_extension_ddl_event_http();
+			extension_ddl_occured = false;
+		}
+		elog(LOG, "no extension DDL");
 	}
-
-	extension_ddl_occured = false;
 }
 
 void
