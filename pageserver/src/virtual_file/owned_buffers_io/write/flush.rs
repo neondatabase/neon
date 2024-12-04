@@ -14,13 +14,13 @@ pub struct FlushHandle<Buf, W> {
     inner: Option<FlushHandleInner<Buf, W>>,
     /// Immutable buffer for serving tail reads.
     /// `None` if no flush request has been submitted.
-    pub(super) maybe_flushed: Option<FullSlice<Buf>>,
+    pub(super) maybe_flushed: MaybeFlushedFullSlice<Buf>,
 }
 
 pub struct FlushHandleInner<Buf, W> {
     /// A bi-directional channel that sends (buffer, offset) for writes,
     /// and receives recyled buffer.
-    channel: duplex::mpsc::Duplex<FlushRequest<Buf>, FullSlice<Buf>>,
+    channel: duplex::mpsc::Sender<FlushRequest<Buf>, FullSlice<Buf>>,
     /// Join handle for the background flush task.
     join_handle: tokio::task::JoinHandle<std::io::Result<Arc<W>>>,
 }
@@ -57,6 +57,62 @@ fn new_flush_op<Buf>(slice: FullSlice<Buf>, offset: u64) -> (FlushRequest<Buf>, 
         done_flush_tx,
     };
     (request, control)
+}
+
+pub enum MaybeFlushedFullSlice<Buf> {
+    Unused(FullSlice<Buf>),
+    Flushing {
+        read_buf: FullSlice<Buf>,
+        write_buf: tokio::sync::oneshot::Receiver<FullSlice<Buf>>,
+    },
+}
+
+impl<Buf> MaybeFlushedFullSlice<Buf> {
+    pub fn new_flushing(
+        read_buf: FullSlice<Buf>,
+        write_buf: tokio::sync::oneshot::Receiver<FullSlice<Buf>>,
+    ) -> Self {
+        Self::Flushing {
+            read_buf,
+            write_buf,
+        }
+    }
+
+    /// Creates an unused maybe flushed full slice.
+    pub fn new_unused(buf: FullSlice<Buf>) -> Self {
+        Self::Unused(buf)
+    }
+
+    /// Returns a reference to the buffer for read if the buffer is [`Self::Flushing`], otherwise returns `None`.
+    pub fn read_buf(&self) -> Option<&FullSlice<Buf>> {
+        match self {
+            MaybeFlushedFullSlice::Unused(_) => None,
+            MaybeFlushedFullSlice::Flushing {
+                read_buf,
+                write_buf: _,
+            } => Some(read_buf),
+        }
+    }
+
+    /// Recycles a maybe flushed buffer to a `FullSlice`.
+    ///
+    /// The call returns immediately if the buffer is [`Self::Unused`].
+    /// If the buffer is [`Self::Flushing`], the call will wait for an available buffer from the background task.
+    /// The cheap-cloned slice for read is also dropped.
+    pub async fn recycle(self) -> Result<FullSlice<Buf>, duplex::mpsc::error::RecvError> {
+        let buf = match self {
+            MaybeFlushedFullSlice::Unused(buf) => buf,
+            MaybeFlushedFullSlice::Flushing {
+                read_buf: _,
+                write_buf,
+            } => {
+                // This is the BACKPRESSURE mechanism: if the flush task can't keep up,
+                // then the write path will eventually wait for it here.
+                write_buf.await?
+            }
+        };
+        Ok(buf)
+    }
 }
 
 /// A handle to a `FlushRequest` that allows unit tests precise control over flush behavior.
@@ -129,7 +185,7 @@ where
 
         let join_handle = tokio::spawn(async move {
             FlushBackgroundTask::new(back, file, gate_guard, ctx)
-                .run(buf.flush())
+                .run()
                 .await
         });
 
@@ -138,7 +194,7 @@ where
                 channel: front,
                 join_handle,
             }),
-            maybe_flushed: None,
+            maybe_flushed: MaybeFlushedFullSlice::new_unused(buf.flush()),
         }
     }
 
@@ -146,37 +202,29 @@ where
     /// Returns a buffer that completed flushing for re-use, length reset to 0, capacity unchanged.
     /// If `save_buf_for_read` is true, then we save the buffer in `Self::maybe_flushed`, otherwise
     /// clear `maybe_flushed`.
-    pub async fn flush<B>(&mut self, buf: B, offset: u64) -> std::io::Result<(B, FlushControl)>
-    where
-        B: Buffer<IoBuf = Buf> + Send + 'static,
-    {
-        let slice = buf.flush();
-
-        // Saves a buffer for read while flushing. This also removes reference to the old buffer.
-        self.maybe_flushed = Some(slice.cheap_clone());
-
-        let (request, flush_control) = new_flush_op(slice, offset);
+    pub async fn flush(
+        &mut self,
+        slice: FullSlice<Buf>,
+        offset: u64,
+    ) -> std::io::Result<(MaybeFlushedFullSlice<Buf>, FlushControl)> {
+        let (request, flush_control) = new_flush_op(slice.cheap_clone(), offset);
 
         // Submits the buffer to the background task.
-        let submit = self.inner_mut().channel.send(request).await;
-        if submit.is_err() {
-            return self.handle_error().await;
-        }
-
-        // Wait for an available buffer from the background flush task.
-        // This is the BACKPRESSURE mechanism: if the flush task can't keep up,
-        // then the write path will eventually wait for it here.
-        let Some(recycled) = self.inner_mut().channel.recv().await else {
+        let Ok(submit) = self.inner_mut().channel.send(request).await else {
             return self.handle_error().await;
         };
 
-        // The only other place that could hold a reference to the recycled buffer
-        // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.
-        let recycled = Buffer::reuse_after_flush(recycled.into_raw_slice().into_inner());
+        // Saves a buffer for read while flushing. This also removes reference to the old buffer.
+        let recycled = std::mem::replace(
+            &mut self.maybe_flushed,
+            MaybeFlushedFullSlice::new_flushing(slice, submit),
+        );
+
         Ok((recycled, flush_control))
     }
 
-    async fn handle_error<T>(&mut self) -> std::io::Result<T> {
+    /// Joins the background task to check for io error.
+    pub(super) async fn handle_error<T>(&mut self) -> std::io::Result<T> {
         Err(self
             .shutdown()
             .await
@@ -206,7 +254,7 @@ where
 pub struct FlushBackgroundTask<Buf, W> {
     /// A bi-directional channel that receives (buffer, offset) for writes,
     /// and send back recycled buffer.
-    channel: duplex::mpsc::Duplex<FullSlice<Buf>, FlushRequest<Buf>>,
+    channel: duplex::mpsc::Receiver<FlushRequest<Buf>, FullSlice<Buf>>,
     /// A writter for persisting data to disk.
     writer: Arc<W>,
     ctx: RequestContext,
@@ -221,7 +269,7 @@ where
 {
     /// Creates a new background flush task.
     fn new(
-        channel: duplex::mpsc::Duplex<FullSlice<Buf>, FlushRequest<Buf>>,
+        channel: duplex::mpsc::Receiver<FlushRequest<Buf>, FullSlice<Buf>>,
         file: Arc<W>,
         gate_guard: utils::sync::gate::GateGuard,
         ctx: RequestContext,
@@ -236,18 +284,19 @@ where
 
     /// Runs the background flush task.
     /// The passed in slice is immediately sent back to the flush handle through the duplex channel.
-    async fn run(mut self, slice: FullSlice<Buf>) -> std::io::Result<Arc<W>> {
+    async fn run(mut self) -> std::io::Result<Arc<W>> {
         // Sends the extra buffer back to the handle.
-        self.channel.send(slice).await.map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "flush handle closed early")
-        })?;
 
         //  Exit condition: channel is closed and there is no remaining buffer to be flushed
-        while let Some(request) = self.channel.recv().await {
+        while let Some(duplex::mpsc::Request {
+            payload,
+            response_tx,
+        }) = self.channel.recv().await
+        {
             #[cfg(test)]
             {
                 // In test, wait for control to signal that we are ready to flush.
-                if request.ready_to_flush_rx.await.is_err() {
+                if payload.ready_to_flush_rx.await.is_err() {
                     tracing::debug!("control dropped");
                 }
             }
@@ -255,19 +304,19 @@ where
             // Write slice to disk at `offset`.
             let slice = self
                 .writer
-                .write_all_at(request.slice, request.offset, &self.ctx)
+                .write_all_at(payload.slice, payload.offset, &self.ctx)
                 .await?;
 
             #[cfg(test)]
             {
                 // In test, tell control we are done flushing buffer.
-                if request.done_flush_tx.send(()).is_err() {
+                if payload.done_flush_tx.send(()).is_err() {
                     tracing::debug!("control dropped");
                 }
             }
 
             // Sends the buffer back to the handle for reuse. The handle is in charged of cleaning the buffer.
-            if self.channel.send(slice).await.is_err() {
+            if response_tx.send(slice).is_err() {
                 // Although channel is closed. Still need to finish flushing the remaining buffers.
                 continue;
             }

@@ -103,7 +103,7 @@ where
     /// Gets a reference to the maybe flushed read-only buffer.
     /// Returns `None` if the writer has not submitted any flush request.
     pub fn inspect_maybe_flushed(&self) -> Option<&FullSlice<Buf>> {
-        self.flush_handle.maybe_flushed.as_ref()
+        self.flush_handle.maybe_flushed.read_buf()
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -178,9 +178,20 @@ where
             self.mutable = Some(buf);
             return Ok(None);
         }
-        let (recycled, flush_control) = self.flush_handle.flush(buf, self.bytes_submitted).await?;
+        let (maybe_flushed, flush_control) = self
+            .flush_handle
+            .flush(buf.flush(), self.bytes_submitted)
+            .await?;
         self.bytes_submitted += u64::try_from(buf_len).unwrap();
-        self.mutable = Some(recycled);
+        let Ok(recycled) = maybe_flushed.recycle().await else {
+            return self.flush_handle.handle_error().await;
+        };
+
+        // The only other place that could hold a reference to the recycled buffer
+        // is in `Self::maybe_flushed`, which get dropped when the buffer is recycled.
+        self.mutable = Some(Buffer::reuse_after_flush(
+            recycled.into_raw_slice().into_inner(),
+        ));
         Ok(Some(flush_control))
     }
 }
