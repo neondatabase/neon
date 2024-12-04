@@ -5681,7 +5681,7 @@ impl Service {
         }
 
         match node_policy {
-            NodeSchedulingPolicy::Active | NodeSchedulingPolicy::Pause => {
+            NodeSchedulingPolicy::Active => {
                 self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Draining))
                     .await?;
 
