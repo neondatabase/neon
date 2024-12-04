@@ -838,6 +838,7 @@ mod test {
                 local_path: remote_fs_dir.clone(),
             },
             timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+            small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT,
         };
         let storage = GenericRemoteStorage::from_config(&storage_config)
             .await
@@ -1144,18 +1145,24 @@ pub(crate) mod mock {
         rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,
         executor_rx: tokio::sync::mpsc::Receiver<DeleterMessage>,
         cancel: CancellationToken,
+        executed: Arc<AtomicUsize>,
     }
 
     impl ConsumerState {
-        async fn consume(&mut self, remote_storage: &GenericRemoteStorage) -> usize {
-            let mut executed = 0;
-
+        async fn consume(&mut self, remote_storage: &GenericRemoteStorage) {
             info!("Executing all pending deletions");
 
             // Transform all executor messages to generic frontend messages
-            while let Ok(msg) = self.executor_rx.try_recv() {
+            loop {
+                use either::Either;
+                let msg = tokio::select! {
+                    left = self.executor_rx.recv() => Either::Left(left),
+                    right = self.rx.recv() => Either::Right(right),
+                };
                 match msg {
-                    DeleterMessage::Delete(objects) => {
+                    Either::Left(None) => break,
+                    Either::Right(None) => break,
+                    Either::Left(Some(DeleterMessage::Delete(objects))) => {
                         for path in objects {
                             match remote_storage.delete(&path, &self.cancel).await {
                                 Ok(_) => {
@@ -1165,18 +1172,13 @@ pub(crate) mod mock {
                                     error!("Failed to delete {path}, leaking object! ({e})");
                                 }
                             }
-                            executed += 1;
+                            self.executed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    DeleterMessage::Flush(flush_op) => {
+                    Either::Left(Some(DeleterMessage::Flush(flush_op))) => {
                         flush_op.notify();
                     }
-                }
-            }
-
-            while let Ok(msg) = self.rx.try_recv() {
-                match msg {
-                    ListWriterQueueMessage::Delete(op) => {
+                    Either::Right(Some(ListWriterQueueMessage::Delete(op))) => {
                         let mut objects = op.objects;
                         for (layer, meta) in op.layers {
                             objects.push(remote_layer_path(
@@ -1198,33 +1200,27 @@ pub(crate) mod mock {
                                     error!("Failed to delete {path}, leaking object! ({e})");
                                 }
                             }
-                            executed += 1;
+                            self.executed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    ListWriterQueueMessage::Flush(op) => {
+                    Either::Right(Some(ListWriterQueueMessage::Flush(op))) => {
                         op.notify();
                     }
-                    ListWriterQueueMessage::FlushExecute(op) => {
+                    Either::Right(Some(ListWriterQueueMessage::FlushExecute(op))) => {
                         // We have already executed all prior deletions because mock does them inline
                         op.notify();
                     }
-                    ListWriterQueueMessage::Recover(_) => {
+                    Either::Right(Some(ListWriterQueueMessage::Recover(_))) => {
                         // no-op in mock
                     }
                 }
-                info!("All pending deletions have been executed");
             }
-
-            executed
         }
     }
 
     pub struct MockDeletionQueue {
         tx: tokio::sync::mpsc::UnboundedSender<ListWriterQueueMessage>,
         executor_tx: tokio::sync::mpsc::Sender<DeleterMessage>,
-        executed: Arc<AtomicUsize>,
-        remote_storage: Option<GenericRemoteStorage>,
-        consumer: std::sync::Mutex<ConsumerState>,
         lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
     }
 
@@ -1235,29 +1231,34 @@ pub(crate) mod mock {
 
             let executed = Arc::new(AtomicUsize::new(0));
 
+            let mut consumer = ConsumerState {
+                rx,
+                executor_rx,
+                cancel: CancellationToken::new(),
+                executed: executed.clone(),
+            };
+
+            tokio::spawn(async move {
+                if let Some(remote_storage) = &remote_storage {
+                    consumer.consume(remote_storage).await;
+                }
+            });
+
             Self {
                 tx,
                 executor_tx,
-                executed,
-                remote_storage,
-                consumer: std::sync::Mutex::new(ConsumerState {
-                    rx,
-                    executor_rx,
-                    cancel: CancellationToken::new(),
-                }),
                 lsn_table: Arc::new(std::sync::RwLock::new(VisibleLsnUpdates::new())),
             }
         }
 
         #[allow(clippy::await_holding_lock)]
         pub async fn pump(&self) {
-            if let Some(remote_storage) = &self.remote_storage {
-                // Permit holding mutex across await, because this is only ever
-                // called once at a time in tests.
-                let mut locked = self.consumer.lock().unwrap();
-                let count = locked.consume(remote_storage).await;
-                self.executed.fetch_add(count, Ordering::Relaxed);
-            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.executor_tx
+                .send(DeleterMessage::Flush(FlushOp { tx }))
+                .await
+                .expect("Failed to send flush message");
+            rx.await.ok();
         }
 
         pub(crate) fn new_client(&self) -> DeletionQueueClient {

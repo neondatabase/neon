@@ -129,22 +129,23 @@ impl Flow {
         }
 
         // Import SLRUs
-
-        // pg_xact (01:00 keyspace)
-        self.import_slru(SlruKind::Clog, &self.storage.pgdata().join("pg_xact"))
+        if self.timeline.tenant_shard_id.is_shard_zero() {
+            // pg_xact (01:00 keyspace)
+            self.import_slru(SlruKind::Clog, &self.storage.pgdata().join("pg_xact"))
+                .await?;
+            // pg_multixact/members (01:01 keyspace)
+            self.import_slru(
+                SlruKind::MultiXactMembers,
+                &self.storage.pgdata().join("pg_multixact/members"),
+            )
             .await?;
-        // pg_multixact/members (01:01 keyspace)
-        self.import_slru(
-            SlruKind::MultiXactMembers,
-            &self.storage.pgdata().join("pg_multixact/members"),
-        )
-        .await?;
-        // pg_multixact/offsets (01:02 keyspace)
-        self.import_slru(
-            SlruKind::MultiXactOffsets,
-            &self.storage.pgdata().join("pg_multixact/offsets"),
-        )
-        .await?;
+            // pg_multixact/offsets (01:02 keyspace)
+            self.import_slru(
+                SlruKind::MultiXactOffsets,
+                &self.storage.pgdata().join("pg_multixact/offsets"),
+            )
+            .await?;
+        }
 
         // Import pg_twophase.
         // TODO: as empty
@@ -302,6 +303,8 @@ impl Flow {
     }
 
     async fn import_slru(&mut self, kind: SlruKind, path: &RemotePath) -> anyhow::Result<()> {
+        assert!(self.timeline.tenant_shard_id.is_shard_zero());
+
         let segments = self.storage.listfilesindir(path).await?;
         let segments: Vec<(String, u32, usize)> = segments
             .into_iter()
@@ -337,7 +340,6 @@ impl Flow {
             debug!(%p, segno=%segno, %size, %start_key, %end_key, "scheduling SLRU segment");
             self.tasks
                 .push(AnyImportTask::SlruBlocks(ImportSlruBlocksTask::new(
-                    *self.timeline.get_shard_identity(),
                     start_key..end_key,
                     &p,
                     self.storage.clone(),
@@ -631,21 +633,14 @@ impl ImportTask for ImportRelBlocksTask {
 }
 
 struct ImportSlruBlocksTask {
-    shard_identity: ShardIdentity,
     key_range: Range<Key>,
     path: RemotePath,
     storage: RemoteStorageWrapper,
 }
 
 impl ImportSlruBlocksTask {
-    fn new(
-        shard_identity: ShardIdentity,
-        key_range: Range<Key>,
-        path: &RemotePath,
-        storage: RemoteStorageWrapper,
-    ) -> Self {
+    fn new(key_range: Range<Key>, path: &RemotePath, storage: RemoteStorageWrapper) -> Self {
         ImportSlruBlocksTask {
-            shard_identity,
             key_range,
             path: path.clone(),
             storage,
@@ -673,17 +668,13 @@ impl ImportTask for ImportSlruBlocksTask {
         let mut file_offset = 0;
         while blknum < end_blk {
             let key = slru_block_to_key(kind, segno, blknum);
-            assert!(
-                !self.shard_identity.is_key_disposable(&key),
-                "SLRU keys need to go into every shard"
-            );
             let buf = &buf[file_offset..(file_offset + 8192)];
             file_offset += 8192;
             layer_writer
                 .put_image(key, Bytes::copy_from_slice(buf), ctx)
                 .await?;
-            blknum += 1;
             nimages += 1;
+            blknum += 1;
         }
         Ok(nimages)
     }

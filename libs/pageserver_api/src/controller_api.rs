@@ -48,7 +48,7 @@ pub struct TenantCreateResponse {
     pub shards: Vec<TenantCreateResponseShard>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeRegisterRequest {
     pub node_id: NodeId,
 
@@ -75,7 +75,7 @@ pub struct TenantPolicyRequest {
     pub scheduling: Option<ShardSchedulingPolicy>,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Debug)]
 pub struct AvailabilityZone(pub String);
 
 impl Display for AvailabilityZone {

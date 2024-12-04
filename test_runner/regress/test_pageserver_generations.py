@@ -352,7 +352,7 @@ def test_deletion_queue_recovery(
         def assert_some_validations():
             assert get_deletion_queue_validated(ps_http) > 0
 
-        wait_until(20, 1, assert_some_validations)
+        wait_until(assert_some_validations)
 
         # The validatated keys statistic advances before the header is written, so we
         # also wait to see the header hit the disk: this seems paranoid but the race
@@ -360,7 +360,7 @@ def test_deletion_queue_recovery(
         def assert_header_written():
             assert (main_pageserver.workdir / "deletion" / "header-01").exists()
 
-        wait_until(20, 1, assert_header_written)
+        wait_until(assert_header_written)
 
         # If we will lose attachment, then our expectation on restart is that only the ones
         # we already validated will execute.  Act like only those were present in the queue.
@@ -382,11 +382,11 @@ def test_deletion_queue_recovery(
     # After restart, issue a flush to kick the deletion frontend to do recovery.
     # It should recover all the operations we submitted before the restart.
     ps_http.deletion_queue_flush(execute=False)
-    wait_until(20, 0.25, lambda: assert_deletions_submitted(before_restart_depth))
+    wait_until(lambda: assert_deletions_submitted(before_restart_depth))
 
     # The queue should drain through completely if we flush it
     ps_http.deletion_queue_flush(execute=True)
-    wait_until(10, 1, lambda: assert_deletion_queue(ps_http, lambda n: n == 0))
+    wait_until(lambda: assert_deletion_queue(ps_http, lambda n: n == 0))
 
     if keep_attachment == KeepAttachment.KEEP:
         # - If we kept the attachment, then our pre-restart deletions should execute
@@ -564,7 +564,7 @@ def test_multi_attach(
     )
 
     # Initially, the tenant will be attached to the first pageserver (first is default in our test harness)
-    wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[0], tenant_id, "Active"))
+    wait_until(lambda: assert_tenant_state(http_clients[0], tenant_id, "Active"))
     _detail = http_clients[0].timeline_detail(tenant_id, timeline_id)
     with pytest.raises(PageserverApiException):
         http_clients[1].timeline_detail(tenant_id, timeline_id)
@@ -579,8 +579,8 @@ def test_multi_attach(
     pageservers[1].tenant_attach(env.initial_tenant)
     pageservers[2].tenant_attach(env.initial_tenant)
 
-    wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[1], tenant_id, "Active"))
-    wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[2], tenant_id, "Active"))
+    wait_until(lambda: assert_tenant_state(http_clients[1], tenant_id, "Active"))
+    wait_until(lambda: assert_tenant_state(http_clients[2], tenant_id, "Active"))
 
     # Now they all have it attached
     _details = list([c.timeline_detail(tenant_id, timeline_id) for c in http_clients])

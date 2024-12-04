@@ -6,8 +6,8 @@ use std::time::Duration;
 use ::http::header::AUTHORIZATION;
 use ::http::HeaderName;
 use futures::TryFutureExt;
+use postgres_client::config::SslMode;
 use tokio::time::Instant;
-use tokio_postgres::config::SslMode;
 use tracing::{debug, info, info_span, warn, Instrument};
 
 use super::super::messages::{ControlPlaneErrorMessage, GetRoleSecret, WakeCompute};
@@ -241,8 +241,8 @@ impl NeonControlPlaneClient {
             // Don't set anything but host and port! This config will be cached.
             // We'll set username and such later using the startup message.
             // TODO: add more type safety (in progress).
-            let mut config = compute::ConnCfg::new();
-            config.host(host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
+            let mut config = compute::ConnCfg::new(host.to_owned(), port);
+            config.ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
 
             let node = NodeInfo {
                 config,

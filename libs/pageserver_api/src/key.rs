@@ -229,6 +229,18 @@ impl Key {
     }
 }
 
+impl CompactKey {
+    pub fn raw(&self) -> i128 {
+        self.0
+    }
+}
+
+impl From<i128> for CompactKey {
+    fn from(value: i128) -> Self {
+        Self(value)
+    }
+}
+
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -756,6 +768,11 @@ impl Key {
             && self.field4 == 0
             && self.field5 == 0
             && self.field6 == 1
+    }
+
+    #[inline(always)]
+    pub fn is_aux_file_key(&self) -> bool {
+        self.field1 == AUX_KEY_PREFIX
     }
 
     /// Guaranteed to return `Ok()` if [`Self::is_rel_block_key`] returns `true` for `key`.
