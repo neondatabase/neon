@@ -3422,7 +3422,7 @@ impl Tenant {
                             r.map_err(
                             |_e: tokio::sync::watch::error::RecvError|
                                 // Tenant existed but was dropped: report it as non-existent
-                                GetActiveTenantError::NotFound(GetTenantError::NotFound(self.tenant_shard_id.tenant_id))
+                                GetActiveTenantError::NotFound(GetTenantError::ShardNotFound(self.tenant_shard_id))
                         )?
                         }
                         Err(TimeoutCancellableError::Cancelled) => {
