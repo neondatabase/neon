@@ -39,9 +39,10 @@ def setup(neon_api: NeonAPI):
     log.info("Branch ID: %s", current_branch_id)
     neon_api.configure_endpoint(project_id, primary_endpoint_id, {"endpoint": {"branch_id": current_branch_id}})
     neon_api.wait_for_operation_to_finish(project_id)
-    uri = neon_api.get_connection_uri(project_id, current_branch_id)["uri"]
+    uri = neon_api.get_connection_uri(project_id, current_branch_id, pooled=False)["uri"]
 
     pgconn = PgConnectParam(uri)
+    log.info("Hostname: %s", pgconn.host)
 
     yield pgconn
 
