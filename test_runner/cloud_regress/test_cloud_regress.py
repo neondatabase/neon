@@ -4,57 +4,19 @@ Run the regression tests on the cloud instance of Neon
 
 from __future__ import annotations
 
-import os
-from datetime import datetime
 from pathlib import Path
+from typing import Any
 
+import psycopg2
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_api import NeonAPI
 from fixtures.neon_fixtures import RemotePostgres
 from fixtures.pg_version import PgVersion
-from fixtures.utils import PgConnectParam
-
-
-@pytest.fixture
-def setup(neon_api: NeonAPI):
-    """
-    Setup and teardown of the tests
-    """
-    project_id = os.getenv("PROJECT_ID")
-    assert project_id is not None, "PROJECT_ID undefined"
-    branches = neon_api.get_branches(project_id)
-    log.info("Branches: %s", branches)
-    primary_branch_id = None
-    for branch in branches["branches"]:
-        if branch["primary"]:
-            primary_branch_id = branch["id"]
-            break
-    assert primary_branch_id is not None, "Cannot get the primary branch"
-    primary_endpoint_id = neon_api.get_endpoints(project_id, primary_branch_id)["endpoints"][0]["id"]
-    resp = neon_api.create_branch(
-        project_id, primary_branch_id, datetime.now().strftime("test-%y%m%d%H%M")
-    )
-    current_branch_id = resp["branch"]["id"]
-    log.info("Branch ID: %s", current_branch_id)
-    neon_api.configure_endpoint(project_id, primary_endpoint_id, {"endpoint": {"branch_id": current_branch_id}})
-    neon_api.wait_for_operation_to_finish(project_id)
-    uri = neon_api.get_connection_uri(project_id, current_branch_id, pooled=False)["uri"]
-
-    pgconn = PgConnectParam(uri)
-    log.info("Hostname: %s", pgconn.host)
-
-    yield pgconn
-
-    neon_api.configure_endpoint(project_id, primary_endpoint_id, {"endpoint": {"branch_id": primary_branch_id}})
-    log.info("Delete branch %s", current_branch_id)
-    neon_api.delete_branch(project_id, current_branch_id)
 
 
 @pytest.mark.timeout(7200)
 @pytest.mark.remote_cluster
 def test_cloud_regress(
-    setup,
     remote_pg: RemotePostgres,
     pg_version: PgVersion,
     pg_distrib_dir: Path,
@@ -69,6 +31,15 @@ def test_cloud_regress(
     )
     test_path = base_dir / f"vendor/postgres-{pg_version.v_prefixed}/src/test/regress"
 
+    env_vars = {
+        "PGHOST": remote_pg.default_options["host"],
+        "PGPORT": str(
+            remote_pg.default_options["port"] if "port" in remote_pg.default_options else 5432
+        ),
+        "PGUSER": remote_pg.default_options["user"],
+        "PGPASSWORD": remote_pg.default_options["password"],
+        "PGDATABASE": remote_pg.default_options["dbname"],
+    }
     regress_cmd = [
         str(regress_bin),
         f"--inputdir={test_path}",
@@ -78,4 +49,4 @@ def test_cloud_regress(
         f"--schedule={test_path}/parallel_schedule",
         "--max-connections=5",
     ]
-    remote_pg.pg_bin.run(regress_cmd, env=setup.env_vars(), cwd=test_output_dir)
+    remote_pg.pg_bin.run(regress_cmd, env=env_vars, cwd=test_output_dir)
