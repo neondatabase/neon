@@ -2394,7 +2394,7 @@ pub(crate) struct TimelineMetrics {
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub find_gc_cutoffs_histo: StorageTimeMetrics,
-    pub last_record_gauge: IntGauge,
+    pub last_record_lsn_gauge: IntGauge,
     pub pitr_history_size: UIntGauge,
     pub archival_size: UIntGauge,
     pub(crate) layer_size_image: UIntGauge,
@@ -2475,7 +2475,7 @@ impl TimelineMetrics {
             &shard_id,
             &timeline_id,
         );
-        let last_record_gauge = LAST_RECORD_LSN
+        let last_record_lsn_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
@@ -2578,7 +2578,7 @@ impl TimelineMetrics {
             garbage_collect_histo,
             find_gc_cutoffs_histo,
             load_layer_map_histo,
-            last_record_gauge,
+            last_record_lsn_gauge,
             pitr_history_size,
             archival_size,
             layer_size_image,

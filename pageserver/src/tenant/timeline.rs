@@ -2359,7 +2359,7 @@ impl Timeline {
 
             result
                 .metrics
-                .last_record_gauge
+                .last_record_lsn_gauge
                 .set(disk_consistent_lsn.0 as i64);
             result
         })
@@ -3482,7 +3482,7 @@ impl Timeline {
     pub(crate) fn finish_write(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
 
-        self.metrics.last_record_gauge.set(new_lsn.0 as i64);
+        self.metrics.last_record_lsn_gauge.set(new_lsn.0 as i64);
         self.last_record_lsn.advance(new_lsn);
     }
 
