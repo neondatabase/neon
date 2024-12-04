@@ -1,4 +1,7 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    mem::MaybeUninit,
+    ops::{Deref, DerefMut},
+};
 
 use super::{
     alignment::{Alignment, ConstAlign},
@@ -46,6 +49,11 @@ impl<const A: usize> AlignedBufferMut<ConstAlign<A>> {
 }
 
 impl<A: Alignment> AlignedBufferMut<A> {
+    /// Constructs a mutable aligned buffer from raw.
+    pub(super) fn from_raw(raw: RawAlignedBuffer<A>) -> Self {
+        AlignedBufferMut { raw }
+    }
+
     /// Returns the total number of bytes the buffer can hold.
     #[inline]
     pub fn capacity(&self) -> usize {
@@ -127,6 +135,39 @@ impl<A: Alignment> AlignedBufferMut<A> {
     pub fn freeze(self) -> AlignedBuffer<A> {
         let len = self.len();
         AlignedBuffer::from_raw(self.raw, 0..len)
+    }
+
+    /// Clones and appends all elements in a slice to the buffer. Reserves additional capacity as needed.
+    #[inline]
+    pub fn extend_from_slice(&mut self, extend: &[u8]) {
+        let cnt = extend.len();
+        self.reserve(cnt);
+
+        // SAFETY: we already reserved additional `cnt` bytes, safe to perform memcpy.
+        unsafe {
+            let dst = self.spare_capacity_mut();
+            // Reserved above
+            debug_assert!(dst.len() >= cnt);
+
+            core::ptr::copy_nonoverlapping(extend.as_ptr(), dst.as_mut_ptr().cast(), cnt);
+        }
+        // SAFETY: We do have at least `cnt` bytes remaining before advance.
+        unsafe {
+            bytes::BufMut::advance_mut(self, cnt);
+        }
+    }
+
+    /// Returns the remaining spare capacity of the vector as a slice of `MaybeUninit<u8>`.
+    #[inline]
+    fn spare_capacity_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+        // SAFETY: we guarantees that the `Self::capacity()` bytes from
+        // `Self::as_mut_ptr()` are allocated.
+        unsafe {
+            let ptr = self.as_mut_ptr().add(self.len());
+            let len = self.capacity() - self.len();
+
+            core::slice::from_raw_parts_mut(ptr.cast(), len)
+        }
     }
 }
 

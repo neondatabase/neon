@@ -182,7 +182,7 @@ impl OpenLayerManager {
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
-        gate_guard: utils::sync::gate::GateGuard,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
@@ -212,15 +212,9 @@ impl OpenLayerManager {
                 lsn
             );
 
-            let new_layer = InMemoryLayer::create(
-                conf,
-                timeline_id,
-                tenant_shard_id,
-                start_lsn,
-                gate_guard,
-                ctx,
-            )
-            .await?;
+            let new_layer =
+                InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn, gate, ctx)
+                    .await?;
             let layer = Arc::new(new_layer);
 
             self.layer_map.open_layer = Some(layer.clone());
