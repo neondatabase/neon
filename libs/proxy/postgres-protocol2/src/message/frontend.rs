@@ -273,12 +273,12 @@ pub struct StartupMessageParams {
 impl StartupMessageParams {
     /// Set parameter's value by its name.
     pub fn insert(&mut self, name: &str, value: &str) {
-        if name.contains('\0') | value.contains('\0') {
+        if name.contains('\0') || value.contains('\0') {
             panic!("startup parameter name or value contained a null")
         }
-        self.params.put(name.as_bytes());
+        self.params.put_slice(name.as_bytes());
         self.params.put_u8(0);
-        self.params.put(value.as_bytes());
+        self.params.put_slice(value.as_bytes());
         self.params.put_u8(0);
     }
 }

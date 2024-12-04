@@ -340,7 +340,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let params_compat = match &user_info {
         auth::Backend::ControlPlane(_, info) => {
-            info.info.options.get("proxy_params_compat").is_some()
+            info.info.options.get(NeonOptions::PARAMS_COMPAT).is_some()
         }
         auth::Backend::Local(_) => false,
     };
@@ -417,6 +417,19 @@ pub(crate) async fn prepare_client_connection<P>(
 pub(crate) struct NeonOptions(Vec<(SmolStr, SmolStr)>);
 
 impl NeonOptions {
+    // proxy options:
+
+    /// `PARAMS_COMPAT` allows opting in to forwarding all startup parameters from client to compute.
+    const PARAMS_COMPAT: &str = "proxy_params_compat";
+
+    // cplane options:
+
+    /// `LSN` allows provisioning an ephemeral compute with time-travel to the provided LSN.
+    const LSN: &str = "lsn";
+
+    /// `ENDPOINT_TYPE` allows configuring an ephemeral compute to be read_only or read_write.
+    const ENDPOINT_TYPE: &str = "endpoint_type";
+
     pub(crate) fn parse_params(params: &StartupMessageParams) -> Self {
         params
             .options_raw()
@@ -436,15 +449,15 @@ impl NeonOptions {
     }
 
     pub(crate) fn is_ephemeral(&self) -> bool {
-        fn parameter_is_not_ephemeral(p: &str) -> bool {
-            p == "proxy_params_compat"
-        }
-
-        self.0
-            .iter()
-            .filter(|(k, _)| !parameter_is_not_ephemeral(k))
-            .count()
-            > 0
+        self.0.iter().any(|(k, _)| match &**k {
+            // This is not a cplane option, we know it does not create ephemeral computes.
+            Self::PARAMS_COMPAT => false,
+            Self::LSN => true,
+            Self::ENDPOINT_TYPE => true,
+            // err on the side of caution. any cplane options we don't know about
+            // might lead to ephemeral computes.
+            _ => true,
+        })
     }
 
     fn parse_from_iter<'a>(options: impl Iterator<Item = &'a str>) -> Self {
