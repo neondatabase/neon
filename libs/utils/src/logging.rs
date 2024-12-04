@@ -310,7 +310,11 @@ mod tests {
             tracing::error!("foo");
         });
 
-        assert_eq!(counter_vec.with_label_values(&["trace"]).get(), 1);
+        if tracing::level_filters::LevelFilter::TRACE <= tracing::level_filters::STATIC_MAX_LEVEL {
+            assert_eq!(counter_vec.with_label_values(&["trace"]).get(), 1);
+        } else {
+            assert_eq!(counter_vec.with_label_values(&["trace"]).get(), 0);
+        }
         assert_eq!(counter_vec.with_label_values(&["debug"]).get(), 1);
         assert_eq!(counter_vec.with_label_values(&["info"]).get(), 1);
         assert_eq!(counter_vec.with_label_values(&["warn"]).get(), 1);
