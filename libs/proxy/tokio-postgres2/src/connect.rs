@@ -1,14 +1,11 @@
 use crate::client::SocketConfig;
 use crate::codec::BackendMessage;
-use crate::config::{Host, TargetSessionAttrs};
+use crate::config::Host;
 use crate::connect_raw::connect_raw;
 use crate::connect_socket::connect_socket;
 use crate::tls::{MakeTlsConnect, TlsConnect};
-use crate::{Client, Config, Connection, Error, RawConnection, SimpleQueryMessage};
-use futures_util::{future, pin_mut, Future, FutureExt, Stream};
+use crate::{Client, Config, Connection, Error, RawConnection};
 use postgres_protocol2::message::backend::Message;
-use std::io;
-use std::task::Poll;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
@@ -72,47 +69,7 @@ where
         .map(|m| BackendMessage::Async(Message::NoticeResponse(m)))
         .collect();
 
-    let mut connection = Connection::new(stream, delayed, parameters, receiver);
-
-    if let TargetSessionAttrs::ReadWrite = config.target_session_attrs {
-        let rows = client.simple_query_raw("SHOW transaction_read_only");
-        pin_mut!(rows);
-
-        let rows = future::poll_fn(|cx| {
-            if connection.poll_unpin(cx)?.is_ready() {
-                return Poll::Ready(Err(Error::closed()));
-            }
-
-            rows.as_mut().poll(cx)
-        })
-        .await?;
-        pin_mut!(rows);
-
-        loop {
-            let next = future::poll_fn(|cx| {
-                if connection.poll_unpin(cx)?.is_ready() {
-                    return Poll::Ready(Some(Err(Error::closed())));
-                }
-
-                rows.as_mut().poll_next(cx)
-            });
-
-            match next.await.transpose()? {
-                Some(SimpleQueryMessage::Row(row)) => {
-                    if row.try_get(0)? == Some("on") {
-                        return Err(Error::connect(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            "database does not allow writes",
-                        )));
-                    } else {
-                        break;
-                    }
-                }
-                Some(_) => {}
-                None => return Err(Error::unexpected_message()),
-            }
-        }
-    }
+    let connection = Connection::new(stream, delayed, parameters, receiver);
 
     Ok((client, connection))
 }

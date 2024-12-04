@@ -117,7 +117,7 @@ enum Credentials<const N: usize> {
     /// A regular password as a vector of bytes.
     Password(Vec<u8>),
     /// A precomputed pair of keys.
-    Keys(Box<ScramKeys<N>>),
+    Keys(ScramKeys<N>),
 }
 
 enum State {
@@ -176,7 +176,7 @@ impl ScramSha256 {
 
     /// Constructs a new instance which will use the provided key pair for authentication.
     pub fn new_with_keys(keys: ScramKeys<32>, channel_binding: ChannelBinding) -> ScramSha256 {
-        let password = Credentials::Keys(keys.into());
+        let password = Credentials::Keys(keys);
         ScramSha256::new_inner(password, channel_binding, nonce())
     }
 

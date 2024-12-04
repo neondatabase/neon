@@ -252,7 +252,7 @@ async fn handshake_raw() -> anyhow::Result<()> {
     let _conn = postgres_client::Config::new("test".to_owned(), 5432)
         .user("john_doe")
         .dbname("earth")
-        .options("project=generic-project-name")
+        .set_param("options", "project=generic-project-name")
         .ssl_mode(SslMode::Prefer)
         .connect_raw(server, NoTls)
         .await?;
