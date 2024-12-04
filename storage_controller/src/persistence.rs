@@ -636,6 +636,13 @@ impl Persistence {
                     .into_boxed(),
             };
 
+            // Clear generation_pageserver if we are moving into a state where we won't have
+            // any attached pageservers.
+            let input_generation_pageserver = match input_placement_policy {
+                None | Some(PlacementPolicy::Attached(_)) => None,
+                Some(PlacementPolicy::Detached | PlacementPolicy::Secondary) => Some(None),
+            };
+
             #[derive(AsChangeset)]
             #[diesel(table_name = crate::schema::tenant_shards)]
             struct ShardUpdate {
@@ -643,6 +650,7 @@ impl Persistence {
                 placement_policy: Option<String>,
                 config: Option<String>,
                 scheduling_policy: Option<String>,
+                generation_pageserver: Option<Option<i64>>,
             }
 
             let update = ShardUpdate {
@@ -655,6 +663,7 @@ impl Persistence {
                     .map(|c| serde_json::to_string(&c).unwrap()),
                 scheduling_policy: input_scheduling_policy
                     .map(|p| serde_json::to_string(&p).unwrap()),
+                generation_pageserver: input_generation_pageserver,
             };
 
             query.set(update).execute(conn)?;
