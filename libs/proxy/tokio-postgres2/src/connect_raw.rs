@@ -1,5 +1,5 @@
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
-use crate::config::{self, AuthKeys, Config, ReplicationMode};
+use crate::config::{self, AuthKeys, Config};
 use crate::connect_tls::connect_tls;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::{TlsConnect, TlsStream};
@@ -96,12 +96,7 @@ where
     let stream = connect_tls(stream, config.ssl_mode, tls).await?;
 
     let mut stream = StartupStream {
-        inner: Framed::new(
-            stream,
-            PostgresCodec {
-                max_message_size: config.max_backend_message_size,
-            },
-        ),
+        inner: Framed::new(stream, PostgresCodec),
         buf: BackendMessages::empty(),
         delayed_notice: Vec::new(),
     };
@@ -124,28 +119,8 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut params = vec![("client_encoding", "UTF8")];
-    if let Some(user) = &config.user {
-        params.push(("user", &**user));
-    }
-    if let Some(dbname) = &config.dbname {
-        params.push(("database", &**dbname));
-    }
-    if let Some(options) = &config.options {
-        params.push(("options", &**options));
-    }
-    if let Some(application_name) = &config.application_name {
-        params.push(("application_name", &**application_name));
-    }
-    if let Some(replication_mode) = &config.replication_mode {
-        match replication_mode {
-            ReplicationMode::Physical => params.push(("replication", "true")),
-            ReplicationMode::Logical => params.push(("replication", "database")),
-        }
-    }
-
     let mut buf = BytesMut::new();
-    frontend::startup_message(params, &mut buf).map_err(Error::encode)?;
+    frontend::startup_message(&config.server_params, &mut buf).map_err(Error::encode)?;
 
     stream
         .send(FrontendMessage::Raw(buf.freeze()))

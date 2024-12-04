@@ -66,6 +66,8 @@ pub(crate) trait ComputeConnectBackend {
 }
 
 pub(crate) struct TcpMechanism<'a> {
+    pub(crate) params_compat: bool,
+
     /// KV-dictionary with PostgreSQL connection params.
     pub(crate) params: &'a StartupMessageParams,
 
@@ -92,7 +94,7 @@ impl ConnectMechanism for TcpMechanism<'_> {
     }
 
     fn update_connect_config(&self, config: &mut compute::ConnCfg) {
-        config.set_startup_params(self.params);
+        config.set_startup_params(self.params, self.params_compat);
     }
 }
 

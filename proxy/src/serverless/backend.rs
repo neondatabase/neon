@@ -309,10 +309,13 @@ impl PoolingBackend {
             .config
             .user(&conn_info.user_info.user)
             .dbname(&conn_info.dbname)
-            .options(&format!(
-                "-c pg_session_jwt.jwk={}",
-                serde_json::to_string(&jwk).expect("serializing jwk to json should not fail")
-            ));
+            .set_param(
+                "options",
+                &format!(
+                    "-c pg_session_jwt.jwk={}",
+                    serde_json::to_string(&jwk).expect("serializing jwk to json should not fail")
+                ),
+            );
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (client, connection) = config.connect(postgres_client::NoTls).await?;

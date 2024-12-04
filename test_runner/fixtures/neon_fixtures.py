@@ -269,7 +269,7 @@ class PgProtocol:
             for match in re.finditer(r"-c(\w*)=(\w*)", options):
                 key = match.group(1)
                 val = match.group(2)
-                if "server_options" in conn_options:
+                if "server_settings" in conn_options:
                     conn_options["server_settings"].update({key: val})
                 else:
                     conn_options["server_settings"] = {key: val}
