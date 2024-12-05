@@ -311,7 +311,15 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         }
 
         // handle HEAD method of /installed_extensions route
-        // just log info
+        // This is the signal from postgres that extension DDL occured and we need to update the metric.
+        //
+        // Don't wait for the result, because the caller doesn't need it
+        // just spawn a task and the metric will be updated eventually.
+        //
+        // In theory there could be multiple HEAD requests in a row, so we should protect
+        // from spawning multiple tasks, but in practice it's not a problem.
+        // TODO: add some mutex or quere?
+        // In practice, extensions are not installed very often, so it's not a problem
         (&Method::HEAD, route) if route.starts_with("/installed_extensions") => {
             info!("serving /installed_extensions HEAD request");
             let status = compute.get_status();
@@ -326,12 +334,6 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 return resp;
             }
 
-            // should I rewrite this to not wait for the result?
-            //let _ = crate::installed_extensions::get_installed_extensions(connstr).await;
-
-            // spwan a task to get installed extensions, but don't wait for the result
-            // since get_installed_extensions is a blocking call call it with spawn_blocking
-            // within an async task
             let conf = compute.get_conn_conf(None);
             task::spawn(async move {
                 let _ = task::spawn_blocking(move || {

@@ -154,6 +154,10 @@ def test_installed_extensions(neon_simple_env: NeonEnv):
             assert sample.value == 1
 
 
+# WIP Test metric live update
+# TODO: cleamup the test and stabilize it.
+# Now there is a race, because there is a gap between the extension creation and the metric collection.
+# This is fine for the real world, as we don't need to be 100% real time, but not convenient for the test.
 def test_installed_extensions_metric_live_update(neon_simple_env: NeonEnv):
     """basic test for the endpoint that returns the list of installed extensions"""
 
