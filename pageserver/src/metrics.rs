@@ -473,8 +473,8 @@ static DISK_CONSISTENT_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static PROJECTED_REMOTE_CONSISTENT_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
+pub(crate) static PROJECTED_REMOTE_CONSISTENT_LSN: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
         "pageserver_projected_remote_consistent_lsn",
         "Projected remote consistent LSN grouped by timeline",
         &["tenant_id", "shard_id", "timeline_id"]
@@ -2667,11 +2667,6 @@ impl TimelineMetrics {
         let shard_id = &self.shard_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = DISK_CONSISTENT_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
-        let _ = PROJECTED_REMOTE_CONSISTENT_LSN.remove_label_values(&[
-            tenant_id,
-            shard_id,
-            timeline_id,
-        ]);
         let _ = FLUSH_WAIT_UPLOAD_TIME.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = STANDBY_HORIZON.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         {
@@ -2835,6 +2830,7 @@ pub(crate) struct RemoteTimelineClientMetrics {
     calls: Mutex<HashMap<(&'static str, &'static str), IntCounterPair>>,
     bytes_started_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
     bytes_finished_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
+    pub(crate) projected_remote_consistent_lsn_gauge: UIntGauge,
 }
 
 impl RemoteTimelineClientMetrics {
@@ -2849,6 +2845,10 @@ impl RemoteTimelineClientMetrics {
                 .unwrap(),
         );
 
+        let projected_remote_consistent_lsn_gauge = PROJECTED_REMOTE_CONSISTENT_LSN
+            .get_metric_with_label_values(&[&tenant_id_str, &shard_id_str, &timeline_id_str])
+            .unwrap();
+
         RemoteTimelineClientMetrics {
             tenant_id: tenant_id_str,
             shard_id: shard_id_str,
@@ -2857,6 +2857,7 @@ impl RemoteTimelineClientMetrics {
             bytes_started_counter: Mutex::new(HashMap::default()),
             bytes_finished_counter: Mutex::new(HashMap::default()),
             remote_physical_size_gauge,
+            projected_remote_consistent_lsn_gauge,
         }
     }
 
@@ -3070,6 +3071,7 @@ impl Drop for RemoteTimelineClientMetrics {
             calls,
             bytes_started_counter,
             bytes_finished_counter,
+            projected_remote_consistent_lsn_gauge,
         } = self;
         for ((a, b), _) in calls.get_mut().unwrap().drain() {
             let mut res = [Ok(()), Ok(())];
@@ -3098,6 +3100,14 @@ impl Drop for RemoteTimelineClientMetrics {
         {
             let _ = remote_physical_size_gauge; // use to avoid 'unused' warning in desctructuring above
             let _ = REMOTE_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        }
+        {
+            let _ = projected_remote_consistent_lsn_gauge;
+            let _ = PROJECTED_REMOTE_CONSISTENT_LSN.remove_label_values(&[
+                tenant_id,
+                shard_id,
+                timeline_id,
+            ]);
         }
     }
 }
