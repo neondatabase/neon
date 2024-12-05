@@ -4241,9 +4241,6 @@ impl Service {
                     };
                     child_state.generation = Some(generation);
                     child_state.config = config.clone();
-                    if let Some(preferred_az) = &preferred_az {
-                        child_state.set_preferred_az(preferred_az.clone());
-                    }
 
                     // The child's TenantShard::splitting is intentionally left at the default value of Idle,
                     // as at this point in the split process we have succeeded and this part is infallible:
@@ -4860,6 +4857,8 @@ impl Service {
                         // If our new attached node was a secondary, it no longer should be.
                         shard.intent.remove_secondary(scheduler, migrate_req.node_id);
 
+                        shard.intent.set_attached(scheduler, Some(migrate_req.node_id));
+
                         // If we were already attached to something, demote that to a secondary
                         if let Some(old_attached) = old_attached {
                             if n > 0 {
@@ -4871,8 +4870,6 @@ impl Service {
                                 shard.intent.push_secondary(scheduler, old_attached);
                             }
                         }
-
-                        shard.intent.set_attached(scheduler, Some(migrate_req.node_id));
                     }
                     PlacementPolicy::Secondary => {
                         shard.intent.clear(scheduler);
@@ -5444,7 +5441,7 @@ impl Service {
             register_req.listen_http_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
-            register_req.availability_zone_id,
+            register_req.availability_zone_id.clone(),
         );
 
         // TODO: idempotency if the node already exists in the database
@@ -5464,8 +5461,9 @@ impl Service {
             .set(locked.nodes.len() as i64);
 
         tracing::info!(
-            "Registered pageserver {}, now have {} pageservers",
+            "Registered pageserver {} ({}), now have {} pageservers",
             register_req.node_id,
+            register_req.availability_zone_id,
             locked.nodes.len()
         );
         Ok(())
@@ -6176,6 +6174,7 @@ impl Service {
                 // Shard was dropped between planning and execution;
                 continue;
             };
+            tracing::info!("Applying optimization: {optimization:?}");
             if shard.apply_optimization(scheduler, optimization) {
                 optimizations_applied += 1;
                 if self.maybe_reconcile_shard(shard, nodes).is_some() {
@@ -6206,7 +6205,13 @@ impl Service {
 
         let mut work = Vec::new();
         let mut locked = self.inner.write().unwrap();
-        let (nodes, tenants, scheduler) = locked.parts_mut();
+        let (_nodes, tenants, scheduler) = locked.parts_mut();
+
+        // We are going to plan a bunch of optimisations before applying any of them, so the
+        // utilisation stats on nodes will be effectively stale for the >1st optimisation we
+        // generate.  To avoid this causing unstable migrations/flapping, it's important that the
+        // code in TenantShard for finding optimisations uses [`NodeAttachmentSchedulingScore::disregard_utilization`]
+        // to ignore the utilisation component of the score.
 
         for (_tenant_id, schedule_context, shards) in
             TenantShardContextIterator::new(tenants, ScheduleMode::Speculative)
@@ -6237,13 +6242,25 @@ impl Service {
                     continue;
                 }
 
+                // Fast path: we may quickly identify shards that don't have any possible optimisations
+                if !shard.maybe_optimizable(scheduler, &schedule_context) {
+                    debug_assert!(shard
+                        .optimize_attachment(scheduler, &schedule_context)
+                        .is_none());
+                    debug_assert!(shard
+                        .optimize_secondary(scheduler, &schedule_context)
+                        .is_none());
+                    continue;
+                }
+
                 // TODO: optimization calculations are relatively expensive: create some fast-path for
                 // the common idle case (avoiding the search on tenants that we have recently checked)
                 if let Some(optimization) =
                     // If idle, maybe ptimize attachments: if a shard has a secondary location that is preferable to
                     // its primary location based on soft constraints, cut it over.
-                    shard.optimize_attachment(nodes, &schedule_context)
+                    shard.optimize_attachment(scheduler, &schedule_context)
                 {
+                    tracing::info!(tenant_shard_id=%shard.tenant_shard_id, "Identified optimization for attachment: {optimization:?}");
                     work.push((shard.tenant_shard_id, optimization));
                     break;
                 } else if let Some(optimization) =
@@ -6253,6 +6270,7 @@ impl Service {
                     // in the same tenant with secondary locations on the node where they originally split.
                     shard.optimize_secondary(scheduler, &schedule_context)
                 {
+                    tracing::info!(tenant_shard_id=%shard.tenant_shard_id, "Identified optimization for asecondary: {optimization:?}");
                     work.push((shard.tenant_shard_id, optimization));
                     break;
                 }
@@ -6301,8 +6319,10 @@ impl Service {
                         }
                     }
                 }
-                ScheduleOptimizationAction::ReplaceSecondary(_) => {
-                    // No extra checks needed to replace a secondary: this does not interrupt client access
+                ScheduleOptimizationAction::ReplaceSecondary(_)
+                | ScheduleOptimizationAction::CreateSecondary(_)
+                | ScheduleOptimizationAction::RemoveSecondary(_) => {
+                    // No extra checks needed to manage secondaries: this does not interrupt client access
                     validated_work.push((tenant_shard_id, optimization))
                 }
             };
