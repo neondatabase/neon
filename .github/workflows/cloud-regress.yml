@@ -103,13 +103,14 @@ jobs:
           data=$(jq -nc "{endpoint:{branch_id: \"${BRANCH_ID}\"}}")
           ENDPOINT_ID=$(echo ${ENDPOINT_ID} | tr -d \")
           for i in {1 10}; do
-            endpoint_id=$(curl -X PATCH \
+            res=$(curl -X PATCH \
             "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/endpoints/${ENDPOINT_ID}" \
             --header "Accept: application/json" \
             --header "Content-Type: application/json" \
             --header "Authorization: Bearer ${API_KEY}" \
-            --data ${data} | \
-            jq '.endpoint.id')
+            --data ${data})
+          
+            endpoint_id=$(echo $res | jq '.endpoint.id')
         
             if [ -z "${endpoint_id}" ] || [ "${endpoint_id}" == "null" ]; then
               sleep 1
