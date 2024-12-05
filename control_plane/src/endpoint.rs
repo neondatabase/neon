@@ -53,6 +53,7 @@ use compute_api::spec::Role;
 use nix::sys::signal::kill;
 use nix::sys::signal::Signal;
 use pageserver_api::shard::ShardStripeSize;
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -817,6 +818,7 @@ impl Endpoint {
                 self.http_address.ip(),
                 self.http_address.port()
             ))
+            .header(CONTENT_TYPE.as_str(), "application/json")
             .body(format!(
                 "{{\"spec\":{}}}",
                 serde_json::to_string_pretty(&spec)?
