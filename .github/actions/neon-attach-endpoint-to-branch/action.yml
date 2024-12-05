@@ -1,0 +1,55 @@
+name: 'Attach an endpoint to the branch'
+description: 'Attach an endpoint to the branch'
+
+inputs:
+  api_key:
+    description: 'Neon API key'
+    required: true
+  project_id:
+    description: 'ID of the Project to create Branch in'
+    required: true
+  api_host:
+    description: 'Neon API host'
+    default: console-stage.neon.build
+  branch_id:
+    description: 'Branch ID'
+    required: true
+  endpoint_id:
+    description: 'EndPoint ID'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Attach an endpoint
+      shell: bash -euxo pipefail {0}
+      run: |
+        data=$(jq -nc "{endpoint:{branch_id: \"${BRANCH_ID}\"}}")
+        ENDPOINT_ID=$(echo ${ENDPOINT_ID} | tr -d \")
+        for i in {1 10}; do
+          res=$(curl -X PATCH \
+          "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/endpoints/${ENDPOINT_ID}" \
+          --header "Accept: application/json" \
+          --header "Content-Type: application/json" \
+          --header "Authorization: Bearer ${API_KEY}" \
+          --data ${data})
+          echo ${res}
+          endpoint_id=$(echo $res | jq '.endpoint.id')
+        
+          if [ -z "${endpoint_id}" ] || [ "${endpoint_id}" == "null" ]; then
+            sleep 1
+            continue
+          fi
+        
+          break
+        done
+        if [ -z "${endpoint_id}" ] || [ "${endpoint_id}" == "null" ]; then
+          echo Cannot bind endpoint id to branch
+          exit 1
+        fi
+      env:
+        API_HOST: ${{ inputs.api_host }}
+        API_KEY: ${{ inputs.api_key }}
+        PROJECT_ID: ${{ inputs.project_id }}
+        BRANCH_ID: ${{ inputs.branch_id }}
+        ENDPOINT_ID: ${{ inputs.endpoint_id }}

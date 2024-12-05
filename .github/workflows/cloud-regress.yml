@@ -93,36 +93,13 @@ jobs:
           add_endpoint: false
 
       - name: Attach the endpoint to the new branch
-        env:
-          PROJECT_ID: ${{inputs.project_id}}
-          ENDPOINT_ID: ${{steps.endpoint-id.outputs.id}}
-          BRANCH_ID: ${{steps.create-branch.outputs.branch_id}}
-          API_HOST: console-stage.neon.build
-          API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
-        run: |
-          data=$(jq -nc "{endpoint:{branch_id: \"${BRANCH_ID}\"}}")
-          ENDPOINT_ID=$(echo ${ENDPOINT_ID} | tr -d \")
-          for i in {1 10}; do
-            res=$(curl -X PATCH \
-            "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/endpoints/${ENDPOINT_ID}" \
-            --header "Accept: application/json" \
-            --header "Content-Type: application/json" \
-            --header "Authorization: Bearer ${API_KEY}" \
-            --data ${data})
-          
-            endpoint_id=$(echo $res | jq '.endpoint.id')
-        
-            if [ -z "${endpoint_id}" ] || [ "${endpoint_id}" == "null" ]; then
-              sleep 1
-              continue
-            fi
-        
-            break
-          done
-          if [ -z "${endpoint_id}" ] || [ "${endpoint_id}" == "null" ]; then
-            echo Cannot bind endpoint id to branch
-            exit 1
-          fi
+        uses: ./github/actions/neon-get-endpoint
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{inputs.project-id}}
+          endpoint_id: ${{steps.endpoint-id.outputs.id}}
+          branch_id: ${{steps.create-branch.outputs.branch_id}}
+
 
       - name: Get the connection URI
         id: connect-uri
