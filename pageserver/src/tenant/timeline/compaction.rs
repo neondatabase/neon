@@ -1774,7 +1774,9 @@ impl Timeline {
         let mut compact_jobs = Vec::new();
         // For now, we simply use the key partitioning information; we should do a more fine-grained partitioning
         // by estimating the amount of files read for a compaction job. We should also partition on LSN.
-        let partition = self.partitioning.lock().await;
+        let Ok(partition) = self.partitioning.try_lock() else {
+            bail!("failed to acquire partition lock");
+        };
         let ((dense_ks, sparse_ks), _) = &*partition;
         // Truncate the key range to be within user specified compaction range.
         fn truncate_to(
@@ -1816,7 +1818,7 @@ impl Timeline {
         let layer_map = guard.layer_map()?;
         let mut current_start = None;
         // Split compaction job to about 2GB each
-        const GC_COMPACT_MAX_SIZE_MB: u64 = 4 * 1024; // 2GB, TODO: should be configuration in the future
+        const GC_COMPACT_MAX_SIZE_MB: u64 = 4 * 1024; // 4GB, TODO: should be configuration in the future
         let ranges_num = split_key_ranges.len();
         for (idx, (start, end)) in split_key_ranges.into_iter().enumerate() {
             if current_start.is_none() {
@@ -1839,7 +1841,7 @@ impl Timeline {
                     .min()
                     .expect("at least one layer in the resuult?");
                 let end = extended_end.max(end);
-                debug!(
+                info!(
                     "splitting compaction job: {}..{}, estimated_size={}",
                     start, end, total_size
                 );
