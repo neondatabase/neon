@@ -52,7 +52,7 @@ runs:
         params="${params}database_name=${DATABASE_NAME}&role_name=${ROLE_NAME}&"
         params="${params}pooled=${POOLED}"
         for i in {1..10}; do
-         res=$(curl \
+         res=$(curl -X GET \
             "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/connection_uri${params}" \
             --header "Accept: application/json" \
             --header "Content-Type: application/json" \
