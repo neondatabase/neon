@@ -33,7 +33,7 @@ runs:
       run: |
         branch_name="Created by actions/neon-branch-create; GITHUB_RUN_ID=${GITHUB_RUN_ID} at $(date +%s)"
         data=$(jq -nc "{branch:{name: \"$branch_name\"}}")
-        if [ ${{ add_endpoint }} == "true" ]; then
+        if [ ${{ inputs.add_endpoint }} == "true" ]; then
           data=$(echo $data | jq '{branch,endpoints:[{type: "read_write"}]}')
         fi
         for i in {1..10}; do
@@ -74,7 +74,7 @@ runs:
         PROJECT_ID: ${{ inputs.project_id }}
 
     - name: Get Role name
-      if: add_endpoint
+      if: inputs.add_endpoint
       id: role-name
       shell: bash -euxo pipefail {0}
       run: |
@@ -95,7 +95,7 @@ runs:
         BRANCH_ID: ${{ steps.create-branch.outputs.branch_id }}
 
     - name: Change Password
-      if: add_endpoint
+      if: inputs.add_endpoint
       id: change-password
       # A shell without `set -x` to not to expose password/dsn in logs
       shell: bash -euo pipefail {0}
