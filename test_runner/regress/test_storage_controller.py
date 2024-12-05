@@ -2403,7 +2403,7 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
 
     # Make a change to the tenant config to trigger a slow reconcile
     virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
-    virtual_ps_http.patch_tenant_config_client_side(tid, {"compaction_threshold": 5}, None)
+    virtual_ps_http.update_tenant_config(tid, {"compaction_threshold": 5}, None)
     env.storage_controller.allowed_errors.extend(
         [
             ".*Accepted configuration update but reconciliation failed.*",

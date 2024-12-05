@@ -81,7 +81,7 @@ def test_threshold_based_eviction(
 
     # create a bunch of L1s, only the least of which will need to be resident
     compaction_threshold = 3  # create L1 layers quickly
-    vps_http.patch_tenant_config_client_side(
+    vps_http.update_tenant_config(
         tenant_id,
         inserts={
             # Disable gc and compaction to avoid on-demand downloads from their side.
