@@ -107,7 +107,7 @@ jobs:
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           project_id: ${{inputs.project-id}}
-          endpoint_id: ${{steps.endpoint-id.id}}
+          endpoint_id: ${{steps.endpoint-id.outputs.id}}
 
       - name: Run the regression tests
         uses: ./.github/actions/run-python-test-set
