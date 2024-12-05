@@ -86,7 +86,7 @@ jobs:
 
       - name: Create a new branch
         id: create-branch
-        uses: ./.github/actions/neon-get-endpoint
+        uses: ./.github/actions/neon-branch-create
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           project_id: ${{inputs.project-id}}
