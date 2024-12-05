@@ -1962,6 +1962,26 @@ async fn timeline_gc_handler(
     json_response(StatusCode::OK, gc_result)
 }
 
+// Cancel scheduled compaction tasks
+async fn timeline_cancel_compact_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
+    async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+        tenant.cancel_scheduled_compaction(timeline_id);
+        json_response(StatusCode::OK, ())
+    }
+    .instrument(info_span!("timeline_cancel_compact", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .await
+}
+
 // Run compaction immediately on given timeline.
 async fn timeline_compact_handler(
     mut request: Request<Body>,
@@ -3304,6 +3324,10 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",
             |r| api_handler(r, timeline_compact_handler),
+        )
+        .delete(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",
+            |r| api_handler(r, timeline_cancel_compact_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/offload",

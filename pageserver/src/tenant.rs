@@ -3043,6 +3043,20 @@ impl Tenant {
         Ok(has_pending_task)
     }
 
+    /// Cancel scheduled compaction tasks
+    pub(crate) fn cancel_scheduled_compaction(
+        &self,
+        timeline_id: TimelineId,
+    ) -> Vec<ScheduledCompactionTask> {
+        let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
+        if let Some(tline_pending_tasks) = guard.get_mut(&timeline_id) {
+            let current_tline_pending_tasks = std::mem::take(tline_pending_tasks);
+            current_tline_pending_tasks.into_iter().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Schedule a compaction task for a timeline.
     pub(crate) async fn schedule_compaction(
         &self,
