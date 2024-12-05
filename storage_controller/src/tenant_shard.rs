@@ -727,6 +727,59 @@ impl TenantShard {
         Ok(())
     }
 
+    /// Returns None if the current location's score is unavailable, i.e. cannot draw a conclusion
+    fn is_better_location(
+        &self,
+        scheduler: &mut Scheduler,
+        schedule_context: &ScheduleContext,
+        current: NodeId,
+        candidate: NodeId,
+    ) -> Option<bool> {
+        let Some(candidate_score) = scheduler.compute_node_score::<NodeAttachmentSchedulingScore>(
+            candidate,
+            &self.preferred_az_id,
+            schedule_context,
+        ) else {
+            // The candidate node is unavailable for scheduling or otherwise couldn't get a score
+            return None;
+        };
+
+        match scheduler.compute_node_score::<NodeAttachmentSchedulingScore>(
+            current,
+            &self.preferred_az_id,
+            schedule_context,
+        ) {
+            Some(current_score) => {
+                // Ignore utilization components when comparing scores: we don't want to migrate
+                // because of transient load variations, it risks making the system thrash, and
+                // migrating for utilization requires a separate high level view of the system to
+                // e.g. prioritize moving larger or smaller tenants, rather than arbitrarily
+                // moving things around in the order that we hit this function.
+                let candidate_score = candidate_score.for_optimization();
+                let current_score = current_score.for_optimization();
+
+                if candidate_score < current_score {
+                    tracing::info!("Found a lower scoring location! {candidate} is better than {current} ({candidate_score:?} is better than {current_score:?})");
+                    Some(true)
+                } else {
+                    // The candidate node is no better than our current location, so don't migrate
+                    tracing::debug!(
+                        "Candidate node {candidate} is no better than our current location {current} (candidate {candidate_score:?} vs current {current_score:?})",
+                    );
+                    Some(false)
+                }
+            }
+            None => {
+                // The current node is unavailable for scheduling, so we can't make any sensible
+                // decisions about optimisation.  This should be a transient state -- if the node
+                // is offline then it will get evacuated, if is blocked by a scheduling mode
+                // then we will respect that mode by doing nothing.
+                tracing::debug!("Current node {current} is unavailable for scheduling");
+                None
+            }
+        }
+    }
+
     fn find_better_location(
         &self,
         scheduler: &mut Scheduler,
@@ -744,13 +797,13 @@ impl TenantShard {
 
         // Construct a schedule context that excludes locations belonging to
         // this shard: this simulates removing and re-scheduling the shard
-        let schedule_context = schedule_context.project_detach(self);
+        //        let schedule_context = schedule_context.project_detach(self);
 
         // Look for a lower-scoring location to attach to
         let Ok(candidate_node) = scheduler.schedule_shard::<AttachedShardTag>(
             &[], // Don't hard-exclude anything: we want to consider the possibility of migrating to somewhere we already have a secondary
             &self.preferred_az_id,
-            &schedule_context,
+            schedule_context,
         ) else {
             // A scheduling error means we have no possible candidate replacements
             tracing::debug!("No candidate node found");
@@ -775,54 +828,8 @@ impl TenantShard {
             return None;
         }
 
-        // Consider whether the candidate is any better than our current location once the
-        // context is updated to reflect the migration.
-        let Some(candidate_score) = scheduler.compute_node_score::<NodeAttachmentSchedulingScore>(
-            candidate_node,
-            &self.preferred_az_id,
-            &schedule_context,
-        ) else {
-            // The candidate node is unavailable for scheduling or otherwise couldn't get a score
-            // This is unexpected, because schedule() yielded this node
-            debug_assert!(false);
-            return None;
-        };
-
-        match scheduler.compute_node_score::<NodeAttachmentSchedulingScore>(
-            attached,
-            &self.preferred_az_id,
-            &schedule_context,
-        ) {
-            Some(current_score) => {
-                // Ignore utilization components when comparing scores: we don't want to migrate
-                // because of transient load variations, it risks making the system thrash, and
-                // migrating for utilization requires a separate high level view of the system to
-                // e.g. prioritize moving larger or smaller tenants, rather than arbitrarily
-                // moving things around in the order that we hit this function.
-                let candidate_score = candidate_score.for_optimization();
-                let current_score = current_score.for_optimization();
-
-                if candidate_score < current_score {
-                    tracing::info!("Found a lower scoring location!  {candidate_score:?} is better than {current_score:?}");
-                } else {
-                    // The candidate node is no better than our current location, so don't migrate
-                    tracing::debug!(
-                        "Candidate node {candidate_node} is no better than our current location {attached} (candidate {candidate_score:?} vs attached {current_score:?})",
-                    );
-                    return None;
-                }
-            }
-            None => {
-                // The current node is unavailable for scheduling, so we can't make any sensible
-                // decisions about optimisation.  This should be a transient state -- if the node
-                // is offline then it will get evacuated, if is blocked by a scheduling mode
-                // then we will respect that mode by doing nothing.
-                tracing::debug!("Current node {attached} is unavailable for scheduling");
-                return None;
-            }
-        }
-
-        Some(candidate_node)
+        self.is_better_location(scheduler, schedule_context, attached, candidate_node)
+            .and_then(|better| if better { Some(candidate_node) } else { None })
     }
 
     /// Optimize attachments: if a shard has a secondary location that is preferable to
@@ -836,7 +843,75 @@ impl TenantShard {
     ) -> Option<ScheduleOptimization> {
         let attached = (*self.intent.get_attached())?;
 
-        let replacement = self.find_better_location(scheduler, schedule_context);
+        let schedule_context = schedule_context.project_detach(self);
+
+        // If we already have a secondary that is higher-scoring than out current location,
+        // then simply migrate to it.
+        for secondary in self.intent.get_secondary() {
+            if let Some(true) =
+                self.is_better_location(scheduler, &schedule_context, attached, *secondary)
+            {
+                return Some(ScheduleOptimization {
+                    sequence: self.sequence,
+                    action: ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                        old_attached_node_id: attached,
+                        new_attached_node_id: *secondary,
+                    }),
+                });
+            }
+        }
+
+        // Given that none of our current secondaries is a better location than our current
+        // attached location (checked above), we may trim any secondaries that are not needed
+        // for the placement policy.
+        if self.intent.get_secondary().len() > self.policy.want_secondaries() {
+            // This code path cleans up extra secondaries after migrating, and/or
+            // trims extra secondaries after a PlacementPolicy::Attached(N) was
+            // modified to decrease N.
+
+            let mut secondary_scores = self
+                .intent
+                .get_secondary()
+                .iter()
+                .map(|node_id| {
+                    (
+                        *node_id,
+                        scheduler.compute_node_score::<NodeSecondarySchedulingScore>(
+                            *node_id,
+                            &self.preferred_az_id,
+                            &schedule_context,
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            if secondary_scores.iter().any(|score| score.1.is_none()) {
+                // Don't have full list of scores, so can't make a good decision about which to drop unless
+                // there is an obvious one in the wrong AZ
+                for secondary in self.intent.get_secondary() {
+                    if scheduler.get_node_az(secondary) == self.preferred_az_id {
+                        return Some(ScheduleOptimization {
+                            sequence: self.sequence,
+                            action: ScheduleOptimizationAction::RemoveSecondary(*secondary),
+                        });
+                    }
+                }
+
+                // Fall through: we didn't identify one to remove.  This ought to be rare.
+                tracing::warn!("Keeping extra secondaries: can't determine which of {:?} to remove (some nodes offline?)",
+                self.intent.get_secondary()
+            );
+            } else {
+                secondary_scores.sort_by_key(|score| score.1.unwrap());
+                let victim = secondary_scores.last().unwrap().0;
+                return Some(ScheduleOptimization {
+                    sequence: self.sequence,
+                    action: ScheduleOptimizationAction::RemoveSecondary(victim),
+                });
+            }
+        }
+
+        let replacement = self.find_better_location(scheduler, &schedule_context);
 
         // We have found a candidate and confirmed that its score is preferable
         // to our current location. See if we have a secondary location in the preferred location already: if not,
@@ -866,34 +941,34 @@ impl TenantShard {
                     }),
                 })
             }
-        } else if self.intent.get_secondary().len() > self.policy.want_secondaries() {
-            // We aren't in the process of migrating anywhere, and we're attached in our preferred AZ.  If there are
-            // any other secondary locations in our preferred AZ, we presume they were created to facilitate a migration
-            // of the attached location, and remove them.
-            for secondary in self.intent.get_secondary() {
-                if scheduler.get_node_az(secondary) == self.preferred_az_id {
-                    tracing::info!(
-                        "Identified optimization({}): remove secondary {secondary}",
-                        self.tenant_shard_id
-                    );
-                    return Some(ScheduleOptimization {
-                        sequence: self.sequence,
-                        action: ScheduleOptimizationAction::RemoveSecondary(*secondary),
-                    });
-                }
-            }
+        // } else if self.intent.get_secondary().len() > self.policy.want_secondaries() {
+        //     // We aren't in the process of migrating anywhere, and we're attached in our preferred AZ.  If there are
+        //     // any other secondary locations in our preferred AZ, we presume they were created to facilitate a migration
+        //     // of the attached location, and remove them.
+        //     for secondary in self.intent.get_secondary() {
+        //         if scheduler.get_node_az(secondary) == self.preferred_az_id {
+        //             tracing::info!(
+        //                 "Identified optimization({}): remove secondary {secondary}",
+        //                 self.tenant_shard_id
+        //             );
+        //             return Some(ScheduleOptimization {
+        //                 sequence: self.sequence,
+        //                 action: ScheduleOptimizationAction::RemoveSecondary(*secondary),
+        //             });
+        //         }
+        //     }
 
-            // Fall through: maybe we had excess secondaries in other AZs?  Trim them in an arbitrary order
-            // (lowest Node ID first).
-            let mut secondary_node_ids = self.intent.get_secondary().clone();
-            secondary_node_ids.sort();
-            let victim = secondary_node_ids
-                .first()
-                .expect("Within block for > check on secondary count");
-            Some(ScheduleOptimization {
-                sequence: self.sequence,
-                action: ScheduleOptimizationAction::RemoveSecondary(*victim),
-            })
+        //     // Fall through: maybe we had excess secondaries in other AZs?  Trim them in an arbitrary order
+        //     // (lowest Node ID first).
+        //     let mut secondary_node_ids = self.intent.get_secondary().clone();
+        //     secondary_node_ids.sort();
+        //     let victim = secondary_node_ids
+        //         .first()
+        //         .expect("Within block for > check on secondary count");
+        //     Some(ScheduleOptimization {
+        //         sequence: self.sequence,
+        //         action: ScheduleOptimizationAction::RemoveSecondary(*victim),
+        //     })
         } else {
             // We didn't find somewhere we'd rather be, and we don't have any excess secondaries
             // to clean up: no action required.
@@ -2026,7 +2101,7 @@ pub(crate) mod tests {
             optimization_a_cleanup,
             Some(ScheduleOptimization {
                 sequence: shard_a.sequence,
-                action: ScheduleOptimizationAction::RemoveSecondary(NodeId(2))
+                action: ScheduleOptimizationAction::RemoveSecondary(NodeId(3))
             })
         );
         shard_a.apply_optimization(&mut scheduler, optimization_a_cleanup.unwrap());
@@ -2190,6 +2265,11 @@ pub(crate) mod tests {
 
             for shard in shards.iter_mut() {
                 let optimization = shard.optimize_attachment(scheduler, &schedule_context);
+                tracing::info!(
+                    "optimize_attachment({})={:?}",
+                    shard.tenant_shard_id,
+                    optimization
+                );
                 if let Some(optimization) = optimization {
                     optimizations.push(optimization.clone());
                     shard.apply_optimization(scheduler, optimization);
@@ -2198,6 +2278,11 @@ pub(crate) mod tests {
                 }
 
                 let optimization = shard.optimize_secondary(scheduler, &schedule_context);
+                tracing::info!(
+                    "optimize_secondary({})={:?}",
+                    shard.tenant_shard_id,
+                    optimization
+                );
                 if let Some(optimization) = optimization {
                     optimizations.push(optimization.clone());
                     shard.apply_optimization(scheduler, optimization);
