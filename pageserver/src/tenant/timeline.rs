@@ -768,13 +768,23 @@ pub enum GetLogicalSizePriority {
     Background,
 }
 
-#[derive(enumset::EnumSetType)]
+#[derive(Debug, enumset::EnumSetType)]
 pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
     ForceL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
+}
+
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct CompactRequest {
+    pub compact_range: Option<CompactRange>,
+    pub compact_below_lsn: Option<Lsn>,
+    /// Whether the compaction job should be scheduled.
+    #[serde(default)]
+    pub scheduled: bool,
 }
 
 #[serde_with::serde_as]
@@ -786,10 +796,24 @@ pub(crate) struct CompactRange {
     pub end: Key,
 }
 
-#[derive(Clone, Default)]
+impl From<Range<Key>> for CompactRange {
+    fn from(range: Range<Key>) -> Self {
+        CompactRange {
+            start: range.start,
+            end: range.end,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub(crate) struct CompactOptions {
     pub flags: EnumSet<CompactFlags>,
+    /// If set, the compaction will only compact the key range specified by this option.
+    /// This option is only used by GC compaction.
     pub compact_range: Option<CompactRange>,
+    /// If set, the compaction will only compact the LSN below this value.
+    /// This option is only used by GC compaction.
+    pub compact_below_lsn: Option<Lsn>,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1604,6 +1628,7 @@ impl Timeline {
             CompactOptions {
                 flags,
                 compact_range: None,
+                compact_below_lsn: None,
             },
             ctx,
         )
