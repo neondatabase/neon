@@ -57,7 +57,7 @@ runs:
             --header "Accept: application/json" \
             --header "Content-Type: application/json" \
             --header "Authorization: Bearer ${API_KEY}")
-        uri=$(echo $res | jq .uri)
+        uri=$(echo $res | jq -r .uri)
 
           if [ -z "${uri}" ] || [ "${uri}" == "null" ]; then
             sleep 1
