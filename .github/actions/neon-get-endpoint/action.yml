@@ -48,8 +48,6 @@ runs:
 
         echo "id=${endpoint_id}" >> ${GITHUB_OUTPUT}
 
-        host=$(echo $branch | jq --raw-output '.endpoints[0].host')
-        echo "host=${host}" >> $GITHUB_OUTPUT
       env:
         API_HOST: ${{ inputs.api_host }}
         API_KEY: ${{ inputs.api_key }}

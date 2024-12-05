@@ -81,14 +81,14 @@ jobs:
         id: endpoint-id
         uses: ./.github/actions/neon-get-endpoint
         with:
-          api_key: ${{secrets.NEON_STAGING_API}}
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           project_id: ${{inputs.project-id}}
 
       - name: Create a new branch
         id: create-branch
         uses: ./.github/actions/neon-get-endpoint
         with:
-          api_key: ${{secrets.NEON_STAGING_API}}
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           project_id: ${{inputs.project-id}}
           add_endpoint: false
 
@@ -98,7 +98,7 @@ jobs:
           ENDPOINT_ID: ${{steps.endpoint-id.outputs.id}}
           BRANCH_ID: ${{steps.create-branch.outputs.id}}
           API_HOST: console-stage.neon.build
-          API_KEY: ${{secrets.NEON_STAGING_API}}
+          API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
         run: |
           for i in ${1 10}; do
             data=$(jq -nc "{endpoint:{branch_id: \"${BRANCH_ID}\"}}")
@@ -126,7 +126,7 @@ jobs:
         id: connect-uri
         uses: ./.github/actions/neon-get-connection-uri
         with:
-          api_key: ${{secrets.NEON_STAGING_API}}
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           project_id: ${{inputs.project-id}}
           endpoint_id: ${{steps.endpoint-id.id}}
 
