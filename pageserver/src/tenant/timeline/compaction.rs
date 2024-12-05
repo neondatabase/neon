@@ -1792,31 +1792,25 @@ impl Timeline {
             }
         }
         let mut split_key_ranges = Vec::new();
-        for partition in &dense_ks.parts {
-            for range in partition.ranges.iter() {
-                let Some((start, end)) = truncate_to(
-                    &range.start,
-                    &range.end,
-                    &compact_range.start,
-                    &compact_range.end,
-                ) else {
-                    continue;
-                };
-                split_key_ranges.push((start, end));
-            }
-        }
-        for partition in &sparse_ks.parts {
-            for range in partition.0.ranges.iter() {
-                let Some((start, end)) = truncate_to(
-                    &range.start,
-                    &range.end,
-                    &compact_range.start,
-                    &compact_range.end,
-                ) else {
-                    continue;
-                };
-                split_key_ranges.push((start, end));
-            }
+        let mut ranges = dense_ks
+            .parts
+            .iter()
+            .map(|partition| partition.ranges.iter())
+            .chain(sparse_ks.parts.iter().map(|x| x.0.ranges.iter()))
+            .flatten()
+            .cloned()
+            .collect_vec();
+        ranges.sort_by(|a, b| ((&a.start, &a.end)).cmp(&(&b.start, &b.end)));
+        for range in ranges.iter() {
+            let Some((start, end)) = truncate_to(
+                &range.start,
+                &range.end,
+                &compact_range.start,
+                &compact_range.end,
+            ) else {
+                continue;
+            };
+            split_key_ranges.push((start, end));
         }
         let guard = self.layers.read().await;
         let layer_map = guard.layer_map()?;
@@ -1829,10 +1823,22 @@ impl Timeline {
                 current_start = Some(start);
             }
             let start = current_start.unwrap();
+            if end >= start {
+                // We have already processed this partition.
+                continue;
+            }
             let res = layer_map.range_search(start..end, compact_lsn);
             let total_size = res.found.keys().map(|x| x.layer.file_size()).sum::<u64>();
             if total_size > GC_COMPACT_MAX_SIZE_MB * 1024 * 1024 || ranges_num == idx + 1 {
                 let mut compact_options = options.clone();
+                // Try to extend the compaction range so that we include at least one full layer file.
+                let extended_end = res
+                    .found
+                    .iter()
+                    .map(|(layer, _)| layer.layer.key_range.end)
+                    .min()
+                    .expect("at least one layer in the resuult?");
+                let end = extended_end.max(end);
                 debug!(
                     "splitting compaction job: {}..{}, estimated_size={}",
                     start, end, total_size
