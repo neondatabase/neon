@@ -46,10 +46,10 @@ runs:
         if [ -n "${BRANCH_ID}" ]; then
           params="${params}branch_id=${BRANCH_ID}&"
         fi
-        params="${params}database_name=${DATABASE_NAME}&role_name=${ROLE_NAME}&"
         if [ -n "${ENDPOINT_ID}" ]; then
           params="${params}endpoint_id=${ENDPOINT_ID}&"
         fi
+        params="${params}database_name=${DATABASE_NAME}&role_name=${ROLE_NAME}&"
         params="${params}pooled=${POOLED}"
         for i in {1..10}; do
          uri=$(curl \
