@@ -47,6 +47,12 @@ pub(crate) trait NodeSchedulingScore: Debug + Ord + Copy + Sized {
         preferred_az: &Option<AvailabilityZone>,
         context: &ScheduleContext,
     ) -> Option<Self>;
+
+    /// Return a score that drops any components based on node utilization: this is useful
+    /// for finding scores for scheduling optimisation, when we want to avoid rescheduling
+    /// shards due to e.g. disk usage, to avoid flapping.
+    fn for_optimization(&self) -> Self;
+
     fn is_overloaded(&self) -> bool;
     fn node_id(&self) -> NodeId;
 }
@@ -143,10 +149,6 @@ pub(crate) struct NodeAttachmentSchedulingScore {
     /// The number of shards belonging to the tenant currently being
     /// scheduled that are attached to this node.
     affinity_score: AffinityScore,
-    /// Size of [`ScheduleContext::attached_nodes`] for the current node.
-    /// This normally tracks the number of attached shards belonging to the
-    /// tenant being scheduled that are already on this node.
-    attached_shards_in_context: usize,
     /// Utilisation score that combines shard count and disk utilisation
     utilization_score: u64,
     /// Total number of shards attached to this node. When nodes have identical utilisation, this
@@ -177,11 +179,23 @@ impl NodeSchedulingScore for NodeAttachmentSchedulingScore {
                 .copied()
                 .unwrap_or(AffinityScore::FREE),
             az_match: AttachmentAzMatch(AzMatch::new(&node.az, preferred_az.as_ref())),
-            attached_shards_in_context: context.attached_nodes.get(node_id).copied().unwrap_or(0),
             utilization_score: utilization.cached_score(),
             total_attached_shard_count: node.attached_shard_count,
             node_id: *node_id,
         })
+    }
+
+    /// For use in scheduling optimisation, where we only want to consider the aspects
+    /// of the score that can only be resolved by moving things (such as inter-shard affinity
+    /// and AZ affinity), and ignore aspects that reflect the total utilization of a node (which
+    /// can fluctuate for other reasons)
+    fn for_optimization(&self) -> Self {
+        Self {
+            utilization_score: 0,
+            total_attached_shard_count: 0,
+            node_id: NodeId(0),
+            ..*self
+        }
     }
 
     fn is_overloaded(&self) -> bool {
@@ -242,6 +256,15 @@ impl NodeSchedulingScore for NodeSecondarySchedulingScore {
         })
     }
 
+    fn for_optimization(&self) -> Self {
+        Self {
+            utilization_score: 0,
+            total_attached_shard_count: 0,
+            node_id: NodeId(0),
+            ..*self
+        }
+    }
+
     fn is_overloaded(&self) -> bool {
         PageserverUtilization::is_overloaded(self.utilization_score)
     }
@@ -292,6 +315,10 @@ impl AffinityScore {
 
     pub(crate) fn inc(&mut self) {
         self.0 += 1;
+    }
+
+    pub(crate) fn dec(&mut self) {
+        self.0 -= 1;
     }
 }
 
@@ -353,15 +380,34 @@ impl ScheduleContext {
         *entry += 1;
     }
 
-    pub(crate) fn get_node_affinity(&self, node_id: NodeId) -> AffinityScore {
-        self.nodes
-            .get(&node_id)
-            .copied()
-            .unwrap_or(AffinityScore::FREE)
-    }
+    /// Imagine we migrated our attached location to the given node.  Return a new context that
+    /// reflects this.
+    pub(crate) fn project_detach(&self, shard: &TenantShard) -> Self {
+        let mut new_context = self.clone();
 
-    pub(crate) fn get_node_attachments(&self, node_id: NodeId) -> usize {
-        self.attached_nodes.get(&node_id).copied().unwrap_or(0)
+        if let Some(attached) = shard.intent.get_attached() {
+            if let Some(count) = new_context.attached_nodes.get_mut(attached) {
+                // It's unexpected that we get called in a context where the source of
+                // the migration is not already in the context.
+                debug_assert!(*count > 0);
+
+                if *count > 0 {
+                    *count -= 1;
+                }
+            }
+
+            if let Some(score) = new_context.nodes.get_mut(attached) {
+                score.dec();
+            }
+        }
+
+        for secondary in shard.intent.get_secondary() {
+            if let Some(score) = new_context.nodes.get_mut(secondary) {
+                score.dec();
+            }
+        }
+
+        new_context
     }
 
     #[cfg(test)]
@@ -636,6 +682,22 @@ impl Scheduler {
         node.and_then(|(node_id, may_schedule)| if may_schedule { Some(node_id) } else { None })
     }
 
+    /// Calculate a single node's score, used in optimizer logic to compare specific
+    /// nodes' scores.
+    pub(crate) fn compute_node_score<Score>(
+        &mut self,
+        node_id: NodeId,
+        preferred_az: &Option<AvailabilityZone>,
+        context: &ScheduleContext,
+    ) -> Option<Score>
+    where
+        Score: NodeSchedulingScore,
+    {
+        self.nodes
+            .get_mut(&node_id)
+            .and_then(|node| Score::generate(&node_id, node, preferred_az, context))
+    }
+
     /// Compute a schedulling score for each node that the scheduler knows of
     /// minus a set of hard excluded nodes.
     fn compute_node_scores<Score>(
@@ -727,7 +789,7 @@ impl Scheduler {
             tracing::info!(
             "scheduler selected node {node_id} (elegible nodes {:?}, hard exclude: {hard_exclude:?}, soft exclude: {context:?})",
             scores.iter().map(|i| i.node_id().0).collect::<Vec<_>>()
-        );
+       );
         }
 
         // Note that we do not update shard count here to reflect the scheduling: that
@@ -784,6 +846,10 @@ impl Scheduler {
 
         // Return the AZ with the lowest median utilization
         Some(median_by_az.first().unwrap().0.clone())
+    }
+
+    pub(crate) fn get_node_az(&self, node_id: &NodeId) -> Option<AvailabilityZone> {
+        self.nodes.get(node_id).map(|n| n.az.clone())
     }
 
     /// Unit test access to internal state
@@ -1171,20 +1237,25 @@ mod tests {
     use test_log::test;
 
     #[test]
-    /// Reproducer for https://github.com/neondatabase/neon/issues/8969 -- a case where
-    /// having an odd number of nodes can cause instability when scheduling even numbers of
-    /// shards with secondaries
+    /// Make sure that when we have an odd number of nodes and an even number of shards, we still
+    /// get scheduling stability.
     fn odd_nodes_stability() {
-        let az_tag = AvailabilityZone("az-a".to_string());
+        let az_a = AvailabilityZone("az-a".to_string());
+        let az_b = AvailabilityZone("az-b".to_string());
 
         let nodes = test_utils::make_test_nodes(
-            5,
+            10,
             &[
-                az_tag.clone(),
-                az_tag.clone(),
-                az_tag.clone(),
-                az_tag.clone(),
-                az_tag.clone(),
+                az_a.clone(),
+                az_a.clone(),
+                az_a.clone(),
+                az_a.clone(),
+                az_a.clone(),
+                az_b.clone(),
+                az_b.clone(),
+                az_b.clone(),
+                az_b.clone(),
+                az_b.clone(),
             ],
         );
         let mut scheduler = Scheduler::new(nodes.values());
@@ -1200,6 +1271,7 @@ mod tests {
             expect_secondary: NodeId,
             scheduled_shards: &mut Vec<TenantShard>,
             scheduler: &mut Scheduler,
+            preferred_az: Option<AvailabilityZone>,
             context: &mut ScheduleContext,
         ) {
             let shard_identity = ShardIdentity::new(
@@ -1212,6 +1284,7 @@ mod tests {
                 tenant_shard_id,
                 shard_identity,
                 pageserver_api::controller_api::PlacementPolicy::Attached(1),
+                preferred_az,
             );
 
             shard.schedule(scheduler, context).unwrap();
@@ -1234,9 +1307,10 @@ mod tests {
                 shard_count: ShardCount(8),
             },
             NodeId(1),
-            NodeId(2),
+            NodeId(6),
             &mut scheduled_shards,
             &mut scheduler,
+            Some(az_a.clone()),
             &mut context,
         );
 
@@ -1246,10 +1320,11 @@ mod tests {
                 shard_number: ShardNumber(1),
                 shard_count: ShardCount(8),
             },
-            NodeId(3),
-            NodeId(4),
+            NodeId(2),
+            NodeId(7),
             &mut scheduled_shards,
             &mut scheduler,
+            Some(az_a.clone()),
             &mut context,
         );
 
@@ -1259,10 +1334,11 @@ mod tests {
                 shard_number: ShardNumber(2),
                 shard_count: ShardCount(8),
             },
-            NodeId(5),
-            NodeId(2),
+            NodeId(3),
+            NodeId(8),
             &mut scheduled_shards,
             &mut scheduler,
+            Some(az_a.clone()),
             &mut context,
         );
 
@@ -1273,9 +1349,10 @@ mod tests {
                 shard_count: ShardCount(8),
             },
             NodeId(4),
-            NodeId(1),
+            NodeId(9),
             &mut scheduled_shards,
             &mut scheduler,
+            Some(az_a.clone()),
             &mut context,
         );
 
@@ -1285,10 +1362,11 @@ mod tests {
                 shard_number: ShardNumber(4),
                 shard_count: ShardCount(8),
             },
-            NodeId(3),
             NodeId(5),
+            NodeId(10),
             &mut scheduled_shards,
             &mut scheduler,
+            Some(az_a.clone()),
             &mut context,
         );
 
@@ -1298,10 +1376,11 @@ mod tests {
                 shard_number: ShardNumber(5),
                 shard_count: ShardCount(8),
             },
-            NodeId(2),
             NodeId(1),
+            NodeId(6),
             &mut scheduled_shards,
             &mut scheduler,
+            Some(az_a.clone()),
             &mut context,
         );
 
@@ -1311,10 +1390,11 @@ mod tests {
                 shard_number: ShardNumber(6),
                 shard_count: ShardCount(8),
             },
-            NodeId(4),
-            NodeId(5),
+            NodeId(2),
+            NodeId(7),
             &mut scheduled_shards,
             &mut scheduler,
+            Some(az_a.clone()),
             &mut context,
         );
 
@@ -1325,9 +1405,10 @@ mod tests {
                 shard_count: ShardCount(8),
             },
             NodeId(3),
-            NodeId(1),
+            NodeId(8),
             &mut scheduled_shards,
             &mut scheduler,
+            Some(az_a.clone()),
             &mut context,
         );
 
