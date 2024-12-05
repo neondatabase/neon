@@ -1,4 +1,4 @@
-//! Stale console backend, remove after migrating to Proxy V1 API (#15245).
+//! Production console backend.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +10,7 @@ use postgres_client::config::SslMode;
 use tokio::time::Instant;
 use tracing::{debug, info, info_span, warn, Instrument};
 
-use super::super::messages::{ControlPlaneErrorMessage, GetRoleSecret, WakeCompute};
+use super::super::messages::{ControlPlaneErrorMessage, GetEndpointAccessControl, WakeCompute};
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::ComputeUserInfo;
 use crate::cache::Cached;
@@ -83,13 +83,13 @@ impl NeonControlPlaneClient {
         async {
             let request = self
                 .endpoint
-                .get_path("proxy_get_role_secret")
+                .get_path("get_endpoint_access_control")
                 .header(X_REQUEST_ID, &request_id)
                 .header(AUTHORIZATION, format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", ctx.session_id())])
                 .query(&[
                     ("application_name", application_name.as_str()),
-                    ("project", user_info.endpoint.as_str()),
+                    ("endpointish", user_info.endpoint.as_str()),
                     ("role", user_info.user.as_str()),
                 ])
                 .build()?;
@@ -100,7 +100,7 @@ impl NeonControlPlaneClient {
             let response = self.endpoint.execute(request).await?;
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
-            let body = match parse_body::<GetRoleSecret>(response).await {
+            let body = match parse_body::<GetEndpointAccessControl>(response).await {
                 Ok(body) => body,
                 // Error 404 is special: it's ok not to have a secret.
                 // TODO(anna): retry
@@ -114,6 +114,9 @@ impl NeonControlPlaneClient {
                     };
                 }
             };
+
+            // Ivan: don't know where it will be used, so I leave it here
+            let _endpoint_vpc_ids = body.allowed_vpc_endpoint_ids.unwrap_or_default();
 
             let secret = if body.role_secret.is_empty() {
                 None
@@ -208,13 +211,13 @@ impl NeonControlPlaneClient {
         async {
             let mut request_builder = self
                 .endpoint
-                .get_path("proxy_wake_compute")
+                .get_path("wake_compute")
                 .header("X-Request-ID", &request_id)
                 .header("Authorization", format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", ctx.session_id())])
                 .query(&[
                     ("application_name", application_name.as_str()),
-                    ("project", user_info.endpoint.as_str()),
+                    ("endpointish", user_info.endpoint.as_str()),
                 ]);
 
             let options = user_info.options.to_deep_object();
