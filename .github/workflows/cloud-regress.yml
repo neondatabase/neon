@@ -101,7 +101,7 @@ jobs:
           API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
         run: |
           data=$(jq -nc "{endpoint:{branch_id: \"${BRANCH_ID}\"}}")
-          ENDPOINT_ID=$(echo ${ENDPOINT_ID})
+          ENDPOINT_ID=$(echo ${ENDPOINT_ID} | tr -d \")
           for i in {1 10}; do
             endpoint_id=$(curl -X PATCH \
             "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/endpoints/${ENDPOINT_ID}" \
