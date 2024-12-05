@@ -1768,7 +1768,7 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     # Modify a tenant's config
     storcon_cli(
         [
-            "tenant-config",
+            "patch-tenant-config",
             "--tenant-id",
             str(env.initial_tenant),
             "--config",
