@@ -82,6 +82,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InstalledExtensions"
+     head:
+      tags:
+      - Extension
+      summary: Report extension DDL to trigger metric recollection.
+      description: ""
+      operationId: ExtensionDDL
+      responses:
+        200:
+          description: Result
+        500:
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
   /info:
     get:
       tags:

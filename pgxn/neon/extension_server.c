@@ -12,14 +12,20 @@
 
 #include <curl/curl.h>
 
+#include "access/xact.h"
 #include "utils/guc.h"
+#include "tcop/utility.h"
 
 #include "extension_server.h" 
 #include "neon_utils.h"
 
-static int	extension_server_port = 0;
+static int extension_server_port = 0;
 
 static download_extension_file_hook_type prev_download_extension_file_hook = NULL;
+
+static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
+
+static bool extension_ddl_occured = false;
 
 /*
   * to download all SQL (and data) files for an extension:
@@ -74,9 +80,154 @@ neon_download_extension_file_http(const char *filename, bool is_library)
 	return ret;
 }
 
+
+// Handle extension DDL: we need this for monitoring of installed extensions.
+// General solution is hard, because extensions can be installed in many ways,
+// i.e. sometimes as a cascade operations.
+//
+// Also, we don't have enough information in the statement itself,
+// i.e. extension version is not always present and retrieved from the control file
+// at a later stage.
+//
+// So, just remember the fact of the extension DDL and send it to compute_ctl
+// on commit.
+static void
+NeonExtensionProcessUtility(
+				   PlannedStmt *pstmt,
+				   const char *queryString,
+				   bool readOnlyTree,
+				   ProcessUtilityContext context,
+				   ParamListInfo params,
+				   QueryEnvironment *queryEnv,
+				   DestReceiver *dest,
+				   QueryCompletion *qc)
+{
+	Node	   *parseTree = pstmt->utilityStmt;
+
+	switch (nodeTag(parseTree))
+	{
+		case T_CreateExtensionStmt:
+		case T_AlterExtensionStmt:
+			extension_ddl_occured = true;
+			elog(LOG, "Extension DDL occured");
+			break;
+		case T_DropStmt:
+			{
+				switch (((DropStmt *) parseTree)->removeType)
+				{
+					case OBJECT_EXTENSION:
+						extension_ddl_occured = true;
+						elog(LOG, "Extension DDL occured");
+						break;
+					default:
+						break;
+				}
+			}
+			break;
+		default:
+			break;
+	}
+
+	if (PreviousProcessUtilityHook)
+	{
+		PreviousProcessUtilityHook(
+								   pstmt,
+								   queryString,
+								   readOnlyTree,
+								   context,
+								   params,
+								   queryEnv,
+								   dest,
+								   qc);
+	}
+	else
+	{
+		standard_ProcessUtility(
+								pstmt,
+								queryString,
+								readOnlyTree,
+								context,
+								params,
+								queryEnv,
+								dest,
+								qc);
+	}
+}
+
+
+
+static bool
+neon_send_extension_ddl_event_http()
+{
+	static CURL	   *handle = NULL;
+
+	CURLcode	res;
+	char	   *compute_ctl_url;
+	bool		ret = false;
+
+	if (handle == NULL)
+	{
+		handle = alloc_curl_handle();
+	}
+
+	compute_ctl_url = psprintf("http://localhost:%d/installed_extensions",
+							   extension_server_port);
+
+	elog(LOG, "Sending ddl event to compute_ctl: %s", compute_ctl_url);
+
+	curl_easy_setopt(handle, CURLOPT_URL, compute_ctl_url);
+
+	// Use HEAD request without payload, because this is just a notification.
+	//
+	// This is probably not the best API design, but I didn't want to introduce
+	// new endpoint for this. Suggestions are welcome.
+	curl_easy_setopt(handle, CURLOPT_NOBODY, 1L); 
+
+	/* Perform the request, res will get the return code */
+	res = curl_easy_perform(handle);
+
+	/* Check for errors */
+	if (res != CURLE_OK)
+	{
+		/*
+		 * Don't error here because this is just a monitoring feature.
+		 */
+		elog(WARNING, "neon_send_extension_ddl_event_http failed: %s\n", curl_easy_strerror(res));
+	}
+
+	return ret;
+}
+
+static void
+NeonExtensionXactCallback(XactEvent event, void *arg)
+{
+	elog(LOG, "NeonExtensionXactCallback: %d", event);
+	/* the handler on the compute_ctl side must be non-blocking
+	 * otherwise, the compute_ctl won't see the data that is not yet committed.
+	 * There is still a chance of the race, because the data becomes visible only after XACT_EVENT_COMMIT
+	 * callback is called. We assume that this is not critical for the monitoring feature and expect that
+	 * compute_ctl will eventually see the data.
+	 */
+	if (event == XACT_EVENT_COMMIT || event == XACT_EVENT_PARALLEL_COMMIT)
+	{
+		if (extension_ddl_occured)
+		{
+			elog(LOG, "Sending extension DDL event to compute_ctl");
+			neon_send_extension_ddl_event_http();
+			extension_ddl_occured = false;
+		}
+		elog(LOG, "no extension DDL");
+	}
+}
+
 void
 pg_init_extension_server()
 {
+
+	PreviousProcessUtilityHook = ProcessUtility_hook;
+	ProcessUtility_hook = NeonExtensionProcessUtility;
+	RegisterXactCallback(NeonExtensionXactCallback, NULL);
+
 	/* Port to connect to compute_ctl on localhost */
 	/* to request extension files. */
 	DefineCustomIntVariable("neon.extension_server_port",

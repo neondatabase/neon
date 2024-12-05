@@ -89,6 +89,16 @@ pub fn get_installed_extensions(mut conf: postgres::config::Config) -> Result<In
         }
     }
 
+    // reset the metric to handle dropped extensions and extension version changes -
+    // we need to remove them from the metric.
+    // It creates a race condition - if collector is called before we set the new values
+    // we will have a gap in the metrics.
+    //
+    // TODO: Add a mutex to lock the metric update and collection
+    // so that the collector doesn't see intermediate state.
+    // Or is it ok for this metric to be eventually consistent?
+    INSTALLED_EXTENSIONS.reset();
+
     for (key, ext) in extensions_map.iter() {
         let (extname, version, owned_by_superuser) = key;
         let n_databases = ext.n_databases as u64;
@@ -97,6 +107,8 @@ pub fn get_installed_extensions(mut conf: postgres::config::Config) -> Result<In
             .with_label_values(&[extname, version, owned_by_superuser])
             .set(n_databases);
     }
+
+    tracing::debug!("Installed extensions: {:?}", extensions_map);
 
     Ok(InstalledExtensions {
         extensions: extensions_map.into_values().collect(),
@@ -113,5 +125,6 @@ static INSTALLED_EXTENSIONS: Lazy<UIntGaugeVec> = Lazy::new(|| {
 });
 
 pub fn collect() -> Vec<MetricFamily> {
+    // TODO Add a mutex here to ensure that the metric is not updated while we are collecting it
     INSTALLED_EXTENSIONS.collect()
 }

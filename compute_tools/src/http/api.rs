@@ -310,6 +310,41 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
+        // handle HEAD method of /installed_extensions route
+        // This is the signal from postgres that extension DDL occured and we need to update the metric.
+        //
+        // Don't wait for the result, because the caller doesn't need it
+        // just spawn a task and the metric will be updated eventually.
+        //
+        // In theory there could be multiple HEAD requests in a row, so we should protect
+        // from spawning multiple tasks, but in practice it's not a problem.
+        // TODO: add some mutex or quere?
+        // In practice, extensions are not installed very often, so it's not a problem
+        (&Method::HEAD, route) if route.starts_with("/installed_extensions") => {
+            info!("serving /installed_extensions HEAD request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for extensions request: {:?}",
+                    status
+                );
+                error!(msg);
+                let mut resp = Response::new(Body::from(msg));
+                *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                return resp;
+            }
+
+            let conf = compute.get_conn_conf(None);
+            task::spawn(async move {
+                let _ = task::spawn_blocking(move || {
+                    installed_extensions::get_installed_extensions(conf)
+                })
+                .await;
+            });
+
+            Response::new(Body::from("OK"))
+        }
+
         // download extension files from remote extension storage on demand
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);
