@@ -33,7 +33,7 @@ inputs:
 outputs:
   uri:
     description: 'Connect URI'
-    value: ${{ steps.get-uri.outputs.id }}
+    value: ${{ steps.get-uri.outputs.uri }}
 
 runs:
   using: "composite"
