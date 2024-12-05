@@ -96,17 +96,17 @@ jobs:
         env:
           PROJECT_ID: ${{inputs.project_id}}
           ENDPOINT_ID: ${{steps.endpoint-id.outputs.id}}
-          BRANCH_ID: ${{steps.create-branch.outputs.id}}
+          BRANCH_ID: ${{steps.create-branch.outputs.branch_id}}
           API_HOST: console-stage.neon.build
           API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
         run: |
+          data=$(jq -nc "{endpoint:{branch_id: \"${BRANCH_ID}\"}}")
           for i in {1 10}; do
-            data=$(jq -nc "{endpoint:{branch_id: \"${BRANCH_ID}\"}}")
             endpoint_id=$(curl -X PATCH \
             "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/endpoints/${ENDPOINT_ID}" \
             --header "Accept: application/json" \
             --header "Content-Type: application/json" \
-            --header "Authorization: Bearer ${API_KEY}"
+            --header "Authorization: Bearer ${API_KEY}" \
             --data ${data} | \
             jq '.endpoint.id')
         
