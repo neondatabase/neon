@@ -18,8 +18,9 @@ use pageserver_api::controller_api::{
     ShardsPreferredAzsRequest, TenantCreateRequest,
 };
 use pageserver_api::models::{
-    TenantConfigRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
-    TenantTimeTravelRequest, TimelineArchivalConfigRequest, TimelineCreateRequest,
+    TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
+    TenantShardSplitRequest, TenantTimeTravelRequest, TimelineArchivalConfigRequest,
+    TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::{mgmt_api, BlockUnblock};
@@ -205,6 +206,27 @@ async fn handle_tenant_location_config(
         service
             .tenant_location_config(tenant_shard_id, config_req)
             .await?,
+    )
+}
+
+async fn handle_tenant_config_patch(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let config_req = json_request::<TenantConfigPatchRequest>(&mut req).await?;
+
+    json_response(
+        StatusCode::OK,
+        service.tenant_config_patch(config_req).await?,
     )
 }
 
@@ -1862,6 +1884,13 @@ pub fn make_router(
         })
         .delete("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(r, handle_tenant_delete, RequestName("v1_tenant"))
+        })
+        .patch("/v1/tenant/config", |r| {
+            tenant_service_handler(
+                r,
+                handle_tenant_config_patch,
+                RequestName("v1_tenant_config"),
+            )
         })
         .put("/v1/tenant/config", |r| {
             tenant_service_handler(r, handle_tenant_config_set, RequestName("v1_tenant_config"))

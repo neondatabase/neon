@@ -52,8 +52,8 @@ use pageserver_api::{
         TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
     },
     models::{
-        SecondaryProgress, TenantConfigRequest, TimelineArchivalConfigRequest,
-        TopTenantShardsRequest,
+        SecondaryProgress, TenantConfigPatchRequest, TenantConfigRequest,
+        TimelineArchivalConfigRequest, TopTenantShardsRequest,
     },
 };
 use reqwest::StatusCode;
@@ -139,6 +139,7 @@ enum TenantOperations {
     Create,
     LocationConfig,
     ConfigSet,
+    ConfigPatch,
     TimeTravelRemoteStorage,
     Delete,
     UpdatePolicy,
@@ -2575,6 +2576,53 @@ impl Service {
         Ok(result)
     }
 
+    pub(crate) async fn tenant_config_patch(
+        &self,
+        req: TenantConfigPatchRequest,
+    ) -> Result<(), ApiError> {
+        let _tenant_lock = trace_exclusive_lock(
+            &self.tenant_op_locks,
+            req.tenant_id,
+            TenantOperations::ConfigPatch,
+        )
+        .await;
+
+        let tenant_id = req.tenant_id;
+        let patch = req.config;
+
+        let base = {
+            let locked = self.inner.read().unwrap();
+            let shards = locked
+                .tenants
+                .range(TenantShardId::tenant_range(req.tenant_id));
+
+            let mut configs = shards.map(|(_sid, shard)| &shard.config).peekable();
+
+            let first = match configs.peek() {
+                Some(first) => (*first).clone(),
+                None => {
+                    return Err(ApiError::NotFound(
+                        anyhow::anyhow!("Tenant {} not found", req.tenant_id).into(),
+                    ));
+                }
+            };
+
+            if !configs.all_equal() {
+                tracing::error!("Tenant configs for {} are mismatched. ", req.tenant_id);
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "Tenant configs for {} are mismatched",
+                    req.tenant_id
+                )));
+            }
+
+            first
+        };
+
+        let updated_config = base.apply_patch(patch);
+        self.set_tenant_config_and_reconcile(tenant_id, updated_config)
+            .await
+    }
+
     pub(crate) async fn tenant_config_set(&self, req: TenantConfigRequest) -> Result<(), ApiError> {
         // We require an exclusive lock, because we are updating persistent and in-memory state
         let _tenant_lock = trace_exclusive_lock(
@@ -2584,12 +2632,32 @@ impl Service {
         )
         .await;
 
-        let tenant_id = req.tenant_id;
-        let config = req.config;
+        let tenant_exists = {
+            let locked = self.inner.read().unwrap();
+            let mut r = locked
+                .tenants
+                .range(TenantShardId::tenant_range(req.tenant_id));
+            r.next().is_some()
+        };
 
+        if !tenant_exists {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Tenant {} not found", req.tenant_id).into(),
+            ));
+        }
+
+        self.set_tenant_config_and_reconcile(req.tenant_id, req.config)
+            .await
+    }
+
+    async fn set_tenant_config_and_reconcile(
+        &self,
+        tenant_id: TenantId,
+        config: TenantConfig,
+    ) -> Result<(), ApiError> {
         self.persistence
             .update_tenant_shard(
-                TenantFilter::Tenant(req.tenant_id),
+                TenantFilter::Tenant(tenant_id),
                 None,
                 Some(config.clone()),
                 None,
