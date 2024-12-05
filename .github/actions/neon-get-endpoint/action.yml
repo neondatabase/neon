@@ -33,8 +33,8 @@ runs:
             --header "Content-Type: application/json" \
             --header "Authorization: Bearer ${API_KEY}")
         
-         endpoint_id=$(echo $res | jq '.endpoints[0].id')
-         branch_id=$(echo $res | jq '.endpoints[0].branch_id')
+         endpoint_id=$(echo $res | jq -r '.endpoints[0].id')
+         branch_id=$(echo $res | jq -r '.endpoints[0].branch_id')
           
 
          if [ -z "${endpoint_id}" ] || [ "${endpoint_id}" == "null" ]; then

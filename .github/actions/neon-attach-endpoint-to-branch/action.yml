@@ -25,7 +25,6 @@ runs:
       shell: bash -euxo pipefail {0}
       run: |
         data=$(jq -nc "{endpoint:{branch_id: \"${BRANCH_ID}\"}}")
-        ENDPOINT_ID=$(echo ${ENDPOINT_ID} | tr -d \")
         for i in {1 10}; do
           res=$(curl -X PATCH \
           "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/endpoints/${ENDPOINT_ID}" \
@@ -33,8 +32,7 @@ runs:
           --header "Content-Type: application/json" \
           --header "Authorization: Bearer ${API_KEY}" \
           --data ${data})
-          echo ${res}
-          endpoint_id=$(echo $res | jq '.endpoint.id')
+          endpoint_id=$(echo $res | jq -r '.endpoint.id')
         
           if [ -z "${endpoint_id}" ] || [ "${endpoint_id}" == "null" ]; then
             sleep 1
