@@ -47,6 +47,12 @@ pub(crate) trait NodeSchedulingScore: Debug + Ord + Copy + Sized {
         preferred_az: &Option<AvailabilityZone>,
         context: &ScheduleContext,
     ) -> Option<Self>;
+
+    /// Return a score that drops any components based on node utilization: this is useful
+    /// for finding scores for scheduling optimisation, when we want to avoid rescheduling
+    /// shards due to e.g. disk usage, to avoid flapping.
+    fn disregard_utilization(&self) -> Self;
+
     fn is_overloaded(&self) -> bool;
     fn node_id(&self) -> NodeId;
 }
@@ -156,6 +162,28 @@ pub(crate) struct NodeAttachmentSchedulingScore {
     node_id: NodeId,
 }
 
+impl NodeAttachmentSchedulingScore {
+    /// For speculative scheduling: generate the score for this node as if one more tenant
+    /// shard was attached to it.
+    pub(crate) fn project_attachment(&self) -> Self {
+        Self {
+            total_attached_shard_count: self.total_attached_shard_count + 1,
+            ..*self
+        }
+    }
+
+    /// The literal equality and comparison operators include the node ID to provide a deterministic
+    /// ordering.  However, when doing scheduling optimisation we of course don't want to regard
+    /// a difference in node ID as significant, so that code uses this method to exclude that case.
+    pub(crate) fn different(&self, other: &Self) -> bool {
+        self.az_match != other.az_match
+            || self.affinity_score != other.affinity_score
+            || self.attached_shards_in_context != other.attached_shards_in_context
+            || self.utilization_score != other.utilization_score
+            || self.total_attached_shard_count != other.total_attached_shard_count
+    }
+}
+
 impl NodeSchedulingScore for NodeAttachmentSchedulingScore {
     fn generate(
         node_id: &NodeId,
@@ -182,6 +210,18 @@ impl NodeSchedulingScore for NodeAttachmentSchedulingScore {
             total_attached_shard_count: node.attached_shard_count,
             node_id: *node_id,
         })
+    }
+
+    /// For use in scheduling optimisation, where we only want to consider the aspects
+    /// of the score that can only be resolved by moving things (such as inter-shard affinity
+    /// and AZ affinity), and ignore aspects that reflect the total utilization of a node (which
+    /// can fluctuate for other reasons)
+    fn disregard_utilization(&self) -> Self {
+        Self {
+            utilization_score: 0,
+            total_attached_shard_count: 0,
+            ..*self
+        }
     }
 
     fn is_overloaded(&self) -> bool {
@@ -215,6 +255,17 @@ pub(crate) struct NodeSecondarySchedulingScore {
     node_id: NodeId,
 }
 
+impl NodeSecondarySchedulingScore {
+    /// The literal equality and comparison operators include the node ID to provide a deterministic
+    /// ordering.  However, when doing scheduling optimisation we of course don't want to regard
+    /// a difference in node ID as significant, so that code uses this method to exclude that case.
+    pub(crate) fn different(&self, other: &Self) -> bool {
+        self.az_match != other.az_match
+            || self.affinity_score != other.affinity_score
+            || self.utilization_score != other.utilization_score
+    }
+}
+
 impl NodeSchedulingScore for NodeSecondarySchedulingScore {
     fn generate(
         node_id: &NodeId,
@@ -240,6 +291,13 @@ impl NodeSchedulingScore for NodeSecondarySchedulingScore {
             total_attached_shard_count: node.attached_shard_count,
             node_id: *node_id,
         })
+    }
+
+    fn disregard_utilization(&self) -> Self {
+        Self {
+            utilization_score: 0,
+            ..*self
+        }
     }
 
     fn is_overloaded(&self) -> bool {
@@ -292,6 +350,10 @@ impl AffinityScore {
 
     pub(crate) fn inc(&mut self) {
         self.0 += 1;
+    }
+
+    pub(crate) fn dec(&mut self) {
+        self.0 -= 1;
     }
 }
 
@@ -353,15 +415,36 @@ impl ScheduleContext {
         *entry += 1;
     }
 
-    pub(crate) fn get_node_affinity(&self, node_id: NodeId) -> AffinityScore {
-        self.nodes
-            .get(&node_id)
-            .copied()
-            .unwrap_or(AffinityScore::FREE)
+    /// Imagine we migrated our attached location to the given node.  Return a new context that
+    /// reflects this.
+    pub(crate) fn project_detach(&self, source: NodeId) -> Self {
+        let mut new_context = self.clone();
+
+        if let Some(count) = new_context.attached_nodes.get_mut(&source) {
+            // It's unexpected that we get called in a context where the source of
+            // the migration is not already in the context.
+            debug_assert!(*count > 0);
+
+            if *count > 0 {
+                *count -= 1;
+            }
+        }
+
+        if let Some(score) = new_context.nodes.get_mut(&source) {
+            score.dec();
+        }
+
+        new_context
     }
 
-    pub(crate) fn get_node_attachments(&self, node_id: NodeId) -> usize {
-        self.attached_nodes.get(&node_id).copied().unwrap_or(0)
+    pub(crate) fn project_secondary_detach(&self, source: NodeId) -> Self {
+        let mut new_context = self.clone();
+
+        if let Some(score) = new_context.nodes.get_mut(&source) {
+            score.dec();
+        }
+
+        new_context
     }
 
     #[cfg(test)]
@@ -636,6 +719,22 @@ impl Scheduler {
         node.and_then(|(node_id, may_schedule)| if may_schedule { Some(node_id) } else { None })
     }
 
+    /// Calculate a single node's score, used in optimizer logic to compare specific
+    /// nodes' scores.
+    pub(crate) fn compute_node_score<Score>(
+        &mut self,
+        node_id: NodeId,
+        preferred_az: &Option<AvailabilityZone>,
+        context: &ScheduleContext,
+    ) -> Option<Score>
+    where
+        Score: NodeSchedulingScore,
+    {
+        self.nodes
+            .get_mut(&node_id)
+            .and_then(|node| Score::generate(&node_id, node, preferred_az, context))
+    }
+
     /// Compute a schedulling score for each node that the scheduler knows of
     /// minus a set of hard excluded nodes.
     fn compute_node_scores<Score>(
@@ -740,6 +839,10 @@ impl Scheduler {
     /// deletions).
     pub(crate) fn any_available_node(&mut self) -> Result<NodeId, ScheduleError> {
         self.schedule_shard::<AttachedShardTag>(&[], &None, &ScheduleContext::default())
+    }
+
+    pub(crate) fn get_node_az(&self, node_id: &NodeId) -> Option<AvailabilityZone> {
+        self.nodes.get(node_id).map(|n| n.az.clone())
     }
 
     /// Unit test access to internal state
