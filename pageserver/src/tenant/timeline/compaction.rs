@@ -1821,15 +1821,18 @@ impl Timeline {
             let layers = guard.layer_map()?;
             let gc_info = self.gc_info.read().unwrap();
             let mut retain_lsns_below_horizon = Vec::new();
-            let real_gc_cutoff = gc_info.cutoffs.select_min();
-            // The compaction algorithm will keep all keys above the gc_cutoff while keeping only necessary keys below the gc_cutoff for
-            // each of the retain_lsn. Therefore, if the user-provided `compact_below_lsn` is larger than the real gc cutoff, we will use
-            // the real cutoff.
-            let mut gc_cutoff = options.compact_below_lsn.unwrap_or(real_gc_cutoff);
-            if gc_cutoff > real_gc_cutoff {
-                warn!("provided compact_below_lsn={} is larger than the real_gc_cutoff={}, using the real gc cutoff", gc_cutoff, real_gc_cutoff);
-                gc_cutoff = real_gc_cutoff;
-            }
+            let gc_cutoff = {
+                let real_gc_cutoff = gc_info.cutoffs.select_min();
+                // The compaction algorithm will keep all keys above the gc_cutoff while keeping only necessary keys below the gc_cutoff for
+                // each of the retain_lsn. Therefore, if the user-provided `compact_below_lsn` is larger than the real gc cutoff, we will use
+                // the real cutoff.
+                let mut gc_cutoff = options.compact_below_lsn.unwrap_or(real_gc_cutoff);
+                if gc_cutoff > real_gc_cutoff {
+                    warn!("provided compact_below_lsn={} is larger than the real_gc_cutoff={}, using the real gc cutoff", gc_cutoff, real_gc_cutoff);
+                    gc_cutoff = real_gc_cutoff;
+                }
+                gc_cutoff
+            };
             for (lsn, _timeline_id, _is_offloaded) in &gc_info.retain_lsns {
                 if lsn < &gc_cutoff {
                     retain_lsns_below_horizon.push(*lsn);
