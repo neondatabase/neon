@@ -29,7 +29,7 @@ runs:
             --header "Accept: application/json" \
             --header "Content-Type: application/json" \
             --header "Authorization: Bearer ${API_KEY}" | \
-            jq '.endpoints.[0].id'
+            jq '.endpoints[0].id'
             )
 
           if [ -z "${endpoint_id}" ] || [ "${endpoint_id}" == "null" ]; then

@@ -7,7 +7,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import psycopg2
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import RemotePostgres
