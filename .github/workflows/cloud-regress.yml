@@ -84,6 +84,14 @@ jobs:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           project_id: ${{inputs.project-id}}
 
+      - name: Get the connection URI
+        id: connect-uri
+        uses: ./.github/actions/neon-get-connection-uri
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{inputs.project-id}}
+          endpoint_id: ${{steps.endpoint-id.outputs.id}}
+
       - name: Create a new branch
         id: create-branch
         uses: ./.github/actions/neon-branch-create
@@ -99,15 +107,6 @@ jobs:
           project_id: ${{inputs.project-id}}
           endpoint_id: ${{steps.endpoint-id.outputs.id}}
           branch_id: ${{steps.create-branch.outputs.branch_id}}
-
-
-      - name: Get the connection URI
-        id: connect-uri
-        uses: ./.github/actions/neon-get-connection-uri
-        with:
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{inputs.project-id}}
-          endpoint_id: ${{steps.endpoint-id.outputs.id}}
 
       - name: Run the regression tests
         uses: ./.github/actions/run-python-test-set
