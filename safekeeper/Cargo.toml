@@ -41,6 +41,7 @@ serde_json.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 thiserror.workspace = true
+tikv-jemallocator.workspace = true
 tokio = { workspace = true, features = ["fs"] }
 tokio-util = { workspace = true }
 tokio-io-timeout.workspace = true

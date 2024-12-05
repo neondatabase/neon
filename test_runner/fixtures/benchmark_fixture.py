@@ -266,6 +266,16 @@ class NeonBenchmarker:
         name = f"{self.PROPERTY_PREFIX}_{metric_name}"
         if labels is None:
             labels = {}
+
+        # Sometimes mypy can't catch non-numeric values,
+        # so adding a check here
+        try:
+            float(metric_value)
+        except ValueError as e:
+            raise ValueError(
+                f"`metric_value` (`{metric_value}`) must be a NUMERIC-friendly data type"
+            ) from e
+
         self.property_recorder(
             name,
             {

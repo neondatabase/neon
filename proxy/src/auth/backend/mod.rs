@@ -11,8 +11,8 @@ pub use console_redirect::ConsoleRedirectBackend;
 pub(crate) use console_redirect::ConsoleRedirectError;
 use ipnet::{Ipv4Net, Ipv6Net};
 use local::LocalBackend;
+use postgres_client::config::AuthKeys;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_postgres::config::AuthKeys;
 use tracing::{debug, info, warn};
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
@@ -70,6 +70,10 @@ impl std::fmt::Display for Backend<'_, ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ControlPlane(api, ()) => match &**api {
+                ControlPlaneClient::ProxyV1(endpoint) => fmt
+                    .debug_tuple("ControlPlane::ProxyV1")
+                    .field(&endpoint.url())
+                    .finish(),
                 ControlPlaneClient::Neon(endpoint) => fmt
                     .debug_tuple("ControlPlane::Neon")
                     .field(&endpoint.url())

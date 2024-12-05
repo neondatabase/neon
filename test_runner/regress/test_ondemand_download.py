@@ -256,7 +256,7 @@ def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start()
 
-    wait_until(10, 0.2, lambda: assert_tenant_state(client, tenant_id, "Active"))
+    wait_until(lambda: assert_tenant_state(client, tenant_id, "Active"))
 
     # The current_physical_size reports the sum of layers loaded in the layer
     # map, regardless of where the layer files are located. So even though we
@@ -413,7 +413,7 @@ def test_download_remote_layers_api(
         ]
     )
 
-    wait_until(10, 0.2, lambda: assert_tenant_state(client, tenant_id, "Active"))
+    wait_until(lambda: assert_tenant_state(client, tenant_id, "Active"))
 
     ###### Phase 1: exercise download error code path
 
@@ -705,7 +705,7 @@ def test_layer_download_cancelled_by_config_location(neon_env_builder: NeonEnvBu
         )
 
         _, offset = wait_until(
-            20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+            lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
         )
 
         location_conf = {"mode": "Detached", "tenant_conf": {}}
@@ -713,8 +713,6 @@ def test_layer_download_cancelled_by_config_location(neon_env_builder: NeonEnvBu
         detach = exec.submit(client.tenant_location_conf, env.initial_tenant, location_conf)
 
         _, offset = wait_until(
-            20,
-            0.5,
             lambda: env.pageserver.assert_log_contains(
                 "closing is taking longer than expected", offset
             ),
@@ -734,8 +732,6 @@ def test_layer_download_cancelled_by_config_location(neon_env_builder: NeonEnvBu
         client.configure_failpoints((failpoint, "pause"))
 
         _, offset = wait_until(
-            20,
-            0.5,
             lambda: env.pageserver.assert_log_contains(f"cfg failpoint: {failpoint} pause", offset),
         )
 
@@ -750,8 +746,6 @@ def test_layer_download_cancelled_by_config_location(neon_env_builder: NeonEnvBu
         warmup = exec.submit(client.tenant_secondary_download, env.initial_tenant, wait_ms=30000)
 
         _, offset = wait_until(
-            20,
-            0.5,
             lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}", offset),
         )
 
@@ -805,7 +799,7 @@ def test_layer_download_timeouted(neon_env_builder: NeonEnvBuilder):
         )
 
         _, offset = wait_until(
-            20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+            lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
         )
         # ensure enough time while paused to trip the timeout
         time.sleep(2)
@@ -824,8 +818,6 @@ def test_layer_download_timeouted(neon_env_builder: NeonEnvBuilder):
 
         # capture the next offset for a new synchronization with the failpoint
         _, offset = wait_until(
-            20,
-            0.5,
             lambda: env.pageserver.assert_log_contains(f"cfg failpoint: {failpoint} pause", offset),
         )
 
