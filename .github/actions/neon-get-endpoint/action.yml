@@ -28,12 +28,13 @@ runs:
             "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/endpoints" \
             --header "Accept: application/json" \
             --header "Content-Type: application/json" \
-            --header "Authorization: Bearer ${API_KEY}" | \
+            --header "Authorization: Bearer ${API_KEY}" | tee endpoints.json \
             jq '.endpoints[0].id'
             )
 
           if [ -z "${endpoint_id}" ] || [ "${endpoint_id}" == "null" ]; then
             sleep 1
+            cat endpoints.json
             continue
           fi
 
