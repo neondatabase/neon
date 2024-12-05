@@ -100,7 +100,7 @@ impl StartupMessageParamsBuilder {
 
 #[derive(Debug, Clone, Default)]
 pub struct StartupMessageParams {
-    params: Bytes,
+    pub params: Bytes,
 }
 
 impl StartupMessageParams {

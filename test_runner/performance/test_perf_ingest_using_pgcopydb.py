@@ -184,7 +184,7 @@ def parse_log_and_report_metrics(
             for metric_name, pattern in metric_patterns.items():
                 if pattern.search(line):
                     # Extract duration and convert it to seconds
-                    duration_match = re.search(r"\d+h\d+m|\d+s|\d+ms|\d+\.\d+s", line)
+                    duration_match = re.search(r"\d+h\d+m|\d+m\d+s|\d+s|\d+ms|\d+\.\d+s", line)
                     if duration_match:
                         duration_str = duration_match.group(0)
                         parts = re.findall(r"\d+[a-zA-Z]+", duration_str)

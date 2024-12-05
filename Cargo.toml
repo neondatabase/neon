@@ -74,7 +74,7 @@ bindgen = "0.70"
 bit_field = "0.10.2"
 bstr = "1.0"
 byteorder = "1.4"
-bytes = "1.0"
+bytes = "1.9"
 camino = "1.1.6"
 cfg-if = "1.0.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

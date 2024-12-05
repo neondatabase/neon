@@ -894,7 +894,7 @@ impl TenantManager {
             Some(TenantSlot::Attached(tenant)) => Ok(Arc::clone(tenant)),
             Some(TenantSlot::InProgress(_)) => Err(GetTenantError::NotActive(tenant_shard_id)),
             None | Some(TenantSlot::Secondary(_)) => {
-                Err(GetTenantError::NotFound(tenant_shard_id.tenant_id))
+                Err(GetTenantError::ShardNotFound(tenant_shard_id))
             }
         }
     }
@@ -2257,6 +2257,9 @@ pub(crate) enum GetTenantError {
     /// getters that use a TenantId and a ShardSelector, not just getters that target a specific shard.
     #[error("Tenant {0} not found")]
     NotFound(TenantId),
+
+    #[error("Tenant {0} not found")]
+    ShardNotFound(TenantShardId),
 
     #[error("Tenant {0} is not active")]
     NotActive(TenantShardId),

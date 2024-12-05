@@ -3455,7 +3455,6 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
-        let gate_guard = self.gate.enter().context("enter gate for inmem layer")?;
 
         let last_record_lsn = self.get_last_record_lsn();
         ensure!(
@@ -3472,7 +3471,7 @@ impl Timeline {
                 self.conf,
                 self.timeline_id,
                 self.tenant_shard_id,
-                gate_guard,
+                &self.gate,
                 ctx,
             )
             .await?;
