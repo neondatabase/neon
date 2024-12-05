@@ -6374,26 +6374,35 @@ impl Service {
     /// we have this helper to move things along faster.
     #[cfg(feature = "testing")]
     async fn kick_secondary_download(&self, tenant_shard_id: TenantShardId) {
-        let (attached_node, secondary_node) = {
+        let (attached_node, secondaries) = {
             let locked = self.inner.read().unwrap();
             let Some(shard) = locked.tenants.get(&tenant_shard_id) else {
+                tracing::warn!(
+                    "Skipping kick of secondary download for {tenant_shard_id}: not found"
+                );
                 return;
             };
-            let (Some(attached), Some(secondary)) = (
-                shard.intent.get_attached(),
-                shard.intent.get_secondary().first(),
-            ) else {
+
+            let Some(attached) = shard.intent.get_attached() else {
+                tracing::warn!(
+                    "Skipping kick of secondary download for {tenant_shard_id}: no attached"
+                );
                 return;
             };
-            (
-                locked.nodes.get(attached).unwrap().clone(),
-                locked.nodes.get(secondary).unwrap().clone(),
-            )
+
+            let secondaries = shard
+                .intent
+                .get_secondary()
+                .iter()
+                .map(|n| locked.nodes.get(n).unwrap().clone())
+                .collect::<Vec<_>>();
+
+            (locked.nodes.get(attached).unwrap().clone(), secondaries)
         };
 
         // Make remote API calls to upload + download heatmaps: we ignore errors because this is just
         // a 'kick' to let scheduling optimisation run more promptly.
-        attached_node
+        match attached_node
             .with_client_retries(
                 |client| async move { client.tenant_heatmap_upload(tenant_shard_id).await },
                 &self.config.jwt_token,
@@ -6402,22 +6411,57 @@ impl Service {
                 SHORT_RECONCILE_TIMEOUT,
                 &self.cancel,
             )
-            .await;
+            .await
+        {
+            Some(Err(e)) => {
+                tracing::info!(
+                    "Failed to upload heatmap from {attached_node} for {tenant_shard_id}: {e}"
+                );
+            }
+            None => {
+                tracing::info!(
+                    "Cancelled while uploading heatmap from {attached_node} for {tenant_shard_id}"
+                );
+            }
+            Some(Ok(_)) => {
+                tracing::info!(
+                    "Successfully uploaded heatmap from {attached_node} for {tenant_shard_id}"
+                );
+            }
+        }
 
-        secondary_node
-            .with_client_retries(
-                |client| async move {
-                    client
-                        .tenant_secondary_download(tenant_shard_id, Some(Duration::from_secs(1)))
-                        .await
-                },
-                &self.config.jwt_token,
-                3,
-                10,
-                SHORT_RECONCILE_TIMEOUT,
-                &self.cancel,
-            )
-            .await;
+        for secondary_node in secondaries {
+            match secondary_node
+                .with_client_retries(
+                    |client| async move {
+                        client
+                            .tenant_secondary_download(
+                                tenant_shard_id,
+                                Some(Duration::from_secs(1)),
+                            )
+                            .await
+                    },
+                    &self.config.jwt_token,
+                    3,
+                    10,
+                    SHORT_RECONCILE_TIMEOUT,
+                    &self.cancel,
+                )
+                .await
+            {
+                Some(Err(e)) => {
+                    tracing::info!(
+                "Failed to download heatmap from {secondary_node} for {tenant_shard_id}: {e}"
+            );
+                }
+                None => {
+                    tracing::info!("Cancelled while downloading heatmap from {secondary_node} for {tenant_shard_id}");
+                }
+                Some(Ok(progress)) => {
+                    tracing::info!("Successfully downloaded heatmap from {secondary_node} for {tenant_shard_id}: {progress:?}");
+                }
+            }
+        }
     }
 
     /// Look for shards which are oversized and in need of splitting
