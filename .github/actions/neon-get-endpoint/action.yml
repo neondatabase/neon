@@ -15,6 +15,9 @@ outputs:
   id:
     description: 'Endpoint ID'
     value: ${{ steps.get-endpoint.outputs.id }}
+  branch_id:
+    description: 'Branch ID'
+    value: ${{ steps.get-endpoint.outputs.branch_id }}
 
 runs:
   using: "composite"
@@ -24,19 +27,20 @@ runs:
       shell: bash -euxo pipefail {0}
       run: |
         for i in {1..10}; do
-         endpoint_id=$(curl \
+         res=$(curl \
             "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/endpoints" \
             --header "Accept: application/json" \
             --header "Content-Type: application/json" \
-            --header "Authorization: Bearer ${API_KEY}" | tee endpoints.json | \
-            jq '.endpoints[0].id'
-            )
+            --header "Authorization: Bearer ${API_KEY}")
+        
+         endpoint_id=$(echo $res | jq '.endpoints[0].id')
+         branch_id=$(echo $res | jq '.endpoints[0].branch_id')
+          
 
-          if [ -z "${endpoint_id}" ] || [ "${endpoint_id}" == "null" ]; then
-            sleep 1
-            cat endpoints.json
-            continue
-          fi
+         if [ -z "${endpoint_id}" ] || [ "${endpoint_id}" == "null" ]; then
+           sleep 1
+           continue
+         fi
 
           break
         done
@@ -47,6 +51,7 @@ runs:
         fi
 
         echo "id=${endpoint_id}" >> ${GITHUB_OUTPUT}
+        echo "branch_id=${branch_id}" >> ${GITHUB_OUTPUT}
 
       env:
         API_HOST: ${{ inputs.api_host }}

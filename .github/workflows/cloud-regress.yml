@@ -119,6 +119,22 @@ jobs:
         env:
           BENCHMARK_CONNSTR: ${{steps.connect-uri.outputs.uri}}
 
+      - name: Re-attach the endpoint to the old branch
+        if: always()
+        uses: ./.github/actions/neon-attach-endpoint-to-branch
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{inputs.project-id}}
+          endpoint_id: ${{steps.endpoint-id.outputs.id}}
+          branch_id: ${{steps.endpoint-id.outputs.branch_id}}
+
+      - name: Delete branch
+        uses: ./.github/actions/neon-branch-delete
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{inputs.project-id}}
+          branch_id: ${{steps.endpoint-id.outputs.branch_id}}
+
       - name: Create Allure report
         id: create-allure-report
         if: ${{ !cancelled() }}
