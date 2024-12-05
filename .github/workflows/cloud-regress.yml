@@ -93,7 +93,7 @@ jobs:
           add_endpoint: false
 
       - name: Attach the endpoint to the new branch
-        uses: ./github/actions/neon-attach-endpoint-to-branch
+        uses: ./.github/actions/neon-attach-endpoint-to-branch
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           project_id: ${{inputs.project-id}}
