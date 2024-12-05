@@ -100,7 +100,7 @@ jobs:
           API_HOST: console-stage.neon.build
           API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
         run: |
-          for i in ${1 10}; do
+          for i in {1 10}; do
             data=$(jq -nc "{endpoint:{branch_id: \"${BRANCH_ID}\"}}")
             endpoint_id=$(curl -X PATCH \
             "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/endpoints/${ENDPOINT_ID}" \
