@@ -780,15 +780,11 @@ pub(crate) enum CompactFlags {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct CompactRequest {
     pub compact_range: Option<CompactRange>,
-    pub compact_below_lsn: Option<LsnDisplay>,
+    pub compact_below_lsn: Option<Lsn>,
     /// Whether the compaction job should be scheduled.
     #[serde(default)]
     pub scheduled: bool,
 }
-
-#[serde_with::serde_as]
-#[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct LsnDisplay(#[serde_as(as = "serde_with::DisplayFromStr")] pub Lsn);
 
 #[serde_with::serde_as]
 #[derive(Debug, Clone, serde::Deserialize)]

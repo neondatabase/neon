@@ -2004,9 +2004,7 @@ async fn timeline_compact_handler(
         compact_range: compact_request
             .as_ref()
             .and_then(|r| r.compact_range.clone()),
-        compact_below_lsn: compact_request
-            .as_ref()
-            .and_then(|r| r.compact_below_lsn.as_ref().map(|x| x.0)),
+        compact_below_lsn: compact_request.as_ref().and_then(|r| r.compact_below_lsn),
         flags,
     };
 
