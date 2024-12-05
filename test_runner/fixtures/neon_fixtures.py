@@ -479,6 +479,8 @@ class NeonEnvBuilder:
         Configuring pageserver with remote storage is now the default. There will be a warning if pageserver is created without one.
         """
         env = self.init_configs(default_remote_storage_if_missing=default_remote_storage_if_missing)
+        if (timeout_in_seconds is None) and (os.getenv("BUILD_TYPE") == "debug"):
+            timeout_in_seconds = 30
         env.start(timeout_in_seconds=timeout_in_seconds)
 
         # Prepare the default branch to start the postgres on later.
