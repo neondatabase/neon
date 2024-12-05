@@ -74,10 +74,10 @@ runs:
         PROJECT_ID: ${{ inputs.project_id }}
 
     - name: Get Role name
-      if: inputs.add_endpoint
       id: role-name
       shell: bash -euxo pipefail {0}
       run: |
+        test ${{inputs.add_endpoint}} == "true" || exit 0
         roles=$(curl \
           "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/branches/${BRANCH_ID}/roles" \
           --fail \
@@ -95,11 +95,11 @@ runs:
         BRANCH_ID: ${{ steps.create-branch.outputs.branch_id }}
 
     - name: Change Password
-      if: inputs.add_endpoint
       id: change-password
       # A shell without `set -x` to not to expose password/dsn in logs
       shell: bash -euo pipefail {0}
       run: |
+        test ${{inputs.add_endpoint}} == "true" || exit 0
         for i in $(seq 1 10); do
           reset_password=$(curl \
             "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/branches/${BRANCH_ID}/roles/${ROLE_NAME}/reset_password" \
