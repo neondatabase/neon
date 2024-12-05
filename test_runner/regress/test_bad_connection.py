@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import random
 import time
 
@@ -7,6 +8,8 @@ import psycopg2.errors
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.pageserver_mitm import BreakConnectionException, PageserverProxy
+from fixtures.port_distributor import PortDistributor
 
 
 @pytest.mark.timeout(600)
@@ -76,6 +79,69 @@ def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
             cur.fetchall()
         times_executed += 1
     log.info(f"Workload executed {times_executed} times")
+
+    # do a graceful shutdown which would had caught the allowed_errors before
+    # https://github.com/neondatabase/neon/pull/8632
+    env.pageserver.stop()
+
+
+@pytest.mark.timeout(600)
+def test_compute_pageserver_connection_stress2(
+        neon_env_builder: NeonEnvBuilder, port_distributor: PortDistributor,
+        pg_bin: PgBin
+):
+    env = neon_env_builder.init_start()
+
+    # Set up the MITM proxy
+
+    error_fraction = 0
+
+    async def response_cb(conn_id):
+        global error_fraction
+        if random.random() < error_fraction:
+            raise BreakConnectionException("unlucky")
+
+    mitm_listen_port = port_distributor.get_port()
+    mitm = PageserverProxy(mitm_listen_port, env.pageserver.service_port.pg, response_cb)
+
+    def main():
+        global error_fraction
+        endpoint = env.endpoints.create(
+            "main",
+            config_lines=[
+                "max_connections=1000",
+            ])
+        endpoint.start()
+
+        with open(endpoint.pg_data_dir_path() / "postgresql.conf", "a") as conf:
+            conf.write(
+                f"neon.pageserver_connstring='postgres://localhost:{mitm_listen_port}'  # MITM proxy\n"
+            )
+
+        pg_conn = endpoint.connect()
+        cur = pg_conn.cursor()
+
+        cur.execute("select pg_reload_conf()")
+
+        scale = 5
+        connstr = endpoint.connstr()
+        log.info(f"Start a pgbench workload on pg {connstr}")
+
+        error_fraction=0.001
+
+        pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", f"-s{scale}", connstr])
+        error_fraction=0.01
+        pg_bin.run_capture(["pgbench", "-S", "-c80", "-j4", "-P1", "-T60", connstr])
+
+        mitm.shutdown()
+
+    async def mm():
+        await asyncio.gather(
+            asyncio.to_thread(main),
+            mitm.run_server()
+        )
+
+    asyncio.run(mm())
 
     # do a graceful shutdown which would had caught the allowed_errors before
     # https://github.com/neondatabase/neon/pull/8632
