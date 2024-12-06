@@ -122,6 +122,13 @@ jobs:
           path: pg_install/v17
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-v17-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
+      - name: Cache walproposer-lib
+        id: cache_walproposer_lib
+        uses: actions/cache@v4
+        with:
+          path: pg_install/build/walproposer-lib
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-walproposer_lib-v17-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
       - name: Set extra env for macOS
         run: |
           echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
@@ -140,7 +147,7 @@ jobs:
       )
     timeout-minutes: 30
     runs-on: macos-15
-    needs: [build-pgxn]
+    needs: [build-pgxn, build-walproposer-lib]
     env:
       # Use release build only, to have less debug info around
       # Hence keeping target/ (and general cache size) smaller
