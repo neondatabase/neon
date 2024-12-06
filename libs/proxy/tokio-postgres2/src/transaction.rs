@@ -53,7 +53,7 @@ impl<'a> Transaction<'a> {
     }
 
     /// Like `Client::query_raw_txt`.
-    pub async fn query_raw_txt<S, I>(&self, statement: &str, params: I) -> Result<RowStream, Error>
+    pub async fn query_raw_txt<S, I>(&mut self, statement: &str, params: I) -> Result<RowStream, Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = Option<S>>,
@@ -68,7 +68,7 @@ impl<'a> Transaction<'a> {
     }
 
     /// Returns a reference to the underlying `Client`.
-    pub fn client(&self) -> &Client {
+    pub fn client(&mut self) -> &mut Client {
         self.client
     }
 }

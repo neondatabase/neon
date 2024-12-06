@@ -31,22 +31,8 @@ impl SimpleColumn {
     }
 }
 
-pub async fn simple_query(client: &InnerClient, query: &str) -> Result<SimpleQueryStream, Error> {
-    debug!("executing simple query: {}", query);
-
-    let buf = encode(client, query)?;
-    let responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
-
-    Ok(SimpleQueryStream {
-        responses,
-        columns: None,
-        status: ReadyForQueryStatus::Unknown,
-        _p: PhantomPinned,
-    })
-}
-
 pub async fn batch_execute(
-    client: &InnerClient,
+    client: &mut InnerClient,
     query: &str,
 ) -> Result<ReadyForQueryStatus, Error> {
     debug!("executing statement batch: {}", query);
@@ -66,7 +52,7 @@ pub async fn batch_execute(
     }
 }
 
-pub(crate) fn encode(client: &InnerClient, query: &str) -> Result<Bytes, Error> {
+pub(crate) fn encode(client: &mut InnerClient, query: &str) -> Result<Bytes, Error> {
     client.with_buf(|buf| {
         frontend::query(query, buf).map_err(Error::encode)?;
         Ok(buf.split().freeze())

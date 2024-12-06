@@ -23,7 +23,6 @@ use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
 use p256::ecdsa::{Signature, SigningKey};
 use parking_lot::RwLock;
 use postgres_client::tls::NoTlsStream;
-use postgres_client::types::ToSql;
 use postgres_client::AsyncMessage;
 use serde_json::value::RawValue;
 use signature::Signer;
@@ -287,12 +286,11 @@ impl ClientInnerCommon<postgres_client::Client> {
             let token = resign_jwt(&local_data.key, payload, local_data.jti)?;
 
             // initiates the auth session
-            self.inner.batch_execute("discard all").await?;
+            // the token contains only `[a-zA-Z1-9_-\.]+` so it cannot escape the string literal formatting.
             self.inner
-                .execute(
-                    "select auth.jwt_session_init($1)",
-                    &[&&*token as &(dyn ToSql + Sync)],
-                )
+                .batch_execute(&format!(
+                    "discard all; select auth.jwt_session_init('{token}');"
+                ))
                 .await?;
 
             let pid = self.inner.get_process_id();

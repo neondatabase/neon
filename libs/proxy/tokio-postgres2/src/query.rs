@@ -14,7 +14,6 @@ use postgres_types2::{Format, ToSql, Type};
 use std::fmt;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 struct BorrowToSqlParamsDebug<'a>(&'a [&'a (dyn ToSql + Sync)]);
@@ -26,7 +25,7 @@ impl fmt::Debug for BorrowToSqlParamsDebug<'_> {
 }
 
 pub async fn query<'a, I>(
-    client: &InnerClient,
+    client: &mut InnerClient,
     statement: Statement,
     params: I,
 ) -> Result<RowStream, Error>
@@ -57,7 +56,7 @@ where
 }
 
 pub async fn query_txt<S, I>(
-    client: &Arc<InnerClient>,
+    client: &mut InnerClient,
     query: &str,
     params: I,
 ) -> Result<RowStream, Error>
@@ -157,49 +156,6 @@ where
     })
 }
 
-pub async fn execute<'a, I>(
-    client: &InnerClient,
-    statement: Statement,
-    params: I,
-) -> Result<u64, Error>
-where
-    I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
-    I::IntoIter: ExactSizeIterator,
-{
-    let buf = if log_enabled!(Level::Debug) {
-        let params = params.into_iter().collect::<Vec<_>>();
-        debug!(
-            "executing statement {} with parameters: {:?}",
-            statement.name(),
-            BorrowToSqlParamsDebug(params.as_slice()),
-        );
-        encode(client, &statement, params)?
-    } else {
-        encode(client, &statement, params)?
-    };
-    let mut responses = start(client, buf).await?;
-
-    let mut rows = 0;
-    loop {
-        match responses.next().await? {
-            Message::DataRow(_) => {}
-            Message::CommandComplete(body) => {
-                rows = body
-                    .tag()
-                    .map_err(Error::parse)?
-                    .rsplit(' ')
-                    .next()
-                    .unwrap()
-                    .parse()
-                    .unwrap_or(0);
-            }
-            Message::EmptyQueryResponse => rows = 0,
-            Message::ReadyForQuery(_) => return Ok(rows),
-            _ => return Err(Error::unexpected_message()),
-        }
-    }
-}
-
 async fn start(client: &InnerClient, buf: Bytes) -> Result<Responses, Error> {
     let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
 
@@ -211,7 +167,7 @@ async fn start(client: &InnerClient, buf: Bytes) -> Result<Responses, Error> {
     Ok(responses)
 }
 
-pub fn encode<'a, I>(client: &InnerClient, statement: &Statement, params: I) -> Result<Bytes, Error>
+pub fn encode<'a, I>(client: &mut InnerClient, statement: &Statement, params: I) -> Result<Bytes, Error>
 where
     I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
     I::IntoIter: ExactSizeIterator,

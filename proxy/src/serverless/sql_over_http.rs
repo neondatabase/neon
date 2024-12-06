@@ -797,7 +797,7 @@ impl QueryData {
         let cancel_token = inner.cancel_token();
 
         let res = match select(
-            pin!(query_to_json(config, &*inner, self, &mut 0, parsed_headers)),
+            pin!(query_to_json(config, &mut *inner, self, &mut 0, parsed_headers)),
             pin!(cancel.cancelled()),
         )
         .await
@@ -881,7 +881,7 @@ impl BatchQueryData {
             builder = builder.deferrable(true);
         }
 
-        let transaction = builder.start().await.inspect_err(|_| {
+        let mut transaction = builder.start().await.inspect_err(|_| {
             // if we cannot start a transaction, we should return immediately
             // and not return to the pool. connection is clearly broken
             discard.discard();
@@ -890,7 +890,7 @@ impl BatchQueryData {
         let json_output = match query_batch(
             config,
             cancel.child_token(),
-            &transaction,
+            &mut transaction,
             self,
             parsed_headers,
         )
@@ -934,7 +934,7 @@ impl BatchQueryData {
 async fn query_batch(
     config: &'static HttpConfig,
     cancel: CancellationToken,
-    transaction: &Transaction<'_>,
+    transaction: &mut Transaction<'_>,
     queries: BatchQueryData,
     parsed_headers: HttpHeaders,
 ) -> Result<String, SqlOverHttpError> {
@@ -972,7 +972,7 @@ async fn query_batch(
 
 async fn query_to_json<T: GenericClient>(
     config: &'static HttpConfig,
-    client: &T,
+    client: &mut T,
     data: QueryData,
     current_size: &mut usize,
     parsed_headers: HttpHeaders,

@@ -14,7 +14,6 @@ use postgres_protocol2::message::frontend;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 pub(crate) const TYPEINFO_QUERY: &str = "\
 SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid
@@ -59,7 +58,7 @@ ORDER BY attnum
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
 pub async fn prepare(
-    client: &Arc<InnerClient>,
+    client: &mut InnerClient,
     query: &str,
     types: &[Type],
 ) -> Result<Statement, Error> {
@@ -100,18 +99,18 @@ pub async fn prepare(
         }
     }
 
-    Ok(Statement::new(client, name, parameters, columns))
+    Ok(Statement::new(name, parameters, columns))
 }
 
 fn prepare_rec<'a>(
-    client: &'a Arc<InnerClient>,
+    client: &'a mut InnerClient,
     query: &'a str,
     types: &'a [Type],
 ) -> Pin<Box<dyn Future<Output = Result<Statement, Error>> + 'a + Send>> {
     Box::pin(prepare(client, query, types))
 }
 
-fn encode(client: &InnerClient, name: &str, query: &str, types: &[Type]) -> Result<Bytes, Error> {
+fn encode(client: &mut InnerClient, name: &str, query: &str, types: &[Type]) -> Result<Bytes, Error> {
     if types.is_empty() {
         debug!("preparing query {}: {}", name, query);
     } else {
@@ -126,7 +125,7 @@ fn encode(client: &InnerClient, name: &str, query: &str, types: &[Type]) -> Resu
     })
 }
 
-pub async fn get_type(client: &Arc<InnerClient>, oid: Oid) -> Result<Type, Error> {
+pub async fn get_type(client: &mut InnerClient, oid: Oid) -> Result<Type, Error> {
     if let Some(type_) = Type::from_oid(oid) {
         return Ok(type_);
     }
@@ -181,13 +180,13 @@ pub async fn get_type(client: &Arc<InnerClient>, oid: Oid) -> Result<Type, Error
 }
 
 fn get_type_rec<'a>(
-    client: &'a Arc<InnerClient>,
+    client: &'a mut InnerClient,
     oid: Oid,
 ) -> Pin<Box<dyn Future<Output = Result<Type, Error>> + Send + 'a>> {
     Box::pin(get_type(client, oid))
 }
 
-async fn typeinfo_statement(client: &Arc<InnerClient>) -> Result<Statement, Error> {
+async fn typeinfo_statement(client: &mut InnerClient) -> Result<Statement, Error> {
     if let Some(stmt) = client.typeinfo() {
         return Ok(stmt);
     }
@@ -204,7 +203,7 @@ async fn typeinfo_statement(client: &Arc<InnerClient>) -> Result<Statement, Erro
     Ok(stmt)
 }
 
-async fn get_enum_variants(client: &Arc<InnerClient>, oid: Oid) -> Result<Vec<String>, Error> {
+async fn get_enum_variants(client: &mut InnerClient, oid: Oid) -> Result<Vec<String>, Error> {
     let stmt = typeinfo_enum_statement(client).await?;
 
     query::query(client, stmt, slice_iter(&[&oid]))
@@ -214,7 +213,7 @@ async fn get_enum_variants(client: &Arc<InnerClient>, oid: Oid) -> Result<Vec<St
         .await
 }
 
-async fn typeinfo_enum_statement(client: &Arc<InnerClient>) -> Result<Statement, Error> {
+async fn typeinfo_enum_statement(client: &mut InnerClient) -> Result<Statement, Error> {
     if let Some(stmt) = client.typeinfo_enum() {
         return Ok(stmt);
     }
@@ -231,7 +230,7 @@ async fn typeinfo_enum_statement(client: &Arc<InnerClient>) -> Result<Statement,
     Ok(stmt)
 }
 
-async fn get_composite_fields(client: &Arc<InnerClient>, oid: Oid) -> Result<Vec<Field>, Error> {
+async fn get_composite_fields(client: &mut InnerClient, oid: Oid) -> Result<Vec<Field>, Error> {
     let stmt = typeinfo_composite_statement(client).await?;
 
     let rows = query::query(client, stmt, slice_iter(&[&oid]))
@@ -250,7 +249,7 @@ async fn get_composite_fields(client: &Arc<InnerClient>, oid: Oid) -> Result<Vec
     Ok(fields)
 }
 
-async fn typeinfo_composite_statement(client: &Arc<InnerClient>) -> Result<Statement, Error> {
+async fn typeinfo_composite_statement(client: &mut InnerClient) -> Result<Statement, Error> {
     if let Some(stmt) = client.typeinfo_composite() {
         return Ok(stmt);
     }
