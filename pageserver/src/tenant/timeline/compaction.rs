@@ -1765,8 +1765,8 @@ impl Timeline {
             start: Key::MIN,
             end: Key::MAX,
         });
-        let compact_lsn = if let Some(compact_lsn) = options.compact_below_lsn {
-            compact_lsn
+        let compact_below_lsn = if let Some(compact_below_lsn) = options.compact_below_lsn {
+            compact_below_lsn
         } else {
             let gc_info = self.gc_info.read().unwrap();
             gc_info.cutoffs.select_min() // use the real gc cutoff
@@ -1802,7 +1802,7 @@ impl Timeline {
             .flatten()
             .cloned()
             .collect_vec();
-        ranges.sort_by(|a, b| ((&a.start, &a.end)).cmp(&(&b.start, &b.end)));
+        ranges.sort_by(|a, b| (&a.start, &a.end).cmp(&(&b.start, &b.end)));
         for range in ranges.iter() {
             let Some((start, end)) = truncate_to(
                 &range.start,
@@ -1829,15 +1829,15 @@ impl Timeline {
                 // We have already processed this partition.
                 continue;
             }
-            let res = layer_map.range_search(start..end, compact_lsn);
+            let res = layer_map.range_search(start..end, compact_below_lsn);
             let total_size = res.found.keys().map(|x| x.layer.file_size()).sum::<u64>();
             if total_size > GC_COMPACT_MAX_SIZE_MB * 1024 * 1024 || ranges_num == idx + 1 {
                 let mut compact_options = options.clone();
                 // Try to extend the compaction range so that we include at least one full layer file.
                 let extended_end = res
                     .found
-                    .iter()
-                    .map(|(layer, _)| layer.layer.key_range.end)
+                    .keys()
+                    .map(|layer| layer.layer.key_range.end)
                     .min()
                     .expect("at least one layer in the resuult?");
                 let end = extended_end.max(end);
@@ -1846,7 +1846,7 @@ impl Timeline {
                     start, end, total_size
                 );
                 compact_options.compact_range = Some(CompactRange { start, end });
-                compact_options.compact_below_lsn = Some(compact_lsn);
+                compact_options.compact_below_lsn = Some(compact_below_lsn);
                 compact_options.sub_compaction = false;
                 compact_jobs.push(compact_options);
                 current_start = Some(end);
