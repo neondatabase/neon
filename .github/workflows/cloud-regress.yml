@@ -30,7 +30,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-          pg-version: [16, 17]
           include:
             - pg-version: 16
               project-id: ${{ vars.PGREGRESS_PG16_PROJECT_ID }}
