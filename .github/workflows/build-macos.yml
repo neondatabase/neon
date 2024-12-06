@@ -79,10 +79,10 @@ jobs:
         run: |
           make "neon-pg-ext-${{ matrix.postgres-version }}" -j$(sysctl -n hw.ncpu)
 
-      - name: Get postgres headers
+      - name: Get postgres headers ${{ matrix.postgres-version }}
         if: steps.cache_pg.outputs.cache-hit != 'true'
         run: |
-          make postgres-headers -j$(sysctl -n hw.ncpu)
+          make postgres-headers-${{ matrix.postgres-version }} -j$(sysctl -n hw.ncpu)
 
   build-walproposer-lib:
     if: |
