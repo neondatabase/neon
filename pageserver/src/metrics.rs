@@ -1309,9 +1309,13 @@ impl SmgrOpFlushInProgress {
         Fut: std::future::Future<Output = O>,
     {
         let mut fut = std::pin::pin!(fut);
+
+        let now = Instant::now();
+        // Whenever observe_guard gets called, or dropped,
+        // it adds the time elapsed since its last call to metrics.
+        // Last call is tracked in `now`.
         let mut observe_guard = scopeguard::guard(
             || {
-                let now = Instant::now();
                 let elapsed = now - self.base;
                 self.global_micros
                     .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
@@ -1328,7 +1332,7 @@ impl SmgrOpFlushInProgress {
             match tokio::time::timeout(Duration::from_secs(10), &mut fut).await {
                 Ok(v) => return v,
                 Err(_timeout) => {
-                    (&mut *observe_guard)();
+                    (*observe_guard)();
                 }
             }
         }
@@ -1620,9 +1624,9 @@ impl SmgrQueryTimePerTimeline {
             op,
             throttled: Duration::ZERO,
             global_flush_in_progress_micros: Some(self.global_flush_in_progress_micros.clone()),
-            per_timeline_flush_in_progress_micros: Some(self
-                .per_timeline_flush_in_progress_micros
-                .clone()),
+            per_timeline_flush_in_progress_micros: Some(
+                self.per_timeline_flush_in_progress_micros.clone(),
+            ),
         }
     }
 
