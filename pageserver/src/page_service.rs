@@ -65,7 +65,7 @@ use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
-use crate::{basebackup, timed_after_cancellation};
+use crate::{basebackup, timed, timed_after_cancellation};
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
@@ -1046,14 +1046,17 @@ impl PageServerHandler {
                             PagestreamBeMessage::Error(PagestreamErrorResponse {
                                 message: e.to_string(),
                             }),
-                            None,
+                            None, // TODO: measure errors
                         )
                     }
                 },
                 Ok((response_msg, timer)) => (response_msg, Some(timer)),
             };
 
+            //
             // marshal & transmit response message
+            //
+
             pgb_writer.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
 
             // We purposefully don't count flush time into the timer.
@@ -1068,19 +1071,42 @@ impl PageServerHandler {
             // The timer's underlying metric is used for a storage-internal latency SLO and
             // we don't want to include latency in it that we can't control.
             // And as pointed out above, in this case, we don't control the time that flush will take.
-            drop(timer);
-        }
+            let flushing_timer =
+                timer.map(|timer| timer.observe_smgr_op_completion_and_start_flushing());
 
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                // We were requested to shut down.
-                info!("shutdown request received in page handler");
-                return Err(QueryError::Shutdown)
+            // what we want to do
+            let flush_fut = pgb_writer.flush();
+            // make log noise if flushing is really slow
+            let flush_fut = timed(
+                flush_fut,
+                "flush pagestream response",
+                Duration::from_secs(60),
+            );
+            // metric for how long flushing takes
+            let flush_fut = match flushing_timer {
+                Some(flushing_timer) => {
+                    futures::future::Either::Left(flushing_timer.measure(flush_fut))
+                }
+                None => futures::future::Either::Right(flush_fut),
+            };
+            // do it while respecting cancellation
+            let _: () = async move {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        // We were requested to shut down.
+                        info!("shutdown request received in page handler");
+                        return Err(QueryError::Shutdown)
+                    }
+                    res = flush_fut => {
+                        res?;
+                    }
+                }
+                Ok(())
             }
-            res = pgb_writer.flush() => {
-                res?;
-            }
+            // and log the info! line inside the request span
+            .instrument(span.clone())
+            .await?;
         }
         Ok(())
     }

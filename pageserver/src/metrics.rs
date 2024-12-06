@@ -1229,9 +1229,20 @@ pub(crate) struct SmgrOpTimer {
     // Optional because not all op types are tracked per-timeline
     per_timeline_latency_histo: Option<Histogram>,
 
+    /// Always Some() except when we transition into [`SmgrOpFlushInProgress`]
+    global_flush_in_progress_micros: Option<IntCounter>,
+    /// See [`Self::global_flush_in_progress_micros`].
+    per_timeline_flush_in_progress_micros: Option<IntCounter>,
+
     start: Instant,
     throttled: Duration,
     op: SmgrQueryType,
+}
+
+pub(crate) struct SmgrOpFlushInProgress {
+    base: Instant,
+    global_micros: IntCounter,
+    per_timeline_micros: IntCounter,
 }
 
 impl SmgrOpTimer {
@@ -1241,11 +1252,20 @@ impl SmgrOpTimer {
         };
         self.throttled += *throttle;
     }
-}
 
-impl Drop for SmgrOpTimer {
-    fn drop(&mut self) {
-        let elapsed = self.start.elapsed();
+    pub(crate) fn observe_smgr_op_completion_and_start_flushing(mut self) -> SmgrOpFlushInProgress {
+        let flush_start = self.smgr_op_end();
+        SmgrOpFlushInProgress {
+            base: flush_start,
+            global_micros: self.global_flush_in_progress_micros.take().unwrap(),
+            per_timeline_micros: self.per_timeline_flush_in_progress_micros.take().unwrap(),
+        }
+    }
+
+    /// Must only call once!
+    fn smgr_op_end(&self) -> Instant {
+        let now = Instant::now();
+        let elapsed = now - self.start;
 
         let elapsed = match elapsed.checked_sub(self.throttled) {
             Some(elapsed) => elapsed,
@@ -1271,6 +1291,46 @@ impl Drop for SmgrOpTimer {
         self.global_latency_histo.observe(elapsed);
         if let Some(per_timeline_getpage_histo) = &self.per_timeline_latency_histo {
             per_timeline_getpage_histo.observe(elapsed);
+        }
+
+        now
+    }
+}
+
+impl Drop for SmgrOpTimer {
+    fn drop(&mut self) {
+        self.smgr_op_end();
+    }
+}
+
+impl SmgrOpFlushInProgress {
+    pub(crate) async fn measure<Fut, O>(mut self, mut fut: Fut) -> O
+    where
+        Fut: std::future::Future<Output = O>,
+    {
+        let mut fut = std::pin::pin!(fut);
+        let mut observe_guard = scopeguard::guard(
+            || {
+                let now = Instant::now();
+                let elapsed = now - self.base;
+                self.global_micros
+                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
+                self.per_timeline_micros
+                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
+                self.base = now;
+            },
+            |mut observe| {
+                observe();
+            },
+        );
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(10), &mut fut).await {
+                Ok(v) => return v,
+                Err(_timeout) => {
+                    (&mut *observe_guard)();
+                }
+            }
         }
     }
 }
@@ -1302,6 +1362,8 @@ pub(crate) struct SmgrQueryTimePerTimeline {
     per_timeline_getpage_latency: Histogram,
     global_batch_size: Histogram,
     per_timeline_batch_size: Histogram,
+    global_flush_in_progress_micros: IntCounter,
+    per_timeline_flush_in_progress_micros: IntCounter,
 }
 
 static SMGR_QUERY_STARTED_GLOBAL: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -1464,6 +1526,26 @@ fn set_page_service_config_max_batch_size(conf: &PageServicePipeliningConfig) {
         .set(value.try_into().unwrap());
 }
 
+static PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_page_service_pagestream_flush_in_progress_micros",
+        "Counter that sums up the microseconds that a pagestream response was being flushed into the TCP connection. \
+         If the flush is particularly slow, this counter will be updated periodically to make slow flushes \
+         easily discoverable in monitoring. \
+         Hence, this is NOT a completion latency historgram.",
+        &["tenant_id", "shard_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
+static PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS_GLOBAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_page_service_pagestream_flush_in_progress_micros_global",
+        "Like pageserver_page_service_pagestream_flush_in_progress_seconds, but instance-wide.",
+    )
+    .expect("failed to define a metric")
+});
+
 impl SmgrQueryTimePerTimeline {
     pub(crate) fn new(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
         let tenant_id = tenant_shard_id.tenant_id.to_string();
@@ -1504,6 +1586,12 @@ impl SmgrQueryTimePerTimeline {
             .get_metric_with_label_values(&[&tenant_id, &shard_slug, &timeline_id])
             .unwrap();
 
+        let global_flush_in_progress_micros =
+            PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS_GLOBAL.clone();
+        let per_timeline_flush_in_progress_micros = PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS
+            .get_metric_with_label_values(&[&tenant_id, &shard_slug, &timeline_id])
+            .unwrap();
+
         Self {
             global_started,
             global_latency,
@@ -1511,6 +1599,8 @@ impl SmgrQueryTimePerTimeline {
             per_timeline_getpage_started,
             global_batch_size,
             per_timeline_batch_size,
+            global_flush_in_progress_micros,
+            per_timeline_flush_in_progress_micros,
         }
     }
     pub(crate) fn start_smgr_op(&self, op: SmgrQueryType, started_at: Instant) -> SmgrOpTimer {
@@ -1529,6 +1619,10 @@ impl SmgrQueryTimePerTimeline {
             start: started_at,
             op,
             throttled: Duration::ZERO,
+            global_flush_in_progress_micros: Some(self.global_flush_in_progress_micros.clone()),
+            per_timeline_flush_in_progress_micros: Some(self
+                .per_timeline_flush_in_progress_micros
+                .clone()),
         }
     }
 
@@ -2773,6 +2867,11 @@ impl TimelineMetrics {
             timeline_id,
         ]);
         let _ = PAGESERVER_TIMELINE_WAL_RECORDS_RECEIVED.remove_label_values(&[
+            tenant_id,
+            shard_id,
+            timeline_id,
+        ]);
+        let _ = PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS.remove_label_values(&[
             tenant_id,
             shard_id,
             timeline_id,
