@@ -75,7 +75,8 @@ impl AzureBlobStorage {
         let credentials = if let Ok(access_key) = env::var("AZURE_STORAGE_ACCESS_KEY") {
             StorageCredentials::access_key(account.clone(), access_key)
         } else {
-            let token_credential = azure_identity::create_default_credential().context("trying to obtain Azure default credentials")?;
+            let token_credential = azure_identity::create_default_credential()
+                .context("trying to obtain Azure default credentials")?;
             StorageCredentials::token_credential(token_credential)
         };
 
