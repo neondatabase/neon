@@ -29,7 +29,6 @@ use utils::id::TimelineId;
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
 use crate::statvfs::Statvfs;
-use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::batch_split_writer::{
     BatchWriterResult, SplitDeltaLayerWriter, SplitImageLayerWriter,
@@ -1794,7 +1793,7 @@ impl Timeline {
             }
         }
         let mut split_key_ranges = Vec::new();
-        let mut ranges = dense_ks
+        let ranges = dense_ks
             .parts
             .iter()
             .map(|partition| partition.ranges.iter())
@@ -1802,7 +1801,6 @@ impl Timeline {
             .flatten()
             .cloned()
             .collect_vec();
-        ranges.sort_by(|a, b| (&a.start, &a.end).cmp(&(&b.start, &b.end)));
         for range in ranges.iter() {
             let Some((start, end)) = truncate_to(
                 &range.start,
@@ -1814,6 +1812,7 @@ impl Timeline {
             };
             split_key_ranges.push((start, end));
         }
+        split_key_ranges.sort();
         let guard = self.layers.read().await;
         let layer_map = guard.layer_map()?;
         let mut current_start = None;
@@ -1825,7 +1824,7 @@ impl Timeline {
                 current_start = Some(start);
             }
             let start = current_start.unwrap();
-            if end >= start {
+            if start >= end {
                 // We have already processed this partition.
                 continue;
             }
@@ -1838,9 +1837,14 @@ impl Timeline {
                     .found
                     .keys()
                     .map(|layer| layer.layer.key_range.end)
-                    .min()
-                    .expect("at least one layer in the resuult?");
-                let end = extended_end.max(end);
+                    .min();
+                // It is possible that the search range does not contain any layer files when we reach the end of the loop.
+                // In this case, we simply use the specified key range end.
+                let end = if let Some(extended_end) = extended_end {
+                    extended_end.max(end)
+                } else {
+                    end
+                };
                 info!(
                     "splitting compaction job: {}..{}, estimated_size={}",
                     start, end, total_size
@@ -2077,14 +2081,15 @@ impl Timeline {
 
         // Step 1: construct a k-merge iterator over all layers.
         // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
-        let layer_names = job_desc
-            .selected_layers
-            .iter()
-            .map(|layer| layer.layer_desc().layer_name())
-            .collect_vec();
-        if let Some(err) = check_valid_layermap(&layer_names) {
-            warn!("gc-compaction layer map check failed because {}, this is normal if partial compaction is not finished yet", err);
-        }
+        // disable the check for now because we need to adjust the check for partial compactions, will enable later.
+        // let layer_names = job_desc
+        //     .selected_layers
+        //     .iter()
+        //     .map(|layer| layer.layer_desc().layer_name())
+        //     .collect_vec();
+        // if let Some(err) = check_valid_layermap(&layer_names) {
+        //     warn!("gc-compaction layer map check failed because {}, this is normal if partial compaction is not finished yet", err);
+        // }
         // The maximum LSN we are processing in this compaction loop
         let end_lsn = job_desc
             .selected_layers
