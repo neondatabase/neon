@@ -1230,10 +1230,8 @@ pub(crate) struct SmgrOpTimerInner {
     // Optional because not all op types are tracked per-timeline
     per_timeline_latency_histo: Option<Histogram>,
 
-    /// Always Some() except when we transition into [`SmgrOpFlushInProgress`]
-    global_flush_in_progress_micros: Option<IntCounter>,
-    /// See [`Self::global_flush_in_progress_micros`].
-    per_timeline_flush_in_progress_micros: Option<IntCounter>,
+    global_flush_in_progress_micros: IntCounter,
+    per_timeline_flush_in_progress_micros: IntCounter,
 
     start: Instant,
     throttled: Duration,
@@ -1246,20 +1244,41 @@ pub(crate) struct SmgrOpFlushInProgress {
     per_timeline_micros: IntCounter,
 }
 
-impl SmgrOpTimerInner {
+impl SmgrOpTimer {
     pub(crate) fn deduct_throttle(&mut self, throttle: &Option<Duration>) {
         let Some(throttle) = throttle else {
             return;
         };
-        self.throttled += *throttle;
+        let inner = self.0.as_mut().expect("other public methods consume self");
+        inner.throttled += *throttle;
     }
 
-    /// Must only call once!
-    fn smgr_op_end(&self) -> Instant {
-        let now = Instant::now();
-        let elapsed = now - self.start;
+    pub(crate) fn observe_smgr_op_completion_and_start_flushing(mut self) -> SmgrOpFlushInProgress {
+        let (flush_start, inner) = self
+            .smgr_op_end()
+            .expect("this method consume self, and the only other caller is drop handler");
+        let SmgrOpTimerInner {
+            global_flush_in_progress_micros,
+            per_timeline_flush_in_progress_micros,
+            ..
+        } = inner;
+        SmgrOpFlushInProgress {
+            base: flush_start,
+            global_micros: global_flush_in_progress_micros,
+            per_timeline_micros: per_timeline_flush_in_progress_micros,
+        }
+    }
 
-        let elapsed = match elapsed.checked_sub(self.throttled) {
+    /// Returns `None`` if this method has already been called, `Some` otherwise.
+    fn smgr_op_end(&mut self) -> Option<(Instant, SmgrOpTimerInner)> {
+        let Some(inner) = self.0.take() else {
+            return None;
+        };
+
+        let now = Instant::now();
+        let elapsed = now - inner.start;
+
+        let elapsed = match elapsed.checked_sub(inner.throttled) {
             Some(elapsed) => elapsed,
             None => {
                 use utils::rate_limit::RateLimit;
@@ -1270,9 +1289,9 @@ impl SmgrOpTimerInner {
                         })))
                     });
                 let mut guard = LOGGED.lock().unwrap();
-                let rate_limit = &mut guard[self.op];
+                let rate_limit = &mut guard[inner.op];
                 rate_limit.call(|| {
-                    warn!(op=?self.op, ?elapsed, ?self.throttled, "implementation error: time spent throttled exceeds total request wall clock time");
+                    warn!(op=?inner.op, ?elapsed, ?inner.throttled, "implementation error: time spent throttled exceeds total request wall clock time");
                 });
                 elapsed // un-throttled time, more info than just saturating to 0
             }
@@ -1280,53 +1299,18 @@ impl SmgrOpTimerInner {
 
         let elapsed = elapsed.as_secs_f64();
 
-        self.global_latency_histo.observe(elapsed);
-        if let Some(per_timeline_getpage_histo) = &self.per_timeline_latency_histo {
+        inner.global_latency_histo.observe(elapsed);
+        if let Some(per_timeline_getpage_histo) = &inner.per_timeline_latency_histo {
             per_timeline_getpage_histo.observe(elapsed);
         }
 
-        now
-    }
-}
-
-impl SmgrOpTimer {
-    pub(crate) fn observe_smgr_op_completion_and_start_flushing(mut self) -> SmgrOpFlushInProgress {
-        let flush_start = self.smgr_op_end();
-        let SmgrOpTimerInner {
-            global_flush_in_progress_micros,
-            per_timeline_flush_in_progress_micros,
-            ..
-        } = self.0.take().unwrap();
-        SmgrOpFlushInProgress {
-            base: flush_start,
-            global_micros: global_flush_in_progress_micros.unwrap(),
-            per_timeline_micros: per_timeline_flush_in_progress_micros.unwrap(),
-        }
-    }
-}
-
-impl std::ops::Deref for SmgrOpTimer {
-    type Target = SmgrOpTimerInner;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref().unwrap()
-    }
-}
-
-impl std::ops::DerefMut for SmgrOpTimer {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut().unwrap()
+        Some((now, inner))
     }
 }
 
 impl Drop for SmgrOpTimer {
     fn drop(&mut self) {
-        if let Some(inner) = self.0.take() {
-            inner.smgr_op_end();
-            // no flush timer
-        } else {
-            // observe_smgr_op_completion_and_start_flushing was called
-        }
+        self.smgr_op_end();
     }
 }
 
@@ -1650,10 +1634,10 @@ impl SmgrQueryTimePerTimeline {
             start: started_at,
             op,
             throttled: Duration::ZERO,
-            global_flush_in_progress_micros: Some(self.global_flush_in_progress_micros.clone()),
-            per_timeline_flush_in_progress_micros: Some(
-                self.per_timeline_flush_in_progress_micros.clone(),
-            ),
+            global_flush_in_progress_micros: self.global_flush_in_progress_micros.clone(),
+            per_timeline_flush_in_progress_micros: self
+                .per_timeline_flush_in_progress_micros
+                .clone(),
         }))
     }
 
