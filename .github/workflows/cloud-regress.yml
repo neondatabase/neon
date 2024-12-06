@@ -30,11 +30,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg-version: []
-        project-id: []
+        pg-version: [16]
+        project-id: [${{ vars.PGREGRESS_PG16_PROJECT_ID }}]
         include:
-          - pg-version: 16
-            project-id: ${{ vars.PGREGRESS_PG16_PROJECT_ID }}
           - pg-version: 17
             project-id: ${{ vars.PGREGRESS_PG17_PROJECT_ID }}
 
