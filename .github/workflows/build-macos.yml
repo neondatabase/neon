@@ -69,17 +69,6 @@ jobs:
           echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
           echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
 
-      - name: Cache cargo deps (only for v17)
-        if: matrix.postgres-version == 'v17'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            !~/.cargo/registry/src
-            ~/.cargo/git
-            target
-          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
-
       - name: Build Postgres ${{ matrix.postgres-version }}
         if: steps.cache_pg.outputs.cache-hit != 'true'
         run: |
@@ -137,16 +126,6 @@ jobs:
         run: |
           echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
           echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
-
-      - name: Cache cargo deps (only for v17)
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            !~/.cargo/registry/src
-            ~/.cargo/git
-            target
-          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
 
       - name: Build walproposer-lib (only for v17)
         run:
@@ -219,7 +198,6 @@ jobs:
           echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
 
       - name: Cache cargo deps (only for v17)
-        if: matrix.postgres-version == 'v17'
         uses: actions/cache@v4
         with:
           path: |
