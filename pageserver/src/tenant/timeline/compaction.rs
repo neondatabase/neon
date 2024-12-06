@@ -29,6 +29,7 @@ use utils::id::TimelineId;
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
 use crate::statvfs::Statvfs;
+use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::batch_split_writer::{
     BatchWriterResult, SplitDeltaLayerWriter, SplitImageLayerWriter,
@@ -2156,15 +2157,14 @@ impl Timeline {
 
         // Step 1: construct a k-merge iterator over all layers.
         // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
-        // disable the check for now because we need to adjust the check for partial compactions, will enable later.
-        // let layer_names = job_desc
-        //     .selected_layers
-        //     .iter()
-        //     .map(|layer| layer.layer_desc().layer_name())
-        //     .collect_vec();
-        // if let Some(err) = check_valid_layermap(&layer_names) {
-        //     warn!("gc-compaction layer map check failed because {}, this is normal if partial compaction is not finished yet", err);
-        // }
+        let layer_names = job_desc
+            .selected_layers
+            .iter()
+            .map(|layer| layer.layer_desc().layer_name())
+            .collect_vec();
+        if let Some(err) = check_valid_layermap(&layer_names) {
+            bail!("gc-compaction layer map check failed because {}, cannot proceed with compaction due to potential data loss", err);
+        }
         // The maximum LSN we are processing in this compaction loop
         let end_lsn = job_desc
             .selected_layers
