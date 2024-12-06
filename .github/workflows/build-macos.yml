@@ -140,6 +140,7 @@ jobs:
       )
     timeout-minutes: 30
     runs-on: macos-15
+    needs: [build-pgxn]
     env:
       # Use release build only, to have less debug info around
       # Hence keeping target/ (and general cache size) smaller
