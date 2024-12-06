@@ -72,6 +72,7 @@ impl EphemeralFile {
             bytes_written: 0,
             buffered_writer: owned_buffers_io::write::BufferedWriter::new(
                 file,
+                0,
                 || IoBufferMut::with_capacity(TAIL_SZ),
                 gate.enter()?,
                 ctx,
@@ -180,7 +181,7 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         dst: tokio_epoll_uring::Slice<B>,
         ctx: &'a RequestContext,
     ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
-        let submitted_offset = self.buffered_writer.bytes_submitted();
+        let submitted_offset = self.buffered_writer.submit_offset();
 
         let mutable = self.buffered_writer.inspect_mutable();
         let mutable = &mutable[0..mutable.pending()];

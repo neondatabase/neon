@@ -392,7 +392,7 @@ struct DeltaLayerWriterInner {
 
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
 
-    blob_writer: BlobWriter<true>,
+    blob_writer: BlobWriter,
 
     // Number of key-lsns in the layer.
     num_keys: usize,
@@ -419,10 +419,13 @@ impl DeltaLayerWriterInner {
         let path =
             DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
 
-        let mut file = VirtualFile::create(&path, ctx).await?;
-        // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
-        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
+        let file = Arc::new(VirtualFile::create(&path, ctx).await?);
+
+        // FIXME(yuchen): propagate &gate from parent
+        let gate = utils::sync::gate::Gate::default();
+
+        // Start at PAGE_SZ, make room for the header block
+        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, &gate, ctx)?;
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();

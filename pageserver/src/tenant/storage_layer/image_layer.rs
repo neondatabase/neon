@@ -62,6 +62,7 @@ use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::str::FromStr;
+use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 use tracing::*;
@@ -724,7 +725,7 @@ struct ImageLayerWriterInner {
     // Number of keys in the layer.
     num_keys: usize,
 
-    blob_writer: BlobWriter<false>,
+    blob_writer: BlobWriter,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 
     #[cfg(feature = "testing")]
@@ -755,19 +756,24 @@ impl ImageLayerWriterInner {
             },
         );
         trace!("creating image layer {}", path);
-        let mut file = {
-            VirtualFile::open_with_options(
-                &path,
-                virtual_file::OpenOptions::new()
-                    .write(true)
-                    .create_new(true),
-                ctx,
+        let file = {
+            Arc::new(
+                VirtualFile::open_with_options(
+                    &path,
+                    virtual_file::OpenOptions::new()
+                        .write(true)
+                        .create_new(true),
+                    ctx,
+                )
+                .await?,
             )
-            .await?
         };
-        // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
-        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
+
+        // FIXME(yuchen): propagate &gate from parent
+        let gate = utils::sync::gate::Gate::default();
+
+        // Start at `PAGE_SZ` to make room for the header block.
+        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, &gate, ctx)?;
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -873,7 +879,7 @@ impl ImageLayerWriterInner {
         crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN.inc_by(self.uncompressed_bytes_chosen);
         crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
 
-        let mut file = self.blob_writer.into_inner();
+        let mut file = self.blob_writer.into_inner(ctx).await?;
 
         // Write out the index
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
@@ -1038,7 +1044,7 @@ impl ImageLayerWriter {
 impl Drop for ImageLayerWriter {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
-            inner.blob_writer.into_inner().remove();
+            inner.blob_writer.into_inner_no_flush().remove();
         }
     }
 }

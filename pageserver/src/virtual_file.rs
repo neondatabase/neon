@@ -975,7 +975,10 @@ impl VirtualFileInner {
     ) -> (FullSlice<B>, Result<usize, Error>) {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
-            Err(e) => return (buf, Err(e)),
+            Err(e) => {
+                println!("ERRORED :(");
+                return (buf, Err(e));
+            }
         };
         observe_duration!(StorageIoOperation::Write, {
             let ((_file_guard, buf), result) =
@@ -1328,8 +1331,16 @@ impl OwnedAsyncWriter for VirtualFile {
         offset: u64,
         ctx: &RequestContext,
     ) -> std::io::Result<FullSlice<Buf>> {
+        println!(
+            "offset={offset}, buf={:?}, buflen={}",
+            buf.as_ptr(),
+            buf.len()
+        );
+        assert_eq!(offset % 512, 0);
+        assert_eq!(buf.as_ptr().align_offset(512), 0);
         let (buf, res) = VirtualFile::write_all_at(self, buf, offset, ctx).await;
-        res.map(|_| buf)
+        let x = res.map(|_| buf).unwrap();
+        Ok(x)
     }
 }
 
