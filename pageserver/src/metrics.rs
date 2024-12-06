@@ -2204,6 +2204,15 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMet
     .expect("failed to define a metric"),
 });
 
+pub(crate) static PAGESERVER_TIMELINE_WAL_RECORDS_RECEIVED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_timeline_wal_records_received",
+        "Number of WAL records received per shard",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_seconds",
@@ -2431,6 +2440,7 @@ pub(crate) struct TimelineMetrics {
     pub evictions_with_low_residence_duration: std::sync::RwLock<EvictionsWithLowResidenceDuration>,
     /// Number of valid LSN leases.
     pub valid_lsn_lease_count_gauge: UIntGauge,
+    pub wal_records_received: IntCounter,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -2588,6 +2598,10 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
+        let wal_records_received = PAGESERVER_TIMELINE_WAL_RECORDS_RECEIVED
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -2620,6 +2634,7 @@ impl TimelineMetrics {
                 evictions_with_low_residence_duration,
             ),
             valid_lsn_lease_count_gauge,
+            wal_records_received,
             shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
@@ -2753,6 +2768,11 @@ impl TimelineMetrics {
             timeline_id,
         ]);
         let _ = PAGE_SERVICE_BATCH_SIZE_PER_TENANT_TIMELINE.remove_label_values(&[
+            tenant_id,
+            shard_id,
+            timeline_id,
+        ]);
+        let _ = PAGESERVER_TIMELINE_WAL_RECORDS_RECEIVED.remove_label_values(&[
             tenant_id,
             shard_id,
             timeline_id,
