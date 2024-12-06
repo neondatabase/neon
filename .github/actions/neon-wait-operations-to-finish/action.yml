@@ -26,7 +26,7 @@ runs:
         while [ "$(date +%s)" -le ${end_time} ]; do
           rc=0
           operations=$(curl -X GET \
-          "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/operations" \
+          "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/operations?limit=10" \
           --header "Accept: application/json" \
           --header "Content-Type: application/json" \
           --header "Authorization: Bearer ${API_KEY}" \
