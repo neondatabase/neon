@@ -785,6 +785,9 @@ pub(crate) struct CompactRequest {
     /// Whether the compaction job should be scheduled.
     #[serde(default)]
     pub scheduled: bool,
+    /// Whether the compaction job should be split across key ranges.
+    #[serde(default)]
+    pub sub_compaction: bool,
 }
 
 #[serde_with::serde_as]
@@ -814,6 +817,9 @@ pub(crate) struct CompactOptions {
     /// If set, the compaction will only compact the LSN below this value.
     /// This option is only used by GC compaction.
     pub compact_below_lsn: Option<Lsn>,
+    /// Enable sub-compaction (split compaction job across key ranges).
+    /// This option is only used by GC compaction.
+    pub sub_compaction: bool,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1637,6 +1643,7 @@ impl Timeline {
                 flags,
                 compact_range: None,
                 compact_below_lsn: None,
+                sub_compaction: false,
             },
             ctx,
         )
