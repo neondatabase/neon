@@ -2193,9 +2193,12 @@ impl Timeline {
         }
         let mut delta_layer_rewriters = HashMap::<Arc<PersistentLayerKey>, RewritingLayers>::new();
 
-        /// Returns None if there is no data below the lowest_retain_lsn (either no ancestor branch, or above_lsn is not specified).
-        /// Throw an error when the key is not found.
-        ///
+        /// When compacting not at a bottom range (=`[0,X)`) of the root branch, we "have data below" (`has_data_below=true`).
+        /// The two cases are compaction in ancestor branches and `compact_above_lsn=Some`.
+        /// In those cases, we need to pull up data from below the LSN range we're compaction.
+        /// 
+        /// This function unifies the cases so that later code doesn't have to think about it.
+        /// 
         /// Currently, we always get the ancestor image for each key in the child branch no matter whether the image
         /// is needed for reconstruction. This should be fixed in the future.
         ///
