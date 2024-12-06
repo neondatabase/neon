@@ -202,29 +202,6 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
-    def create_branch(
-        self, project_id: str, parent_id: str, name: str, with_endpoint: bool = False
-    ) -> dict[str, Any]:
-        data: dict[str, Any] = {
-            "branch": {"parent_id": parent_id, "name": name},
-        }
-        if with_endpoint:
-            data["endpoints"] = [{"type": "read_write"}]
-        resp = self.__request(
-            "POST",
-            f"/projects/{project_id}/branches",
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            json=data,
-        )
-        return cast("dict[str, Any]", resp.json())
-
-    def delete_branch(self, project_id: str, branch_id: str):
-        resp = self.__request("DELETE", f"/projects/{project_id}/branches/{branch_id}")
-        return cast("dict[str, Any]", resp.json())
-
     def get_branches(self, project_id: str) -> dict[str, Any]:
         resp = self.__request(
             "GET",
@@ -236,27 +213,15 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
-    def get_endpoints(self, project_id: str, branch_id: str | None = None) -> dict[str, Any]:
+    def get_endpoints(self, project_id: str) -> dict[str, Any]:
         resp = self.__request(
             "GET",
-            f"/projects/{project_id}{'' if branch_id is None else '/branches/'+branch_id}/endpoints",
+            f"/projects/{project_id}/endpoints",
             headers={
                 "Accept": "application/json",
             },
         )
 
-        return cast("dict[str, Any]", resp.json())
-
-    def configure_endpoint(self, project_id: str, endpoint_id: str, data: dict[str, Any]) -> dict[str, Any]:
-        resp = self.__request(
-            "PATCH",
-            f"/projects/{project_id}/endpoints/{endpoint_id}",
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            json=data,
-        )
         return cast("dict[str, Any]", resp.json())
 
     def get_operations(self, project_id: str) -> dict[str, Any]:
