@@ -1,7 +1,7 @@
 //! Rows.
 use crate::statement::Column;
 use crate::types::{FromSql, Type, WrongType};
-use crate::{Error, Statement};
+use crate::Error;
 use fallible_iterator::FallibleIterator;
 use postgres_protocol2::message::backend::DataRowBody;
 use postgres_types2::{Format, WrongFormat};
@@ -11,7 +11,6 @@ use std::str;
 
 /// A row of data returned from the database by a query.
 pub struct Row {
-    statement: Statement,
     output_format: Format,
     body: DataRowBody,
     ranges: Vec<Option<Range<usize>>>,
@@ -19,72 +18,29 @@ pub struct Row {
 
 impl fmt::Debug for Row {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Row")
-            .field("columns", &self.columns())
-            .finish()
+        f.debug_struct("Row").finish()
     }
 }
 
 impl Row {
     pub(crate) fn new(
-        statement: Statement,
+        // statement: Statement,
         body: DataRowBody,
         output_format: Format,
     ) -> Result<Row, Error> {
         let ranges = body.ranges().collect().map_err(Error::parse)?;
         Ok(Row {
-            statement,
             body,
             ranges,
             output_format,
         })
     }
 
-    /// Returns information about the columns of data in the row.
-    pub fn columns(&self) -> &[Column] {
-        self.statement.columns()
-    }
-
-    /// Determines if the row contains no values.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Returns the number of values in the row.
-    pub fn len(&self) -> usize {
-        self.columns().len()
-    }
-
-    /// Deserializes a value from the row.
-    ///
-    /// The value can be specified either by its numeric index in the row, or by its column name.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the index is out of bounds or if the value cannot be converted to the specified type.
-    pub fn get<'a, T>(&'a self, idx: usize) -> T
+    pub(crate) fn try_get<'a, T>(&'a self, columns: &[Column], idx: usize) -> Result<T, Error>
     where
         T: FromSql<'a>,
     {
-        match self.get_inner(idx) {
-            Ok(ok) => ok,
-            Err(err) => panic!("error retrieving column {}: {}", idx, err),
-        }
-    }
-
-    /// Like `Row::get`, but returns a `Result` rather than panicking.
-    pub fn try_get<'a, T>(&'a self, idx: usize) -> Result<T, Error>
-    where
-        T: FromSql<'a>,
-    {
-        self.get_inner(idx)
-    }
-
-    fn get_inner<'a, T>(&'a self, idx: usize) -> Result<T, Error>
-    where
-        T: FromSql<'a>,
-    {
-        let Some(column) = self.columns().get(idx) else {
+        let Some(column) = columns.get(idx) else {
             return Err(Error::column(idx.to_string()));
         };
 

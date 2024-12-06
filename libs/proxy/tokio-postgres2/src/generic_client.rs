@@ -39,7 +39,7 @@ impl GenericClient for Client {
 
     /// Query for type information
     async fn get_type(&mut self, oid: Oid) -> Result<Type, Error> {
-        crate::prepare::get_type(self.inner(), oid).await
+        crate::prepare::get_type(&mut self.inner, &mut self.cached_typeinfo, oid).await
     }
 }
 
@@ -59,6 +59,7 @@ impl GenericClient for Transaction<'_> {
 
     /// Query for type information
     async fn get_type(&mut self, oid: Oid) -> Result<Type, Error> {
-        crate::prepare::get_type(self.client().inner(), oid).await
+        let client = self.client();
+        crate::prepare::get_type(&mut client.inner, &mut client.cached_typeinfo, oid).await
     }
 }

@@ -797,7 +797,13 @@ impl QueryData {
         let cancel_token = inner.cancel_token();
 
         let res = match select(
-            pin!(query_to_json(config, &mut *inner, self, &mut 0, parsed_headers)),
+            pin!(query_to_json(
+                config,
+                &mut *inner,
+                self,
+                &mut 0,
+                parsed_headers
+            )),
             pin!(cancel.cancelled()),
         )
         .await
@@ -1027,7 +1033,7 @@ async fn query_to_json<T: GenericClient>(
 
     let columns_len = row_stream.columns().len();
     let mut fields = Vec::with_capacity(columns_len);
-    let mut columns = Vec::with_capacity(columns_len);
+    let mut c_types = Vec::with_capacity(columns_len);
 
     for c in row_stream.columns() {
         fields.push(json!({
@@ -1039,7 +1045,7 @@ async fn query_to_json<T: GenericClient>(
             "dataTypeModifier": c.type_modifier(),
             "format": "text",
         }));
-        columns.push(client.get_type(c.type_oid()).await?);
+        c_types.push(client.get_type(c.type_oid()).await?);
     }
 
     let array_mode = data.array_mode.unwrap_or(parsed_headers.default_array_mode);
@@ -1047,7 +1053,15 @@ async fn query_to_json<T: GenericClient>(
     // convert rows to JSON
     let rows = rows
         .iter()
-        .map(|row| pg_text_row_to_json(row, &columns, parsed_headers.raw_output, array_mode))
+        .map(|row| {
+            pg_text_row_to_json(
+                row,
+                row_stream.columns(),
+                &c_types,
+                parsed_headers.raw_output,
+                array_mode,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     // Resulting JSON format is based on the format of node-postgres result.

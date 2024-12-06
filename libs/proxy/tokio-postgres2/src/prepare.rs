@@ -1,4 +1,4 @@
-use crate::client::InnerClient;
+use crate::client::{CachedTypeInfo, InnerClient};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::error::SqlState;
@@ -7,12 +7,12 @@ use crate::{query, slice_iter};
 use crate::{Column, Error, Statement};
 use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
-use futures_util::{pin_mut, TryStreamExt};
+use futures_util::{pin_mut, StreamExt, TryStreamExt};
 use log::debug;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
 use std::future::Future;
-use std::pin::Pin;
+use std::pin::{pin, Pin};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) const TYPEINFO_QUERY: &str = "\
@@ -59,6 +59,7 @@ static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
 pub async fn prepare(
     client: &mut InnerClient,
+    cache: &mut CachedTypeInfo,
     query: &str,
     types: &[Type],
 ) -> Result<Statement, Error> {
@@ -85,7 +86,7 @@ pub async fn prepare(
     let mut parameters = vec![];
     let mut it = parameter_description.parameters();
     while let Some(oid) = it.next().map_err(Error::parse)? {
-        let type_ = get_type(client, oid).await?;
+        let type_ = get_type(client, cache, oid).await?;
         parameters.push(type_);
     }
 
@@ -93,7 +94,7 @@ pub async fn prepare(
     if let Some(row_description) = row_description {
         let mut it = row_description.fields();
         while let Some(field) = it.next().map_err(Error::parse)? {
-            let type_ = get_type(client, field.type_oid()).await?;
+            let type_ = get_type(client, cache, field.type_oid()).await?;
             let column = Column::new(field.name().to_string(), type_, field);
             columns.push(column);
         }
@@ -104,13 +105,19 @@ pub async fn prepare(
 
 fn prepare_rec<'a>(
     client: &'a mut InnerClient,
+    cache: &'a mut CachedTypeInfo,
     query: &'a str,
     types: &'a [Type],
 ) -> Pin<Box<dyn Future<Output = Result<Statement, Error>> + 'a + Send>> {
-    Box::pin(prepare(client, query, types))
+    Box::pin(prepare(client, cache, query, types))
 }
 
-fn encode(client: &mut InnerClient, name: &str, query: &str, types: &[Type]) -> Result<Bytes, Error> {
+fn encode(
+    client: &mut InnerClient,
+    name: &str,
+    query: &str,
+    types: &[Type],
+) -> Result<Bytes, Error> {
     if types.is_empty() {
         debug!("preparing query {}: {}", name, query);
     } else {
@@ -125,16 +132,20 @@ fn encode(client: &mut InnerClient, name: &str, query: &str, types: &[Type]) -> 
     })
 }
 
-pub async fn get_type(client: &mut InnerClient, oid: Oid) -> Result<Type, Error> {
+pub async fn get_type(
+    client: &mut InnerClient,
+    cache: &mut CachedTypeInfo,
+    oid: Oid,
+) -> Result<Type, Error> {
     if let Some(type_) = Type::from_oid(oid) {
         return Ok(type_);
     }
 
-    if let Some(type_) = client.type_(oid) {
+    if let Some(type_) = cache.type_(oid) {
         return Ok(type_);
     }
 
-    let stmt = typeinfo_statement(client).await?;
+    let stmt = typeinfo_statement(client, cache).await?;
 
     let rows = query::query(client, stmt, slice_iter(&[&oid])).await?;
     pin_mut!(rows);
@@ -144,118 +155,141 @@ pub async fn get_type(client: &mut InnerClient, oid: Oid) -> Result<Type, Error>
         None => return Err(Error::unexpected_message()),
     };
 
-    let name: String = row.try_get(0)?;
-    let type_: i8 = row.try_get(1)?;
-    let elem_oid: Oid = row.try_get(2)?;
-    let rngsubtype: Option<Oid> = row.try_get(3)?;
-    let basetype: Oid = row.try_get(4)?;
-    let schema: String = row.try_get(5)?;
-    let relid: Oid = row.try_get(6)?;
+    let name: String = row.try_get(stmt.columns(), 0)?;
+    let type_: i8 = row.try_get(stmt.columns(), 1)?;
+    let elem_oid: Oid = row.try_get(stmt.columns(), 2)?;
+    let rngsubtype: Option<Oid> = row.try_get(stmt.columns(), 3)?;
+    let basetype: Oid = row.try_get(stmt.columns(), 4)?;
+    let schema: String = row.try_get(stmt.columns(), 5)?;
+    let relid: Oid = row.try_get(stmt.columns(), 6)?;
 
     let kind = if type_ == b'e' as i8 {
-        let variants = get_enum_variants(client, oid).await?;
+        let variants = get_enum_variants(client, cache, oid).await?;
         Kind::Enum(variants)
     } else if type_ == b'p' as i8 {
         Kind::Pseudo
     } else if basetype != 0 {
-        let type_ = get_type_rec(client, basetype).await?;
+        let type_ = get_type_rec(client, cache, basetype).await?;
         Kind::Domain(type_)
     } else if elem_oid != 0 {
-        let type_ = get_type_rec(client, elem_oid).await?;
+        let type_ = get_type_rec(client, cache, elem_oid).await?;
         Kind::Array(type_)
     } else if relid != 0 {
-        let fields = get_composite_fields(client, relid).await?;
+        let fields = get_composite_fields(client, cache, relid).await?;
         Kind::Composite(fields)
     } else if let Some(rngsubtype) = rngsubtype {
-        let type_ = get_type_rec(client, rngsubtype).await?;
+        let type_ = get_type_rec(client, cache, rngsubtype).await?;
         Kind::Range(type_)
     } else {
         Kind::Simple
     };
 
     let type_ = Type::new(name, oid, kind, schema);
-    client.set_type(oid, &type_);
+    cache.set_type(oid, &type_);
 
     Ok(type_)
 }
 
 fn get_type_rec<'a>(
     client: &'a mut InnerClient,
+    cache: &'a mut CachedTypeInfo,
     oid: Oid,
 ) -> Pin<Box<dyn Future<Output = Result<Type, Error>> + Send + 'a>> {
-    Box::pin(get_type(client, oid))
+    Box::pin(get_type(client, cache, oid))
 }
 
-async fn typeinfo_statement(client: &mut InnerClient) -> Result<Statement, Error> {
-    if let Some(stmt) = client.typeinfo() {
-        return Ok(stmt);
+async fn typeinfo_statement<'c>(
+    client: &mut InnerClient,
+    cache: &'c mut CachedTypeInfo,
+) -> Result<&'c Statement, Error> {
+    if cache.typeinfo().is_some() {
+        // needed to get around a borrow checker limitation
+        return Ok(cache.typeinfo().unwrap());
     }
 
-    let stmt = match prepare_rec(client, TYPEINFO_QUERY, &[]).await {
+    let stmt = match prepare_rec(client, cache, TYPEINFO_QUERY, &[]).await {
         Ok(stmt) => stmt,
         Err(ref e) if e.code() == Some(&SqlState::UNDEFINED_TABLE) => {
-            prepare_rec(client, TYPEINFO_FALLBACK_QUERY, &[]).await?
+            prepare_rec(client, cache, TYPEINFO_FALLBACK_QUERY, &[]).await?
         }
         Err(e) => return Err(e),
     };
 
-    client.set_typeinfo(&stmt);
-    Ok(stmt)
+    Ok(cache.set_typeinfo(stmt))
 }
 
-async fn get_enum_variants(client: &mut InnerClient, oid: Oid) -> Result<Vec<String>, Error> {
-    let stmt = typeinfo_enum_statement(client).await?;
+async fn get_enum_variants(
+    client: &mut InnerClient,
+    cache: &mut CachedTypeInfo,
+    oid: Oid,
+) -> Result<Vec<String>, Error> {
+    let stmt = typeinfo_enum_statement(client, cache).await?;
 
-    query::query(client, stmt, slice_iter(&[&oid]))
-        .await?
-        .and_then(|row| async move { row.try_get(0) })
-        .try_collect()
-        .await
+    let mut out = vec![];
+
+    let mut rows = pin!(query::query(client, stmt, slice_iter(&[&oid])).await?);
+    while let Some(row) = rows.next().await {
+        out.push(row?.try_get(stmt.columns(), 0)?)
+    }
+    Ok(out)
 }
 
-async fn typeinfo_enum_statement(client: &mut InnerClient) -> Result<Statement, Error> {
-    if let Some(stmt) = client.typeinfo_enum() {
-        return Ok(stmt);
+async fn typeinfo_enum_statement<'c>(
+    client: &mut InnerClient,
+    cache: &'c mut CachedTypeInfo,
+) -> Result<&'c Statement, Error> {
+    if cache.typeinfo_enum().is_some() {
+        // needed to get around a borrow checker limitation
+        return Ok(cache.typeinfo_enum().unwrap());
     }
 
-    let stmt = match prepare_rec(client, TYPEINFO_ENUM_QUERY, &[]).await {
+    let stmt = match prepare_rec(client, cache, TYPEINFO_ENUM_QUERY, &[]).await {
         Ok(stmt) => stmt,
         Err(ref e) if e.code() == Some(&SqlState::UNDEFINED_COLUMN) => {
-            prepare_rec(client, TYPEINFO_ENUM_FALLBACK_QUERY, &[]).await?
+            prepare_rec(client, cache, TYPEINFO_ENUM_FALLBACK_QUERY, &[]).await?
         }
         Err(e) => return Err(e),
     };
 
-    client.set_typeinfo_enum(&stmt);
-    Ok(stmt)
+    Ok(cache.set_typeinfo_enum(stmt))
 }
 
-async fn get_composite_fields(client: &mut InnerClient, oid: Oid) -> Result<Vec<Field>, Error> {
-    let stmt = typeinfo_composite_statement(client).await?;
+async fn get_composite_fields(
+    client: &mut InnerClient,
+    cache: &mut CachedTypeInfo,
+    oid: Oid,
+) -> Result<Vec<Field>, Error> {
+    let stmt = typeinfo_composite_statement(client, cache).await?;
 
-    let rows = query::query(client, stmt, slice_iter(&[&oid]))
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?;
+    let mut rows = pin!(query::query(client, stmt, slice_iter(&[&oid])).await?);
+
+    let mut oids = vec![];
+    while let Some(row) = rows.next().await {
+        let row = row?;
+        let name = row.try_get(stmt.columns(), 0)?;
+        let oid = row.try_get(stmt.columns(), 1)?;
+        oids.push((name, oid));
+    }
 
     let mut fields = vec![];
-    for row in rows {
-        let name = row.try_get(0)?;
-        let oid = row.try_get(1)?;
-        let type_ = get_type_rec(client, oid).await?;
+    for (name, oid) in oids {
+        let type_ = get_type_rec(client, cache, oid).await?;
         fields.push(Field::new(name, type_));
     }
 
     Ok(fields)
 }
 
-async fn typeinfo_composite_statement(client: &mut InnerClient) -> Result<Statement, Error> {
-    if let Some(stmt) = client.typeinfo_composite() {
-        return Ok(stmt);
+async fn typeinfo_composite_statement<'c>(
+    client: &mut InnerClient,
+    cache: &'c mut CachedTypeInfo,
+) -> Result<&'c Statement, Error> {
+    if cache.typeinfo_composite().is_some() {
+        // needed to get around a borrow checker limitation
+        return Ok(cache.typeinfo_composite().unwrap());
     }
 
-    let stmt = prepare_rec(client, TYPEINFO_COMPOSITE_QUERY, &[]).await?;
+    let stmt = prepare_rec(client, cache, TYPEINFO_COMPOSITE_QUERY, &[]).await?;
 
-    client.set_typeinfo_composite(&stmt);
-    Ok(stmt)
+    Ok(cache.set_typeinfo_composite(stmt))
 }

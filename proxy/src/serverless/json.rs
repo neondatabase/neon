@@ -1,5 +1,5 @@
 use postgres_client::types::{Kind, Type};
-use postgres_client::Row;
+use postgres_client::{Column, Row};
 use serde_json::{Map, Value};
 
 //
@@ -77,14 +77,14 @@ pub(crate) enum JsonConversionError {
 //
 pub(crate) fn pg_text_row_to_json(
     row: &Row,
-    columns: &[Type],
+    columns: &[Column],
+    c_types: &[Type],
     raw_output: bool,
     array_mode: bool,
 ) -> Result<Value, JsonConversionError> {
-    let iter = row
-        .columns()
+    let iter = columns
         .iter()
-        .zip(columns)
+        .zip(c_types)
         .enumerate()
         .map(|(i, (column, typ))| {
             let name = column.name();

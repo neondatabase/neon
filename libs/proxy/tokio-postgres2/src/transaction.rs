@@ -19,13 +19,13 @@ impl Drop for Transaction<'_> {
             return;
         }
 
-        let buf = self.client.inner().with_buf(|buf| {
+        let buf = self.client.inner.with_buf(|buf| {
             frontend::query("ROLLBACK", buf).unwrap();
             buf.split().freeze()
         });
         let _ = self
             .client
-            .inner()
+            .inner
             .send(RequestMessages::Single(FrontendMessage::Raw(buf)));
     }
 }
@@ -53,7 +53,11 @@ impl<'a> Transaction<'a> {
     }
 
     /// Like `Client::query_raw_txt`.
-    pub async fn query_raw_txt<S, I>(&mut self, statement: &str, params: I) -> Result<RowStream, Error>
+    pub async fn query_raw_txt<S, I>(
+        &mut self,
+        statement: &str,
+        params: I,
+    ) -> Result<RowStream, Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = Option<S>>,

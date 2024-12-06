@@ -1,6 +1,6 @@
 use crate::types::Type;
 use postgres_protocol2::{message::backend::Field, Oid};
-use std::{fmt, sync::Arc};
+use std::fmt;
 
 struct StatementInner {
     name: String,
@@ -11,24 +11,23 @@ struct StatementInner {
 /// A prepared statement.
 ///
 /// Prepared statements can only be used with the connection that created them.
-#[derive(Clone)]
-pub struct Statement(Arc<StatementInner>);
+pub struct Statement(StatementInner);
 
 impl Statement {
     pub(crate) fn new(name: String, params: Vec<Type>, columns: Vec<Column>) -> Statement {
-        Statement(Arc::new(StatementInner {
+        Statement(StatementInner {
             name,
             params,
             columns,
-        }))
+        })
     }
 
     pub(crate) fn new_anonymous(params: Vec<Type>, columns: Vec<Column>) -> Statement {
-        Statement(Arc::new(StatementInner {
+        Statement(StatementInner {
             name: String::new(),
             params,
             columns,
-        }))
+        })
     }
 
     pub(crate) fn name(&self) -> &str {

@@ -52,7 +52,7 @@ impl Responses {
 /// A cache of type info and prepared statements for fetching type info
 /// (corresponding to the queries in the [prepare] module).
 #[derive(Default)]
-struct CachedTypeInfo {
+pub(crate) struct CachedTypeInfo {
     /// A statement for basic information for a type from its
     /// OID. Corresponds to [TYPEINFO_QUERY](prepare::TYPEINFO_QUERY) (or its
     /// fallback).
@@ -68,10 +68,42 @@ struct CachedTypeInfo {
     /// Cache of types already looked up.
     types: HashMap<Oid, Type>,
 }
+impl CachedTypeInfo {
+    pub(crate) fn typeinfo(&mut self) -> Option<&Statement> {
+        self.typeinfo.as_ref()
+    }
+
+    pub(crate) fn set_typeinfo(&mut self, statement: Statement) -> &Statement {
+        self.typeinfo.insert(statement)
+    }
+
+    pub(crate) fn typeinfo_composite(&mut self) -> Option<&Statement> {
+        self.typeinfo_composite.as_ref()
+    }
+
+    pub(crate) fn set_typeinfo_composite(&mut self, statement: Statement) -> &Statement {
+        self.typeinfo_composite.insert(statement)
+    }
+
+    pub(crate) fn typeinfo_enum(&mut self) -> Option<&Statement> {
+        self.typeinfo_enum.as_ref()
+    }
+
+    pub(crate) fn set_typeinfo_enum(&mut self, statement: Statement) -> &Statement {
+        self.typeinfo_enum.insert(statement)
+    }
+
+    pub(crate) fn type_(&mut self, oid: Oid) -> Option<Type> {
+        self.types.get(&oid).cloned()
+    }
+
+    pub(crate) fn set_type(&mut self, oid: Oid, type_: &Type) {
+        self.types.insert(oid, type_.clone());
+    }
+}
 
 pub struct InnerClient {
     sender: mpsc::UnboundedSender<Request>,
-    cached_typeinfo: CachedTypeInfo,
 
     /// A buffer to use when writing out postgres commands.
     buffer: BytesMut,
@@ -87,38 +119,6 @@ impl InnerClient {
             receiver,
             cur: BackendMessages::empty(),
         })
-    }
-
-    pub fn typeinfo(&mut self) -> Option<Statement> {
-        self.cached_typeinfo.typeinfo.clone()
-    }
-
-    pub fn set_typeinfo(&mut self, statement: &Statement) {
-        self.cached_typeinfo.typeinfo = Some(statement.clone());
-    }
-
-    pub fn typeinfo_composite(&mut self) -> Option<Statement> {
-        self.cached_typeinfo.typeinfo_composite.clone()
-    }
-
-    pub fn set_typeinfo_composite(&mut self, statement: &Statement) {
-        self.cached_typeinfo.typeinfo_composite = Some(statement.clone());
-    }
-
-    pub fn typeinfo_enum(&mut self) -> Option<Statement> {
-        self.cached_typeinfo.typeinfo_enum.clone()
-    }
-
-    pub fn set_typeinfo_enum(&mut self, statement: &Statement) {
-        self.cached_typeinfo.typeinfo_enum = Some(statement.clone());
-    }
-
-    pub fn type_(&mut self, oid: Oid) -> Option<Type> {
-        self.cached_typeinfo.types.get(&oid).cloned()
-    }
-
-    pub fn set_type(&mut self, oid: Oid, type_: &Type) {
-        self.cached_typeinfo.types.insert(oid, type_.clone());
     }
 
     /// Call the given function with a buffer to be used when writing out
@@ -146,7 +146,8 @@ pub struct SocketConfig {
 /// The client is one half of what is returned when a connection is established. Users interact with the database
 /// through this client object.
 pub struct Client {
-    inner: InnerClient,
+    pub(crate) inner: InnerClient,
+    pub(crate) cached_typeinfo: CachedTypeInfo,
 
     socket_config: SocketConfig,
     ssl_mode: SslMode,
@@ -165,9 +166,9 @@ impl Client {
         Client {
             inner: InnerClient {
                 sender,
-                cached_typeinfo: Default::default(),
                 buffer: Default::default(),
             },
+            cached_typeinfo: Default::default(),
 
             socket_config,
             ssl_mode,
@@ -179,10 +180,6 @@ impl Client {
     /// Returns process_id.
     pub fn get_process_id(&self) -> i32 {
         self.process_id
-    }
-
-    pub(crate) fn inner(&mut self) -> &mut InnerClient {
-        &mut self.inner
     }
 
     /// Pass text directly to the Postgres backend to allow it to sort out typing itself and
@@ -211,7 +208,7 @@ impl Client {
     /// functionality to safely embed that data in the request. Do not form statements via string concatenation and pass
     /// them to this method!
     pub async fn batch_execute(&mut self, query: &str) -> Result<ReadyForQueryStatus, Error> {
-        simple_query::batch_execute(self.inner(), query).await
+        simple_query::batch_execute(&mut self.inner, query).await
     }
 
     /// Begins a new database transaction.
@@ -229,13 +226,13 @@ impl Client {
                     return;
                 }
 
-                let buf = self.client.inner().with_buf(|buf| {
+                let buf = self.client.inner.with_buf(|buf| {
                     frontend::query("ROLLBACK", buf).unwrap();
                     buf.split().freeze()
                 });
                 let _ = self
                     .client
-                    .inner()
+                    .inner
                     .send(RequestMessages::Single(FrontendMessage::Raw(buf)));
             }
         }
@@ -274,11 +271,6 @@ impl Client {
             process_id: self.process_id,
             secret_key: self.secret_key,
         }
-    }
-
-    /// Query for type information
-    pub async fn get_type(&mut self, oid: Oid) -> Result<Type, Error> {
-        crate::prepare::get_type(&mut self.inner, oid).await
     }
 
     /// Determines if the connection to the server has already closed.

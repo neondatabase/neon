@@ -26,9 +26,9 @@ impl fmt::Debug for BorrowToSqlParamsDebug<'_> {
 
 pub async fn query<'a, I>(
     client: &mut InnerClient,
-    statement: Statement,
+    statement: &Statement,
     params: I,
-) -> Result<RowStream, Error>
+) -> Result<RawRowStream, Error>
 where
     I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
     I::IntoIter: ExactSizeIterator,
@@ -40,13 +40,12 @@ where
             statement.name(),
             BorrowToSqlParamsDebug(params.as_slice()),
         );
-        encode(client, &statement, params)?
+        encode(client, statement, params)?
     } else {
-        encode(client, &statement, params)?
+        encode(client, statement, params)?
     };
     let responses = start(client, buf).await?;
-    Ok(RowStream {
-        statement,
+    Ok(RawRowStream {
         responses,
         command_tag: None,
         status: ReadyForQueryStatus::Unknown,
@@ -167,7 +166,11 @@ async fn start(client: &InnerClient, buf: Bytes) -> Result<Responses, Error> {
     Ok(responses)
 }
 
-pub fn encode<'a, I>(client: &mut InnerClient, statement: &Statement, params: I) -> Result<Bytes, Error>
+pub fn encode<'a, I>(
+    client: &mut InnerClient,
+    statement: &Statement,
+    params: I,
+) -> Result<Bytes, Error>
 where
     I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
     I::IntoIter: ExactSizeIterator,
@@ -252,11 +255,7 @@ impl Stream for RowStream {
         loop {
             match ready!(this.responses.poll_next(cx)?) {
                 Message::DataRow(body) => {
-                    return Poll::Ready(Some(Ok(Row::new(
-                        this.statement.clone(),
-                        body,
-                        *this.output_format,
-                    )?)))
+                    return Poll::Ready(Some(Ok(Row::new(body, *this.output_format)?)))
                 }
                 Message::EmptyQueryResponse | Message::PortalSuspended => {}
                 Message::CommandComplete(body) => {
@@ -292,5 +291,43 @@ impl RowStream {
     /// This might be available only after the stream has been exhausted.
     pub fn ready_status(&self) -> ReadyForQueryStatus {
         self.status
+    }
+}
+
+pin_project! {
+    /// A stream of table rows.
+    pub struct RawRowStream {
+        responses: Responses,
+        command_tag: Option<String>,
+        output_format: Format,
+        status: ReadyForQueryStatus,
+        #[pin]
+        _p: PhantomPinned,
+    }
+}
+
+impl Stream for RawRowStream {
+    type Item = Result<Row, Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        loop {
+            match ready!(this.responses.poll_next(cx)?) {
+                Message::DataRow(body) => {
+                    return Poll::Ready(Some(Ok(Row::new(body, *this.output_format)?)))
+                }
+                Message::EmptyQueryResponse | Message::PortalSuspended => {}
+                Message::CommandComplete(body) => {
+                    if let Ok(tag) = body.tag() {
+                        *this.command_tag = Some(tag.to_string());
+                    }
+                }
+                Message::ReadyForQuery(status) => {
+                    *this.status = status.into();
+                    return Poll::Ready(None);
+                }
+                _ => return Poll::Ready(Some(Err(Error::unexpected_message()))),
+            }
+        }
     }
 }
