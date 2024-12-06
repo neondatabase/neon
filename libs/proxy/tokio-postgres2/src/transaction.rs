@@ -1,6 +1,5 @@
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
-use crate::query::RowStream;
 use crate::{CancelToken, Client, Error, ReadyForQueryStatus};
 use postgres_protocol2::message::frontend;
 
@@ -50,20 +49,6 @@ impl<'a> Transaction<'a> {
     pub async fn rollback(mut self) -> Result<ReadyForQueryStatus, Error> {
         self.done = true;
         self.client.batch_execute("ROLLBACK").await
-    }
-
-    /// Like `Client::query_raw_txt`.
-    pub async fn query_raw_txt<S, I>(
-        &mut self,
-        statement: &str,
-        params: I,
-    ) -> Result<RowStream, Error>
-    where
-        S: AsRef<str>,
-        I: IntoIterator<Item = Option<S>>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        self.client.query_raw_txt(statement, params).await
     }
 
     /// Like `Client::cancel_token`.

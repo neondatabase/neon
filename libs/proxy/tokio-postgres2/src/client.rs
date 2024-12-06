@@ -4,12 +4,10 @@ use crate::config::Host;
 use crate::config::SslMode;
 use crate::connection::{Request, RequestMessages};
 
-use crate::query::RowStream;
-
 use crate::types::{Oid, Type};
 
 use crate::{
-    query, simple_query, CancelToken, Error, ReadyForQueryStatus, Statement, Transaction,
+    simple_query, CancelToken, Error, ReadyForQueryStatus, Statement, Transaction,
     TransactionBuilder,
 };
 use bytes::BytesMut;
@@ -180,21 +178,6 @@ impl Client {
     /// Returns process_id.
     pub fn get_process_id(&self) -> i32 {
         self.process_id
-    }
-
-    /// Pass text directly to the Postgres backend to allow it to sort out typing itself and
-    /// to save a roundtrip
-    pub async fn query_raw_txt<S, I>(
-        &mut self,
-        statement: &str,
-        params: I,
-    ) -> Result<RowStream, Error>
-    where
-        S: AsRef<str>,
-        I: IntoIterator<Item = Option<S>>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        query::query_txt(&mut self.inner, statement, params).await
     }
 
     /// Executes a sequence of SQL statements using the simple query protocol.
