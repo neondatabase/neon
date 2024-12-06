@@ -32,7 +32,7 @@ runs:
           --header "Authorization: Bearer ${API_KEY}" \
           --fail) || rc=${?}
         
-          ongoing_operations=$(echo ${operations} | jq -c '.operations[0][] | select(.status as $st | ["cancelling", "scheduling", "running"] |index($st))' )
+          ongoing_operations=$(echo ${operations} | jq -c '.operations[] | select(.status as $st | ["cancelling", "scheduling", "running"] |index($st))' )
         
           if [ $rc -ne 0 ] || [ -n "${ongoing_operations}" ]; then
             sleep 2
