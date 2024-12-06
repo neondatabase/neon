@@ -77,4 +77,4 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         assert tasks_started == tasks_ended
         assert tasks_panicked is None or int(tasks_panicked) == 0
 
-    wait_until(10, 0.2, assert_tasks_finish)
+    wait_until(assert_tasks_finish)

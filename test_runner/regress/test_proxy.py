@@ -5,6 +5,7 @@ import json
 import subprocess
 import time
 import urllib.parse
+from contextlib import closing
 from typing import TYPE_CHECKING
 
 import psycopg2
@@ -129,6 +130,24 @@ def test_proxy_options(static_proxy: NeonProxy, option_name: str):
     options = "-c proxytest.foo=\\ str"
     out = static_proxy.safe_psql("show proxytest.foo", options=options)
     assert out[0][0] == " str"
+
+
+@pytest.mark.asyncio
+async def test_proxy_arbitrary_params(static_proxy: NeonProxy):
+    with closing(
+        await static_proxy.connect_async(server_settings={"IntervalStyle": "iso_8601"})
+    ) as conn:
+        out = await conn.fetchval("select to_json('0 seconds'::interval)")
+        assert out == '"00:00:00"'
+
+    options = "neon_proxy_params_compat:true"
+    with closing(
+        await static_proxy.connect_async(
+            server_settings={"IntervalStyle": "iso_8601", "options": options}
+        )
+    ) as conn:
+        out = await conn.fetchval("select to_json('0 seconds'::interval)")
+        assert out == '"PT0S"'
 
 
 def test_auth_errors(static_proxy: NeonProxy):

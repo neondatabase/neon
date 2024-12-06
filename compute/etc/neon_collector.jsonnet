@@ -6,6 +6,7 @@
     import 'sql_exporter/compute_backpressure_throttling_seconds.libsonnet',
     import 'sql_exporter/compute_current_lsn.libsonnet',
     import 'sql_exporter/compute_logical_snapshot_files.libsonnet',
+    import 'sql_exporter/compute_logical_snapshots_bytes.libsonnet',
     import 'sql_exporter/compute_max_connections.libsonnet',
     import 'sql_exporter/compute_receive_lsn.libsonnet',
     import 'sql_exporter/compute_subscriptions_count.libsonnet',

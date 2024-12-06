@@ -431,8 +431,6 @@ def test_scrubber_physical_gc_ancestors_split(neon_env_builder: NeonEnvBuilder):
 
         # Let the controller reach the failpoint
         wait_until(
-            10,
-            1,
             lambda: env.storage_controller.assert_log_contains(
                 'failpoint "shard-split-post-remote-sleep": sleeping'
             ),

@@ -66,7 +66,7 @@ pub(super) async fn authenticate(
 
     Ok(ComputeCredentials {
         info: creds,
-        keys: ComputeCredentialKeys::AuthKeys(tokio_postgres::config::AuthKeys::ScramSha256(
+        keys: ComputeCredentialKeys::AuthKeys(postgres_client::config::AuthKeys::ScramSha256(
             scram_keys,
         )),
     })

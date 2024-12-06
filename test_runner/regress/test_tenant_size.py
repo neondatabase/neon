@@ -638,7 +638,7 @@ def test_synthetic_size_while_deleting(neon_env_builder: NeonEnvBuilder):
     with ThreadPoolExecutor(max_workers=1) as exec:
         completion = exec.submit(client.tenant_size, env.initial_tenant)
         _, last_offset = wait_until(
-            10, 1.0, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+            lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
         )
 
         timeline_delete_wait_completed(client, env.initial_tenant, branch_id)
@@ -656,8 +656,6 @@ def test_synthetic_size_while_deleting(neon_env_builder: NeonEnvBuilder):
     with ThreadPoolExecutor(max_workers=1) as exec:
         completion = exec.submit(client.tenant_size, env.initial_tenant)
         wait_until(
-            10,
-            1.0,
             lambda: env.pageserver.assert_log_contains(
                 f"at failpoint {failpoint}", offset=last_offset
             ),

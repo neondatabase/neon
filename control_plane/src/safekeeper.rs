@@ -5,6 +5,7 @@
 //! ```text
 //!   .neon/safekeepers/<safekeeper id>
 //! ```
+use std::error::Error as _;
 use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
@@ -26,7 +27,7 @@ use crate::{
 
 #[derive(Error, Debug)]
 pub enum SafekeeperHttpError {
-    #[error("Reqwest error: {0}")]
+    #[error("request error: {0}{}", .0.source().map(|e| format!(": {e}")).unwrap_or_default())]
     Transport(#[from] reqwest::Error),
 
     #[error("Error: {0}")]

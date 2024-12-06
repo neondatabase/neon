@@ -11,12 +11,12 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
 use hyper::{header, HeaderMap, Request, Response, StatusCode};
+use postgres_client::error::{DbError, ErrorPosition, SqlState};
+use postgres_client::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
 use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::time::{self, Instant};
-use tokio_postgres::error::{DbError, ErrorPosition, SqlState};
-use tokio_postgres::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use typed_json::json;
@@ -139,9 +139,6 @@ fn get_conn_info(
     headers: &HeaderMap,
     tls: Option<&TlsConfig>,
 ) -> Result<ConnInfoWithAuth, ConnInfoError> {
-    // HTTP only uses cleartext (for now and likely always)
-    ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
-
     let connection_string = headers
         .get(&CONN_STRING)
         .ok_or(ConnInfoError::InvalidHeader(&CONN_STRING))?
@@ -364,7 +361,7 @@ pub(crate) enum SqlOverHttpError {
     #[error("invalid isolation level")]
     InvalidIsolationLevel,
     #[error("{0}")]
-    Postgres(#[from] tokio_postgres::Error),
+    Postgres(#[from] postgres_client::Error),
     #[error("{0}")]
     JsonConversion(#[from] JsonConversionError),
     #[error("{0}")]
@@ -989,7 +986,7 @@ async fn query_to_json<T: GenericClient>(
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
     // big.
-    let mut rows: Vec<tokio_postgres::Row> = Vec::new();
+    let mut rows: Vec<postgres_client::Row> = Vec::new();
     while let Some(row) = row_stream.next().await {
         let row = row?;
         *current_size += row.body_len();
@@ -1066,13 +1063,13 @@ async fn query_to_json<T: GenericClient>(
 }
 
 enum Client {
-    Remote(conn_pool_lib::Client<tokio_postgres::Client>),
-    Local(conn_pool_lib::Client<tokio_postgres::Client>),
+    Remote(conn_pool_lib::Client<postgres_client::Client>),
+    Local(conn_pool_lib::Client<postgres_client::Client>),
 }
 
 enum Discard<'a> {
-    Remote(conn_pool_lib::Discard<'a, tokio_postgres::Client>),
-    Local(conn_pool_lib::Discard<'a, tokio_postgres::Client>),
+    Remote(conn_pool_lib::Discard<'a, postgres_client::Client>),
+    Local(conn_pool_lib::Discard<'a, postgres_client::Client>),
 }
 
 impl Client {
@@ -1083,7 +1080,7 @@ impl Client {
         }
     }
 
-    fn inner(&mut self) -> (&mut tokio_postgres::Client, Discard<'_>) {
+    fn inner(&mut self) -> (&mut postgres_client::Client, Discard<'_>) {
         match self {
             Client::Remote(client) => {
                 let (c, d) = client.inner();

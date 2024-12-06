@@ -66,6 +66,8 @@ pub(crate) trait ComputeConnectBackend {
 }
 
 pub(crate) struct TcpMechanism<'a> {
+    pub(crate) params_compat: bool,
+
     /// KV-dictionary with PostgreSQL connection params.
     pub(crate) params: &'a StartupMessageParams,
 
@@ -86,13 +88,13 @@ impl ConnectMechanism for TcpMechanism<'_> {
         node_info: &control_plane::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<PostgresConnection, Self::Error> {
-        let host = node_info.config.get_host()?;
+        let host = node_info.config.get_host();
         let permit = self.locks.get_permit(&host).await?;
         permit.release_result(node_info.connect(ctx, timeout).await)
     }
 
     fn update_connect_config(&self, config: &mut compute::ConnCfg) {
-        config.set_startup_params(self.params);
+        config.set_startup_params(self.params, self.params_compat);
     }
 }
 

@@ -1,0 +1,69 @@
+git revision: bcbff084a
+Platform: Linux nonlibrem 6.10.11-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.10.11-1 (2024-09-22) x86_64 GNU/Linux
+CPU Info Linux: 13th Gen Intel(R) Core(TM) i7-1355U
+CPU Cores Linux: 10
+CPU Info Mac: 
+CPU Cores Mac: 
+Spec: MCProposerAcceptorStatic.tla
+Config: models/MCProposerAcceptorStatic_p2_a3_t3_l2.cfg
+----
+\* A model next to the smallest one.
+CONSTANTS
+NULL = NULL
+proposers = {p1, p2}
+acceptors = {a1, a2, a3}
+max_term = 3
+max_entries = 2
+SPECIFICATION Spec
+CONSTRAINT StateConstraint
+INVARIANT
+TypeOk
+ElectionSafety
+LogIsMonotonic
+LogSafety
+CommittedNotTruncated
+SYMMETRY ProposerAcceptorSymmetry
+CHECK_DEADLOCK FALSE
+ALIAS Alias
+
+
+----
+
+TLC2 Version 2.20 of Day Month 20?? (rev: cc65eef)
+Running breadth-first search Model-Checking with fp 41 and seed -3061068726727581619 with 10 workers on 10 cores with 6372MB heap and 7168MB offheap memory [pid: 1250346] (Linux 6.10.11-amd64 amd64, Debian 21.0.5 x86_64, OffHeapDiskFPSet, DiskStateQueue).
+Parsing file /home/ars/neon/neon/safekeeper/spec/MCProposerAcceptorStatic.tla
+Parsing file /tmp/tlc-3023124431504466774/TLC.tla (jar:file:/opt/TLA+Toolbox/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /home/ars/neon/neon/safekeeper/spec/ProposerAcceptorStatic.tla
+Parsing file /tmp/tlc-3023124431504466774/_TLCTrace.tla (jar:file:/opt/TLA+Toolbox/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /tmp/tlc-3023124431504466774/Integers.tla (jar:file:/opt/TLA+Toolbox/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Parsing file /tmp/tlc-3023124431504466774/Sequences.tla (jar:file:/opt/TLA+Toolbox/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /tmp/tlc-3023124431504466774/FiniteSets.tla (jar:file:/opt/TLA+Toolbox/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /tmp/tlc-3023124431504466774/Naturals.tla (jar:file:/opt/TLA+Toolbox/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /tmp/tlc-3023124431504466774/TLCExt.tla (jar:file:/opt/TLA+Toolbox/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module ProposerAcceptorStatic
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module MCProposerAcceptorStatic
+Starting... (2024-11-15 12:09:59)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2024-11-15 12:10:00.
+Progress(19) at 2024-11-15 12:10:03: 464,696 states generated (464,696 s/min), 57,859 distinct states found (57,859 ds/min), 21,435 states left on queue.
+Progress(26) at 2024-11-15 12:11:03: 8,813,399 states generated (8,348,703 s/min), 877,254 distinct states found (819,395 ds/min), 214,794 states left on queue.
+Progress(27) at 2024-11-15 12:12:03: 16,121,858 states generated (7,308,459 s/min), 1,464,707 distinct states found (587,453 ds/min), 274,230 states left on queue.
+Progress(29) at 2024-11-15 12:13:03: 23,073,903 states generated (6,952,045 s/min), 1,948,802 distinct states found (484,095 ds/min), 263,697 states left on queue.
+Progress(31) at 2024-11-15 12:14:03: 29,740,681 states generated (6,666,778 s/min), 2,331,052 distinct states found (382,250 ds/min), 185,484 states left on queue.
+Progress(34) at 2024-11-15 12:15:03: 36,085,876 states generated (6,345,195 s/min), 2,602,370 distinct states found (271,318 ds/min), 31,659 states left on queue.
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 4.9E-6
+  based on the actual fingerprints:  val = 6.9E-7
+36896322 states generated, 2623542 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 39.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 7 and the 95th percentile is 3).
+Finished in 05min 14s at (2024-11-15 12:15:13)

@@ -1149,6 +1149,7 @@ impl LayerInner {
                 &self.desc.layer_name(),
                 &self.metadata(),
                 &self.path,
+                &timeline.gate,
                 &timeline.cancel,
                 ctx,
             )

@@ -330,7 +330,7 @@ def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
         assert len(tenants) == 1
         assert all(t["state"]["slug"] != "Attaching" for t in tenants)
 
-    wait_until(10, 0.2, not_attaching)
+    wait_until(not_attaching)
 
     tenants = client.tenant_list()
 

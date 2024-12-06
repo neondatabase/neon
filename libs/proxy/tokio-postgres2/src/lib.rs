@@ -1,9 +1,10 @@
 //! An asynchronous, pipelined, PostgreSQL client.
-#![warn(rust_2018_idioms, clippy::all, missing_docs)]
+#![warn(rust_2018_idioms, clippy::all)]
 
 pub use crate::cancel_token::CancelToken;
-pub use crate::client::Client;
+pub use crate::client::{Client, SocketConfig};
 pub use crate::config::Config;
+pub use crate::connect_raw::RawConnection;
 pub use crate::connection::Connection;
 use crate::error::DbError;
 pub use crate::error::Error;
@@ -12,14 +13,12 @@ pub use crate::query::RowStream;
 pub use crate::row::{Row, SimpleQueryRow};
 pub use crate::simple_query::SimpleQueryStream;
 pub use crate::statement::{Column, Statement};
-use crate::tls::MakeTlsConnect;
 pub use crate::tls::NoTls;
 pub use crate::to_statement::ToStatement;
 pub use crate::transaction::Transaction;
 pub use crate::transaction_builder::{IsolationLevel, TransactionBuilder};
 use crate::types::ToSql;
 use postgres_protocol2::message::backend::ReadyForQueryBody;
-use tokio::net::TcpStream;
 
 /// After executing a query, the connection will be in one of these states
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,24 +69,6 @@ mod to_statement;
 mod transaction;
 mod transaction_builder;
 pub mod types;
-
-/// A convenience function which parses a connection string and connects to the database.
-///
-/// See the documentation for [`Config`] for details on the connection string format.
-///
-/// Requires the `runtime` Cargo feature (enabled by default).
-///
-/// [`Config`]: config/struct.Config.html
-pub async fn connect<T>(
-    config: &str,
-    tls: T,
-) -> Result<(Client, Connection<TcpStream, T::Stream>), Error>
-where
-    T: MakeTlsConnect<TcpStream>,
-{
-    let config = config.parse::<Config>()?;
-    config.connect(tls).await
-}
 
 /// An asynchronous notification.
 #[derive(Clone, Debug)]

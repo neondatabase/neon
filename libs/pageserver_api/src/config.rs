@@ -442,7 +442,14 @@ impl Default for ConfigToml {
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
             wal_receiver_protocol: DEFAULT_WAL_RECEIVER_PROTOCOL,
-            page_service_pipelining: PageServicePipeliningConfig::Serial,
+            page_service_pipelining: if !cfg!(test) {
+                PageServicePipeliningConfig::Serial
+            } else {
+                PageServicePipeliningConfig::Pipelined(PageServicePipeliningConfigPipelined {
+                    max_batch_size: NonZeroUsize::new(32).unwrap(),
+                    execution: PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures,
+                })
+            },
         }
     }
 }

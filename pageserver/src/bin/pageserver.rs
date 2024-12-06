@@ -53,6 +53,11 @@ project_build_tag!(BUILD_TAG);
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// Configure jemalloc to sample allocations for profiles every 1 MB (1 << 20).
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:20\0";
+
 const PID_FILE_NAME: &str = "pageserver.pid";
 
 const FEATURES: &[&str] = &[
@@ -127,6 +132,7 @@ fn main() -> anyhow::Result<()> {
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.virtual_file_io_mode, "starting with virtual_file IO mode");
     info!(?conf.wal_receiver_protocol, "starting with WAL receiver protocol");
+    info!(?conf.page_service_pipelining, "starting with page service pipelining config");
 
     // The tenants directory contains all the pageserver local disk state.
     // Create if not exists and make sure all the contents are durable before proceeding.
@@ -302,7 +308,7 @@ fn start_pageserver(
         pageserver::metrics::tokio_epoll_uring::Collector::new(),
     ))
     .unwrap();
-    pageserver::preinitialize_metrics();
+    pageserver::preinitialize_metrics(conf);
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes
@@ -630,45 +636,59 @@ fn start_pageserver(
         tokio::net::TcpListener::from_std(pageserver_listener).context("create tokio listener")?
     });
 
-    let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
-
     // All started up! Now just sit and wait for shutdown signal.
+    BACKGROUND_RUNTIME.block_on(async move {
+        let signal_token = CancellationToken::new();
+        let signal_cancel = signal_token.child_token();
 
-    {
-        BACKGROUND_RUNTIME.block_on(async move {
+        // Spawn signal handlers. Runs in a loop since we want to be responsive to multiple signals
+        // even after triggering shutdown (e.g. a SIGQUIT after a slow SIGTERM shutdown). See:
+        // https://github.com/neondatabase/neon/issues/9740.
+        tokio::spawn(async move {
             let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt()).unwrap();
             let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate()).unwrap();
             let mut sigquit = tokio::signal::unix::signal(SignalKind::quit()).unwrap();
-            let signal = tokio::select! {
-                _ = sigquit.recv() => {
-                    info!("Got signal SIGQUIT. Terminating in immediate shutdown mode",);
-                    std::process::exit(111);
+
+            loop {
+                let signal = tokio::select! {
+                    _ = sigquit.recv() => {
+                        info!("Got signal SIGQUIT. Terminating in immediate shutdown mode.");
+                        std::process::exit(111);
+                    }
+                    _ = sigint.recv() => "SIGINT",
+                    _ = sigterm.recv() => "SIGTERM",
+                };
+
+                if !signal_token.is_cancelled() {
+                    info!("Got signal {signal}. Terminating gracefully in fast shutdown mode.");
+                    signal_token.cancel();
+                } else {
+                    info!("Got signal {signal}. Already shutting down.");
                 }
-                _ = sigint.recv() => { "SIGINT" },
-                _ = sigterm.recv() => { "SIGTERM" },
-            };
+            }
+        });
 
-            info!("Got signal {signal}. Terminating gracefully in fast shutdown mode",);
+        // Wait for cancellation signal and shut down the pageserver.
+        //
+        // This cancels the `shutdown_pageserver` cancellation tree. Right now that tree doesn't
+        // reach very far, and `task_mgr` is used instead. The plan is to change that over time.
+        signal_cancel.cancelled().await;
 
-            // This cancels the `shutdown_pageserver` cancellation tree.
-            // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
-            // The plan is to change that over time.
-            shutdown_pageserver.take();
-            pageserver::shutdown_pageserver(
-                http_endpoint_listener,
-                page_service,
-                consumption_metrics_tasks,
-                disk_usage_eviction_task,
-                &tenant_manager,
-                background_purges,
-                deletion_queue.clone(),
-                secondary_controller_tasks,
-                0,
-            )
-            .await;
-            unreachable!()
-        })
-    }
+        shutdown_pageserver.cancel();
+        pageserver::shutdown_pageserver(
+            http_endpoint_listener,
+            page_service,
+            consumption_metrics_tasks,
+            disk_usage_eviction_task,
+            &tenant_manager,
+            background_purges,
+            deletion_queue.clone(),
+            secondary_controller_tasks,
+            0,
+        )
+        .await;
+        unreachable!();
+    })
 }
 
 async fn create_remote_storage_client(

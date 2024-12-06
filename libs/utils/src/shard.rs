@@ -164,6 +164,12 @@ impl TenantShardId {
     }
 }
 
+impl std::fmt::Display for ShardNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl std::fmt::Display for ShardSlug<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(

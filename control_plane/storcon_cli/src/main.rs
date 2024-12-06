@@ -560,14 +560,26 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
         Command::TenantDescribe { tenant_id } => {
-            let describe_response = storcon_client
+            let TenantDescribeResponse {
+                tenant_id,
+                shards,
+                stripe_size,
+                policy,
+                config,
+            } = storcon_client
                 .dispatch::<(), TenantDescribeResponse>(
                     Method::GET,
                     format!("control/v1/tenant/{tenant_id}"),
                     None,
                 )
                 .await?;
-            let shards = describe_response.shards;
+            println!("Tenant {tenant_id}");
+            let mut table = comfy_table::Table::new();
+            table.add_row(["Policy", &format!("{:?}", policy)]);
+            table.add_row(["Stripe size", &format!("{:?}", stripe_size)]);
+            table.add_row(["Config", &serde_json::to_string_pretty(&config).unwrap()]);
+            println!("{table}");
+            println!("Shards:");
             let mut table = comfy_table::Table::new();
             table.set_header(["Shard", "Attached", "Secondary", "Last error", "status"]);
             for shard in shards {

@@ -138,7 +138,7 @@ impl InnerClient {
 }
 
 #[derive(Clone)]
-pub(crate) struct SocketConfig {
+pub struct SocketConfig {
     pub host: Host,
     pub port: u16,
     pub connect_timeout: Option<Duration>,
@@ -152,7 +152,7 @@ pub(crate) struct SocketConfig {
 pub struct Client {
     inner: Arc<InnerClient>,
 
-    socket_config: Option<SocketConfig>,
+    socket_config: SocketConfig,
     ssl_mode: SslMode,
     process_id: i32,
     secret_key: i32,
@@ -161,6 +161,7 @@ pub struct Client {
 impl Client {
     pub(crate) fn new(
         sender: mpsc::UnboundedSender<Request>,
+        socket_config: SocketConfig,
         ssl_mode: SslMode,
         process_id: i32,
         secret_key: i32,
@@ -172,7 +173,7 @@ impl Client {
                 buffer: Default::default(),
             }),
 
-            socket_config: None,
+            socket_config,
             ssl_mode,
             process_id,
             secret_key,
@@ -186,10 +187,6 @@ impl Client {
 
     pub(crate) fn inner(&self) -> &Arc<InnerClient> {
         &self.inner
-    }
-
-    pub(crate) fn set_socket_config(&mut self, socket_config: SocketConfig) {
-        self.socket_config = Some(socket_config);
     }
 
     /// Creates a new prepared statement.
@@ -412,7 +409,7 @@ impl Client {
     /// connection associated with this client.
     pub fn cancel_token(&self) -> CancelToken {
         CancelToken {
-            socket_config: self.socket_config.clone(),
+            socket_config: Some(self.socket_config.clone()),
             ssl_mode: self.ssl_mode,
             process_id: self.process_id,
             secret_key: self.secret_key,

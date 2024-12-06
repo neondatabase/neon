@@ -378,7 +378,7 @@ def test_replica_too_many_known_assigned_xids(neon_simple_env: NeonEnv):
             return None
         raise RuntimeError("connection succeeded")
 
-    wait_until(20, 0.5, check_replica_crashed)
+    wait_until(check_replica_crashed)
     assert secondary.log_contains("too many KnownAssignedXids")
 
     # Replica is crashed, so ignore stop result

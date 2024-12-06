@@ -1,3 +1,4 @@
+use std::error::Error as _;
 use std::sync::Arc;
 use std::{collections::HashMap, time::Duration};
 
@@ -172,7 +173,7 @@ struct ComputeHookNotifyRequest {
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum NotifyError {
     // Request was not send successfully, e.g. transport error
-    #[error("Sending request: {0}")]
+    #[error("Sending request: {0}{}", .0.source().map(|e| format!(": {e}")).unwrap_or_default())]
     Request(#[from] reqwest::Error),
     // Request could not be serviced right now due to ongoing Operation in control plane, but should be possible soon.
     #[error("Control plane tenant busy")]

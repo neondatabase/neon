@@ -31,9 +31,9 @@ impl CouldRetry for io::Error {
     }
 }
 
-impl CouldRetry for tokio_postgres::error::DbError {
+impl CouldRetry for postgres_client::error::DbError {
     fn could_retry(&self) -> bool {
-        use tokio_postgres::error::SqlState;
+        use postgres_client::error::SqlState;
         matches!(
             self.code(),
             &SqlState::CONNECTION_FAILURE
@@ -43,9 +43,9 @@ impl CouldRetry for tokio_postgres::error::DbError {
         )
     }
 }
-impl ShouldRetryWakeCompute for tokio_postgres::error::DbError {
+impl ShouldRetryWakeCompute for postgres_client::error::DbError {
     fn should_retry_wake_compute(&self) -> bool {
-        use tokio_postgres::error::SqlState;
+        use postgres_client::error::SqlState;
         // Here are errors that happens after the user successfully authenticated to the database.
         // TODO: there are pgbouncer errors that should be retried, but they are not listed here.
         !matches!(
@@ -61,21 +61,21 @@ impl ShouldRetryWakeCompute for tokio_postgres::error::DbError {
     }
 }
 
-impl CouldRetry for tokio_postgres::Error {
+impl CouldRetry for postgres_client::Error {
     fn could_retry(&self) -> bool {
         if let Some(io_err) = self.source().and_then(|x| x.downcast_ref()) {
             io::Error::could_retry(io_err)
         } else if let Some(db_err) = self.source().and_then(|x| x.downcast_ref()) {
-            tokio_postgres::error::DbError::could_retry(db_err)
+            postgres_client::error::DbError::could_retry(db_err)
         } else {
             false
         }
     }
 }
-impl ShouldRetryWakeCompute for tokio_postgres::Error {
+impl ShouldRetryWakeCompute for postgres_client::Error {
     fn should_retry_wake_compute(&self) -> bool {
         if let Some(db_err) = self.source().and_then(|x| x.downcast_ref()) {
-            tokio_postgres::error::DbError::should_retry_wake_compute(db_err)
+            postgres_client::error::DbError::should_retry_wake_compute(db_err)
         } else {
             // likely an IO error. Possible the compute has shutdown and the
             // cache is stale.

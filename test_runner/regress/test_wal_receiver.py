@@ -97,7 +97,7 @@ def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuil
                     str(safekeeper.id) in exception_string
                 ), f"Should have safekeeper {safekeeper.id} printed in walreceiver state after WAL wait timeout"
 
-    wait_until(60, 0.5, all_sks_in_wareceiver_state)
+    wait_until(all_sks_in_wareceiver_state, timeout=30)
 
     stopped_safekeeper = env.safekeepers[-1]
     stopped_safekeeper_id = stopped_safekeeper.id
@@ -124,7 +124,7 @@ def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuil
                         str(safekeeper.id) in exception_string
                     ), f"Should have safekeeper {safekeeper.id} printed in walreceiver state after 2nd WAL wait timeout"
 
-    wait_until(60, 0.5, all_but_stopped_sks_in_wareceiver_state)
+    wait_until(all_but_stopped_sks_in_wareceiver_state, timeout=30)
 
 
 def insert_test_elements(env: NeonEnv, tenant_id: TenantId, start: int, count: int):

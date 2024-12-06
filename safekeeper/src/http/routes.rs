@@ -14,7 +14,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info_span, Instrument};
 use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::{
-    profile_cpu_handler, prometheus_metrics_handler, request_span, ChannelWriter,
+    profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
+    ChannelWriter,
 };
 use utils::http::request::parse_query_param;
 
@@ -573,7 +574,8 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
     let mut router = endpoint::make_router();
     if conf.http_auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
-            const ALLOWLIST_ROUTES: &[&str] = &["/v1/status", "/metrics", "/profile/cpu"];
+            const ALLOWLIST_ROUTES: &[&str] =
+                &["/v1/status", "/metrics", "/profile/cpu", "profile/heap"];
             if ALLOWLIST_ROUTES.contains(&request.uri().path()) {
                 None
             } else {
@@ -594,6 +596,7 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .data(auth)
         .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
         .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
+        .get("/profile/heap", |r| request_span(r, profile_heap_handler))
         .get("/v1/status", |r| request_span(r, status_handler))
         .put("/v1/failpoints", |r| {
             request_span(r, move |r| async {

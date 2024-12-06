@@ -72,7 +72,7 @@ def test_storage_controller_many_tenants(
     we don't fall over for a thousand shards.
     """
 
-    neon_env_builder.num_pageservers = 5
+    neon_env_builder.num_pageservers = 6
     neon_env_builder.storage_controller_config = {
         # Default neon_local uses a small timeout: use a longer one to tolerate longer pageserver restarts.
         # TODO: tune this down as restarts get faster (https://github.com/neondatabase/neon/pull/7553), to
@@ -82,6 +82,11 @@ def test_storage_controller_many_tenants(
     }
     neon_env_builder.control_plane_compute_hook_api = (
         compute_reconfigure_listener.control_plane_compute_hook_api
+    )
+
+    AZS = ["alpha", "bravo", "charlie"]
+    neon_env_builder.pageserver_config_override = lambda ps_cfg: ps_cfg.update(
+        {"availability_zone": f"az-{AZS[ps_cfg['id'] % len(AZS)]}"}
     )
 
     # A small sleep on each call into the notify hook, to simulate the latency of doing a database write

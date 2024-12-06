@@ -10,10 +10,10 @@ use tokio::net::TcpStream;
 /// connection.
 #[derive(Clone)]
 pub struct CancelToken {
-    pub(crate) socket_config: Option<SocketConfig>,
-    pub(crate) ssl_mode: SslMode,
-    pub(crate) process_id: i32,
-    pub(crate) secret_key: i32,
+    pub socket_config: Option<SocketConfig>,
+    pub ssl_mode: SslMode,
+    pub process_id: i32,
+    pub secret_key: i32,
 }
 
 impl CancelToken {

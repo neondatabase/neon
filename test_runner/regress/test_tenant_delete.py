@@ -185,21 +185,21 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
     deletion = None
 
     try:
-        wait_until(10, 1, has_hit_failpoint)
+        wait_until(has_hit_failpoint)
 
         # it should start ok, sync up with the stuck creation, then hang waiting for the timeline
         # to shut down.
         deletion = Thread(target=start_deletion)
         deletion.start()
 
-        wait_until(10, 1, deletion_has_started_waiting_for_timelines)
+        wait_until(deletion_has_started_waiting_for_timelines)
 
         pageserver_http.configure_failpoints((failpoint, "off"))
 
         creation.join()
         deletion.join()
 
-        wait_until(10, 1, tenant_is_deleted)
+        wait_until(tenant_is_deleted)
     finally:
         creation.join()
         if deletion is not None:
@@ -264,7 +264,7 @@ def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder)
     def hit_initdb_upload_failpoint():
         env.pageserver.assert_log_contains(f"at failpoint {BEFORE_INITDB_UPLOAD_FAILPOINT}")
 
-    wait_until(100, 0.1, hit_initdb_upload_failpoint)
+    wait_until(hit_initdb_upload_failpoint)
 
     def creation_connection_timed_out():
         env.pageserver.assert_log_contains(
@@ -273,7 +273,7 @@ def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder)
 
     # Wait so that we hit the timeout and the connection is dropped
     # (But timeline creation still continues)
-    wait_until(100, 0.1, creation_connection_timed_out)
+    wait_until(creation_connection_timed_out)
 
     ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "pause"))
 
@@ -281,7 +281,7 @@ def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder)
         def tenant_delete_inner():
             ps_http.tenant_delete(tenant_id)
 
-        wait_until(100, 0.5, tenant_delete_inner)
+        wait_until(tenant_delete_inner)
 
     Thread(target=tenant_delete).start()
 
@@ -290,7 +290,7 @@ def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder)
             f"cfg failpoint: {DELETE_BEFORE_CLEANUP_FAILPOINT} pause"
         )
 
-    wait_until(100, 0.1, deletion_arrived)
+    wait_until(deletion_arrived)
 
     ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "off"))
 

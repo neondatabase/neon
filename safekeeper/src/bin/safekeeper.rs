@@ -51,6 +51,11 @@ use utils::{
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// Configure jemalloc to sample allocations for profiles every 1 MB (1 << 20).
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:20\0";
+
 const PID_FILE_NAME: &str = "safekeeper.pid";
 const ID_FILE_NAME: &str = "safekeeper.id";
 

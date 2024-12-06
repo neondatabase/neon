@@ -850,6 +850,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         force_repartition=False,
         force_image_layer_creation=False,
         force_l0_compaction=False,
+        wait_until_flushed=True,
         wait_until_uploaded=False,
         compact: bool | None = None,
         **kwargs,
@@ -862,6 +863,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_image_layer_creation"] = "true"
         if force_l0_compaction:
             query["force_l0_compaction"] = "true"
+        if not wait_until_flushed:
+            query["wait_until_flushed"] = "false"
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
 
@@ -869,7 +872,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["compact"] = "true" if compact else "false"
 
         log.info(
-            f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}, wait_until_uploaded={wait_until_uploaded}"
+            f"Requesting checkpoint: tenant={tenant_id} timeline={timeline_id} wait_until_flushed={wait_until_flushed} wait_until_uploaded={wait_until_uploaded} compact={compact}"
         )
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint",

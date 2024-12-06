@@ -60,13 +60,13 @@ def build_pgcopydb_command(pgcopydb_filter_file: Path, test_output_dir: Path):
         "--no-acl",
         "--skip-db-properties",
         "--table-jobs",
-        "8",
+        "4",
         "--index-jobs",
-        "8",
+        "4",
         "--restore-jobs",
-        "8",
+        "4",
         "--split-tables-larger-than",
-        "5GB",
+        "10GB",
         "--skip-extensions",
         "--use-copy-binary",
         "--filters",
@@ -136,7 +136,7 @@ def run_command_and_log_output(command, log_file_path: Path):
         "LD_LIBRARY_PATH": f"{os.getenv('PGCOPYDB_LIB_PATH')}:{os.getenv('PG_16_LIB_PATH')}",
         "PGCOPYDB_SOURCE_PGURI": cast(str, os.getenv("BENCHMARK_INGEST_SOURCE_CONNSTR")),
         "PGCOPYDB_TARGET_PGURI": cast(str, os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR")),
-        "PGOPTIONS": "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=16",
+        "PGOPTIONS": "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7",
     }
     # Combine the current environment with custom variables
     env = os.environ.copy()
@@ -184,7 +184,7 @@ def parse_log_and_report_metrics(
             for metric_name, pattern in metric_patterns.items():
                 if pattern.search(line):
                     # Extract duration and convert it to seconds
-                    duration_match = re.search(r"\d+h\d+m|\d+s|\d+ms|\d+\.\d+s", line)
+                    duration_match = re.search(r"\d+h\d+m|\d+m\d+s|\d+s|\d+ms|\d+\.\d+s", line)
                     if duration_match:
                         duration_str = duration_match.group(0)
                         parts = re.findall(r"\d+[a-zA-Z]+", duration_str)

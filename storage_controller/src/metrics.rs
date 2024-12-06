@@ -50,6 +50,12 @@ pub(crate) struct StorageControllerMetricGroup {
     /// Count of how many times we make an optimization change to a tenant's scheduling
     pub(crate) storage_controller_schedule_optimization: measured::Counter,
 
+    /// How many shards are not scheduled into their preferred AZ
+    pub(crate) storage_controller_schedule_az_violation: measured::Gauge,
+
+    /// How many shards would like to reconcile but were blocked by concurrency limits
+    pub(crate) storage_controller_pending_reconciles: measured::Gauge,
+
     /// HTTP request status counters for handled requests
     pub(crate) storage_controller_http_request_status:
         measured::CounterVec<HttpRequestStatusLabelGroupSet>,

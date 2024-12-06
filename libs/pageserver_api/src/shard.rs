@@ -158,7 +158,8 @@ impl ShardIdentity {
         key_to_shard_number(self.count, self.stripe_size, key)
     }
 
-    /// Return true if the key should be ingested by this shard
+    /// Return true if the key is stored only on this shard. This does not include
+    /// global keys, see is_key_global().
     ///
     /// Shards must ingest _at least_ keys which return true from this check.
     pub fn is_key_local(&self, key: &Key) -> bool {
@@ -170,19 +171,37 @@ impl ShardIdentity {
         }
     }
 
+    /// Return true if the key should be stored on all shards, not just one.
+    pub fn is_key_global(&self, key: &Key) -> bool {
+        if key.is_slru_block_key() || key.is_slru_segment_size_key() || key.is_aux_file_key() {
+            // Special keys that are only stored on shard 0
+            false
+        } else if key.is_rel_block_key() {
+            // Ordinary relation blocks are distributed across shards
+            false
+        } else if key.is_rel_size_key() {
+            // All shards maintain rel size keys (although only shard 0 is responsible for
+            // keeping it strictly accurate, other shards just reflect the highest block they've ingested)
+            true
+        } else {
+            // For everything else, we assume it must be kept everywhere, because ingest code
+            // might assume this -- this covers functionality where the ingest code has
+            // not (yet) been made fully shard aware.
+            true
+        }
+    }
+
     /// Return true if the key should be discarded if found in this shard's
     /// data store, e.g. during compaction after a split.
     ///
     /// Shards _may_ drop keys which return false here, but are not obliged to.
     pub fn is_key_disposable(&self, key: &Key) -> bool {
-        if key_is_shard0(key) {
-            // Q: Why can't we dispose of shard0 content if we're not shard 0?
-            // A1: because the WAL ingestion logic currently ingests some shard 0
-            //     content on all shards, even though it's only read on shard 0.  If we
-            //     dropped it, then subsequent WAL ingest to these keys would encounter
-            //     an error.
-            // A2: because key_is_shard0 also covers relation size keys, which are written
-            //     on all shards even though they're only maintained accurately on shard 0.
+        if self.count < ShardCount(2) {
+            // Fast path: unsharded tenant doesn't dispose of anything
+            return false;
+        }
+
+        if self.is_key_global(key) {
             false
         } else {
             !self.is_key_local(key)
