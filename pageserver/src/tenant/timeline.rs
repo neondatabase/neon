@@ -2392,7 +2392,7 @@ impl Timeline {
 
             result
                 .metrics
-                .last_record_gauge
+                .last_record_lsn_gauge
                 .set(disk_consistent_lsn.0 as i64);
             result
         })
@@ -3514,7 +3514,7 @@ impl Timeline {
     pub(crate) fn finish_write(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
 
-        self.metrics.last_record_gauge.set(new_lsn.0 as i64);
+        self.metrics.last_record_lsn_gauge.set(new_lsn.0 as i64);
         self.last_record_lsn.advance(new_lsn);
     }
 
@@ -3882,6 +3882,10 @@ impl Timeline {
     fn set_disk_consistent_lsn(&self, new_value: Lsn) -> bool {
         let old_value = self.disk_consistent_lsn.fetch_max(new_value);
         assert!(new_value >= old_value, "disk_consistent_lsn must be growing monotonously at runtime; current {old_value}, offered {new_value}");
+
+        self.metrics
+            .disk_consistent_lsn_gauge
+            .set(new_value.0 as i64);
         new_value != old_value
     }
 
