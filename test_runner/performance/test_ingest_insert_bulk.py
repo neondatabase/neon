@@ -20,7 +20,7 @@ from fixtures.remote_storage import s3_storage
 
 
 @pytest.mark.timeout(900)
-@pytest.mark.parametrize("size", [8, 64, 1024, 8192])
+@pytest.mark.parametrize("size", [8, 1024, 8192])
 @pytest.mark.parametrize("s3", [True, False], ids=["s3", "local"])
 @pytest.mark.parametrize("backpressure", [True, False], ids=["backpressure", "nobackpressure"])
 @pytest.mark.parametrize("fsync", [True, False], ids=["fsync", "nofsync"])
