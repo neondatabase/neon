@@ -230,6 +230,16 @@ pub(crate) struct GetRoleSecret {
     pub(crate) project_id: Option<ProjectIdInt>,
 }
 
+/// Response which holds client's auth secret, e.g. [`crate::scram::ServerSecret`].
+/// Returned by the `/get_endpoint_access_control` API method.
+#[derive(Deserialize)]
+pub(crate) struct GetEndpointAccessControl {
+    pub(crate) role_secret: Box<str>,
+    pub(crate) allowed_ips: Option<Vec<IpPattern>>,
+    pub(crate) project_id: Option<ProjectIdInt>,
+    pub(crate) allowed_vpc_endpoint_ids: Option<Vec<EndpointIdInt>>,
+}
+
 // Manually implement debug to omit sensitive info.
 impl fmt::Debug for GetRoleSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

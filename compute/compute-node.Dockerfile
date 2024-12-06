@@ -1367,15 +1367,12 @@ RUN make PG_VERSION="${PG_VERSION}" -C compute
 
 FROM neon-pg-ext-build AS neon-pg-ext-test
 ARG PG_VERSION
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    mkdir /ext-src
+RUN mkdir /ext-src
 
 #COPY --from=postgis-build /postgis.tar.gz /ext-src/
 #COPY --from=postgis-build /sfcgal/* /usr
 COPY --from=plv8-build /plv8.tar.gz /ext-src/
-COPY --from=h3-pg-build /h3-pg.tar.gz /ext-src/
+#COPY --from=h3-pg-build /h3-pg.tar.gz /ext-src/
 COPY --from=unit-pg-build /postgresql-unit.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.patch /ext-src/
@@ -1395,7 +1392,7 @@ COPY --from=hll-pg-build /hll.tar.gz /ext-src
 COPY --from=plpgsql-check-pg-build /plpgsql_check.tar.gz /ext-src
 #COPY --from=timescaledb-pg-build /timescaledb.tar.gz /ext-src
 COPY --from=pg-hint-plan-pg-build /pg_hint_plan.tar.gz /ext-src
-COPY compute/patches/pg_hint_plan.patch /ext-src
+COPY compute/patches/pg_hint_plan_${PG_VERSION}.patch /ext-src
 COPY --from=pg-cron-pg-build /pg_cron.tar.gz /ext-src
 COPY compute/patches/pg_cron.patch /ext-src
 #COPY --from=pg-pgx-ulid-build /home/nonroot/pgx_ulid.tar.gz /ext-src
@@ -1405,38 +1402,23 @@ COPY --from=pg-roaringbitmap-pg-build /pg_roaringbitmap.tar.gz /ext-src
 COPY --from=pg-semver-pg-build /pg_semver.tar.gz /ext-src
 #COPY --from=pg-embedding-pg-build /home/nonroot/pg_embedding-src/ /ext-src
 #COPY --from=wal2json-pg-build /wal2json_2_5.tar.gz /ext-src
-COPY --from=pg-anon-pg-build /pg_anon.tar.gz /ext-src
+#pg_anon is not supported yet for pg v17 so, don't fail if nothing found
+COPY --from=pg-anon-pg-build /pg_anon.tar.g? /ext-src
 COPY compute/patches/pg_anon.patch /ext-src
 COPY --from=pg-ivm-build /pg_ivm.tar.gz /ext-src
 COPY --from=pg-partman-build /pg_partman.tar.gz /ext-src
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    cd /ext-src/ && for f in *.tar.gz; \
+RUN cd /ext-src/ && for f in *.tar.gz; \
     do echo $f; dname=$(echo $f | sed 's/\.tar.*//')-src; \
     rm -rf $dname; mkdir $dname; tar xzf $f --strip-components=1 -C $dname \
     || exit 1; rm -f $f; done
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    cd /ext-src/rum-src && patch -p1 <../rum.patch
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan.patch
+RUN cd /ext-src/rum-src && patch -p1 <../rum.patch
+RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
+RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan_${PG_VERSION}.patch
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    patch -p1 </ext-src/pg_anon.patch
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    patch -p1 </ext-src/pg_cron.patch
+    echo "postgresql_anonymizer does not yet support PG17" && exit 0;; \
+    esac && patch -p1 </ext-src/pg_anon.patch
+RUN patch -p1 </ext-src/pg_cron.patch
 ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
 ENV PGPORT=55433

@@ -90,6 +90,7 @@ def test_sharded_ingest(
     # Start the endpoint.
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     start_lsn = Lsn(endpoint.safe_psql("select pg_current_wal_lsn()")[0][0])
+
     # Ingest data and measure WAL volume and duration.
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
@@ -104,6 +105,8 @@ def test_sharded_ingest(
                 wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     end_lsn = Lsn(endpoint.safe_psql("select pg_current_wal_lsn()")[0][0])
+
+    # Record metrics.
     wal_written_mb = round((end_lsn - start_lsn) / (1024 * 1024))
     zenbenchmark.record("wal_written", wal_written_mb, "MB", MetricReport.TEST_PARAM)
 
@@ -152,3 +155,7 @@ def test_sharded_ingest(
     log.info(f"WAL ingested by each pageserver {ingested_by_ps}")
 
     assert tenant_get_shards(env, tenant_id) == shards, "shards moved"
+
+    # The pageservers can take a long time to shut down gracefully, presumably due to the upload
+    # queue or compactions or something. Just stop them immediately, we don't care.
+    env.stop(immediate=True)

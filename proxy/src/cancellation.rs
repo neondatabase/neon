@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use postgres_client::{CancelToken, NoTls};
 use pq_proto::CancelKeyData;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio_postgres::{CancelToken, NoTls};
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -44,7 +44,7 @@ pub(crate) enum CancelError {
     IO(#[from] std::io::Error),
 
     #[error("{0}")]
-    Postgres(#[from] tokio_postgres::Error),
+    Postgres(#[from] postgres_client::Error),
 
     #[error("rate limit exceeded")]
     RateLimit,
@@ -70,11 +70,12 @@ impl ReportableError for CancelError {
 impl<P: CancellationPublisher> CancellationHandler<P> {
     /// Run async action within an ephemeral session identified by [`CancelKeyData`].
     pub(crate) fn get_session(self: Arc<Self>) -> Session<P> {
-        // HACK: We'd rather get the real backend_pid but tokio_postgres doesn't
-        // expose it and we don't want to do another roundtrip to query
-        // for it. The client will be able to notice that this is not the
-        // actual backend_pid, but backend_pid is not used for anything
-        // so it doesn't matter.
+        // we intentionally generate a random "backend pid" and "secret key" here.
+        // we use the corresponding u64 as an identifier for the
+        // actual endpoint+pid+secret for postgres/pgbouncer.
+        //
+        // if we forwarded the backend_pid from postgres to the client, there would be a lot
+        // of overlap between our computes as most pids are small (~100).
         let key = loop {
             let key = rand::random();
 

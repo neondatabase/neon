@@ -142,10 +142,9 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
     # start without gc so we can time compaction with less noise; use shorter
     # period for compaction so it starts earlier
     def patch_default_tenant_config(config):
-        tenant_config = config.get("tenant_config", {})
+        tenant_config = config.setdefault("tenant_config", {})
         tenant_config["compaction_period"] = "3s"
         tenant_config["gc_period"] = "0s"
-        config["tenant_config"] = tenant_config
 
     env.pageserver.edit_config_toml(patch_default_tenant_config)
     env.pageserver.start(
