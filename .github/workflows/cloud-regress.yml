@@ -108,6 +108,12 @@ jobs:
           endpoint_id: ${{steps.endpoint-id.outputs.id}}
           branch_id: ${{steps.create-branch.outputs.branch_id}}
 
+      - name: Wait for operations to be completed
+        uses: ./.github/actions/neon-wait-operations-to-finish
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{inputs.project-id}}
+
       - name: Run the regression tests
         uses: ./.github/actions/run-python-test-set
         with:

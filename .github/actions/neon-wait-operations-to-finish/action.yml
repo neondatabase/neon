@@ -1,0 +1,52 @@
+name: 'Wait operations to finish'
+description: 'Wait operations to finish'
+
+inputs:
+  api_key:
+    description: 'Neon API key'
+    required: true
+  project_id:
+    description: 'ID of the Project to create Branch in'
+    required: true
+  api_host:
+    description: 'Neon API host'
+    default: console-stage.neon.build
+  timeout:
+    description: 'Timeout in seconds to wait'
+    type: integer
+    default: 180
+
+runs:
+  using: "composite"
+  steps:
+    - name: Wait for operations complete
+      shell: bash -euxo pipefail {0}
+      run: |
+        end_time=$(( $(date +%s) + ${TIMEOUT} ))
+        while [ "$(date +%s)" -le ${end_time} ]; do
+          rc=0
+          operations=$(curl -X GET \
+          "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/operations" \
+          --header "Accept: application/json" \
+          --header "Content-Type: application/json" \
+          --header "Authorization: Bearer ${API_KEY}" \
+          --fail) || rc=${?}
+        
+          ongoing_operations=$(echo $res | jq -rc '.operations[0].[] | select (.status as $st | ["cancelling", "scheduling", "running"] |index($st))' )
+        
+          if [ $rc -ne 0 ] || [ -n "${ongoing_operations}" ]; then
+            sleep 2
+            continue
+          fi
+        
+          break
+        done
+        if [ $(date +%s) -gt ${end_time} ]; then
+          echo Time is out
+          exit 1
+        fi
+      env:
+        API_HOST: ${{ inputs.api_host }}
+        API_KEY: ${{ inputs.api_key }}
+        PROJECT_ID: ${{ inputs.project_id }}
+        TIMEOUT: ${{ inputs.timeout }}
