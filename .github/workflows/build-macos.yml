@@ -41,18 +41,6 @@ jobs:
       # Hence keeping target/ (and general cache size) smaller
       BUILD_TYPE: release
     steps:
-      - name: Checkout main repo
-        uses: actions/checkout@v4
-
-      - name: Checkout submodule vendor/postgres-${{ matrix.postgres-version }}
-        run: |
-          git submodule init vendor/postgres-${{ matrix.postgres-version }}
-          git submodule update --depth 1 --recursive
-
-      - name: Install build dependencies
-        run: |
-          brew install flex bison openssl protobuf icu4c
-
       - name: Set pg ${{ matrix.postgres-version }} for caching
         id: pg_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-${{ matrix.postgres-version }}) | tee -a "${GITHUB_OUTPUT}"
@@ -64,7 +52,23 @@ jobs:
           path: pg_install/${{ matrix.postgres-version }}
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ matrix.postgres-version}}-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
+      - name: Checkout main repo
+        if: steps.cache_pg.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+
+      - name: Checkout submodule vendor/postgres-${{ matrix.postgres-version }}
+        if: steps.cache_pg.outputs.cache-hit != 'true'
+        run: |
+          git submodule init vendor/postgres-${{ matrix.postgres-version }}
+          git submodule update --depth 1 --recursive
+
+      - name: Install build dependencies
+        if: steps.cache_pg.outputs.cache-hit != 'true'
+        run: |
+          brew install flex bison openssl protobuf icu4c
+
       - name: Set extra env for macOS
+        if: steps.cache_pg.outputs.cache-hit != 'true'
         run: |
           echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
           echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
@@ -99,18 +103,6 @@ jobs:
       # Hence keeping target/ (and general cache size) smaller
       BUILD_TYPE: release
     steps:
-      - name: Checkout main repo
-        uses: actions/checkout@v4
-
-      - name: Checkout submodule vendor/postgres-v17
-        run: |
-          git submodule init vendor/postgres-v17
-          git submodule update --depth 1 --recursive
-
-      - name: Install build dependencies
-        run: |
-          brew install flex bison openssl protobuf icu4c
-
       - name: Set pg v17 for caching
         id: pg_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v17) | tee -a "${GITHUB_OUTPUT}"
@@ -129,12 +121,29 @@ jobs:
           path: pg_install/build/walproposer-lib
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-walproposer_lib-v17-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
+      - name: Checkout main repo
+        if: steps.cache_walproposer_lib.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+
+      - name: Checkout submodule vendor/postgres-v17
+        if: steps.cache_walproposer_lib.outputs.cache-hit != 'true'
+        run: |
+          git submodule init vendor/postgres-v17
+          git submodule update --depth 1 --recursive
+
+      - name: Install build dependencies
+        if: steps.cache_walproposer_lib.outputs.cache-hit != 'true'
+        run: |
+          brew install flex bison openssl protobuf icu4c
+
       - name: Set extra env for macOS
+        if: steps.cache_walproposer_lib.outputs.cache-hit != 'true'
         run: |
           echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
           echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
 
       - name: Build walproposer-lib (only for v17)
+        if: steps.cache_walproposer_lib.outputs.cache-hit != 'true'
         run:
           make walproposer-lib -j$(sysctl -n hw.ncpu)
 
@@ -153,15 +162,6 @@ jobs:
       # Hence keeping target/ (and general cache size) smaller
       BUILD_TYPE: release
     steps:
-      - name: Checkout main repo
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - name: Install build dependencies
-        run: |
-          brew install flex bison openssl protobuf icu4c
-
       - name: Set pg v14 for caching
         id: pg_rev_v14
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) | tee -a "${GITHUB_OUTPUT}"
@@ -200,11 +200,6 @@ jobs:
           path: pg_install/v17
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-v17-${{ steps.pg_rev_v17.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
-      - name: Set extra env for macOS
-        run: |
-          echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
-          echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
-
       - name: Cache cargo deps (only for v17)
         uses: actions/cache@v4
         with:
@@ -215,6 +210,19 @@ jobs:
             target
           key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
 
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install build dependencies
+        run: |
+          brew install flex bison openssl protobuf icu4c
+
+      - name: Set extra env for macOS
+        run: |
+          echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
+          echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
 
       - name: Run cargo build (only for v17)
         run: PQ_LIB_DIR=$(pwd)/pg_install/v17/lib cargo build --all --release -j$(sysctl -n hw.ncpu)
