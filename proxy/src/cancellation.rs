@@ -115,7 +115,8 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
                 IpAddr::V6(ip) => IpNet::V6(Ipv6Net::new_assert(ip, 64).trunc()),
             };
             if !self.limiter.lock().unwrap().check(subnet_key, 1) {
-                tracing::debug!("Rate limit exceeded. Skipping cancellation message");
+                // log only the subnet part of the IP address to know which subnet is rate limited
+                tracing::warn!("Rate limit exceeded. Skipping cancellation message, {subnet_key}");
                 Metrics::get()
                     .proxy
                     .cancellation_requests_total
