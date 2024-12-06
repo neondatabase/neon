@@ -115,7 +115,8 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
                 IpAddr::V6(ip) => IpNet::V6(Ipv6Net::new_assert(ip, 64).trunc()),
             };
             if !self.limiter.lock().unwrap().check(subnet_key, 1) {
-                tracing::debug!("Rate limit exceeded. Skipping cancellation message");
+                // log only the subnet part of the IP address to know which subnet is rate limited
+                tracing::warn!("Rate limit exceeded. Skipping cancellation message, {subnet_key}, {session_id}");
                 Metrics::get()
                     .proxy
                     .cancellation_requests_total
@@ -129,7 +130,7 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
 
         // NB: we should immediately release the lock after cloning the token.
         let Some(cancel_closure) = self.map.get(&key).and_then(|x| x.clone()) else {
-            tracing::warn!("query cancellation key not found: {key}");
+            tracing::warn!("query cancellation key not found: {key}, {session_id}");
             Metrics::get()
                 .proxy
                 .cancellation_requests_total
@@ -147,7 +148,7 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
                 Ok(()) => {} // do nothing
                 Err(e) => {
                     // log it here since cancel_session could be spawned in a task
-                    tracing::error!("failed to publish cancellation key: {key}, error: {e}");
+                    tracing::error!("failed to publish cancellation key: {key}, {session_id}, error: {e}");
                     return Err(CancelError::IO(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         e.to_string(),
@@ -161,7 +162,7 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
             && !check_peer_addr_is_in_list(&peer_addr, cancel_closure.ip_allowlist.as_slice())
         {
             // log it here since cancel_session could be spawned in a task
-            tracing::warn!("IP is not allowed to cancel the query: {key}");
+            tracing::warn!("IP is not allowed to cancel the query: {key}, {session_id}");
             return Err(CancelError::IpNotAllowed);
         }
 
@@ -172,7 +173,7 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
                 source: self.from,
                 kind: crate::metrics::CancellationOutcome::Found,
             });
-        info!("cancelling query per user's request using key {key}");
+        info!("cancelling query per user's request using key {key}, {session_id}");
         cancel_closure.try_cancel_query().await
     }
 
