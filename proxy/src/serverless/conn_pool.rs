@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, Instrument};
 #[cfg(test)]
 use {
     super::conn_pool_lib::GlobalConnPoolOptions,
@@ -125,13 +125,10 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
 
                 match message {
                     Some(Ok(AsyncMessage::Notice(notice))) => {
-                        info!(%session_id, "notice: {}", notice);
+                        debug!(%session_id, "notice: {}", notice);
                     }
                     Some(Ok(AsyncMessage::Notification(notif))) => {
-                        warn!(%session_id, pid = notif.process_id(), channel = notif.channel(), "notification received");
-                    }
-                    Some(Ok(_)) => {
-                        warn!(%session_id, "unknown message");
+                        debug!(%session_id, pid = notif.process_id(), channel = notif.channel(), "notification received");
                     }
                     Some(Err(e)) => {
                         error!(%session_id, "connection error: {}", e);

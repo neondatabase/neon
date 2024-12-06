@@ -10,8 +10,7 @@ use crate::error::DbError;
 pub use crate::error::Error;
 pub use crate::generic_client::GenericClient;
 pub use crate::query::RowStream;
-pub use crate::row::{Row, SimpleQueryRow};
-pub use crate::simple_query::SimpleQueryStream;
+pub use crate::row::Row;
 pub use crate::statement::{Column, Statement};
 pub use crate::tls::NoTls;
 // pub use crate::to_statement::ToStatement;
@@ -98,7 +97,6 @@ impl Notification {
 /// An asynchronous message from the server.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub enum AsyncMessage {
     /// A notice.
     ///
@@ -108,18 +106,6 @@ pub enum AsyncMessage {
     ///
     /// Connections can subscribe to notifications with the `LISTEN` command.
     Notification(Notification),
-}
-
-/// Message returned by the `SimpleQuery` stream.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum SimpleQueryMessage {
-    /// A row of data.
-    Row(SimpleQueryRow),
-    /// A statement in the query has completed.
-    ///
-    /// The number of rows modified or selected is returned.
-    CommandComplete(u64),
 }
 
 fn slice_iter<'a>(
