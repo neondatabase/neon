@@ -120,7 +120,7 @@ page_cache_size=10
     assert non_vectored_average < 8
     assert vectored_average < 8
 
-
+@pytest.mark.skip("This is being fixed and tracked in https://github.com/neondatabase/neon/issues/9114")
 @skip_in_debug_build("only run with release build")
 def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     SMOKE_CONF = {
