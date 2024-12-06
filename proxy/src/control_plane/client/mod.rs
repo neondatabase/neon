@@ -1,3 +1,4 @@
+pub mod cplane_proxy_v1;
 #[cfg(any(test, feature = "testing"))]
 pub mod mock;
 pub mod neon;
@@ -27,6 +28,8 @@ use crate::types::EndpointId;
 #[non_exhaustive]
 #[derive(Clone)]
 pub enum ControlPlaneClient {
+    /// New Proxy V1 control plane API
+    ProxyV1(cplane_proxy_v1::NeonControlPlaneClient),
     /// Current Management API (V2).
     Neon(neon::NeonControlPlaneClient),
     /// Local mock control plane.
@@ -45,6 +48,7 @@ impl ControlPlaneApi for ControlPlaneClient {
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError> {
         match self {
+            Self::ProxyV1(api) => api.get_role_secret(ctx, user_info).await,
             Self::Neon(api) => api.get_role_secret(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
             Self::PostgresMock(api) => api.get_role_secret(ctx, user_info).await,
@@ -61,6 +65,7 @@ impl ControlPlaneApi for ControlPlaneClient {
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
         match self {
+            Self::ProxyV1(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             Self::Neon(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
             Self::PostgresMock(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
@@ -75,6 +80,7 @@ impl ControlPlaneApi for ControlPlaneClient {
         endpoint: EndpointId,
     ) -> Result<Vec<AuthRule>, errors::GetEndpointJwksError> {
         match self {
+            Self::ProxyV1(api) => api.get_endpoint_jwks(ctx, endpoint).await,
             Self::Neon(api) => api.get_endpoint_jwks(ctx, endpoint).await,
             #[cfg(any(test, feature = "testing"))]
             Self::PostgresMock(api) => api.get_endpoint_jwks(ctx, endpoint).await,
@@ -89,6 +95,7 @@ impl ControlPlaneApi for ControlPlaneClient {
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError> {
         match self {
+            Self::ProxyV1(api) => api.wake_compute(ctx, user_info).await,
             Self::Neon(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
             Self::PostgresMock(api) => api.wake_compute(ctx, user_info).await,

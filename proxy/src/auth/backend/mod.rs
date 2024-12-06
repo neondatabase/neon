@@ -70,6 +70,10 @@ impl std::fmt::Display for Backend<'_, ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ControlPlane(api, ()) => match &**api {
+                ControlPlaneClient::ProxyV1(endpoint) => fmt
+                    .debug_tuple("ControlPlane::ProxyV1")
+                    .field(&endpoint.url())
+                    .finish(),
                 ControlPlaneClient::Neon(endpoint) => fmt
                     .debug_tuple("ControlPlane::Neon")
                     .field(&endpoint.url())

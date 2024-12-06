@@ -16,7 +16,6 @@ use super::{
 
 use anyhow::{anyhow, bail, Context};
 use bytes::Bytes;
-use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::key::KEY_SIZE;
@@ -63,6 +62,12 @@ use super::CompactionError;
 
 /// Maximum number of deltas before generating an image layer in bottom-most compaction.
 const COMPACTION_DELTA_THRESHOLD: usize = 5;
+
+/// A scheduled compaction task.
+pub struct ScheduledCompactionTask {
+    pub options: CompactOptions,
+    pub result_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
 
 pub struct GcCompactionJobDescription {
     /// All layers to read in the compaction job
@@ -1746,24 +1751,6 @@ impl Timeline {
         Ok(())
     }
 
-    pub(crate) async fn compact_with_gc(
-        self: &Arc<Self>,
-        cancel: &CancellationToken,
-        options: CompactOptions,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        self.partial_compact_with_gc(
-            options
-                .compact_range
-                .map(|range| range.start..range.end)
-                .unwrap_or_else(|| Key::MIN..Key::MAX),
-            cancel,
-            options.flags,
-            ctx,
-        )
-        .await
-    }
-
     /// An experimental compaction building block that combines compaction with garbage collection.
     ///
     /// The current implementation picks all delta + image layers that are below or intersecting with
@@ -1771,17 +1758,19 @@ impl Timeline {
     /// layers and image layers, which generates image layers on the gc horizon, drop deltas below gc horizon,
     /// and create delta layers with all deltas >= gc horizon.
     ///
-    /// If `key_range` is provided, it will only compact the keys within the range, aka partial compaction.
+    /// If `options.compact_range` is provided, it will only compact the keys within the range, aka partial compaction.
     /// Partial compaction will read and process all layers overlapping with the key range, even if it might
     /// contain extra keys. After the gc-compaction phase completes, delta layers that are not fully contained
     /// within the key range will be rewritten to ensure they do not overlap with the delta layers. Providing
     /// Key::MIN..Key..MAX to the function indicates a full compaction, though technically, `Key::MAX` is not
     /// part of the range.
-    pub(crate) async fn partial_compact_with_gc(
+    ///
+    /// If `options.compact_below_lsn` is provided, the compaction will only compact layers below or intersect with
+    /// the LSN. Otherwise, it will use the gc cutoff by default.
+    pub(crate) async fn compact_with_gc(
         self: &Arc<Self>,
-        compaction_key_range: Range<Key>,
         cancel: &CancellationToken,
-        flags: EnumSet<CompactFlags>,
+        options: CompactOptions,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Block other compaction/GC tasks from running for now. GC-compaction could run along
@@ -1802,6 +1791,12 @@ impl Timeline {
             std::time::Duration::from_secs(5),
         )
         .await?;
+
+        let flags = options.flags;
+        let compaction_key_range = options
+            .compact_range
+            .map(|range| range.start..range.end)
+            .unwrap_or_else(|| Key::MIN..Key::MAX);
 
         let dry_run = flags.contains(CompactFlags::DryRun);
 
@@ -1826,7 +1821,18 @@ impl Timeline {
             let layers = guard.layer_map()?;
             let gc_info = self.gc_info.read().unwrap();
             let mut retain_lsns_below_horizon = Vec::new();
-            let gc_cutoff = gc_info.cutoffs.select_min();
+            let gc_cutoff = {
+                let real_gc_cutoff = gc_info.cutoffs.select_min();
+                // The compaction algorithm will keep all keys above the gc_cutoff while keeping only necessary keys below the gc_cutoff for
+                // each of the retain_lsn. Therefore, if the user-provided `compact_below_lsn` is larger than the real gc cutoff, we will use
+                // the real cutoff.
+                let mut gc_cutoff = options.compact_below_lsn.unwrap_or(real_gc_cutoff);
+                if gc_cutoff > real_gc_cutoff {
+                    warn!("provided compact_below_lsn={} is larger than the real_gc_cutoff={}, using the real gc cutoff", gc_cutoff, real_gc_cutoff);
+                    gc_cutoff = real_gc_cutoff;
+                }
+                gc_cutoff
+            };
             for (lsn, _timeline_id, _is_offloaded) in &gc_info.retain_lsns {
                 if lsn < &gc_cutoff {
                     retain_lsns_below_horizon.push(*lsn);
@@ -1846,7 +1852,7 @@ impl Timeline {
                 .map(|desc| desc.get_lsn_range().end)
                 .max()
             else {
-                info!("no layers to compact with gc");
+                info!("no layers to compact with gc: no historic layers below gc_cutoff, gc_cutoff={}", gc_cutoff);
                 return Ok(());
             };
             // Then, pick all the layers that are below the max_layer_lsn. This is to ensure we can pick all single-key
@@ -1869,7 +1875,7 @@ impl Timeline {
                 }
             }
             if selected_layers.is_empty() {
-                info!("no layers to compact with gc");
+                info!("no layers to compact with gc: no layers within the key range, gc_cutoff={}, key_range={}..{}", gc_cutoff, compaction_key_range.start, compaction_key_range.end);
                 return Ok(());
             }
             retain_lsns_below_horizon.sort();
