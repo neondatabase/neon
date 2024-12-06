@@ -132,7 +132,7 @@ jobs:
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           project_id: ${{inputs.project-id}}
-          branch_id: ${{steps.endpoint-id.outputs.create-branch.branch_id}}
+          branch_id: ${{steps.create-branch.outputs.branch_id}}
 
       - name: Create Allure report
         id: create-allure-report
