@@ -30,11 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-          include:
-            - pg-version: 16
-              project-id: ${{ vars.PGREGRESS_PG16_PROJECT_ID }}
-            - pg-version: 17
-              project-id: ${{ vars.PGREGRESS_PG17_PROJECT_ID }}
+        pg-version: [16, 17]
 
     runs-on: us-east-2
     container:
@@ -88,14 +84,14 @@ jobs:
         uses: ./.github/actions/neon-get-endpoint
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{matrix.project-id}}
+          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
 
       - name: Get the connection URI
         id: connect-uri
         uses: ./.github/actions/neon-get-connection-uri
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{matrix.project-id}}
+          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
           endpoint_id: ${{steps.endpoint-id.outputs.id}}
 
       - name: Create a new branch
@@ -103,14 +99,14 @@ jobs:
         uses: ./.github/actions/neon-branch-create
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{matrix.project-id}}
+          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
           add_endpoint: false
 
       - name: Attach the endpoint to the new branch
         uses: ./.github/actions/neon-attach-endpoint-to-branch
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{matrix.project-id}}
+          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
           endpoint_id: ${{steps.endpoint-id.outputs.id}}
           branch_id: ${{steps.create-branch.outputs.branch_id}}
 
@@ -118,7 +114,7 @@ jobs:
         uses: ./.github/actions/neon-wait-operations-to-finish
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{matrix.project-id}}
+          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
 
       - name: Run the regression tests
         uses: ./.github/actions/run-python-test-set
@@ -135,7 +131,7 @@ jobs:
         uses: ./.github/actions/neon-attach-endpoint-to-branch
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{matrix.project-id}}
+          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
           endpoint_id: ${{steps.endpoint-id.outputs.id}}
           branch_id: ${{steps.endpoint-id.outputs.branch_id}}
 
@@ -143,7 +139,7 @@ jobs:
         uses: ./.github/actions/neon-branch-delete
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{matrix.project-id}}
+          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
           branch_id: ${{steps.create-branch.outputs.branch_id}}
 
       - name: Create Allure report
