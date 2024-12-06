@@ -51,6 +51,8 @@ jobs:
             echo "tag=release-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
             echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
+            echo "tag=release-compute-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -c $CURRENT_SHA -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')

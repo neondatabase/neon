@@ -300,9 +300,9 @@ def test_remote_storage_upload_queue_retries(
     print_gc_result(gc_result)
     assert gc_result["layers_removed"] > 0
 
-    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
-    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
-    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
+    wait_until(lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
+    wait_until(lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
+    wait_until(lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
 
     # let all future operations queue up
     configure_storage_sync_failpoints("return")
@@ -333,16 +333,28 @@ def test_remote_storage_upload_queue_retries(
     # wait for churn thread's data to get stuck in the upload queue
     # Exponential back-off in upload queue, so, gracious timeouts.
 
-    wait_until(30, 1, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="upload"), 0))
-    wait_until(30, 1, lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 1))
-    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
+    wait_until(
+        lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="upload"), 0), timeout=30
+    )
+    wait_until(
+        lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 1), timeout=30
+    )
+    wait_until(
+        lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0), timeout=30
+    )
 
     # unblock churn operations
     configure_storage_sync_failpoints("off")
 
-    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
-    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
-    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
+    wait_until(
+        lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0), timeout=30
+    )
+    wait_until(
+        lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0), timeout=30
+    )
+    wait_until(
+        lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0), timeout=30
+    )
 
     # The churn thread doesn't make progress once it blocks on the first wait_completion() call,
     # so, give it some time to wrap up.
@@ -580,7 +592,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
             > 0
         )
 
-    wait_until(200, 0.1, assert_compacted_and_uploads_queued)
+    wait_until(assert_compacted_and_uploads_queued)
 
     # Regardless, give checkpoint some time to block for good.
     # Not strictly necessary, but might help uncover failure modes in the future.
@@ -598,9 +610,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         ]
     )
 
-    # Generous timeout, because currently deletions can get blocked waiting for compaction
-    # This can be reduced when https://github.com/neondatabase/neon/issues/4998 is fixed.
-    timeline_delete_wait_completed(client, tenant_id, timeline_id, iterations=30, interval=1)
+    timeline_delete_wait_completed(client, tenant_id, timeline_id)
 
     assert not timeline_path.exists()
 
@@ -826,22 +836,16 @@ def wait_upload_queue_empty(
     client: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
 ):
     wait_until(
-        2,
-        1,
         lambda: assert_eq(
             get_queued_count(client, tenant_id, timeline_id, file_kind="layer", op_kind="upload"), 0
         ),
     )
     wait_until(
-        2,
-        1,
         lambda: assert_eq(
             get_queued_count(client, tenant_id, timeline_id, file_kind="index", op_kind="upload"), 0
         ),
     )
     wait_until(
-        2,
-        1,
         lambda: assert_eq(
             get_queued_count(client, tenant_id, timeline_id, file_kind="layer", op_kind="delete"), 0
         ),

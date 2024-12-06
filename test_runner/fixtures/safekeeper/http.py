@@ -175,7 +175,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
             assert s > Lsn(0)
             return s
 
-        return wait_until(30, 1, timeline_start_lsn_non_zero)
+        return wait_until(timeline_start_lsn_non_zero)
 
     def get_commit_lsn(self, tenant_id: TenantId, timeline_id: TimelineId) -> Lsn:
         return self.timeline_status(tenant_id, timeline_id).commit_lsn

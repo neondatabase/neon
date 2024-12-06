@@ -681,6 +681,7 @@ impl RemoteTimelineClient {
         layer_file_name: &LayerName,
         layer_metadata: &LayerFileMetadata,
         local_path: &Utf8Path,
+        gate: &utils::sync::gate::Gate,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<u64, DownloadError> {
@@ -700,6 +701,7 @@ impl RemoteTimelineClient {
                 layer_file_name,
                 layer_metadata,
                 local_path,
+                gate,
                 cancel,
                 ctx,
             )
@@ -2190,6 +2192,9 @@ impl RemoteTimelineClient {
                     upload_queue.clean.1 = Some(task.task_id);
 
                     let lsn = upload_queue.clean.0.metadata.disk_consistent_lsn();
+                    self.metrics
+                        .projected_remote_consistent_lsn_gauge
+                        .set(lsn.0);
 
                     if self.generation.is_none() {
                         // Legacy mode: skip validating generation
@@ -2564,9 +2569,9 @@ pub fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
 }
 
 /// Given the key of a tenant manifest, parse out the generation number
-pub(crate) fn parse_remote_tenant_manifest_path(path: RemotePath) -> Option<Generation> {
+pub fn parse_remote_tenant_manifest_path(path: RemotePath) -> Option<Generation> {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r".+tenant-manifest-([0-9a-f]{8}).json").unwrap());
+    let re = RE.get_or_init(|| Regex::new(r".*tenant-manifest-([0-9a-f]{8}).json").unwrap());
     re.captures(path.get_path().as_str())
         .and_then(|c| c.get(1))
         .and_then(|m| Generation::parse_suffix(m.as_str()))
