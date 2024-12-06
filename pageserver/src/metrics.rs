@@ -1271,9 +1271,7 @@ impl SmgrOpTimer {
 
     /// Returns `None`` if this method has already been called, `Some` otherwise.
     fn smgr_op_end(&mut self) -> Option<(Instant, SmgrOpTimerInner)> {
-        let Some(inner) = self.0.take() else {
-            return None;
-        };
+        let inner = self.0.take()?;
 
         let now = Instant::now();
         let elapsed = now - inner.start;
