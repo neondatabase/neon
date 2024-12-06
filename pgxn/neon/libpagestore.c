@@ -656,6 +656,23 @@ call_PQgetCopyData(shardno_t shard_no, char **buffer)
 	int			ret;
 	PageServer *shard = &page_servers[shard_no];
 	PGconn	   *pageserver_conn = shard->conn;
+	TimestampTz now,
+				start_ts,
+				next_log_ts;
+	bool		logged = false;
+
+	/*
+	 * As a debugging aid, if we don't get a response for a long time, print a
+	 * log message.
+	 *
+	 * 10 s is a very generous threshold, normally we expect a response in a
+	 * few milliseconds. We have metrics to track latencies in normal ranges,
+	 * but in the cases that take exceptionally long, it's useful to log the
+	 * exact timestamps.
+	 */
+#define LOG_INTERVAL_US		UINT64CONST(10 * 1000000)
+	now = start_ts = GetCurrentTimestamp();
+	next_log_ts = now + LOG_INTERVAL_US;
 
 retry:
 	ret = PQgetCopyData(pageserver_conn, buffer, 1 /* async */ );
@@ -665,7 +682,9 @@ retry:
 		WaitEvent	event;
 
 		/* Sleep until there's something to do */
-		(void) WaitEventSetWait(shard->wes_read, -1L, &event, 1,
+		(void) WaitEventSetWait(shard->wes_read,
+								(long) ((next_log_ts - now) / 1000),
+								&event, 1,
 								WAIT_EVENT_NEON_PS_READ);
 		ResetLatch(MyLatch);
 
@@ -684,7 +703,32 @@ retry:
 			}
 		}
 
+		/*
+		 * Print a message to the log if a long time has passed with no
+		 * response.
+		 */
+		now = GetCurrentTimestamp();
+		if (next_log_ts - now >= LOG_INTERVAL_US)
+		{
+			neon_shard_log(shard_no, LOG, "no response received from pageserver for %0.3f s, still waiting",
+						   (double) ((now - start_ts) / 1000000.0));
+			next_log_ts = now + LOG_INTERVAL_US;
+			logged = true;
+		}
+
 		goto retry;
+	}
+
+	/*
+	 * If we logged earlier that the response is taking a long time, log
+	 * another message when the response is finally received.
+	 */
+	if (logged)
+	{
+		now = GetCurrentTimestamp();
+		neon_shard_log(shard_no, LOG, "received response from pageserver after %0.3f s",
+						   (double) ((now - start_ts) / 1000000.0));
+			next_log_ts = now + LOG_INTERVAL_US;
 	}
 
 	return ret;
