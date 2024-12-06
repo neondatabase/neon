@@ -41,6 +41,9 @@ jobs:
       # Hence keeping target/ (and general cache size) smaller
       BUILD_TYPE: release
     steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
       - name: Set pg ${{ matrix.postgres-version }} for caching
         id: pg_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-${{ matrix.postgres-version }}) | tee -a "${GITHUB_OUTPUT}"
@@ -51,10 +54,6 @@ jobs:
         with:
           path: pg_install/${{ matrix.postgres-version }}
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ matrix.postgres-version }}-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
-
-      - name: Checkout main repo
-        if: steps.cache_pg.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
 
       - name: Checkout submodule vendor/postgres-${{ matrix.postgres-version }}
         if: steps.cache_pg.outputs.cache-hit != 'true'
@@ -103,6 +102,9 @@ jobs:
       # Hence keeping target/ (and general cache size) smaller
       BUILD_TYPE: release
     steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
       - name: Set pg v17 for caching
         id: pg_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v17) | tee -a "${GITHUB_OUTPUT}"
@@ -120,10 +122,6 @@ jobs:
         with:
           path: pg_install/build/walproposer-lib
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-walproposer_lib-v17-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
-
-      - name: Checkout main repo
-        if: steps.cache_walproposer_lib.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
 
       - name: Checkout submodule vendor/postgres-v17
         if: steps.cache_walproposer_lib.outputs.cache-hit != 'true'
@@ -162,6 +160,11 @@ jobs:
       # Hence keeping target/ (and general cache size) smaller
       BUILD_TYPE: release
     steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
       - name: Set pg v14 for caching
         id: pg_rev_v14
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) | tee -a "${GITHUB_OUTPUT}"
@@ -210,10 +213,6 @@ jobs:
             target
           key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
 
-      - name: Checkout main repo
-        uses: actions/checkout@v4
-        with:
-          submodules: true
 
       - name: Install build dependencies
         run: |
