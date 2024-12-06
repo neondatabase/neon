@@ -24,7 +24,7 @@ env:
 # - You can call a maximum of 20 unique reusable workflows from a single workflow file.
 # https://docs.github.com/en/actions/sharing-automations/reusing-workflows#limitations
 jobs:
-  check-macos-build:
+  build-pgxn:
     if: |
       (inputs.pg_versions != '[]' || inputs.rebuild_everything) && (
         contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
@@ -47,13 +47,7 @@ jobs:
       - name: Checkout submodule vendor/postgres-${{ matrix.postgres-version }}
         run: |
           git submodule init vendor/postgres-${{ matrix.postgres-version }}
-          git submodule update --depth 2 --recursive
-
-      - name: Checkout all submodule vendor/postgres-${{ matrix.postgres-version }}
-        if: matrix.postgres-version == 'v17'
-        run: |
-          git submodule init
-          git submodule update --depth 2 --recursive
+          git submodule update --depth 1 --recursive
 
       - name: Install build dependencies
         run: |
@@ -68,7 +62,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: pg_install/${{ matrix.postgres-version }}
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ matrix.postgres-version}}-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Set extra env for macOS
         run: |
@@ -92,23 +86,152 @@ jobs:
           make postgres-${{ matrix.postgres-version }} -j$(sysctl -n hw.ncpu)
 
       - name: Build Neon Pg Ext ${{ matrix.postgres-version }}
+        if: steps.cache_pg.outputs.cache-hit != 'true'
         run: |
           make "neon-pg-ext-${{ matrix.postgres-version }}" -j$(sysctl -n hw.ncpu)
 
       - name: Get postgres headers
-        if: matrix.postgres-version == 'v17'
+        if: steps.cache_pg.outputs.cache-hit != 'true'
         run: |
           make postgres-headers -j$(sysctl -n hw.ncpu)
 
+  build-walproposer-lib:
+    if: |
+      (inputs.pg_versions != '[]' || inputs.rebuild_everything) && (
+        contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
+        contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
+        github.ref_name == 'main'
+      )
+    timeout-minutes: 30
+    runs-on: macos-15
+    needs: [build-pgxn]
+    env:
+      # Use release build only, to have less debug info around
+      # Hence keeping target/ (and general cache size) smaller
+      BUILD_TYPE: release
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Checkout submodule vendor/postgres-v17
+        run: |
+          git submodule init vendor/postgres-v17
+          git submodule update --depth 1 --recursive
+
+      - name: Install build dependencies
+        run: |
+          brew install flex bison openssl protobuf icu4c
+
+      - name: Set pg v17 for caching
+        id: pg_rev
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v17) | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Cache postgres v17 build
+        id: cache_pg
+        uses: actions/cache@v4
+        with:
+          path: pg_install/v17
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-v17-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Set extra env for macOS
+        run: |
+          echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
+          echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
+
+      - name: Cache cargo deps (only for v17)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            !~/.cargo/registry/src
+            ~/.cargo/git
+            target
+          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
+
       - name: Build walproposer-lib (only for v17)
-        if: matrix.postgres-version == 'v17'
         run:
           make walproposer-lib -j$(sysctl -n hw.ncpu)
 
-      - name: Run cargo build (only for v17)
+  cargo-build:
+    if: |
+      (inputs.pg_versions != '[]' || inputs.rebuild_everything) && (
+        contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
+        contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
+        github.ref_name == 'main'
+      )
+    timeout-minutes: 30
+    runs-on: macos-15
+    env:
+      # Use release build only, to have less debug info around
+      # Hence keeping target/ (and general cache size) smaller
+      BUILD_TYPE: release
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install build dependencies
+        run: |
+          brew install flex bison openssl protobuf icu4c
+
+      - name: Set pg v14 for caching
+        id: pg_rev_v14
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) | tee -a "${GITHUB_OUTPUT}"
+      - name: Set pg v15 for caching
+        id: pg_rev_v15
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) | tee -a "${GITHUB_OUTPUT}"
+      - name: Set pg v16 for caching
+        id: pg_rev_v16
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v16) | tee -a "${GITHUB_OUTPUT}"
+      - name: Set pg v17 for caching
+        id: pg_rev_v17
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v17) | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Cache postgres v14 build
+        id: cache_pg
+        uses: actions/cache@v4
+        with:
+          path: pg_install/v14
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-v14-${{ steps.pg_rev_v14.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+      - name: Cache postgres v15 build
+        id: cache_pg
+        uses: actions/cache@v4
+        with:
+          path: pg_install/v15
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-v15-${{ steps.pg_rev_v15.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+      - name: Cache postgres v16 build
+        id: cache_pg
+        uses: actions/cache@v4
+        with:
+          path: pg_install/v16
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-v16-${{ steps.pg_rev_v16.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+      - name: Cache postgres v17 build
+        id: cache_pg
+        uses: actions/cache@v4
+        with:
+          path: pg_install/v17
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-v17-${{ steps.pg_rev_v17.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Set extra env for macOS
+        run: |
+          echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
+          echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
+
+      - name: Cache cargo deps (only for v17)
         if: matrix.postgres-version == 'v17'
-        run: PQ_LIB_DIR=$(pwd)/pg_install/${{ matrix.postgres-version }}/lib cargo build --all --release -j$(sysctl -n hw.ncpu)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            !~/.cargo/registry/src
+            ~/.cargo/git
+            target
+          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
+
+
+      - name: Run cargo build (only for v17)
+        run: PQ_LIB_DIR=$(pwd)/pg_install/v17/lib cargo build --all --release -j$(sysctl -n hw.ncpu)
 
       - name: Check that no warnings are produced (only for v17)
-        if: matrix.postgres-version == 'v17'
         run: ./run_clippy.sh
