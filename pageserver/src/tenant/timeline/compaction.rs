@@ -1179,11 +1179,12 @@ impl Timeline {
                     .await
                     .map_err(CompactionError::Other)?;
             } else {
-                debug!(
-                    "Dropping key {} during compaction (it belongs on shard {:?})",
-                    key,
-                    self.shard_identity.get_shard_number(&key)
-                );
+                let shard = self.shard_identity.shard_index();
+                let owner = self.shard_identity.get_shard_number(&key);
+                if cfg!(debug_assertions) {
+                    panic!("key {key} does not belong on shard {shard}, owned by {owner}");
+                }
+                debug!("dropping key {key} during compaction (it belongs on shard {owner})");
             }
 
             if !new_layers.is_empty() {
@@ -2054,6 +2055,11 @@ impl Timeline {
                 // This is not handled in the filter iterator because shard is determined by hash.
                 // Therefore, it does not give us any performance benefit to do things like skip
                 // a whole layer file as handling key spaces (ranges).
+                if cfg!(debug_assertions) {
+                    let shard = self.shard_identity.shard_index();
+                    let owner = self.shard_identity.get_shard_number(&key);
+                    panic!("key {key} does not belong on shard {shard}, owned by {owner}");
+                }
                 continue;
             }
             if !job_desc.compaction_key_range.contains(&key) {
