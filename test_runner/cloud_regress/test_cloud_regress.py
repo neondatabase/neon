@@ -5,10 +5,8 @@ Run the regression tests on the cloud instance of Neon
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import RemotePostgres
 from fixtures.pg_version import PgVersion
 
