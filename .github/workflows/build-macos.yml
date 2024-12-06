@@ -213,6 +213,13 @@ jobs:
             target
           key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
 
+      - name: Cache walproposer-lib
+        id: cache_walproposer_lib
+        uses: actions/cache@v4
+        with:
+          path: pg_install/build/walproposer-lib
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-walproposer_lib-v17-${{ steps.pg_rev_v17.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
 
       - name: Install build dependencies
         run: |
@@ -223,8 +230,8 @@ jobs:
           echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
           echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
 
-      - name: Run cargo build (only for v16)
-        run: PQ_LIB_DIR=$(pwd)/pg_install/v16/lib cargo build --all --release -j$(sysctl -n hw.ncpu)
+      - name: Run cargo build (only for v17)
+        run: PQ_LIB_DIR=$(pwd)/pg_install/v17/lib cargo build --all --release -j$(sysctl -n hw.ncpu)
 
-      - name: Check that no warnings are produced (only for v16)
+      - name: Check that no warnings are produced (only for v17)
         run: ./run_clippy.sh
