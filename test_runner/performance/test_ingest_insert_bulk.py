@@ -34,7 +34,9 @@ def test_ingest_insert_bulk(
     size: int,
 ):
     """
-    Benchmarks ingestion of 5 GB of sequential insert WAL with concurrent inserts.
+    Benchmarks ingestion of 5 GB of sequential insert WAL. Measures ingestion and S3 upload
+    separately. Also does a Safekeeper→Pageserver re-ingestion to measure Pageserver ingestion in
+    isolation.
     """
 
     CONCURRENCY = 1  # 1 is optimal without fsync or backpressure
@@ -45,7 +47,9 @@ def test_ingest_insert_bulk(
 
     if s3:
         neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-        neon_env_builder.enable_safekeeper_remote_storage(s3_storage())
+        # NB: don't use S3 for Safekeeper. It doesn't affect throughput (no backpressure), but it
+        # would compete with Pageserver for bandwidth.
+        # neon_env_builder.enable_safekeeper_remote_storage(s3_storage())
 
     env = neon_env_builder.init_start()
 
