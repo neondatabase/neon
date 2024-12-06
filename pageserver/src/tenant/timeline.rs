@@ -1457,23 +1457,31 @@ impl Timeline {
         Ok(lease)
     }
 
-    /// Flush to disk all data that was written with the put_* functions
+    /// Freeze the current open in-memory layer. It will be written to disk on next iteration.
+    /// Returns the flush request ID which can be awaited with wait_flush_completion().
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
+    pub(crate) async fn freeze(&self) -> Result<u64, FlushLayerError> {
+        self.freeze0().await
+    }
+
+    /// Freeze and flush the open in-memory layer, waiting for it to be written to disk.
     #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
     pub(crate) async fn freeze_and_flush(&self) -> Result<(), FlushLayerError> {
         self.freeze_and_flush0().await
     }
 
+    /// Freeze the current open in-memory layer. It will be written to disk on next iteration.
+    /// Returns the flush request ID which can be awaited with wait_flush_completion().
+    pub(crate) async fn freeze0(&self) -> Result<u64, FlushLayerError> {
+        let mut g = self.write_lock.lock().await;
+        let to_lsn = self.get_last_record_lsn();
+        self.freeze_inmem_layer_at(to_lsn, &mut g).await
+    }
+
     // This exists to provide a non-span creating version of `freeze_and_flush` we can call without
     // polluting the span hierarchy.
     pub(crate) async fn freeze_and_flush0(&self) -> Result<(), FlushLayerError> {
-        let token = {
-            // Freeze the current open in-memory layer. It will be written to disk on next
-            // iteration.
-            let mut g = self.write_lock.lock().await;
-
-            let to_lsn = self.get_last_record_lsn();
-            self.freeze_inmem_layer_at(to_lsn, &mut g).await?
-        };
+        let token = self.freeze0().await?;
         self.wait_flush_completion(token).await
     }
 
