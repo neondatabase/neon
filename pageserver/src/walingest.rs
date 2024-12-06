@@ -582,18 +582,21 @@ impl WalIngest {
                 forknum: FSM_FORKNUM,
             };
 
+            // Zero out the last remaining FSM page, if this shard owns it. We are not precise here,
+            // and instead of digging in the FSM bitmap format we just clear the whole page.
             let fsm_logical_page_no = blkno / pg_constants::SLOTS_PER_FSM_PAGE;
             let mut fsm_physical_page_no = fsm_logical_to_physical(fsm_logical_page_no);
-            if blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0 {
-                // Tail of last remaining FSM page has to be zeroed.
-                // We are not precise here and instead of digging in FSM bitmap format just clear the whole page.
+            if blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0
+                && self
+                    .shard
+                    .is_key_local(&rel_block_to_key(rel, fsm_physical_page_no))
+            {
                 modification.put_rel_page_image_zero(rel, fsm_physical_page_no)?;
                 fsm_physical_page_no += 1;
             }
-            // TODO: re-examine the None case here wrt. sharding; should we error?
+            // Truncate this shard's view of the FSM relation size, if it even has one.
             let nblocks = get_relsize(modification, rel, ctx).await?.unwrap_or(0);
             if nblocks > fsm_physical_page_no {
-                // check if something to do: FSM is larger than truncate position
                 self.put_rel_truncation(modification, rel, fsm_physical_page_no, ctx)
                     .await?;
             }
@@ -617,7 +620,7 @@ impl WalIngest {
             // tail bits in the last remaining map page, representing truncated heap
             // blocks, need to be cleared. This is not only tidy, but also necessary
             // because we don't get a chance to clear the bits if the heap is extended
-            // again.
+            // again. Only do this on the shard that owns the page.
             if (trunc_byte != 0 || trunc_offs != 0)
                 && self.shard.is_key_local(&rel_block_to_key(rel, vm_page_no))
             {
@@ -631,10 +634,9 @@ impl WalIngest {
                 )?;
                 vm_page_no += 1;
             }
-            // TODO: re-examine the None case here wrt. sharding; should we error?
+            // Truncate this shard's view of the VM relation size, if it even has one.
             let nblocks = get_relsize(modification, rel, ctx).await?.unwrap_or(0);
             if nblocks > vm_page_no {
-                // check if something to do: VM is larger than truncate position
                 self.put_rel_truncation(modification, rel, vm_page_no, ctx)
                     .await?;
             }
