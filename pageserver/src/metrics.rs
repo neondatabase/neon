@@ -1223,7 +1223,8 @@ pub(crate) mod virtual_file_io_engine {
     });
 }
 
-pub(crate) struct SmgrOpTimer {
+pub(crate) struct SmgrOpTimer(Option<SmgrOpTimerInner>);
+pub(crate) struct SmgrOpTimerInner {
     global_latency_histo: Histogram,
 
     // Optional because not all op types are tracked per-timeline
@@ -1245,21 +1246,12 @@ pub(crate) struct SmgrOpFlushInProgress {
     per_timeline_micros: IntCounter,
 }
 
-impl SmgrOpTimer {
+impl SmgrOpTimerInner {
     pub(crate) fn deduct_throttle(&mut self, throttle: &Option<Duration>) {
         let Some(throttle) = throttle else {
             return;
         };
         self.throttled += *throttle;
-    }
-
-    pub(crate) fn observe_smgr_op_completion_and_start_flushing(mut self) -> SmgrOpFlushInProgress {
-        let flush_start = self.smgr_op_end();
-        SmgrOpFlushInProgress {
-            base: flush_start,
-            global_micros: self.global_flush_in_progress_micros.take().unwrap(),
-            per_timeline_micros: self.per_timeline_flush_in_progress_micros.take().unwrap(),
-        }
     }
 
     /// Must only call once!
@@ -1297,9 +1289,44 @@ impl SmgrOpTimer {
     }
 }
 
+impl SmgrOpTimer {
+    pub(crate) fn observe_smgr_op_completion_and_start_flushing(mut self) -> SmgrOpFlushInProgress {
+        let flush_start = self.smgr_op_end();
+        let SmgrOpTimerInner {
+            global_flush_in_progress_micros,
+            per_timeline_flush_in_progress_micros,
+            ..
+        } = self.0.take().unwrap();
+        SmgrOpFlushInProgress {
+            base: flush_start,
+            global_micros: global_flush_in_progress_micros.unwrap(),
+            per_timeline_micros: per_timeline_flush_in_progress_micros.unwrap(),
+        }
+    }
+}
+
+impl std::ops::Deref for SmgrOpTimer {
+    type Target = SmgrOpTimerInner;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().unwrap()
+    }
+}
+
+impl std::ops::DerefMut for SmgrOpTimer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().unwrap()
+    }
+}
+
 impl Drop for SmgrOpTimer {
     fn drop(&mut self) {
-        self.smgr_op_end();
+        if let Some(inner) = self.0.take() {
+            inner.smgr_op_end();
+            // no flush timer
+        } else {
+            // observe_smgr_op_completion_and_start_flushing was called
+        }
     }
 }
 
@@ -1617,7 +1644,7 @@ impl SmgrQueryTimePerTimeline {
             None
         };
 
-        SmgrOpTimer {
+        SmgrOpTimer(Some(SmgrOpTimerInner {
             global_latency_histo: self.global_latency[op as usize].clone(),
             per_timeline_latency_histo,
             start: started_at,
@@ -1627,7 +1654,7 @@ impl SmgrQueryTimePerTimeline {
             per_timeline_flush_in_progress_micros: Some(
                 self.per_timeline_flush_in_progress_micros.clone(),
             ),
-        }
+        }))
     }
 
     pub(crate) fn observe_getpage_batch_start(&self, batch_size: usize) {
