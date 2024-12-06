@@ -60,7 +60,7 @@ jobs:
       - name: Change tests according to the generated password
         env:
           DBPASS: ${{ steps.pwgen.outputs.DBPASS }}
-          PG_VERSION: ${{matrix.pg-version}}
+          PG_VERSION: ${{inputs.pg-version}}
         run: |
           cd vendor/postgres-v"${PG_VERSION}"/src/test/regress
           for fname in sql/*.sql expected/*.out; do
@@ -79,6 +79,43 @@ jobs:
           path: /tmp/neon/
           prefix: latest
 
+      - name: Get endpoint ID
+        id: endpoint-id
+        uses: ./.github/actions/neon-get-endpoint
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{inputs.project-id}}
+
+      - name: Get the connection URI
+        id: connect-uri
+        uses: ./.github/actions/neon-get-connection-uri
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{inputs.project-id}}
+          endpoint_id: ${{steps.endpoint-id.outputs.id}}
+
+      - name: Create a new branch
+        id: create-branch
+        uses: ./.github/actions/neon-branch-create
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{inputs.project-id}}
+          add_endpoint: false
+
+      - name: Attach the endpoint to the new branch
+        uses: ./.github/actions/neon-attach-endpoint-to-branch
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{inputs.project-id}}
+          endpoint_id: ${{steps.endpoint-id.outputs.id}}
+          branch_id: ${{steps.create-branch.outputs.branch_id}}
+
+      - name: Wait for operations to be completed
+        uses: ./.github/actions/neon-wait-operations-to-finish
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{inputs.project-id}}
+
       - name: Run the regression tests
         uses: ./.github/actions/run-python-test-set
         with:
@@ -87,7 +124,23 @@ jobs:
           pg_version: ${{ matrix.pg-version }}
           extra_params: -m remote_cluster
         env:
-          BENCHMARK_CONNSTR: ${{ matrix.pg-version == 17 && secrets.PG_REGRESS_CONNSTR_17 || secrets.PG_REGRESS_CONNSTR }}
+          BENCHMARK_CONNSTR: ${{steps.connect-uri.outputs.uri}}
+
+      - name: Re-attach the endpoint to the old branch
+        if: always()
+        uses: ./.github/actions/neon-attach-endpoint-to-branch
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{inputs.project-id}}
+          endpoint_id: ${{steps.endpoint-id.outputs.id}}
+          branch_id: ${{steps.endpoint-id.outputs.branch_id}}
+
+      - name: Delete branch
+        uses: ./.github/actions/neon-branch-delete
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{inputs.project-id}}
+          branch_id: ${{steps.create-branch.outputs.branch_id}}
 
       - name: Create Allure report
         id: create-allure-report
