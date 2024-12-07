@@ -488,7 +488,20 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
 
-    def patch_tenant_config_client_side(
+    def patch_tenant_config(self, tenant_id: TenantId | TenantShardId, updates: dict[str, Any]):
+        """
+        Only use this via storage_controller.pageserver_api().
+
+        See `set_tenant_config` for more information.
+        """
+        assert "tenant_id" not in updates.keys()
+        res = self.patch(
+            f"http://localhost:{self.port}/v1/tenant/config",
+            json={**updates, "tenant_id": str(tenant_id)},
+        )
+        self.verbose_error(res)
+
+    def update_tenant_config(
         self,
         tenant_id: TenantId,
         inserts: dict[str, Any] | None = None,
@@ -499,13 +512,13 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
         See `set_tenant_config` for more information.
         """
-        current = self.tenant_config(tenant_id).tenant_specific_overrides
-        if inserts is not None:
-            current.update(inserts)
-        if removes is not None:
-            for key in removes:
-                del current[key]
-        self.set_tenant_config(tenant_id, current)
+        if inserts is None:
+            inserts = {}
+        if removes is None:
+            removes = []
+
+        patch = inserts | {remove: None for remove in removes}
+        self.patch_tenant_config(tenant_id, patch)
 
     def tenant_size(self, tenant_id: TenantId | TenantShardId) -> int:
         return self.tenant_size_and_modelinputs(tenant_id)[0]

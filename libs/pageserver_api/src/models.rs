@@ -17,7 +17,7 @@ use std::{
 
 use byteorder::{BigEndian, ReadBytesExt};
 use postgres_ffi::BLCKSZ;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::serde_as;
 use utils::{
     completion,
@@ -325,6 +325,99 @@ impl Default for ShardParameters {
     }
 }
 
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub enum FieldPatch<T> {
+    Upsert(T),
+    Remove,
+    #[default]
+    Noop,
+}
+
+impl<T> FieldPatch<T> {
+    fn is_noop(&self) -> bool {
+        matches!(self, FieldPatch::Noop)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for FieldPatch<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::deserialize(deserializer).map(|opt| match opt {
+            None => FieldPatch::Remove,
+            Some(val) => FieldPatch::Upsert(val),
+        })
+    }
+}
+
+impl<T: Serialize> Serialize for FieldPatch<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            FieldPatch::Upsert(val) => serializer.serialize_some(val),
+            FieldPatch::Remove => serializer.serialize_none(),
+            FieldPatch::Noop => unreachable!(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
+#[serde(default)]
+pub struct TenantConfigPatch {
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub checkpoint_distance: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub checkpoint_timeout: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_target_size: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_period: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_threshold: FieldPatch<usize>,
+    // defer parsing compaction_algorithm, like eviction_policy
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_algorithm: FieldPatch<CompactionAlgorithmSettings>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_horizon: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_period: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub image_creation_threshold: FieldPatch<usize>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub pitr_interval: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub walreceiver_connect_timeout: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub lagging_wal_timeout: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub max_lsn_wal_lag: FieldPatch<NonZeroU64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub eviction_policy: FieldPatch<EvictionPolicy>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub min_resident_size_override: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub evictions_low_residence_duration_metric_threshold: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub heatmap_period: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub lazy_slru_download: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub timeline_get_throttle: FieldPatch<ThrottleConfig>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub image_layer_creation_check_threshold: FieldPatch<u8>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub lsn_lease_length: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub lsn_lease_length_for_ts: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub timeline_offloading: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub wal_receiver_protocol_override: FieldPatch<PostgresClientProtocol>,
+}
+
 /// An alternative representation of `pageserver::tenant::TenantConf` with
 /// simpler types.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
@@ -354,6 +447,51 @@ pub struct TenantConfig {
     pub lsn_lease_length_for_ts: Option<String>,
     pub timeline_offloading: Option<bool>,
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
+}
+
+macro_rules! apply_field_patch {
+    ($self:ident, $to:ident, $field:ident) => {
+        match $self.$field {
+            FieldPatch::Upsert(value) => $to.$field = Some(value),
+            FieldPatch::Remove => $to.$field = None,
+            FieldPatch::Noop => {}
+        }
+    };
+}
+
+impl TenantConfig {
+    pub fn apply_patch(mut self, patch: TenantConfigPatch) -> TenantConfig {
+        apply_field_patch!(patch, self, checkpoint_distance);
+        apply_field_patch!(patch, self, checkpoint_timeout);
+        apply_field_patch!(patch, self, compaction_target_size);
+        apply_field_patch!(patch, self, compaction_period);
+        apply_field_patch!(patch, self, compaction_threshold);
+        apply_field_patch!(patch, self, compaction_algorithm);
+        apply_field_patch!(patch, self, gc_horizon);
+        apply_field_patch!(patch, self, gc_period);
+        apply_field_patch!(patch, self, image_creation_threshold);
+        apply_field_patch!(patch, self, pitr_interval);
+        apply_field_patch!(patch, self, walreceiver_connect_timeout);
+        apply_field_patch!(patch, self, lagging_wal_timeout);
+        apply_field_patch!(patch, self, max_lsn_wal_lag);
+        apply_field_patch!(patch, self, eviction_policy);
+        apply_field_patch!(patch, self, min_resident_size_override);
+        apply_field_patch!(
+            patch,
+            self,
+            evictions_low_residence_duration_metric_threshold
+        );
+        apply_field_patch!(patch, self, heatmap_period);
+        apply_field_patch!(patch, self, lazy_slru_download);
+        apply_field_patch!(patch, self, timeline_get_throttle);
+        apply_field_patch!(patch, self, image_layer_creation_check_threshold);
+        apply_field_patch!(patch, self, lsn_lease_length);
+        apply_field_patch!(patch, self, lsn_lease_length_for_ts);
+        apply_field_patch!(patch, self, timeline_offloading);
+        apply_field_patch!(patch, self, wal_receiver_protocol_override);
+
+        self
+    }
 }
 
 /// The policy for the aux file storage.
@@ -684,6 +822,14 @@ impl TenantConfigRequest {
         let config = TenantConfig::default();
         TenantConfigRequest { tenant_id, config }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantConfigPatchRequest {
+    pub tenant_id: TenantId,
+    #[serde(flatten)]
+    pub config: TenantConfigPatch, // as we have a flattened field, we should reject all unknown fields in it
 }
 
 /// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
@@ -1698,5 +1844,27 @@ mod tests {
                 "Display is the serde serialization"
             );
         }
+    }
+
+    #[test]
+    fn test_tenant_config_patch_request_serde() {
+        let patch_request = TenantConfigPatchRequest {
+            tenant_id: TenantId::from_str("17c6d121946a61e5ab0fe5a2fd4d8215").unwrap(),
+            config: TenantConfigPatch {
+                checkpoint_distance: FieldPatch::Upsert(42),
+                gc_horizon: FieldPatch::Remove,
+                compaction_threshold: FieldPatch::Noop,
+                ..TenantConfigPatch::default()
+            },
+        };
+
+        let json = serde_json::to_string(&patch_request).unwrap();
+
+        let expected = r#"{"tenant_id":"17c6d121946a61e5ab0fe5a2fd4d8215","checkpoint_distance":42,"gc_horizon":null}"#;
+        assert_eq!(json, expected);
+
+        let decoded: TenantConfigPatchRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.tenant_id, patch_request.tenant_id);
+        assert_eq!(decoded.config, patch_request.config);
     }
 }

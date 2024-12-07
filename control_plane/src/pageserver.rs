@@ -435,7 +435,7 @@ impl PageServerNode {
     ) -> anyhow::Result<()> {
         let config = Self::parse_config(settings)?;
         self.http_client
-            .tenant_config(&models::TenantConfigRequest { tenant_id, config })
+            .set_tenant_config(&models::TenantConfigRequest { tenant_id, config })
             .await?;
 
         Ok(())

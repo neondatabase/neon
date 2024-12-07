@@ -8,10 +8,11 @@
 //! We cannot use global or default config instead, because wrong settings
 //! may lead to a data loss.
 //!
+use anyhow::Context;
 pub(crate) use pageserver_api::config::TenantConfigToml as TenantConf;
 use pageserver_api::models::CompactionAlgorithmSettings;
 use pageserver_api::models::EvictionPolicy;
-use pageserver_api::models::{self, ThrottleConfig};
+use pageserver_api::models::{self, FieldPatch, TenantConfigPatch, ThrottleConfig};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
@@ -359,6 +360,30 @@ pub struct TenantConfOpt {
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
 }
 
+macro_rules! apply_field_patch {
+    ($patch:ident, $self:ident, $field:ident) => {
+        match $patch.$field {
+            FieldPatch::Upsert(value) => $self.$field = Some(value),
+            FieldPatch::Remove => $self.$field = None,
+            FieldPatch::Noop => {}
+        }
+    };
+}
+
+macro_rules! apply_field_patch_transform {
+    ($patch:ident, $self:ident, $field:ident, $transform:expr) => {
+        match $patch.$field {
+            FieldPatch::Upsert(ref value) => {
+                $self.$field = Some(($transform)(value).with_context(|| {
+                    format!("Failed to transform value for {}", stringify!($field))
+                })?);
+            }
+            FieldPatch::Remove => $self.$field = None,
+            FieldPatch::Noop => {}
+        }
+    };
+}
+
 impl TenantConfOpt {
     pub fn merge(&self, global_conf: TenantConf) -> TenantConf {
         TenantConf {
@@ -426,6 +451,50 @@ impl TenantConfOpt {
                 .wal_receiver_protocol_override
                 .or(global_conf.wal_receiver_protocol_override),
         }
+    }
+
+    pub fn apply_patch(mut self, patch: TenantConfigPatch) -> anyhow::Result<TenantConfOpt> {
+        apply_field_patch!(patch, self, checkpoint_distance);
+        apply_field_patch_transform!(patch, self, checkpoint_timeout, humantime::parse_duration);
+        apply_field_patch!(patch, self, compaction_target_size);
+        apply_field_patch_transform!(patch, self, compaction_period, humantime::parse_duration);
+        apply_field_patch!(patch, self, compaction_threshold);
+        apply_field_patch!(patch, self, compaction_algorithm);
+        apply_field_patch!(patch, self, gc_horizon);
+        apply_field_patch_transform!(patch, self, gc_period, humantime::parse_duration);
+        apply_field_patch!(patch, self, image_creation_threshold);
+        apply_field_patch_transform!(patch, self, pitr_interval, humantime::parse_duration);
+        apply_field_patch_transform!(
+            patch,
+            self,
+            walreceiver_connect_timeout,
+            humantime::parse_duration
+        );
+        apply_field_patch_transform!(patch, self, lagging_wal_timeout, humantime::parse_duration);
+        apply_field_patch!(patch, self, max_lsn_wal_lag);
+        apply_field_patch!(patch, self, eviction_policy);
+        apply_field_patch!(patch, self, min_resident_size_override);
+        apply_field_patch_transform!(
+            patch,
+            self,
+            evictions_low_residence_duration_metric_threshold,
+            humantime::parse_duration
+        );
+        apply_field_patch_transform!(patch, self, heatmap_period, humantime::parse_duration);
+        apply_field_patch!(patch, self, lazy_slru_download);
+        apply_field_patch!(patch, self, timeline_get_throttle);
+        apply_field_patch!(patch, self, image_layer_creation_check_threshold);
+        apply_field_patch_transform!(patch, self, lsn_lease_length, humantime::parse_duration);
+        apply_field_patch_transform!(
+            patch,
+            self,
+            lsn_lease_length_for_ts,
+            humantime::parse_duration
+        );
+        apply_field_patch!(patch, self, timeline_offloading);
+        apply_field_patch!(patch, self, wal_receiver_protocol_override);
+
+        Ok(self)
     }
 }
 
