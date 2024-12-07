@@ -2,6 +2,7 @@
 
 # Usage: ./modelcheck.sh <config_file> <spec_file>, e.g.
 # ./modelcheck.sh models/MCProposerAcceptorStatic_p2_a3_t3_l3.cfg MCProposerAcceptorStatic.tla
+# ./modelcheck.sh models/MCProposerAcceptorReconfig_p2_a3_t3_l3_c3.cfg MCProposerAcceptorReconfig.tla
 CONFIG=$1
 SPEC=$2
 
@@ -45,5 +46,6 @@ echo "" >> $outfile
 # https://docs.tlapl.us/codebase:architecture#fingerprint_sets_fpsets
 #
 # Add -simulate to run in infinite simulation mode.
+# -coverage 1 is useful for profiling (check how many times actions are taken).
 java -Xmx$MEM -XX:MaxDirectMemorySize=$MEM -XX:+UseParallelGC -Dtlc2.tool.fp.FPSet.impl=tlc2.tool.fp.OffHeapDiskFPSet \
   -cp "${TOOLSPATH}" tlc2.TLC $SPEC -config $CONFIG -workers auto -gzip | tee -a $outfile
