@@ -1076,12 +1076,6 @@ impl PageServerHandler {
 
             // what we want to do
             let flush_fut = pgb_writer.flush();
-            // make log noise if flushing is really slow
-            let flush_fut = timed(
-                flush_fut,
-                "flush pagestream response",
-                Duration::from_secs(60),
-            );
             // metric for how long flushing takes
             let flush_fut = match flushing_timer {
                 Some(flushing_timer) => {
