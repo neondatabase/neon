@@ -23,8 +23,8 @@ use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn, Instrument};
 use wal_decoder::{
+    codec::make_decoder,
     models::{FlushUncommittedRecords, InterpretedWalRecord, InterpretedWalRecords},
-    wire_format::FromWireFormat,
 };
 
 use super::TaskStateUpdate;
@@ -264,12 +264,12 @@ pub(super) async fn handle_walreceiver_connection(
 
     let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx).await?;
 
-    let interpreted_proto_config = match protocol {
+    let interpreted_proto_decoder = match protocol {
         PostgresClientProtocol::Vanilla => None,
         PostgresClientProtocol::Interpreted {
             format,
             compression,
-        } => Some((format, compression)),
+        } => Some(make_decoder(format, compression)),
     };
 
     while let Some(replication_message) = {
@@ -345,14 +345,12 @@ pub(super) async fn handle_walreceiver_connection(
                 // were interpreted.
                 let streaming_lsn = Lsn::from(raw.streaming_lsn());
 
-                let (format, compression) = interpreted_proto_config.unwrap();
-                let batch = InterpretedWalRecords::from_wire(raw.data(), format, compression)
-                    .await
-                    .with_context(|| {
-                        anyhow::anyhow!(
+                let decoder = interpreted_proto_decoder.as_ref().unwrap();
+                let batch = decoder.decode(raw.data()).await.with_context(|| {
+                    anyhow::anyhow!(
                         "Failed to deserialize interpreted records ending at LSN {streaming_lsn}"
                     )
-                    })?;
+                })?;
 
                 let InterpretedWalRecords {
                     records,
