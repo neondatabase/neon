@@ -327,6 +327,7 @@ impl Default for ShardParameters {
 
 /// An alternative representation of `pageserver::tenant::TenantConf` with
 /// simpler types.
+#[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
 pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
