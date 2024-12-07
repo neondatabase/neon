@@ -65,7 +65,7 @@ use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
-use crate::{basebackup, timed, timed_after_cancellation};
+use crate::{basebackup, timed_after_cancellation};
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
