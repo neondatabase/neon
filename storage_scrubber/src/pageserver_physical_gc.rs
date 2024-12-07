@@ -4,14 +4,13 @@ use std::time::Duration;
 
 use crate::checks::{
     list_tenant_manifests, list_timeline_blobs, BlobDataParseResult, ListTenantManifestResult,
+    RemoteTenantManifestInfo,
 };
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
 use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId, MAX_RETRIES};
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
-use pageserver::tenant::remote_timeline_client::manifest::{
-    OffloadedTimelineManifest, TenantManifest,
-};
+use pageserver::tenant::remote_timeline_client::manifest::OffloadedTimelineManifest;
 use pageserver::tenant::remote_timeline_client::{
     parse_remote_index_path, parse_remote_tenant_manifest_path, remote_layer_path,
 };
@@ -530,7 +529,7 @@ async fn gc_tenant_manifests(
     target: &RootTarget,
     mode: GcMode,
     tenant_shard_id: TenantShardId,
-) -> anyhow::Result<(GcSummary, Option<TenantManifest>)> {
+) -> anyhow::Result<(GcSummary, Option<RemoteTenantManifestInfo>)> {
     let mut gc_summary = GcSummary::default();
     match list_tenant_manifests(remote_client, tenant_shard_id, target).await? {
         ListTenantManifestResult::WithErrors {
@@ -542,30 +541,31 @@ async fn gc_tenant_manifests(
             }
             Ok((gc_summary, None))
         }
-        ListTenantManifestResult::NoErrors(mut manifest_info) => {
-            let Some((latest_gen, latest_manifest)) = manifest_info.latest_generation else {
+        ListTenantManifestResult::NoErrors {
+            latest_generation,
+            mut manifests,
+        } => {
+            let Some(latest_generation) = latest_generation else {
                 return Ok((gc_summary, None));
             };
-            manifest_info
-                .manifests
-                .sort_by_key(|(generation, _obj)| *generation);
+            manifests.sort_by_key(|(generation, _obj)| *generation);
             // skip the two latest generations (they don't neccessarily have to be 1 apart from each other)
-            let candidates = manifest_info.manifests.iter().rev().skip(2);
+            let candidates = manifests.iter().rev().skip(2);
             for (_generation, key) in candidates {
                 maybe_delete_tenant_manifest(
                     remote_client,
                     &min_age,
-                    latest_gen,
+                    latest_generation.generation,
                     key,
                     mode,
                     &mut gc_summary,
                 )
                 .instrument(
-                    info_span!("maybe_delete_tenant_manifest", %tenant_shard_id, ?latest_gen, %key.key),
+                    info_span!("maybe_delete_tenant_manifest", %tenant_shard_id, ?latest_generation.generation, %key.key),
                 )
                 .await;
             }
-            Ok((gc_summary, Some(latest_manifest)))
+            Ok((gc_summary, Some(latest_generation)))
         }
     }
 }
@@ -577,7 +577,7 @@ async fn gc_timeline(
     mode: GcMode,
     ttid: TenantShardTimelineId,
     accumulator: &Arc<std::sync::Mutex<TenantRefAccumulator>>,
-    tenant_manifest: Arc<Option<TenantManifest>>,
+    tenant_manifest_info: Arc<Option<RemoteTenantManifestInfo>>,
 ) -> anyhow::Result<GcSummary> {
     let mut summary = GcSummary::default();
     let data = list_timeline_blobs(remote_client, ttid, target).await?;
@@ -602,14 +602,57 @@ async fn gc_timeline(
         }
     };
 
-    if let Some(tenant_manifest) = &*tenant_manifest {
+    if let Some(tenant_manifest_info) = &*tenant_manifest_info {
         // TODO: this is O(n^2) in the number of offloaded timelines. Do a hashmap lookup instead.
-        let maybe_offloaded = tenant_manifest
+        let maybe_offloaded = tenant_manifest_info
+            .manifest
             .offloaded_timelines
             .iter()
             .find(|offloaded_timeline| offloaded_timeline.timeline_id == ttid.timeline_id);
         if let Some(offloaded) = maybe_offloaded {
-            validate_index_part_with_offloaded(ttid, index_part, offloaded);
+            let warnings = validate_index_part_with_offloaded(ttid, index_part, offloaded);
+            let warn = if warnings.is_empty() {
+                false
+            } else {
+                // Verify that the manifest hasn't changed. If it has, a potential racing change could have been cause for our troubles.
+                match list_tenant_manifests(remote_client, ttid.tenant_shard_id, target).await? {
+                    ListTenantManifestResult::WithErrors {
+                        errors,
+                        unknown_keys: _,
+                    } => {
+                        for (_key, error) in errors {
+                            tracing::warn!(%ttid, "list_tenant_manifests in gc_timeline: {error}");
+                        }
+                        true
+                    }
+                    ListTenantManifestResult::NoErrors {
+                        latest_generation,
+                        manifests: _,
+                    } => {
+                        if let Some(new_latest_gen) = latest_generation {
+                            let manifest_changed = (
+                                new_latest_gen.generation,
+                                new_latest_gen.listing_object.last_modified,
+                            ) == (
+                                tenant_manifest_info.generation,
+                                tenant_manifest_info.listing_object.last_modified,
+                            );
+                            if manifest_changed {
+                                tracing::debug!(%ttid, "tenant manifest changed since it was loaded, suppressing {} warnings", warnings.len());
+                            }
+                            manifest_changed
+                        } else {
+                            // The latest generation is gone. This timeline is in the progress of being deleted?
+                            false
+                        }
+                    }
+                }
+            };
+            if warn {
+                for warning in warnings {
+                    tracing::warn!(%ttid, "{}", warning);
+                }
+            }
         }
     }
 
@@ -628,21 +671,32 @@ fn validate_index_part_with_offloaded(
     ttid: TenantShardTimelineId,
     index_part: &IndexPart,
     offloaded: &OffloadedTimelineManifest,
-) {
+) -> Vec<String> {
+    let mut warnings = Vec::new();
     if let Some(archived_at_index_part) = index_part.archived_at {
         if archived_at_index_part
             .signed_duration_since(offloaded.archived_at)
             .num_seconds()
             != 0
         {
-            tracing::warn!(%ttid, "index-part archived_at={} differs from manifest archived_at={}", archived_at_index_part, offloaded.archived_at);
+            warnings.push(format!(
+                "index-part archived_at={} differs from manifest archived_at={}",
+                archived_at_index_part, offloaded.archived_at
+            ));
         }
     } else {
-        tracing::warn!(%ttid, "Timeline offloaded in manifest but not archived in index-part");
+        warnings.push(format!(
+            "Timeline offloaded in manifest but not archived in index-part"
+        ));
     }
     if index_part.metadata.ancestor_timeline() != offloaded.ancestor_timeline_id {
-        tracing::warn!(%ttid, "index-part anestor={:?} differs from manifest ancestor={:?}", index_part.metadata.ancestor_timeline(), offloaded.ancestor_timeline_id);
+        warnings.push(format!(
+            "index-part anestor={:?} differs from manifest ancestor={:?}",
+            index_part.metadata.ancestor_timeline(),
+            offloaded.ancestor_timeline_id
+        ));
     }
+    warnings
 }
 
 /// Physical garbage collection: removing unused S3 objects.

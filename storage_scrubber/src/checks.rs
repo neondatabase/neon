@@ -533,8 +533,9 @@ async fn list_timeline_blobs_impl(
 }
 
 pub(crate) struct RemoteTenantManifestInfo {
-    pub(crate) latest_generation: Option<(Generation, TenantManifest)>,
-    pub(crate) manifests: Vec<(Generation, ListingObject)>,
+    pub(crate) generation: Generation,
+    pub(crate) manifest: TenantManifest,
+    pub(crate) listing_object: ListingObject,
 }
 
 pub(crate) enum ListTenantManifestResult {
@@ -543,7 +544,10 @@ pub(crate) enum ListTenantManifestResult {
         #[allow(dead_code)]
         unknown_keys: Vec<ListingObject>,
     },
-    NoErrors(RemoteTenantManifestInfo),
+    NoErrors {
+        latest_generation: Option<RemoteTenantManifestInfo>,
+        manifests: Vec<(Generation, ListingObject)>,
+    },
 }
 
 /// Lists the tenant manifests in remote storage and parses the latest one, returning a [`ListTenantManifestResult`] object.
@@ -604,12 +608,10 @@ pub(crate) async fn list_tenant_manifests(
     if manifests.is_empty() {
         tracing::debug!("No manifest for timeline.");
 
-        return Ok(ListTenantManifestResult::NoErrors(
-            RemoteTenantManifestInfo {
-                latest_generation: None,
-                manifests,
-            },
-        ));
+        return Ok(ListTenantManifestResult::NoErrors {
+            latest_generation: None,
+            manifests,
+        });
     }
 
     // Find the manifest with the highest generation
@@ -638,12 +640,14 @@ pub(crate) async fn list_tenant_manifests(
 
     match TenantManifest::from_json_bytes(&manifest_bytes) {
         Ok(manifest) => {
-            return Ok(ListTenantManifestResult::NoErrors(
-                RemoteTenantManifestInfo {
-                    latest_generation: Some((latest_generation, manifest)),
-                    manifests,
-                },
-            ));
+            return Ok(ListTenantManifestResult::NoErrors {
+                latest_generation: Some(RemoteTenantManifestInfo {
+                    generation: latest_generation,
+                    manifest,
+                    listing_object: latest_listing_object,
+                }),
+                manifests: vec![],
+            });
         }
         Err(parse_error) => errors.push((
             latest_listing_object.key.get_path().as_str().to_owned(),
