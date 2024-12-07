@@ -657,6 +657,7 @@ impl Service {
                             *tenant_shard_id,
                             attached_at,
                             tenant_shard.shard.stripe_size,
+                            tenant_shard.preferred_az().cloned(),
                         ));
                     }
                 }
@@ -4740,7 +4741,13 @@ impl Service {
         for (child_id, child_ps, stripe_size) in child_locations {
             if let Err(e) = self
                 .compute_hook
-                .notify(child_id, child_ps, stripe_size, &self.cancel)
+                .notify(
+                    child_id,
+                    child_ps,
+                    stripe_size,
+                    preferred_az_id.as_ref(),
+                    &self.cancel,
+                )
                 .await
             {
                 tracing::warn!("Failed to update compute of {}->{} during split, proceeding anyway to complete split ({e})",
