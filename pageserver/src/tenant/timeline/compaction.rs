@@ -41,7 +41,7 @@ use crate::tenant::storage_layer::{
 use crate::tenant::timeline::ImageLayerCreationOutcome;
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
-use crate::tenant::{DeltaLayer, MaybeOffloaded};
+use crate::tenant::{gc_block, DeltaLayer, MaybeOffloaded};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 use pageserver_api::config::tenant_conf_defaults::{
     DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD,
@@ -63,9 +63,12 @@ use super::CompactionError;
 const COMPACTION_DELTA_THRESHOLD: usize = 5;
 
 /// A scheduled compaction task.
-pub struct ScheduledCompactionTask {
+pub(crate) struct ScheduledCompactionTask {
     pub options: CompactOptions,
+    /// The channel to send the compaction result. If this is a subcompaction, the last compaction job holds the sender.
     pub result_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Hold the GC block. If this is a subcompaction, the last compaction job holds the gc block guard.
+    pub gc_block: Option<gc_block::Guard>,
 }
 
 pub struct GcCompactionJobDescription {

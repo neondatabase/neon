@@ -301,6 +301,7 @@ pub(crate) struct GcBlocking {
 pub(crate) enum GcBlockingReason {
     Manual,
     DetachAncestor,
+    GcCompaction,
 }
 
 impl GcBlocking {

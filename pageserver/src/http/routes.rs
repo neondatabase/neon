@@ -2061,7 +2061,7 @@ async fn timeline_compact_handler(
             let tenant = state
                 .tenant_manager
                 .get_attached_tenant_shard(tenant_shard_id)?;
-            let rx = tenant.schedule_compaction(timeline_id, options).await;
+            let rx = tenant.schedule_compaction(timeline_id, options).await.map_err(ApiError::InternalServerError)?;
             if wait_until_scheduled_compaction_done {
                 // It is possible that this will take a long time, dropping the HTTP request will not cancel the compaction.
                 rx.await.ok();
