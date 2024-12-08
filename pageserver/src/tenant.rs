@@ -44,6 +44,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
+use timeline::compaction::GcCompactJob;
 use timeline::compaction::ScheduledCompactionTask;
 use timeline::import_pgdata;
 use timeline::offload::offload_timeline;
@@ -3017,7 +3018,9 @@ impl Tenant {
                         } else if next_scheduled_compaction_task.options.sub_compaction {
                             info!("running scheduled enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs");
                             let jobs = timeline
-                                .gc_compaction_split_jobs(next_scheduled_compaction_task.options)
+                                .gc_compaction_split_jobs(GcCompactJob::from_compact_options(
+                                    next_scheduled_compaction_task.options,
+                                ))
                                 .await
                                 .map_err(CompactionError::Other)?;
                             if jobs.is_empty() {
@@ -3028,9 +3031,22 @@ impl Tenant {
                                 let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
                                 let tline_pending_tasks = guard.entry(*timeline_id).or_default();
                                 for (idx, job) in jobs.into_iter().enumerate() {
+                                    let options = CompactOptions {
+                                        flags: if job.dry_run {
+                                            let mut flags: EnumSet<CompactFlags> =
+                                                EnumSet::default();
+                                            flags |= CompactFlags::DryRun;
+                                            flags
+                                        } else {
+                                            EnumSet::default()
+                                        },
+                                        sub_compaction: false,
+                                        compact_key_range: Some(job.compact_key_range.into()),
+                                        compact_lsn_range: Some(job.compact_lsn_range.into()),
+                                    };
                                     tline_pending_tasks.push_back(if idx == jobs_len - 1 {
                                         ScheduledCompactionTask {
-                                            options: job,
+                                            options,
                                             // The last job in the queue sends the signal and releases the gc guard
                                             result_tx: next_scheduled_compaction_task
                                                 .result_tx
@@ -3041,7 +3057,7 @@ impl Tenant {
                                         }
                                     } else {
                                         ScheduledCompactionTask {
-                                            options: job,
+                                            options,
                                             result_tx: None,
                                             gc_block: None,
                                         }

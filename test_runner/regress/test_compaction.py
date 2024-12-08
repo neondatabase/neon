@@ -161,7 +161,7 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
                 body={
                     "scheduled": True,
                     "sub_compaction": True,
-                    "compact_range": {
+                    "compact_key_range": {
                         "start": "000000000000000000000000000000000000",
                         "end": "030000000000000000000000000000000000",
                     },
