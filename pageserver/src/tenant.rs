@@ -44,6 +44,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
+use timeline::compaction::GcCompactJob;
 use timeline::compaction::ScheduledCompactionTask;
 use timeline::import_pgdata;
 use timeline::offload::offload_timeline;
@@ -3017,7 +3018,9 @@ impl Tenant {
                         } else if next_scheduled_compaction_task.options.sub_compaction {
                             info!("running scheduled enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs");
                             let jobs = timeline
-                                .gc_compaction_split_jobs(next_scheduled_compaction_task.options)
+                                .gc_compaction_split_jobs(GcCompactJob::from_compact_options(
+                                    next_scheduled_compaction_task.options,
+                                ))
                                 .await
                                 .map_err(CompactionError::Other)?;
                             if jobs.is_empty() {
@@ -3029,7 +3032,21 @@ impl Tenant {
                                 let tline_pending_tasks = guard.entry(*timeline_id).or_default();
                                 for (idx, job) in jobs.into_iter().enumerate() {
                                     tline_pending_tasks.push_back(ScheduledCompactionTask {
-                                        options: job,
+                                        // TODO: use a single `GcCompactJob` here instead of converting it back
+                                        // to `CompactOptions`
+                                        options: CompactOptions {
+                                            flags: if job.dry_run {
+                                                let mut flags: EnumSet<CompactFlags> =
+                                                    EnumSet::default();
+                                                flags |= CompactFlags::DryRun;
+                                                flags
+                                            } else {
+                                                EnumSet::default()
+                                            },
+                                            sub_compaction: false,
+                                            compact_key_range: Some(job.compact_key_range.into()),
+                                            compact_lsn_range: Some(job.compact_lsn_range.into()),
+                                        },
                                         result_tx: if idx == jobs_len - 1 {
                                             // The last compaction job sends the completion signal
                                             next_scheduled_compaction_task.result_tx.take()

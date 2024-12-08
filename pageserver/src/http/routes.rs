@@ -2041,13 +2041,12 @@ async fn timeline_compact_handler(
         .map(|r| r.sub_compaction)
         .unwrap_or(false);
     let options = CompactOptions {
-        compact_range: compact_request
+        compact_key_range: compact_request
             .as_ref()
-            .and_then(|r| r.compact_range.clone()),
-        compact_below_lsn: compact_request.as_ref().and_then(|r| r.compact_below_lsn),
-        compact_above_lsn: compact_request
+            .and_then(|r| r.compact_key_range.clone()),
+        compact_lsn_range: compact_request
             .as_ref()
-            .and_then(|r| r.compact_above_lsn.as_ref().map(|x| x.0)),
+            .and_then(|r| r.compact_lsn_range.clone()),
         flags,
         sub_compaction,
     };

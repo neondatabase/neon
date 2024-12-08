@@ -780,20 +780,59 @@ pub(crate) enum CompactFlags {
 #[serde_with::serde_as]
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct CompactRequest {
-    pub compact_range: Option<CompactRange>,
-    pub compact_below_lsn: Option<Lsn>,
-    pub compact_above_lsn: Option<Lsn>,
+    pub compact_key_range: Option<CompactKeyRange>,
+    pub compact_lsn_range: Option<CompactLsnRange>,
+    /// Whether the compaction job should be scheduled.
+    #[serde(default)]
+    pub scheduled: bool,
+    /// Whether the compaction job should be split across key ranges.
+    #[serde(default)]
+    pub sub_compaction: bool,
+}
+
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct CompactLsnRange {
+    pub start: Lsn,
+    pub end: Lsn,
+}
+
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct CompactKeyRange {
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub start: Key,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub end: Key,
 }
 
-impl From<Range<Key>> for CompactRange {
-    fn from(range: Range<Key>) -> Self {
-        CompactRange {
+impl From<Range<Lsn>> for CompactLsnRange {
+    fn from(range: Range<Lsn>) -> Self {
+        Self {
             start: range.start,
             end: range.end,
         }
+    }
+}
+
+impl From<Range<Key>> for CompactKeyRange {
+    fn from(range: Range<Key>) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+        }
+    }
+}
+
+impl From<CompactLsnRange> for Range<Lsn> {
+    fn from(range: CompactLsnRange) -> Self {
+        range.start..range.end
+    }
+}
+
+impl From<CompactKeyRange> for Range<Key> {
+    fn from(range: CompactKeyRange) -> Self {
+        range.start..range.end
     }
 }
 
@@ -801,14 +840,11 @@ impl From<Range<Key>> for CompactRange {
 pub(crate) struct CompactOptions {
     pub flags: EnumSet<CompactFlags>,
     /// If set, the compaction will only compact the key range specified by this option.
-    /// This option is only used by GC compaction.
-    pub compact_range: Option<CompactRange>,
-    /// If set, the compaction will only compact the LSN below this value.
-    /// This option is only used by GC compaction.
-    pub compact_below_lsn: Option<Lsn>,
-    /// If set, the compaction will only compact the LSN above this value.
-    /// This option is only used by GC compaction.
-    pub compact_above_lsn: Option<Lsn>,
+    /// This option is only used by GC compaction. For the full explanation, see [`GcCompactionJob`].
+    pub compact_key_range: Option<CompactKeyRange>,
+    /// If set, the compaction will only compact the LSN within this value.
+    /// This option is only used by GC compaction. For the full explanation, see [`GcCompactionJob`].
+    pub compact_lsn_range: Option<CompactLsnRange>,
     /// Enable sub-compaction (split compaction job across key ranges).
     /// This option is only used by GC compaction.
     pub sub_compaction: bool,
@@ -1633,9 +1669,8 @@ impl Timeline {
             cancel,
             CompactOptions {
                 flags,
-                compact_range: None,
-                compact_below_lsn: None,
-                compact_above_lsn: None,
+                compact_key_range: None,
+                compact_lsn_range: None,
                 sub_compaction: false,
             },
             ctx,
