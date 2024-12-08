@@ -163,7 +163,7 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
             body={
                 "scheduled": True,
                 "sub_compaction": True,
-                "compact_range": {
+                "compact_key_range": {
                     "start": "000000000000000000000000000000000000",
                     # skip the SLRU range for now -- it races with get-lsn-by-timestamp, TODO: fix this
                     "end": "010000000000000000000000000000000000",
