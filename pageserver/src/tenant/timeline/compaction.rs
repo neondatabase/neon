@@ -1771,8 +1771,7 @@ impl Timeline {
         let compact_below_lsn = if let Some(compact_below_lsn) = options.compact_below_lsn {
             compact_below_lsn
         } else {
-            let gc_info = self.gc_info.read().unwrap();
-            gc_info.cutoffs.select_min() // use the real gc cutoff
+            *self.get_latest_gc_cutoff_lsn() // use the real gc cutoff
         };
         let mut compact_jobs = Vec::new();
         // For now, we simply use the key partitioning information; we should do a more fine-grained partitioning
@@ -1965,7 +1964,11 @@ impl Timeline {
             let gc_info = self.gc_info.read().unwrap();
             let mut retain_lsns_below_horizon = Vec::new();
             let gc_cutoff = {
-                let real_gc_cutoff = gc_info.cutoffs.select_min();
+                // Currently, gc-compaction only kicks in when the legacy gc finishes updating the gc_cutoff.
+                // Therefore, it can only clean up data that cannot be cleaned up with legacy gc, instead of
+                // cleaning everything that theoritically it could. In the future, it should use `self.gc_info`
+                // to get the truth data.
+                let real_gc_cutoff = *self.get_latest_gc_cutoff_lsn();
                 // The compaction algorithm will keep all keys above the gc_cutoff while keeping only necessary keys below the gc_cutoff for
                 // each of the retain_lsn. Therefore, if the user-provided `compact_below_lsn` is larger than the real gc cutoff, we will use
                 // the real cutoff.
