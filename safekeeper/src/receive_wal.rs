@@ -267,6 +267,7 @@ impl SafekeeperPostgresHandler {
             pgb_reader: &mut pgb_reader,
             peer_addr,
             acceptor_handle: &mut acceptor_handle,
+            global_timelines: self.global_timelines.clone(),
         };
 
         // Read first message and create timeline if needed.
@@ -331,6 +332,7 @@ struct NetworkReader<'a, IO> {
     // WalAcceptor is spawned when we learn server info from walproposer and
     // create timeline; handle is put here.
     acceptor_handle: &'a mut Option<JoinHandle<anyhow::Result<()>>>,
+    global_timelines: Arc<GlobalTimelines>,
 }
 
 impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
@@ -350,10 +352,11 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
                     system_id: greeting.system_id,
                     wal_seg_size: greeting.wal_seg_size,
                 };
-                let tli =
-                    GlobalTimelines::create(self.ttid, server_info, Lsn::INVALID, Lsn::INVALID)
-                        .await
-                        .context("create timeline")?;
+                let tli = self
+                    .global_timelines
+                    .create(self.ttid, server_info, Lsn::INVALID, Lsn::INVALID)
+                    .await
+                    .context("create timeline")?;
                 tli.wal_residence_guard().await?
             }
             _ => {
