@@ -121,9 +121,6 @@ page_cache_size=10
     assert vectored_average < 8
 
 
-@pytest.mark.skip(
-    "This is being fixed and tracked in https://github.com/neondatabase/neon/issues/9114"
-)
 @skip_in_debug_build("only run with release build")
 def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     SMOKE_CONF = {
@@ -165,8 +162,7 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
                 "sub_compaction": True,
                 "compact_range": {
                     "start": "000000000000000000000000000000000000",
-                    # skip the SLRU range for now -- it races with get-lsn-by-timestamp, TODO: fix this
-                    "end": "010000000000000000000000000000000000",
+                    "end": "030000000000000000000000000000000000",
                 },
             },
         )
