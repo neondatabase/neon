@@ -79,9 +79,15 @@ jobs:
           path: /tmp/neon/
           prefix: latest
 
-      - name: Get endpoint ID
-        id: endpoint-id
-        uses: ./.github/actions/neon-get-endpoint
+      - name: Create a new branch
+        id: create-branch
+        uses: ./.github/actions/neon-branch-create
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
+
+      - name: Wait for operations to be completed
+        uses: ./.github/actions/neon-wait-operations-to-finish
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
@@ -89,29 +95,6 @@ jobs:
       - name: Get the connection URI
         id: connect-uri
         uses: ./.github/actions/neon-get-connection-uri
-        with:
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
-          endpoint_id: ${{steps.endpoint-id.outputs.id}}
-
-      - name: Create a new branch
-        id: create-branch
-        uses: ./.github/actions/neon-branch-create
-        with:
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
-          add_endpoint: false
-
-      - name: Attach the endpoint to the new branch
-        uses: ./.github/actions/neon-attach-endpoint-to-branch
-        with:
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
-          endpoint_id: ${{steps.endpoint-id.outputs.id}}
-          branch_id: ${{steps.create-branch.outputs.branch_id}}
-
-      - name: Wait for operations to be completed
-        uses: ./.github/actions/neon-wait-operations-to-finish
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
@@ -125,15 +108,6 @@ jobs:
           extra_params: -m remote_cluster
         env:
           BENCHMARK_CONNSTR: ${{steps.connect-uri.outputs.uri}}
-
-      - name: Re-attach the endpoint to the old branch
-        if: always()
-        uses: ./.github/actions/neon-attach-endpoint-to-branch
-        with:
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
-          endpoint_id: ${{steps.endpoint-id.outputs.id}}
-          branch_id: ${{steps.endpoint-id.outputs.branch_id}}
 
       - name: Delete branch
         uses: ./.github/actions/neon-branch-delete

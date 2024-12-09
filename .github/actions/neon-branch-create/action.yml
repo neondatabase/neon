@@ -11,11 +11,6 @@ inputs:
   api_host:
     description: 'Neon API host'
     default: console-stage.neon.build
-  add_endpoint:
-    description: 'Add an endpoint or not'
-    required: false
-    type: boolean
-    default: true
 outputs:
   dsn:
     description: 'Created Branch DSN (for main database)'
@@ -31,18 +26,22 @@ runs:
       id: create-branch
       shell: bash -euxo pipefail {0}
       run: |
-        branch_name="Created by actions/neon-branch-create; GITHUB_RUN_ID=${GITHUB_RUN_ID} at $(date +%s)"
-        data=$(jq -nc "{branch:{name: \"$branch_name\"}}")
-        if [ ${{ inputs.add_endpoint }} == "true" ]; then
-          data=$(echo $data | jq '{branch,endpoints:[{type: "read_write"}]}')
-        fi
-        for i in {1..10}; do
+        for i in $(seq 1 10); do
          branch=$(curl \
             "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/branches" \
             --header "Accept: application/json" \
             --header "Content-Type: application/json" \
             --header "Authorization: Bearer ${API_KEY}" \
-            --data "$data")
+            --data "{
+              \"branch\": {
+                \"name\": \"Created by actions/neon-branch-create; GITHUB_RUN_ID=${GITHUB_RUN_ID} at $(date +%s)\"
+              },
+              \"endpoints\": [
+                {
+                  \"type\": \"read_write\"
+                }
+              ]
+            }")
 
           if [ -z "${branch}" ]; then
             sleep 1
@@ -77,7 +76,6 @@ runs:
       id: role-name
       shell: bash -euxo pipefail {0}
       run: |
-        test ${{inputs.add_endpoint}} == "true" || exit 0
         roles=$(curl \
           "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/branches/${BRANCH_ID}/roles" \
           --fail \
@@ -99,7 +97,6 @@ runs:
       # A shell without `set -x` to not to expose password/dsn in logs
       shell: bash -euo pipefail {0}
       run: |
-        test ${{inputs.add_endpoint}} == "true" || exit 0
         for i in $(seq 1 10); do
           reset_password=$(curl \
             "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/branches/${BRANCH_ID}/roles/${ROLE_NAME}/reset_password" \
