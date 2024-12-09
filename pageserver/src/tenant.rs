@@ -8170,6 +8170,12 @@ mod tests {
             let mut guard = tline.gc_info.write().unwrap();
             guard.cutoffs.time = Lsn(0x30);
             guard.cutoffs.space = Lsn(0x30);
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
         }
 
         let expected_result = [
@@ -8272,6 +8278,12 @@ mod tests {
             let mut guard = tline.gc_info.write().unwrap();
             guard.cutoffs.time = Lsn(0x40);
             guard.cutoffs.space = Lsn(0x40);
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x40))
+                .wait()
+                .await;
         }
         tline
             .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
@@ -8733,6 +8745,12 @@ mod tests {
             let mut guard = tline.gc_info.write().unwrap();
             guard.cutoffs.time = Lsn(0x40);
             guard.cutoffs.space = Lsn(0x40);
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x40))
+                .wait()
+                .await;
         }
         tline
             .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
@@ -9322,6 +9340,12 @@ mod tests {
             let mut guard = tline.gc_info.write().unwrap();
             guard.cutoffs.time = Lsn(0x38);
             guard.cutoffs.space = Lsn(0x38);
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x38))
+                .wait()
+                .await;
         }
         tline
             .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
