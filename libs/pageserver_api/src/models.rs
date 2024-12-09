@@ -1084,7 +1084,7 @@ pub mod virtual_file {
 
     impl IoMode {
         pub const fn preferred() -> Self {
-            Self::Direct
+            Self::Buffered
         }
     }
 
