@@ -3031,15 +3031,15 @@ impl Tenant {
                                 let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
                                 let tline_pending_tasks = guard.entry(*timeline_id).or_default();
                                 for (idx, job) in jobs.into_iter().enumerate() {
+                                    // Unfortunately we need to convert the `GcCompactJob` back to `CompactionOptions`
+                                    // until we do further refactors to allow directly call `compact_with_gc`.
+                                    let mut flags: EnumSet<CompactFlags> = EnumSet::default();
+                                    flags |= CompactFlags::EnhancedGcBottomMostCompaction;
+                                    if job.dry_run {
+                                        flags |= CompactFlags::DryRun;
+                                    }
                                     let options = CompactOptions {
-                                        flags: if job.dry_run {
-                                            let mut flags: EnumSet<CompactFlags> =
-                                                EnumSet::default();
-                                            flags |= CompactFlags::DryRun;
-                                            flags
-                                        } else {
-                                            EnumSet::default()
-                                        },
+                                        flags,
                                         sub_compaction: false,
                                         compact_key_range: Some(job.compact_key_range.into()),
                                         compact_lsn_range: Some(job.compact_lsn_range.into()),
@@ -10473,6 +10473,12 @@ mod tests {
             )
             .await?;
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
@@ -10718,6 +10724,12 @@ mod tests {
             )
             .await?;
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
