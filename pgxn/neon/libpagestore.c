@@ -22,6 +22,7 @@
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "portability/instr_time.h"
 #include "postmaster/interrupt.h"
 #include "storage/buf_internals.h"
 #include "storage/ipc.h"
@@ -663,9 +664,11 @@ call_PQgetCopyData(shardno_t shard_no, char **buffer)
 	int			ret;
 	PageServer *shard = &page_servers[shard_no];
 	PGconn	   *pageserver_conn = shard->conn;
-	TimestampTz now,
+	instr_time	now,
 				start_ts,
-				next_log_ts;
+				since_start,
+				last_log_ts,
+				since_last_log;
 	bool		logged = false;
 
 	/*
@@ -678,8 +681,10 @@ call_PQgetCopyData(shardno_t shard_no, char **buffer)
 	 * exact timestamps.
 	 */
 #define LOG_INTERVAL_US		UINT64CONST(10 * 1000000)
-	now = start_ts = GetCurrentTimestamp();
-	next_log_ts = now + LOG_INTERVAL_US;
+
+	INSTR_TIME_SET_CURRENT(now);
+	start_ts = last_log_ts = now;
+	INSTR_TIME_SET_ZERO(since_last_log);
 
 retry:
 	ret = PQgetCopyData(pageserver_conn, buffer, 1 /* async */ );
@@ -687,11 +692,12 @@ retry:
 	if (ret == 0)
 	{
 		WaitEvent	event;
+		long		timeout;
+
+		timeout = Min(0, LOG_INTERVAL_US - INSTR_TIME_GET_MICROSEC(since_last_log));
 
 		/* Sleep until there's something to do */
-		(void) WaitEventSetWait(shard->wes_read,
-								(long) ((next_log_ts - now) / 1000),
-								&event, 1,
+		(void) WaitEventSetWait(shard->wes_read, timeout, &event, 1,
 								WAIT_EVENT_NEON_PS_READ);
 		ResetLatch(MyLatch);
 
@@ -714,13 +720,17 @@ retry:
 		 * Print a message to the log if a long time has passed with no
 		 * response.
 		 */
-		now = GetCurrentTimestamp();
-		if (now >= next_log_ts)
+		INSTR_TIME_SET_CURRENT(now);
+		since_last_log = now;
+		INSTR_TIME_SUBTRACT(since_last_log, last_log_ts);
+		if (INSTR_TIME_GET_MICROSEC(since_last_log) >= LOG_INTERVAL_US)
 		{
+			since_start = now;
+			INSTR_TIME_SUBTRACT(since_start, start_ts);
 			neon_shard_log(shard_no, LOG, "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses)",
-						   (double) ((now - start_ts) / 1000000.0),
+						   INSTR_TIME_GET_DOUBLE(since_start),
 						   shard->nrequests_sent, shard->nresponses_received);
-			next_log_ts = now + LOG_INTERVAL_US;
+			last_log_ts = now;
 			logged = true;
 		}
 
@@ -733,10 +743,11 @@ retry:
 	 */
 	if (logged)
 	{
-		now = GetCurrentTimestamp();
+		INSTR_TIME_SET_CURRENT(now);
+		since_start = now;
+		INSTR_TIME_SUBTRACT(since_start, start_ts);
 		neon_shard_log(shard_no, LOG, "received response from pageserver after %0.3f s",
-						   (double) ((now - start_ts) / 1000000.0));
-			next_log_ts = now + LOG_INTERVAL_US;
+					   INSTR_TIME_GET_DOUBLE(since_start));
 	}
 
 	return ret;
