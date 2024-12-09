@@ -153,6 +153,7 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
         if i % 10 == 0:
             log.info(f"Running churn round {i}/{churn_rounds} ...")
 
+        if (i - 1) % 10 == 0:
             # Run gc-compaction every 10 rounds to ensure the test doesn't take too long time.
             ps_http.timeline_compact(
                 tenant_id,
@@ -161,10 +162,11 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
                 body={
                     "scheduled": True,
                     "sub_compaction": True,
-                    "compact_range": {
+                    "compact_key_range": {
                         "start": "000000000000000000000000000000000000",
                         "end": "030000000000000000000000000000000000",
                     },
+                    "sub_compaction_max_job_size_mb": 16,
                 },
             )
 
