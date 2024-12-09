@@ -2240,10 +2240,6 @@ impl Service {
             Entry::Occupied(mut entry) => {
                 tracing::info!("Tenant shard {tenant_shard_id} already exists while creating");
 
-                // TODO: schedule() should take an anti-affinity expression that pushes
-                // attached and secondary locations (independently) away frorm those
-                // pageservers also holding a shard for this tenant.
-
                 if let Err(err) = entry.get_mut().schedule(scheduler, schedule_context) {
                     return InitialShardScheduleOutcome::ShardScheduleError(err);
                 }
