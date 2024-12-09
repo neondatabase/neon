@@ -3230,3 +3230,55 @@ def test_multi_attached_timeline_creation(neon_env_builder: NeonEnvBuilder, migr
         # Always disable 'pause' failpoints, even on failure, to avoid hanging in shutdown
         env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
         raise
+
+
+@run_only_on_default_postgres("Postgres version makes no difference here")
+def test_storage_controller_detached_stopped(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Test that detaching a tenant while it has scheduling policy set to Paused or Stop works
+    """
+
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+
+    neon_env_builder.num_pageservers = 1
+
+    env = neon_env_builder.init_configs()
+    env.start()
+    virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
+
+    tenant_id = TenantId.generate()
+    env.storage_controller.tenant_create(
+        tenant_id,
+        shard_count=1,
+    )
+
+    assert len(env.pageserver.http_client().tenant_list_locations()["tenant_shards"]) == 1
+
+    # Disable scheduling: ordinarily this would prevent the tenant's configuration being
+    # reconciled to pageservers, but this should be overridden when detaching.
+    env.storage_controller.allowed_errors.append(".*Scheduling is disabled by policy.*")
+    env.storage_controller.tenant_policy_update(
+        tenant_id,
+        {"scheduling": "Stop"},
+    )
+
+    env.storage_controller.consistency_check()
+
+    # Detach the tenant
+    virtual_ps_http.tenant_location_conf(
+        tenant_id,
+        {
+            "mode": "Detached",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": None,
+        },
+    )
+
+    env.storage_controller.consistency_check()
+
+    # Confirm the detach happened
+    assert env.pageserver.http_client().tenant_list_locations()["tenant_shards"] == []

@@ -1243,12 +1243,7 @@ impl ComputeNode {
         let postgresql_conf_path = pgdata_path.join("postgresql.conf");
         config::write_postgres_conf(&postgresql_conf_path, &spec, self.http_port)?;
 
-        // TODO(ololobus): We need a concurrency during reconfiguration as well,
-        // but DB is already running and used by user. We can easily get out of
-        // `max_connections` limit, and the current code won't handle that.
-        // let compute_state = self.state.lock().unwrap().clone();
-        // let max_concurrent_connections = self.max_service_connections(&compute_state, &spec);
-        let max_concurrent_connections = 1;
+        let max_concurrent_connections = spec.reconfigure_concurrency;
 
         // Temporarily reset max_cluster_size in config
         // to avoid the possibility of hitting the limit, while we are reconfiguring:

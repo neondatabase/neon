@@ -6,7 +6,6 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::{anyhow, Context};
@@ -27,7 +26,7 @@ use crate::span::{
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::Generation;
-use crate::virtual_file::{on_fatal_io_error, IoBufferMut, MaybeFatalIo, VirtualFile};
+use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{
     DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,
@@ -150,7 +149,7 @@ async fn download_object<'a>(
     storage: &'a GenericRemoteStorage,
     src_path: &RemotePath,
     dst_path: &Utf8PathBuf,
-    gate: &utils::sync::gate::Gate,
+    #[cfg_attr(target_os = "macos", allow(unused_variables))] gate: &utils::sync::gate::Gate,
     cancel: &CancellationToken,
     #[cfg_attr(target_os = "macos", allow(unused_variables))] ctx: &RequestContext,
 ) -> Result<u64, DownloadError> {
@@ -209,6 +208,8 @@ async fn download_object<'a>(
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
             use crate::virtual_file::owned_buffers_io;
+            use crate::virtual_file::IoBufferMut;
+            use std::sync::Arc;
             async {
                 let destination_file = Arc::new(
                     VirtualFile::create(dst_path, ctx)

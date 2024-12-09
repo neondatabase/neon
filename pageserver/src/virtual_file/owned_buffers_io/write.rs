@@ -162,6 +162,7 @@ where
             .expect("must not use after we returned an error")
     }
 
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub async fn write_buffered_borrowed(
         &mut self,
         chunk: &[u8],

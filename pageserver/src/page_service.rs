@@ -1017,10 +1017,8 @@ impl PageServerHandler {
         // Map handler result to protocol behavior.
         // Some handler errors cause exit from pagestream protocol.
         // Other handler errors are sent back as an error message and we stay in pagestream protocol.
-        let mut timers: smallvec::SmallVec<[_; 1]> =
-            smallvec::SmallVec::with_capacity(handler_results.len());
         for handler_result in handler_results {
-            let response_msg = match handler_result {
+            let (response_msg, timer) = match handler_result {
                 Err(e) => match &e {
                     PageStreamError::Shutdown => {
                         // If we fail to fulfil a request during shutdown, which may be _because_ of
@@ -1044,34 +1042,66 @@ impl PageServerHandler {
                         span.in_scope(|| {
                             error!("error reading relation or page version: {full:#}")
                         });
-                        PagestreamBeMessage::Error(PagestreamErrorResponse {
-                            message: e.to_string(),
-                        })
+                        (
+                            PagestreamBeMessage::Error(PagestreamErrorResponse {
+                                message: e.to_string(),
+                            }),
+                            None, // TODO: measure errors
+                        )
                     }
                 },
-                Ok((response_msg, timer)) => {
-                    // Extending the lifetime of the timers so observations on drop
-                    // include the flush time.
-                    timers.push(timer);
-                    response_msg
-                }
+                Ok((response_msg, timer)) => (response_msg, Some(timer)),
             };
 
+            //
             // marshal & transmit response message
+            //
+
             pgb_writer.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
-        }
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                // We were requested to shut down.
-                info!("shutdown request received in page handler");
-                return Err(QueryError::Shutdown)
+
+            // We purposefully don't count flush time into the timer.
+            //
+            // The reason is that current compute client will not perform protocol processing
+            // if the postgres backend process is doing things other than `->smgr_read()`.
+            // This is especially the case for prefetch.
+            //
+            // If the compute doesn't read from the connection, eventually TCP will backpressure
+            // all the way into our flush call below.
+            //
+            // The timer's underlying metric is used for a storage-internal latency SLO and
+            // we don't want to include latency in it that we can't control.
+            // And as pointed out above, in this case, we don't control the time that flush will take.
+            let flushing_timer =
+                timer.map(|timer| timer.observe_smgr_op_completion_and_start_flushing());
+
+            // what we want to do
+            let flush_fut = pgb_writer.flush();
+            // metric for how long flushing takes
+            let flush_fut = match flushing_timer {
+                Some(flushing_timer) => {
+                    futures::future::Either::Left(flushing_timer.measure(flush_fut))
+                }
+                None => futures::future::Either::Right(flush_fut),
+            };
+            // do it while respecting cancellation
+            let _: () = async move {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        // We were requested to shut down.
+                        info!("shutdown request received in page handler");
+                        return Err(QueryError::Shutdown)
+                    }
+                    res = flush_fut => {
+                        res?;
+                    }
+                }
+                Ok(())
             }
-            res = pgb_writer.flush() => {
-                res?;
-            }
+            // and log the info! line inside the request span
+            .instrument(span.clone())
+            .await?;
         }
-        drop(timers);
         Ok(())
     }
 
