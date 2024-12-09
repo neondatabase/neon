@@ -21,8 +21,6 @@ concurrency:
 env:
   RUST_BACKTRACE: 1
   COPT: '-Werror'
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
   # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
   E2E_CONCURRENCY_GROUP: ${{ github.repository }}-e2e-tests-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
 
@@ -575,6 +573,8 @@ jobs:
   neon-image:
     needs: [ neon-image-arch, tag ]
     runs-on: ubuntu-22.04
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
 
     steps:
       - uses: docker/login-action@v3
@@ -589,11 +589,15 @@ jobs:
                                              neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-x64 \
                                              neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-arm64
 
-      - uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Push multi-arch image to ECR
         run: |
@@ -602,6 +606,8 @@ jobs:
 
   compute-node-image-arch:
     needs: [ check-permissions, build-build-tools-image, tag ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
     strategy:
       fail-fast: false
       matrix:
@@ -642,11 +648,15 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       - uses: docker/login-action@v3
         with:
@@ -719,6 +729,8 @@ jobs:
 
   compute-node-image:
     needs: [ compute-node-image-arch, tag ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
     runs-on: ubuntu-22.04
 
     strategy:
@@ -763,11 +775,15 @@ jobs:
                                              neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
                                              neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
-      - uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Push multi-arch compute-node-${{ matrix.version.pg }} image to ECR
         run: |
@@ -903,12 +919,15 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - name: Login to dev ECR
-        uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Copy vm-compute-node images to ECR
         run: |
