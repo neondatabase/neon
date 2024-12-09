@@ -21,8 +21,8 @@ pub struct MetadataSummary {
     tenant_count: usize,
     timeline_count: usize,
     timeline_shard_count: usize,
-    with_errors: HashMap<TenantShardTimelineId, Vec<String>>,
-    with_warnings: HashMap<TenantShardTimelineId, Vec<String>>,
+    with_errors: HashMap<String, Vec<String>>,
+    with_warnings: HashMap<String, Vec<String>>,
     with_orphans: HashSet<TenantShardTimelineId>,
     indices_by_version: HashMap<usize, usize>,
 
@@ -52,7 +52,12 @@ impl MetadataSummary {
         }
     }
 
-    fn update_analysis(&mut self, id: &TenantShardTimelineId, analysis: &TimelineAnalysis, verbose: bool) {
+    fn update_analysis(
+        &mut self,
+        id: &TenantShardTimelineId,
+        analysis: &TimelineAnalysis,
+        verbose: bool,
+    ) {
         if analysis.is_healthy() {
             self.healthy_tenant_shards.insert(id.tenant_shard_id);
         } else {
@@ -61,14 +66,14 @@ impl MetadataSummary {
         }
 
         if !analysis.errors.is_empty() {
-            let entry = self.with_errors.entry(*id).or_default();
+            let entry = self.with_errors.entry(id.to_string()).or_default();
             if verbose {
                 entry.extend(analysis.errors.iter().cloned());
             }
         }
 
         if !analysis.warnings.is_empty() {
-            let entry = self.with_warnings.entry(*id).or_default();
+            let entry = self.with_warnings.entry(id.to_string()).or_default();
             if verbose {
                 entry.extend(analysis.warnings.iter().cloned());
             }
@@ -291,7 +296,7 @@ pub async fn scan_pageserver_metadata(
                         tenant_objects,
                         timelines,
                         highest_shard_count,
-                        verbose
+                        verbose,
                     )
                     .instrument(info_span!("analyze-tenant", tenant = %prev_tenant_id))
                     .await;
@@ -335,7 +340,7 @@ pub async fn scan_pageserver_metadata(
             tenant_objects,
             tenant_timeline_results,
             highest_shard_count,
-            verbose
+            verbose,
         )
         .instrument(info_span!("analyze-tenant", tenant = %tenant_id))
         .await;
