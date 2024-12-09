@@ -1579,6 +1579,7 @@ impl Service {
                             attach_req.tenant_shard_id,
                             ShardIdentity::unsharded(),
                             PlacementPolicy::Attached(0),
+                            None,
                         ),
                     );
                     tracing::info!("Inserted shard {} in memory", attach_req.tenant_shard_id);
@@ -2106,6 +2107,16 @@ impl Service {
             )
         };
 
+        let preferred_az_id = {
+            let locked = self.inner.read().unwrap();
+            // Idempotency: take the existing value if the tenant already exists
+            if let Some(shard) = locked.tenants.get(create_ids.first().unwrap()) {
+                shard.preferred_az().cloned()
+            } else {
+                locked.scheduler.get_az_for_new_tenant()
+            }
+        };
+
         // Ordering: we persist tenant shards before creating them on the pageserver.  This enables a caller
         // to clean up after themselves by issuing a tenant deletion if something goes wrong and we restart
         // during the creation, rather than risking leaving orphan objects in S3.
@@ -2125,7 +2136,7 @@ impl Service {
                 splitting: SplitState::default(),
                 scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
                     .unwrap(),
-                preferred_az_id: None,
+                preferred_az_id: preferred_az_id.as_ref().map(|az| az.to_string()),
             })
             .collect();
 
@@ -2161,6 +2172,7 @@ impl Service {
                     &create_req.shard_parameters,
                     create_req.config.clone(),
                     placement_policy.clone(),
+                    preferred_az_id.as_ref(),
                     &mut schedule_context,
                 )
                 .await;
@@ -2170,44 +2182,6 @@ impl Service {
                 InitialShardScheduleOutcome::NotScheduled => {}
                 InitialShardScheduleOutcome::ShardScheduleError(err) => {
                     schedule_error = Some(err);
-                }
-            }
-        }
-
-        let preferred_azs = {
-            let locked = self.inner.read().unwrap();
-            response_shards
-                .iter()
-                .filter_map(|resp| {
-                    let az_id = locked
-                        .nodes
-                        .get(&resp.node_id)
-                        .map(|n| n.get_availability_zone_id().clone())?;
-
-                    Some((resp.shard_id, az_id))
-                })
-                .collect::<Vec<_>>()
-        };
-
-        // Note that we persist the preferred AZ for the new shards separately.
-        // In theory, we could "peek" the scheduler to determine where the shard will
-        // land, but the subsequent "real" call into the scheduler might select a different
-        // node. Hence, we do this awkward update to keep things consistent.
-        let updated = self
-            .persistence
-            .set_tenant_shard_preferred_azs(preferred_azs)
-            .await
-            .map_err(|err| {
-                ApiError::InternalServerError(anyhow::anyhow!(
-                    "Failed to persist preferred az ids: {err}"
-                ))
-            })?;
-
-        {
-            let mut locked = self.inner.write().unwrap();
-            for (tid, az_id) in updated {
-                if let Some(shard) = locked.tenants.get_mut(&tid) {
-                    shard.set_preferred_az(az_id);
                 }
             }
         }
@@ -2242,6 +2216,7 @@ impl Service {
 
     /// Helper for tenant creation that does the scheduling for an individual shard. Covers both the
     /// case of a new tenant and a pre-existing one.
+    #[allow(clippy::too_many_arguments)]
     async fn do_initial_shard_scheduling(
         &self,
         tenant_shard_id: TenantShardId,
@@ -2249,6 +2224,7 @@ impl Service {
         shard_params: &ShardParameters,
         config: TenantConfig,
         placement_policy: PlacementPolicy,
+        preferred_az_id: Option<&AvailabilityZone>,
         schedule_context: &mut ScheduleContext,
     ) -> InitialShardScheduleOutcome {
         let mut locked = self.inner.write().unwrap();
@@ -2258,10 +2234,6 @@ impl Service {
         match tenants.entry(tenant_shard_id) {
             Entry::Occupied(mut entry) => {
                 tracing::info!("Tenant shard {tenant_shard_id} already exists while creating");
-
-                // TODO: schedule() should take an anti-affinity expression that pushes
-                // attached and secondary locations (independently) away frorm those
-                // pageservers also holding a shard for this tenant.
 
                 if let Err(err) = entry.get_mut().schedule(scheduler, schedule_context) {
                     return InitialShardScheduleOutcome::ShardScheduleError(err);
@@ -2286,6 +2258,7 @@ impl Service {
                     tenant_shard_id,
                     ShardIdentity::from_params(tenant_shard_id.shard_number, shard_params),
                     placement_policy,
+                    preferred_az_id.cloned(),
                 ));
 
                 state.generation = initial_generation;
@@ -4184,16 +4157,14 @@ impl Service {
                         },
                     );
 
-                    let mut child_state = TenantShard::new(child, child_shard, policy.clone());
+                    let mut child_state =
+                        TenantShard::new(child, child_shard, policy.clone(), preferred_az.clone());
                     child_state.intent = IntentState::single(scheduler, Some(pageserver));
                     child_state.observed = ObservedState {
                         locations: child_observed,
                     };
                     child_state.generation = Some(generation);
                     child_state.config = config.clone();
-                    if let Some(preferred_az) = &preferred_az {
-                        child_state.set_preferred_az(preferred_az.clone());
-                    }
 
                     // The child's TenantShard::splitting is intentionally left at the default value of Idle,
                     // as at this point in the split process we have succeeded and this part is infallible:
@@ -4802,6 +4773,8 @@ impl Service {
                         // If our new attached node was a secondary, it no longer should be.
                         shard.intent.remove_secondary(scheduler, migrate_req.node_id);
 
+                        shard.intent.set_attached(scheduler, Some(migrate_req.node_id));
+
                         // If we were already attached to something, demote that to a secondary
                         if let Some(old_attached) = old_attached {
                             if n > 0 {
@@ -4813,8 +4786,6 @@ impl Service {
                                 shard.intent.push_secondary(scheduler, old_attached);
                             }
                         }
-
-                        shard.intent.set_attached(scheduler, Some(migrate_req.node_id));
                     }
                     PlacementPolicy::Secondary => {
                         shard.intent.clear(scheduler);
@@ -5386,7 +5357,7 @@ impl Service {
             register_req.listen_http_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
-            register_req.availability_zone_id,
+            register_req.availability_zone_id.clone(),
         );
 
         // TODO: idempotency if the node already exists in the database
@@ -5406,8 +5377,9 @@ impl Service {
             .set(locked.nodes.len() as i64);
 
         tracing::info!(
-            "Registered pageserver {}, now have {} pageservers",
+            "Registered pageserver {} ({}), now have {} pageservers",
             register_req.node_id,
+            register_req.availability_zone_id,
             locked.nodes.len()
         );
         Ok(())
@@ -6118,6 +6090,7 @@ impl Service {
                 // Shard was dropped between planning and execution;
                 continue;
             };
+            tracing::info!("Applying optimization: {optimization:?}");
             if shard.apply_optimization(scheduler, optimization) {
                 optimizations_applied += 1;
                 if self.maybe_reconcile_shard(shard, nodes).is_some() {
@@ -6144,11 +6117,17 @@ impl Service {
         // How many candidate optimizations we will generate, before evaluating them for readniess: setting
         // this higher than the execution limit gives us a chance to execute some work even if the first
         // few optimizations we find are not ready.
-        const MAX_OPTIMIZATIONS_PLAN_PER_PASS: usize = 8;
+        const MAX_OPTIMIZATIONS_PLAN_PER_PASS: usize = 2;
 
         let mut work = Vec::new();
         let mut locked = self.inner.write().unwrap();
-        let (nodes, tenants, scheduler) = locked.parts_mut();
+        let (_nodes, tenants, scheduler) = locked.parts_mut();
+
+        // We are going to plan a bunch of optimisations before applying any of them, so the
+        // utilisation stats on nodes will be effectively stale for the >1st optimisation we
+        // generate.  To avoid this causing unstable migrations/flapping, it's important that the
+        // code in TenantShard for finding optimisations uses [`NodeAttachmentSchedulingScore::disregard_utilization`]
+        // to ignore the utilisation component of the score.
 
         for (_tenant_id, schedule_context, shards) in
             TenantShardContextIterator::new(tenants, ScheduleMode::Speculative)
@@ -6179,13 +6158,25 @@ impl Service {
                     continue;
                 }
 
+                // Fast path: we may quickly identify shards that don't have any possible optimisations
+                if !shard.maybe_optimizable(scheduler, &schedule_context) {
+                    debug_assert!(shard
+                        .optimize_attachment(scheduler, &schedule_context)
+                        .is_none());
+                    debug_assert!(shard
+                        .optimize_secondary(scheduler, &schedule_context)
+                        .is_none());
+                    continue;
+                }
+
                 // TODO: optimization calculations are relatively expensive: create some fast-path for
                 // the common idle case (avoiding the search on tenants that we have recently checked)
                 if let Some(optimization) =
                     // If idle, maybe ptimize attachments: if a shard has a secondary location that is preferable to
                     // its primary location based on soft constraints, cut it over.
-                    shard.optimize_attachment(nodes, &schedule_context)
+                    shard.optimize_attachment(scheduler, &schedule_context)
                 {
+                    tracing::info!(tenant_shard_id=%shard.tenant_shard_id, "Identified optimization for attachment: {optimization:?}");
                     work.push((shard.tenant_shard_id, optimization));
                     break;
                 } else if let Some(optimization) =
@@ -6195,6 +6186,7 @@ impl Service {
                     // in the same tenant with secondary locations on the node where they originally split.
                     shard.optimize_secondary(scheduler, &schedule_context)
                 {
+                    tracing::info!(tenant_shard_id=%shard.tenant_shard_id, "Identified optimization for asecondary: {optimization:?}");
                     work.push((shard.tenant_shard_id, optimization));
                     break;
                 }
@@ -6243,8 +6235,10 @@ impl Service {
                         }
                     }
                 }
-                ScheduleOptimizationAction::ReplaceSecondary(_) => {
-                    // No extra checks needed to replace a secondary: this does not interrupt client access
+                ScheduleOptimizationAction::ReplaceSecondary(_)
+                | ScheduleOptimizationAction::CreateSecondary(_)
+                | ScheduleOptimizationAction::RemoveSecondary(_) => {
+                    // No extra checks needed to manage secondaries: this does not interrupt client access
                     validated_work.push((tenant_shard_id, optimization))
                 }
             };
@@ -6316,26 +6310,35 @@ impl Service {
     /// we have this helper to move things along faster.
     #[cfg(feature = "testing")]
     async fn kick_secondary_download(&self, tenant_shard_id: TenantShardId) {
-        let (attached_node, secondary_node) = {
+        let (attached_node, secondaries) = {
             let locked = self.inner.read().unwrap();
             let Some(shard) = locked.tenants.get(&tenant_shard_id) else {
+                tracing::warn!(
+                    "Skipping kick of secondary download for {tenant_shard_id}: not found"
+                );
                 return;
             };
-            let (Some(attached), Some(secondary)) = (
-                shard.intent.get_attached(),
-                shard.intent.get_secondary().first(),
-            ) else {
+
+            let Some(attached) = shard.intent.get_attached() else {
+                tracing::warn!(
+                    "Skipping kick of secondary download for {tenant_shard_id}: no attached"
+                );
                 return;
             };
-            (
-                locked.nodes.get(attached).unwrap().clone(),
-                locked.nodes.get(secondary).unwrap().clone(),
-            )
+
+            let secondaries = shard
+                .intent
+                .get_secondary()
+                .iter()
+                .map(|n| locked.nodes.get(n).unwrap().clone())
+                .collect::<Vec<_>>();
+
+            (locked.nodes.get(attached).unwrap().clone(), secondaries)
         };
 
         // Make remote API calls to upload + download heatmaps: we ignore errors because this is just
         // a 'kick' to let scheduling optimisation run more promptly.
-        attached_node
+        match attached_node
             .with_client_retries(
                 |client| async move { client.tenant_heatmap_upload(tenant_shard_id).await },
                 &self.config.jwt_token,
@@ -6344,22 +6347,57 @@ impl Service {
                 SHORT_RECONCILE_TIMEOUT,
                 &self.cancel,
             )
-            .await;
+            .await
+        {
+            Some(Err(e)) => {
+                tracing::info!(
+                    "Failed to upload heatmap from {attached_node} for {tenant_shard_id}: {e}"
+                );
+            }
+            None => {
+                tracing::info!(
+                    "Cancelled while uploading heatmap from {attached_node} for {tenant_shard_id}"
+                );
+            }
+            Some(Ok(_)) => {
+                tracing::info!(
+                    "Successfully uploaded heatmap from {attached_node} for {tenant_shard_id}"
+                );
+            }
+        }
 
-        secondary_node
-            .with_client_retries(
-                |client| async move {
-                    client
-                        .tenant_secondary_download(tenant_shard_id, Some(Duration::from_secs(1)))
-                        .await
-                },
-                &self.config.jwt_token,
-                3,
-                10,
-                SHORT_RECONCILE_TIMEOUT,
-                &self.cancel,
-            )
-            .await;
+        for secondary_node in secondaries {
+            match secondary_node
+                .with_client_retries(
+                    |client| async move {
+                        client
+                            .tenant_secondary_download(
+                                tenant_shard_id,
+                                Some(Duration::from_secs(1)),
+                            )
+                            .await
+                    },
+                    &self.config.jwt_token,
+                    3,
+                    10,
+                    SHORT_RECONCILE_TIMEOUT,
+                    &self.cancel,
+                )
+                .await
+            {
+                Some(Err(e)) => {
+                    tracing::info!(
+                "Failed to download heatmap from {secondary_node} for {tenant_shard_id}: {e}"
+            );
+                }
+                None => {
+                    tracing::info!("Cancelled while downloading heatmap from {secondary_node} for {tenant_shard_id}");
+                }
+                Some(Ok(progress)) => {
+                    tracing::info!("Successfully downloaded heatmap from {secondary_node} for {tenant_shard_id}: {progress:?}");
+                }
+            }
+        }
     }
 
     /// Look for shards which are oversized and in need of splitting
@@ -6795,9 +6833,15 @@ impl Service {
     fn fill_node_plan(&self, node_id: NodeId) -> Vec<TenantShardId> {
         let mut locked = self.inner.write().unwrap();
         let fill_requirement = locked.scheduler.compute_fill_requirement(node_id);
+        let (nodes, tenants, _scheduler) = locked.parts_mut();
 
-        let mut tids_by_node = locked
-            .tenants
+        let node_az = nodes
+            .get(&node_id)
+            .expect("Node must exist")
+            .get_availability_zone_id()
+            .clone();
+
+        let mut tids_by_node = tenants
             .iter_mut()
             .filter_map(|(tid, tenant_shard)| {
                 if !matches!(
@@ -6808,6 +6852,25 @@ impl Service {
                     // even exclude Essential, because moving to fill a node is not essential to keeping this
                     // tenant available.
                     return None;
+                }
+
+                // AZ check: when filling nodes after a restart, our intent is to move _back_ the
+                // shards which belong on this node, not to promote shards whose scheduling preference
+                // would be on their currently attached node.  So will avoid promoting shards whose
+                // home AZ doesn't match the AZ of the node we're filling.
+                match tenant_shard.preferred_az() {
+                    None => {
+                        // Shard doesn't have an AZ preference: it is elegible to be moved.
+                    }
+                    Some(az) if az == &node_az => {
+                        // This shard's home AZ is equal to the node we're filling: it is
+                        // elegible to be moved: fall through;
+                    }
+                    Some(_) => {
+                        // This shard's home AZ is somewhere other than the node we're filling:
+                        // do not include it in the fill plan.
+                        return None;
+                    }
                 }
 
                 if tenant_shard.intent.get_secondary().contains(&node_id) {
