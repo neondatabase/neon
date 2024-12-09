@@ -337,6 +337,22 @@ impl<T> FieldPatch<T> {
     fn is_noop(&self) -> bool {
         matches!(self, FieldPatch::Noop)
     }
+
+    pub fn apply(self, target: &mut Option<T>) {
+        match self {
+            Self::Upsert(v) => *target = Some(v),
+            Self::Remove => *target = None,
+            Self::Noop => {}
+        }
+    }
+
+    pub fn map<U, E, F: FnOnce(T) -> Result<U, E>>(self, map: F) -> Result<FieldPatch<U>, E> {
+        match self {
+            Self::Upsert(v) => Ok(FieldPatch::<U>::Upsert(map(v)?)),
+            Self::Remove => Ok(FieldPatch::<U>::Remove),
+            Self::Noop => Ok(FieldPatch::<U>::Noop),
+        }
+    }
 }
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for FieldPatch<T> {
@@ -449,46 +465,52 @@ pub struct TenantConfig {
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
 }
 
-macro_rules! apply_field_patch {
-    ($self:ident, $to:ident, $field:ident) => {
-        match $self.$field {
-            FieldPatch::Upsert(value) => $to.$field = Some(value),
-            FieldPatch::Remove => $to.$field = None,
-            FieldPatch::Noop => {}
-        }
-    };
-}
-
 impl TenantConfig {
     pub fn apply_patch(mut self, patch: TenantConfigPatch) -> TenantConfig {
-        apply_field_patch!(patch, self, checkpoint_distance);
-        apply_field_patch!(patch, self, checkpoint_timeout);
-        apply_field_patch!(patch, self, compaction_target_size);
-        apply_field_patch!(patch, self, compaction_period);
-        apply_field_patch!(patch, self, compaction_threshold);
-        apply_field_patch!(patch, self, compaction_algorithm);
-        apply_field_patch!(patch, self, gc_horizon);
-        apply_field_patch!(patch, self, gc_period);
-        apply_field_patch!(patch, self, image_creation_threshold);
-        apply_field_patch!(patch, self, pitr_interval);
-        apply_field_patch!(patch, self, walreceiver_connect_timeout);
-        apply_field_patch!(patch, self, lagging_wal_timeout);
-        apply_field_patch!(patch, self, max_lsn_wal_lag);
-        apply_field_patch!(patch, self, eviction_policy);
-        apply_field_patch!(patch, self, min_resident_size_override);
-        apply_field_patch!(
-            patch,
-            self,
-            evictions_low_residence_duration_metric_threshold
-        );
-        apply_field_patch!(patch, self, heatmap_period);
-        apply_field_patch!(patch, self, lazy_slru_download);
-        apply_field_patch!(patch, self, timeline_get_throttle);
-        apply_field_patch!(patch, self, image_layer_creation_check_threshold);
-        apply_field_patch!(patch, self, lsn_lease_length);
-        apply_field_patch!(patch, self, lsn_lease_length_for_ts);
-        apply_field_patch!(patch, self, timeline_offloading);
-        apply_field_patch!(patch, self, wal_receiver_protocol_override);
+        patch
+            .checkpoint_distance
+            .apply(&mut self.checkpoint_distance);
+        patch.checkpoint_timeout.apply(&mut self.checkpoint_timeout);
+        patch
+            .compaction_target_size
+            .apply(&mut self.compaction_target_size);
+        patch.compaction_period.apply(&mut self.compaction_period);
+        patch
+            .compaction_threshold
+            .apply(&mut self.compaction_threshold);
+        patch
+            .compaction_algorithm
+            .apply(&mut self.compaction_algorithm);
+        patch.gc_horizon.apply(&mut self.gc_horizon);
+        patch.gc_period.apply(&mut self.gc_period);
+        patch
+            .image_creation_threshold
+            .apply(&mut self.image_creation_threshold);
+        patch.pitr_interval.apply(&mut self.pitr_interval);
+        patch
+            .walreceiver_connect_timeout
+            .apply(&mut self.walreceiver_connect_timeout);
+        patch
+            .lagging_wal_timeout
+            .apply(&mut self.lagging_wal_timeout);
+        patch.max_lsn_wal_lag.apply(&mut self.max_lsn_wal_lag);
+        patch.eviction_policy.apply(&mut self.eviction_policy);
+        patch
+            .min_resident_size_override
+            .apply(&mut self.min_resident_size_override);
+        patch
+            .evictions_low_residence_duration_metric_threshold
+            .apply(&mut self.evictions_low_residence_duration_metric_threshold);
+        patch.lsn_lease_length.apply(&mut self.lsn_lease_length);
+        patch
+            .lsn_lease_length_for_ts
+            .apply(&mut self.lsn_lease_length_for_ts);
+        patch
+            .timeline_offloading
+            .apply(&mut self.timeline_offloading);
+        patch
+            .wal_receiver_protocol_override
+            .apply(&mut self.wal_receiver_protocol_override);
 
         self
     }
@@ -1866,5 +1888,24 @@ mod tests {
         let decoded: TenantConfigPatchRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.tenant_id, patch_request.tenant_id);
         assert_eq!(decoded.config, patch_request.config);
+
+        // Now apply the patch to a config to demonstrate semantics
+
+        let base = TenantConfig {
+            checkpoint_distance: Some(28),
+            gc_horizon: Some(100),
+            compaction_target_size: Some(1024),
+            ..Default::default()
+        };
+
+        let expected = TenantConfig {
+            checkpoint_distance: Some(42),
+            gc_horizon: None,
+            ..base.clone()
+        };
+
+        let patched = base.apply_patch(decoded.config);
+
+        assert_eq!(patched, expected);
     }
 }
