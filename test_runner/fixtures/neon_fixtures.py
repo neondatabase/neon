@@ -4674,7 +4674,9 @@ class StorageScrubber:
                     healthy = False
             else:
                 for _, warnings in with_warnings.items():
-                    assert len(warnings) > 0, "with_warnings value should not be empty, running without verbose mode?"
+                    assert (
+                        len(warnings) > 0
+                    ), "with_warnings value should not be empty, running without verbose mode?"
                     if not self._check_line_list_allowed(warnings):
                         healthy = False
                         break
@@ -4688,7 +4690,9 @@ class StorageScrubber:
                     healthy = False
             else:
                 for _, errors in with_errors.items():
-                    assert len(errors) > 0, "with_errors value should not be empty, running without verbose mode?"
+                    assert (
+                        len(errors) > 0
+                    ), "with_errors value should not be empty, running without verbose mode?"
                     if not self._check_line_list_allowed(errors):
                         healthy = False
                         break
