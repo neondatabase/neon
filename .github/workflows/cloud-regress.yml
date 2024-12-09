@@ -86,19 +86,6 @@ jobs:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
 
-      - name: Wait for operations to be completed
-        uses: ./.github/actions/neon-wait-operations-to-finish
-        with:
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
-
-      - name: Get the connection URI
-        id: connect-uri
-        uses: ./.github/actions/neon-get-connection-uri
-        with:
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
-
       - name: Run the regression tests
         uses: ./.github/actions/run-python-test-set
         with:
@@ -107,7 +94,7 @@ jobs:
           pg_version: ${{matrix.pg-version}}
           extra_params: -m remote_cluster
         env:
-          BENCHMARK_CONNSTR: ${{steps.connect-uri.outputs.uri}}
+          BENCHMARK_CONNSTR: ${{steps.create-branch.outputs.dsn}}
 
       - name: Delete branch
         uses: ./.github/actions/neon-branch-delete
