@@ -2023,7 +2023,7 @@ impl Timeline {
             }
             let mut selected_layers: Vec<Layer> = Vec::new();
             drop(gc_info);
-            // Pick all the layers intersect or below the gc_cutoff, get the largest LSN in the selected layers.
+            // Firstly, pick all the layers intersect or below the gc_cutoff, get the largest LSN in the selected layers.
             let Some(max_layer_lsn) = layers
                 .iter_historic_layers()
                 .filter(|desc| desc.get_lsn_range().start <= gc_cutoff)
@@ -2033,6 +2033,9 @@ impl Timeline {
                 info!("no layers to compact with gc: no historic layers below gc_cutoff, gc_cutoff={}", gc_cutoff);
                 return Ok(());
             };
+            // Next, if the user specifies compact_lsn_range.start, we need to filter some layers out. All the layers (strictly) below
+            // the min_layer_lsn computed as below will be filtered out and the data will be accessed using the normal read path, as if
+            // it is a branch.
             let Some(min_layer_lsn) = layers
                 .iter_historic_layers()
                 .filter(|desc| {
@@ -2223,7 +2226,7 @@ impl Timeline {
         let mut delta_layer_rewriters = HashMap::<Arc<PersistentLayerKey>, RewritingLayers>::new();
 
         /// When compacting not at a bottom range (=`[0,X)`) of the root branch, we "have data below" (`has_data_below=true`).
-        /// The two cases are compaction in ancestor branches and `compact_above_lsn=Some`.
+        /// The two cases are compaction in ancestor branches and when `compact_lsn_range.start` is set.
         /// In those cases, we need to pull up data from below the LSN range we're compaction.
         ///
         /// This function unifies the cases so that later code doesn't have to think about it.
