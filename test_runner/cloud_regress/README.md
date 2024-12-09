@@ -13,7 +13,8 @@
 $ cd vendor/postgres-v17
 $ patch -p1 <../../compute/patches/cloud_regress_pg17.patch
 ```
-* Set the environment variable `BENCHMARK_CONNSTR` to the connection URI of your project
+* Set the environment variable `BENCHMARK_CONNSTR` to the connection URI of your project.
+* Set the environment variable `PG_VERSION` to the version of your project.
 * Run 
 ```bash
 $ pytest -m remote_cluster -k cloud_regress
