@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from contextlib import closing
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.utils import query_scalar
+from fixtures.utils import USE_LFC, query_scalar
 from psycopg2.errors import IoError, UndefinedTable
 
 pytest_plugins = "fixtures.neon_fixtures"
@@ -15,10 +16,20 @@ extensions = ["pageinspect", "neon_test_utils", "pg_buffercache"]
 #
 # Validation of reading different page versions
 #
+# TODO: remove the next line before merge
+@pytest.mark.repeat(100)
 def test_read_validation(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
-    endpoint = env.endpoints.create_start("main")
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            "neon.max_file_cache_size = 1MB",
+            "neon.file_cache_size_limit = 1MB",
+        ]
+        if USE_LFC
+        else [],
+    )
     with closing(endpoint.connect()) as con:
         with con.cursor() as c:
             for e in extensions:
