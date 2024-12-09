@@ -8671,6 +8671,12 @@ mod tests {
                 leases: Default::default(),
                 within_ancestor_pitr: false,
             };
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
         }
 
         let expected_result = [
@@ -9208,6 +9214,12 @@ mod tests {
                 leases: Default::default(),
                 within_ancestor_pitr: false,
             };
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
         }
 
         let expected_result = [
@@ -9451,6 +9463,12 @@ mod tests {
                 leases: Default::default(),
                 within_ancestor_pitr: false,
             };
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
         }
 
         let expected_result = [
@@ -9692,6 +9710,12 @@ mod tests {
                 leases: Default::default(),
                 within_ancestor_pitr: false,
             };
+            parent_tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x10))
+                .wait()
+                .await;
         }
 
         {
@@ -9706,6 +9730,12 @@ mod tests {
                 leases: Default::default(),
                 within_ancestor_pitr: false,
             };
+            branch_tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x50))
+                .wait()
+                .await;
         }
 
         let expected_result_at_gc_horizon = [
@@ -10035,6 +10065,12 @@ mod tests {
                 leases: Default::default(),
                 within_ancestor_pitr: false,
             };
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
         }
 
         let cancel = CancellationToken::new();

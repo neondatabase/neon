@@ -179,7 +179,7 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
 
     # Run a legacy compaction+gc to ensure gc-compaction can coexist with legacy compaction.
     ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
-    ps_http.timeline_gc(tenant_id, timeline_id)
+    ps_http.timeline_gc(tenant_id, timeline_id, None)
 
 
 # Stripe sizes in number of pages.
