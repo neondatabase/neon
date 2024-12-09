@@ -573,6 +573,10 @@ impl RemoteStorage for LocalFs {
         Ok(())
     }
 
+    fn max_keys_per_delete(&self) -> usize {
+        super::MAX_KEYS_PER_DELETE_S3
+    }
+
     async fn copy(
         &self,
         from: &RemotePath,
