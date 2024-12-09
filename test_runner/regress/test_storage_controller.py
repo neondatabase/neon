@@ -3044,9 +3044,9 @@ def test_shard_preferred_azs(neon_env_builder: NeonEnvBuilder):
         assert shards[0]["preferred_az_id"] == expected_az
 
     # When all other schedule scoring parameters are equal, tenants should round-robin on AZs
-    assert env.storage_controller.tenant_describe(tids[0])["shards"][0]["preferred_az_id"] == "az-1"
-    assert env.storage_controller.tenant_describe(tids[1])["shards"][0]["preferred_az_id"] == "az-0"
-    assert env.storage_controller.tenant_describe(tids[2])["shards"][0]["preferred_az_id"] == "az-1"
+    assert env.storage_controller.tenant_describe(tids[0])["shards"][0]["preferred_az_id"] == "az-0"
+    assert env.storage_controller.tenant_describe(tids[1])["shards"][0]["preferred_az_id"] == "az-1"
+    assert env.storage_controller.tenant_describe(tids[2])["shards"][0]["preferred_az_id"] == "az-0"
 
     # Try modifying preferred AZ
     updated = env.storage_controller.set_preferred_azs(
