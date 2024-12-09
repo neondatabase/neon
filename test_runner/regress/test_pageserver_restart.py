@@ -103,7 +103,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
 
         raise AssertionError("No 'complete' metric yet")
 
-    wait_until(30, 1.0, assert_complete)
+    wait_until(assert_complete)
 
     # Expectation callbacks: arg t is sample value, arg p is the previous phase's sample value
     expectations = [

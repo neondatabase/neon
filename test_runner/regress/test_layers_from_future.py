@@ -206,7 +206,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder, attach_mode: str):
         future_layers = set(get_future_layers())
         assert future_layer not in future_layers
 
-    wait_until(10, 0.5, future_layer_is_gone_from_index_part)
+    wait_until(future_layer_is_gone_from_index_part)
 
     # We already make deletion stuck here, but we don't necessarily hit the failpoint
     # because deletions are batched.

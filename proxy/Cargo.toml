@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-testing = []
+testing = ["dep:tokio-postgres"]
 
 [dependencies]
 ahash.workspace = true
@@ -55,6 +55,7 @@ parquet.workspace = true
 parquet_derive.workspace = true
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
+postgres-client = { package = "tokio-postgres2", path = "../libs/proxy/tokio-postgres2" }
 postgres-protocol = { package = "postgres-protocol2", path = "../libs/proxy/postgres-protocol2" }
 pq_proto.workspace = true
 prometheus.workspace = true
@@ -81,7 +82,7 @@ subtle.workspace = true
 thiserror.workspace = true
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl = { workspace = true, features = ["use_std"] }
-tokio-postgres = { package = "tokio-postgres2", path = "../libs/proxy/tokio-postgres2" }
+tokio-postgres = { workspace = true, optional = true }
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["signal"] }
@@ -119,3 +120,4 @@ rcgen.workspace = true
 rstest.workspace = true
 walkdir.workspace = true
 rand_distr = "0.4"
+tokio-postgres.workspace = true

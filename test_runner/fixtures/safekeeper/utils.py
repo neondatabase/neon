@@ -19,4 +19,4 @@ def wait_walreceivers_absent(
         log.info(f"waiting for walreceivers to be gone, currently {status.walreceivers}")
         assert len(status.walreceivers) == 0
 
-    wait_until(30, 0.5, walreceivers_absent)
+    wait_until(walreceivers_absent)

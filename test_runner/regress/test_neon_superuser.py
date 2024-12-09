@@ -77,7 +77,7 @@ def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
             assert len(res) == 4
             assert [r[0] for r in res] == [10, 20, 30, 40]
 
-        wait_until(10, 0.5, check_that_changes_propagated)
+        wait_until(check_that_changes_propagated)
 
         # Test that pg_monitor is working for neon_superuser role
         cur.execute("SELECT query from pg_stat_activity LIMIT 1")
