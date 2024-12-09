@@ -610,7 +610,7 @@ async fn gc_timeline(
             .iter()
             .find(|offloaded_timeline| offloaded_timeline.timeline_id == ttid.timeline_id);
         if let Some(offloaded) = maybe_offloaded {
-            let warnings = validate_index_part_with_offloaded(ttid, index_part, offloaded);
+            let warnings = validate_index_part_with_offloaded(index_part, offloaded);
             let warn = if warnings.is_empty() {
                 false
             } else {
@@ -668,7 +668,6 @@ async fn gc_timeline(
 }
 
 fn validate_index_part_with_offloaded(
-    ttid: TenantShardTimelineId,
     index_part: &IndexPart,
     offloaded: &OffloadedTimelineManifest,
 ) -> Vec<String> {
