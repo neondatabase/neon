@@ -53,6 +53,13 @@ runs:
 
         echo 'SKIPPED=false' >> $GITHUB_OUTPUT
 
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 3600
+
     - name: Upload artifact
       if: ${{ steps.prepare-artifact.outputs.SKIPPED == 'false' }}
       shell: bash -euxo pipefail {0}
