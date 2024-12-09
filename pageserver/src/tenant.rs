@@ -14,6 +14,7 @@
 
 use anyhow::{bail, Context};
 use arc_swap::ArcSwap;
+use arc_swap::AsRaw;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
 use chrono::NaiveDateTime;
@@ -3792,25 +3793,37 @@ impl Tenant {
         }
     }
 
-    pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
+    pub fn update_tenant_config<F: Fn(TenantConfOpt) -> anyhow::Result<TenantConfOpt>>(
+        &self,
+        update: F,
+    ) -> anyhow::Result<TenantConfOpt> {
         // Use read-copy-update in order to avoid overwriting the location config
         // state if this races with [`Tenant::set_new_location_config`]. Note that
         // this race is not possible if both request types come from the storage
         // controller (as they should!) because an exclusive op lock is required
         // on the storage controller side.
 
-        self.tenant_conf.rcu(|inner| {
-            Arc::new(AttachedTenantConf {
-                tenant_conf: new_tenant_conf.clone(),
-                location: inner.location,
-                // Attached location is not changed, no need to update lsn lease deadline.
-                lsn_lease_deadline: inner.lsn_lease_deadline,
-            })
-        });
+        let mut cur = self.tenant_conf.load();
+        let updated = loop {
+            let updated_tenant_conf = update(cur.tenant_conf.clone())?;
+            let new = AttachedTenantConf {
+                tenant_conf: updated_tenant_conf.clone(),
+                location: cur.location,
+                lsn_lease_deadline: cur.lsn_lease_deadline,
+            };
 
-        let updated = self.tenant_conf.load().clone();
+            let prev = self
+                .tenant_conf
+                .compare_and_swap(&*cur, Arc::new(new.clone()));
+            let swapped = std::ptr::eq(cur.as_raw(), prev.as_raw());
+            if swapped {
+                break new;
+            } else {
+                cur = prev;
+            }
+        };
 
-        self.tenant_conf_updated(&new_tenant_conf);
+        self.tenant_conf_updated(&updated.tenant_conf);
         // Don't hold self.timelines.lock() during the notifies.
         // There's no risk of deadlock right now, but there could be if we consolidate
         // mutexes in struct Timeline in the future.
@@ -3818,6 +3831,8 @@ impl Tenant {
         for timeline in timelines {
             timeline.tenant_conf_updated(&updated);
         }
+
+        Ok(updated.tenant_conf)
     }
 
     pub(crate) fn set_new_location_config(&self, new_conf: AttachedTenantConf) {

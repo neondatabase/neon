@@ -1681,7 +1681,10 @@ async fn update_tenant_config_handler(
     crate::tenant::Tenant::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
         .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
-    tenant.set_new_tenant_config(new_tenant_conf);
+
+    let _ = tenant
+        .update_tenant_config(|_crnt| Ok(new_tenant_conf.clone()))
+        .expect("Closure returns Ok()");
 
     json_response(StatusCode::OK, ())
 }
@@ -1703,16 +1706,15 @@ async fn patch_tenant_config_handler(
         .get_attached_tenant_shard(tenant_shard_id)?;
     tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
-    let base = tenant.get_tenant_conf();
-    let new_tenant_conf = base
-        .apply_patch(request_data.config)
+    let updated = tenant
+        .update_tenant_config(|crnt| crnt.apply_patch(request_data.config.clone()))
         .map_err(ApiError::BadRequest)?;
 
     // This is a legacy API that only operates on attached tenants: the preferred
     // API to use is the location_config/ endpoint, which lets the caller provide
     // the full LocationConf.
     let location_conf = LocationConf::attached_single(
-        new_tenant_conf.clone(),
+        updated,
         tenant.get_generation(),
         &ShardParameters::default(),
     );
@@ -1720,7 +1722,6 @@ async fn patch_tenant_config_handler(
     crate::tenant::Tenant::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
         .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
-    tenant.set_new_tenant_config(new_tenant_conf);
 
     json_response(StatusCode::OK, ())
 }
