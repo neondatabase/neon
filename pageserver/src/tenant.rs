@@ -3017,10 +3017,15 @@ impl Tenant {
                             warn!("ignoring scheduled compaction task: scheduled task must be gc compaction: {:?}", next_scheduled_compaction_task.options);
                         } else if next_scheduled_compaction_task.options.sub_compaction {
                             info!("running scheduled enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs");
-                            let jobs = timeline
-                                .gc_compaction_split_jobs(GcCompactJob::from_compact_options(
-                                    next_scheduled_compaction_task.options,
-                                ))
+                            let jobs: Vec<GcCompactJob> = timeline
+                                .gc_compaction_split_jobs(
+                                    GcCompactJob::from_compact_options(
+                                        next_scheduled_compaction_task.options.clone(),
+                                    ),
+                                    next_scheduled_compaction_task
+                                        .options
+                                        .sub_compaction_max_job_size_mb,
+                                )
                                 .await
                                 .map_err(CompactionError::Other)?;
                             if jobs.is_empty() {
@@ -3043,6 +3048,7 @@ impl Tenant {
                                         sub_compaction: false,
                                         compact_key_range: Some(job.compact_key_range.into()),
                                         compact_lsn_range: Some(job.compact_lsn_range.into()),
+                                        sub_compaction_max_job_size_mb: None,
                                     };
                                     tline_pending_tasks.push_back(if idx == jobs_len - 1 {
                                         ScheduledCompactionTask {

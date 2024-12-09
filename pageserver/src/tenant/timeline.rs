@@ -788,6 +788,8 @@ pub(crate) struct CompactRequest {
     /// Whether the compaction job should be split across key ranges.
     #[serde(default)]
     pub sub_compaction: bool,
+    /// Max job size for each subcompaction job.
+    pub sub_compaction_max_job_size_mb: Option<u64>,
 }
 
 #[serde_with::serde_as]
@@ -859,6 +861,9 @@ pub(crate) struct CompactOptions {
     /// Enable sub-compaction (split compaction job across key ranges).
     /// This option is only used by GC compaction.
     pub sub_compaction: bool,
+    /// Set job size for the GC compaction.
+    /// This option is only used by GC compaction.
+    pub sub_compaction_max_job_size_mb: Option<u64>,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1683,6 +1688,7 @@ impl Timeline {
                 compact_key_range: None,
                 compact_lsn_range: None,
                 sub_compaction: false,
+                sub_compaction_max_job_size_mb: None,
             },
             ctx,
         )

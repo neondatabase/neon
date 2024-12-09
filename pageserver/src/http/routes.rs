@@ -2040,6 +2040,10 @@ async fn timeline_compact_handler(
         .as_ref()
         .map(|r| r.sub_compaction)
         .unwrap_or(false);
+    let sub_compaction_max_job_size_mb = compact_request
+        .as_ref()
+        .and_then(|r| r.sub_compaction_max_job_size_mb);
+
     let options = CompactOptions {
         compact_key_range: compact_request
             .as_ref()
@@ -2049,6 +2053,7 @@ async fn timeline_compact_handler(
             .and_then(|r| r.compact_lsn_range.clone()),
         flags,
         sub_compaction,
+        sub_compaction_max_job_size_mb,
     };
 
     let scheduled = compact_request

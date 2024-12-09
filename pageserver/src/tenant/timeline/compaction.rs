@@ -1805,12 +1805,19 @@ impl Timeline {
     pub(crate) async fn gc_compaction_split_jobs(
         self: &Arc<Self>,
         job: GcCompactJob,
+        sub_compaction_max_job_size_mb: Option<u64>,
     ) -> anyhow::Result<Vec<GcCompactJob>> {
         let compact_below_lsn = if job.compact_lsn_range.end != Lsn::MAX {
             job.compact_lsn_range.end
         } else {
             *self.get_latest_gc_cutoff_lsn() // use the real gc cutoff
         };
+
+        // Split compaction job to about 4GB each
+        const GC_COMPACT_MAX_SIZE_MB: u64 = 4 * 1024;
+        let sub_compaction_max_job_size_mb =
+            sub_compaction_max_job_size_mb.unwrap_or(GC_COMPACT_MAX_SIZE_MB);
+
         let mut compact_jobs = Vec::new();
         // For now, we simply use the key partitioning information; we should do a more fine-grained partitioning
         // by estimating the amount of files read for a compaction job. We should also partition on LSN.
@@ -1857,8 +1864,6 @@ impl Timeline {
         let guard = self.layers.read().await;
         let layer_map = guard.layer_map()?;
         let mut current_start = None;
-        // Split compaction job to about 2GB each
-        const GC_COMPACT_MAX_SIZE_MB: u64 = 4 * 1024; // 4GB, TODO: should be configuration in the future
         let ranges_num = split_key_ranges.len();
         for (idx, (start, end)) in split_key_ranges.into_iter().enumerate() {
             if current_start.is_none() {
@@ -1871,7 +1876,7 @@ impl Timeline {
             }
             let res = layer_map.range_search(start..end, compact_below_lsn);
             let total_size = res.found.keys().map(|x| x.layer.file_size()).sum::<u64>();
-            if total_size > GC_COMPACT_MAX_SIZE_MB * 1024 * 1024 || ranges_num == idx + 1 {
+            if total_size > sub_compaction_max_job_size_mb * 1024 * 1024 || ranges_num == idx + 1 {
                 // Try to extend the compaction range so that we include at least one full layer file.
                 let extended_end = res
                     .found
@@ -1924,10 +1929,12 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let sub_compaction = options.sub_compaction;
-        let job = GcCompactJob::from_compact_options(options);
+        let job = GcCompactJob::from_compact_options(options.clone());
         if sub_compaction {
             info!("running enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs");
-            let jobs = self.gc_compaction_split_jobs(job).await?;
+            let jobs = self
+                .gc_compaction_split_jobs(job, options.sub_compaction_max_job_size_mb)
+                .await?;
             let jobs_len = jobs.len();
             for (idx, job) in jobs.into_iter().enumerate() {
                 info!(
