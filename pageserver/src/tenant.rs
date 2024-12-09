@@ -8166,16 +8166,16 @@ mod tests {
             )
             .await?;
         {
-            // Update GC info
-            let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x30);
-            guard.cutoffs.space = Lsn(0x30);
             tline
                 .latest_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x30))
                 .wait()
                 .await;
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            guard.cutoffs.time = Lsn(0x30);
+            guard.cutoffs.space = Lsn(0x30);
         }
 
         let expected_result = [
@@ -8274,16 +8274,16 @@ mod tests {
 
         // increase GC horizon and compact again
         {
-            // Update GC info
-            let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x40);
-            guard.cutoffs.space = Lsn(0x40);
             tline
                 .latest_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x40))
                 .wait()
                 .await;
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            guard.cutoffs.time = Lsn(0x40);
+            guard.cutoffs.space = Lsn(0x40);
         }
         tline
             .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
@@ -8660,6 +8660,12 @@ mod tests {
                 .await?
         };
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
@@ -8671,12 +8677,6 @@ mod tests {
                 leases: Default::default(),
                 within_ancestor_pitr: false,
             };
-            tline
-                .latest_gc_cutoff_lsn
-                .lock_for_write()
-                .store_and_unlock(Lsn(0x30))
-                .wait()
-                .await;
         }
 
         let expected_result = [
@@ -8747,16 +8747,16 @@ mod tests {
 
         // increase GC horizon and compact again
         {
-            // Update GC info
-            let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x40);
-            guard.cutoffs.space = Lsn(0x40);
             tline
                 .latest_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x40))
                 .wait()
                 .await;
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            guard.cutoffs.time = Lsn(0x40);
+            guard.cutoffs.space = Lsn(0x40);
         }
         tline
             .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
@@ -9200,6 +9200,12 @@ mod tests {
             )
             .await?;
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
@@ -9214,12 +9220,6 @@ mod tests {
                 leases: Default::default(),
                 within_ancestor_pitr: false,
             };
-            tline
-                .latest_gc_cutoff_lsn
-                .lock_for_write()
-                .store_and_unlock(Lsn(0x30))
-                .wait()
-                .await;
         }
 
         let expected_result = [
@@ -9348,16 +9348,16 @@ mod tests {
 
         // increase GC horizon and compact again
         {
-            // Update GC info
-            let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x38);
-            guard.cutoffs.space = Lsn(0x38);
             tline
                 .latest_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x38))
                 .wait()
                 .await;
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            guard.cutoffs.time = Lsn(0x38);
+            guard.cutoffs.space = Lsn(0x38);
         }
         tline
             .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
@@ -9449,6 +9449,12 @@ mod tests {
             )
             .await?;
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
@@ -9463,12 +9469,6 @@ mod tests {
                 leases: Default::default(),
                 within_ancestor_pitr: false,
             };
-            tline
-                .latest_gc_cutoff_lsn
-                .lock_for_write()
-                .store_and_unlock(Lsn(0x30))
-                .wait()
-                .await;
         }
 
         let expected_result = [
@@ -9699,6 +9699,12 @@ mod tests {
         branch_tline.add_extra_test_dense_keyspace(KeySpace::single(get_key(0)..get_key(10)));
 
         {
+            parent_tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x10))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = parent_tline.gc_info.write().unwrap();
             *guard = GcInfo {
@@ -9710,15 +9716,15 @@ mod tests {
                 leases: Default::default(),
                 within_ancestor_pitr: false,
             };
-            parent_tline
-                .latest_gc_cutoff_lsn
-                .lock_for_write()
-                .store_and_unlock(Lsn(0x10))
-                .wait()
-                .await;
         }
 
         {
+            branch_tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x50))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = branch_tline.gc_info.write().unwrap();
             *guard = GcInfo {
@@ -9730,12 +9736,6 @@ mod tests {
                 leases: Default::default(),
                 within_ancestor_pitr: false,
             };
-            branch_tline
-                .latest_gc_cutoff_lsn
-                .lock_for_write()
-                .store_and_unlock(Lsn(0x50))
-                .wait()
-                .await;
         }
 
         let expected_result_at_gc_horizon = [
@@ -10054,6 +10054,12 @@ mod tests {
             .await?;
 
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
@@ -10065,12 +10071,6 @@ mod tests {
                 leases: Default::default(),
                 within_ancestor_pitr: false,
             };
-            tline
-                .latest_gc_cutoff_lsn
-                .lock_for_write()
-                .store_and_unlock(Lsn(0x30))
-                .wait()
-                .await;
         }
 
         let cancel = CancellationToken::new();
