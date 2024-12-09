@@ -513,6 +513,9 @@ struct ShardUpdate {
 
     /// If this is None, generation is not updated.
     generation: Option<Generation>,
+
+    /// If this is None, scheduling policy is not updated.
+    scheduling_policy: Option<ShardSchedulingPolicy>,
 }
 
 enum StopReconciliationsReason {
@@ -2376,6 +2379,23 @@ impl Service {
             }
         };
 
+        // Ordinarily we do not update scheduling policy, but when making major changes
+        // like detaching or demoting to secondary-only, we need to force the scheduling
+        // mode to Active, or the caller's expected outcome (detach it) will not happen.
+        let scheduling_policy = match req.config.mode {
+            LocationConfigMode::Detached | LocationConfigMode::Secondary => {
+                // Special case: when making major changes like detaching or demoting to secondary-only,
+                // we need to force the scheduling mode to Active, or nothing will happen.
+                Some(ShardSchedulingPolicy::Active)
+            }
+            LocationConfigMode::AttachedMulti
+            | LocationConfigMode::AttachedSingle
+            | LocationConfigMode::AttachedStale => {
+                // While attached, continue to respect whatever the existing scheduling mode is.
+                None
+            }
+        };
+
         let mut create = true;
         for (shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
             // Saw an existing shard: this is not a creation
@@ -2401,6 +2421,7 @@ impl Service {
                 placement_policy: placement_policy.clone(),
                 tenant_config: req.config.tenant_conf.clone(),
                 generation: set_generation,
+                scheduling_policy,
             });
         }
 
@@ -2497,6 +2518,7 @@ impl Service {
                     placement_policy,
                     tenant_config,
                     generation,
+                    scheduling_policy,
                 } in &updates
                 {
                     self.persistence
@@ -2505,7 +2527,7 @@ impl Service {
                             Some(placement_policy.clone()),
                             Some(tenant_config.clone()),
                             *generation,
-                            None,
+                            *scheduling_policy,
                         )
                         .await?;
                 }
@@ -2521,6 +2543,7 @@ impl Service {
                         placement_policy,
                         tenant_config,
                         generation: update_generation,
+                        scheduling_policy,
                     } in updates
                     {
                         let Some(shard) = tenants.get_mut(&tenant_shard_id) else {
@@ -2537,6 +2560,10 @@ impl Service {
                         shard.config = tenant_config;
                         if let Some(generation) = update_generation {
                             shard.generation = Some(generation);
+                        }
+
+                        if let Some(scheduling_policy) = scheduling_policy {
+                            shard.set_scheduling_policy(scheduling_policy);
                         }
 
                         shard.schedule(scheduler, &mut schedule_context)?;
@@ -2992,8 +3019,16 @@ impl Service {
 
         let TenantPolicyRequest {
             placement,
-            scheduling,
+            mut scheduling,
         } = req;
+
+        if let Some(PlacementPolicy::Detached | PlacementPolicy::Secondary) = placement {
+            // When someone configures a tenant to detach, we force the scheduling policy to enable
+            // this to take effect.
+            if scheduling.is_none() {
+                scheduling = Some(ShardSchedulingPolicy::Active);
+            }
+        }
 
         self.persistence
             .update_tenant_shard(
