@@ -838,6 +838,7 @@ impl From<CompactKeyRange> for Range<Key> {
 
 impl CompactLsnRange {
     #[cfg(test)]
+    #[cfg(feature = "testing")]
     pub fn above(lsn: Lsn) -> Self {
         Self {
             start: lsn,
