@@ -70,6 +70,8 @@ pub const DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT: usize = 100;
 pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
 
 /// As defined in S3 docs
+///
+/// <https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html>
 pub const MAX_KEYS_PER_DELETE_S3: usize = 1000;
 
 /// As defined in Azure docs
