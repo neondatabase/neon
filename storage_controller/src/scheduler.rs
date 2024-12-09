@@ -742,6 +742,10 @@ impl Scheduler {
         self.schedule_shard::<AttachedShardTag>(&[], &None, &ScheduleContext::default())
     }
 
+    pub(crate) fn get_node_az(&self, node_id: &NodeId) -> Option<AvailabilityZone> {
+        self.nodes.get(node_id).map(|n| n.az.clone())
+    }
+
     /// Unit test access to internal state
     #[cfg(test)]
     pub(crate) fn get_node_shard_count(&self, node_id: NodeId) -> usize {
