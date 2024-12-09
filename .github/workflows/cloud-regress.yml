@@ -26,8 +26,6 @@ jobs:
       DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
     runs-on: us-east-2
     container:
