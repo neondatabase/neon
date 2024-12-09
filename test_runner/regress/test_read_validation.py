@@ -21,8 +21,8 @@ def test_read_validation(neon_simple_env: NeonEnv):
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[
-            "neon.max_file_cache_size = 32MB",
-            "neon.file_cache_size_limit = 32MB",
+            "neon.max_file_cache_size = 1MB",
+            "neon.file_cache_size_limit = 1MB",
         ]
         if USE_LFC
         else [],
