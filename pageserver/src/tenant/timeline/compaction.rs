@@ -1964,7 +1964,7 @@ impl Timeline {
             let gc_info = self.gc_info.read().unwrap();
             let mut retain_lsns_below_horizon = Vec::new();
             let gc_cutoff = {
-                // Currently, gc-compaction only kicks in when the legacy gc finishes updating the gc_cutoff.
+                // Currently, gc-compaction only kicks in after the legacy gc has updated the gc_cutoff.
                 // Therefore, it can only clean up data that cannot be cleaned up with legacy gc, instead of
                 // cleaning everything that theoritically it could. In the future, it should use `self.gc_info`
                 // to get the truth data.

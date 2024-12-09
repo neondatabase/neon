@@ -3031,7 +3031,7 @@ impl Tenant {
                                     tline_pending_tasks.push_back(if idx == jobs_len - 1 {
                                         ScheduledCompactionTask {
                                             options: job,
-                                            // The last job in the queue sends the signal and release the gc guard
+                                            // The last job in the queue sends the signal and releases the gc guard
                                             result_tx: next_scheduled_compaction_task
                                                 .result_tx
                                                 .take(),
