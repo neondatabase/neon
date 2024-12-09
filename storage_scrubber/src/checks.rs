@@ -621,6 +621,8 @@ pub(crate) async fn list_tenant_manifests(
         .map(|(g, obj)| (*g, obj.clone()))
         .unwrap();
 
+    manifests.retain(|(gen, _obj)| gen != &latest_generation);
+
     let manifest_bytes =
         match download_object_with_retries(remote_client, &latest_listing_object.key).await {
             Ok(bytes) => bytes,
@@ -646,7 +648,7 @@ pub(crate) async fn list_tenant_manifests(
                     manifest,
                     listing_object: latest_listing_object,
                 }),
-                manifests: vec![],
+                manifests,
             });
         }
         Err(parse_error) => errors.push((
