@@ -19,6 +19,13 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 3600
+
     - name: Download artifact
       id: download-artifact
       shell: bash -euxo pipefail {0}
