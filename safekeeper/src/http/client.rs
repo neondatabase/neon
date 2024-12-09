@@ -8,6 +8,7 @@
 //! etc.
 
 use reqwest::{IntoUrl, Method, StatusCode};
+use std::error::Error as _;
 use utils::{
     http::error::HttpErrorBody,
     id::{NodeId, TenantId, TimelineId},
@@ -26,7 +27,7 @@ pub struct Client {
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Failed to receive body (reqwest error).
-    #[error("receive body: {0}")]
+    #[error("receive body: {0}{}", .0.source().map(|e| format!(": {e}")).unwrap_or_default())]
     ReceiveBody(reqwest::Error),
 
     /// Status is not ok, but failed to parse body as `HttpErrorBody`.

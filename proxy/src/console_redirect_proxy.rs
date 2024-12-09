@@ -206,6 +206,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let mut node = connect_to_compute(
         ctx,
         &TcpMechanism {
+            params_compat: true,
             params: &params,
             locks: &config.connect_compute_locks,
         },

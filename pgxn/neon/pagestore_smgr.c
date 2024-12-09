@@ -610,6 +610,9 @@ prefetch_read(PrefetchRequest *slot)
 {
 	NeonResponse *response;
 	MemoryContext old;
+	BufferTag	buftag;
+	shardno_t	shard_no;
+	uint64		my_ring_index;
 
 	Assert(slot->status == PRFS_REQUESTED);
 	Assert(slot->response == NULL);
@@ -623,11 +626,29 @@ prefetch_read(PrefetchRequest *slot)
 					   slot->status, slot->response,
 					   (long)slot->my_ring_index, (long)MyPState->ring_receive);
 
+	/*
+	 * Copy the request info so that if an error happens and the prefetch
+	 * queue is flushed during the receive call, we can print the original
+	 * values in the error message
+	 */
+	buftag = slot->buftag;
+	shard_no = slot->shard_no;
+	my_ring_index = slot->my_ring_index;
+
 	old = MemoryContextSwitchTo(MyPState->errctx);
-	response = (NeonResponse *) page_server->receive(slot->shard_no);
+	response = (NeonResponse *) page_server->receive(shard_no);
 	MemoryContextSwitchTo(old);
 	if (response)
 	{
+		/* The slot should still be valid */
+		if (slot->status != PRFS_REQUESTED ||
+			slot->response != NULL ||
+			slot->my_ring_index != MyPState->ring_receive)
+			neon_shard_log(shard_no, ERROR,
+						   "Incorrect prefetch slot state after receive: status=%d response=%p my=%lu receive=%lu",
+						   slot->status, slot->response,
+						   (long) slot->my_ring_index, (long) MyPState->ring_receive);
+
 		/* update prefetch state */
 		MyPState->n_responses_buffered += 1;
 		MyPState->n_requests_inflight -= 1;
@@ -642,11 +663,15 @@ prefetch_read(PrefetchRequest *slot)
 	}
 	else
 	{
-		neon_shard_log(slot->shard_no, LOG,
+		/*
+		 * Note: The slot might no longer be valid, if the connection was lost
+		 * and the prefetch queue was flushed during the receive call
+		 */
+		neon_shard_log(shard_no, LOG,
 					   "No response from reading prefetch entry %lu: %u/%u/%u.%u block %u. This can be caused by a concurrent disconnect",
-					   (long)slot->my_ring_index,
-					   RelFileInfoFmt(BufTagGetNRelFileInfo(slot->buftag)),
-					   slot->buftag.forkNum, slot->buftag.blockNum);
+					   (long) my_ring_index,
+					   RelFileInfoFmt(BufTagGetNRelFileInfo(buftag)),
+					   buftag.forkNum, buftag.blockNum);
 		return false;
 	}
 }

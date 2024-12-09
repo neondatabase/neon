@@ -37,14 +37,19 @@ use remote_timeline_client::manifest::{
 };
 use remote_timeline_client::UploadQueueNotReadyError;
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::sync::atomic::AtomicBool;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
+use timeline::compaction::ScheduledCompactionTask;
 use timeline::import_pgdata;
 use timeline::offload::offload_timeline;
+use timeline::CompactFlags;
+use timeline::CompactOptions;
+use timeline::CompactionError;
 use timeline::ShutdownMode;
 use tokio::io::BufReader;
 use tokio::sync::watch;
@@ -339,6 +344,11 @@ pub struct Tenant {
     /// Overhead of mutex is acceptable because compaction is done with a multi-second period.
     compaction_circuit_breaker: std::sync::Mutex<CircuitBreaker>,
 
+    /// Scheduled compaction tasks. Currently, this can only be populated by triggering
+    /// a manual gc-compaction from the manual compaction API.
+    scheduled_compaction_tasks:
+        std::sync::Mutex<HashMap<TimelineId, VecDeque<ScheduledCompactionTask>>>,
+
     /// If the tenant is in Activating state, notify this to encourage it
     /// to proceed to Active as soon as possible, rather than waiting for lazy
     /// background warmup.
@@ -357,8 +367,8 @@ pub struct Tenant {
 
     /// Throttle applied at the top of [`Timeline::get`].
     /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
-    pub(crate) timeline_get_throttle:
-        Arc<throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
+    pub(crate) pagestream_throttle:
+        Arc<throttle::Throttle<crate::metrics::tenant_throttling::Pagestream>>,
 
     /// An ongoing timeline detach concurrency limiter.
     ///
@@ -1678,7 +1688,7 @@ impl Tenant {
                     remote_metadata,
                     TimelineResources {
                         remote_client,
-                        timeline_get_throttle: self.timeline_get_throttle.clone(),
+                        pagestream_throttle: self.pagestream_throttle.clone(),
                         l0_flush_global_state: self.l0_flush_global_state.clone(),
                     },
                     LoadTimelineCause::Attach,
@@ -2953,27 +2963,100 @@ impl Tenant {
 
         for (timeline_id, timeline, (can_compact, can_offload)) in &timelines_to_compact_or_offload
         {
+            // pending_task_left == None: cannot compact, maybe still pending tasks
+            // pending_task_left == Some(true): compaction task left
+            // pending_task_left == Some(false): no compaction task left
             let pending_task_left = if *can_compact {
-                Some(
-                    timeline
-                        .compact(cancel, EnumSet::empty(), ctx)
-                        .instrument(info_span!("compact_timeline", %timeline_id))
-                        .await
-                        .inspect_err(|e| match e {
-                            timeline::CompactionError::ShuttingDown => (),
-                            timeline::CompactionError::Offload(_) => {
-                                // Failures to offload timelines do not trip the circuit breaker, because
-                                // they do not do lots of writes the way compaction itself does: it is cheap
-                                // to retry, and it would be bad to stop all compaction because of an issue with offloading.
+                let has_pending_l0_compaction_task = timeline
+                    .compact(cancel, EnumSet::empty(), ctx)
+                    .instrument(info_span!("compact_timeline", %timeline_id))
+                    .await
+                    .inspect_err(|e| match e {
+                        timeline::CompactionError::ShuttingDown => (),
+                        timeline::CompactionError::Offload(_) => {
+                            // Failures to offload timelines do not trip the circuit breaker, because
+                            // they do not do lots of writes the way compaction itself does: it is cheap
+                            // to retry, and it would be bad to stop all compaction because of an issue with offloading.
+                        }
+                        timeline::CompactionError::Other(e) => {
+                            self.compaction_circuit_breaker
+                                .lock()
+                                .unwrap()
+                                .fail(&CIRCUIT_BREAKERS_BROKEN, e);
+                        }
+                    })?;
+                if has_pending_l0_compaction_task {
+                    Some(true)
+                } else {
+                    let mut has_pending_scheduled_compaction_task;
+                    let next_scheduled_compaction_task = {
+                        let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
+                        if let Some(tline_pending_tasks) = guard.get_mut(timeline_id) {
+                            if !tline_pending_tasks.is_empty() {
+                                info!(
+                                    "{} tasks left in the compaction schedule queue",
+                                    tline_pending_tasks.len()
+                                );
                             }
-                            timeline::CompactionError::Other(e) => {
-                                self.compaction_circuit_breaker
-                                    .lock()
-                                    .unwrap()
-                                    .fail(&CIRCUIT_BREAKERS_BROKEN, e);
+                            let next_task = tline_pending_tasks.pop_front();
+                            has_pending_scheduled_compaction_task = !tline_pending_tasks.is_empty();
+                            next_task
+                        } else {
+                            has_pending_scheduled_compaction_task = false;
+                            None
+                        }
+                    };
+                    if let Some(mut next_scheduled_compaction_task) = next_scheduled_compaction_task
+                    {
+                        if !next_scheduled_compaction_task
+                            .options
+                            .flags
+                            .contains(CompactFlags::EnhancedGcBottomMostCompaction)
+                        {
+                            warn!("ignoring scheduled compaction task: scheduled task must be gc compaction: {:?}", next_scheduled_compaction_task.options);
+                        } else if next_scheduled_compaction_task.options.sub_compaction {
+                            info!("running scheduled enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs");
+                            let jobs = timeline
+                                .gc_compaction_split_jobs(next_scheduled_compaction_task.options)
+                                .await
+                                .map_err(CompactionError::Other)?;
+                            if jobs.is_empty() {
+                                info!("no jobs to run, skipping scheduled compaction task");
+                            } else {
+                                has_pending_scheduled_compaction_task = true;
+                                let jobs_len = jobs.len();
+                                let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
+                                let tline_pending_tasks = guard.entry(*timeline_id).or_default();
+                                for (idx, job) in jobs.into_iter().enumerate() {
+                                    tline_pending_tasks.push_back(ScheduledCompactionTask {
+                                        options: job,
+                                        result_tx: if idx == jobs_len - 1 {
+                                            // The last compaction job sends the completion signal
+                                            next_scheduled_compaction_task.result_tx.take()
+                                        } else {
+                                            None
+                                        },
+                                    });
+                                }
+                                info!("scheduled enhanced gc bottom-most compaction with sub-compaction, split into {} jobs", jobs_len);
                             }
-                        })?,
-                )
+                        } else {
+                            let _ = timeline
+                                .compact_with_options(
+                                    cancel,
+                                    next_scheduled_compaction_task.options,
+                                    ctx,
+                                )
+                                .instrument(info_span!("scheduled_compact_timeline", %timeline_id))
+                                .await?;
+                            if let Some(tx) = next_scheduled_compaction_task.result_tx.take() {
+                                // TODO: we can send compaction statistics in the future
+                                tx.send(()).ok();
+                            }
+                        }
+                    }
+                    Some(has_pending_scheduled_compaction_task)
+                }
             } else {
                 None
             };
@@ -2991,6 +3074,36 @@ impl Tenant {
             .success(&CIRCUIT_BREAKERS_UNBROKEN);
 
         Ok(has_pending_task)
+    }
+
+    /// Cancel scheduled compaction tasks
+    pub(crate) fn cancel_scheduled_compaction(
+        &self,
+        timeline_id: TimelineId,
+    ) -> Vec<ScheduledCompactionTask> {
+        let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
+        if let Some(tline_pending_tasks) = guard.get_mut(&timeline_id) {
+            let current_tline_pending_tasks = std::mem::take(tline_pending_tasks);
+            current_tline_pending_tasks.into_iter().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Schedule a compaction task for a timeline.
+    pub(crate) async fn schedule_compaction(
+        &self,
+        timeline_id: TimelineId,
+        options: CompactOptions,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
+        let tline_pending_tasks = guard.entry(timeline_id).or_default();
+        tline_pending_tasks.push_back(ScheduledCompactionTask {
+            options,
+            result_tx: Some(tx),
+        });
+        rx
     }
 
     // Call through to all timelines to freeze ephemeral layers if needed.  Usually
@@ -3422,7 +3535,7 @@ impl Tenant {
                             r.map_err(
                             |_e: tokio::sync::watch::error::RecvError|
                                 // Tenant existed but was dropped: report it as non-existent
-                                GetActiveTenantError::NotFound(GetTenantError::NotFound(self.tenant_shard_id.tenant_id))
+                                GetActiveTenantError::NotFound(GetTenantError::ShardNotFound(self.tenant_shard_id))
                         )?
                         }
                         Err(TimeoutCancellableError::Cancelled) => {
@@ -3835,7 +3948,7 @@ impl Tenant {
         }
     }
 
-    fn get_timeline_get_throttle_config(
+    fn get_pagestream_throttle_config(
         psconf: &'static PageServerConf,
         overrides: &TenantConfOpt,
     ) -> throttle::Config {
@@ -3846,8 +3959,8 @@ impl Tenant {
     }
 
     pub(crate) fn tenant_conf_updated(&self, new_conf: &TenantConfOpt) {
-        let conf = Self::get_timeline_get_throttle_config(self.conf, new_conf);
-        self.timeline_get_throttle.reconfigure(conf)
+        let conf = Self::get_pagestream_throttle_config(self.conf, new_conf);
+        self.pagestream_throttle.reconfigure(conf)
     }
 
     /// Helper function to create a new Timeline struct.
@@ -4005,13 +4118,14 @@ impl Tenant {
                 // use an extremely long backoff.
                 Some(Duration::from_secs(3600 * 24)),
             )),
+            scheduled_compaction_tasks: Mutex::new(Default::default()),
             activate_now_sem: tokio::sync::Semaphore::new(0),
             attach_wal_lag_cooldown: Arc::new(std::sync::OnceLock::new()),
             cancel: CancellationToken::default(),
             gate: Gate::default(),
-            timeline_get_throttle: Arc::new(throttle::Throttle::new(
-                Tenant::get_timeline_get_throttle_config(conf, &attached_conf.tenant_conf),
-                crate::metrics::tenant_throttling::TimelineGet::new(&tenant_shard_id),
+            pagestream_throttle: Arc::new(throttle::Throttle::new(
+                Tenant::get_pagestream_throttle_config(conf, &attached_conf.tenant_conf),
+                crate::metrics::tenant_throttling::Metrics::new(&tenant_shard_id),
             )),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
@@ -4909,7 +5023,7 @@ impl Tenant {
     fn build_timeline_resources(&self, timeline_id: TimelineId) -> TimelineResources {
         TimelineResources {
             remote_client: self.build_timeline_remote_client(timeline_id),
-            timeline_get_throttle: self.timeline_get_throttle.clone(),
+            pagestream_throttle: self.pagestream_throttle.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
         }
     }
@@ -9163,6 +9277,7 @@ mod tests {
                 CompactOptions {
                     flags: dryrun_flags,
                     compact_range: None,
+                    ..Default::default()
                 },
                 &ctx,
             )
@@ -9399,6 +9514,7 @@ mod tests {
                 CompactOptions {
                     flags: dryrun_flags,
                     compact_range: None,
+                    ..Default::default()
                 },
                 &ctx,
             )
@@ -9885,7 +10001,15 @@ mod tests {
 
         // Do a partial compaction on key range 0..2
         tline
-            .partial_compact_with_gc(get_key(0)..get_key(2), &cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions {
+                    flags: EnumSet::new(),
+                    compact_range: Some((get_key(0)..get_key(2)).into()),
+                    ..Default::default()
+                },
+                &ctx,
+            )
             .await
             .unwrap();
         let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
@@ -9924,7 +10048,15 @@ mod tests {
 
         // Do a partial compaction on key range 2..4
         tline
-            .partial_compact_with_gc(get_key(2)..get_key(4), &cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions {
+                    flags: EnumSet::new(),
+                    compact_range: Some((get_key(2)..get_key(4)).into()),
+                    ..Default::default()
+                },
+                &ctx,
+            )
             .await
             .unwrap();
         let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
@@ -9968,7 +10100,15 @@ mod tests {
 
         // Do a partial compaction on key range 4..9
         tline
-            .partial_compact_with_gc(get_key(4)..get_key(9), &cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions {
+                    flags: EnumSet::new(),
+                    compact_range: Some((get_key(4)..get_key(9)).into()),
+                    ..Default::default()
+                },
+                &ctx,
+            )
             .await
             .unwrap();
         let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
@@ -10011,7 +10151,15 @@ mod tests {
 
         // Do a partial compaction on key range 9..10
         tline
-            .partial_compact_with_gc(get_key(9)..get_key(10), &cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions {
+                    flags: EnumSet::new(),
+                    compact_range: Some((get_key(9)..get_key(10)).into()),
+                    ..Default::default()
+                },
+                &ctx,
+            )
             .await
             .unwrap();
         let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
@@ -10059,7 +10207,15 @@ mod tests {
 
         // Do a partial compaction on key range 0..10, all image layers below LSN 20 can be replaced with new ones.
         tline
-            .partial_compact_with_gc(get_key(0)..get_key(10), &cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions {
+                    flags: EnumSet::new(),
+                    compact_range: Some((get_key(0)..get_key(10)).into()),
+                    ..Default::default()
+                },
+                &ctx,
+            )
             .await
             .unwrap();
         let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;

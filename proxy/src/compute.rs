@@ -6,13 +6,15 @@ use std::time::Duration;
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use postgres_client::tls::MakeTlsConnect;
+use postgres_client::{CancelToken, RawConnection};
+use postgres_protocol::message::backend::NoticeResponseBody;
 use pq_proto::StartupMessageParams;
 use rustls::client::danger::ServerCertVerifier;
 use rustls::crypto::ring;
 use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio_postgres::tls::MakeTlsConnect;
 use tracing::{debug, error, info, warn};
 
 use crate::auth::parse_endpoint_param;
@@ -32,9 +34,9 @@ pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 #[derive(Debug, Error)]
 pub(crate) enum ConnectionError {
     /// This error doesn't seem to reveal any secrets; for instance,
-    /// `tokio_postgres::error::Kind` doesn't contain ip addresses and such.
+    /// `postgres_client::error::Kind` doesn't contain ip addresses and such.
     #[error("{COULD_NOT_CONNECT}: {0}")]
-    Postgres(#[from] tokio_postgres::Error),
+    Postgres(#[from] postgres_client::Error),
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     CouldNotConnect(#[from] io::Error),
@@ -97,18 +99,18 @@ impl ReportableError for ConnectionError {
 }
 
 /// A pair of `ClientKey` & `ServerKey` for `SCRAM-SHA-256`.
-pub(crate) type ScramKeys = tokio_postgres::config::ScramKeys<32>;
+pub(crate) type ScramKeys = postgres_client::config::ScramKeys<32>;
 
 /// A config for establishing a connection to compute node.
-/// Eventually, `tokio_postgres` will be replaced with something better.
+/// Eventually, `postgres_client` will be replaced with something better.
 /// Newtype allows us to implement methods on top of it.
-#[derive(Clone, Default)]
-pub(crate) struct ConnCfg(Box<tokio_postgres::Config>);
+#[derive(Clone)]
+pub(crate) struct ConnCfg(Box<postgres_client::Config>);
 
 /// Creation and initialization routines.
 impl ConnCfg {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    pub(crate) fn new(host: String, port: u16) -> Self {
+        Self(Box::new(postgres_client::Config::new(host, port)))
     }
 
     /// Reuse password or auth keys from the other config.
@@ -122,65 +124,49 @@ impl ConnCfg {
         }
     }
 
-    pub(crate) fn get_host(&self) -> Result<Host, WakeComputeError> {
-        match self.0.get_hosts() {
-            [tokio_postgres::config::Host::Tcp(s)] => Ok(s.into()),
-            // we should not have multiple address or unix addresses.
-            _ => Err(WakeComputeError::BadComputeAddress(
-                "invalid compute address".into(),
-            )),
+    pub(crate) fn get_host(&self) -> Host {
+        match self.0.get_host() {
+            postgres_client::config::Host::Tcp(s) => s.into(),
         }
     }
 
     /// Apply startup message params to the connection config.
-    pub(crate) fn set_startup_params(&mut self, params: &StartupMessageParams) {
-        // Only set `user` if it's not present in the config.
-        // Console redirect auth flow takes username from the console's response.
-        if let (None, Some(user)) = (self.get_user(), params.get("user")) {
-            self.user(user);
+    pub(crate) fn set_startup_params(
+        &mut self,
+        params: &StartupMessageParams,
+        arbitrary_params: bool,
+    ) {
+        if !arbitrary_params {
+            self.set_param("client_encoding", "UTF8");
         }
-
-        // Only set `dbname` if it's not present in the config.
-        // Console redirect auth flow takes dbname from the console's response.
-        if let (None, Some(dbname)) = (self.get_dbname(), params.get("database")) {
-            self.dbname(dbname);
-        }
-
-        // Don't add `options` if they were only used for specifying a project.
-        // Connection pools don't support `options`, because they affect backend startup.
-        if let Some(options) = filtered_options(params) {
-            self.options(&options);
-        }
-
-        if let Some(app_name) = params.get("application_name") {
-            self.application_name(app_name);
-        }
-
-        // TODO: This is especially ugly...
-        if let Some(replication) = params.get("replication") {
-            use tokio_postgres::config::ReplicationMode;
-            match replication {
-                "true" | "on" | "yes" | "1" => {
-                    self.replication_mode(ReplicationMode::Physical);
+        for (k, v) in params.iter() {
+            match k {
+                // Only set `user` if it's not present in the config.
+                // Console redirect auth flow takes username from the console's response.
+                "user" if self.user_is_set() => continue,
+                "database" if self.db_is_set() => continue,
+                "options" => {
+                    if let Some(options) = filtered_options(v) {
+                        self.set_param(k, &options);
+                    }
                 }
-                "database" => {
-                    self.replication_mode(ReplicationMode::Logical);
+                "user" | "database" | "application_name" | "replication" => {
+                    self.set_param(k, v);
                 }
-                _other => {}
+
+                // if we allow arbitrary params, then we forward them through.
+                // this is a flag for a period of backwards compatibility
+                k if arbitrary_params => {
+                    self.set_param(k, v);
+                }
+                _ => {}
             }
         }
-
-        // TODO: extend the list of the forwarded startup parameters.
-        // Currently, tokio-postgres doesn't allow us to pass
-        // arbitrary parameters, but the ones above are a good start.
-        //
-        // This and the reverse params problem can be better addressed
-        // in a bespoke connection machinery (a new library for that sake).
     }
 }
 
 impl std::ops::Deref for ConnCfg {
-    type Target = tokio_postgres::Config;
+    type Target = postgres_client::Config;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -197,7 +183,7 @@ impl std::ops::DerefMut for ConnCfg {
 impl ConnCfg {
     /// Establish a raw TCP connection to the compute node.
     async fn connect_raw(&self, timeout: Duration) -> io::Result<(SocketAddr, TcpStream, &str)> {
-        use tokio_postgres::config::Host;
+        use postgres_client::config::Host;
 
         // wrap TcpStream::connect with timeout
         let connect_with_timeout = |host, port| {
@@ -222,46 +208,23 @@ impl ConnCfg {
             })
         };
 
-        // We can't reuse connection establishing logic from `tokio_postgres` here,
+        // We can't reuse connection establishing logic from `postgres_client` here,
         // because it has no means for extracting the underlying socket which we
         // require for our business.
-        let mut connection_error = None;
-        let ports = self.0.get_ports();
-        let hosts = self.0.get_hosts();
-        // the ports array is supposed to have 0 entries, 1 entry, or as many entries as in the hosts array
-        if ports.len() > 1 && ports.len() != hosts.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "bad compute config, \
-                     ports and hosts entries' count does not match: {:?}",
-                    self.0
-                ),
-            ));
-        }
+        let port = self.0.get_port();
+        let host = self.0.get_host();
 
-        for (i, host) in hosts.iter().enumerate() {
-            let port = ports.get(i).or_else(|| ports.first()).unwrap_or(&5432);
-            let host = match host {
-                Host::Tcp(host) => host.as_str(),
-            };
+        let host = match host {
+            Host::Tcp(host) => host.as_str(),
+        };
 
-            match connect_once(host, *port).await {
-                Ok((sockaddr, stream)) => return Ok((sockaddr, stream, host)),
-                Err(err) => {
-                    // We can't throw an error here, as there might be more hosts to try.
-                    warn!("couldn't connect to compute node at {host}:{port}: {err}");
-                    connection_error = Some(err);
-                }
+        match connect_once(host, port).await {
+            Ok((sockaddr, stream)) => Ok((sockaddr, stream, host)),
+            Err(err) => {
+                warn!("couldn't connect to compute node at {host}:{port}: {err}");
+                Err(err)
             }
         }
-
-        Err(connection_error.unwrap_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("bad compute config: {:?}", self.0),
-            )
-        }))
     }
 }
 
@@ -270,13 +233,15 @@ type RustlsStream = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>
 pub(crate) struct PostgresConnection {
     /// Socket connected to a compute node.
     pub(crate) stream:
-        tokio_postgres::maybe_tls_stream::MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
+        postgres_client::maybe_tls_stream::MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
     /// PostgreSQL connection parameters.
     pub(crate) params: std::collections::HashMap<String, String>,
     /// Query cancellation token.
     pub(crate) cancel_closure: CancelClosure,
     /// Labels for proxy's metrics.
     pub(crate) aux: MetricsAuxInfo,
+    /// Notices received from compute after authenticating
+    pub(crate) delayed_notice: Vec<NoticeResponseBody>,
 
     _guage: NumDbConnectionsGuard<'static>,
 }
@@ -322,10 +287,19 @@ impl ConnCfg {
 
         // connect_raw() will not use TLS if sslmode is "disable"
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (client, connection) = self.0.connect_raw(stream, tls).await?;
+        let connection = self.0.connect_raw(stream, tls).await?;
         drop(pause);
-        tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
-        let stream = connection.stream.into_inner();
+
+        let RawConnection {
+            stream,
+            parameters,
+            delayed_notice,
+            process_id,
+            secret_key,
+        } = connection;
+
+        tracing::Span::current().record("pid", tracing::field::display(process_id));
+        let stream = stream.into_inner();
 
         // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
         info!(
@@ -334,18 +308,23 @@ impl ConnCfg {
             self.0.get_ssl_mode()
         );
 
-        // This is very ugly but as of now there's no better way to
-        // extract the connection parameters from tokio-postgres' connection.
-        // TODO: solve this problem in a more elegant manner (e.g. the new library).
-        let params = connection.parameters;
-
         // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
         // Yet another reason to rework the connection establishing code.
-        let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token(), vec![]);
+        let cancel_closure = CancelClosure::new(
+            socket_addr,
+            CancelToken {
+                socket_config: None,
+                ssl_mode: self.0.get_ssl_mode(),
+                process_id,
+                secret_key,
+            },
+            vec![],
+        );
 
         let connection = PostgresConnection {
             stream,
-            params,
+            params: parameters,
+            delayed_notice,
             cancel_closure,
             aux,
             _guage: Metrics::get().proxy.db_connections.guard(ctx.protocol()),
@@ -356,10 +335,9 @@ impl ConnCfg {
 }
 
 /// Retrieve `options` from a startup message, dropping all proxy-secific flags.
-fn filtered_options(params: &StartupMessageParams) -> Option<String> {
+fn filtered_options(options: &str) -> Option<String> {
     #[allow(unstable_name_collisions)]
-    let options: String = params
-        .options_raw()?
+    let options: String = StartupMessageParams::parse_options_raw(options)
         .filter(|opt| parse_endpoint_param(opt).is_none() && neon_option(opt).is_none())
         .intersperse(" ") // TODO: use impl from std once it's stabilized
         .collect();
@@ -436,27 +414,24 @@ mod tests {
     #[test]
     fn test_filtered_options() {
         // Empty options is unlikely to be useful anyway.
-        let params = StartupMessageParams::new([("options", "")]);
-        assert_eq!(filtered_options(&params), None);
+        let params = "";
+        assert_eq!(filtered_options(params), None);
 
         // It's likely that clients will only use options to specify endpoint/project.
-        let params = StartupMessageParams::new([("options", "project=foo")]);
-        assert_eq!(filtered_options(&params), None);
+        let params = "project=foo";
+        assert_eq!(filtered_options(params), None);
 
         // Same, because unescaped whitespaces are no-op.
-        let params = StartupMessageParams::new([("options", " project=foo ")]);
-        assert_eq!(filtered_options(&params).as_deref(), None);
+        let params = " project=foo ";
+        assert_eq!(filtered_options(params).as_deref(), None);
 
-        let params = StartupMessageParams::new([("options", r"\  project=foo \ ")]);
-        assert_eq!(filtered_options(&params).as_deref(), Some(r"\  \ "));
+        let params = r"\  project=foo \ ";
+        assert_eq!(filtered_options(params).as_deref(), Some(r"\  \ "));
 
-        let params = StartupMessageParams::new([("options", "project = foo")]);
-        assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
+        let params = "project = foo";
+        assert_eq!(filtered_options(params).as_deref(), Some("project = foo"));
 
-        let params = StartupMessageParams::new([(
-            "options",
-            "project = foo neon_endpoint_type:read_write   neon_lsn:0/2",
-        )]);
-        assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
+        let params = "project = foo neon_endpoint_type:read_write   neon_lsn:0/2 neon_proxy_params_compat:true";
+        assert_eq!(filtered_options(params).as_deref(), Some("project = foo"));
     }
 }

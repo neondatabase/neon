@@ -60,24 +60,22 @@ def test_clickhouse(remote_pg: RemotePostgres):
         "SETTINGS materialized_postgresql_tables_list = 'table1';"
     )
     wait_until(
-        120,
-        0.5,
         lambda: query_clickhouse(
             client,
             "select * from db1_postgres.table1 order by 1",
             "ee600d8f7cd05bd0b169fa81f44300a9dd10085a",
         ),
+        timeout=60,
     )
     cur.execute("INSERT INTO table1 (id, column1) VALUES (3, 'ghi'), (4, 'jkl');")
     conn.commit()
     wait_until(
-        120,
-        0.5,
         lambda: query_clickhouse(
             client,
             "select * from db1_postgres.table1 order by 1",
             "9eba2daaf7e4d7d27ac849525f68b562ab53947d",
         ),
+        timeout=60,
     )
     log.debug("Sleeping before final checking if Neon is still alive")
     time.sleep(3)
