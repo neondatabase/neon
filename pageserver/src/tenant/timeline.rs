@@ -836,6 +836,16 @@ impl From<CompactKeyRange> for Range<Key> {
     }
 }
 
+impl CompactLsnRange {
+    #[cfg(test)]
+    pub fn above(lsn: Lsn) -> Self {
+        Self {
+            start: lsn,
+            end: Lsn::MAX,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CompactOptions {
     pub flags: EnumSet<CompactFlags>,
