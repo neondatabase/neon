@@ -118,6 +118,11 @@ typedef struct
 	 */
 	PSConnectionState state;
 	PGconn		   *conn;
+
+	/* request / response counters for debugging */
+	uint64			nrequests_sent;
+	uint64			nresponses_received;
+
 	/*---
 	 * WaitEventSet containing:
 	 *	- WL_SOCKET_READABLE on 'conn'
@@ -628,6 +633,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		}
 
 		shard->state = PS_Connected;
+		shard->nrequests_sent = 0;
+		shard->nresponses_received = 0;
 	}
 	/* FALLTHROUGH */
 	case PS_Connected:
@@ -708,10 +715,11 @@ retry:
 		 * response.
 		 */
 		now = GetCurrentTimestamp();
-		if (next_log_ts - now >= LOG_INTERVAL_US)
+		if (now >= next_log_ts)
 		{
-			neon_shard_log(shard_no, LOG, "no response received from pageserver for %0.3f s, still waiting",
-						   (double) ((now - start_ts) / 1000000.0));
+			neon_shard_log(shard_no, LOG, "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses)",
+						   (double) ((now - start_ts) / 1000000.0),
+						   shard->nrequests_sent, shard->nresponses_received);
 			next_log_ts = now + LOG_INTERVAL_US;
 			logged = true;
 		}
@@ -830,6 +838,7 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 	 * PGRES_POLLING_WRITING state. It's kinda dirty to disconnect at this
 	 * point, but on the grand scheme of things it's only a small issue.
 	 */
+	shard->nrequests_sent++;
 	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
 	{
 		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
@@ -922,6 +931,7 @@ pageserver_receive(shardno_t shard_no)
 		neon_shard_log(shard_no, ERROR, "pageserver_receive disconnect: unexpected PQgetCopyData return value: %d", rc);
 	}
 
+	shard->nresponses_received++;
 	return (NeonResponse *) resp;
 }
 
