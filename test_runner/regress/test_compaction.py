@@ -121,9 +121,6 @@ page_cache_size=10
     assert vectored_average < 8
 
 
-@pytest.mark.skip(
-    "This is being fixed and tracked in https://github.com/neondatabase/neon/issues/9114"
-)
 @skip_in_debug_build("only run with release build")
 def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     SMOKE_CONF = {
@@ -156,20 +153,20 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
         if i % 10 == 0:
             log.info(f"Running churn round {i}/{churn_rounds} ...")
 
-        ps_http.timeline_compact(
-            tenant_id,
-            timeline_id,
-            enhanced_gc_bottom_most_compaction=True,
-            body={
-                "scheduled": True,
-                "sub_compaction": True,
-                "compact_range": {
-                    "start": "000000000000000000000000000000000000",
-                    # skip the SLRU range for now -- it races with get-lsn-by-timestamp, TODO: fix this
-                    "end": "010000000000000000000000000000000000",
+            # Run gc-compaction every 10 rounds to ensure the test doesn't take too long time.
+            ps_http.timeline_compact(
+                tenant_id,
+                timeline_id,
+                enhanced_gc_bottom_most_compaction=True,
+                body={
+                    "scheduled": True,
+                    "sub_compaction": True,
+                    "compact_range": {
+                        "start": "000000000000000000000000000000000000",
+                        "end": "030000000000000000000000000000000000",
+                    },
                 },
-            },
-        )
+            )
 
         workload.churn_rows(row_count, env.pageserver.id)
 
@@ -180,6 +177,10 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
+
+    # Run a legacy compaction+gc to ensure gc-compaction can coexist with legacy compaction.
+    ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+    ps_http.timeline_gc(tenant_id, timeline_id, None)
 
 
 # Stripe sizes in number of pages.

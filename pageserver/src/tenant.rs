@@ -3028,14 +3028,23 @@ impl Tenant {
                                 let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
                                 let tline_pending_tasks = guard.entry(*timeline_id).or_default();
                                 for (idx, job) in jobs.into_iter().enumerate() {
-                                    tline_pending_tasks.push_back(ScheduledCompactionTask {
-                                        options: job,
-                                        result_tx: if idx == jobs_len - 1 {
-                                            // The last compaction job sends the completion signal
-                                            next_scheduled_compaction_task.result_tx.take()
-                                        } else {
-                                            None
-                                        },
+                                    tline_pending_tasks.push_back(if idx == jobs_len - 1 {
+                                        ScheduledCompactionTask {
+                                            options: job,
+                                            // The last job in the queue sends the signal and releases the gc guard
+                                            result_tx: next_scheduled_compaction_task
+                                                .result_tx
+                                                .take(),
+                                            gc_block: next_scheduled_compaction_task
+                                                .gc_block
+                                                .take(),
+                                        }
+                                    } else {
+                                        ScheduledCompactionTask {
+                                            options: job,
+                                            result_tx: None,
+                                            gc_block: None,
+                                        }
                                     });
                                 }
                                 info!("scheduled enhanced gc bottom-most compaction with sub-compaction, split into {} jobs", jobs_len);
@@ -3095,15 +3104,22 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         options: CompactOptions,
-    ) -> tokio::sync::oneshot::Receiver<()> {
+    ) -> anyhow::Result<tokio::sync::oneshot::Receiver<()>> {
+        let gc_guard = match self.gc_block.start().await {
+            Ok(guard) => guard,
+            Err(e) => {
+                bail!("cannot run gc-compaction because gc is blocked: {}", e);
+            }
+        };
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
         let tline_pending_tasks = guard.entry(timeline_id).or_default();
         tline_pending_tasks.push_back(ScheduledCompactionTask {
             options,
             result_tx: Some(tx),
+            gc_block: Some(gc_guard),
         });
-        rx
+        Ok(rx)
     }
 
     // Call through to all timelines to freeze ephemeral layers if needed.  Usually
@@ -8150,6 +8166,12 @@ mod tests {
             )
             .await?;
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             guard.cutoffs.time = Lsn(0x30);
@@ -8252,6 +8274,12 @@ mod tests {
 
         // increase GC horizon and compact again
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x40))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             guard.cutoffs.time = Lsn(0x40);
@@ -8632,6 +8660,12 @@ mod tests {
                 .await?
         };
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
@@ -8713,6 +8747,12 @@ mod tests {
 
         // increase GC horizon and compact again
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x40))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             guard.cutoffs.time = Lsn(0x40);
@@ -9160,6 +9200,12 @@ mod tests {
             )
             .await?;
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
@@ -9302,6 +9348,12 @@ mod tests {
 
         // increase GC horizon and compact again
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x38))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             guard.cutoffs.time = Lsn(0x38);
@@ -9397,6 +9449,12 @@ mod tests {
             )
             .await?;
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
@@ -9641,6 +9699,12 @@ mod tests {
         branch_tline.add_extra_test_dense_keyspace(KeySpace::single(get_key(0)..get_key(10)));
 
         {
+            parent_tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x10))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = parent_tline.gc_info.write().unwrap();
             *guard = GcInfo {
@@ -9655,6 +9719,12 @@ mod tests {
         }
 
         {
+            branch_tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x50))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = branch_tline.gc_info.write().unwrap();
             *guard = GcInfo {
@@ -9984,6 +10054,12 @@ mod tests {
             .await?;
 
         {
+            tline
+                .latest_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
