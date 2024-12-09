@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{marker::PhantomData, sync::Arc};
 
 use utils::sync::duplex;
 
@@ -22,7 +22,9 @@ pub struct FlushHandleInner<Buf, W> {
     /// and receives recyled buffer.
     channel: duplex::mpsc::Duplex<FlushRequest<Buf>, FullSlice<Buf>>,
     /// Join handle for the background flush task.
-    join_handle: tokio::task::JoinHandle<std::io::Result<Arc<W>>>,
+    join_handle: tokio::task::JoinHandle<std::io::Result<()>>,
+
+    _phantom: PhantomData<W>,
 }
 
 struct FlushRequest<Buf> {
@@ -137,6 +139,7 @@ where
             inner: Some(FlushHandleInner {
                 channel: front,
                 join_handle,
+                _phantom: PhantomData,
             }),
             maybe_flushed: None,
         }
@@ -176,7 +179,7 @@ where
         Ok((recycled, flush_control))
     }
 
-    async fn handle_error<T>(&mut self) -> std::io::Result<T> {
+    pub(super) async fn handle_error<T>(&mut self) -> std::io::Result<T> {
         Err(self
             .shutdown()
             .await
@@ -184,13 +187,21 @@ where
     }
 
     /// Cleans up the channel, join the flush task.
-    pub async fn shutdown(&mut self) -> std::io::Result<Arc<W>> {
+    pub async fn shutdown(&mut self) -> std::io::Result<()> {
         let handle = self
             .inner
             .take()
             .expect("must not use after we returned an error");
         drop(handle.channel.tx);
         handle.join_handle.await.unwrap()
+    }
+
+    pub fn shutdown_no_flush(mut self) {
+        let handle = self
+            .inner
+            .take()
+            .expect("must not use after we returned an error");
+        handle.join_handle.abort();
     }
 
     /// Gets a mutable reference to the inner handle. Panics if [`Self::inner`] is `None`.
@@ -236,7 +247,7 @@ where
 
     /// Runs the background flush task.
     /// The passed in slice is immediately sent back to the flush handle through the duplex channel.
-    async fn run(mut self, slice: FullSlice<Buf>) -> std::io::Result<Arc<W>> {
+    async fn run(mut self, slice: FullSlice<Buf>) -> std::io::Result<()> {
         // Sends the extra buffer back to the handle.
         self.channel.send(slice).await.map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "flush handle closed early")
@@ -272,8 +283,8 @@ where
                 continue;
             }
         }
-
-        Ok(self.writer)
+        drop(self);
+        Ok(())
     }
 }
 
@@ -308,7 +319,7 @@ impl FlushNotStarted {
 impl FlushInProgress {
     /// Waits until background flush is done.
     pub async fn wait_until_flush_is_done(self) -> FlushDone {
-        self.done_flush_rx.await.unwrap();
+        let _ = self.done_flush_rx.await;
         FlushDone
     }
 }
