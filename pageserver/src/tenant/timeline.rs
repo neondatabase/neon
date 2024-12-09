@@ -851,10 +851,10 @@ impl CompactLsnRange {
 pub(crate) struct CompactOptions {
     pub flags: EnumSet<CompactFlags>,
     /// If set, the compaction will only compact the key range specified by this option.
-    /// This option is only used by GC compaction. For the full explanation, see [`GcCompactionJob`].
+    /// This option is only used by GC compaction. For the full explanation, see [`compaction::GcCompactJob`].
     pub compact_key_range: Option<CompactKeyRange>,
     /// If set, the compaction will only compact the LSN within this value.
-    /// This option is only used by GC compaction. For the full explanation, see [`GcCompactionJob`].
+    /// This option is only used by GC compaction. For the full explanation, see [`compaction::GcCompactJob`].
     pub compact_lsn_range: Option<CompactLsnRange>,
     /// Enable sub-compaction (split compaction job across key ranges).
     /// This option is only used by GC compaction.

@@ -118,7 +118,7 @@ pub struct GcCompactionJobDescription {
     /// generate an image == this LSN.
     retain_lsns_below_horizon: Vec<Lsn>,
     /// Maximum layer LSN processed in this compaction, that is max(end_lsn of layers). Exclusive. All data
-    /// >= this LSN will be kept and will not be rewritten.
+    /// \>= this LSN will be kept and will not be rewritten.
     max_layer_lsn: Lsn,
     /// Minimum layer LSN processed in this compaction, that is min(start_lsn of layers). Inclusive.
     /// All access below (strict lower than `<`) this LSN will be routed through the normal read path instead of
