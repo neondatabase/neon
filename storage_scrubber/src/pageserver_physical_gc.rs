@@ -684,9 +684,7 @@ fn validate_index_part_with_offloaded(
             ));
         }
     } else {
-        warnings.push(format!(
-            "Timeline offloaded in manifest but not archived in index-part"
-        ));
+        warnings.push("Timeline offloaded in manifest but not archived in index-part".to_string());
     }
     if index_part.metadata.ancestor_timeline() != offloaded.ancestor_timeline_id {
         warnings.push(format!(
