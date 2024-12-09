@@ -153,19 +153,20 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
         if i % 10 == 0:
             log.info(f"Running churn round {i}/{churn_rounds} ...")
 
-        ps_http.timeline_compact(
-            tenant_id,
-            timeline_id,
-            enhanced_gc_bottom_most_compaction=True,
-            body={
-                "scheduled": True,
-                "sub_compaction": True,
-                "compact_range": {
-                    "start": "000000000000000000000000000000000000",
-                    "end": "030000000000000000000000000000000000",
+            # Run gc-compaction every 10 rounds to ensure the test doesn't take too long time.
+            ps_http.timeline_compact(
+                tenant_id,
+                timeline_id,
+                enhanced_gc_bottom_most_compaction=True,
+                body={
+                    "scheduled": True,
+                    "sub_compaction": True,
+                    "compact_range": {
+                        "start": "000000000000000000000000000000000000",
+                        "end": "030000000000000000000000000000000000",
+                    },
                 },
-            },
-        )
+            )
 
         workload.churn_rows(row_count, env.pageserver.id)
 
