@@ -4556,7 +4556,7 @@ class StorageScrubber:
     def __init__(self, env: NeonEnv, log_dir: Path):
         self.env = env
         self.log_dir = log_dir
-        self.allowed_errors = []
+        self.allowed_errors: list[str] = []
 
     def scrubber_cli(
         self, args: list[str], timeout, extra_env: dict[str, str] | None = None
