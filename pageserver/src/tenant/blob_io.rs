@@ -158,7 +158,7 @@ pub(super) const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
 /// A wrapper of `VirtualFile` that allows users to write blobs.
 ///
 /// If a `BlobWriter` is dropped, the internal buffer will be
-/// discarded. You need to call [`flush_buffer`](Self::flush_buffer)
+/// discarded. You need to call [`Self::into_inner`]
 /// manually before dropping.
 pub struct BlobWriter {
     /// We do tiny writes for the length headers; they need to be in an owned buffer;
@@ -193,46 +193,7 @@ impl BlobWriter {
 
     const CAPACITY: usize = 64 * 1024;
 
-    // /// Writes the given buffer directly to the underlying `VirtualFile`.
-    // /// You need to make sure that the internal buffer is empty, otherwise
-    // /// data will be written in wrong order.
-    // #[inline(always)]
-    // async fn write_all_unbuffered<Buf: IoBuf + Send>(
-    //     &mut self,
-    //     src_buf: FullSlice<Buf>,
-    //     ctx: &RequestContext,
-    // ) -> (FullSlice<Buf>, Result<(), Error>) {
-    //     let (src_buf, res) = self.inner.write_all_at(src_buf, self.offset, ctx).await;
-    //     let nbytes = match res {
-    //         Ok(nbytes) => nbytes,
-    //         Err(e) => return (src_buf, Err(e)),
-    //     };
-    //     self.offset += nbytes as u64;
-    //     (src_buf, Ok(()))
-    // }
-
-    // #[inline(always)]
-    // /// Flushes the internal buffer to the underlying `VirtualFile`.
-    // async fn flush_buffer(&mut self, ctx: &RequestContext) -> Result<(), Error> {
-    //     let buf = std::mem::take(&mut self.buf);
-    //     let (slice, res) = self.inner.write_all(buf.slice_len(), ctx).await;
-    //     res?;
-    //     let mut buf = slice.into_raw_slice().into_inner();
-    //     buf.clear();
-    //     self.buf = buf;
-    //     Ok(())
-    // }
-
-    // #[inline(always)]
-    // /// Writes as much of `src_buf` into the internal buffer as it fits
-    // fn write_into_buffer(&mut self, src_buf: &[u8]) -> usize {
-    //     let remaining = Self::CAPACITY - self.buf.len();
-    //     let to_copy = src_buf.len().min(remaining);
-    //     self.buf.extend_from_slice(&src_buf[..to_copy]);
-    //     self.offset += to_copy as u64;
-    //     to_copy
-    // }
-
+    /// Writes `src_buf` to the file at the current offset.
     async fn write_all<Buf: IoBuf + Send>(
         &mut self,
         src_buf: FullSlice<Buf>,
