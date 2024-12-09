@@ -742,6 +742,7 @@ impl ImageLayerWriterInner {
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
@@ -768,9 +769,6 @@ impl ImageLayerWriterInner {
                 .await?,
             )
         };
-
-        // FIXME(yuchen): propagate &gate from parent
-        let gate = utils::sync::gate::Gate::default();
 
         // Start at `PAGE_SZ` to make room for the header block.
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, &gate, ctx)?;
@@ -987,12 +985,21 @@ impl ImageLayerWriter {
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(
-                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn, ctx)
-                    .await?,
+                ImageLayerWriterInner::new(
+                    conf,
+                    timeline_id,
+                    tenant_shard_id,
+                    key_range,
+                    lsn,
+                    &gate,
+                    ctx,
+                )
+                .await?,
             ),
         })
     }
@@ -1044,7 +1051,8 @@ impl ImageLayerWriter {
 impl Drop for ImageLayerWriter {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
-            inner.blob_writer.into_inner_no_flush().remove();
+            let vfile = inner.blob_writer.into_inner_no_flush();
+            std::fs::remove_file(vfile.path()).expect("failed to remove the virtual file");
         }
     }
 }
@@ -1204,6 +1212,7 @@ mod test {
                 harness.tenant_shard_id,
                 &range,
                 lsn,
+                &timeline.gate,
                 &ctx,
             )
             .await
@@ -1269,6 +1278,7 @@ mod test {
                 harness.tenant_shard_id,
                 &range,
                 lsn,
+                &timeline.gate,
                 &ctx,
             )
             .await
@@ -1347,6 +1357,7 @@ mod test {
             tenant.tenant_shard_id,
             &key_range,
             lsn,
+            &tline.gate,
             ctx,
         )
         .await?;

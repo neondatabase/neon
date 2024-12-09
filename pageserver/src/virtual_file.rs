@@ -1331,13 +1331,6 @@ impl OwnedAsyncWriter for VirtualFile {
         offset: u64,
         ctx: &RequestContext,
     ) -> std::io::Result<FullSlice<Buf>> {
-        println!(
-            "offset={offset}, buf={:?}, buflen={}",
-            buf.as_ptr(),
-            buf.len()
-        );
-        assert_eq!(offset % 512, 0);
-        assert_eq!(buf.as_ptr().align_offset(512), 0);
         let (buf, res) = VirtualFile::write_all_at(self, buf, offset, ctx).await;
         let x = res.map(|_| buf).unwrap();
         Ok(x)

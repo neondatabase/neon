@@ -142,6 +142,7 @@ impl KeyHistoryRetention {
         delta_writer: &mut SplitDeltaLayerWriter,
         mut image_writer: Option<&mut SplitImageLayerWriter>,
         stat: &mut CompactionStatistics,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut first_batch = true;
@@ -153,30 +154,30 @@ impl KeyHistoryRetention {
                     };
                     stat.produce_image_key(img);
                     if let Some(image_writer) = image_writer.as_mut() {
-                        image_writer.put_image(key, img.clone(), ctx).await?;
+                        image_writer.put_image(key, img.clone(), &gate, ctx).await?;
                     } else {
                         delta_writer
-                            .put_value(key, cutoff_lsn, Value::Image(img.clone()), ctx)
+                            .put_value(key, cutoff_lsn, Value::Image(img.clone()), &gate, ctx)
                             .await?;
                     }
                 } else {
                     for (lsn, val) in logs {
                         stat.produce_key(&val);
-                        delta_writer.put_value(key, lsn, val, ctx).await?;
+                        delta_writer.put_value(key, lsn, val, &gate, ctx).await?;
                     }
                 }
                 first_batch = false;
             } else {
                 for (lsn, val) in logs {
                     stat.produce_key(&val);
-                    delta_writer.put_value(key, lsn, val, ctx).await?;
+                    delta_writer.put_value(key, lsn, val, &gate, ctx).await?;
                 }
             }
         }
         let KeyLogAtLsn(above_horizon_logs) = self.above_horizon;
         for (lsn, val) in above_horizon_logs {
             stat.produce_key(&val);
-            delta_writer.put_value(key, lsn, val, ctx).await?;
+            delta_writer.put_value(key, lsn, val, &gate, ctx).await?;
         }
         Ok(())
     }
@@ -557,6 +558,7 @@ impl Timeline {
                 self.tenant_shard_id,
                 &layer.layer_desc().key_range,
                 layer.layer_desc().image_layer_lsn(),
+                &self.gate,
                 ctx,
             )
             .await
@@ -1158,6 +1160,7 @@ impl Timeline {
                                 debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
                                 lsn_range.clone()
                             },
+                            &self.gate,
                             ctx,
                         )
                         .await
@@ -1989,6 +1992,7 @@ impl Timeline {
                     job_desc.compaction_key_range.start,
                     lowest_retain_lsn,
                     self.get_compaction_target_size(),
+                    &self.gate,
                     ctx,
                 )
                 .await?,
@@ -2064,6 +2068,7 @@ impl Timeline {
                                 self.tenant_shard_id,
                                 desc.key_range.start,
                                 desc.lsn_range.clone(),
+                                &self.gate,
                                 ctx,
                             )
                             .await?,
@@ -2079,6 +2084,7 @@ impl Timeline {
                                 self.tenant_shard_id,
                                 job_desc.compaction_key_range.end,
                                 desc.lsn_range.clone(),
+                                &self.gate,
                                 ctx,
                             )
                             .await?,
@@ -2119,6 +2125,7 @@ impl Timeline {
                         &mut delta_layer_writer,
                         image_layer_writer.as_mut(),
                         &mut stat,
+                        &self.gate,
                         ctx,
                     )
                     .await?;
@@ -2148,6 +2155,7 @@ impl Timeline {
                 &mut delta_layer_writer,
                 image_layer_writer.as_mut(),
                 &mut stat,
+                &self.gate,
                 ctx,
             )
             .await?;
@@ -2467,6 +2475,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
             self.timeline.tenant_shard_id,
             key_range.start,
             lsn_range.clone(),
+            &self.timeline.gate,
             ctx,
         )
         .await?;
@@ -2542,6 +2551,7 @@ impl TimelineAdaptor {
             self.timeline.tenant_shard_id,
             key_range,
             lsn,
+            &self.timeline.gate,
             ctx,
         )
         .await?;

@@ -408,6 +408,7 @@ impl DeltaLayerWriterInner {
         tenant_shard_id: TenantShardId,
         key_start: Key,
         lsn_range: Range<Lsn>,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename. We don't know
@@ -420,9 +421,6 @@ impl DeltaLayerWriterInner {
             DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
 
         let file = Arc::new(VirtualFile::create(&path, ctx).await?);
-
-        // FIXME(yuchen): propagate &gate from parent
-        let gate = utils::sync::gate::Gate::default();
 
         // Start at PAGE_SZ, make room for the header block
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, &gate, ctx)?;
@@ -639,6 +637,7 @@ impl DeltaLayerWriter {
         tenant_shard_id: TenantShardId,
         key_start: Key,
         lsn_range: Range<Lsn>,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -649,6 +648,7 @@ impl DeltaLayerWriter {
                     tenant_shard_id,
                     key_start,
                     lsn_range,
+                    gate,
                     ctx,
                 )
                 .await?,
@@ -728,7 +728,7 @@ impl Drop for DeltaLayerWriter {
             // We want to remove the virtual file here, so it's fine to not
             // having completely flushed unwritten data.
             let vfile = inner.blob_writer.into_inner_no_flush();
-            vfile.remove();
+            std::fs::remove_file(vfile.path()).expect("failed to remove the virtual file");
         }
     }
 }
@@ -1905,6 +1905,7 @@ pub(crate) mod test {
             harness.tenant_shard_id,
             entries_meta.key_range.start,
             entries_meta.lsn_range.clone(),
+            &timeline.gate,
             &ctx,
         )
         .await?;
@@ -2100,6 +2101,7 @@ pub(crate) mod test {
                 tenant.tenant_shard_id,
                 Key::MIN,
                 Lsn(0x11)..truncate_at,
+                &branch.gate,
                 ctx,
             )
             .await
@@ -2234,6 +2236,7 @@ pub(crate) mod test {
             tenant.tenant_shard_id,
             *key_start,
             (*lsn_min)..lsn_end,
+            &tline.gate,
             ctx,
         )
         .await?;

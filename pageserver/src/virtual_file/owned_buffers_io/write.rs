@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::{
-    io_buf_aligned::IoBufAligned,
+    io_buf_aligned::{IoBufAligned, IoBufAlignedMut},
     io_buf_ext::{FullSlice, IoBufExt},
 };
 
@@ -61,7 +61,7 @@ pub struct BufferedWriter<B: Buffer, W> {
 
 impl<B, Buf, W> BufferedWriter<B, W>
 where
-    B: Buffer<IoBuf = Buf> + Send + 'static,
+    B: IoBufAlignedMut + Buffer<IoBuf = Buf> + Send + 'static,
     Buf: IoBufAligned + Send + Sync + CheapCloneForRead,
     W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
 {
@@ -111,8 +111,11 @@ where
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub async fn shutdown(mut self, ctx: &RequestContext) -> std::io::Result<(u64, W)> {
         let buf = self.mutable_mut();
-        if buf.pending() < buf.cap() {
-            let count = buf.pending().next_multiple_of(512) - buf.pending();
+        let len = buf.pending();
+        let cap = buf.cap();
+        if len < cap {
+            // pad zeros to the next io alignment requirement.
+            let count = len.next_multiple_of(B::ALIGN).min(cap) - len;
             buf.extend_with(0, count);
         }
         if let Some(control) = self.flush(ctx).await? {
@@ -132,7 +135,7 @@ where
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub fn shutdown_no_flush(self) -> W {
+    pub fn shutdown_no_flush(self) -> Arc<W> {
         let Self {
             mutable: _,
             writer,
@@ -140,7 +143,6 @@ where
             submit_offset: _,
         } = self;
         flush_handle.shutdown_no_flush();
-        let writer = Arc::into_inner(writer).expect("writer is the only strong reference");
         writer
     }
 
@@ -354,7 +356,7 @@ mod tests {
         assert_eq!(
             recorder.get_writes(),
             {
-                let expect: &[&[u8]] = &[b"ab", b"cd", b"ef", b"gh", b"ij", b"kl", b"mn", b"o"];
+                let expect: &[&[u8]] = &[b"ab", b"cd", b"ef", b"gh", b"ij", b"kl", b"mn", b"o\0"];
                 expect
             }
             .iter()

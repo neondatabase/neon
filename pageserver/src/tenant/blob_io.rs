@@ -426,7 +426,7 @@ impl BlobWriter {
     ///
     /// Unlike [`into_inner`](Self::into_inner), this doesn't flush
     /// the internal buffer before giving access.
-    pub fn into_inner_no_flush(self) -> VirtualFile {
+    pub fn into_inner_no_flush(self) -> Arc<VirtualFile> {
         self.writer.shutdown_no_flush()
     }
 }

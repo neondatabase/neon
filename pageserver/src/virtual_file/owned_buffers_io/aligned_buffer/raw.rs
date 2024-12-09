@@ -61,6 +61,10 @@ impl<const A: usize> RawAlignedBuffer<ConstAlign<A>> {
             align,
         }
     }
+
+    pub const fn const_align() -> usize {
+        A
+    }
 }
 
 impl<A: Alignment> RawAlignedBuffer<A> {
