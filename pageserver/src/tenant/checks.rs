@@ -1,12 +1,15 @@
 use std::collections::BTreeSet;
 
 use itertools::Itertools;
+use pageserver_compaction::helpers::overlaps_with;
 
 use super::storage_layer::LayerName;
 
 /// Checks whether a layer map is valid (i.e., is a valid result of the current compaction algorithm if nothing goes wrong).
 ///
-/// The function checks if we can split the LSN range of a delta layer only at the LSNs of the delta layers. For example,
+/// The function implements a fast path check and a slow path check.
+///
+/// The fast path checks if we can split the LSN range of a delta layer only at the LSNs of the delta layers. For example,
 ///
 /// ```plain
 /// |       |                 |       |
@@ -25,6 +28,9 @@ use super::storage_layer::LayerName;
 /// |       |    |   4   |    |       |
 ///
 /// If layer 2 and 4 contain the same single key, this is also a valid layer map.
+///
+/// However, if a partial compaction is still going on, it is possible that we get a layer map not satisfying the above condition.
+/// Therefore, we fallback to simply check if any of the two delta layers overlap.
 pub fn check_valid_layermap(metadata: &[LayerName]) -> Option<String> {
     let mut lsn_split_point = BTreeSet::new(); // TODO: use a better data structure (range tree / range set?)
     let mut all_delta_layers = Vec::new();
@@ -44,12 +50,34 @@ pub fn check_valid_layermap(metadata: &[LayerName]) -> Option<String> {
         let lsn_range = layer.lsn_range.clone();
         let intersects = lsn_split_point.range(lsn_range).collect_vec();
         if intersects.len() > 1 {
-            let err = format!(
-                "layer violates the layer map LSN split assumption: layer {} intersects with LSN [{}]",
-                layer,
-                intersects.into_iter().map(|lsn| lsn.to_string()).join(", ")
-            );
-            return Some(err);
+            return check_valid_layermap_slowpath(metadata);
+        }
+    }
+    None
+}
+
+/// A slow path check for the layer map. Do a one-by-one check for all delta layers and see if any of them overlaps.
+/// Overlapping delta layer would cause wrong results in both compaction and the normal read path.
+fn check_valid_layermap_slowpath(metadata: &[LayerName]) -> Option<String> {
+    let mut all_delta_layers = Vec::new();
+    for name in metadata {
+        if let LayerName::Delta(layer) = name {
+            all_delta_layers.push(layer.clone());
+        }
+    }
+    for a in 0..all_delta_layers.len() {
+        for b in 0..a {
+            let layer_a = &all_delta_layers[a];
+            let layer_b = &all_delta_layers[b];
+            if overlaps_with(&layer_a.lsn_range, &layer_b.lsn_range)
+                && overlaps_with(&layer_a.key_range, &layer_b.key_range)
+            {
+                let err = format!(
+                    "layer violates the layer map LSN split assumption: layer {} intersects with layer {}",
+                    layer_a, layer_b
+                );
+                return Some(err);
+            }
         }
     }
     None
