@@ -154,30 +154,30 @@ impl KeyHistoryRetention {
                     };
                     stat.produce_image_key(img);
                     if let Some(image_writer) = image_writer.as_mut() {
-                        image_writer.put_image(key, img.clone(), &gate, ctx).await?;
+                        image_writer.put_image(key, img.clone(), gate, ctx).await?;
                     } else {
                         delta_writer
-                            .put_value(key, cutoff_lsn, Value::Image(img.clone()), &gate, ctx)
+                            .put_value(key, cutoff_lsn, Value::Image(img.clone()), gate, ctx)
                             .await?;
                     }
                 } else {
                     for (lsn, val) in logs {
                         stat.produce_key(&val);
-                        delta_writer.put_value(key, lsn, val, &gate, ctx).await?;
+                        delta_writer.put_value(key, lsn, val, gate, ctx).await?;
                     }
                 }
                 first_batch = false;
             } else {
                 for (lsn, val) in logs {
                     stat.produce_key(&val);
-                    delta_writer.put_value(key, lsn, val, &gate, ctx).await?;
+                    delta_writer.put_value(key, lsn, val, gate, ctx).await?;
                 }
             }
         }
         let KeyLogAtLsn(above_horizon_logs) = self.above_horizon;
         for (lsn, val) in above_horizon_logs {
             stat.produce_key(&val);
-            delta_writer.put_value(key, lsn, val, &gate, ctx).await?;
+            delta_writer.put_value(key, lsn, val, gate, ctx).await?;
         }
         Ok(())
     }

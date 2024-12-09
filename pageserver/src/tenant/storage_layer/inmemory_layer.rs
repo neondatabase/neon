@@ -758,7 +758,7 @@ impl InMemoryLayer {
             self.tenant_shard_id,
             Key::MIN,
             self.start_lsn..end_lsn,
-            &gate,
+            gate,
             ctx,
         )
         .await?;

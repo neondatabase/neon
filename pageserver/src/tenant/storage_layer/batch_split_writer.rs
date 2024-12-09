@@ -165,6 +165,7 @@ pub struct SplitImageLayerWriter {
 }
 
 impl SplitImageLayerWriter {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
@@ -183,7 +184,7 @@ impl SplitImageLayerWriter {
                 tenant_shard_id,
                 &(start_key..Key::MAX),
                 lsn,
-                &gate,
+                gate,
                 ctx,
             )
             .await?,
@@ -216,7 +217,7 @@ impl SplitImageLayerWriter {
                 self.tenant_shard_id,
                 &(key..Key::MAX),
                 self.lsn,
-                &gate,
+                gate,
                 ctx,
             )
             .await?;
@@ -323,7 +324,7 @@ impl SplitDeltaLayerWriter {
                     self.tenant_shard_id,
                     key,
                     self.lsn_range.clone(),
-                    &gate,
+                    gate,
                     ctx,
                 )
                 .await?,
@@ -342,7 +343,7 @@ impl SplitDeltaLayerWriter {
                     self.tenant_shard_id,
                     key,
                     self.lsn_range.clone(),
-                    &gate,
+                    gate,
                     ctx,
                 )
                 .await?;

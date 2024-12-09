@@ -771,7 +771,7 @@ impl ImageLayerWriterInner {
         };
 
         // Start at `PAGE_SZ` to make room for the header block.
-        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, &gate, ctx)?;
+        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, ctx)?;
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -996,7 +996,7 @@ impl ImageLayerWriter {
                     tenant_shard_id,
                     key_range,
                     lsn,
-                    &gate,
+                    gate,
                     ctx,
                 )
                 .await?,

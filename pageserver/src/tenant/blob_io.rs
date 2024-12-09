@@ -193,9 +193,9 @@ impl BlobWriter {
 
     const CAPACITY: usize = 64 * 1024;
 
-    /// Writes the given buffer directly to the underlying `VirtualFile`.
-    /// You need to make sure that the internal buffer is empty, otherwise
-    /// data will be written in wrong order.
+    // /// Writes the given buffer directly to the underlying `VirtualFile`.
+    // /// You need to make sure that the internal buffer is empty, otherwise
+    // /// data will be written in wrong order.
     // #[inline(always)]
     // async fn write_all_unbuffered<Buf: IoBuf + Send>(
     //     &mut self,
@@ -244,7 +244,6 @@ impl BlobWriter {
             .await
             .map(|len| {
                 self.offset += len as u64;
-                ()
             });
 
         (src_buf, res)
