@@ -29,7 +29,7 @@ use crate::{
         ShardGenerationState, TenantFilter,
     },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
-    scheduler::{AttachedShardTag, MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
+    scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
     tenant_shard::{
         MigrateAttachment, ObservedStateDelta, ReconcileNeeded, ReconcilerStatus,
         ScheduleOptimization, ScheduleOptimizationAction,
@@ -2107,18 +2107,13 @@ impl Service {
             )
         };
 
-        let preferred_az_id: Option<AvailabilityZone> = {
-            let mut locked = self.inner.write().unwrap();
-
+        let preferred_az_id = {
+            let locked = self.inner.read().unwrap();
             // Idempotency: take the existing value if the tenant already exists
             if let Some(shard) = locked.tenants.get(create_ids.first().unwrap()) {
                 shard.preferred_az().cloned()
             } else {
-                locked
-                    .scheduler
-                    .schedule_shard::<AttachedShardTag>(&[], &None, &ScheduleContext::default())
-                    .ok()
-                    .and_then(|n_id| locked.scheduler.get_node_az(&n_id))
+                locked.scheduler.get_az_for_new_tenant()
             }
         };
 
