@@ -10,7 +10,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.utils import assert_tenant_state, wait_for_upload
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.utils import wait_until, run_only_on_default_postgres
+from fixtures.utils import run_only_on_default_postgres, wait_until
 from fixtures.workload import Workload
 
 if TYPE_CHECKING:

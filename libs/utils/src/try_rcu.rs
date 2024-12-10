@@ -1,4 +1,4 @@
-//! Try RCU extension lifted from https://github.com/vorner/arc-swap/issues/94#issuecomment-1987154023
+//! Try RCU extension lifted from <https://github.com/vorner/arc-swap/issues/94#issuecomment-1987154023>
 
 pub trait ArcSwapExt<T> {
     /// [`ArcSwap::rcu`](arc_swap::ArcSwap::rcu), but with Result that short-circuits on error.
