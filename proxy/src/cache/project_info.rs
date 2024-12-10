@@ -22,6 +22,8 @@ use crate::types::{EndpointId, RoleName};
 #[async_trait]
 pub(crate) trait ProjectInfoCache {
     fn invalidate_allowed_ips_for_project(&self, project_id: ProjectIdInt);
+    fn invalidate_allowed_vpc_endpoint_ids_for_project(&self, project_id: ProjectIdInt);
+    fn invalidate_block_public_or_vpc_access_for_project(&self, project_id: ProjectIdInt);
     fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt);
     async fn decrement_active_listeners(&self);
     async fn increment_active_listeners(&self);
@@ -51,6 +53,8 @@ impl<T> From<T> for Entry<T> {
 struct EndpointInfo {
     secret: std::collections::HashMap<RoleNameInt, Entry<Option<AuthSecret>>>,
     allowed_ips: Option<Entry<Arc<Vec<IpPattern>>>>,
+    block_public_or_vpc_access: Option<Entry<(bool, bool)>>,
+    allowed_vpc_endpoint_ids: Option<Entry<Arc<Vec<String>>>>,
 }
 
 impl EndpointInfo {
@@ -92,6 +96,51 @@ impl EndpointInfo {
         }
         None
     }
+
+    pub(crate) fn get_allowed_vpc_endpoint_ids(
+        &self,
+        valid_since: Instant,
+        ignore_cache_since: Option<Instant>,
+    ) -> Option<(Arc<Vec<String>>, bool)> {
+        if let Some(allowed_vpc_endpoint_ids) = &self.allowed_vpc_endpoint_ids {
+            if valid_since < allowed_vpc_endpoint_ids.created_at {
+                return Some((
+                    allowed_vpc_endpoint_ids.value.clone(),
+                    Self::check_ignore_cache(
+                        ignore_cache_since,
+                        allowed_vpc_endpoint_ids.created_at,
+                    ),
+                ));
+            }
+        }
+        None
+    }
+
+    pub(crate) fn get_block_public_or_vpc_access(
+        &self,
+        valid_since: Instant,
+        ignore_cache_since: Option<Instant>,
+    ) -> Option<((bool, bool), bool)> {
+        if let Some(block_public_or_vpc_access) = &self.block_public_or_vpc_access {
+            if valid_since < block_public_or_vpc_access.created_at {
+                return Some((
+                    block_public_or_vpc_access.value.clone(),
+                    Self::check_ignore_cache(
+                        ignore_cache_since,
+                        block_public_or_vpc_access.created_at,
+                    ),
+                ));
+            }
+        }
+        None
+    }
+
+    pub(crate) fn invalidate_block_public_or_vpc_access(&mut self) {
+        self.block_public_or_vpc_access = None;
+    }
+    pub(crate) fn invalidate_allowed_vpc_endpoint_ids(&mut self) {
+        self.allowed_vpc_endpoint_ids = None;
+    }
     pub(crate) fn invalidate_allowed_ips(&mut self) {
         self.allowed_ips = None;
     }
@@ -120,6 +169,40 @@ pub struct ProjectInfoCacheImpl {
 
 #[async_trait]
 impl ProjectInfoCache for ProjectInfoCacheImpl {
+    fn invalidate_allowed_vpc_endpoint_ids_for_project(&self, project_id: ProjectIdInt) {
+        info!(
+            "invalidating allowed vpc endpoint ids for project `{}`",
+            project_id
+        );
+        let endpoints = self
+            .project2ep
+            .get(&project_id)
+            .map(|kv| kv.value().clone())
+            .unwrap_or_default();
+        for endpoint_id in endpoints {
+            if let Some(mut endpoint_info) = self.cache.get_mut(&endpoint_id) {
+                endpoint_info.invalidate_allowed_vpc_endpoint_ids();
+            }
+        }
+    }
+
+    fn invalidate_block_public_or_vpc_access_for_project(&self, project_id: ProjectIdInt) {
+        info!(
+            "invalidating block public or vpc access for project `{}`",
+            project_id
+        );
+        let endpoints = self
+            .project2ep
+            .get(&project_id)
+            .map(|kv| kv.value().clone())
+            .unwrap_or_default();
+        for endpoint_id in endpoints {
+            if let Some(mut endpoint_info) = self.cache.get_mut(&endpoint_id) {
+                endpoint_info.invalidate_block_public_or_vpc_access();
+            }
+        }
+    }
+
     fn invalidate_allowed_ips_for_project(&self, project_id: ProjectIdInt) {
         info!("invalidating allowed ips for project `{}`", project_id);
         let endpoints = self
