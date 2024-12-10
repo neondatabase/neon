@@ -58,6 +58,11 @@ pub struct Stats {
     pub sum_throttled_usecs: u64,
 }
 
+pub enum ThrottleResult {
+    NotThrottled { start: Instant },
+    Throttled { start: Instant, end: Instant },
+}
+
 impl<M> Throttle<M>
 where
     M: Metric,
@@ -122,14 +127,14 @@ where
         self.inner.load().rate_limiter.steady_rps()
     }
 
-    pub async fn throttle(&self, key_count: usize) -> Option<Duration> {
+    pub async fn throttle(&self, key_count: usize) -> ThrottleResult {
         let inner = self.inner.load_full(); // clones the `Inner` Arc
 
-        if !inner.enabled {
-            return None;
-        }
-
         let start = std::time::Instant::now();
+
+        if !inner.enabled {
+            return ThrottleResult::NotThrottled { start };
+        }
 
         self.metric.accounting_start();
         self.count_accounted_start.fetch_add(1, Ordering::Relaxed);
@@ -145,9 +150,9 @@ where
                 .fetch_add(wait_time.as_micros() as u64, Ordering::Relaxed);
             let observation = Observation { wait_time };
             self.metric.observe_throttling(&observation);
-            Some(wait_time)
+            ThrottleResult::Throttled { start, end: now }
         } else {
-            None
+            ThrottleResult::NotThrottled { start }
         }
     }
 }
