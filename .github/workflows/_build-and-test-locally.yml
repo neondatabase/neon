@@ -31,8 +31,6 @@ defaults:
 env:
   RUST_BACKTRACE: 1
   COPT: '-Werror'
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
 jobs:
   build-neon:
