@@ -351,9 +351,6 @@ pub(crate) struct ScheduleContext {
     /// Sparse map of nodes: omitting a node implicitly makes its affinity [`AffinityScore::FREE`]
     pub(crate) nodes: HashMap<NodeId, AffinityScore>,
 
-    /// Specifically how many _attached_ locations are on each node
-    pub(crate) attached_nodes: HashMap<NodeId, usize>,
-
     pub(crate) mode: ScheduleMode,
 }
 
@@ -361,7 +358,6 @@ impl ScheduleContext {
     pub(crate) fn new(mode: ScheduleMode) -> Self {
         Self {
             nodes: HashMap::new(),
-            attached_nodes: HashMap::new(),
             mode,
         }
     }
@@ -375,27 +371,12 @@ impl ScheduleContext {
         }
     }
 
-    pub(crate) fn push_attached(&mut self, node_id: NodeId) {
-        let entry = self.attached_nodes.entry(node_id).or_default();
-        *entry += 1;
-    }
-
     /// Imagine we migrated our attached location to the given node.  Return a new context that
     /// reflects this.
     pub(crate) fn project_detach(&self, shard: &TenantShard) -> Self {
         let mut new_context = self.clone();
 
         if let Some(attached) = shard.intent.get_attached() {
-            if let Some(count) = new_context.attached_nodes.get_mut(attached) {
-                // It's unexpected that we get called in a context where the source of
-                // the migration is not already in the context.
-                debug_assert!(*count > 0);
-
-                if *count > 0 {
-                    *count -= 1;
-                }
-            }
-
             if let Some(score) = new_context.nodes.get_mut(attached) {
                 score.dec();
             }
@@ -410,9 +391,11 @@ impl ScheduleContext {
         new_context
     }
 
+    /// For test, track the sum of AffinityScore values, which is effectively how many
+    /// attached or secondary locations have been registered with this context.
     #[cfg(test)]
-    pub(crate) fn attach_count(&self) -> usize {
-        self.attached_nodes.values().sum()
+    pub(crate) fn location_count(&self) -> usize {
+        self.nodes.values().map(|i| i.0).sum()
     }
 }
 
