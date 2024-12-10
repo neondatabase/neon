@@ -572,4 +572,10 @@ def test_scrubber_scan_pageserver_metadata(
     unhealthy = env.storage_controller.metadata_health_list_unhealthy()["unhealthy_tenant_shards"]
     assert len(unhealthy) == 1 and unhealthy[0] == str(tenant_shard_id)
 
-    neon_env_builder.disable_scrub_on_exit()
+    healthy, _ = env.storage_scrubber.scan_metadata()
+    assert not healthy
+    env.storage_scrubber.allowed_errors.append(".*not present in remote storage.*")
+    healthy, _ = env.storage_scrubber.scan_metadata()
+    assert healthy
+
+    neon_env_builder.disable_scrub_on_exit()  # We already ran scrubber, no need to do an extra run
