@@ -40,6 +40,7 @@ use crate::tenant::vectored_blob_io::{
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
+use crate::virtual_file::owned_buffers_io::write::Buffer;
 use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
@@ -58,7 +59,6 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::str::FromStr;
@@ -349,7 +349,7 @@ impl ImageLayer {
     where
         F: Fn(Summary) -> Summary,
     {
-        let mut file = VirtualFile::open_with_options(
+        let file = VirtualFile::open_with_options_v2(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
             ctx,
@@ -366,11 +366,11 @@ impl ImageLayer {
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
+        let mut buf = IoBufferMut::with_capacity(PAGE_SZ);
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        buf.extend_with(0, buf.capacity() - buf.len());
+        let (_buf, res) = file.write_all_at(buf.freeze().slice_len(), 0, ctx).await;
         res?;
         Ok(())
     }
@@ -759,7 +759,7 @@ impl ImageLayerWriterInner {
         trace!("creating image layer {}", path);
         let file = {
             Arc::new(
-                VirtualFile::open_with_options(
+                VirtualFile::open_with_options_v2(
                     &path,
                     virtual_file::OpenOptions::new()
                         .write(true)
@@ -877,15 +877,16 @@ impl ImageLayerWriterInner {
         crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN.inc_by(self.uncompressed_bytes_chosen);
         crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
 
-        let mut file = self.blob_writer.into_inner(ctx).await?;
+        let file = self.blob_writer.into_inner(ctx).await?;
 
         // Write out the index
-        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
-            .await?;
+        // TODO(yuchen): should we just replace BlockBuf::blocks with one big buffer?
+        let mut offset = index_start_blk as u64 * PAGE_SZ as u64;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+            let (_buf, res) = file.write_all_at(buf.slice_len(), offset, ctx).await;
             res?;
+            offset += PAGE_SZ as u64;
         }
 
         let final_key_range = if let Some(end_key) = end_key {
@@ -906,11 +907,11 @@ impl ImageLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
+        let mut buf = IoBufferMut::with_capacity(PAGE_SZ);
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        buf.extend_with(0, buf.capacity() - buf.len());
+        let (_buf, res) = file.write_all_at(buf.freeze().slice_len(), 0, ctx).await;
         res?;
 
         let metadata = file
