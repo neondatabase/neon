@@ -21,7 +21,11 @@ pub struct MetadataSummary {
     tenant_count: usize,
     timeline_count: usize,
     timeline_shard_count: usize,
+    /// Tenant-shard timeline (key) mapping to errors. The key has to be a string because it will be serialized to a JSON.
+    /// The key is generated using `TenantShardTimelineId::to_string()`.
     with_errors: HashMap<String, Vec<String>>,
+    /// Tenant-shard timeline (key) mapping to warnings. The key has to be a string because it will be serialized to a JSON.
+    /// The key is generated using `TenantShardTimelineId::to_string()`.
     with_warnings: HashMap<String, Vec<String>>,
     with_orphans: HashSet<TenantShardTimelineId>,
     indices_by_version: HashMap<usize, usize>,
