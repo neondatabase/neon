@@ -10,7 +10,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.utils import assert_tenant_state, wait_for_upload
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.utils import wait_until
+from fixtures.utils import wait_until, run_only_on_default_postgres
 from fixtures.workload import Workload
 
 if TYPE_CHECKING:
@@ -333,6 +333,7 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     assert int(metric.value) == 0, "value resets to default"
 
 
+@run_only_on_default_postgres("Test does not start a compute")
 @pytest.mark.parametrize("ps_managed_by", ["storcon", "cplane"])
 def test_tenant_config_patch(neon_env_builder: NeonEnvBuilder, ps_managed_by: str):
     """
