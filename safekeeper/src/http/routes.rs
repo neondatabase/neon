@@ -66,6 +66,13 @@ fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
         .as_ref()
 }
 
+fn get_global_timelines(request: &Request<Body>) -> Arc<GlobalTimelines> {
+    request
+        .data::<Arc<GlobalTimelines>>()
+        .expect("unknown state type")
+        .clone()
+}
+
 /// Same as TermLsn, but serializes LSN using display serializer
 /// in Postgres format, i.e. 0/FFFFFFFF. Used only for the API response.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -123,9 +130,11 @@ async fn tenant_delete_handler(mut request: Request<Body>) -> Result<Response<Bo
     let only_local = parse_query_param(&request, "only_local")?.unwrap_or(false);
     check_permission(&request, Some(tenant_id))?;
     ensure_no_body(&mut request).await?;
+    let global_timelines = get_global_timelines(&request);
     // FIXME: `delete_force_all_for_tenant` can return an error for multiple different reasons;
     // Using an `InternalServerError` should be fixed when the types support it
-    let delete_info = GlobalTimelines::delete_force_all_for_tenant(&tenant_id, only_local)
+    let delete_info = global_timelines
+        .delete_force_all_for_tenant(&tenant_id, only_local)
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(
@@ -156,7 +165,9 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             .commit_lsn
             .segment_lsn(server_info.wal_seg_size as usize)
     });
-    GlobalTimelines::create(ttid, server_info, request_data.commit_lsn, local_start_lsn)
+    let global_timelines = get_global_timelines(&request);
+    global_timelines
+        .create(ttid, server_info, request_data.commit_lsn, local_start_lsn)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -167,7 +178,9 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 /// Note: it is possible to do the same with debug_dump.
 async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
-    let res: Vec<TenantTimelineId> = GlobalTimelines::get_all()
+    let global_timelines = get_global_timelines(&request);
+    let res: Vec<TenantTimelineId> = global_timelines
+        .get_all()
         .iter()
         .map(|tli| tli.ttid)
         .collect();
@@ -182,7 +195,8 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     );
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
     let (inmem, state) = tli.get_state().await;
     let flush_lsn = tli.get_flush_lsn().await;
 
@@ -233,9 +247,11 @@ async fn timeline_delete_handler(mut request: Request<Body>) -> Result<Response<
     let only_local = parse_query_param(&request, "only_local")?.unwrap_or(false);
     check_permission(&request, Some(ttid.tenant_id))?;
     ensure_no_body(&mut request).await?;
+    let global_timelines = get_global_timelines(&request);
     // FIXME: `delete_force` can fail from both internal errors and bad requests. Add better
     // error handling here when we're able to.
-    let resp = GlobalTimelines::delete(&ttid, only_local)
+    let resp = global_timelines
+        .delete(&ttid, only_local)
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, resp)
@@ -247,8 +263,9 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let data: pull_timeline::Request = json_request(&mut request).await?;
     let conf = get_conf(&request);
+    let global_timelines = get_global_timelines(&request);
 
-    let resp = pull_timeline::handle_request(data, conf.sk_auth_token.clone())
+    let resp = pull_timeline::handle_request(data, conf.sk_auth_token.clone(), global_timelines)
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, resp)
@@ -263,7 +280,8 @@ async fn timeline_snapshot_handler(request: Request<Body>) -> Result<Response<Bo
     );
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
 
     // To stream the body use wrap_stream which wants Stream of Result<Bytes>,
     // so create the chan and write to it in another task.
@@ -293,19 +311,19 @@ async fn timeline_copy_handler(mut request: Request<Body>) -> Result<Response<Bo
     check_permission(&request, None)?;
 
     let request_data: TimelineCopyRequest = json_request(&mut request).await?;
-    let ttid = TenantTimelineId::new(
+    let source_ttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "source_timeline_id")?,
     );
 
-    let source = GlobalTimelines::get(ttid)?;
+    let global_timelines = get_global_timelines(&request);
 
     copy_timeline::handle_request(copy_timeline::Request{
-        source,
+        source_ttid,
         until_lsn: request_data.until_lsn,
-        destination_ttid: TenantTimelineId::new(ttid.tenant_id, request_data.target_timeline_id),
-    })
-        .instrument(info_span!("copy_timeline", from=%ttid, to=%request_data.target_timeline_id, until_lsn=%request_data.until_lsn))
+        destination_ttid: TenantTimelineId::new(source_ttid.tenant_id, request_data.target_timeline_id),
+    }, global_timelines)
+        .instrument(info_span!("copy_timeline", from=%source_ttid, to=%request_data.target_timeline_id, until_lsn=%request_data.until_lsn))
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -322,7 +340,8 @@ async fn patch_control_file_handler(
         parse_request_param(&request, "timeline_id")?,
     );
 
-    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
 
     let patch_request: patch_control_file::Request = json_request(&mut request).await?;
     let response = patch_control_file::handle_request(tli, patch_request)
@@ -341,7 +360,8 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
         parse_request_param(&request, "timeline_id")?,
     );
 
-    let tli = GlobalTimelines::get(ttid)?;
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid)?;
     tli.write_shared_state()
         .await
         .sk
@@ -359,6 +379,7 @@ async fn timeline_digest_handler(request: Request<Body>) -> Result<Response<Body
     );
     check_permission(&request, Some(ttid.tenant_id))?;
 
+    let global_timelines = get_global_timelines(&request);
     let from_lsn: Option<Lsn> = parse_query_param(&request, "from_lsn")?;
     let until_lsn: Option<Lsn> = parse_query_param(&request, "until_lsn")?;
 
@@ -371,7 +392,7 @@ async fn timeline_digest_handler(request: Request<Body>) -> Result<Response<Body
         )))?,
     };
 
-    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
     let tli = tli
         .wal_residence_guard()
         .await
@@ -393,7 +414,8 @@ async fn timeline_backup_partial_reset(request: Request<Body>) -> Result<Respons
     );
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
 
     let response = tli
         .backup_partial_reset()
@@ -415,7 +437,8 @@ async fn timeline_term_bump_handler(
 
     let request_data: TimelineTermBumpRequest = json_request(&mut request).await?;
 
-    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
     let response = tli
         .term_bump(request_data.term)
         .await
@@ -452,7 +475,8 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
         standby_horizon: sk_info.standby_horizon.0,
     };
 
-    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
     tli.record_safekeeper_info(proto_sk_info)
         .await
         .map_err(ApiError::InternalServerError)?;
@@ -506,6 +530,8 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
     let dump_term_history = dump_term_history.unwrap_or(true);
     let dump_wal_last_modified = dump_wal_last_modified.unwrap_or(dump_all);
 
+    let global_timelines = get_global_timelines(&request);
+
     let args = debug_dump::Args {
         dump_all,
         dump_control_file,
@@ -517,7 +543,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
         timeline_id,
     };
 
-    let resp = debug_dump::build(args)
+    let resp = debug_dump::build(args, global_timelines)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -570,7 +596,10 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
 }
 
 /// Safekeeper http router.
-pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError> {
+pub fn make_router(
+    conf: Arc<SafeKeeperConf>,
+    global_timelines: Arc<GlobalTimelines>,
+) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router();
     if conf.http_auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
@@ -592,7 +621,8 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
     // located nearby (/safekeeper/src/http/openapi_spec.yaml).
     let auth = conf.http_auth.clone();
     router
-        .data(Arc::new(conf))
+        .data(conf)
+        .data(global_timelines)
         .data(auth)
         .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
         .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))

@@ -203,6 +203,10 @@ impl RemoteStorage for UnreliableWrapper {
         Ok(())
     }
 
+    fn max_keys_per_delete(&self) -> usize {
+        self.inner.max_keys_per_delete()
+    }
+
     async fn copy(
         &self,
         from: &RemotePath,
