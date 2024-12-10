@@ -28,8 +28,6 @@ defaults:
 env:
   DEFAULT_PG_VERSION: 16
   PLATFORM: neon-captest-new
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
   AWS_DEFAULT_REGION: eu-central-1
 
 jobs:
