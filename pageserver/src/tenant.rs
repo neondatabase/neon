@@ -14,7 +14,6 @@
 
 use anyhow::{bail, Context};
 use arc_swap::ArcSwap;
-use arc_swap::AsRaw;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
 use chrono::NaiveDateTime;
@@ -64,6 +63,7 @@ use utils::sync::gate::Gate;
 use utils::sync::gate::GateGuard;
 use utils::timeout::timeout_cancellable;
 use utils::timeout::TimeoutCancellableError;
+use utils::try_rcu::ArcSwapExt;
 use utils::zstd::create_zst_tarball;
 use utils::zstd::extract_zst_tarball;
 
@@ -3803,25 +3803,16 @@ impl Tenant {
         // controller (as they should!) because an exclusive op lock is required
         // on the storage controller side.
 
-        let mut cur = self.tenant_conf.load();
-        let updated = loop {
-            let updated_tenant_conf = update(cur.tenant_conf.clone())?;
-            let new = AttachedTenantConf {
-                tenant_conf: updated_tenant_conf.clone(),
-                location: cur.location,
-                lsn_lease_deadline: cur.lsn_lease_deadline,
-            };
+        self.tenant_conf
+            .try_rcu(|attached_conf| -> Result<_, anyhow::Error> {
+                Ok(Arc::new(AttachedTenantConf {
+                    tenant_conf: update(attached_conf.tenant_conf.clone())?,
+                    location: attached_conf.location,
+                    lsn_lease_deadline: attached_conf.lsn_lease_deadline,
+                }))
+            })?;
 
-            let prev = self
-                .tenant_conf
-                .compare_and_swap(&*cur, Arc::new(new.clone()));
-            let swapped = std::ptr::eq(cur.as_raw(), prev.as_raw());
-            if swapped {
-                break new;
-            } else {
-                cur = prev;
-            }
-        };
+        let updated = self.tenant_conf.load();
 
         self.tenant_conf_updated(&updated.tenant_conf);
         // Don't hold self.timelines.lock() during the notifies.
@@ -3832,7 +3823,7 @@ impl Tenant {
             timeline.tenant_conf_updated(&updated);
         }
 
-        Ok(updated.tenant_conf)
+        Ok(updated.tenant_conf.clone())
     }
 
     pub(crate) fn set_new_location_config(&self, new_conf: AttachedTenantConf) {
