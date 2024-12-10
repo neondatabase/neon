@@ -19,6 +19,9 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: true
 
+permissions:
+  id-token: write # aws-actions/configure-aws-credentials
+
 jobs:
   regress:
     env:
@@ -105,6 +108,8 @@ jobs:
         id: create-allure-report
         if: ${{ !cancelled() }}
         uses: ./.github/actions/allure-report-generate
+        with:
+          aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Post to a Slack channel
         if: ${{ github.event.schedule && failure() }}
