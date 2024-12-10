@@ -2173,10 +2173,22 @@ impl Timeline {
         let mut delta_layers = Vec::new();
         let mut image_layers = Vec::new();
         let mut downloaded_layers = Vec::new();
+        let mut total_downloaded_size = 0;
+        let mut total_layer_size = 0;
         for layer in &job_desc.selected_layers {
+            if layer.needs_download().await?.is_some() {
+                total_downloaded_size += layer.layer_desc().file_size;
+            }
+            total_layer_size += layer.layer_desc().file_size;
             let resident_layer = layer.download_and_keep_resident().await?;
             downloaded_layers.push(resident_layer);
         }
+        info!(
+            "finish downloading layers, downloaded={}, total={}, ratio={:.2}",
+            total_downloaded_size,
+            total_layer_size,
+            total_downloaded_size as f64 / total_layer_size as f64
+        );
         for resident_layer in &downloaded_layers {
             if resident_layer.layer_desc().is_delta() {
                 let layer = resident_layer.get_as_delta(ctx).await?;
