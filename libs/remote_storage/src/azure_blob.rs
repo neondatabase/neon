@@ -624,6 +624,10 @@ impl RemoteStorage for AzureBlobStorage {
         res
     }
 
+    fn max_keys_per_delete(&self) -> usize {
+        super::MAX_KEYS_PER_DELETE_AZURE
+    }
+
     async fn copy(
         &self,
         from: &RemotePath,
