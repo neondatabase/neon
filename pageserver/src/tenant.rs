@@ -4506,7 +4506,12 @@ impl Tenant {
                 // - this timeline was created while we were finding cutoffs
                 // - lsn for timestamp search fails for this timeline repeatedly
                 if let Some(cutoffs) = gc_cutoffs.get(&timeline.timeline_id) {
-                    target.cutoffs = cutoffs.clone();
+                    let original_cutoffs = target.cutoffs.clone();
+                    // GC cutoffs should never go back
+                    target.cutoffs = GcCutoffs {
+                        space: Lsn(cutoffs.space.0.max(original_cutoffs.space.0)),
+                        time: Lsn(cutoffs.time.0.max(original_cutoffs.time.0)),
+                    }
                 }
             }
 
