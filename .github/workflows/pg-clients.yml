@@ -27,6 +27,7 @@ defaults:
 
 permissions:
   id-token: write # aws-actions/configure-aws-credentials
+  statuses: write # require for posting a status update
 
 env:
   DEFAULT_PG_VERSION: 16

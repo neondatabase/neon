@@ -145,6 +145,8 @@ jobs:
     needs: [ check-permissions, build-build-tools-image ]
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||

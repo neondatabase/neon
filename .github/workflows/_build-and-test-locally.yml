@@ -37,6 +37,7 @@ jobs:
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
+      contents: read
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:

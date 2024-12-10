@@ -18,9 +18,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
   cancel-in-progress: true
 
-permissions:
-  id-token: write # aws-actions/configure-aws-credentials
-
 env:
   RUST_BACKTRACE: 1
   COPT: '-Werror'
@@ -363,6 +360,10 @@ jobs:
   create-test-report:
     needs: [ check-permissions, build-and-test-locally, coverage-report, build-build-tools-image, benchmarks ]
     if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
     outputs:
       report-url: ${{ steps.create-allure-report.outputs.report-url }}
 
@@ -415,6 +416,10 @@ jobs:
   coverage-report:
     if: ${{ !startsWith(github.ref_name, 'release') }}
     needs: [ check-permissions, build-build-tools-image, build-and-test-locally ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
     runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -581,6 +586,8 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
 
     steps:
       - uses: docker/login-action@v3
@@ -614,6 +621,8 @@ jobs:
     needs: [ check-permissions, build-build-tools-image, tag ]
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -737,6 +746,8 @@ jobs:
     needs: [ compute-node-image-arch, tag ]
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
     runs-on: ubuntu-22.04
 
     strategy:
@@ -914,7 +925,9 @@ jobs:
     runs-on: ubuntu-22.04
 
     permissions:
-      id-token: write # for `aws-actions/configure-aws-credentials`
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
 
     env:
       VERSIONS: v14 v15 v16 v17
@@ -1087,7 +1100,10 @@ jobs:
     needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
     # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
     if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute') && !failure() && !cancelled()
-
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
     runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     steps:
@@ -1209,6 +1225,10 @@ jobs:
   # The job runs on `release` branch and copies compatibility data and Neon artifact from the last *release PR* to the latest directory
   promote-compatibility-data:
     needs: [ deploy ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
     # `!failure() && !cancelled()` is required because the workflow transitively depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
     if: github.ref_name == 'release' && !failure() && !cancelled()
 
