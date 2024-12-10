@@ -26,11 +26,11 @@ use crate::span::{
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::Generation;
-#[cfg_attr(target_os = "macos", allow(unused_imports))]
-use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
-use remote_storage::{DownloadError, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath};
+use remote_storage::{
+    DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,
+};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 use utils::pausable_failpoint;
@@ -58,6 +58,7 @@ pub async fn download_layer_file<'a>(
     layer_file_name: &'a LayerName,
     layer_metadata: &'a LayerFileMetadata,
     local_path: &Utf8Path,
+    gate: &utils::sync::gate::Gate,
     cancel: &CancellationToken,
     ctx: &RequestContext,
 ) -> Result<u64, DownloadError> {
@@ -86,7 +87,9 @@ pub async fn download_layer_file<'a>(
     let temp_file_path = path_with_suffix_extension(local_path, TEMP_DOWNLOAD_EXTENSION);
 
     let bytes_amount = download_retry(
-        || async { download_object(storage, &remote_path, &temp_file_path, cancel, ctx).await },
+        || async {
+            download_object(storage, &remote_path, &temp_file_path, gate, cancel, ctx).await
+        },
         &format!("download {remote_path:?}"),
         cancel,
     )
@@ -146,6 +149,7 @@ async fn download_object<'a>(
     storage: &'a GenericRemoteStorage,
     src_path: &RemotePath,
     dst_path: &Utf8PathBuf,
+    #[cfg_attr(target_os = "macos", allow(unused_variables))] gate: &utils::sync::gate::Gate,
     cancel: &CancellationToken,
     #[cfg_attr(target_os = "macos", allow(unused_variables))] ctx: &RequestContext,
 ) -> Result<u64, DownloadError> {
@@ -203,13 +207,18 @@ async fn download_object<'a>(
         }
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
-            use crate::virtual_file::owned_buffers_io::{self, util::size_tracking_writer};
-            use bytes::BytesMut;
+            use crate::virtual_file::owned_buffers_io;
+            use crate::virtual_file::IoBufferMut;
+            use std::sync::Arc;
             async {
-                let destination_file = VirtualFile::create(dst_path, ctx)
-                    .await
-                    .with_context(|| format!("create a destination file for layer '{dst_path}'"))
-                    .map_err(DownloadError::Other)?;
+                let destination_file = Arc::new(
+                    VirtualFile::create(dst_path, ctx)
+                        .await
+                        .with_context(|| {
+                            format!("create a destination file for layer '{dst_path}'")
+                        })
+                        .map_err(DownloadError::Other)?,
+                );
 
                 let mut download = storage
                     .download(src_path, &DownloadOpts::default(), cancel)
@@ -217,14 +226,16 @@ async fn download_object<'a>(
 
                 pausable_failpoint!("before-downloading-layer-stream-pausable");
 
+                let mut buffered = owned_buffers_io::write::BufferedWriter::<IoBufferMut, _>::new(
+                    destination_file,
+                    || IoBufferMut::with_capacity(super::BUFFER_SIZE),
+                    gate.enter().map_err(|_| DownloadError::Cancelled)?,
+                    ctx,
+                );
+
                 // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
                 // There's chunks_vectored() on the stream.
                 let (bytes_amount, destination_file) = async {
-                    let size_tracking = size_tracking_writer::Writer::new(destination_file);
-                    let mut buffered = owned_buffers_io::write::BufferedWriter::<BytesMut, _>::new(
-                        size_tracking,
-                        BytesMut::with_capacity(super::BUFFER_SIZE),
-                    );
                     while let Some(res) =
                         futures::StreamExt::next(&mut download.download_stream).await
                     {
@@ -232,10 +243,10 @@ async fn download_object<'a>(
                             Ok(chunk) => chunk,
                             Err(e) => return Err(e),
                         };
-                        buffered.write_buffered(chunk.slice_len(), ctx).await?;
+                        buffered.write_buffered_borrowed(&chunk, ctx).await?;
                     }
-                    let size_tracking = buffered.flush_and_into_inner(ctx).await?;
-                    Ok(size_tracking.into_inner())
+                    let inner = buffered.flush_and_into_inner(ctx).await?;
+                    Ok(inner)
                 }
                 .await?;
 
@@ -345,12 +356,13 @@ pub async fn list_remote_timelines(
 async fn do_download_remote_path_retry_forever(
     storage: &GenericRemoteStorage,
     remote_path: &RemotePath,
+    download_opts: DownloadOpts,
     cancel: &CancellationToken,
 ) -> Result<(Vec<u8>, SystemTime), DownloadError> {
     download_retry_forever(
         || async {
             let download = storage
-                .download(remote_path, &DownloadOpts::default(), cancel)
+                .download(remote_path, &download_opts, cancel)
                 .await?;
 
             let mut bytes = Vec::new();
@@ -377,8 +389,13 @@ async fn do_download_tenant_manifest(
 ) -> Result<(TenantManifest, Generation, SystemTime), DownloadError> {
     let remote_path = remote_tenant_manifest_path(tenant_shard_id, generation);
 
+    let download_opts = DownloadOpts {
+        kind: DownloadKind::Small,
+        ..Default::default()
+    };
+
     let (manifest_bytes, manifest_bytes_mtime) =
-        do_download_remote_path_retry_forever(storage, &remote_path, cancel).await?;
+        do_download_remote_path_retry_forever(storage, &remote_path, download_opts, cancel).await?;
 
     let tenant_manifest = TenantManifest::from_json_bytes(&manifest_bytes)
         .with_context(|| format!("deserialize tenant manifest file at {remote_path:?}"))
@@ -398,8 +415,13 @@ async fn do_download_index_part(
         timeline_id.expect("A timeline ID is always provided when downloading an index");
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
 
+    let download_opts = DownloadOpts {
+        kind: DownloadKind::Small,
+        ..Default::default()
+    };
+
     let (index_part_bytes, index_part_mtime) =
-        do_download_remote_path_retry_forever(storage, &remote_path, cancel).await?;
+        do_download_remote_path_retry_forever(storage, &remote_path, download_opts, cancel).await?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
         .with_context(|| format!("deserialize index part file at {remote_path:?}"))
@@ -706,7 +728,7 @@ where
     .and_then(|x| x)
 }
 
-async fn download_retry_forever<T, O, F>(
+pub(crate) async fn download_retry_forever<T, O, F>(
     op: O,
     description: &str,
     cancel: &CancellationToken,

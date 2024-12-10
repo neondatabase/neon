@@ -10,12 +10,6 @@ pub(crate) fn io_error(e: impl Into<Box<dyn StdError + Send + Sync>>) -> io::Err
     io::Error::new(io::ErrorKind::Other, e)
 }
 
-/// A small combinator for pluggable error logging.
-pub(crate) fn log_error<E: fmt::Display>(e: E) -> E {
-    tracing::error!("{e}");
-    e
-}
-
 /// Marks errors that may be safely shown to a client.
 /// This trait can be seen as a specialized version of [`ToString`].
 ///
@@ -90,7 +84,7 @@ pub(crate) trait ReportableError: fmt::Display + Send + 'static {
     fn get_error_kind(&self) -> ErrorKind;
 }
 
-impl ReportableError for tokio_postgres::error::Error {
+impl ReportableError for postgres_client::error::Error {
     fn get_error_kind(&self) -> ErrorKind {
         if self.as_db_error().is_some() {
             ErrorKind::Postgres

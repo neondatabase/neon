@@ -5,6 +5,7 @@ import enum
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from enum import StrEnum
 from queue import Empty, Queue
 from threading import Barrier
 
@@ -22,7 +23,8 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_timeline_detail_404
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.utils import assert_pageserver_backups_equal, wait_until
+from fixtures.utils import assert_pageserver_backups_equal, skip_in_debug_build, wait_until
+from fixtures.workload import Workload
 from requests import ReadTimeout
 
 
@@ -36,7 +38,7 @@ def layer_name(info: HistoricLayerInfo) -> str:
 
 
 @enum.unique
-class Branchpoint(str, enum.Enum):
+class Branchpoint(StrEnum):
     """
     Have branches at these Lsns possibly relative to L0 layer boundary.
     """
@@ -201,7 +203,7 @@ def test_ancestor_detach_branched_from(
     )
 
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
-    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
+    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
 
     # because we do the fullbackup from ancestor at the branch_lsn, the zenith.signal is always different
     # as there is always "PREV_LSN: invalid" for "before"
@@ -334,10 +336,10 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
 
     # delete the timelines to confirm detach actually worked
     client.timeline_delete(env.initial_tenant, after)
-    wait_timeline_detail_404(client, env.initial_tenant, after, 10, 1.0)
+    wait_timeline_detail_404(client, env.initial_tenant, after)
 
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
-    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
+    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
 
 
 def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEnvBuilder):
@@ -414,7 +416,7 @@ def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEn
 
     assert client.timeline_detail(env.initial_tenant, timeline_id)["ancestor_timeline_id"] is None
 
-    ep.clear_shared_buffers()
+    ep.clear_buffers()
     assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
     assert ep.safe_psql("SELECT SUM(LENGTH(aux)) FROM foo")[0][0] != 0
     ep.stop()
@@ -869,8 +871,17 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
         assert count == 10000
 
 
-@pytest.mark.parametrize("mode", ["delete_timeline", "delete_tenant"])
-@pytest.mark.parametrize("sharded", [False, True])
+@pytest.mark.parametrize(
+    "mode, sharded",
+    [
+        ("delete_timeline", False),
+        ("delete_timeline", True),
+        ("delete_tenant", False),
+        # the shared/exclusive lock for tenant is blocking this:
+        # timeline detach ancestor takes shared, delete tenant takes exclusive
+        # ("delete_tenant", True)
+    ],
+)
 def test_timeline_detach_ancestor_interrupted_by_deletion(
     neon_env_builder: NeonEnvBuilder, mode: str, sharded: bool
 ):
@@ -884,11 +895,6 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
     What remains not tested by this:
     - shutdown winning over complete, see test_timeline_is_deleted_before_timeline_detach_ancestor_completes
     """
-
-    if sharded and mode == "delete_tenant":
-        # the shared/exclusive lock for tenant is blocking this:
-        # timeline detach ancestor takes shared, delete tenant takes exclusive
-        pytest.skip("tenant deletion while timeline ancestor detach is underway cannot happen")
 
     shard_count = 2 if sharded else 1
 
@@ -967,17 +973,17 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
     with ThreadPoolExecutor(max_workers=2) as pool:
         try:
             fut = pool.submit(detach_ancestor)
-            offset = wait_until(10, 1.0, at_failpoint)
+            offset = wait_until(at_failpoint)
 
             delete = pool.submit(start_delete)
 
-            offset = wait_until(10, 1.0, lambda: at_waiting_on_gate_close(offset))
+            offset = wait_until(lambda: at_waiting_on_gate_close(offset))
 
             victim_http.configure_failpoints((pausepoint, "off"))
 
             delete.result()
 
-            assert wait_until(10, 1.0, is_deleted), f"unimplemented mode {mode}"
+            assert wait_until(is_deleted), f"unimplemented mode {mode}"
 
             # TODO: match the error
             with pytest.raises(PageserverApiException) as exc:
@@ -1109,11 +1115,11 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
     with ThreadPoolExecutor(max_workers=1) as pool:
         try:
             fut = pool.submit(detach_timeline)
-            wait_until(10, 1.0, paused_at_failpoint)
+            wait_until(paused_at_failpoint)
 
             # let stuck complete
             stuck_http.configure_failpoints((pausepoint, "off"))
-            wait_until(10, 1.0, first_completed)
+            wait_until(first_completed)
 
             if mode == "delete_reparentable_timeline":
                 assert first_branch is not None
@@ -1121,7 +1127,7 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
                     env.initial_tenant, first_branch
                 )
                 victim_http.configure_failpoints((pausepoint, "off"))
-                wait_until(10, 1.0, first_branch_gone)
+                wait_until(first_branch_gone)
             elif mode == "create_reparentable_timeline":
                 first_branch = create_reparentable_timeline()
                 victim_http.configure_failpoints((pausepoint, "off"))
@@ -1265,11 +1271,11 @@ def test_retryable_500_hit_through_storcon_during_timeline_detach_ancestor(
     with ThreadPoolExecutor(max_workers=1) as pool:
         try:
             fut = pool.submit(detach_timeline)
-            wait_until(10, 1.0, paused_at_failpoint)
+            wait_until(paused_at_failpoint)
 
             # let stuck complete
             stuck_http.configure_failpoints((pausepoint, "off"))
-            wait_until(10, 1.0, first_completed)
+            wait_until(first_completed)
 
             victim_http.configure_failpoints((pausepoint, "off"))
 
@@ -1450,7 +1456,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     # other tests take the "detach? reparent complete", but this only hits
     # "complete".
     http.timeline_delete(env.initial_tenant, env.initial_timeline)
-    wait_timeline_detail_404(http, env.initial_tenant, env.initial_timeline, 20)
+    wait_timeline_detail_404(http, env.initial_tenant, env.initial_timeline)
 
     http.configure_failpoints(("timeline-detach-ancestor::complete_before_uploading", "off"))
 
@@ -1512,7 +1518,7 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
         with ThreadPoolExecutor(max_workers=1) as pool:
             detach = pool.submit(detach_and_get_stuck)
 
-            offset = wait_until(10, 1.0, request_processing_noted_in_log)
+            offset = wait_until(request_processing_noted_in_log)
 
             # make this named fn tor more clear failure test output logging
             def pausepoint_hit_with_gc_paused() -> LogCursor:
@@ -1523,11 +1529,11 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
                 )
                 return at
 
-            offset = wait_until(10, 1.0, pausepoint_hit_with_gc_paused)
+            offset = wait_until(pausepoint_hit_with_gc_paused)
 
             delete_detached()
 
-            wait_timeline_detail_404(http, env.initial_tenant, detached, 10, 1.0)
+            wait_timeline_detail_404(http, env.initial_tenant, detached)
 
             http.configure_failpoints((failpoint, "off"))
 
@@ -1543,6 +1549,57 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
     time.sleep(2)
 
     env.pageserver.assert_log_contains(".* gc_loop.*: 1 timelines need GC", offset)
+
+
+@skip_in_debug_build("only run with release build")
+def test_pageserver_compaction_detach_ancestor_smoke(neon_env_builder: NeonEnvBuilder):
+    SMOKE_CONF = {
+        # Run both gc and gc-compaction.
+        "gc_period": "5s",
+        "compaction_period": "5s",
+        # No PiTR interval and small GC horizon
+        "pitr_interval": "0s",
+        "gc_horizon": f"{1024 ** 2}",
+        "lsn_lease_length": "0s",
+        # Small checkpoint distance to create many layers
+        "checkpoint_distance": 1024**2,
+        # Compact small layers
+        "compaction_target_size": 1024**2,
+        "image_creation_threshold": 2,
+    }
+
+    env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    row_count = 10000
+    churn_rounds = 50
+
+    ps_http = env.pageserver.http_client()
+
+    workload_parent = Workload(env, tenant_id, timeline_id)
+    workload_parent.init(env.pageserver.id)
+    log.info("Writing initial data ...")
+    workload_parent.write_rows(row_count, env.pageserver.id)
+    branch_id = env.create_branch("child")
+    workload_child = Workload(env, tenant_id, branch_id, branch_name="child")
+    workload_child.init(env.pageserver.id, allow_recreate=True)
+    log.info("Writing initial data on child...")
+    workload_child.write_rows(row_count, env.pageserver.id)
+
+    for i in range(1, churn_rounds + 1):
+        if i % 10 == 0:
+            log.info(f"Running churn round {i}/{churn_rounds} ...")
+
+        workload_parent.churn_rows(row_count, env.pageserver.id)
+        workload_child.churn_rows(row_count, env.pageserver.id)
+
+    ps_http.detach_ancestor(tenant_id, branch_id)
+
+    log.info("Validating at workload end ...")
+    workload_parent.validate(env.pageserver.id)
+    workload_child.validate(env.pageserver.id)
 
 
 # TODO:

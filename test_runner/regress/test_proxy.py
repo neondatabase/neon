@@ -5,6 +5,7 @@ import json
 import subprocess
 import time
 import urllib.parse
+from contextlib import closing
 from typing import TYPE_CHECKING
 
 import psycopg2
@@ -13,7 +14,7 @@ import requests
 from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres
 
 if TYPE_CHECKING:
-    from typing import Any, Optional
+    from typing import Any
 
 
 GET_CONNECTION_PID_QUERY = "SELECT pid FROM pg_stat_activity WHERE state = 'active'"
@@ -131,6 +132,24 @@ def test_proxy_options(static_proxy: NeonProxy, option_name: str):
     assert out[0][0] == " str"
 
 
+@pytest.mark.asyncio
+async def test_proxy_arbitrary_params(static_proxy: NeonProxy):
+    with closing(
+        await static_proxy.connect_async(server_settings={"IntervalStyle": "iso_8601"})
+    ) as conn:
+        out = await conn.fetchval("select to_json('0 seconds'::interval)")
+        assert out == '"00:00:00"'
+
+    options = "neon_proxy_params_compat:true"
+    with closing(
+        await static_proxy.connect_async(
+            server_settings={"IntervalStyle": "iso_8601", "options": options}
+        )
+    ) as conn:
+        out = await conn.fetchval("select to_json('0 seconds'::interval)")
+        assert out == '"PT0S"'
+
+
 def test_auth_errors(static_proxy: NeonProxy):
     """
     Check that we throw very specific errors in some unsuccessful auth scenarios.
@@ -228,7 +247,7 @@ def test_sql_over_http_serverless_driver(static_proxy: NeonProxy):
 def test_sql_over_http(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http with login password 'http' superuser")
 
-    def q(sql: str, params: Optional[list[Any]] = None) -> Any:
+    def q(sql: str, params: list[Any] | None = None) -> Any:
         params = params or []
         connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
         response = requests.post(
@@ -291,7 +310,7 @@ def test_sql_over_http_db_name_with_space(static_proxy: NeonProxy):
         )
     )
 
-    def q(sql: str, params: Optional[list[Any]] = None) -> Any:
+    def q(sql: str, params: list[Any] | None = None) -> Any:
         params = params or []
         connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/{urllib.parse.quote(db)}"
         response = requests.post(
@@ -310,7 +329,7 @@ def test_sql_over_http_db_name_with_space(static_proxy: NeonProxy):
 def test_sql_over_http_output_options(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http2 with login password 'http2' superuser")
 
-    def q(sql: str, raw_text: bool, array_mode: bool, params: Optional[list[Any]] = None) -> Any:
+    def q(sql: str, raw_text: bool, array_mode: bool, params: list[Any] | None = None) -> Any:
         params = params or []
         connstr = (
             f"postgresql://http2:http2@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
@@ -346,7 +365,7 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http with login password 'http' superuser")
 
     def qq(
-        queries: list[tuple[str, Optional[list[Any]]]],
+        queries: list[tuple[str, list[Any] | None]],
         read_only: bool = False,
         deferrable: bool = False,
     ) -> Any:

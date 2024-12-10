@@ -4,7 +4,7 @@ import concurrent.futures
 import random
 import time
 from collections import defaultdict
-from enum import Enum
+from enum import StrEnum
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineArchivalState, TimelineId
@@ -16,7 +16,7 @@ from fixtures.neon_fixtures import (
     PageserverAvailability,
     PageserverSchedulingPolicy,
 )
-from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pg_version import PgVersion
 
 
@@ -72,7 +72,7 @@ def test_storage_controller_many_tenants(
     we don't fall over for a thousand shards.
     """
 
-    neon_env_builder.num_pageservers = 5
+    neon_env_builder.num_pageservers = 6
     neon_env_builder.storage_controller_config = {
         # Default neon_local uses a small timeout: use a longer one to tolerate longer pageserver restarts.
         # TODO: tune this down as restarts get faster (https://github.com/neondatabase/neon/pull/7553), to
@@ -82,6 +82,11 @@ def test_storage_controller_many_tenants(
     }
     neon_env_builder.control_plane_compute_hook_api = (
         compute_reconfigure_listener.control_plane_compute_hook_api
+    )
+
+    AZS = ["alpha", "bravo", "charlie"]
+    neon_env_builder.pageserver_config_override = lambda ps_cfg: ps_cfg.update(
+        {"availability_zone": f"az-{AZS[ps_cfg['id'] % len(AZS)]}"}
     )
 
     # A small sleep on each call into the notify hook, to simulate the latency of doing a database write
@@ -139,7 +144,7 @@ def test_storage_controller_many_tenants(
     tenant_timelines_count = 100
 
     # These lists are maintained for use with rng.choice
-    tenants_with_timelines = list(rng.sample(tenants.keys(), tenant_timelines_count))
+    tenants_with_timelines = list(rng.sample(list(tenants.keys()), tenant_timelines_count))
     tenants_without_timelines = list(
         tenant_id for tenant_id in tenants if tenant_id not in tenants_with_timelines
     )
@@ -171,7 +176,7 @@ def test_storage_controller_many_tenants(
     # start timing on test nodes if we aren't a bit careful.
     create_concurrency = 16
 
-    class Operation(str, Enum):
+    class Operation(StrEnum):
         TIMELINE_OPS = "timeline_ops"
         SHARD_MIGRATE = "shard_migrate"
         TENANT_PASSTHROUGH = "tenant_passthrough"
@@ -273,7 +278,17 @@ def test_storage_controller_many_tenants(
             archival_state = rng.choice(
                 [TimelineArchivalState.ARCHIVED, TimelineArchivalState.UNARCHIVED]
             )
-            virtual_ps_http.timeline_archival_config(tenant_id, timeline_id, archival_state)
+            try:
+                virtual_ps_http.timeline_archival_config(tenant_id, timeline_id, archival_state)
+            except PageserverApiException as e:
+                if e.status_code == 404:
+                    # FIXME: there is an edge case where timeline ops can encounter a 404 during
+                    # a very short time window between generating a new generation number and
+                    # attaching this tenant to its new pageserver.
+                    # See https://github.com/neondatabase/neon/issues/9471
+                    pass
+                else:
+                    raise
 
         # Generate a mixture of operations and dispatch them all concurrently
         futs = []

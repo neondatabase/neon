@@ -38,6 +38,7 @@ ifeq ($(UNAME_S),Linux)
 	# Seccomp BPF is only available for Linux
 	PG_CONFIGURE_OPTS += --with-libseccomp
 else ifeq ($(UNAME_S),Darwin)
+	PG_CFLAGS += -DUSE_PREFETCH
 	ifndef DISABLE_HOMEBREW
 		# macOS with brew-installed openssl requires explicit paths
 		# It can be configured with OPENSSL_PREFIX variable
@@ -146,6 +147,8 @@ postgres-%: postgres-configure-% \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_prewarm install
 	+@echo "Compiling pg_buffercache $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_buffercache install
+	+@echo "Compiling pg_visibility $*"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_visibility install
 	+@echo "Compiling pageinspect $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect install
 	+@echo "Compiling amcheck $*"

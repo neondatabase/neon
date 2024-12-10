@@ -13,7 +13,7 @@ from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
-    from typing import Any, Optional
+    from typing import Any, Self
 
 
 def handle_db(dbs, roles, operation):
@@ -91,15 +91,15 @@ class DdlForwardingContext:
             lambda request: ddl_forward_handler(request, self.dbs, self.roles, self)
         )
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         self.pg.start()
         return self
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
     ):
         self.pg.stop()
 

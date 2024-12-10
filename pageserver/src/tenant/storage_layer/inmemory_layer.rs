@@ -553,13 +553,13 @@ impl InMemoryLayer {
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         start_lsn: Lsn,
-        gate_guard: utils::sync::gate::GateGuard,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> Result<InMemoryLayer> {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
         let file = Arc::new(tokio::sync::RwLock::new(
-            EphemeralFile::create(conf, tenant_shard_id, timeline_id, gate_guard, ctx).await?,
+            EphemeralFile::create(conf, tenant_shard_id, timeline_id, gate, ctx).await?,
         ));
         let key = InMemoryLayerFileId(file.read().await.page_cache_file_id());
 

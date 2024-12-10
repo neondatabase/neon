@@ -5,8 +5,10 @@ from typing import TYPE_CHECKING, cast, final
 
 import requests
 
+from fixtures.log_helper import log
+
 if TYPE_CHECKING:
-    from typing import Any, Literal, Optional
+    from typing import Any, Literal
 
     from fixtures.pg_version import PgVersion
 
@@ -30,15 +32,19 @@ class NeonAPI:
             kwargs["headers"] = {}
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
 
-        return requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
+        resp = requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
+        log.debug("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
+        resp.raise_for_status()
+
+        return resp
 
     def create_project(
         self,
-        pg_version: Optional[PgVersion] = None,
-        name: Optional[str] = None,
-        branch_name: Optional[str] = None,
-        branch_role_name: Optional[str] = None,
-        branch_database_name: Optional[str] = None,
+        pg_version: PgVersion | None = None,
+        name: str | None = None,
+        branch_name: str | None = None,
+        branch_role_name: str | None = None,
+        branch_database_name: str | None = None,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {
             "project": {
@@ -66,8 +72,6 @@ class NeonAPI:
             json=data,
         )
 
-        assert resp.status_code == 201
-
         return cast("dict[str, Any]", resp.json())
 
     def get_project_details(self, project_id: str) -> dict[str, Any]:
@@ -79,7 +83,7 @@ class NeonAPI:
                 "Content-Type": "application/json",
             },
         )
-        assert resp.status_code == 200
+
         return cast("dict[str, Any]", resp.json())
 
     def delete_project(
@@ -94,8 +98,6 @@ class NeonAPI:
                 "Content-Type": "application/json",
             },
         )
-
-        assert resp.status_code == 200
 
         return cast("dict[str, Any]", resp.json())
 
@@ -112,8 +114,6 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
         return cast("dict[str, Any]", resp.json())
 
     def suspend_endpoint(
@@ -129,8 +129,6 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
         return cast("dict[str, Any]", resp.json())
 
     def restart_endpoint(
@@ -145,8 +143,6 @@ class NeonAPI:
                 "Accept": "application/json",
             },
         )
-
-        assert resp.status_code == 200
 
         return cast("dict[str, Any]", resp.json())
 
@@ -178,15 +174,13 @@ class NeonAPI:
             json=data,
         )
 
-        assert resp.status_code == 201
-
         return cast("dict[str, Any]", resp.json())
 
     def get_connection_uri(
         self,
         project_id: str,
-        branch_id: Optional[str] = None,
-        endpoint_id: Optional[str] = None,
+        branch_id: str | None = None,
+        endpoint_id: str | None = None,
         database_name: str = "neondb",
         role_name: str = "neondb_owner",
         pooled: bool = True,
@@ -206,8 +200,6 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
         return cast("dict[str, Any]", resp.json())
 
     def get_branches(self, project_id: str) -> dict[str, Any]:
@@ -218,8 +210,6 @@ class NeonAPI:
                 "Accept": "application/json",
             },
         )
-
-        assert resp.status_code == 200
 
         return cast("dict[str, Any]", resp.json())
 
@@ -232,8 +222,6 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
         return cast("dict[str, Any]", resp.json())
 
     def get_operations(self, project_id: str) -> dict[str, Any]:
@@ -245,8 +233,6 @@ class NeonAPI:
                 "Authorization": f"Bearer {self.__neon_api_key}",
             },
         )
-
-        assert resp.status_code == 200
 
         return cast("dict[str, Any]", resp.json())
 
@@ -263,7 +249,7 @@ class NeonAPI:
 
 @final
 class NeonApiEndpoint:
-    def __init__(self, neon_api: NeonAPI, pg_version: PgVersion, project_id: Optional[str]):
+    def __init__(self, neon_api: NeonAPI, pg_version: PgVersion, project_id: str | None):
         self.neon_api = neon_api
         self.project_id: str
         self.endpoint_id: str

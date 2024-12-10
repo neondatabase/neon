@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING
 
 from prometheus_client.parser import text_string_to_metric_families
 from prometheus_client.samples import Sample
 
 from fixtures.log_helper import log
-
-if TYPE_CHECKING:
-    from typing import Optional
 
 
 class Metrics:
@@ -20,7 +16,7 @@ class Metrics:
         self.metrics = defaultdict(list)
         self.name = name
 
-    def query_all(self, name: str, filter: Optional[dict[str, str]] = None) -> list[Sample]:
+    def query_all(self, name: str, filter: dict[str, str] | None = None) -> list[Sample]:
         filter = filter or {}
         res: list[Sample] = []
 
@@ -32,7 +28,7 @@ class Metrics:
                 pass
         return res
 
-    def query_one(self, name: str, filter: Optional[dict[str, str]] = None) -> Sample:
+    def query_one(self, name: str, filter: dict[str, str] | None = None) -> Sample:
         res = self.query_all(name, filter or {})
         assert len(res) == 1, f"expected single sample for {name} {filter}, found {res}"
         return res[0]
@@ -47,9 +43,7 @@ class MetricsGetter:
     def get_metrics(self) -> Metrics:
         raise NotImplementedError()
 
-    def get_metric_value(
-        self, name: str, filter: Optional[dict[str, str]] = None
-    ) -> Optional[float]:
+    def get_metric_value(self, name: str, filter: dict[str, str] | None = None) -> float | None:
         metrics = self.get_metrics()
         results = metrics.query_all(name, filter=filter)
         if not results:
@@ -59,7 +53,7 @@ class MetricsGetter:
         return results[0].value
 
     def get_metrics_values(
-        self, names: list[str], filter: Optional[dict[str, str]] = None, absence_ok: bool = False
+        self, names: list[str], filter: dict[str, str] | None = None, absence_ok: bool = False
     ) -> dict[str, float]:
         """
         When fetching multiple named metrics, it is more efficient to use this
@@ -158,6 +152,8 @@ PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
     "pageserver_resident_physical_size",
     "pageserver_io_operations_bytes_total",
     "pageserver_last_record_lsn",
+    "pageserver_disk_consistent_lsn",
+    "pageserver_projected_remote_consistent_lsn",
     "pageserver_standby_horizon",
     "pageserver_smgr_query_seconds_bucket",
     "pageserver_smgr_query_seconds_count",
@@ -174,10 +170,14 @@ PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
     "pageserver_evictions_with_low_residence_duration_total",
     "pageserver_aux_file_estimated_size",
     "pageserver_valid_lsn_lease_count",
+    "pageserver_flush_wait_upload_seconds",
     counter("pageserver_tenant_throttling_count_accounted_start"),
     counter("pageserver_tenant_throttling_count_accounted_finish"),
     counter("pageserver_tenant_throttling_wait_usecs_sum"),
     counter("pageserver_tenant_throttling_count"),
+    counter("pageserver_timeline_wal_records_received"),
+    counter("pageserver_page_service_pagestream_flush_in_progress_micros"),
+    *histogram("pageserver_page_service_batch_size"),
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
     # "pageserver_directory_entries_count", -- only used if above a certain threshold
     # "pageserver_broken_tenants_count" -- used only for broken

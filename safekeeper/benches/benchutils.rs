@@ -83,14 +83,20 @@ impl Env {
         node_id: NodeId,
         ttid: TenantTimelineId,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let conf = self.make_conf(node_id);
+        let conf = Arc::new(self.make_conf(node_id));
         let timeline_dir = get_timeline_dir(&conf, &ttid);
         let remote_path = remote_timeline_path(&ttid)?;
 
         let safekeeper = self.make_safekeeper(node_id, ttid).await?;
         let shared_state = SharedState::new(StateSK::Loaded(safekeeper));
 
-        let timeline = Timeline::new(ttid, &timeline_dir, &remote_path, shared_state);
+        let timeline = Timeline::new(
+            ttid,
+            &timeline_dir,
+            &remote_path,
+            shared_state,
+            conf.clone(),
+        );
         timeline.bootstrap(
             &mut timeline.write_shared_state().await,
             &conf,

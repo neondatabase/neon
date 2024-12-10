@@ -22,6 +22,7 @@ use super::{
     mgr::TenantManager,
     span::debug_assert_current_span_has_tenant_id,
     storage_layer::LayerName,
+    GetTenantError,
 };
 
 use crate::metrics::SECONDARY_RESIDENT_PHYSICAL_SIZE;
@@ -66,7 +67,21 @@ struct CommandRequest<T> {
 }
 
 struct CommandResponse {
-    result: anyhow::Result<()>,
+    result: Result<(), SecondaryTenantError>,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum SecondaryTenantError {
+    #[error("{0}")]
+    GetTenant(GetTenantError),
+    #[error("shutting down")]
+    ShuttingDown,
+}
+
+impl From<GetTenantError> for SecondaryTenantError {
+    fn from(gte: GetTenantError) -> Self {
+        Self::GetTenant(gte)
+    }
 }
 
 // Whereas [`Tenant`] represents an attached tenant, this type represents the work
@@ -109,15 +124,6 @@ pub(crate) struct SecondaryTenant {
 
     // Sum of layer sizes in the most recently downloaded heatmap
     pub(super) heatmap_total_size_metric: UIntGauge,
-}
-
-impl Drop for SecondaryTenant {
-    fn drop(&mut self) {
-        let tenant_id = self.tenant_shard_id.tenant_id.to_string();
-        let shard_id = format!("{}", self.tenant_shard_id.shard_slug());
-        let _ = SECONDARY_RESIDENT_PHYSICAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
-        let _ = SECONDARY_HEATMAP_TOTAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
-    }
 }
 
 impl SecondaryTenant {
@@ -167,6 +173,13 @@ impl SecondaryTenant {
 
         // Wait for any secondary downloader work to complete
         self.gate.close().await;
+
+        self.validate_metrics();
+
+        let tenant_id = self.tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", self.tenant_shard_id.shard_slug());
+        let _ = SECONDARY_RESIDENT_PHYSICAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
+        let _ = SECONDARY_HEATMAP_TOTAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
     }
 
     pub(crate) fn set_config(&self, config: &SecondaryLocationConfig) {
@@ -254,6 +267,20 @@ impl SecondaryTenant {
         .await
         .expect("secondary eviction should not have panicked");
     }
+
+    /// Exhaustive check that incrementally updated metrics match the actual state.
+    #[cfg(feature = "testing")]
+    fn validate_metrics(&self) {
+        let detail = self.detail.lock().unwrap();
+        let resident_size = detail.total_resident_size();
+
+        assert_eq!(resident_size, self.resident_size_metric.get());
+    }
+
+    #[cfg(not(feature = "testing"))]
+    fn validate_metrics(&self) {
+        // No-op in non-testing builds
+    }
 }
 
 /// The SecondaryController is a pseudo-rpc client for administrative control of secondary mode downloads,
@@ -273,7 +300,7 @@ impl SecondaryController {
         &self,
         queue: &tokio::sync::mpsc::Sender<CommandRequest<T>>,
         payload: T,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), SecondaryTenantError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
         queue
@@ -282,20 +309,26 @@ impl SecondaryController {
                 response_tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("Receiver shut down"))?;
+            .map_err(|_| SecondaryTenantError::ShuttingDown)?;
 
         let response = response_rx
             .await
-            .map_err(|_| anyhow::anyhow!("Request dropped"))?;
+            .map_err(|_| SecondaryTenantError::ShuttingDown)?;
 
         response.result
     }
 
-    pub async fn upload_tenant(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
+    pub(crate) async fn upload_tenant(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<(), SecondaryTenantError> {
         self.dispatch(&self.upload_req_tx, UploadCommand::Upload(tenant_shard_id))
             .await
     }
-    pub async fn download_tenant(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
+    pub(crate) async fn download_tenant(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<(), SecondaryTenantError> {
         self.dispatch(
             &self.download_req_tx,
             DownloadCommand::Download(tenant_shard_id),

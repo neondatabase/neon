@@ -3,6 +3,7 @@ from __future__ import annotations
 import enum
 import os
 import shutil
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -16,7 +17,7 @@ from fixtures.paths import BASE_DIR, COMPUTE_CONFIG_DIR
 
 if TYPE_CHECKING:
     from types import TracebackType
-    from typing import Optional, TypedDict, Union
+    from typing import Self, TypedDict
 
     from fixtures.neon_fixtures import NeonEnv
     from fixtures.pg_version import PgVersion
@@ -26,15 +27,15 @@ if TYPE_CHECKING:
         metric_name: str
         type: str
         help: str
-        key_labels: Optional[list[str]]
-        values: Optional[list[str]]
-        query: Optional[str]
-        query_ref: Optional[str]
+        key_labels: list[str] | None
+        values: list[str] | None
+        query: str | None
+        query_ref: str | None
 
     class Collector(TypedDict):
         collector_name: str
         metrics: list[Metric]
-        queries: Optional[list[Query]]
+        queries: list[Query] | None
 
     class Query(TypedDict):
         query_name: str
@@ -53,12 +54,12 @@ def __import_callback(dir: str, rel: str) -> tuple[str, bytes]:
     if not rel:
         raise RuntimeError("Empty filename")
 
-    full_path: Optional[str] = None
+    full_path: str | None = None
     if os.path.isabs(rel):
         full_path = rel
     else:
         for p in (dir, *JSONNET_PATH):
-            assert isinstance(p, (str, Path)), "for mypy"
+            assert isinstance(p, str | Path), "for mypy"
             full_path = os.path.join(p, rel)
 
             assert isinstance(full_path, str), "for mypy"
@@ -82,9 +83,9 @@ def __import_callback(dir: str, rel: str) -> tuple[str, bytes]:
 
 
 def jsonnet_evaluate_file(
-    jsonnet_file: Union[str, Path],
-    ext_vars: Optional[Union[str, dict[str, str]]] = None,
-    tla_vars: Optional[Union[str, dict[str, str]]] = None,
+    jsonnet_file: str | Path,
+    ext_vars: str | dict[str, str] | None = None,
+    tla_vars: str | dict[str, str] | None = None,
 ) -> str:
     return cast(
         "str",
@@ -102,7 +103,7 @@ def evaluate_collector(jsonnet_file: Path, pg_version: PgVersion) -> str:
 
 
 def evaluate_config(
-    jsonnet_file: Path, collector_name: str, collector_file: Union[str, Path], connstr: str
+    jsonnet_file: Path, collector_name: str, collector_file: str | Path, connstr: str
 ) -> str:
     return jsonnet_evaluate_file(
         jsonnet_file,
@@ -115,7 +116,7 @@ def evaluate_config(
 
 
 @enum.unique
-class SqlExporterProcess(str, enum.Enum):
+class SqlExporterProcess(StrEnum):
     COMPUTE = "compute"
     AUTOSCALING = "autoscaling"
 
@@ -184,16 +185,16 @@ class SqlExporterRunner:
     def stop(self) -> None:
         raise NotImplementedError()
 
-    def __enter__(self) -> SqlExporterRunner:
+    def __enter__(self) -> Self:
         self.start()
 
         return self
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
     ):
         self.stop()
 
@@ -214,7 +215,7 @@ if SQL_EXPORTER is None:
             #
             # The "host" network mode allows sql_exporter to talk to the
             # endpoint which is running on the host.
-            super().__init__("docker.io/burningalchemist/sql_exporter:0.13.1", network_mode="host")
+            super().__init__("docker.io/burningalchemist/sql_exporter:0.16.0", network_mode="host")
 
             self.__logs_dir = logs_dir
             self.__port = port
@@ -241,8 +242,7 @@ if SQL_EXPORTER is None:
             self.with_volume_mapping(str(config_file), container_config_file, "z")
             self.with_volume_mapping(str(collector_file), container_collector_file, "z")
 
-        @override
-        def start(self) -> SqlExporterContainer:
+        def start(self) -> Self:
             super().start()
 
             log.info("Waiting for sql_exporter to be ready")

@@ -239,6 +239,10 @@ impl SafekeeperPostgresHandler {
         pgb: &mut PostgresBackend<IO>,
         tli: &mut Option<WalResidentTimeline>,
     ) -> Result<(), CopyStreamHandlerEnd> {
+        // The `tli` parameter is only used for passing _out_ a timeline, one should
+        // not have been passed in.
+        assert!(tli.is_none());
+
         // Notify the libpq client that it's allowed to send `CopyData` messages
         pgb.write_message(&BeMessage::CopyBothResponse).await?;
 
@@ -256,12 +260,14 @@ impl SafekeeperPostgresHandler {
         // sends, so this avoids deadlocks.
         let mut pgb_reader = pgb.split().context("START_WAL_PUSH split")?;
         let peer_addr = *pgb.get_peer_addr();
+
         let mut network_reader = NetworkReader {
             ttid: self.ttid,
             conn_id: self.conn_id,
             pgb_reader: &mut pgb_reader,
             peer_addr,
             acceptor_handle: &mut acceptor_handle,
+            global_timelines: self.global_timelines.clone(),
         };
 
         // Read first message and create timeline if needed.
@@ -275,10 +281,14 @@ impl SafekeeperPostgresHandler {
                     .subscribe();
             *tli = Some(timeline.wal_residence_guard().await?);
 
+            let timeline_cancel = timeline.cancel.clone();
             tokio::select! {
                 // todo: add read|write .context to these errors
                 r = network_reader.run(msg_tx, msg_rx, reply_tx, timeline, next_msg) => r,
                 r = network_write(pgb, reply_rx, pageserver_feedback_rx) => r,
+                _ = timeline_cancel.cancelled() => {
+                    return Err(CopyStreamHandlerEnd::Cancelled);
+                }
             }
         } else {
             res.map(|_| ())
@@ -303,7 +313,7 @@ impl SafekeeperPostgresHandler {
 
                 // Otherwise, WalAcceptor thread must have errored.
                 match wal_acceptor_res {
-                    Ok(Ok(_)) => Ok(()), // can't happen currently; would be if we add graceful termination
+                    Ok(Ok(_)) => Ok(()), // Clean shutdown
                     Ok(Err(e)) => Err(CopyStreamHandlerEnd::Other(e.context("WAL acceptor"))),
                     Err(_) => Err(CopyStreamHandlerEnd::Other(anyhow!(
                         "WalAcceptor task panicked",
@@ -322,6 +332,7 @@ struct NetworkReader<'a, IO> {
     // WalAcceptor is spawned when we learn server info from walproposer and
     // create timeline; handle is put here.
     acceptor_handle: &'a mut Option<JoinHandle<anyhow::Result<()>>>,
+    global_timelines: Arc<GlobalTimelines>,
 }
 
 impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
@@ -341,10 +352,11 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
                     system_id: greeting.system_id,
                     wal_seg_size: greeting.wal_seg_size,
                 };
-                let tli =
-                    GlobalTimelines::create(self.ttid, server_info, Lsn::INVALID, Lsn::INVALID)
-                        .await
-                        .context("create timeline")?;
+                let tli = self
+                    .global_timelines
+                    .create(self.ttid, server_info, Lsn::INVALID, Lsn::INVALID)
+                    .await
+                    .context("create timeline")?;
                 tli.wal_residence_guard().await?
             }
             _ => {
@@ -356,6 +368,7 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
         Ok((tli, next_msg))
     }
 
+    /// This function is cancellation-safe (only does network I/O and channel read/writes).
     async fn run(
         self,
         msg_tx: Sender<ProposerAcceptorMessage>,
@@ -397,6 +410,7 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
     loop {
         let started = Instant::now();
         let size = next_msg.size();
+
         match msg_tx.send_timeout(next_msg, SLOW_THRESHOLD).await {
             Ok(()) => {}
             // Slow send, log a message and keep trying. Log context has timeline ID.
@@ -428,6 +442,8 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
 /// Read replies from WalAcceptor and pass them back to socket. Returns Ok(())
 /// if reply_rx closed; it must mean WalAcceptor terminated, joining it should
 /// tell the error.
+///
+/// This function is cancellation-safe (only does network I/O and channel read/writes).
 async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_writer: &mut PostgresBackend<IO>,
     mut reply_rx: Receiver<AcceptorProposerMessage>,
@@ -461,7 +477,7 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
                         Some(AcceptorProposerMessage::AppendResponse(append_response))
                     }
                     _ => None,
-                }
+                },
         };
 
         let Some(msg) = msg else {
@@ -527,6 +543,10 @@ impl WalAcceptor {
 
     /// The main loop. Returns Ok(()) if either msg_rx or reply_tx got closed;
     /// it must mean that network thread terminated.
+    ///
+    /// This function is *not* cancellation safe, it does local disk I/O: it should always
+    /// be allowed to run to completion. It respects Timeline::cancel and shuts down cleanly
+    /// when that gets triggered.
     async fn run(&mut self) -> anyhow::Result<()> {
         let walreceiver_guard = self.tli.get_walreceivers().register(self.conn_id);
 
@@ -541,7 +561,7 @@ impl WalAcceptor {
         // Tracks whether we have unflushed appends.
         let mut dirty = false;
 
-        loop {
+        while !self.tli.is_cancelled() {
             let reply = tokio::select! {
                 // Process inbound message.
                 msg = self.msg_rx.recv() => {
@@ -562,6 +582,9 @@ impl WalAcceptor {
                     // Don't flush the WAL on every append, only periodically via flush_ticker.
                     // This batches multiple appends per fsync. If the channel is empty after
                     // sending the reply, we'll schedule an immediate flush.
+                    //
+                    // Note that a flush can still happen on segment bounds, which will result
+                    // in an AppendResponse.
                     if let ProposerAcceptorMessage::AppendRequest(append_request) = msg {
                         msg = ProposerAcceptorMessage::NoFlushAppendRequest(append_request);
                         dirty = true;
@@ -596,6 +619,10 @@ impl WalAcceptor {
                     WAL_RECEIVER_QUEUE_DEPTH.observe(self.msg_rx.len() as f64);
                     None // no reply
                 }
+
+                _ = self.tli.cancel.cancelled() => {
+                    break;
+                }
             };
 
             // Send reply, if any.
@@ -607,7 +634,7 @@ impl WalAcceptor {
         }
 
         // Flush WAL on disconnect, see https://github.com/neondatabase/neon/issues/9259.
-        if dirty {
+        if dirty && !self.tli.cancel.is_cancelled() {
             self.tli
                 .process_msg(&ProposerAcceptorMessage::FlushWAL)
                 .await?;

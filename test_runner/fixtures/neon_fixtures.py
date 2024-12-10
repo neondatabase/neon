@@ -17,7 +17,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
 from types import TracebackType
@@ -90,10 +90,12 @@ from fixtures.safekeeper.utils import wait_walreceivers_absent
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     COMPONENT_BINARIES,
+    USE_LFC,
     allure_add_grafana_links,
     assert_no_errors,
     get_dir_size,
     print_gc_result,
+    size_to_bytes,
     subprocess_capture,
     wait_until,
 )
@@ -101,13 +103,8 @@ from fixtures.utils import (
 from .neon_api import NeonAPI, NeonApiEndpoint
 
 if TYPE_CHECKING:
-    from typing import (
-        Any,
-        Callable,
-        Optional,
-        TypeVar,
-        Union,
-    )
+    from collections.abc import Callable
+    from typing import Any, Self, TypeVar
 
     from fixtures.paths import SnapshotDirLocked
 
@@ -272,7 +269,7 @@ class PgProtocol:
             for match in re.finditer(r"-c(\w*)=(\w*)", options):
                 key = match.group(1)
                 val = match.group(2)
-                if "server_options" in conn_options:
+                if "server_settings" in conn_options:
                     conn_options["server_settings"].update({key: val})
                 else:
                     conn_options["server_settings"] = {key: val}
@@ -286,7 +283,7 @@ class PgProtocol:
         return self.safe_psql_many([query], **kwargs)[0]
 
     def safe_psql_many(
-        self, queries: Iterable[str], log_query=True, **kwargs: Any
+        self, queries: Iterable[str], log_query: bool = True, **kwargs: Any
     ) -> list[list[tuple[Any, ...]]]:
         """
         Execute queries against the node and return all rows.
@@ -306,11 +303,36 @@ class PgProtocol:
                         result.append(cur.fetchall())
         return result
 
-    def safe_psql_scalar(self, query, log_query=True) -> Any:
+    def safe_psql_scalar(self, query: str, log_query: bool = True) -> Any:
         """
         Execute query returning single row with single column.
         """
         return self.safe_psql(query, log_query=log_query)[0][0]
+
+
+class PageserverWalReceiverProtocol(StrEnum):
+    VANILLA = "vanilla"
+    INTERPRETED = "interpreted"
+
+    @staticmethod
+    def to_config_key_value(proto) -> tuple[str, dict[str, Any]]:
+        if proto == PageserverWalReceiverProtocol.VANILLA:
+            return (
+                "wal_receiver_protocol",
+                {
+                    "type": "vanilla",
+                },
+            )
+        elif proto == PageserverWalReceiverProtocol.INTERPRETED:
+            return (
+                "wal_receiver_protocol",
+                {
+                    "type": "interpreted",
+                    "args": {"format": "protobuf", "compression": {"zstd": {"level": 1}}},
+                },
+            )
+        else:
+            raise ValueError(f"Unknown protocol type: {proto}")
 
 
 class NeonEnvBuilder:
@@ -338,10 +360,10 @@ class NeonEnvBuilder:
         top_output_dir: Path,
         test_output_dir: Path,
         combination,
-        test_overlay_dir: Optional[Path] = None,
-        pageserver_remote_storage: Optional[RemoteStorage] = None,
+        test_overlay_dir: Path | None = None,
+        pageserver_remote_storage: RemoteStorage | None = None,
         # toml that will be decomposed into `--config-override` flags during `pageserver --init`
-        pageserver_config_override: Optional[str | Callable[[dict[str, Any]], None]] = None,
+        pageserver_config_override: str | Callable[[dict[str, Any]], None] | None = None,
         num_safekeepers: int = 1,
         num_pageservers: int = 1,
         # Use non-standard SK ids to check for various parsing bugs
@@ -349,16 +371,17 @@ class NeonEnvBuilder:
         # fsync is disabled by default to make the tests go faster
         safekeepers_enable_fsync: bool = False,
         auth_enabled: bool = False,
-        rust_log_override: Optional[str] = None,
+        rust_log_override: str | None = None,
         default_branch_name: str = DEFAULT_BRANCH_NAME,
         preserve_database_files: bool = False,
-        initial_tenant: Optional[TenantId] = None,
-        initial_timeline: Optional[TimelineId] = None,
-        pageserver_virtual_file_io_engine: Optional[str] = None,
-        pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]] = None,
-        safekeeper_extra_opts: Optional[list[str]] = None,
-        storage_controller_port_override: Optional[int] = None,
-        pageserver_virtual_file_io_mode: Optional[str] = None,
+        initial_tenant: TenantId | None = None,
+        initial_timeline: TimelineId | None = None,
+        pageserver_virtual_file_io_engine: str | None = None,
+        pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None = None,
+        safekeeper_extra_opts: list[str] | None = None,
+        storage_controller_port_override: int | None = None,
+        pageserver_virtual_file_io_mode: str | None = None,
+        pageserver_wal_receiver_protocol: PageserverWalReceiverProtocol | None = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -367,7 +390,7 @@ class NeonEnvBuilder:
         # Pageserver remote storage
         self.pageserver_remote_storage = pageserver_remote_storage
         # Safekeepers remote storage
-        self.safekeepers_remote_storage: Optional[RemoteStorage] = None
+        self.safekeepers_remote_storage: RemoteStorage | None = None
 
         self.run_id = run_id
         self.mock_s3_server: MockS3Server = mock_s3_server
@@ -378,7 +401,7 @@ class NeonEnvBuilder:
         self.safekeepers_enable_fsync = safekeepers_enable_fsync
         self.auth_enabled = auth_enabled
         self.default_branch_name = default_branch_name
-        self.env: Optional[NeonEnv] = None
+        self.env: NeonEnv | None = None
         self.keep_remote_storage_contents: bool = True
         self.neon_binpath = neon_binpath
         self.neon_local_binpath = neon_binpath
@@ -391,14 +414,14 @@ class NeonEnvBuilder:
         self.test_output_dir = test_output_dir
         self.test_overlay_dir = test_overlay_dir
         self.overlay_mounts_created_by_us: list[tuple[str, Path]] = []
-        self.config_init_force: Optional[str] = None
+        self.config_init_force: str | None = None
         self.top_output_dir = top_output_dir
-        self.control_plane_compute_hook_api: Optional[str] = None
-        self.storage_controller_config: Optional[dict[Any, Any]] = None
+        self.control_plane_compute_hook_api: str | None = None
+        self.storage_controller_config: dict[Any, Any] | None = None
 
-        self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
+        self.pageserver_virtual_file_io_engine: str | None = pageserver_virtual_file_io_engine
 
-        self.pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]] = (
+        self.pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None = (
             pageserver_default_tenant_config_compaction_algorithm
         )
         if self.pageserver_default_tenant_config_compaction_algorithm is not None:
@@ -411,6 +434,8 @@ class NeonEnvBuilder:
         self.storage_controller_port_override = storage_controller_port_override
 
         self.pageserver_virtual_file_io_mode = pageserver_virtual_file_io_mode
+
+        self.pageserver_wal_receiver_protocol = pageserver_wal_receiver_protocol
 
         assert test_name.startswith(
             "test_"
@@ -440,10 +465,10 @@ class NeonEnvBuilder:
 
     def init_start(
         self,
-        initial_tenant_conf: Optional[dict[str, Any]] = None,
+        initial_tenant_conf: dict[str, Any] | None = None,
         default_remote_storage_if_missing: bool = True,
-        initial_tenant_shard_count: Optional[int] = None,
-        initial_tenant_shard_stripe_size: Optional[int] = None,
+        initial_tenant_shard_count: int | None = None,
+        initial_tenant_shard_stripe_size: int | None = None,
     ) -> NeonEnv:
         """
         Default way to create and start NeonEnv. Also creates the initial_tenant with root initial_timeline.
@@ -781,8 +806,8 @@ class NeonEnvBuilder:
         self,
         kind: RemoteStorageKind,
         user: RemoteStorageUser,
-        bucket_name: Optional[str] = None,
-        bucket_region: Optional[str] = None,
+        bucket_name: str | None = None,
+        bucket_region: str | None = None,
     ) -> RemoteStorage:
         ret = kind.configure(
             self.repo_dir,
@@ -840,14 +865,14 @@ class NeonEnvBuilder:
             if isinstance(x, S3Storage):
                 x.do_cleanup()
 
-    def __enter__(self) -> NeonEnvBuilder:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc_value: Optional[BaseException],
-        traceback: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
     ):
         # Stop all the nodes.
         if self.env:
@@ -1026,6 +1051,7 @@ class NeonEnv:
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
+        self.pageserver_wal_receiver_protocol = config.pageserver_wal_receiver_protocol
 
         # Create the neon_local's `NeonLocalInitConf`
         cfg: dict[str, Any] = {
@@ -1065,7 +1091,21 @@ class NeonEnv:
                 "http_auth_type": http_auth_type,
                 # Default which can be overriden with `NeonEnvBuilder.pageserver_config_override`
                 "availability_zone": "us-east-2a",
+                # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
+                # the pageserver taking a long time to start up due to syncfs flushing other tests' data
+                "no_sync": True,
             }
+
+            # Batching (https://github.com/neondatabase/neon/issues/9377):
+            # enable batching by default in tests and benchmarks.
+            # Compat tests are exempt because old versions fail to parse the new config.
+            if not config.compatibility_neon_binpath:
+                ps_cfg["page_service_pipelining"] = {
+                    "mode": "pipelined",
+                    "execution": "concurrent-futures",
+                    "max_batch_size": 32,
+                }
+
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
             if config.pageserver_default_tenant_config_compaction_algorithm is not None:
@@ -1091,6 +1131,13 @@ class NeonEnv:
 
             if self.pageserver_virtual_file_io_mode is not None:
                 ps_cfg["virtual_file_io_mode"] = self.pageserver_virtual_file_io_mode
+
+            if self.pageserver_wal_receiver_protocol is not None:
+                key, value = PageserverWalReceiverProtocol.to_config_key_value(
+                    self.pageserver_wal_receiver_protocol
+                )
+                if key not in ps_cfg:
+                    ps_cfg[key] = value
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
@@ -1133,7 +1180,7 @@ class NeonEnv:
             force=config.config_init_force,
         )
 
-    def start(self, timeout_in_seconds: Optional[int] = None):
+    def start(self, timeout_in_seconds: int | None = None):
         # Storage controller starts first, so that pageserver /re-attach calls don't
         # bounce through retries on startup
         self.storage_controller.start(timeout_in_seconds=timeout_in_seconds)
@@ -1147,21 +1194,19 @@ class NeonEnv:
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=2 + len(self.pageservers) + len(self.safekeepers)
         ) as executor:
-            futs.append(
-                executor.submit(lambda: self.broker.start() or None)
-            )  # The `or None` is for the linter
+            futs.append(executor.submit(lambda: self.broker.start()))
 
             for pageserver in self.pageservers:
                 futs.append(
                     executor.submit(
-                        lambda ps=pageserver: ps.start(timeout_in_seconds=timeout_in_seconds)
+                        lambda ps=pageserver: ps.start(timeout_in_seconds=timeout_in_seconds)  # type: ignore[misc]
                     )
                 )
 
             for safekeeper in self.safekeepers:
                 futs.append(
                     executor.submit(
-                        lambda sk=safekeeper: sk.start(timeout_in_seconds=timeout_in_seconds)
+                        lambda sk=safekeeper: sk.start(timeout_in_seconds=timeout_in_seconds)  # type: ignore[misc]
                     )
                 )
 
@@ -1234,7 +1279,7 @@ class NeonEnv:
         ), "env.pageserver must only be used with single pageserver NeonEnv"
         return self.pageservers[0]
 
-    def get_pageserver(self, id: Optional[int]) -> NeonPageserver:
+    def get_pageserver(self, id: int | None) -> NeonPageserver:
         """
         Look up a pageserver by its node ID.
 
@@ -1251,7 +1296,7 @@ class NeonEnv:
 
         raise RuntimeError(f"Pageserver with ID {id} not found")
 
-    def get_tenant_pageserver(self, tenant_id: Union[TenantId, TenantShardId]):
+    def get_tenant_pageserver(self, tenant_id: TenantId | TenantShardId):
         """
         Get the NeonPageserver where this tenant shard is currently attached, according
         to the storage controller.
@@ -1313,12 +1358,12 @@ class NeonEnv:
 
     def create_tenant(
         self,
-        tenant_id: Optional[TenantId] = None,
-        timeline_id: Optional[TimelineId] = None,
-        conf: Optional[dict[str, Any]] = None,
-        shard_count: Optional[int] = None,
-        shard_stripe_size: Optional[int] = None,
-        placement_policy: Optional[str] = None,
+        tenant_id: TenantId | None = None,
+        timeline_id: TimelineId | None = None,
+        conf: dict[str, Any] | None = None,
+        shard_count: int | None = None,
+        shard_stripe_size: int | None = None,
+        placement_policy: str | None = None,
         set_default: bool = False,
     ) -> tuple[TenantId, TimelineId]:
         """
@@ -1340,7 +1385,7 @@ class NeonEnv:
 
         return tenant_id, timeline_id
 
-    def config_tenant(self, tenant_id: Optional[TenantId], conf: dict[str, str]):
+    def config_tenant(self, tenant_id: TenantId | None, conf: dict[str, str]):
         """
         Update tenant config.
         """
@@ -1350,10 +1395,10 @@ class NeonEnv:
     def create_branch(
         self,
         new_branch_name: str = DEFAULT_BRANCH_NAME,
-        tenant_id: Optional[TenantId] = None,
-        ancestor_branch_name: Optional[str] = None,
-        ancestor_start_lsn: Optional[Lsn] = None,
-        new_timeline_id: Optional[TimelineId] = None,
+        tenant_id: TenantId | None = None,
+        ancestor_branch_name: str | None = None,
+        ancestor_start_lsn: Lsn | None = None,
+        new_timeline_id: TimelineId | None = None,
     ) -> TimelineId:
         new_timeline_id = new_timeline_id or TimelineId.generate()
         tenant_id = tenant_id or self.initial_tenant
@@ -1367,8 +1412,8 @@ class NeonEnv:
     def create_timeline(
         self,
         new_branch_name: str,
-        tenant_id: Optional[TenantId] = None,
-        timeline_id: Optional[TimelineId] = None,
+        tenant_id: TenantId | None = None,
+        timeline_id: TimelineId | None = None,
     ) -> TimelineId:
         timeline_id = timeline_id or TimelineId.generate()
         tenant_id = tenant_id or self.initial_tenant
@@ -1393,8 +1438,8 @@ def neon_simple_env(
     compatibility_pg_distrib_dir: Path,
     pg_version: PgVersion,
     pageserver_virtual_file_io_engine: str,
-    pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]],
-    pageserver_virtual_file_io_mode: Optional[str],
+    pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None,
+    pageserver_virtual_file_io_mode: str | None,
 ) -> Iterator[NeonEnv]:
     """
     Simple Neon environment, with 1 safekeeper and 1 pageserver. No authentication, no fsync.
@@ -1450,9 +1495,9 @@ def neon_env_builder(
     test_overlay_dir: Path,
     top_output_dir: Path,
     pageserver_virtual_file_io_engine: str,
-    pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]],
+    pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None,
     record_property: Callable[[str, object], None],
-    pageserver_virtual_file_io_mode: Optional[str],
+    pageserver_virtual_file_io_mode: str | None,
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1527,7 +1572,7 @@ class LogUtils:
 
     def log_contains(
         self, pattern: str, offset: None | LogCursor = None
-    ) -> Optional[tuple[str, LogCursor]]:
+    ) -> tuple[str, LogCursor] | None:
         """Check that the log contains a line that matches the given regex"""
         logfile = self.logfile
         if not logfile.exists():
@@ -1566,14 +1611,13 @@ class StorageControllerApiException(Exception):
 
 # See libs/pageserver_api/src/controller_api.rs
 # for the rust definitions of the enums below
-# TODO: Replace with `StrEnum` when we upgrade to python 3.11
-class PageserverAvailability(str, Enum):
+class PageserverAvailability(StrEnum):
     ACTIVE = "Active"
     UNAVAILABLE = "Unavailable"
     OFFLINE = "Offline"
 
 
-class PageserverSchedulingPolicy(str, Enum):
+class PageserverSchedulingPolicy(StrEnum):
     ACTIVE = "Active"
     DRAINING = "Draining"
     FILLING = "Filling"
@@ -1581,7 +1625,7 @@ class PageserverSchedulingPolicy(str, Enum):
     PAUSE_FOR_RESTART = "PauseForRestart"
 
 
-class StorageControllerLeadershipStatus(str, Enum):
+class StorageControllerLeadershipStatus(StrEnum):
     LEADER = "leader"
     STEPPED_DOWN = "stepped_down"
     CANDIDATE = "candidate"
@@ -1599,16 +1643,16 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
     def start(
         self,
-        timeout_in_seconds: Optional[int] = None,
-        instance_id: Optional[int] = None,
-        base_port: Optional[int] = None,
-    ):
+        timeout_in_seconds: int | None = None,
+        instance_id: int | None = None,
+        base_port: int | None = None,
+    ) -> Self:
         assert not self.running
         self.env.neon_cli.storage_controller_start(timeout_in_seconds, instance_id, base_port)
         self.running = True
         return self
 
-    def stop(self, immediate: bool = False) -> NeonStorageController:
+    def stop(self, immediate: bool = False) -> Self:
         if self.running:
             self.env.neon_cli.storage_controller_stop(immediate)
             self.running = False
@@ -1670,7 +1714,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         return resp
 
-    def headers(self, scope: Optional[TokenScope]) -> dict[str, str]:
+    def headers(self, scope: TokenScope | None) -> dict[str, str]:
         headers = {}
         if self.auth_enabled and scope is not None:
             jwt_token = self.env.auth_keys.generate_token(scope=scope)
@@ -1703,14 +1747,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
         def storage_controller_ready():
             assert self.ready() is True
 
-        wait_until(30, 1, storage_controller_ready)
+        wait_until(storage_controller_ready)
         return time.time() - t1
 
     def attach_hook_issue(
         self,
-        tenant_shard_id: Union[TenantId, TenantShardId],
+        tenant_shard_id: TenantId | TenantShardId,
         pageserver_id: int,
-        generation_override: Optional[int] = None,
+        generation_override: int | None = None,
     ) -> int:
         body = {"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id}
         if generation_override is not None:
@@ -1726,7 +1770,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         assert isinstance(gen, int)
         return gen
 
-    def attach_hook_drop(self, tenant_shard_id: Union[TenantId, TenantShardId]):
+    def attach_hook_drop(self, tenant_shard_id: TenantId | TenantShardId):
         self.request(
             "POST",
             f"{self.api}/debug/v1/attach-hook",
@@ -1734,7 +1778,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
-    def inspect(self, tenant_shard_id: Union[TenantId, TenantShardId]) -> Optional[tuple[int, int]]:
+    def inspect(self, tenant_shard_id: TenantId | TenantShardId) -> tuple[int, int] | None:
         """
         :return: 2-tuple of (generation, pageserver id), or None if unknown
         """
@@ -1854,10 +1898,10 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def tenant_create(
         self,
         tenant_id: TenantId,
-        shard_count: Optional[int] = None,
-        shard_stripe_size: Optional[int] = None,
-        tenant_config: Optional[dict[Any, Any]] = None,
-        placement_policy: Optional[Union[dict[Any, Any], str]] = None,
+        shard_count: int | None = None,
+        shard_stripe_size: int | None = None,
+        tenant_config: dict[Any, Any] | None = None,
+        placement_policy: dict[Any, Any] | str | None = None,
     ):
         """
         Use this rather than pageserver_api() when you need to include shard parameters
@@ -1887,6 +1931,20 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         response.raise_for_status()
         log.info(f"tenant_create success: {response.json()}")
+
+    def timeline_create(
+        self,
+        tenant_id: TenantId,
+        body: dict[str, Any],
+    ):
+        response = self.request(
+            "POST",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline",
+            json=body,
+            headers=self.headers(TokenScope.PAGE_SERVER_API),
+        )
+        response.raise_for_status()
+        log.info(f"timeline_create success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
         """
@@ -1938,7 +1996,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return response.json()
 
     def tenant_shard_split(
-        self, tenant_id: TenantId, shard_count: int, shard_stripe_size: Optional[int] = None
+        self, tenant_id: TenantId, shard_count: int, shard_stripe_size: int | None = None
     ) -> list[TenantShardId]:
         response = self.request(
             "PUT",
@@ -2036,8 +2094,8 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def poll_node_status(
         self,
         node_id: int,
-        desired_availability: Optional[PageserverAvailability],
-        desired_scheduling_policy: Optional[PageserverSchedulingPolicy],
+        desired_availability: PageserverAvailability | None,
+        desired_scheduling_policy: PageserverSchedulingPolicy | None,
         max_attempts: int,
         backoff: float,
     ):
@@ -2256,7 +2314,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             json=body,
         )
 
-    def get_safekeeper(self, id: int) -> Optional[dict[str, Any]]:
+    def get_safekeeper(self, id: int) -> dict[str, Any] | None:
         try:
             response = self.request(
                 "GET",
@@ -2282,14 +2340,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response.raise_for_status()
         return [TenantShardId.parse(tid) for tid in response.json()["updated"]]
 
-    def __enter__(self) -> NeonStorageController:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
     ):
         self.stop(immediate=True)
 
@@ -2301,10 +2359,10 @@ class NeonProxiedStorageController(NeonStorageController):
 
     def start(
         self,
-        timeout_in_seconds: Optional[int] = None,
-        instance_id: Optional[int] = None,
-        base_port: Optional[int] = None,
-    ):
+        timeout_in_seconds: int | None = None,
+        instance_id: int | None = None,
+        base_port: int | None = None,
+    ) -> Self:
         assert instance_id is not None and base_port is not None
 
         self.env.neon_cli.storage_controller_start(timeout_in_seconds, instance_id, base_port)
@@ -2314,7 +2372,7 @@ class NeonProxiedStorageController(NeonStorageController):
         return self
 
     def stop_instance(
-        self, immediate: bool = False, instance_id: Optional[int] = None
+        self, immediate: bool = False, instance_id: int | None = None
     ) -> NeonStorageController:
         assert instance_id in self.instances
         if self.instances[instance_id]["running"]:
@@ -2324,7 +2382,7 @@ class NeonProxiedStorageController(NeonStorageController):
         self.running = any(meta["running"] for meta in self.instances.values())
         return self
 
-    def stop(self, immediate: bool = False) -> NeonStorageController:
+    def stop(self, immediate: bool = False) -> Self:
         for iid, details in self.instances.items():
             if details["running"]:
                 self.env.neon_cli.storage_controller_stop(immediate, iid)
@@ -2343,7 +2401,7 @@ class NeonProxiedStorageController(NeonStorageController):
 
     def log_contains(
         self, pattern: str, offset: None | LogCursor = None
-    ) -> Optional[tuple[str, LogCursor]]:
+    ) -> tuple[str, LogCursor] | None:
         raise NotImplementedError()
 
 
@@ -2376,11 +2434,22 @@ class NeonPageserver(PgProtocol, LogUtils):
         #
         # The entries in the list are regular experessions.
         self.allowed_errors: list[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
+        # Store persistent failpoints that should be reapplied on each start
+        self._persistent_failpoints: dict[str, str] = {}
+
+    def add_persistent_failpoint(self, name: str, action: str):
+        """
+        Add a failpoint that will be automatically reapplied each time the pageserver starts.
+        The failpoint will be set immediately if the pageserver is running.
+        """
+        self._persistent_failpoints[name] = action
+        if self.running:
+            self.http_client().configure_failpoints([(name, action)])
 
     def timeline_dir(
         self,
-        tenant_shard_id: Union[TenantId, TenantShardId],
-        timeline_id: Optional[TimelineId] = None,
+        tenant_shard_id: TenantId | TenantShardId,
+        timeline_id: TimelineId | None = None,
     ) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
         if timeline_id is None:
@@ -2389,7 +2458,7 @@ class NeonPageserver(PgProtocol, LogUtils):
 
     def tenant_dir(
         self,
-        tenant_shard_id: Optional[Union[TenantId, TenantShardId]] = None,
+        tenant_shard_id: TenantId | TenantShardId | None = None,
     ) -> Path:
         """Get a tenant directory's path based on the repo directory of the test environment"""
         if tenant_shard_id is None:
@@ -2433,15 +2502,24 @@ class NeonPageserver(PgProtocol, LogUtils):
 
     def start(
         self,
-        extra_env_vars: Optional[dict[str, str]] = None,
-        timeout_in_seconds: Optional[int] = None,
-    ) -> NeonPageserver:
+        extra_env_vars: dict[str, str] | None = None,
+        timeout_in_seconds: int | None = None,
+    ) -> Self:
         """
         Start the page server.
         `overrides` allows to add some config to this pageserver start.
         Returns self.
         """
         assert self.running is False
+
+        if self._persistent_failpoints:
+            # Tests shouldn't use this mechanism _and_ set FAILPOINTS explicitly
+            assert extra_env_vars is None or "FAILPOINTS" not in extra_env_vars
+            if extra_env_vars is None:
+                extra_env_vars = {}
+            extra_env_vars["FAILPOINTS"] = ",".join(
+                f"{k}={v}" for (k, v) in self._persistent_failpoints.items()
+            )
 
         storage = self.env.pageserver_remote_storage
         if isinstance(storage, S3Storage):
@@ -2461,7 +2539,7 @@ class NeonPageserver(PgProtocol, LogUtils):
 
         return self
 
-    def stop(self, immediate: bool = False) -> NeonPageserver:
+    def stop(self, immediate: bool = False) -> Self:
         """
         Stop the page server.
         Returns self.
@@ -2474,7 +2552,7 @@ class NeonPageserver(PgProtocol, LogUtils):
     def restart(
         self,
         immediate: bool = False,
-        timeout_in_seconds: Optional[int] = None,
+        timeout_in_seconds: int | None = None,
     ):
         """
         High level wrapper for restart: restarts the process, and waits for
@@ -2507,16 +2585,16 @@ class NeonPageserver(PgProtocol, LogUtils):
             log.info(f"any_unstable={any_unstable}")
             assert not any_unstable
 
-        wait_until(20, 0.5, complete)
+        wait_until(complete)
 
-    def __enter__(self) -> NeonPageserver:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
     ):
         self.stop(immediate=True)
 
@@ -2525,7 +2603,7 @@ class NeonPageserver(PgProtocol, LogUtils):
             pytest.skip("pageserver was built without 'testing' feature")
 
     def http_client(
-        self, auth_token: Optional[str] = None, retries: Optional[Retry] = None
+        self, auth_token: str | None = None, retries: Retry | None = None
     ) -> PageserverHttpClient:
         return PageserverHttpClient(
             port=self.service_port.http,
@@ -2562,7 +2640,7 @@ class NeonPageserver(PgProtocol, LogUtils):
         self,
         tenant_id: TenantId,
         config: None | dict[str, Any] = None,
-        generation: Optional[int] = None,
+        generation: int | None = None,
         override_storage_controller_generation: bool = False,
     ):
         """
@@ -2596,7 +2674,7 @@ class NeonPageserver(PgProtocol, LogUtils):
         return client.tenant_location_conf(tenant_id, config, **kwargs)
 
     def read_tenant_location_conf(
-        self, tenant_shard_id: Union[TenantId, TenantShardId]
+        self, tenant_shard_id: TenantId | TenantShardId
     ) -> dict[str, Any]:
         path = self.tenant_dir(tenant_shard_id) / "config-v1"
         log.info(f"Reading location conf from {path}")
@@ -2611,9 +2689,9 @@ class NeonPageserver(PgProtocol, LogUtils):
     def tenant_create(
         self,
         tenant_id: TenantId,
-        conf: Optional[dict[str, Any]] = None,
-        auth_token: Optional[str] = None,
-        generation: Optional[int] = None,
+        conf: dict[str, Any] | None = None,
+        auth_token: str | None = None,
+        generation: int | None = None,
     ) -> TenantId:
         if generation is None:
             generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
@@ -2633,7 +2711,7 @@ class NeonPageserver(PgProtocol, LogUtils):
         return tenant_id
 
     def list_layers(
-        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId
     ) -> list[Path]:
         """
         Inspect local storage on a pageserver to discover which layer files are present.
@@ -2726,7 +2804,7 @@ class PgBin:
         if "/" not in str(command[0]):
             command[0] = str(self.pg_bin_path / command[0])
 
-    def _build_env(self, env_add: Optional[Env]) -> Env:
+    def _build_env(self, env_add: Env | None) -> Env:
         if env_add is None:
             return self.env
         env = self.env.copy()
@@ -2743,8 +2821,8 @@ class PgBin:
     def run_nonblocking(
         self,
         command: list[str],
-        env: Optional[Env] = None,
-        cwd: Optional[Union[str, Path]] = None,
+        env: Env | None = None,
+        cwd: str | Path | None = None,
     ) -> subprocess.Popen[Any]:
         """
         Run one of the postgres binaries, not waiting for it to finish
@@ -2767,8 +2845,8 @@ class PgBin:
     def run(
         self,
         command: list[str],
-        env: Optional[Env] = None,
-        cwd: Optional[Union[str, Path]] = None,
+        env: Env | None = None,
+        cwd: str | Path | None = None,
     ) -> None:
         """
         Run one of the postgres binaries, waiting for it to finish
@@ -2790,8 +2868,8 @@ class PgBin:
     def run_capture(
         self,
         command: list[str],
-        env: Optional[Env] = None,
-        cwd: Optional[str] = None,
+        env: Env | None = None,
+        cwd: str | None = None,
         with_command_header=True,
         **popen_kwargs: Any,
     ) -> str:
@@ -2918,7 +2996,7 @@ class VanillaPostgres(PgProtocol):
             conf_file.write("\n".join(hba) + "\n")
             conf_file.write(data)
 
-    def start(self, log_path: Optional[str] = None):
+    def start(self, log_path: str | None = None):
         assert not self.running
         self.running = True
 
@@ -2937,14 +3015,14 @@ class VanillaPostgres(PgProtocol):
         """Return size of pgdatadir subdirectory in bytes."""
         return get_dir_size(self.pgdatadir / subdir)
 
-    def __enter__(self) -> VanillaPostgres:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
     ):
         if self.running:
             self.stop()
@@ -2986,14 +3064,14 @@ class RemotePostgres(PgProtocol):
         # See https://www.postgresql.org/docs/14/functions-admin.html#FUNCTIONS-ADMIN-GENFILE
         raise Exception("cannot get size of a Postgres instance")
 
-    def __enter__(self) -> RemotePostgres:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
     ):
         # do nothing
         pass
@@ -3069,7 +3147,7 @@ class PSQL:
         self.path = full_path
         self.database_url = f"postgres://{host}:{port}/main?options=project%3Dgeneric-project-name"
 
-    async def run(self, query: Optional[str] = None) -> asyncio.subprocess.Process:
+    async def run(self, query: str | None = None) -> asyncio.subprocess.Process:
         run_args = [self.path, "--no-psqlrc", "--quiet", "--tuples-only", self.database_url]
         if query is not None:
             run_args += ["--command", query]
@@ -3115,7 +3193,7 @@ class NeonProxy(PgProtocol):
         """All auth backends must inherit from this class"""
 
         @property
-        def default_conn_url(self) -> Optional[str]:
+        def default_conn_url(self) -> str | None:
             return None
 
         @abc.abstractmethod
@@ -3132,7 +3210,7 @@ class NeonProxy(PgProtocol):
             ]
 
     class Console(AuthBackend):
-        def __init__(self, endpoint: str, fixed_rate_limit: Optional[int] = None):
+        def __init__(self, endpoint: str, fixed_rate_limit: int | None = None):
             self.endpoint = endpoint
             self.fixed_rate_limit = fixed_rate_limit
 
@@ -3160,7 +3238,7 @@ class NeonProxy(PgProtocol):
         pg_conn_url: str
 
         @property
-        def default_conn_url(self) -> Optional[str]:
+        def default_conn_url(self) -> str | None:
             return self.pg_conn_url
 
         def extra_args(self) -> list[str]:
@@ -3179,8 +3257,8 @@ class NeonProxy(PgProtocol):
         mgmt_port: int,
         external_http_port: int,
         auth_backend: NeonProxy.AuthBackend,
-        metric_collection_endpoint: Optional[str] = None,
-        metric_collection_interval: Optional[str] = None,
+        metric_collection_endpoint: str | None = None,
+        metric_collection_interval: str | None = None,
     ):
         host = "127.0.0.1"
         domain = "proxy.localtest.me"  # resolves to 127.0.0.1
@@ -3198,9 +3276,9 @@ class NeonProxy(PgProtocol):
         self.metric_collection_endpoint = metric_collection_endpoint
         self.metric_collection_interval = metric_collection_interval
         self.http_timeout_seconds = 15
-        self._popen: Optional[subprocess.Popen[bytes]] = None
+        self._popen: subprocess.Popen[bytes] | None = None
 
-    def start(self) -> NeonProxy:
+    def start(self) -> Self:
         assert self._popen is None
 
         # generate key of it doesn't exist
@@ -3328,14 +3406,14 @@ class NeonProxy(PgProtocol):
                 log.info(f"SUCCESS, found auth url: {line}")
                 return line
 
-    def __enter__(self) -> NeonProxy:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
     ):
         if self._popen is not None:
             self._popen.terminate()
@@ -3416,9 +3494,9 @@ class NeonAuthBroker:
         self.mgmt_port = mgmt_port
         self.auth_backend = auth_backend
         self.http_timeout_seconds = 15
-        self._popen: Optional[subprocess.Popen[bytes]] = None
+        self._popen: subprocess.Popen[bytes] | None = None
 
-    def start(self) -> NeonAuthBroker:
+    def start(self) -> Self:
         assert self._popen is None
 
         # generate key of it doesn't exist
@@ -3487,14 +3565,14 @@ class NeonAuthBroker:
         request_result = requests.get(f"http://{self.host}:{self.http_port}/metrics")
         return request_result.text
 
-    def __enter__(self) -> NeonAuthBroker:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
         self,
-        _exc_type: Optional[type[BaseException]],
-        _exc_value: Optional[BaseException],
-        _traceback: Optional[TracebackType],
+        _exc_type: type[BaseException] | None,
+        _exc_value: BaseException | None,
+        _traceback: TracebackType | None,
     ):
         if self._popen is not None:
             self._popen.terminate()
@@ -3650,9 +3728,9 @@ class Endpoint(PgProtocol, LogUtils):
     ):
         super().__init__(host="localhost", port=pg_port, user="cloud_admin", dbname="postgres")
         self.env = env
-        self.branch_name: Optional[str] = None  # dubious
-        self.endpoint_id: Optional[str] = None  # dubious, see asserts below
-        self.pgdata_dir: Optional[Path] = None  # Path to computenode PGDATA
+        self.branch_name: str | None = None  # dubious
+        self.endpoint_id: str | None = None  # dubious, see asserts below
+        self.pgdata_dir: Path | None = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
         self.pg_port = pg_port
         self.http_port = http_port
@@ -3669,7 +3747,7 @@ class Endpoint(PgProtocol, LogUtils):
         self._running = threading.Semaphore(0)
 
     def http_client(
-        self, auth_token: Optional[str] = None, retries: Optional[Retry] = None
+        self, auth_token: str | None = None, retries: Retry | None = None
     ) -> EndpointHttpClient:
         return EndpointHttpClient(
             port=self.http_port,
@@ -3678,13 +3756,13 @@ class Endpoint(PgProtocol, LogUtils):
     def create(
         self,
         branch_name: str,
-        endpoint_id: Optional[str] = None,
+        endpoint_id: str | None = None,
         hot_standby: bool = False,
-        lsn: Optional[Lsn] = None,
-        config_lines: Optional[list[str]] = None,
-        pageserver_id: Optional[int] = None,
+        lsn: Lsn | None = None,
+        config_lines: list[str] | None = None,
+        pageserver_id: int | None = None,
         allow_multiple: bool = False,
-    ) -> Endpoint:
+    ) -> Self:
         """
         Create a new Postgres endpoint.
         Returns self.
@@ -3713,11 +3791,43 @@ class Endpoint(PgProtocol, LogUtils):
         self.pgdata_dir = self.env.repo_dir / path
         self.logfile = self.endpoint_path() / "compute.log"
 
-        config_lines = config_lines or []
-
         # set small 'max_replication_write_lag' to enable backpressure
         # and make tests more stable.
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
+
+        # Delete file cache if it exists (and we're recreating the endpoint)
+        if USE_LFC:
+            if (lfc_path := Path(self.lfc_path())).exists():
+                lfc_path.unlink()
+            else:
+                lfc_path.parent.mkdir(parents=True, exist_ok=True)
+            for line in config_lines:
+                if (
+                    line.find("neon.max_file_cache_size") > -1
+                    or line.find("neon.file_cache_size_limit") > -1
+                ):
+                    m = re.search(r"=\s*(\S+)", line)
+                    assert m is not None, f"malformed config line {line}"
+                    size = m.group(1)
+                    assert size_to_bytes(size) >= size_to_bytes(
+                        "1MB"
+                    ), "LFC size cannot be set less than 1MB"
+            lfc_path_escaped = str(lfc_path).replace("'", "''")
+            config_lines = [
+                f"neon.file_cache_path = '{lfc_path_escaped}'",
+                # neon.max_file_cache_size and neon.file_cache size limits are
+                # set to 1MB because small LFC is better for testing (helps to find more problems)
+                "neon.max_file_cache_size = 1MB",
+                "neon.file_cache_size_limit = 1MB",
+            ] + config_lines
+        else:
+            for line in config_lines:
+                assert (
+                    line.find("neon.max_file_cache_size") == -1
+                ), "Setting LFC parameters is not allowed when LFC is disabled"
+                assert (
+                    line.find("neon.file_cache_size_limit") == -1
+                ), "Setting LFC parameters is not allowed when LFC is disabled"
 
         self.config(config_lines)
 
@@ -3725,12 +3835,12 @@ class Endpoint(PgProtocol, LogUtils):
 
     def start(
         self,
-        remote_ext_config: Optional[str] = None,
-        pageserver_id: Optional[int] = None,
-        safekeepers: Optional[list[int]] = None,
+        remote_ext_config: str | None = None,
+        pageserver_id: int | None = None,
+        safekeepers: list[int] | None = None,
         allow_multiple: bool = False,
-        basebackup_request_tries: Optional[int] = None,
-    ) -> Endpoint:
+        basebackup_request_tries: int | None = None,
+    ) -> Self:
         """
         Start the Postgres instance.
         Returns self.
@@ -3752,6 +3862,9 @@ class Endpoint(PgProtocol, LogUtils):
             basebackup_request_tries=basebackup_request_tries,
         )
         self._running.release(1)
+        self.log_config_value("shared_buffers")
+        self.log_config_value("neon.max_file_cache_size")
+        self.log_config_value("neon.file_cache_size_limit")
 
         return self
 
@@ -3777,7 +3890,11 @@ class Endpoint(PgProtocol, LogUtils):
         """Path to the postgresql.conf in the endpoint directory (not the one in pgdata)"""
         return self.endpoint_path() / "postgresql.conf"
 
-    def config(self, lines: list[str]) -> Endpoint:
+    def lfc_path(self) -> Path:
+        """Path to the lfc file"""
+        return self.endpoint_path() / "file_cache" / "file.cache"
+
+    def config(self, lines: list[str]) -> Self:
         """
         Add lines to postgresql.conf.
         Lines should be an array of valid postgresql.conf rows.
@@ -3805,9 +3922,7 @@ class Endpoint(PgProtocol, LogUtils):
     def is_running(self):
         return self._running._value > 0
 
-    def reconfigure(
-        self, pageserver_id: Optional[int] = None, safekeepers: Optional[list[int]] = None
-    ):
+    def reconfigure(self, pageserver_id: int | None = None, safekeepers: list[int] | None = None):
         assert self.endpoint_id is not None
         # If `safekeepers` is not None, they are remember them as active and use
         # in the following commands.
@@ -3829,6 +3944,35 @@ class Endpoint(PgProtocol, LogUtils):
             log.info(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
+    def respec_deep(self, **kwargs: Any) -> None:
+        """
+        Update the endpoint.json file taking into account nested keys.
+        It does one level deep update. Should enough for most cases.
+        Distinct method from respec() to do not break existing functionality.
+        NOTE: This method also updates the spec.json file, not endpoint.json.
+        We need it because neon_local also writes to spec.json, so intended
+        use-case is i) start endpoint with some config, ii) respec_deep(),
+        iii) call reconfigure() to apply the changes.
+        """
+        config_path = os.path.join(self.endpoint_path(), "spec.json")
+        with open(config_path) as f:
+            data_dict: dict[str, Any] = json.load(f)
+
+        log.info("Current compute spec: %s", json.dumps(data_dict, indent=4))
+
+        for key, value in kwargs.items():
+            if isinstance(value, dict):
+                if key not in data_dict:
+                    data_dict[key] = value
+                else:
+                    data_dict[key] = {**data_dict[key], **value}
+            else:
+                data_dict[key] = value
+
+        with open(config_path, "w") as file:
+            log.info("Updating compute spec to: %s", json.dumps(data_dict, indent=4))
+            json.dump(data_dict, file, indent=4)
+
     # Please note: Migrations only run if pg_skip_catalog_updates is false
     def wait_for_migrations(self, num_migrations: int = 11):
         with self.cursor() as cur:
@@ -3838,7 +3982,7 @@ class Endpoint(PgProtocol, LogUtils):
                 migration_id: int = cur.fetchall()[0][0]
                 assert migration_id >= num_migrations
 
-            wait_until(20, 0.5, check_migrations_done)
+            wait_until(check_migrations_done)
 
     # Mock the extension part of spec passed from control plane for local testing
     # endpooint.rs adds content of this file as a part of the spec.json
@@ -3854,8 +3998,8 @@ class Endpoint(PgProtocol, LogUtils):
     def stop(
         self,
         mode: str = "fast",
-        sks_wait_walreceiver_gone: Optional[tuple[list[Safekeeper], TimelineId]] = None,
-    ) -> Endpoint:
+        sks_wait_walreceiver_gone: tuple[list[Safekeeper], TimelineId] | None = None,
+    ) -> Self:
         """
         Stop the Postgres instance if it's running.
 
@@ -3889,7 +4033,7 @@ class Endpoint(PgProtocol, LogUtils):
 
         return self
 
-    def stop_and_destroy(self, mode: str = "immediate") -> Endpoint:
+    def stop_and_destroy(self, mode: str = "immediate") -> Self:
         """
         Stop the Postgres instance, then destroy the endpoint.
         Returns self.
@@ -3908,15 +4052,15 @@ class Endpoint(PgProtocol, LogUtils):
     def create_start(
         self,
         branch_name: str,
-        endpoint_id: Optional[str] = None,
+        endpoint_id: str | None = None,
         hot_standby: bool = False,
-        lsn: Optional[Lsn] = None,
-        config_lines: Optional[list[str]] = None,
-        remote_ext_config: Optional[str] = None,
-        pageserver_id: Optional[int] = None,
+        lsn: Lsn | None = None,
+        config_lines: list[str] | None = None,
+        remote_ext_config: str | None = None,
+        pageserver_id: int | None = None,
         allow_multiple: bool = False,
-        basebackup_request_tries: Optional[int] = None,
-    ) -> Endpoint:
+        basebackup_request_tries: int | None = None,
+    ) -> Self:
         """
         Create an endpoint, apply config, and start Postgres.
         Returns self.
@@ -3939,14 +4083,14 @@ class Endpoint(PgProtocol, LogUtils):
 
         return self
 
-    def __enter__(self) -> Endpoint:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
     ):
         self.stop()
 
@@ -3957,16 +4101,46 @@ class Endpoint(PgProtocol, LogUtils):
         assert self.pgdata_dir is not None  # please mypy
         return get_dir_size(self.pgdata_dir / "pg_wal") / 1024 / 1024
 
-    def clear_shared_buffers(self, cursor: Optional[Any] = None):
+    def clear_buffers(self, cursor: Any | None = None):
         """
         Best-effort way to clear postgres buffers. Pinned buffers will not be 'cleared.'
-
-        Might also clear LFC.
+        It clears LFC as well by setting neon.file_cache_size_limit to 0 and then returning it to the previous value,
+        if LFC is enabled
         """
         if cursor is not None:
             cursor.execute("select clear_buffer_cache()")
+            if not USE_LFC:
+                return
+            cursor.execute("SHOW neon.file_cache_size_limit")
+            res = cursor.fetchone()
+            assert res, "Cannot get neon.file_cache_size_limit"
+            file_cache_size_limit = res[0]
+            if file_cache_size_limit == 0:
+                return
+            cursor.execute("ALTER SYSTEM SET neon.file_cache_size_limit=0")
+            cursor.execute("SELECT pg_reload_conf()")
+            cursor.execute(f"ALTER SYSTEM SET neon.file_cache_size_limit='{file_cache_size_limit}'")
+            cursor.execute("SELECT pg_reload_conf()")
         else:
             self.safe_psql("select clear_buffer_cache()")
+            if not USE_LFC:
+                return
+            file_cache_size_limit = self.safe_psql_scalar(
+                "SHOW neon.file_cache_size_limit", log_query=False
+            )
+            if file_cache_size_limit == 0:
+                return
+            self.safe_psql("ALTER SYSTEM SET neon.file_cache_size_limit=0")
+            self.safe_psql("SELECT pg_reload_conf()")
+            self.safe_psql(f"ALTER SYSTEM SET neon.file_cache_size_limit='{file_cache_size_limit}'")
+            self.safe_psql("SELECT pg_reload_conf()")
+
+    def log_config_value(self, param):
+        """
+        Writes the config value param to log
+        """
+        res = self.safe_psql_scalar(f"SHOW {param}", log_query=False)
+        log.info("%s = %s", param, res)
 
 
 class EndpointFactory:
@@ -3980,14 +4154,14 @@ class EndpointFactory:
     def create_start(
         self,
         branch_name: str,
-        endpoint_id: Optional[str] = None,
-        tenant_id: Optional[TenantId] = None,
-        lsn: Optional[Lsn] = None,
+        endpoint_id: str | None = None,
+        tenant_id: TenantId | None = None,
+        lsn: Lsn | None = None,
         hot_standby: bool = False,
-        config_lines: Optional[list[str]] = None,
-        remote_ext_config: Optional[str] = None,
-        pageserver_id: Optional[int] = None,
-        basebackup_request_tries: Optional[int] = None,
+        config_lines: list[str] | None = None,
+        remote_ext_config: str | None = None,
+        pageserver_id: int | None = None,
+        basebackup_request_tries: int | None = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4012,12 +4186,12 @@ class EndpointFactory:
     def create(
         self,
         branch_name: str,
-        endpoint_id: Optional[str] = None,
-        tenant_id: Optional[TenantId] = None,
-        lsn: Optional[Lsn] = None,
+        endpoint_id: str | None = None,
+        tenant_id: TenantId | None = None,
+        lsn: Lsn | None = None,
         hot_standby: bool = False,
-        config_lines: Optional[list[str]] = None,
-        pageserver_id: Optional[int] = None,
+        config_lines: list[str] | None = None,
+        pageserver_id: int | None = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4040,7 +4214,7 @@ class EndpointFactory:
             pageserver_id=pageserver_id,
         )
 
-    def stop_all(self, fail_on_error=True) -> EndpointFactory:
+    def stop_all(self, fail_on_error=True) -> Self:
         exception = None
         for ep in self.endpoints:
             try:
@@ -4055,7 +4229,7 @@ class EndpointFactory:
         return self
 
     def new_replica(
-        self, origin: Endpoint, endpoint_id: str, config_lines: Optional[list[str]] = None
+        self, origin: Endpoint, endpoint_id: str, config_lines: list[str] | None = None
     ):
         branch_name = origin.branch_name
         assert origin in self.endpoints
@@ -4071,7 +4245,7 @@ class EndpointFactory:
         )
 
     def new_replica_start(
-        self, origin: Endpoint, endpoint_id: str, config_lines: Optional[list[str]] = None
+        self, origin: Endpoint, endpoint_id: str, config_lines: list[str] | None = None
     ):
         branch_name = origin.branch_name
         assert origin in self.endpoints
@@ -4109,7 +4283,7 @@ class Safekeeper(LogUtils):
         port: SafekeeperPort,
         id: int,
         running: bool = False,
-        extra_opts: Optional[list[str]] = None,
+        extra_opts: list[str] | None = None,
     ):
         self.env = env
         self.port = port
@@ -4135,8 +4309,8 @@ class Safekeeper(LogUtils):
         self.extra_opts = extra_opts
 
     def start(
-        self, extra_opts: Optional[list[str]] = None, timeout_in_seconds: Optional[int] = None
-    ) -> Safekeeper:
+        self, extra_opts: list[str] | None = None, timeout_in_seconds: int | None = None
+    ) -> Self:
         if extra_opts is None:
             # Apply either the extra_opts passed in, or the ones from our constructor: we do not merge the two.
             extra_opts = self.extra_opts
@@ -4171,7 +4345,7 @@ class Safekeeper(LogUtils):
                 break  # success
         return self
 
-    def stop(self, immediate: bool = False) -> Safekeeper:
+    def stop(self, immediate: bool = False) -> Self:
         self.env.neon_cli.safekeeper_stop(self.id, immediate)
         self.running = False
         return self
@@ -4215,7 +4389,7 @@ class Safekeeper(LogUtils):
                 return res
 
     def http_client(
-        self, auth_token: Optional[str] = None, gen_sk_wide_token: bool = True
+        self, auth_token: str | None = None, gen_sk_wide_token: bool = True
     ) -> SafekeeperHttpClient:
         """
         When auth_token is None but gen_sk_wide is True creates safekeeper wide
@@ -4239,6 +4413,10 @@ class Safekeeper(LogUtils):
         flush_lsn = timeline_status.flush_lsn
         log.info(f"sk {self.id} flush LSN: {flush_lsn}")
         return flush_lsn
+
+    def get_commit_lsn(self, tenant_id: TenantId, timeline_id: TimelineId) -> Lsn:
+        timeline_status = self.http_client().timeline_status(tenant_id, timeline_id)
+        return timeline_status.commit_lsn
 
     def pull_timeline(
         self, srcs: list[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId
@@ -4320,12 +4498,10 @@ class Safekeeper(LogUtils):
             )
             assert stat.remote_consistent_lsn >= lsn and stat.backup_lsn >= lsn.segment_lsn()
 
-        # xxx: max wait is long because we might be waiting for reconnection from
-        # pageserver to this safekeeper
-        wait_until(30, 1, are_lsns_advanced)
+        wait_until(are_lsns_advanced)
         client.checkpoint(tenant_id, timeline_id)
         if wait_wal_removal:
-            wait_until(30, 1, are_segments_removed)
+            wait_until(are_segments_removed)
 
     def wait_until_paused(self, failpoint: str):
         msg = f"at failpoint {failpoint}"
@@ -4334,7 +4510,7 @@ class Safekeeper(LogUtils):
             log.info(f"waiting for hitting failpoint {failpoint}")
             self.assert_log_contains(msg)
 
-        wait_until(20, 0.5, paused)
+        wait_until(paused)
 
 
 class NeonBroker(LogUtils):
@@ -4348,14 +4524,14 @@ class NeonBroker(LogUtils):
 
     def start(
         self,
-        timeout_in_seconds: Optional[int] = None,
-    ):
+        timeout_in_seconds: int | None = None,
+    ) -> Self:
         assert not self.running
         self.env.neon_cli.storage_broker_start(timeout_in_seconds)
         self.running = True
         return self
 
-    def stop(self):
+    def stop(self) -> Self:
         if self.running:
             self.env.neon_cli.storage_broker_stop()
             self.running = False
@@ -4371,8 +4547,7 @@ class NeonBroker(LogUtils):
         assert_no_errors(self.logfile, "storage_controller", [])
 
 
-# TODO: Replace with `StrEnum` when we upgrade to python 3.11
-class NodeKind(str, Enum):
+class NodeKind(StrEnum):
     PAGESERVER = "pageserver"
     SAFEKEEPER = "safekeeper"
 
@@ -4383,7 +4558,7 @@ class StorageScrubber:
         self.log_dir = log_dir
 
     def scrubber_cli(
-        self, args: list[str], timeout, extra_env: Optional[dict[str, str]] = None
+        self, args: list[str], timeout, extra_env: dict[str, str] | None = None
     ) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
         s3_storage = self.env.pageserver_remote_storage
@@ -4446,8 +4621,8 @@ class StorageScrubber:
         self,
         post_to_storage_controller: bool = False,
         node_kind: NodeKind = NodeKind.PAGESERVER,
-        timeline_lsns: Optional[list[dict[str, Any]]] = None,
-        extra_env: Optional[dict[str, str]] = None,
+        timeline_lsns: list[dict[str, Any]] | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> tuple[bool, Any]:
         """
         Returns the health status and the metadata summary.
@@ -4481,8 +4656,8 @@ class StorageScrubber:
     def pageserver_physical_gc(
         self,
         min_age_secs: int,
-        tenant_ids: Optional[list[TenantId]] = None,
-        mode: Optional[str] = None,
+        tenant_ids: list[TenantId] | None = None,
+        mode: str | None = None,
     ):
         args = ["pageserver-physical-gc", "--min-age", f"{min_age_secs}s"]
 
@@ -4519,7 +4694,7 @@ def pytest_addoption(parser: Parser):
 
 
 SMALL_DB_FILE_NAME_REGEX: re.Pattern[str] = re.compile(
-    r"config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql|conf)"
+    r"config-v1|heatmap-v1|tenant-manifest|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
 
 
@@ -4596,7 +4771,7 @@ def check_restored_datadir_content(
     test_output_dir: Path,
     env: NeonEnv,
     endpoint: Endpoint,
-    ignored_files: Optional[list[str]] = None,
+    ignored_files: list[str] | None = None,
 ):
     pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
 
@@ -4698,7 +4873,7 @@ def logical_replication_sync(subscriber: PgProtocol, publisher: PgProtocol) -> L
 
 
 def tenant_get_shards(
-    env: NeonEnv, tenant_id: TenantId, pageserver_id: Optional[int] = None
+    env: NeonEnv, tenant_id: TenantId, pageserver_id: int | None = None
 ) -> list[tuple[TenantShardId, NeonPageserver]]:
     """
     Helper for when you want to talk to one or more pageservers, and the
@@ -4761,8 +4936,8 @@ def wait_for_last_flush_lsn(
     endpoint: Endpoint,
     tenant: TenantId,
     timeline: TimelineId,
-    pageserver_id: Optional[int] = None,
-    auth_token: Optional[str] = None,
+    pageserver_id: int | None = None,
+    auth_token: str | None = None,
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
 
@@ -4786,12 +4961,39 @@ def wait_for_last_flush_lsn(
     return min(results)
 
 
+def wait_for_commit_lsn(
+    env: NeonEnv,
+    tenant: TenantId,
+    timeline: TimelineId,
+    lsn: Lsn,
+) -> Lsn:
+    # TODO: it would be better to poll this in the compute, but there's no API for it. See:
+    # https://github.com/neondatabase/neon/issues/9758
+    "Wait for the given LSN to be committed on any Safekeeper"
+
+    max_commit_lsn = Lsn(0)
+    for i in range(1000):
+        for sk in env.safekeepers:
+            commit_lsn = sk.get_commit_lsn(tenant, timeline)
+            if commit_lsn >= lsn:
+                log.info(f"{tenant}/{timeline} at commit_lsn {commit_lsn}")
+                return commit_lsn
+            max_commit_lsn = max(max_commit_lsn, commit_lsn)
+
+        if i % 10 == 0:
+            log.info(
+                f"{tenant}/{timeline} waiting for commit_lsn to reach {lsn}, now {max_commit_lsn}"
+            )
+        time.sleep(0.1)
+    raise Exception(f"timed out while waiting for commit_lsn to reach {lsn}, was {max_commit_lsn}")
+
+
 def flush_ep_to_pageserver(
     env: NeonEnv,
     ep: Endpoint,
     tenant: TenantId,
     timeline: TimelineId,
-    pageserver_id: Optional[int] = None,
+    pageserver_id: int | None = None,
 ) -> Lsn:
     """
     Stop endpoint and wait until all committed WAL reaches the pageserver
@@ -4834,7 +5036,7 @@ def wait_for_wal_insert_lsn(
     endpoint: Endpoint,
     tenant: TenantId,
     timeline: TimelineId,
-    pageserver_id: Optional[int] = None,
+    pageserver_id: int | None = None,
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
     last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_insert_lsn()")[0][0])
@@ -4855,7 +5057,7 @@ def fork_at_current_lsn(
     endpoint: Endpoint,
     new_branch_name: str,
     ancestor_branch_name: str,
-    tenant_id: Optional[TenantId] = None,
+    tenant_id: TenantId | None = None,
 ) -> TimelineId:
     """
     Create new branch at the last LSN of an existing branch.
@@ -4928,8 +5130,9 @@ def last_flush_lsn_upload(
     endpoint: Endpoint,
     tenant_id: TenantId,
     timeline_id: TimelineId,
-    pageserver_id: Optional[int] = None,
-    auth_token: Optional[str] = None,
+    pageserver_id: int | None = None,
+    auth_token: str | None = None,
+    wait_until_uploaded: bool = True,
 ) -> Lsn:
     """
     Wait for pageserver to catch to the latest flush LSN of given endpoint,
@@ -4943,7 +5146,9 @@ def last_flush_lsn_upload(
     for tenant_shard_id, pageserver in shards:
         ps_http = pageserver.http_client(auth_token=auth_token)
         wait_for_last_record_lsn(ps_http, tenant_shard_id, timeline_id, last_flush_lsn)
-        ps_http.timeline_checkpoint(tenant_shard_id, timeline_id, wait_until_uploaded=True)
+        ps_http.timeline_checkpoint(
+            tenant_shard_id, timeline_id, wait_until_uploaded=wait_until_uploaded
+        )
     return last_flush_lsn
 
 
@@ -4964,10 +5169,11 @@ def generate_uploads_and_deletions(
     env: NeonEnv,
     *,
     init: bool = True,
-    tenant_id: Optional[TenantId] = None,
-    timeline_id: Optional[TimelineId] = None,
-    data: Optional[str] = None,
+    tenant_id: TenantId | None = None,
+    timeline_id: TimelineId | None = None,
+    data: str | None = None,
     pageserver: NeonPageserver,
+    wait_until_uploaded: bool = True,
 ):
     """
     Using the environment's default tenant + timeline, generate a load pattern
@@ -4990,7 +5196,12 @@ def generate_uploads_and_deletions(
         if init:
             endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
             last_flush_lsn_upload(
-                env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver.id
+                env,
+                endpoint,
+                tenant_id,
+                timeline_id,
+                pageserver_id=pageserver.id,
+                wait_until_uploaded=wait_until_uploaded,
             )
 
         def churn(data):
@@ -5013,7 +5224,12 @@ def generate_uploads_and_deletions(
             # in a state where there are "future layers" in remote storage that will generate deletions
             # after a restart.
             last_flush_lsn_upload(
-                env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver.id
+                env,
+                endpoint,
+                tenant_id,
+                timeline_id,
+                pageserver_id=pageserver.id,
+                wait_until_uploaded=wait_until_uploaded,
             )
 
         # Compaction should generate some GC-elegible layers
@@ -5029,4 +5245,4 @@ def generate_uploads_and_deletions(
         # background ingest, no more uploads pending, and therefore no non-determinism
         # in subsequent actions like pageserver restarts.
         flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
-        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=wait_until_uploaded)

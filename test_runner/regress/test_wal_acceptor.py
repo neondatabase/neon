@@ -54,12 +54,14 @@ from fixtures.utils import (
     PropagatingThread,
     get_dir_size,
     query_scalar,
+    run_only_on_default_postgres,
+    skip_in_debug_build,
     start_in_background,
     wait_until,
 )
 
 if TYPE_CHECKING:
-    from typing import Any, Optional
+    from typing import Any, Self
 
 
 def wait_lsn_force_checkpoint(
@@ -187,7 +189,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
                 m.flush_lsns.append(Lsn(int(sk_m.flush_lsn_inexact(tenant_id, timeline_id))))
                 m.commit_lsns.append(Lsn(int(sk_m.commit_lsn_inexact(tenant_id, timeline_id))))
 
-            for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns):
+            for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns, strict=False):
                 # Invariant. May be < when transaction is in progress.
                 assert (
                     commit_lsn <= flush_lsn
@@ -222,7 +224,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
         def __init__(self) -> None:
             super().__init__(daemon=True)
             self.should_stop = threading.Event()
-            self.exception: Optional[BaseException] = None
+            self.exception: BaseException | None = None
 
         def run(self) -> None:
             try:
@@ -519,7 +521,7 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder):
     # Shut down subsequently each of safekeepers and fill a segment while sk is
     # down; ensure segment gets offloaded by others.
     offloaded_seg_end = [Lsn("0/2000000"), Lsn("0/3000000"), Lsn("0/4000000")]
-    for victim, seg_end in zip(env.safekeepers, offloaded_seg_end):
+    for victim, seg_end in zip(env.safekeepers, offloaded_seg_end, strict=False):
         victim.stop()
         # roughly fills one segment
         cur.execute("insert into t select generate_series(1,250000), 'payload'")
@@ -664,7 +666,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
 
     # recreate timeline on pageserver from scratch
     ps_http.timeline_create(
-        pg_version=PgVersion(pg_version),
+        pg_version=PgVersion(str(pg_version)),
         tenant_id=tenant_id,
         new_timeline_id=timeline_id,
     )
@@ -1175,14 +1177,14 @@ def cmp_sk_wal(sks: list[Safekeeper], tenant_id: TenantId, timeline_id: Timeline
     # report/understand if WALs are different due to that.
     statuses = [sk_http_cli.timeline_status(tenant_id, timeline_id) for sk_http_cli in sk_http_clis]
     term_flush_lsns = [(s.last_log_term, s.flush_lsn) for s in statuses]
-    for tfl, sk in zip(term_flush_lsns[1:], sks[1:]):
+    for tfl, sk in zip(term_flush_lsns[1:], sks[1:], strict=False):
         assert (
             term_flush_lsns[0] == tfl
         ), f"(last_log_term, flush_lsn) are not equal on sks {sks[0].id} and {sk.id}: {term_flush_lsns[0]} != {tfl}"
 
     # check that WALs are identic.
     segs = [sk.list_segments(tenant_id, timeline_id) for sk in sks]
-    for cmp_segs, sk in zip(segs[1:], sks[1:]):
+    for cmp_segs, sk in zip(segs[1:], sks[1:], strict=False):
         assert (
             segs[0] == cmp_segs
         ), f"lists of segments on sks {sks[0].id} and {sk.id} are not identic: {segs[0]} and {cmp_segs}"
@@ -1453,12 +1455,12 @@ class SafekeeperEnv:
         self.pg_bin = pg_bin
         self.num_safekeepers = num_safekeepers
         self.bin_safekeeper = str(neon_binpath / "safekeeper")
-        self.safekeepers: Optional[list[subprocess.CompletedProcess[Any]]] = None
-        self.postgres: Optional[ProposerPostgres] = None
-        self.tenant_id: Optional[TenantId] = None
-        self.timeline_id: Optional[TimelineId] = None
+        self.safekeepers: list[subprocess.CompletedProcess[Any]] | None = None
+        self.postgres: ProposerPostgres | None = None
+        self.tenant_id: TenantId | None = None
+        self.timeline_id: TimelineId | None = None
 
-    def init(self) -> SafekeeperEnv:
+    def init(self) -> Self:
         assert self.postgres is None, "postgres is already initialized"
         assert self.safekeepers is None, "safekeepers are already initialized"
 
@@ -1539,7 +1541,7 @@ class SafekeeperEnv:
             log.info(f"Killing safekeeper with pid {pid}")
             os.kill(pid, signal.SIGKILL)
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -1780,6 +1782,89 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     with closing(endpoint_other.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("INSERT INTO t (key) VALUES (123)")
+
+
+def test_delete_timeline_under_load(neon_env_builder: NeonEnvBuilder):
+    """
+    Test deleting timelines on a safekeeper while they're under load.
+
+    This should not happen under normal operation, but it can happen if
+    there is some rogue compute/pageserver that is writing/reading to a
+    safekeeper that we're migrating a timeline away from, or if the timeline
+    is being deleted while such a rogue client is running.
+    """
+    neon_env_builder.auth_enabled = True
+    env = neon_env_builder.init_start()
+
+    # Create two endpoints that will generate load
+    timeline_id_a = env.create_branch("deleteme_a")
+    timeline_id_b = env.create_branch("deleteme_b")
+
+    endpoint_a = env.endpoints.create("deleteme_a")
+    endpoint_a.start()
+    endpoint_b = env.endpoints.create("deleteme_b")
+    endpoint_b.start()
+
+    # Get tenant and timeline IDs
+    tenant_id = env.initial_tenant
+
+    # Start generating load on both timelines
+    def generate_load(endpoint: Endpoint):
+        with closing(endpoint.connect()) as conn:
+            with conn.cursor() as cur:
+                cur.execute("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+                while True:
+                    try:
+                        cur.execute("INSERT INTO t SELECT generate_series(1,1000), 'data'")
+                    except:  # noqa
+                        # Ignore errors since timeline may be deleted
+                        break
+
+    t_a = threading.Thread(target=generate_load, args=(endpoint_a,))
+    t_b = threading.Thread(target=generate_load, args=(endpoint_b,))
+    try:
+        t_a.start()
+        t_b.start()
+
+        # Let the load run for a bit
+        log.info("Warming up...")
+        time.sleep(2)
+
+        # Safekeeper errors will propagate to the pageserver: it is correct that these are
+        # logged at error severity because they indicate the pageserver is trying to read
+        # a timeline that it shouldn't.
+        env.pageserver.allowed_errors.extend(
+            [
+                ".*Timeline.*was cancelled.*",
+                ".*Timeline.*was not found.*",
+            ]
+        )
+
+        # Try deleting timelines while under load
+        sk = env.safekeepers[0]
+        sk_http = sk.http_client(auth_token=env.auth_keys.generate_tenant_token(tenant_id))
+
+        # Delete first timeline
+        log.info(f"Deleting {timeline_id_a}...")
+        assert sk_http.timeline_delete(tenant_id, timeline_id_a, only_local=True)["dir_existed"]
+
+        # Delete second timeline
+        log.info(f"Deleting {timeline_id_b}...")
+        assert sk_http.timeline_delete(tenant_id, timeline_id_b, only_local=True)["dir_existed"]
+
+        # Verify timelines are gone from disk
+        sk_data_dir = sk.data_dir
+        assert not (sk_data_dir / str(tenant_id) / str(timeline_id_a)).exists()
+        # assert not (sk_data_dir / str(tenant_id) / str(timeline_id_b)).exists()
+
+    finally:
+        log.info("Stopping endpoints...")
+        # Stop endpoints with immediate mode because we deleted the timeline out from under the compute, which may cause it to hang
+        endpoint_a.stop(mode="immediate")
+        endpoint_b.stop(mode="immediate")
+        log.info("Joining threads...")
+        t_a.join()
+        t_b.join()
 
 
 # Basic pull_timeline test.
@@ -2051,7 +2136,7 @@ def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
         # Check that on source no segment files are present
         assert src_sk.list_segments(tenant_id, timeline_id) == []
 
-    wait_until(60, 1, evicted_on_source)
+    wait_until(evicted_on_source, timeout=60)
 
     # Invoke pull_timeline: source should serve snapshot request without promoting anything to local disk,
     # destination should import the control file only & go into evicted mode immediately
@@ -2070,7 +2155,7 @@ def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
 
     # This should be fast, it is a wait_until because eviction state is updated
     # in the background wrt pull_timeline.
-    wait_until(10, 0.1, evicted_on_destination)
+    wait_until(evicted_on_destination, timeout=1.0, interval=0.1)
 
     # Delete the timeline on the source, to prove that deletion works on an
     # evicted timeline _and_ that the final compute test is really not using
@@ -2093,7 +2178,7 @@ def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
         n_evicted = dst_sk.http_client().get_metric_value("safekeeper_evicted_timelines")
         assert n_evicted == 0
 
-    wait_until(10, 1, unevicted_on_dest)
+    wait_until(unevicted_on_dest, interval=0.1, timeout=1.0)
 
 
 # In this test we check for excessive START_REPLICATION and START_WAL_PUSH queries
@@ -2104,10 +2189,9 @@ def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
 # The only way to verify this without manipulating time is to sleep for a while.
 # In this test we sleep for 60 seconds, so this test takes at least 1 minute to run.
 # This is longer than most other tests, we run it only for v16 to save CI resources.
+@run_only_on_default_postgres("run only on release build to save CI resources")
+@skip_in_debug_build("run only on release build to save CI resources")
 def test_idle_reconnections(neon_env_builder: NeonEnvBuilder):
-    if os.environ.get("PYTEST_CURRENT_TEST", "").find("[debug-pg16]") == -1:
-        pytest.skip("run only on debug postgres v16 to save CI resources")
-
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
@@ -2362,7 +2446,7 @@ def test_broker_discovery(neon_env_builder: NeonEnvBuilder):
         # generate some data to commit WAL on safekeepers
         endpoint.safe_psql("insert into t select generate_series(1,100), 'action'")
         # clear the buffers
-        endpoint.clear_shared_buffers()
+        endpoint.clear_buffers()
         # read data to fetch pages from pageserver
         endpoint.safe_psql("select sum(i) from t")
 
@@ -2522,10 +2606,10 @@ def test_s3_eviction(
         assert n_evicted  # make mypy happy
         assert int(n_evicted) == n_timelines
 
-    wait_until(60, 0.5, all_evicted)
+    wait_until(all_evicted, timeout=30)
     # restart should preserve the metric value
     sk.stop().start()
-    wait_until(60, 0.5, all_evicted)
+    wait_until(all_evicted)
     # and endpoint start should reduce is
     endpoints[0].start()
 
@@ -2534,7 +2618,7 @@ def test_s3_eviction(
         assert n_evicted  # make mypy happy
         assert int(n_evicted) < n_timelines
 
-    wait_until(60, 0.5, one_unevicted)
+    wait_until(one_unevicted)
 
 
 # Test resetting uploaded partial segment state.
@@ -2582,7 +2666,7 @@ def test_backup_partial_reset(neon_env_builder: NeonEnvBuilder):
         if isinstance(eviction_state, str) and eviction_state == "Present":
             raise Exception("eviction didn't happen yet")
 
-    wait_until(30, 1, evicted)
+    wait_until(evicted)
     # it must have uploaded something
     uploaded_segs = sk.list_uploaded_segments(tenant_id, timeline_id)
     log.info(f"uploaded segments before reset: {uploaded_segs}")
@@ -2679,7 +2763,7 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
 
         raise Exception("Partial segment not uploaded yet")
 
-    source_partial_segment = wait_until(15, 1, source_partial_segment_uploaded)
+    source_partial_segment = wait_until(source_partial_segment_uploaded)
     log.info(
         f"Uploaded segments before pull are {src_sk.list_uploaded_segments(tenant_id, timeline_id)}"
     )
@@ -2703,7 +2787,7 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
         if evictions is None or evictions == 0:
             raise Exception("Eviction did not happen on source safekeeper yet")
 
-    wait_until(30, 1, evicted)
+    wait_until(evicted)
 
     endpoint.start(safekeepers=[2, 3])
 
@@ -2720,7 +2804,7 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
     )
 
     endpoint.safe_psql("insert into t select generate_series(1, 1000), 'pear'")
-    wait_until(15, 1, new_partial_segment_uploaded)
+    wait_until(new_partial_segment_uploaded)
 
     log.info(
         f"Uploaded segments after post-pull ingest are {src_sk.list_uploaded_segments(tenant_id, timeline_id)}"
@@ -2749,4 +2833,4 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
         if unevictions is None or unevictions == 0:
             raise Exception("Uneviction did not happen on source safekeeper yet")
 
-    wait_until(10, 1, unevicted)
+    wait_until(unevicted)

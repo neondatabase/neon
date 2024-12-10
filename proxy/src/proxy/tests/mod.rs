@@ -7,14 +7,13 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use http::StatusCode;
+use postgres_client::config::SslMode;
+use postgres_client::tls::{MakeTlsConnect, NoTls};
 use retry::{retry_after, ShouldRetryWakeCompute};
 use rstest::rstest;
 use rustls::crypto::ring;
 use rustls::pki_types;
 use tokio::io::DuplexStream;
-use tokio_postgres::config::SslMode;
-use tokio_postgres::tls::{MakeTlsConnect, NoTls};
-use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
@@ -29,6 +28,7 @@ use crate::control_plane::{
     self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo, NodeInfoCache,
 };
 use crate::error::ErrorKind;
+use crate::postgres_rustls::MakeRustlsConnect;
 use crate::types::{BranchId, EndpointId, ProjectId};
 use crate::{sasl, scram};
 
@@ -162,7 +162,7 @@ impl TestAuth for Scram {
         stream: &mut PqStream<Stream<S>>,
     ) -> anyhow::Result<()> {
         let outcome = auth::AuthFlow::new(stream)
-            .begin(auth::Scram(&self.0, &RequestMonitoring::test()))
+            .begin(auth::Scram(&self.0, &RequestContext::test()))
             .await?
             .authenticate()
             .await?;
@@ -182,11 +182,10 @@ async fn dummy_proxy(
     auth: impl TestAuth + Send,
 ) -> anyhow::Result<()> {
     let (client, _) = read_proxy_protocol(client).await?;
-    let mut stream =
-        match handshake(&RequestMonitoring::test(), client, tls.as_ref(), false).await? {
-            HandshakeData::Startup(stream, _) => stream,
-            HandshakeData::Cancel(_) => bail!("cancellation not supported"),
-        };
+    let mut stream = match handshake(&RequestContext::test(), client, tls.as_ref(), false).await? {
+        HandshakeData::Startup(stream, _) => stream,
+        HandshakeData::Cancel(_) => bail!("cancellation not supported"),
+    };
 
     auth.authenticate(&mut stream).await?;
 
@@ -205,7 +204,7 @@ async fn handshake_tls_is_enforced_by_proxy() -> anyhow::Result<()> {
     let (_, server_config) = generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
-    let client_err = tokio_postgres::Config::new()
+    let client_err = postgres_client::Config::new("test".to_owned(), 5432)
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Disable)
@@ -234,7 +233,7 @@ async fn handshake_tls() -> anyhow::Result<()> {
         generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Require)
@@ -250,10 +249,10 @@ async fn handshake_raw() -> anyhow::Result<()> {
 
     let proxy = tokio::spawn(dummy_proxy(client, None, NoAuth));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
         .user("john_doe")
         .dbname("earth")
-        .options("project=generic-project-name")
+        .set_param("options", "project=generic-project-name")
         .ssl_mode(SslMode::Prefer)
         .connect_raw(server, NoTls)
         .await?;
@@ -297,8 +296,8 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
         Scram::new(password).await?,
     ));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
-        .channel_binding(tokio_postgres::config::ChannelBinding::Require)
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
+        .channel_binding(postgres_client::config::ChannelBinding::Require)
         .user("user")
         .dbname("db")
         .password(password)
@@ -321,8 +320,8 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
         Scram::new("password").await?,
     ));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
-        .channel_binding(tokio_postgres::config::ChannelBinding::Disable)
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
+        .channel_binding(postgres_client::config::ChannelBinding::Disable)
         .user("user")
         .dbname("db")
         .password("password")
@@ -349,7 +348,7 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
         .map(char::from)
         .collect();
 
-    let _client_err = tokio_postgres::Config::new()
+    let _client_err = postgres_client::Config::new("test".to_owned(), 5432)
         .user("user")
         .dbname("db")
         .password(&password) // no password will match the mocked secret
@@ -466,7 +465,7 @@ impl ConnectMechanism for TestConnectMechanism {
 
     async fn connect_once(
         &self,
-        _ctx: &RequestMonitoring,
+        _ctx: &RequestContext,
         _node_info: &control_plane::CachedNodeInfo,
         _timeout: std::time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
@@ -547,7 +546,7 @@ impl TestControlPlaneClient for TestConnectMechanism {
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
-        config: compute::ConnCfg::new(),
+        config: compute::ConnCfg::new("test".to_owned(), 5432),
         aux: MetricsAuxInfo {
             endpoint_id: (&EndpointId::from("endpoint")).into(),
             project_id: (&ProjectId::from("project")).into(),
@@ -581,7 +580,7 @@ fn helper_create_connect_info(
 async fn connect_to_compute_success() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
     let config = RetryConfig {
@@ -599,7 +598,7 @@ async fn connect_to_compute_success() {
 async fn connect_to_compute_retry() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
     let config = RetryConfig {
@@ -618,7 +617,7 @@ async fn connect_to_compute_retry() {
 async fn connect_to_compute_non_retry_1() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Fail]);
     let user_info = helper_create_connect_info(&mechanism);
     let config = RetryConfig {
@@ -637,7 +636,7 @@ async fn connect_to_compute_non_retry_1() {
 async fn connect_to_compute_non_retry_2() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Fail, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
     let config = RetryConfig {
@@ -657,7 +656,7 @@ async fn connect_to_compute_non_retry_3() {
     let _ = env_logger::try_init();
     tokio::time::pause();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism =
         TestConnectMechanism::new(vec![Wake, Retry, Wake, Retry, Retry, Retry, Retry, Retry]);
     let user_info = helper_create_connect_info(&mechanism);
@@ -689,7 +688,7 @@ async fn connect_to_compute_non_retry_3() {
 async fn wake_retry() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![WakeRetry, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
     let config = RetryConfig {
@@ -708,7 +707,7 @@ async fn wake_retry() {
 async fn wake_non_retry() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![WakeRetry, WakeFail]);
     let user_info = helper_create_connect_info(&mechanism);
     let config = RetryConfig {

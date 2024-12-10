@@ -23,6 +23,8 @@ jobs:
         id: python-src
         with:
           files: |
+            .github/workflows/_check-codestyle-python.yml
+            .github/workflows/build-build-tools-image.yml
             .github/workflows/pre-merge-checks.yml
             **/**.py
             poetry.lock
@@ -34,16 +36,14 @@ jobs:
         run: |
           echo "${PYTHON_CHANGED_FILES}"
 
-  check-build-tools-image:
+  build-build-tools-image:
     if: needs.get-changed-files.outputs.python-changed == 'true'
     needs: [ get-changed-files ]
-    uses: ./.github/workflows/check-build-tools-image.yml
-
-  build-build-tools-image:
-    needs: [ check-build-tools-image ]
     uses: ./.github/workflows/build-build-tools-image.yml
     with:
-      image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
+      # Build only one combination to save time
+      archs: '["x64"]'
+      debians: '["bookworm"]'
     secrets: inherit
 
   check-codestyle-python:
@@ -51,7 +51,8 @@ jobs:
     needs: [ get-changed-files, build-build-tools-image ]
     uses: ./.github/workflows/_check-codestyle-python.yml
     with:
-      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
+      # `-bookworm-x64` suffix should match the combination in `build-build-tools-image`
+      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm-x64
     secrets: inherit
 
   # To get items from the merge queue merged into main we need to satisfy "Status checks that are required".

@@ -3,9 +3,10 @@ use std::{
     sync::Arc,
 };
 
-use super::{alignment::Alignment, raw::RawAlignedBuffer};
+use super::{alignment::Alignment, raw::RawAlignedBuffer, AlignedBufferMut, ConstAlign};
 
 /// An shared, immutable aligned buffer type.
+#[derive(Clone, Debug)]
 pub struct AlignedBuffer<A: Alignment> {
     /// Shared raw buffer.
     raw: Arc<RawAlignedBuffer<A>>,
@@ -86,6 +87,13 @@ impl<A: Alignment> AlignedBuffer<A> {
             range: begin..end,
         }
     }
+
+    /// Returns the mutable aligned buffer, if the immutable aligned buffer
+    /// has exactly one strong reference. Otherwise returns `None`.
+    pub fn into_mut(self) -> Option<AlignedBufferMut<A>> {
+        let raw = Arc::into_inner(self.raw)?;
+        Some(AlignedBufferMut::from_raw(raw))
+    }
 }
 
 impl<A: Alignment> Deref for AlignedBuffer<A> {
@@ -105,6 +113,14 @@ impl<A: Alignment> AsRef<[u8]> for AlignedBuffer<A> {
 impl<A: Alignment> PartialEq<[u8]> for AlignedBuffer<A> {
     fn eq(&self, other: &[u8]) -> bool {
         self.as_slice().eq(other)
+    }
+}
+
+impl<const A: usize, const N: usize> From<&[u8; N]> for AlignedBuffer<ConstAlign<A>> {
+    fn from(value: &[u8; N]) -> Self {
+        let mut buf = AlignedBufferMut::with_capacity(N);
+        buf.extend_from_slice(value);
+        buf.freeze()
     }
 }
 

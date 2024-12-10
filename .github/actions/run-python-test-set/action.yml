@@ -36,8 +36,8 @@ inputs:
     description: 'Region name for real s3 tests'
     required: false
     default: ''
-  rerun_flaky:
-    description: 'Whether to rerun flaky tests'
+  rerun_failed:
+    description: 'Whether to rerun failed tests'
     required: false
     default: 'false'
   pg_version:
@@ -48,6 +48,10 @@ inputs:
     description: 'benchmark durations JSON'
     required: false
     default: '{}'
+  aws_oicd_role_arn:
+    description: 'the OIDC role arn to (re-)acquire for allure report upload - if not set call must acquire OIDC role'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -104,7 +108,7 @@ runs:
         COMPATIBILITY_SNAPSHOT_DIR: /tmp/compatibility_snapshot_pg${{ inputs.pg_version }}
         ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'backward compatibility breakage')
         ALLOW_FORWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'forward compatibility breakage')
-        RERUN_FLAKY: ${{ inputs.rerun_flaky }}
+        RERUN_FAILED: ${{ inputs.rerun_failed }}
         PG_VERSION: ${{ inputs.pg_version }}
       shell: bash -euxo pipefail {0}
       run: |
@@ -150,15 +154,8 @@ runs:
           EXTRA_PARAMS="--out-dir $PERF_REPORT_DIR $EXTRA_PARAMS"
         fi
 
-        if [ "${RERUN_FLAKY}" == "true" ]; then
-          mkdir -p $TEST_OUTPUT
-          poetry run ./scripts/flaky_tests.py "${TEST_RESULT_CONNSTR}" \
-                                              --days 7 \
-                                              --output "$TEST_OUTPUT/flaky.json" \
-                                              --pg-version "${DEFAULT_PG_VERSION}" \
-                                              --build-type "${BUILD_TYPE}"
-
-          EXTRA_PARAMS="--flaky-tests-json $TEST_OUTPUT/flaky.json $EXTRA_PARAMS"
+        if [ "${RERUN_FAILED}" == "true" ]; then
+          EXTRA_PARAMS="--reruns 2 $EXTRA_PARAMS"
         fi
 
         # We use pytest-split plugin to run benchmarks in parallel on different CI runners
@@ -222,6 +219,13 @@ runs:
         # (for example if we didn't run the test for non build-and-test workflow)
         skip-if-does-not-exist: true
 
+    - name: (Re-)configure AWS credentials # necessary to upload reports to S3 after a long-running test
+      if: ${{ !cancelled() && (inputs.aws_oicd_role_arn != '') }}
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ inputs.aws_oicd_role_arn }}
+        role-duration-seconds: 3600 # 1 hour should be more than enough to upload report
     - name: Upload test results
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-store

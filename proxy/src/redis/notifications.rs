@@ -13,6 +13,7 @@ use crate::cache::project_info::ProjectInfoCache;
 use crate::cancellation::{CancelMap, CancellationHandler};
 use crate::intern::{ProjectIdInt, RoleNameInt};
 use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
+use tracing::Instrument;
 
 const CPLANE_CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
 pub(crate) const PROXY_CHANNEL_NAME: &str = "neondb-proxy-to-proxy-updates";
@@ -60,6 +61,7 @@ pub(crate) struct CancelSession {
     pub(crate) region_id: Option<String>,
     pub(crate) cancel_key_data: CancelKeyData,
     pub(crate) session_id: Uuid,
+    pub(crate) peer_addr: Option<std::net::IpAddr>,
 }
 
 fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -137,10 +139,23 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                         return Ok(());
                     }
                 }
+
+                // TODO: Remove unspecified peer_addr after the complete migration to the new format
+                let peer_addr = cancel_session
+                    .peer_addr
+                    .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?cancel_session.session_id);
+                cancel_span.follows_from(tracing::Span::current());
                 // This instance of cancellation_handler doesn't have a RedisPublisherClient so it can't publish the message.
                 match self
                     .cancellation_handler
-                    .cancel_session(cancel_session.cancel_key_data, uuid::Uuid::nil())
+                    .cancel_session(
+                        cancel_session.cancel_key_data,
+                        uuid::Uuid::nil(),
+                        peer_addr,
+                        cancel_session.peer_addr.is_some(),
+                    )
+                    .instrument(cancel_span)
                     .await
                 {
                     Ok(()) => {}
@@ -335,6 +350,7 @@ mod tests {
             cancel_key_data,
             region_id: None,
             session_id: uuid,
+            peer_addr: None,
         });
         let text = serde_json::to_string(&msg)?;
         let result: Notification = serde_json::from_str(&text)?;
@@ -344,6 +360,7 @@ mod tests {
             cancel_key_data,
             region_id: Some("region".to_string()),
             session_id: uuid,
+            peer_addr: None,
         });
         let text = serde_json::to_string(&msg)?;
         let result: Notification = serde_json::from_str(&text)?;

@@ -7,21 +7,28 @@ use bytes::Buf;
 use futures::FutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
-use pageserver_api::models::TenantState;
+use pageserver_api::config::{
+    PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
+    PageServiceProtocolPipelinedExecutionStrategy,
+};
+use pageserver_api::models::{self, TenantState};
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
-    PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
-    PagestreamGetSlruSegmentRequest, PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest,
-    PagestreamNblocksResponse, PagestreamProtocolVersion,
+    PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetSlruSegmentRequest,
+    PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest, PagestreamNblocksResponse,
+    PagestreamProtocolVersion,
 };
 use pageserver_api::shard::TenantShardId;
-use postgres_backend::{is_expected_io_error, AuthType, PostgresBackend, QueryError};
+use postgres_backend::{
+    is_expected_io_error, AuthType, PostgresBackend, PostgresBackendReader, QueryError,
+};
 use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
 use std::borrow::Cow;
 use std::io;
+use std::num::NonZeroUsize;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -32,6 +39,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::sync::spsc_fold;
 use utils::{
     auth::{Claims, Scope, SwappableJwtAuth},
     id::{TenantId, TimelineId},
@@ -40,11 +48,10 @@ use utils::{
 };
 
 use crate::auth::check_permission;
-use crate::basebackup;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::metrics;
+use crate::metrics::{self, SmgrOpTimer};
 use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
 use crate::pgdatadir_mapping::Version;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -58,8 +65,9 @@ use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
+use crate::{basebackup, timed_after_cancellation};
 use pageserver_api::key::rel_block_to_key;
-use pageserver_api::reltag::SlruKind;
+use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
@@ -105,6 +113,7 @@ pub fn spawn(
             pg_auth,
             tcp_listener,
             conf.pg_auth_type,
+            conf.page_service_pipelining.clone(),
             libpq_ctx,
             cancel.clone(),
         )
@@ -153,6 +162,7 @@ pub async fn libpq_listener_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     listener: tokio::net::TcpListener,
     auth_type: AuthType,
+    pipelining_config: PageServicePipeliningConfig,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
 ) -> Connections {
@@ -183,6 +193,7 @@ pub async fn libpq_listener_main(
                     local_auth,
                     socket,
                     auth_type,
+                    pipelining_config.clone(),
                     connection_ctx,
                     connections_cancel.child_token(),
                 ));
@@ -210,6 +221,7 @@ async fn page_service_conn_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
+    pipelining_config: PageServicePipeliningConfig,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
 ) -> ConnectionHandlerResult {
@@ -252,7 +264,7 @@ async fn page_service_conn_main(
     // a while: we will tear down this PageServerHandler and instantiate a new one if/when
     // they reconnect.
     socket.set_timeout(Some(std::time::Duration::from_millis(socket_timeout_ms)));
-    let socket = std::pin::pin!(socket);
+    let socket = Box::pin(socket);
 
     fail::fail_point!("ps::connection-start::pre-login");
 
@@ -260,8 +272,13 @@ async fn page_service_conn_main(
     // and create a child per-query context when it invokes process_query.
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
-    let mut conn_handler =
-        PageServerHandler::new(tenant_manager, auth, connection_ctx, cancel.clone());
+    let mut conn_handler = PageServerHandler::new(
+        tenant_manager,
+        auth,
+        pipelining_config,
+        connection_ctx,
+        cancel.clone(),
+    );
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
     match pgbackend.run(&mut conn_handler, &cancel).await {
@@ -274,7 +291,7 @@ async fn page_service_conn_main(
                 info!("Postgres client disconnected ({io_error})");
                 Ok(())
             } else {
-                let tenant_id = conn_handler.timeline_handles.tenant_id();
+                let tenant_id = conn_handler.timeline_handles.as_ref().unwrap().tenant_id();
                 Err(io_error).context(format!(
                     "Postgres connection error for tenant_id={:?} client at peer_addr={}",
                     tenant_id, peer_addr
@@ -282,7 +299,7 @@ async fn page_service_conn_main(
             }
         }
         other => {
-            let tenant_id = conn_handler.timeline_handles.tenant_id();
+            let tenant_id = conn_handler.timeline_handles.as_ref().unwrap().tenant_id();
             other.context(format!(
                 "Postgres query error for tenant_id={:?} client peer_addr={}",
                 tenant_id, peer_addr
@@ -303,7 +320,10 @@ struct PageServerHandler {
 
     cancel: CancellationToken,
 
-    timeline_handles: TimelineHandles,
+    /// None only while pagestream protocol is being processed.
+    timeline_handles: Option<TimelineHandles>,
+
+    pipelining_config: PageServicePipeliningConfig,
 }
 
 struct TimelineHandles {
@@ -517,10 +537,83 @@ impl From<WaitLsnError> for QueryError {
     }
 }
 
+enum BatchedFeMessage {
+    Exists {
+        span: Span,
+        timer: SmgrOpTimer,
+        shard: timeline::handle::Handle<TenantManagerTypes>,
+        req: models::PagestreamExistsRequest,
+    },
+    Nblocks {
+        span: Span,
+        timer: SmgrOpTimer,
+        shard: timeline::handle::Handle<TenantManagerTypes>,
+        req: models::PagestreamNblocksRequest,
+    },
+    GetPage {
+        span: Span,
+        shard: timeline::handle::Handle<TenantManagerTypes>,
+        effective_request_lsn: Lsn,
+        pages: smallvec::SmallVec<[(RelTag, BlockNumber, SmgrOpTimer); 1]>,
+    },
+    DbSize {
+        span: Span,
+        timer: SmgrOpTimer,
+        shard: timeline::handle::Handle<TenantManagerTypes>,
+        req: models::PagestreamDbSizeRequest,
+    },
+    GetSlruSegment {
+        span: Span,
+        timer: SmgrOpTimer,
+        shard: timeline::handle::Handle<TenantManagerTypes>,
+        req: models::PagestreamGetSlruSegmentRequest,
+    },
+    RespondError {
+        span: Span,
+        error: PageStreamError,
+    },
+}
+
+impl BatchedFeMessage {
+    async fn throttle(&mut self, cancel: &CancellationToken) -> Result<(), QueryError> {
+        let (shard, tokens, timers) = match self {
+            BatchedFeMessage::Exists { shard, timer, .. }
+            | BatchedFeMessage::Nblocks { shard, timer, .. }
+            | BatchedFeMessage::DbSize { shard, timer, .. }
+            | BatchedFeMessage::GetSlruSegment { shard, timer, .. } => {
+                (
+                    shard,
+                    // 1 token is probably under-estimating because these
+                    // request handlers typically do several Timeline::get calls.
+                    1,
+                    itertools::Either::Left(std::iter::once(timer)),
+                )
+            }
+            BatchedFeMessage::GetPage { shard, pages, .. } => (
+                shard,
+                pages.len(),
+                itertools::Either::Right(pages.iter_mut().map(|(_, _, timer)| timer)),
+            ),
+            BatchedFeMessage::RespondError { .. } => return Ok(()),
+        };
+        let throttled = tokio::select! {
+            throttled = shard.pagestream_throttle.throttle(tokens) => { throttled }
+            _ = cancel.cancelled() => {
+                return Err(QueryError::Shutdown);
+            }
+        };
+        for timer in timers {
+            timer.deduct_throttle(&throttled);
+        }
+        Ok(())
+    }
+}
+
 impl PageServerHandler {
     pub fn new(
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
+        pipelining_config: PageServicePipeliningConfig,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
     ) -> Self {
@@ -528,8 +621,9 @@ impl PageServerHandler {
             auth,
             claims: None,
             connection_ctx,
-            timeline_handles: TimelineHandles::new(tenant_manager),
+            timeline_handles: Some(TimelineHandles::new(tenant_manager)),
             cancel,
+            pipelining_config,
         }
     }
 
@@ -557,126 +651,374 @@ impl PageServerHandler {
         )
     }
 
-    /// Pagestream sub-protocol handler.
-    ///
-    /// It is a simple request-response protocol inside a COPYBOTH session.
-    ///
-    /// # Coding Discipline
-    ///
-    /// Coding discipline within this function: all interaction with the `pgb` connection
-    /// needs to be sensitive to connection shutdown, currently signalled via [`Self::cancel`].
-    /// This is so that we can shutdown page_service quickly.
-    #[instrument(skip_all)]
-    async fn handle_pagerequests<IO>(
-        &mut self,
-        pgb: &mut PostgresBackend<IO>,
+    async fn pagestream_read_message<IO>(
+        pgb: &mut PostgresBackendReader<IO>,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        _protocol_version: PagestreamProtocolVersion,
-        ctx: RequestContext,
+        timeline_handles: &mut TimelineHandles,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+        parent_span: Span,
+    ) -> Result<Option<BatchedFeMessage>, QueryError>
+    where
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
+    {
+        let msg = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Err(QueryError::Shutdown)
+            }
+            msg = pgb.read_message() => { msg }
+        };
+
+        let received_at = Instant::now();
+
+        let copy_data_bytes = match msg? {
+            Some(FeMessage::CopyData(bytes)) => bytes,
+            Some(FeMessage::Terminate) => {
+                return Ok(None);
+            }
+            Some(m) => {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "unexpected message: {m:?} during COPY"
+                )));
+            }
+            None => {
+                return Ok(None);
+            } // client disconnected
+        };
+        trace!("query: {copy_data_bytes:?}");
+
+        fail::fail_point!("ps::handle-pagerequest-message");
+
+        // parse request
+        let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
+
+        let batched_msg = match neon_fe_msg {
+            PagestreamFeMessage::Exists(req) => {
+                let span = tracing::info_span!(parent: parent_span, "handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
+                let shard = timeline_handles
+                    .get(tenant_id, timeline_id, ShardSelector::Zero)
+                    .instrument(span.clone()) // sets `shard_id` field
+                    .await?;
+                let timer = shard
+                    .query_metrics
+                    .start_smgr_op(metrics::SmgrQueryType::GetRelExists, received_at);
+                BatchedFeMessage::Exists {
+                    span,
+                    timer,
+                    shard,
+                    req,
+                }
+            }
+            PagestreamFeMessage::Nblocks(req) => {
+                let span = tracing::info_span!(parent: parent_span, "handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn);
+                let shard = timeline_handles
+                    .get(tenant_id, timeline_id, ShardSelector::Zero)
+                    .instrument(span.clone()) // sets `shard_id` field
+                    .await?;
+                let timer = shard
+                    .query_metrics
+                    .start_smgr_op(metrics::SmgrQueryType::GetRelSize, received_at);
+                BatchedFeMessage::Nblocks {
+                    span,
+                    timer,
+                    shard,
+                    req,
+                }
+            }
+            PagestreamFeMessage::DbSize(req) => {
+                let span = tracing::info_span!(parent: parent_span, "handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn);
+                let shard = timeline_handles
+                    .get(tenant_id, timeline_id, ShardSelector::Zero)
+                    .instrument(span.clone()) // sets `shard_id` field
+                    .await?;
+                let timer = shard
+                    .query_metrics
+                    .start_smgr_op(metrics::SmgrQueryType::GetDbSize, received_at);
+                BatchedFeMessage::DbSize {
+                    span,
+                    timer,
+                    shard,
+                    req,
+                }
+            }
+            PagestreamFeMessage::GetSlruSegment(req) => {
+                let span = tracing::info_span!(parent: parent_span, "handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn);
+                let shard = timeline_handles
+                    .get(tenant_id, timeline_id, ShardSelector::Zero)
+                    .instrument(span.clone()) // sets `shard_id` field
+                    .await?;
+                let timer = shard
+                    .query_metrics
+                    .start_smgr_op(metrics::SmgrQueryType::GetSlruSegment, received_at);
+                BatchedFeMessage::GetSlruSegment {
+                    span,
+                    timer,
+                    shard,
+                    req,
+                }
+            }
+            PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
+                request_lsn,
+                not_modified_since,
+                rel,
+                blkno,
+            }) => {
+                let span = tracing::info_span!(parent: parent_span, "handle_get_page_at_lsn_request_batched", req_lsn = %request_lsn);
+
+                macro_rules! respond_error {
+                    ($error:expr) => {{
+                        let error = BatchedFeMessage::RespondError {
+                            span,
+                            error: $error,
+                        };
+                        Ok(Some(error))
+                    }};
+                }
+
+                let key = rel_block_to_key(rel, blkno);
+                let shard = match timeline_handles
+                    .get(tenant_id, timeline_id, ShardSelector::Page(key))
+                    .instrument(span.clone()) // sets `shard_id` field
+                    .await
+                {
+                    Ok(tl) => tl,
+                    Err(GetActiveTimelineError::Tenant(GetActiveTenantError::NotFound(_))) => {
+                        // We already know this tenant exists in general, because we resolved it at
+                        // start of connection.  Getting a NotFound here indicates that the shard containing
+                        // the requested page is not present on this node: the client's knowledge of shard->pageserver
+                        // mapping is out of date.
+                        //
+                        // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
+                        // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
+                        // and talk to a different pageserver.
+                        return respond_error!(PageStreamError::Reconnect(
+                            "getpage@lsn request routed to wrong shard".into()
+                        ));
+                    }
+                    Err(e) => {
+                        return respond_error!(e.into());
+                    }
+                };
+
+                // It's important to start the timer before waiting for the LSN
+                // so that the _started counters are incremented before we do
+                // any serious waiting, e.g., for LSNs.
+                let timer = shard
+                    .query_metrics
+                    .start_smgr_op(metrics::SmgrQueryType::GetPageAtLsn, received_at);
+
+                let effective_request_lsn = match Self::wait_or_get_last_lsn(
+                    &shard,
+                    request_lsn,
+                    not_modified_since,
+                    &shard.get_latest_gc_cutoff_lsn(),
+                    ctx,
+                )
+                // TODO: if we actually need to wait for lsn here, it delays the entire batch which doesn't need to wait
+                .await
+                {
+                    Ok(lsn) => lsn,
+                    Err(e) => {
+                        return respond_error!(e);
+                    }
+                };
+                BatchedFeMessage::GetPage {
+                    span,
+                    shard,
+                    effective_request_lsn,
+                    pages: smallvec::smallvec![(rel, blkno, timer)],
+                }
+            }
+        };
+        Ok(Some(batched_msg))
+    }
+
+    /// Post-condition: `batch` is Some()
+    #[instrument(skip_all, level = tracing::Level::TRACE)]
+    #[allow(clippy::boxed_local)]
+    fn pagestream_do_batch(
+        max_batch_size: NonZeroUsize,
+        batch: &mut Result<BatchedFeMessage, QueryError>,
+        this_msg: Result<BatchedFeMessage, QueryError>,
+    ) -> Result<(), Result<BatchedFeMessage, QueryError>> {
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
+
+        let this_msg = match this_msg {
+            Ok(this_msg) => this_msg,
+            Err(e) => return Err(Err(e)),
+        };
+
+        match (&mut *batch, this_msg) {
+            // something batched already, let's see if we can add this message to the batch
+            (
+                Ok(BatchedFeMessage::GetPage {
+                    span: _,
+                    shard: accum_shard,
+                    pages: ref mut accum_pages,
+                    effective_request_lsn: accum_lsn,
+                }),
+                BatchedFeMessage::GetPage {
+                    span: _,
+                    shard: this_shard,
+                    pages: this_pages,
+                    effective_request_lsn: this_lsn,
+                },
+            ) if (|| {
+                assert_eq!(this_pages.len(), 1);
+                if accum_pages.len() >= max_batch_size.get() {
+                    trace!(%accum_lsn, %this_lsn, %max_batch_size, "stopping batching because of batch size");
+                    assert_eq!(accum_pages.len(), max_batch_size.get());
+                    return false;
+                }
+                if (accum_shard.tenant_shard_id, accum_shard.timeline_id)
+                    != (this_shard.tenant_shard_id, this_shard.timeline_id)
+                {
+                    trace!(%accum_lsn, %this_lsn, "stopping batching because timeline object mismatch");
+                    // TODO: we _could_ batch & execute each shard seperately (and in parallel).
+                    // But the current logic for keeping responses in order does not support that.
+                    return false;
+                }
+                // the vectored get currently only supports a single LSN, so, bounce as soon
+                // as the effective request_lsn changes
+                if *accum_lsn != this_lsn {
+                    trace!(%accum_lsn, %this_lsn, "stopping batching because LSN changed");
+                    return false;
+                }
+                true
+            })() =>
+            {
+                // ok to batch
+                accum_pages.extend(this_pages);
+                Ok(())
+            }
+            // something batched already but this message is unbatchable
+            (_, this_msg) => {
+                // by default, don't continue batching
+                Err(Ok(this_msg))
+            }
+        }
+    }
+
+    #[instrument(level = tracing::Level::DEBUG, skip_all)]
+    async fn pagesteam_handle_batched_message<IO>(
+        &mut self,
+        pgb_writer: &mut PostgresBackend<IO>,
+        batch: BatchedFeMessage,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
     ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
-
-        // switch client to COPYBOTH
-        pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
-        tokio::select! {
-            biased;
-            _ = self.cancel.cancelled() => {
-                return Err(QueryError::Shutdown)
+        // invoke handler function
+        let (handler_results, span): (
+            Vec<Result<(PagestreamBeMessage, SmgrOpTimer), PageStreamError>>,
+            _,
+        ) = match batch {
+            BatchedFeMessage::Exists {
+                span,
+                timer,
+                shard,
+                req,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::exists");
+                (
+                    vec![self
+                        .handle_get_rel_exists_request(&shard, &req, ctx)
+                        .instrument(span.clone())
+                        .await
+                        .map(|msg| (msg, timer))],
+                    span,
+                )
             }
-            res = pgb.flush() => {
-                res?;
+            BatchedFeMessage::Nblocks {
+                span,
+                timer,
+                shard,
+                req,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::nblocks");
+                (
+                    vec![self
+                        .handle_get_nblocks_request(&shard, &req, ctx)
+                        .instrument(span.clone())
+                        .await
+                        .map(|msg| (msg, timer))],
+                    span,
+                )
             }
-        }
-
-        loop {
-            // read request bytes (it's exactly 1 PagestreamFeMessage per CopyData)
-            let msg = tokio::select! {
-                biased;
-                _ = self.cancel.cancelled() => {
-                    return Err(QueryError::Shutdown)
-                }
-                msg = pgb.read_message() => { msg }
-            };
-            let copy_data_bytes = match msg? {
-                Some(FeMessage::CopyData(bytes)) => bytes,
-                Some(FeMessage::Terminate) => break,
-                Some(m) => {
-                    return Err(QueryError::Other(anyhow::anyhow!(
-                        "unexpected message: {m:?} during COPY"
-                    )));
-                }
-                None => break, // client disconnected
-            };
-
-            trace!("query: {copy_data_bytes:?}");
-            fail::fail_point!("ps::handle-pagerequest-message");
-
-            // parse request
-            let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
-
-            // invoke handler function
-            let (handler_result, span) = match neon_fe_msg {
-                PagestreamFeMessage::Exists(req) => {
-                    fail::fail_point!("ps::handle-pagerequest-message::exists");
-                    let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
-                    (
-                        self.handle_get_rel_exists_request(tenant_id, timeline_id, &req, &ctx)
+            BatchedFeMessage::GetPage {
+                span,
+                shard,
+                effective_request_lsn,
+                pages,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::getpage");
+                (
+                    {
+                        let npages = pages.len();
+                        trace!(npages, "handling getpage request");
+                        let res = self
+                            .handle_get_page_at_lsn_request_batched(
+                                &shard,
+                                effective_request_lsn,
+                                pages,
+                                ctx,
+                            )
                             .instrument(span.clone())
-                            .await,
-                        span,
-                    )
-                }
-                PagestreamFeMessage::Nblocks(req) => {
-                    fail::fail_point!("ps::handle-pagerequest-message::nblocks");
-                    let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn);
-                    (
-                        self.handle_get_nblocks_request(tenant_id, timeline_id, &req, &ctx)
-                            .instrument(span.clone())
-                            .await,
-                        span,
-                    )
-                }
-                PagestreamFeMessage::GetPage(req) => {
-                    fail::fail_point!("ps::handle-pagerequest-message::getpage");
-                    // shard_id is filled in by the handler
-                    let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.request_lsn);
-                    (
-                        self.handle_get_page_at_lsn_request(tenant_id, timeline_id, &req, &ctx)
-                            .instrument(span.clone())
-                            .await,
-                        span,
-                    )
-                }
-                PagestreamFeMessage::DbSize(req) => {
-                    fail::fail_point!("ps::handle-pagerequest-message::dbsize");
-                    let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn);
-                    (
-                        self.handle_db_size_request(tenant_id, timeline_id, &req, &ctx)
-                            .instrument(span.clone())
-                            .await,
-                        span,
-                    )
-                }
-                PagestreamFeMessage::GetSlruSegment(req) => {
-                    fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
-                    let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn);
-                    (
-                        self.handle_get_slru_segment_request(tenant_id, timeline_id, &req, &ctx)
-                            .instrument(span.clone())
-                            .await,
-                        span,
-                    )
-                }
-            };
+                            .await;
+                        assert_eq!(res.len(), npages);
+                        res
+                    },
+                    span,
+                )
+            }
+            BatchedFeMessage::DbSize {
+                span,
+                timer,
+                shard,
+                req,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::dbsize");
+                (
+                    vec![self
+                        .handle_db_size_request(&shard, &req, ctx)
+                        .instrument(span.clone())
+                        .await
+                        .map(|msg| (msg, timer))],
+                    span,
+                )
+            }
+            BatchedFeMessage::GetSlruSegment {
+                span,
+                timer,
+                shard,
+                req,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
+                (
+                    vec![self
+                        .handle_get_slru_segment_request(&shard, &req, ctx)
+                        .instrument(span.clone())
+                        .await
+                        .map(|msg| (msg, timer))],
+                    span,
+                )
+            }
+            BatchedFeMessage::RespondError { span, error } => {
+                // We've already decided to respond with an error, so we don't need to
+                // call the handler.
+                (vec![Err(error)], span)
+            }
+        };
 
-            // Map handler result to protocol behavior.
-            // Some handler errors cause exit from pagestream protocol.
-            // Other handler errors are sent back as an error message and we stay in pagestream protocol.
-            let response_msg = match handler_result {
+        // Map handler result to protocol behavior.
+        // Some handler errors cause exit from pagestream protocol.
+        // Other handler errors are sent back as an error message and we stay in pagestream protocol.
+        for handler_result in handler_results {
+            let (response_msg, timer) = match handler_result {
                 Err(e) => match &e {
                     PageStreamError::Shutdown => {
                         // If we fail to fulfil a request during shutdown, which may be _because_ of
@@ -700,29 +1042,387 @@ impl PageServerHandler {
                         span.in_scope(|| {
                             error!("error reading relation or page version: {full:#}")
                         });
-                        PagestreamBeMessage::Error(PagestreamErrorResponse {
-                            message: e.to_string(),
-                        })
+                        (
+                            PagestreamBeMessage::Error(PagestreamErrorResponse {
+                                message: e.to_string(),
+                            }),
+                            None, // TODO: measure errors
+                        )
                     }
                 },
-                Ok(response_msg) => response_msg,
+                Ok((response_msg, timer)) => (response_msg, Some(timer)),
             };
 
+            //
             // marshal & transmit response message
-            pgb.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
-            tokio::select! {
-                biased;
-                _ = self.cancel.cancelled() => {
-                    // We were requested to shut down.
-                    info!("shutdown request received in page handler");
-                    return Err(QueryError::Shutdown)
+            //
+
+            pgb_writer.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
+
+            // We purposefully don't count flush time into the timer.
+            //
+            // The reason is that current compute client will not perform protocol processing
+            // if the postgres backend process is doing things other than `->smgr_read()`.
+            // This is especially the case for prefetch.
+            //
+            // If the compute doesn't read from the connection, eventually TCP will backpressure
+            // all the way into our flush call below.
+            //
+            // The timer's underlying metric is used for a storage-internal latency SLO and
+            // we don't want to include latency in it that we can't control.
+            // And as pointed out above, in this case, we don't control the time that flush will take.
+            let flushing_timer =
+                timer.map(|timer| timer.observe_smgr_op_completion_and_start_flushing());
+
+            // what we want to do
+            let flush_fut = pgb_writer.flush();
+            // metric for how long flushing takes
+            let flush_fut = match flushing_timer {
+                Some(flushing_timer) => {
+                    futures::future::Either::Left(flushing_timer.measure(flush_fut))
                 }
-                res = pgb.flush() => {
-                    res?;
+                None => futures::future::Either::Right(flush_fut),
+            };
+            // do it while respecting cancellation
+            let _: () = async move {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        // We were requested to shut down.
+                        info!("shutdown request received in page handler");
+                        return Err(QueryError::Shutdown)
+                    }
+                    res = flush_fut => {
+                        res?;
+                    }
                 }
+                Ok(())
             }
+            // and log the info! line inside the request span
+            .instrument(span.clone())
+            .await?;
         }
         Ok(())
+    }
+
+    /// Pagestream sub-protocol handler.
+    ///
+    /// It is a simple request-response protocol inside a COPYBOTH session.
+    ///
+    /// # Coding Discipline
+    ///
+    /// Coding discipline within this function: all interaction with the `pgb` connection
+    /// needs to be sensitive to connection shutdown, currently signalled via [`Self::cancel`].
+    /// This is so that we can shutdown page_service quickly.
+    #[instrument(skip_all)]
+    async fn handle_pagerequests<IO>(
+        &mut self,
+        pgb: &mut PostgresBackend<IO>,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        _protocol_version: PagestreamProtocolVersion,
+        ctx: RequestContext,
+    ) -> Result<(), QueryError>
+    where
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
+    {
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
+
+        // switch client to COPYBOTH
+        pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {
+                return Err(QueryError::Shutdown)
+            }
+            res = pgb.flush() => {
+                res?;
+            }
+        }
+
+        let pgb_reader = pgb
+            .split()
+            .context("implementation error: split pgb into reader and writer")?;
+
+        let timeline_handles = self
+            .timeline_handles
+            .take()
+            .expect("implementation error: timeline_handles should not be locked");
+
+        let request_span = info_span!("request", shard_id = tracing::field::Empty);
+        let ((pgb_reader, timeline_handles), result) = match self.pipelining_config.clone() {
+            PageServicePipeliningConfig::Pipelined(pipelining_config) => {
+                self.handle_pagerequests_pipelined(
+                    pgb,
+                    pgb_reader,
+                    tenant_id,
+                    timeline_id,
+                    timeline_handles,
+                    request_span,
+                    pipelining_config,
+                    &ctx,
+                )
+                .await
+            }
+            PageServicePipeliningConfig::Serial => {
+                self.handle_pagerequests_serial(
+                    pgb,
+                    pgb_reader,
+                    tenant_id,
+                    timeline_id,
+                    timeline_handles,
+                    request_span,
+                    &ctx,
+                )
+                .await
+            }
+        };
+
+        debug!("pagestream subprotocol shut down cleanly");
+
+        pgb.unsplit(pgb_reader)
+            .context("implementation error: unsplit pgb")?;
+
+        let replaced = self.timeline_handles.replace(timeline_handles);
+        assert!(replaced.is_none());
+
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_pagerequests_serial<IO>(
+        &mut self,
+        pgb_writer: &mut PostgresBackend<IO>,
+        mut pgb_reader: PostgresBackendReader<IO>,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        mut timeline_handles: TimelineHandles,
+        request_span: Span,
+        ctx: &RequestContext,
+    ) -> (
+        (PostgresBackendReader<IO>, TimelineHandles),
+        Result<(), QueryError>,
+    )
+    where
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
+    {
+        let cancel = self.cancel.clone();
+        let err = loop {
+            let msg = Self::pagestream_read_message(
+                &mut pgb_reader,
+                tenant_id,
+                timeline_id,
+                &mut timeline_handles,
+                &cancel,
+                ctx,
+                request_span.clone(),
+            )
+            .await;
+            let msg = match msg {
+                Ok(msg) => msg,
+                Err(e) => break e,
+            };
+            let mut msg = match msg {
+                Some(msg) => msg,
+                None => {
+                    debug!("pagestream subprotocol end observed");
+                    return ((pgb_reader, timeline_handles), Ok(()));
+                }
+            };
+
+            if let Err(cancelled) = msg.throttle(&self.cancel).await {
+                break cancelled;
+            }
+
+            let err = self
+                .pagesteam_handle_batched_message(pgb_writer, msg, &cancel, ctx)
+                .await;
+            match err {
+                Ok(()) => {}
+                Err(e) => break e,
+            }
+        };
+        ((pgb_reader, timeline_handles), Err(err))
+    }
+
+    /// # Cancel-Safety
+    ///
+    /// May leak tokio tasks if not polled to completion.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_pagerequests_pipelined<IO>(
+        &mut self,
+        pgb_writer: &mut PostgresBackend<IO>,
+        pgb_reader: PostgresBackendReader<IO>,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        mut timeline_handles: TimelineHandles,
+        request_span: Span,
+        pipelining_config: PageServicePipeliningConfigPipelined,
+        ctx: &RequestContext,
+    ) -> (
+        (PostgresBackendReader<IO>, TimelineHandles),
+        Result<(), QueryError>,
+    )
+    where
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
+    {
+        //
+        // Pipelined pagestream handling consists of
+        // - a Batcher that reads requests off the wire and
+        //   and batches them if possible,
+        // - an Executor that processes the batched requests.
+        //
+        // The batch is built up inside an `spsc_fold` channel,
+        // shared betwen Batcher (Sender) and Executor (Receiver).
+        //
+        // The Batcher continously folds client requests into the batch,
+        // while the Executor can at any time take out what's in the batch
+        // in order to process it.
+        // This means the next batch builds up while the Executor
+        // executes the last batch.
+        //
+        // CANCELLATION
+        //
+        // We run both Batcher and Executor futures to completion before
+        // returning from this function.
+        //
+        // If Executor exits first, it signals cancellation to the Batcher
+        // via a CancellationToken that is child of `self.cancel`.
+        // If Batcher exits first, it signals cancellation to the Executor
+        // by dropping the spsc_fold channel Sender.
+        //
+        // CLEAN SHUTDOWN
+        //
+        // Clean shutdown means that the client ends the COPYBOTH session.
+        // In response to such a client message, the Batcher exits.
+        // The Executor continues to run, draining the spsc_fold channel.
+        // Once drained, the spsc_fold recv will fail with a distinct error
+        // indicating that the sender disconnected.
+        // The Executor exits with Ok(()) in response to that error.
+        //
+        // Server initiated shutdown is not clean shutdown, but instead
+        // is an error Err(QueryError::Shutdown) that is propagated through
+        // error propagation.
+        //
+        // ERROR PROPAGATION
+        //
+        // When the Batcher encounter an error, it sends it as a value
+        // through the spsc_fold channel and exits afterwards.
+        // When the Executor observes such an error in the channel,
+        // it exits returning that error value.
+        //
+        // This design ensures that the Executor stage will still process
+        // the batch that was in flight when the Batcher encountered an error,
+        // thereby beahving identical to a serial implementation.
+
+        let PageServicePipeliningConfigPipelined {
+            max_batch_size,
+            execution,
+        } = pipelining_config;
+
+        // Macro to _define_ a pipeline stage.
+        macro_rules! pipeline_stage {
+            ($name:literal, $cancel:expr, $make_fut:expr) => {{
+                let cancel: CancellationToken = $cancel;
+                let stage_fut = $make_fut(cancel.clone());
+                async move {
+                    scopeguard::defer! {
+                        debug!("exiting");
+                    }
+                    timed_after_cancellation(stage_fut, $name, Duration::from_millis(100), &cancel)
+                        .await
+                }
+                .instrument(tracing::info_span!($name))
+            }};
+        }
+
+        //
+        // Batcher
+        //
+
+        let cancel_batcher = self.cancel.child_token();
+        let (mut batch_tx, mut batch_rx) = spsc_fold::channel();
+        let batcher = pipeline_stage!("batcher", cancel_batcher.clone(), move |cancel_batcher| {
+            let ctx = ctx.attached_child();
+            async move {
+                let mut pgb_reader = pgb_reader;
+                let mut exit = false;
+                while !exit {
+                    let read_res = Self::pagestream_read_message(
+                        &mut pgb_reader,
+                        tenant_id,
+                        timeline_id,
+                        &mut timeline_handles,
+                        &cancel_batcher,
+                        &ctx,
+                        request_span.clone(),
+                    )
+                    .await;
+                    let Some(read_res) = read_res.transpose() else {
+                        debug!("client-initiated shutdown");
+                        break;
+                    };
+                    exit |= read_res.is_err();
+                    let could_send = batch_tx
+                        .send(read_res, |batch, res| {
+                            Self::pagestream_do_batch(max_batch_size, batch, res)
+                        })
+                        .await;
+                    exit |= could_send.is_err();
+                }
+                (pgb_reader, timeline_handles)
+            }
+        });
+
+        //
+        // Executor
+        //
+
+        let executor = pipeline_stage!("executor", self.cancel.clone(), move |cancel| {
+            let ctx = ctx.attached_child();
+            async move {
+                let _cancel_batcher = cancel_batcher.drop_guard();
+                loop {
+                    let maybe_batch = batch_rx.recv().await;
+                    let batch = match maybe_batch {
+                        Ok(batch) => batch,
+                        Err(spsc_fold::RecvError::SenderGone) => {
+                            debug!("upstream gone");
+                            return Ok(());
+                        }
+                    };
+                    let mut batch = match batch {
+                        Ok(batch) => batch,
+                        Err(e) => {
+                            return Err(e);
+                        }
+                    };
+                    batch.throttle(&self.cancel).await?;
+                    self.pagesteam_handle_batched_message(pgb_writer, batch, &cancel, &ctx)
+                        .await?;
+                }
+            }
+        });
+
+        //
+        // Execute the stages.
+        //
+
+        match execution {
+            PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures => {
+                tokio::join!(batcher, executor)
+            }
+            PageServiceProtocolPipelinedExecutionStrategy::Tasks => {
+                // These tasks are not tracked anywhere.
+                let read_messages_task = tokio::spawn(batcher);
+                let (read_messages_task_res, executor_res_) =
+                    tokio::join!(read_messages_task, executor,);
+                (
+                    read_messages_task_res.expect("propagated panic from read_messages"),
+                    executor_res_,
+                )
+            }
+        }
     }
 
     /// Helper function to handle the LSN from client request.
@@ -767,21 +1467,26 @@ impl PageServerHandler {
             ));
         }
 
-        if request_lsn < **latest_gc_cutoff_lsn {
+        // Check explicitly for INVALID just to get a less scary error message if the request is obviously bogus
+        if request_lsn == Lsn::INVALID {
+            return Err(PageStreamError::BadRequest(
+                "invalid LSN(0) in request".into(),
+            ));
+        }
+
+        // Clients should only read from recent LSNs on their timeline, or from locations holding an LSN lease.
+        //
+        // We may have older data available, but we make a best effort to detect this case and return an error,
+        // to distinguish a misbehaving client (asking for old LSN) from a storage issue (data missing at a legitimate LSN).
+        if request_lsn < **latest_gc_cutoff_lsn && !timeline.is_gc_blocked_by_lsn_lease_deadline() {
             let gc_info = &timeline.gc_info.read().unwrap();
             if !gc_info.leases.contains_key(&request_lsn) {
-                // The requested LSN is below gc cutoff and is not guarded by a lease.
-
-                // Check explicitly for INVALID just to get a less scary error message if the
-                // request is obviously bogus
-                return Err(if request_lsn == Lsn::INVALID {
-                    PageStreamError::BadRequest("invalid LSN(0) in request".into())
-                } else {
+                return Err(
                     PageStreamError::BadRequest(format!(
                         "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
                         request_lsn, **latest_gc_cutoff_lsn
                     ).into())
-                });
+                );
             }
         }
 
@@ -825,6 +1530,8 @@ impl PageServerHandler {
     {
         let timeline = self
             .timeline_handles
+            .as_mut()
+            .unwrap()
             .get(
                 tenant_shard_id.tenant_id,
                 timeline_id,
@@ -859,22 +1566,13 @@ impl PageServerHandler {
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_rel_exists_request(
         &mut self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
+        timeline: &Timeline,
         req: &PagestreamExistsRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let timeline = self
-            .timeline_handles
-            .get(tenant_id, timeline_id, ShardSelector::Zero)
-            .await?;
-        let _timer = timeline
-            .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetRelExists, ctx);
-
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
-            &timeline,
+            timeline,
             req.request_lsn,
             req.not_modified_since,
             &latest_gc_cutoff_lsn,
@@ -894,23 +1592,13 @@ impl PageServerHandler {
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_nblocks_request(
         &mut self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
+        timeline: &Timeline,
         req: &PagestreamNblocksRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let timeline = self
-            .timeline_handles
-            .get(tenant_id, timeline_id, ShardSelector::Zero)
-            .await?;
-
-        let _timer = timeline
-            .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetRelSize, ctx);
-
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
-            &timeline,
+            timeline,
             req.request_lsn,
             req.not_modified_since,
             &latest_gc_cutoff_lsn,
@@ -930,23 +1618,13 @@ impl PageServerHandler {
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_db_size_request(
         &mut self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
+        timeline: &Timeline,
         req: &PagestreamDbSizeRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let timeline = self
-            .timeline_handles
-            .get(tenant_id, timeline_id, ShardSelector::Zero)
-            .await?;
-
-        let _timer = timeline
-            .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetDbSize, ctx);
-
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
-            &timeline,
+            timeline,
             req.request_lsn,
             req.not_modified_since,
             &latest_gc_cutoff_lsn,
@@ -964,83 +1642,58 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip_all, fields(shard_id))]
-    async fn handle_get_page_at_lsn_request(
+    #[instrument(skip_all)]
+    async fn handle_get_page_at_lsn_request_batched(
         &mut self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        req: &PagestreamGetPageRequest,
+        timeline: &Timeline,
+        effective_lsn: Lsn,
+        requests: smallvec::SmallVec<[(RelTag, BlockNumber, SmgrOpTimer); 1]>,
         ctx: &RequestContext,
-    ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let timeline = match self
-            .timeline_handles
-            .get(
-                tenant_id,
-                timeline_id,
-                ShardSelector::Page(rel_block_to_key(req.rel, req.blkno)),
-            )
-            .await
-        {
-            Ok(tl) => tl,
-            Err(GetActiveTimelineError::Tenant(GetActiveTenantError::NotFound(_))) => {
-                // We already know this tenant exists in general, because we resolved it at
-                // start of connection.  Getting a NotFound here indicates that the shard containing
-                // the requested page is not present on this node: the client's knowledge of shard->pageserver
-                // mapping is out of date.
-                //
-                // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
-                // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
-                // and talk to a different pageserver.
-                return Err(PageStreamError::Reconnect(
-                    "getpage@lsn request routed to wrong shard".into(),
-                ));
-            }
-            Err(e) => return Err(e.into()),
-        };
+    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), PageStreamError>> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let _timer = timeline
+        timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetPageAtLsn, ctx);
+            .observe_getpage_batch_start(requests.len());
 
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(
-            &timeline,
-            req.request_lsn,
-            req.not_modified_since,
-            &latest_gc_cutoff_lsn,
-            ctx,
+        let results = timeline
+            .get_rel_page_at_lsn_batched(
+                requests.iter().map(|(reltag, blkno, _)| (reltag, blkno)),
+                effective_lsn,
+                ctx,
+            )
+            .await;
+        assert_eq!(results.len(), requests.len());
+
+        // TODO: avoid creating the new Vec here
+        Vec::from_iter(
+            requests
+                .into_iter()
+                .zip(results.into_iter())
+                .map(|((_, _, timer), res)| {
+                    res.map(|page| {
+                        (
+                            PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse {
+                                page,
+                            }),
+                            timer,
+                        )
+                    })
+                    .map_err(PageStreamError::from)
+                }),
         )
-        .await?;
-
-        let page = timeline
-            .get_rel_page_at_lsn(req.rel, req.blkno, Version::Lsn(lsn), ctx)
-            .await?;
-
-        Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
-            page,
-        }))
     }
 
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_slru_segment_request(
         &mut self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
+        timeline: &Timeline,
         req: &PagestreamGetSlruSegmentRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let timeline = self
-            .timeline_handles
-            .get(tenant_id, timeline_id, ShardSelector::Zero)
-            .await?;
-
-        let _timer = timeline
-            .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetSlruSegment, ctx);
-
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
-            &timeline,
+            timeline,
             req.request_lsn,
             req.not_modified_since,
             &latest_gc_cutoff_lsn,
@@ -1098,6 +1751,8 @@ impl PageServerHandler {
 
         let timeline = self
             .timeline_handles
+            .as_mut()
+            .unwrap()
             .get(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
 
@@ -1440,7 +2095,7 @@ impl PageServiceCmd {
 
 impl<IO> postgres_backend::Handler<IO> for PageServerHandler
 where
-    IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
 {
     fn check_auth_jwt(
         &mut self,
@@ -1536,7 +2191,7 @@ where
                 COMPUTE_COMMANDS_COUNTERS
                     .for_command(ComputeCommandKind::Basebackup)
                     .inc();
-                let metric_recording = metrics::BASEBACKUP_QUERY_TIME.start_recording(&ctx);
+                let metric_recording = metrics::BASEBACKUP_QUERY_TIME.start_recording();
                 let res = async {
                     self.handle_basebackup_request(
                         pgb,
@@ -1672,6 +2327,13 @@ fn set_tracing_field_shard_id(timeline: &Timeline) {
         tracing::field::display(timeline.tenant_shard_id.shard_slug()),
     );
     debug_assert_current_span_has_tenant_and_timeline_id();
+}
+
+struct WaitedForLsn(Lsn);
+impl From<WaitedForLsn> for Lsn {
+    fn from(WaitedForLsn(lsn): WaitedForLsn) -> Self {
+        lsn
+    }
 }
 
 #[cfg(test)]

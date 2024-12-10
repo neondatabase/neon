@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use futures::TryFutureExt;
 use thiserror::Error;
-use tokio_postgres::config::SslMode;
 use tokio_postgres::Client;
 use tracing::{error, info, info_span, warn, Instrument};
 
@@ -13,7 +12,7 @@ use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::IpPattern;
 use crate::cache::Cached;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::client::{CachedAllowedIps, CachedRoleSecret};
 use crate::control_plane::errors::{
     ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
@@ -114,7 +113,7 @@ impl MockControlPlane {
 
             Ok((secret, allowed_ips))
         }
-        .map_err(crate::error::log_error::<GetAuthInfoError>)
+        .inspect_err(|e: &GetAuthInfoError| tracing::error!("{e}"))
         .instrument(info_span!("postgres", url = self.endpoint.as_str()))
         .await?;
         Ok(AuthInfo {
@@ -161,11 +160,11 @@ impl MockControlPlane {
     }
 
     async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
-        let mut config = compute::ConnCfg::new();
-        config
-            .host(self.endpoint.host_str().unwrap_or("localhost"))
-            .port(self.endpoint.port().unwrap_or(5432))
-            .ssl_mode(SslMode::Disable);
+        let mut config = compute::ConnCfg::new(
+            self.endpoint.host_str().unwrap_or("localhost").to_owned(),
+            self.endpoint.port().unwrap_or(5432),
+        );
+        config.ssl_mode(postgres_client::config::SslMode::Disable);
 
         let node = NodeInfo {
             config,
@@ -206,7 +205,7 @@ impl super::ControlPlaneApi for MockControlPlane {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
-        _ctx: &RequestMonitoring,
+        _ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         Ok(CachedRoleSecret::new_uncached(
@@ -216,7 +215,7 @@ impl super::ControlPlaneApi for MockControlPlane {
 
     async fn get_allowed_ips_and_secret(
         &self,
-        _ctx: &RequestMonitoring,
+        _ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         Ok((
@@ -229,7 +228,7 @@ impl super::ControlPlaneApi for MockControlPlane {
 
     async fn get_endpoint_jwks(
         &self,
-        _ctx: &RequestMonitoring,
+        _ctx: &RequestContext,
         endpoint: EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         self.do_get_endpoint_jwks(endpoint).await
@@ -238,7 +237,7 @@ impl super::ControlPlaneApi for MockControlPlane {
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        _ctx: &RequestMonitoring,
+        _ctx: &RequestContext,
         _user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         self.do_wake_compute().map_ok(Cached::new_uncached).await

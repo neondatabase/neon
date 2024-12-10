@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Optional
 
 import pytest
 from fixtures.common_types import TenantId
@@ -65,8 +64,6 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
     )
 
     wait_until(
-        50,
-        0.1,
         lambda: env.pageserver.assert_log_contains(".*Error processing HTTP request: Bad request"),
     )
 
@@ -105,7 +102,7 @@ def test_null_config(negative_env: NegativeTests):
 
 
 @pytest.mark.parametrize("content_type", [None, "application/json"])
-def test_empty_config(positive_env: NeonEnv, content_type: Optional[str]):
+def test_empty_config(positive_env: NeonEnv, content_type: str | None):
     """
     When the 'config' body attribute is omitted, the request should be accepted
     and the tenant should use the default configuration
@@ -175,6 +172,10 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "lsn_lease_length": "1m",
         "lsn_lease_length_for_ts": "5s",
         "timeline_offloading": True,
+        "wal_receiver_protocol_override": {
+            "type": "interpreted",
+            "args": {"format": "bincode", "compression": {"zstd": {"level": 1}}},
+        },
     }
 
     vps_http = env.storage_controller.pageserver_api()

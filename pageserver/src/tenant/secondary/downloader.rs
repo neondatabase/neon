@@ -35,7 +35,7 @@ use super::{
         self, period_jitter, period_warmup, Completion, JobGenerator, SchedulingResult,
         TenantBackgroundJobs,
     },
-    SecondaryTenant,
+    GetTenantError, SecondaryTenant, SecondaryTenantError,
 };
 
 use crate::tenant::{
@@ -49,7 +49,7 @@ use futures::Future;
 use metrics::UIntGauge;
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
-use remote_storage::{DownloadError, DownloadOpts, Etag, GenericRemoteStorage};
+use remote_storage::{DownloadError, DownloadKind, DownloadOpts, Etag, GenericRemoteStorage};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
@@ -240,6 +240,19 @@ impl SecondaryDetail {
             next_download: None,
             timelines: HashMap::new(),
         }
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn total_resident_size(&self) -> u64 {
+        self.timelines
+            .values()
+            .map(|tl| {
+                tl.on_disk_layers
+                    .values()
+                    .map(|v| v.metadata.file_size)
+                    .sum::<u64>()
+            })
+            .sum::<u64>()
     }
 
     pub(super) fn evict_layer(
@@ -457,15 +470,16 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         result
     }
 
-    fn on_command(&mut self, command: DownloadCommand) -> anyhow::Result<PendingDownload> {
+    fn on_command(
+        &mut self,
+        command: DownloadCommand,
+    ) -> Result<PendingDownload, SecondaryTenantError> {
         let tenant_shard_id = command.get_tenant_shard_id();
 
         let tenant = self
             .tenant_manager
-            .get_secondary_tenant_shard(*tenant_shard_id);
-        let Some(tenant) = tenant else {
-            return Err(anyhow::anyhow!("Not found or not in Secondary mode"));
-        };
+            .get_secondary_tenant_shard(*tenant_shard_id)
+            .ok_or(GetTenantError::ShardNotFound(*tenant_shard_id))?;
 
         Ok(PendingDownload {
             target_time: None,
@@ -763,24 +777,7 @@ impl<'a> TenantDownloader<'a> {
         }
 
         // Metrics consistency check in testing builds
-        if cfg!(feature = "testing") {
-            let detail = self.secondary_state.detail.lock().unwrap();
-            let resident_size = detail
-                .timelines
-                .values()
-                .map(|tl| {
-                    tl.on_disk_layers
-                        .values()
-                        .map(|v| v.metadata.file_size)
-                        .sum::<u64>()
-                })
-                .sum::<u64>();
-            assert_eq!(
-                resident_size,
-                self.secondary_state.resident_size_metric.get()
-            );
-        }
-
+        self.secondary_state.validate_metrics();
         // Only update last_etag after a full successful download: this way will not skip
         // the next download, even if the heatmap's actual etag is unchanged.
         self.secondary_state.detail.lock().unwrap().last_download = Some(DownloadSummary {
@@ -950,6 +947,7 @@ impl<'a> TenantDownloader<'a> {
         let cancel = &self.secondary_state.cancel;
         let opts = DownloadOpts {
             etag: prev_etag.cloned(),
+            kind: DownloadKind::Small,
             ..Default::default()
         };
 
@@ -1185,6 +1183,7 @@ impl<'a> TenantDownloader<'a> {
             &layer.name,
             &layer.metadata,
             &local_path,
+            &self.secondary_state.gate,
             &self.secondary_state.cancel,
             ctx,
         )

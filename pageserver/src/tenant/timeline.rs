@@ -4,6 +4,7 @@ pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
 pub(crate) mod handle;
+pub(crate) mod import_pgdata;
 mod init;
 pub mod layer_manager;
 pub(crate) mod logical_size;
@@ -39,6 +40,7 @@ use pageserver_api::{
     shard::{ShardIdentity, ShardNumber, TenantShardId},
 };
 use rand::Rng;
+use remote_storage::DownloadError;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
 use tokio::{
@@ -49,9 +51,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
     fs_ext, pausable_failpoint,
+    postgres_client::PostgresClientProtocol,
     sync::gate::{Gate, GateGuard},
 };
-use wal_decoder::serialized_batch::SerializedValueBatch;
+use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -208,8 +211,8 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
     pub remote_client: RemoteTimelineClient,
-    pub timeline_get_throttle:
-        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
+    pub pagestream_throttle:
+        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::Pagestream>>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
@@ -275,7 +278,7 @@ pub struct Timeline {
 
     /// Remote storage client.
     /// See [`remote_timeline_client`](super::remote_timeline_client) module comment for details.
-    pub remote_client: Arc<RemoteTimelineClient>,
+    pub(crate) remote_client: Arc<RemoteTimelineClient>,
 
     // What page versions do we hold in the repository? If we get a
     // request > last_record_lsn, we need to wait until we receive all
@@ -411,9 +414,9 @@ pub struct Timeline {
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     gc_lock: tokio::sync::Mutex<()>,
 
-    /// Cloned from [`super::Tenant::timeline_get_throttle`] on construction.
-    timeline_get_throttle:
-        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
+    /// Cloned from [`super::Tenant::pagestream_throttle`] on construction.
+    pub(crate) pagestream_throttle:
+        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::Pagestream>>,
 
     /// Size estimator for aux file v2
     pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
@@ -480,8 +483,31 @@ impl GcInfo {
         self.retain_lsns.sort_by_key(|i| i.0);
     }
 
-    pub(super) fn remove_child(&mut self, child_id: TimelineId) {
-        self.retain_lsns.retain(|i| i.1 != child_id);
+    pub(super) fn remove_child_maybe_offloaded(
+        &mut self,
+        child_id: TimelineId,
+        maybe_offloaded: MaybeOffloaded,
+    ) -> bool {
+        // Remove at most one element. Needed for correctness if there is two live `Timeline` objects referencing
+        // the same timeline. Shouldn't but maybe can occur when Arc's live longer than intended.
+        let mut removed = false;
+        self.retain_lsns.retain(|i| {
+            if removed {
+                return true;
+            }
+            let remove = i.1 == child_id && i.2 == maybe_offloaded;
+            removed |= remove;
+            !remove
+        });
+        removed
+    }
+
+    pub(super) fn remove_child_not_offloaded(&mut self, child_id: TimelineId) -> bool {
+        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::No)
+    }
+
+    pub(super) fn remove_child_offloaded(&mut self, child_id: TimelineId) -> bool {
+        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes)
     }
 }
 
@@ -745,13 +771,58 @@ pub enum GetLogicalSizePriority {
     Background,
 }
 
-#[derive(enumset::EnumSetType)]
+#[derive(Debug, enumset::EnumSetType)]
 pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
     ForceL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
+}
+
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct CompactRequest {
+    pub compact_range: Option<CompactRange>,
+    pub compact_below_lsn: Option<Lsn>,
+    /// Whether the compaction job should be scheduled.
+    #[serde(default)]
+    pub scheduled: bool,
+    /// Whether the compaction job should be split across key ranges.
+    #[serde(default)]
+    pub sub_compaction: bool,
+}
+
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct CompactRange {
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub start: Key,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub end: Key,
+}
+
+impl From<Range<Key>> for CompactRange {
+    fn from(range: Range<Key>) -> Self {
+        CompactRange {
+            start: range.start,
+            end: range.end,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CompactOptions {
+    pub flags: EnumSet<CompactFlags>,
+    /// If set, the compaction will only compact the key range specified by this option.
+    /// This option is only used by GC compaction.
+    pub compact_range: Option<CompactRange>,
+    /// If set, the compaction will only compact the LSN below this value.
+    /// This option is only used by GC compaction.
+    pub compact_below_lsn: Option<Lsn>,
+    /// Enable sub-compaction (split compaction job across key ranges).
+    /// This option is only used by GC compaction.
+    pub sub_compaction: bool,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -856,10 +927,11 @@ pub(crate) enum ShutdownMode {
     /// While we are flushing, we continue to accept read I/O for LSNs ingested before
     /// the call to [`Timeline::shutdown`].
     FreezeAndFlush,
-    /// Only flush the layers to the remote storage without freezing any open layers. This is the
-    /// mode used by ancestor detach and any other operations that reloads a tenant but not increasing
-    /// the generation number.
-    Flush,
+    /// Only flush the layers to the remote storage without freezing any open layers. Flush the deletion
+    /// queue. This is the mode used by ancestor detach and any other operations that reloads a tenant
+    /// but not increasing the generation number. Note that this mode cannot be used at tenant shutdown,
+    /// as flushing the deletion queue at that time will cause shutdown-in-progress errors.
+    Reload,
     /// Shut down immediately, without waiting for any open layers to flush.
     Hard,
 }
@@ -910,7 +982,7 @@ impl Timeline {
     /// If a remote layer file is needed, it is downloaded as part of this
     /// call.
     ///
-    /// This method enforces [`Self::timeline_get_throttle`] internally.
+    /// This method enforces [`Self::pagestream_throttle`] internally.
     ///
     /// NOTE: It is considered an error to 'get' a key that doesn't exist. The
     /// abstraction above this needs to store suitable metadata to track what
@@ -937,8 +1009,6 @@ impl Timeline {
         // already checked the key against the shard_identity when looking up the Timeline from
         // page_service.
         debug_assert!(!self.shard_identity.is_key_disposable(&key));
-
-        self.timeline_get_throttle.throttle(ctx, 1).await;
 
         let keyspace = KeySpace {
             ranges: vec![key..key.next()],
@@ -1017,13 +1087,6 @@ impl Timeline {
             .for_task_kind(ctx.task_kind())
             .map(|metric| (metric, Instant::now()));
 
-        // start counting after throttle so that throttle time
-        // is always less than observation time
-        let throttled = self
-            .timeline_get_throttle
-            .throttle(ctx, key_count as usize)
-            .await;
-
         let res = self
             .get_vectored_impl(
                 keyspace.clone(),
@@ -1035,23 +1098,7 @@ impl Timeline {
 
         if let Some((metric, start)) = start {
             let elapsed = start.elapsed();
-            let ex_throttled = if let Some(throttled) = throttled {
-                elapsed.checked_sub(throttled)
-            } else {
-                Some(elapsed)
-            };
-
-            if let Some(ex_throttled) = ex_throttled {
-                metric.observe(ex_throttled.as_secs_f64());
-            } else {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<RateLimit>> =
-                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-                let mut rate_limit = LOGGED.lock().unwrap();
-                rate_limit.call(|| {
-                    warn!("error deducting time spent throttled; this message is logged at a global rate limit");
-                });
-            }
+            metric.observe(elapsed.as_secs_f64());
         }
 
         res
@@ -1096,14 +1143,6 @@ impl Timeline {
             .for_task_kind(ctx.task_kind())
             .map(ScanLatencyOngoingRecording::start_recording);
 
-        // start counting after throttle so that throttle time
-        // is always less than observation time
-        let throttled = self
-            .timeline_get_throttle
-            // assume scan = 1 quota for now until we find a better way to process this
-            .throttle(ctx, 1)
-            .await;
-
         let vectored_res = self
             .get_vectored_impl(
                 keyspace.clone(),
@@ -1114,7 +1153,7 @@ impl Timeline {
             .await;
 
         if let Some(recording) = start {
-            recording.observe(throttled);
+            recording.observe();
         }
 
         vectored_res
@@ -1437,23 +1476,31 @@ impl Timeline {
         Ok(lease)
     }
 
-    /// Flush to disk all data that was written with the put_* functions
+    /// Freeze the current open in-memory layer. It will be written to disk on next iteration.
+    /// Returns the flush request ID which can be awaited with wait_flush_completion().
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
+    pub(crate) async fn freeze(&self) -> Result<u64, FlushLayerError> {
+        self.freeze0().await
+    }
+
+    /// Freeze and flush the open in-memory layer, waiting for it to be written to disk.
     #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
     pub(crate) async fn freeze_and_flush(&self) -> Result<(), FlushLayerError> {
         self.freeze_and_flush0().await
     }
 
+    /// Freeze the current open in-memory layer. It will be written to disk on next iteration.
+    /// Returns the flush request ID which can be awaited with wait_flush_completion().
+    pub(crate) async fn freeze0(&self) -> Result<u64, FlushLayerError> {
+        let mut g = self.write_lock.lock().await;
+        let to_lsn = self.get_last_record_lsn();
+        self.freeze_inmem_layer_at(to_lsn, &mut g).await
+    }
+
     // This exists to provide a non-span creating version of `freeze_and_flush` we can call without
     // polluting the span hierarchy.
     pub(crate) async fn freeze_and_flush0(&self) -> Result<(), FlushLayerError> {
-        let token = {
-            // Freeze the current open in-memory layer. It will be written to disk on next
-            // iteration.
-            let mut g = self.write_lock.lock().await;
-
-            let to_lsn = self.get_last_record_lsn();
-            self.freeze_inmem_layer_at(to_lsn, &mut g).await?
-        };
+        let token = self.freeze0().await?;
         self.wait_flush_completion(token).await
     }
 
@@ -1603,6 +1650,27 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<bool, CompactionError> {
+        self.compact_with_options(
+            cancel,
+            CompactOptions {
+                flags,
+                compact_range: None,
+                compact_below_lsn: None,
+                sub_compaction: false,
+            },
+            ctx,
+        )
+        .await
+    }
+
+    /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
+    /// compaction tasks.
+    pub(crate) async fn compact_with_options(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        options: CompactOptions,
+        ctx: &RequestContext,
+    ) -> Result<bool, CompactionError> {
         // most likely the cancellation token is from background task, but in tests it could be the
         // request task as well.
 
@@ -1639,7 +1707,7 @@ impl Timeline {
                 self.compact_tiered(cancel, ctx).await?;
                 Ok(false)
             }
-            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
+            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, options, ctx).await,
         }
     }
 
@@ -1771,7 +1839,7 @@ impl Timeline {
             }
         }
 
-        if let ShutdownMode::Flush = mode {
+        if let ShutdownMode::Reload = mode {
             // drain the upload queue
             self.remote_client.shutdown().await;
             if !self.remote_client.no_pending_work() {
@@ -2040,6 +2108,11 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
     }
 
+    pub(crate) fn is_gc_blocked_by_lsn_lease_deadline(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf.is_gc_blocked_by_lsn_lease_deadline()
+    }
+
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2127,14 +2200,29 @@ impl Timeline {
             )
     }
 
-    pub(super) fn tenant_conf_updated(&self, new_conf: &TenantConfOpt) {
+    /// Resolve the effective WAL receiver protocol to use for this tenant.
+    ///
+    /// Priority order is:
+    /// 1. Tenant config override
+    /// 2. Default value for tenant config override
+    /// 3. Pageserver config override
+    /// 4. Pageserver config default
+    pub fn resolve_wal_receiver_protocol(&self) -> PostgresClientProtocol {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .wal_receiver_protocol_override
+            .or(self.conf.default_tenant_conf.wal_receiver_protocol_override)
+            .unwrap_or(self.conf.wal_receiver_protocol)
+    }
+
+    pub(super) fn tenant_conf_updated(&self, new_conf: &AttachedTenantConf) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
 
         // The threshold is embedded in the metric. So, we need to update it.
         {
             let new_threshold = Self::get_evictions_low_residence_duration_metric_threshold(
-                new_conf,
+                &new_conf.tenant_conf,
                 &self.conf.default_tenant_conf,
             );
 
@@ -2142,6 +2230,9 @@ impl Timeline {
             let shard_id_str = format!("{}", self.tenant_shard_id.shard_slug());
 
             let timeline_id_str = self.timeline_id.to_string();
+
+            self.remote_client.update_config(&new_conf.location);
+
             self.metrics
                 .evictions_with_low_residence_duration
                 .write()
@@ -2300,7 +2391,7 @@ impl Timeline {
 
                 standby_horizon: AtomicLsn::new(0),
 
-                timeline_get_throttle: resources.timeline_get_throttle,
+                pagestream_throttle: resources.pagestream_throttle,
 
                 aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
 
@@ -2321,7 +2412,7 @@ impl Timeline {
 
             result
                 .metrics
-                .last_record_gauge
+                .last_record_lsn_gauge
                 .set(disk_consistent_lsn.0 as i64);
             result
         })
@@ -2416,6 +2507,7 @@ impl Timeline {
         *guard = Some(WalReceiver::start(
             Arc::clone(self),
             WalReceiverConf {
+                protocol: self.resolve_wal_receiver_protocol(),
                 wal_connect_timeout,
                 lagging_wal_timeout,
                 max_lsn_wal_lag,
@@ -2599,6 +2691,7 @@ impl Timeline {
         //
         // NB: generation numbers naturally protect against this because they disambiguate
         //     (1) and (4)
+        // TODO: this is basically a no-op now, should we remove it?
         self.remote_client.schedule_barrier()?;
         // Tenant::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
@@ -2654,20 +2747,23 @@ impl Timeline {
                 {
                     Some(cancel) => cancel.cancel(),
                     None => {
-                        let state = self.current_state();
-                        if matches!(
-                            state,
-                            TimelineState::Broken { .. } | TimelineState::Stopping
-                        ) {
-
-                            // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
-                            // Don't make noise.
-                        } else {
-                            warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
-                            debug_assert!(false);
+                        match self.current_state() {
+                            TimelineState::Broken { .. } | TimelineState::Stopping => {
+                                // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
+                                // Don't make noise.
+                            }
+                            TimelineState::Loading => {
+                                // Import does not return an activated timeline.
+                                info!("discarding priority boost for logical size calculation because timeline is not yet active");
+                            }
+                            TimelineState::Active => {
+                                // activation should be setting the once cell
+                                warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
+                                debug_assert!(false);
+                            }
                         }
                     }
-                };
+                }
             }
         }
 
@@ -3412,7 +3508,6 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
-        let gate_guard = self.gate.enter().context("enter gate for inmem layer")?;
 
         let last_record_lsn = self.get_last_record_lsn();
         ensure!(
@@ -3429,7 +3524,7 @@ impl Timeline {
                 self.conf,
                 self.timeline_id,
                 self.tenant_shard_id,
-                gate_guard,
+                &self.gate,
                 ctx,
             )
             .await?;
@@ -3439,7 +3534,7 @@ impl Timeline {
     pub(crate) fn finish_write(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
 
-        self.metrics.last_record_gauge.set(new_lsn.0 as i64);
+        self.metrics.last_record_lsn_gauge.set(new_lsn.0 as i64);
         self.last_record_lsn.advance(new_lsn);
     }
 
@@ -3544,7 +3639,7 @@ impl Timeline {
                         self.get_compaction_threshold(),
                         DEFAULT_COMPACTION_THRESHOLD,
                     )
-                    && frozen_layer_total_size >= /* 64 MB */ 64000000
+                    && frozen_layer_total_size >= /* 128 MB */ 128000000
                 {
                     tracing::warn!(
                         "too many frozen layers: {num_frozen_layers} layers with estimated in-mem size of {frozen_layer_total_size} bytes",
@@ -3771,7 +3866,8 @@ impl Timeline {
         };
 
         // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
-        // This makes us refuse ingest until the new layers have been persisted to the remote.
+        // This makes us refuse ingest until the new layers have been persisted to the remote
+        let start = Instant::now();
         self.remote_client
             .wait_completion()
             .await
@@ -3784,6 +3880,8 @@ impl Timeline {
                     FlushLayerError::Other(anyhow!(e).into())
                 }
             })?;
+        let duration = start.elapsed().as_secs_f64();
+        self.metrics.flush_wait_upload_time_gauge_add(duration);
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
@@ -3804,6 +3902,10 @@ impl Timeline {
     fn set_disk_consistent_lsn(&self, new_value: Lsn) -> bool {
         let old_value = self.disk_consistent_lsn.fetch_max(new_value);
         assert!(new_value >= old_value, "disk_consistent_lsn must be growing monotonously at runtime; current {old_value}, offered {new_value}");
+
+        self.metrics
+            .disk_consistent_lsn_gauge
+            .set(new_value.0 as i64);
         new_value != old_value
     }
 
@@ -4514,7 +4616,10 @@ impl Drop for Timeline {
             // This lock should never be poisoned, but in case it is we do a .map() instead of
             // an unwrap(), to avoid panicking in a destructor and thereby aborting the process.
             if let Ok(mut gc_info) = ancestor.gc_info.write() {
-                gc_info.remove_child(self.timeline_id)
+                if !gc_info.remove_child_not_offloaded(self.timeline_id) {
+                    tracing::error!(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id,
+                        "Couldn't remove retain_lsn entry from offloaded timeline's parent: already removed");
+                }
             }
         }
     }
@@ -4774,6 +4879,86 @@ impl Timeline {
         Ok(())
     }
 
+    async fn find_gc_time_cutoff(
+        &self,
+        pitr: Duration,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> Result<Option<Lsn>, PageReconstructError> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+        if self.shard_identity.is_shard_zero() {
+            // Shard Zero has SLRU data and can calculate the PITR time -> LSN mapping itself
+            let now = SystemTime::now();
+            let time_range = if pitr == Duration::ZERO {
+                humantime::parse_duration(DEFAULT_PITR_INTERVAL).expect("constant is invalid")
+            } else {
+                pitr
+            };
+
+            // If PITR is so large or `now` is so small that this underflows, we will retain no history (highly unexpected case)
+            let time_cutoff = now.checked_sub(time_range).unwrap_or(now);
+            let timestamp = to_pg_timestamp(time_cutoff);
+
+            let time_cutoff = match self.find_lsn_for_timestamp(timestamp, cancel, ctx).await? {
+                LsnForTimestamp::Present(lsn) => Some(lsn),
+                LsnForTimestamp::Future(lsn) => {
+                    // The timestamp is in the future. That sounds impossible,
+                    // but what it really means is that there hasn't been
+                    // any commits since the cutoff timestamp.
+                    //
+                    // In this case we should use the LSN of the most recent commit,
+                    // which is implicitly the last LSN in the log.
+                    debug!("future({})", lsn);
+                    Some(self.get_last_record_lsn())
+                }
+                LsnForTimestamp::Past(lsn) => {
+                    debug!("past({})", lsn);
+                    None
+                }
+                LsnForTimestamp::NoData(lsn) => {
+                    debug!("nodata({})", lsn);
+                    None
+                }
+            };
+            Ok(time_cutoff)
+        } else {
+            // Shards other than shard zero cannot do timestamp->lsn lookups, and must instead learn their GC cutoff
+            // from shard zero's index.  The index doesn't explicitly tell us the time cutoff, but we may assume that
+            // the point up to which shard zero's last_gc_cutoff has advanced will either be the time cutoff, or a
+            // space cutoff that we would also have respected ourselves.
+            match self
+                .remote_client
+                .download_foreign_index(ShardNumber(0), cancel)
+                .await
+            {
+                Ok((index_part, index_generation, _index_mtime)) => {
+                    tracing::info!("GC loaded shard zero metadata (gen {index_generation:?}): latest_gc_cutoff_lsn: {}",
+                        index_part.metadata.latest_gc_cutoff_lsn());
+                    Ok(Some(index_part.metadata.latest_gc_cutoff_lsn()))
+                }
+                Err(DownloadError::NotFound) => {
+                    // This is unexpected, because during timeline creations shard zero persists to remote
+                    // storage before other shards are called, and during timeline deletion non-zeroth shards are
+                    // deleted before the zeroth one.  However, it should be harmless: if we somehow end up in this
+                    // state, then shard zero should _eventually_ write an index when it GCs.
+                    tracing::warn!("GC couldn't find shard zero's index for timeline");
+                    Ok(None)
+                }
+                Err(e) => {
+                    // TODO: this function should return a different error type than page reconstruct error
+                    Err(PageReconstructError::Other(anyhow::anyhow!(e)))
+                }
+            }
+
+            // TODO: after reading shard zero's GC cutoff, we should validate its generation with the storage
+            // controller.  Otherwise, it is possible that we see the GC cutoff go backwards while shard zero
+            // is going through a migration if we read the old location's index and it has GC'd ahead of the
+            // new location.  This is legal in principle, but problematic in practice because it might result
+            // in a timeline creation succeeding on shard zero ('s new location) but then failing on other shards
+            // because they have GC'd past the branch point.
+        }
+    }
+
     /// Find the Lsns above which layer files need to be retained on
     /// garbage collection.
     ///
@@ -4816,40 +5001,7 @@ impl Timeline {
         // - if PITR interval is set, then this is our cutoff.
         // - if PITR interval is not set, then we do a lookup
         //   based on DEFAULT_PITR_INTERVAL, so that size-based retention does not result in keeping history around permanently on idle databases.
-        let time_cutoff = {
-            let now = SystemTime::now();
-            let time_range = if pitr == Duration::ZERO {
-                humantime::parse_duration(DEFAULT_PITR_INTERVAL).expect("constant is invalid")
-            } else {
-                pitr
-            };
-
-            // If PITR is so large or `now` is so small that this underflows, we will retain no history (highly unexpected case)
-            let time_cutoff = now.checked_sub(time_range).unwrap_or(now);
-            let timestamp = to_pg_timestamp(time_cutoff);
-
-            match self.find_lsn_for_timestamp(timestamp, cancel, ctx).await? {
-                LsnForTimestamp::Present(lsn) => Some(lsn),
-                LsnForTimestamp::Future(lsn) => {
-                    // The timestamp is in the future. That sounds impossible,
-                    // but what it really means is that there hasn't been
-                    // any commits since the cutoff timestamp.
-                    //
-                    // In this case we should use the LSN of the most recent commit,
-                    // which is implicitly the last LSN in the log.
-                    debug!("future({})", lsn);
-                    Some(self.get_last_record_lsn())
-                }
-                LsnForTimestamp::Past(lsn) => {
-                    debug!("past({})", lsn);
-                    None
-                }
-                LsnForTimestamp::NoData(lsn) => {
-                    debug!("nodata({})", lsn);
-                    None
-                }
-            }
-        };
+        let time_cutoff = self.find_gc_time_cutoff(pitr, cancel, ctx).await?;
 
         Ok(match (pitr, time_cutoff) {
             (Duration::ZERO, Some(time_cutoff)) => {
@@ -5043,7 +5195,7 @@ impl Timeline {
 
             // 1. Is it newer than GC horizon cutoff point?
             if l.get_lsn_range().end > space_cutoff {
-                debug!(
+                info!(
                     "keeping {} because it's newer than space_cutoff {}",
                     l.layer_name(),
                     space_cutoff,
@@ -5054,7 +5206,7 @@ impl Timeline {
 
             // 2. It is newer than PiTR cutoff point?
             if l.get_lsn_range().end > time_cutoff {
-                debug!(
+                info!(
                     "keeping {} because it's newer than time_cutoff {}",
                     l.layer_name(),
                     time_cutoff,
@@ -5073,7 +5225,7 @@ impl Timeline {
             for retain_lsn in &retain_lsns {
                 // start_lsn is inclusive
                 if &l.get_lsn_range().start <= retain_lsn {
-                    debug!(
+                    info!(
                         "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
                         l.layer_name(),
                         retain_lsn,
@@ -5088,7 +5240,7 @@ impl Timeline {
             if let Some(lsn) = &max_lsn_with_valid_lease {
                 // keep if layer start <= any of the lease
                 if &l.get_lsn_range().start <= lsn {
-                    debug!(
+                    info!(
                         "keeping {} because there is a valid lease preventing GC at {}",
                         l.layer_name(),
                         lsn,
@@ -5120,13 +5272,13 @@ impl Timeline {
             if !layers
                 .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))
             {
-                debug!("keeping {} because it is the latest layer", l.layer_name());
+                info!("keeping {} because it is the latest layer", l.layer_name());
                 result.layers_not_updated += 1;
                 continue 'outer;
             }
 
             // We didn't find any reason to keep this file, so remove it.
-            debug!(
+            info!(
                 "garbage collecting {} is_dropped: xx is_incremental: {}",
                 l.layer_name(),
                 l.is_incremental(),
@@ -5789,8 +5941,25 @@ impl<'a> TimelineWriter<'a> {
         batch: SerializedValueBatch,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        if batch.is_empty() {
+        if !batch.has_data() {
             return Ok(());
+        }
+
+        // In debug builds, assert that we don't write any keys that don't belong to this shard.
+        // We don't assert this in release builds, since key ownership policies may change over
+        // time. Stray keys will be removed during compaction.
+        if cfg!(debug_assertions) {
+            for metadata in &batch.metadata {
+                if let ValueMeta::Serialized(metadata) = metadata {
+                    let key = Key::from_compact(metadata.key);
+                    assert!(
+                        self.shard_identity.is_key_local(&key)
+                            || self.shard_identity.is_key_global(&key),
+                        "key {key} does not belong on shard {}",
+                        self.shard_identity.shard_index()
+                    );
+                }
+            }
         }
 
         let batch_max_lsn = batch.max_lsn;

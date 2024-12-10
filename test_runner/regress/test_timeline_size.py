@@ -7,7 +7,6 @@ import time
 from collections import defaultdict
 from contextlib import closing
 from pathlib import Path
-from typing import Optional
 
 import psycopg2.errors
 import psycopg2.extras
@@ -397,11 +396,7 @@ def test_timeline_physical_size_init(neon_env_builder: NeonEnvBuilder):
 
     # Wait for the tenant to be loaded
     client = env.pageserver.http_client()
-    wait_until(
-        number_of_iterations=5,
-        interval=1,
-        func=lambda: assert_tenant_state(client, env.initial_tenant, "Active"),
-    )
+    wait_until(lambda: assert_tenant_state(client, env.initial_tenant, "Active"))
 
     assert_physical_size_invariants(
         get_physical_size_values(env, env.initial_tenant, new_timeline_id),
@@ -434,7 +429,7 @@ def test_timeline_physical_size_post_checkpoint(neon_env_builder: NeonEnvBuilder
             get_physical_size_values(env, env.initial_tenant, new_timeline_id),
         )
 
-    wait_until(10, 1, check)
+    wait_until(check)
 
 
 def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder):
@@ -668,7 +663,7 @@ def test_tenant_physical_size(neon_env_builder: NeonEnvBuilder):
 class TimelinePhysicalSizeValues:
     api_current_physical: int
     prometheus_resident_physical: float
-    prometheus_remote_physical: Optional[float] = None
+    prometheus_remote_physical: float | None = None
     python_timelinedir_layerfiles_physical: int
     layer_map_file_size_sum: int
 
@@ -722,7 +717,7 @@ def wait_for_tenant_startup_completions(client: PageserverHttpClient, count: int
     def condition():
         assert client.get_metric_value("pageserver_tenant_startup_complete_total") == count
 
-    wait_until(5, 1.0, condition)
+    wait_until(condition)
 
 
 def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
@@ -769,7 +764,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         assert "Active" in set(get_tenant_states().values())
 
     # One tenant should activate, then get stuck in their logical size calculation
-    wait_until(10, 1, at_least_one_active)
+    wait_until(at_least_one_active)
 
     # Wait some walltime to gain confidence that other tenants really are stuck and not proceeding to activate
     time.sleep(5)
@@ -837,13 +832,13 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     def all_active():
         assert all(s == "Active" for s in get_tenant_states().values())
 
-    wait_until(10, 1, all_active)
+    wait_until(all_active)
 
     # Final control check: restarting with no failpoints at all results in all tenants coming active
     # without being prompted by client I/O
     env.pageserver.stop()
     env.pageserver.start()
-    wait_until(10, 1, all_active)
+    wait_until(all_active)
 
     assert (
         pageserver_http.get_metric_value("pageserver_tenant_startup_scheduled_total") == n_tenants
@@ -857,7 +852,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         extra_env_vars={"FAILPOINTS": "timeline-calculate-logical-size-pause=pause"}
     )
 
-    wait_until(10, 1, at_least_one_active)
+    wait_until(at_least_one_active)
 
     detach_tenant_id = list(
         [(tid, s) for (tid, s) in get_tenant_states().items() if s == "Attaching"]
@@ -882,7 +877,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
 
     # Check that all the stuck tenants proceed to active (apart from the one that deletes, and the one
     # we detached)
-    wait_until(10, 1, all_active)
+    wait_until(all_active)
     assert len(get_tenant_states()) == n_tenants - 2
 
 
@@ -909,7 +904,7 @@ def delete_lazy_activating(
         try:
             # Deletion will get to the point in shutdown where it's waiting for timeline shutdown, then
             # hang because of our failpoint blocking activation.
-            wait_until(10, 1, shutting_down)
+            wait_until(shutting_down)
         finally:
             log.info("Clearing failpoint")
             pageserver_http.configure_failpoints(("timeline-calculate-logical-size-pause", "off"))
@@ -1031,13 +1026,13 @@ def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
         log.info(f"{states}")
         assert len(states["Active"]) == 1
 
-    wait_until(10, 1, one_is_active)
+    wait_until(one_is_active)
 
     def other_is_attaching():
         states = get_tenant_states()
         assert len(states["Attaching"]) == 1
 
-    wait_until(10, 1, other_is_attaching)
+    wait_until(other_is_attaching)
 
     def eager_tenant_is_active():
         resp = client.tenant_status(eager_tenant)
@@ -1054,7 +1049,7 @@ def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
         },
         lazy=False,
     )
-    wait_until(10, 1, eager_tenant_is_active)
+    wait_until(eager_tenant_is_active)
 
     other_is_attaching()
 
@@ -1097,7 +1092,7 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
         resp = client.tenant_status(env.initial_tenant)
         assert resp["state"]["slug"] == "Active"
 
-    wait_until(10, 1, initial_tenant_is_active)
+    wait_until(initial_tenant_is_active)
 
     # even though the initial tenant is now active, because it was startup time
     # attach, it will consume the only permit because logical size calculation
@@ -1120,7 +1115,7 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
         assert resp["state"]["slug"] == "Attaching"
 
     # paused logical size calculation of env.initial_tenant is keeping it attaching
-    wait_until(10, 1, lazy_tenant_is_attaching)
+    wait_until(lazy_tenant_is_attaching)
 
     for _ in range(5):
         lazy_tenant_is_attaching()
@@ -1133,10 +1128,10 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
     if activation_method == "endpoint":
         with env.endpoints.create_start("main", tenant_id=lazy_tenant):
             # starting up the endpoint should make it jump the queue
-            wait_until(10, 1, lazy_tenant_is_active)
+            wait_until(lazy_tenant_is_active)
     elif activation_method == "branch":
         env.create_timeline("second_branch", lazy_tenant)
-        wait_until(10, 1, lazy_tenant_is_active)
+        wait_until(lazy_tenant_is_active)
     elif activation_method == "delete":
         delete_lazy_activating(lazy_tenant, env.pageserver, expect_attaching=True)
     else:

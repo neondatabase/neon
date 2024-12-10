@@ -6,6 +6,7 @@ on:
       - main
       - release
       - release-proxy
+      - release-compute
   pull_request:
 
 defaults:
@@ -70,22 +71,18 @@ jobs:
             echo "tag=release-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
             echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
+            echo "tag=release-compute-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release', 'release-proxy', 'release-compute'"
             echo "tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
           fi
         shell: bash
         id: build-tag
 
-  check-build-tools-image:
-    needs: [ check-permissions ]
-    uses: ./.github/workflows/check-build-tools-image.yml
-
   build-build-tools-image:
-    needs: [ check-build-tools-image ]
+    needs: [ check-permissions ]
     uses: ./.github/workflows/build-build-tools-image.yml
-    with:
-      image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
     secrets: inherit
 
   check-codestyle-python:
@@ -259,7 +256,14 @@ jobs:
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
       # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
-      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16", "v17"]' || '["v17"]' }}
+      # run without LFC on v17 release only
+      test-cfg: |
+        ${{ matrix.build-type == 'release' && '[{"pg_version":"v14", "lfc_state": "without-lfc"},
+                                                {"pg_version":"v15", "lfc_state": "without-lfc"},
+                                                {"pg_version":"v16", "lfc_state": "without-lfc"},
+                                                {"pg_version":"v17", "lfc_state": "without-lfc"},
+                                                {"pg_version":"v17", "lfc_state": "with-lfc"}]'
+                                           || '[{"pg_version":"v17", "lfc_state": "without-lfc"}]' }}
     secrets: inherit
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
@@ -497,6 +501,8 @@ jobs:
           REPORT_URL_NEW: ${{ steps.upload-coverage-report-new.outputs.report-url }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         with:
+          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+          retries: 5
           script: |
             const { REPORT_URL_NEW, COMMIT_SHA } = process.env
 
@@ -510,7 +516,7 @@ jobs:
             })
 
   trigger-e2e-tests:
-    if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' }}
+    if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute' }}
     needs: [ check-permissions, promote-images, tag ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
     secrets: inherit
@@ -666,7 +672,7 @@ jobs:
             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
       - name: Build neon extensions test image
-        if: matrix.version.pg == 'v16'
+        if: matrix.version.pg >= 'v16'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -681,8 +687,7 @@ jobs:
           pull: true
           file: compute/compute-node.Dockerfile
           target: neon-pg-ext-test
-          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           tags: |
             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
@@ -705,7 +710,7 @@ jobs:
           push: true
           pull: true
           file: compute/compute-node.Dockerfile
-          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
+          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-tools-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
           tags: |
             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
@@ -741,7 +746,7 @@ jobs:
                                              neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
       - name: Create multi-arch neon-test-extensions image
-        if: matrix.version.pg == 'v16'
+        if: matrix.version.pg >= 'v16'
         run: |
           docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
                                           -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }} \
@@ -830,6 +835,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [ x64, arm64 ]
+        pg_version: [v16, v17]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
@@ -868,7 +874,10 @@ jobs:
 
       - name: Verify docker-compose example and test extensions
         timeout-minutes: 20
-        run: env TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
+        env:
+          TAG: ${{needs.tag.outputs.build-tag}}
+          TEST_VERSION_ONLY: ${{ matrix.pg_version }}
+        run: ./docker-compose/docker_compose_test.sh
 
       - name: Print logs and clean up
         if: always()
@@ -928,7 +937,7 @@ jobs:
                                               neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
 
       - name: Configure AWS-prod credentials
-        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: eu-central-1
@@ -937,12 +946,12 @@ jobs:
 
       - name: Login to prod ECR
         uses: docker/login-action@v3
-        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
         with:
           registry: 093970136003.dkr.ecr.eu-central-1.amazonaws.com
 
       - name: Copy all images to prod ECR
-        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
         run: |
           for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16,v17}; do
             docker buildx imagetools create -t 093970136003.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }} \
@@ -962,7 +971,7 @@ jobs:
       tenant_id: ${{ vars.AZURE_TENANT_ID }}
 
   push-to-acr-prod:
-    if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+    if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
     needs: [ tag, promote-images ]
     uses: ./.github/workflows/_push-to-acr.yml
     with:
@@ -1050,7 +1059,7 @@ jobs:
   deploy:
     needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
     # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
-    if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy') && !failure() && !cancelled()
+    if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute') && !failure() && !cancelled()
 
     runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
@@ -1099,13 +1108,15 @@ jobs:
               -f deployProxyAuthBroker=true \
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
+          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
+            gh workflow --repo neondatabase/infra run deploy-compute-dev.yml --ref main -f dockerTag=${{needs.tag.outputs.build-tag}}
           else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main', 'release', 'release-proxy' or 'release-compute'"
             exit 1
           fi
 
       - name: Create git tag
-        if: github.ref_name == 'release' || github.ref_name == 'release-proxy'
+        if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
         uses: actions/github-script@v7
         with:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries

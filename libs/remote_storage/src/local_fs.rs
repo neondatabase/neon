@@ -360,7 +360,12 @@ impl RemoteStorage for LocalFs {
             let mut objects = Vec::with_capacity(keys.len());
             for key in keys {
                 let path = key.with_base(&self.storage_root);
-                let metadata = file_metadata(&path).await?;
+                let metadata = file_metadata(&path).await;
+                if let Err(DownloadError::NotFound) = metadata {
+                    // Race: if the file is deleted between listing and metadata check, ignore it.
+                    continue;
+                }
+                let metadata = metadata?;
                 if metadata.is_dir() {
                     continue;
                 }
@@ -566,6 +571,10 @@ impl RemoteStorage for LocalFs {
             self.delete(path, cancel).await?
         }
         Ok(())
+    }
+
+    fn max_keys_per_delete(&self) -> usize {
+        super::MAX_KEYS_PER_DELETE_S3
     }
 
     async fn copy(

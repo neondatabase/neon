@@ -2,6 +2,8 @@ pub mod detach_ancestor;
 pub mod partitioning;
 pub mod utilization;
 
+#[cfg(feature = "testing")]
+use camino::Utf8PathBuf;
 pub use utilization::PageserverUtilization;
 
 use std::{
@@ -21,6 +23,7 @@ use utils::{
     completion,
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
+    postgres_client::PostgresClientProtocol,
     serde_system_time,
 };
 
@@ -227,6 +230,9 @@ pub enum TimelineCreateRequestMode {
         // we continue to accept it by having it here.
         pg_version: Option<u32>,
     },
+    ImportPgdata {
+        import_pgdata: TimelineCreateRequestModeImportPgdata,
+    },
     // NB: Bootstrap is all-optional, and thus the serde(untagged) will cause serde to stop at Bootstrap.
     // (serde picks the first matching enum variant, in declaration order).
     Bootstrap {
@@ -234,6 +240,42 @@ pub enum TimelineCreateRequestMode {
         existing_initdb_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
     },
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TimelineCreateRequestModeImportPgdata {
+    pub location: ImportPgdataLocation,
+    pub idempotency_key: ImportPgdataIdempotencyKey,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum ImportPgdataLocation {
+    #[cfg(feature = "testing")]
+    LocalFs { path: Utf8PathBuf },
+    AwsS3 {
+        region: String,
+        bucket: String,
+        /// A better name for this would be `prefix`; changing requires coordination with cplane.
+        /// See <https://github.com/neondatabase/cloud/issues/20646>.
+        key: String,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(transparent)]
+pub struct ImportPgdataIdempotencyKey(pub String);
+
+impl ImportPgdataIdempotencyKey {
+    pub fn random() -> Self {
+        use rand::{distributions::Alphanumeric, Rng};
+        Self(
+            rand::thread_rng()
+                .sample_iter(&Alphanumeric)
+                .take(20)
+                .map(char::from)
+                .collect(),
+        )
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -311,6 +353,7 @@ pub struct TenantConfig {
     pub lsn_lease_length: Option<String>,
     pub lsn_lease_length_for_ts: Option<String>,
     pub timeline_offloading: Option<bool>,
+    pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
 }
 
 /// The policy for the aux file storage.
@@ -458,7 +501,9 @@ pub struct EvictionPolicyLayerAccessThreshold {
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct ThrottleConfig {
-    pub task_kinds: Vec<String>, // TaskKind
+    /// See [`ThrottleConfigTaskKinds`] for why we do the serde `rename`.
+    #[serde(rename = "task_kinds")]
+    pub enabled: ThrottleConfigTaskKinds,
     pub initial: u32,
     #[serde(with = "humantime_serde")]
     pub refill_interval: Duration,
@@ -466,10 +511,38 @@ pub struct ThrottleConfig {
     pub max: u32,
 }
 
+/// Before <https://github.com/neondatabase/neon/pull/9962>
+/// the throttle was a per `Timeline::get`/`Timeline::get_vectored` call.
+/// The `task_kinds` field controlled which Pageserver "Task Kind"s
+/// were subject to the throttle.
+///
+/// After that PR, the throttle is applied at pagestream request level
+/// and the `task_kinds` field does not apply since the only task kind
+/// that us subject to the throttle is that of the page service.
+///
+/// However, we don't want to make a breaking config change right now
+/// because it means we have to migrate all the tenant configs.
+/// This will be done in a future PR.
+///
+/// In the meantime, we use emptiness / non-emptsiness of the `task_kinds`
+/// field to determine if the throttle is enabled or not.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct ThrottleConfigTaskKinds(Vec<String>);
+
+impl ThrottleConfigTaskKinds {
+    pub fn disabled() -> Self {
+        Self(vec![])
+    }
+    pub fn is_enabled(&self) -> bool {
+        !self.0.is_empty()
+    }
+}
+
 impl ThrottleConfig {
     pub fn disabled() -> Self {
         Self {
-            task_kinds: vec![], // effectively disables the throttle
+            enabled: ThrottleConfigTaskKinds::disabled(),
             // other values don't matter with emtpy `task_kinds`.
             initial: 0,
             refill_interval: Duration::from_millis(1),
@@ -480,6 +553,30 @@ impl ThrottleConfig {
     /// The requests per second allowed  by the given config.
     pub fn steady_rps(&self) -> f64 {
         (self.refill_amount.get() as f64) / (self.refill_interval.as_secs_f64())
+    }
+}
+
+#[cfg(test)]
+mod throttle_config_tests {
+    use super::*;
+
+    #[test]
+    fn test_disabled_is_disabled() {
+        let config = ThrottleConfig::disabled();
+        assert!(!config.enabled.is_enabled());
+    }
+    #[test]
+    fn test_enabled_backwards_compat() {
+        let input = serde_json::json!({
+            "task_kinds": ["PageRequestHandler"],
+            "initial": 40000,
+            "refill_interval": "50ms",
+            "refill_amount": 1000,
+            "max": 40000,
+            "fair": true
+        });
+        let config: ThrottleConfig = serde_json::from_value(input).unwrap();
+        assert!(config.enabled.is_enabled());
     }
 }
 

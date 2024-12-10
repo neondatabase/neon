@@ -1,5 +1,5 @@
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::info;
+use tracing::debug;
 use utils::measured_stream::MeasuredStream;
 
 use super::copy_bidirectional::ErrorSource;
@@ -45,7 +45,7 @@ pub(crate) async fn proxy_pass(
     );
 
     // Starting from here we only proxy the client's traffic.
-    info!("performing the proxy pass...");
+    debug!("performing the proxy pass...");
     let _ = crate::proxy::copy_bidirectional::copy_bidirectional_client_compute(
         &mut client,
         &mut compute,
@@ -59,6 +59,7 @@ pub(crate) struct ProxyPassthrough<P, S> {
     pub(crate) client: Stream<S>,
     pub(crate) compute: PostgresConnection,
     pub(crate) aux: MetricsAuxInfo,
+    pub(crate) session_id: uuid::Uuid,
 
     pub(crate) _req: NumConnectionRequestsGuard<'static>,
     pub(crate) _conn: NumClientConnectionsGuard<'static>,
@@ -69,7 +70,7 @@ impl<P, S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<P, S> {
     pub(crate) async fn proxy_pass(self) -> Result<(), ErrorSource> {
         let res = proxy_pass(self.client, self.compute.stream, self.aux).await;
         if let Err(err) = self.compute.cancel_closure.try_cancel_query().await {
-            tracing::warn!(?err, "could not cancel the query in the database");
+            tracing::warn!(session_id = ?self.session_id, ?err, "could not cancel the query in the database");
         }
         res
     }

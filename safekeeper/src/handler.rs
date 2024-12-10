@@ -2,11 +2,15 @@
 //! protocol commands.
 
 use anyhow::Context;
+use pageserver_api::models::ShardParameters;
+use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
 use std::future::Future;
 use std::str::{self, FromStr};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, info_span, Instrument};
+use utils::postgres_client::PostgresClientProtocol;
+use utils::shard::{ShardCount, ShardNumber};
 
 use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
@@ -29,14 +33,17 @@ use utils::{
 
 /// Safekeeper handler of postgres commands
 pub struct SafekeeperPostgresHandler {
-    pub conf: SafeKeeperConf,
+    pub conf: Arc<SafeKeeperConf>,
     /// assigned application name
     pub appname: Option<String>,
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
     pub ttid: TenantTimelineId,
+    pub shard: Option<ShardIdentity>,
+    pub protocol: Option<PostgresClientProtocol>,
     /// Unique connection id is logged in spans for observability.
     pub conn_id: ConnectionId,
+    pub global_timelines: Arc<GlobalTimelines>,
     /// Auth scope allowed on the connections and public key used to check auth tokens. None if auth is not configured.
     auth: Option<(Scope, Arc<JwtAuth>)>,
     claims: Option<Claims>,
@@ -107,11 +114,21 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
     ) -> Result<(), QueryError> {
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
             if let Some(options) = params.options_raw() {
+                let mut shard_count: Option<u8> = None;
+                let mut shard_number: Option<u8> = None;
+                let mut shard_stripe_size: Option<u32> = None;
+
                 for opt in options {
                     // FIXME `ztenantid` and `ztimelineid` left for compatibility during deploy,
                     // remove these after the PR gets deployed:
                     // https://github.com/neondatabase/neon/pull/2433#discussion_r970005064
                     match opt.split_once('=') {
+                        Some(("protocol", value)) => {
+                            self.protocol =
+                                Some(serde_json::from_str(value).with_context(|| {
+                                    format!("Failed to parse {value} as protocol")
+                                })?);
+                        }
                         Some(("ztenantid", value)) | Some(("tenant_id", value)) => {
                             self.tenant_id = Some(value.parse().with_context(|| {
                                 format!("Failed to parse {value} as tenant id")
@@ -127,7 +144,52 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                                 metrics.set_client_az(client_az)
                             }
                         }
+                        Some(("shard_count", value)) => {
+                            shard_count = Some(value.parse::<u8>().with_context(|| {
+                                format!("Failed to parse {value} as shard count")
+                            })?);
+                        }
+                        Some(("shard_number", value)) => {
+                            shard_number = Some(value.parse::<u8>().with_context(|| {
+                                format!("Failed to parse {value} as shard number")
+                            })?);
+                        }
+                        Some(("shard_stripe_size", value)) => {
+                            shard_stripe_size = Some(value.parse::<u32>().with_context(|| {
+                                format!("Failed to parse {value} as shard stripe size")
+                            })?);
+                        }
                         _ => continue,
+                    }
+                }
+
+                match self.protocol() {
+                    PostgresClientProtocol::Vanilla => {
+                        if shard_count.is_some()
+                            || shard_number.is_some()
+                            || shard_stripe_size.is_some()
+                        {
+                            return Err(QueryError::Other(anyhow::anyhow!(
+                                "Shard params specified for vanilla protocol"
+                            )));
+                        }
+                    }
+                    PostgresClientProtocol::Interpreted { .. } => {
+                        match (shard_count, shard_number, shard_stripe_size) {
+                            (Some(count), Some(number), Some(stripe_size)) => {
+                                let params = ShardParameters {
+                                    count: ShardCount(count),
+                                    stripe_size: ShardStripeSize(stripe_size),
+                                };
+                                self.shard =
+                                    Some(ShardIdentity::from_params(ShardNumber(number), &params));
+                            }
+                            _ => {
+                                return Err(QueryError::Other(anyhow::anyhow!(
+                                    "Shard params were not specified"
+                                )));
+                            }
+                        }
                     }
                 }
             }
@@ -149,6 +211,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                     "application_name",
                     tracing::field::debug(self.appname.clone()),
                 );
+
+            if let Some(shard) = self.shard.as_ref() {
+                if let Some(slug) = shard.shard_slug().strip_prefix("-") {
+                    tracing::Span::current().record("shard", tracing::field::display(slug));
+                }
+            }
 
             Ok(())
         } else {
@@ -247,10 +315,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
 
 impl SafekeeperPostgresHandler {
     pub fn new(
-        conf: SafeKeeperConf,
+        conf: Arc<SafeKeeperConf>,
         conn_id: u32,
         io_metrics: Option<TrafficMetrics>,
         auth: Option<(Scope, Arc<JwtAuth>)>,
+        global_timelines: Arc<GlobalTimelines>,
     ) -> Self {
         SafekeeperPostgresHandler {
             conf,
@@ -258,11 +327,18 @@ impl SafekeeperPostgresHandler {
             tenant_id: None,
             timeline_id: None,
             ttid: TenantTimelineId::empty(),
+            shard: None,
+            protocol: None,
             conn_id,
             claims: None,
             auth,
             io_metrics,
+            global_timelines,
         }
+    }
+
+    pub fn protocol(&self) -> PostgresClientProtocol {
+        self.protocol.unwrap_or(PostgresClientProtocol::Vanilla)
     }
 
     // when accessing management api supply None as an argument
@@ -287,7 +363,7 @@ impl SafekeeperPostgresHandler {
         pgb: &mut PostgresBackend<IO>,
     ) -> Result<(), QueryError> {
         // Get timeline, handling "not found" error
-        let tli = match GlobalTimelines::get(self.ttid) {
+        let tli = match self.global_timelines.get(self.ttid) {
             Ok(tli) => Ok(Some(tli)),
             Err(TimelineError::NotFound(_)) => Ok(None),
             Err(e) => Err(QueryError::Other(e.into())),
@@ -321,7 +397,10 @@ impl SafekeeperPostgresHandler {
         &mut self,
         pgb: &mut PostgresBackend<IO>,
     ) -> Result<(), QueryError> {
-        let tli = GlobalTimelines::get(self.ttid).map_err(|e| QueryError::Other(e.into()))?;
+        let tli = self
+            .global_timelines
+            .get(self.ttid)
+            .map_err(|e| QueryError::Other(e.into()))?;
 
         let lsn = if self.is_walproposer_recovery() {
             // walproposer should get all local WAL until flush_lsn

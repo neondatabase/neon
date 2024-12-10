@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from typing import Union
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
@@ -174,7 +173,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 
     def get_layers_protected_by_lease(
         ps_http: PageserverHttpClient,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         lease_lsn: Lsn,
     ) -> set[str]:
@@ -216,8 +215,6 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 
         # wait for lease renewal before running query.
         _, offset = wait_until(
-            20,
-            0.5,
             lambda: ep_static.assert_log_contains(
                 "lsn_lease_bg_task.*Request succeeded", offset=offset
             ),
@@ -231,7 +228,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
         return offset
 
     # Insert some records on main branch
-    with env.endpoints.create_start("main") as ep_main:
+    with env.endpoints.create_start("main", config_lines=["shared_buffers=1MB"]) as ep_main:
         with ep_main.cursor() as cur:
             cur.execute("CREATE TABLE t0(v0 int primary key, v1 text)")
         lsn = Lsn(0)

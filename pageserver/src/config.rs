@@ -14,6 +14,7 @@ use remote_storage::{RemotePath, RemoteStorageConfig};
 use std::env;
 use storage_broker::Uri;
 use utils::logging::SecretString;
+use utils::postgres_client::PostgresClientProtocol;
 
 use once_cell::sync::OnceCell;
 use reqwest::Url;
@@ -144,6 +145,10 @@ pub struct PageServerConf {
     /// JWT token for use with the control plane API.
     pub control_plane_api_token: Option<SecretString>,
 
+    pub import_pgdata_upcall_api: Option<Url>,
+    pub import_pgdata_upcall_api_token: Option<SecretString>,
+    pub import_pgdata_aws_endpoint_url: Option<Url>,
+
     /// If true, pageserver will make best-effort to operate without a control plane: only
     /// for use in major incidents.
     pub control_plane_emergency_mode: bool,
@@ -182,6 +187,10 @@ pub struct PageServerConf {
 
     /// Optionally disable disk syncs (unsafe!)
     pub no_sync: bool,
+
+    pub wal_receiver_protocol: PostgresClientProtocol,
+
+    pub page_service_pipelining: pageserver_api::config::PageServicePipeliningConfig,
 }
 
 /// Token for authentication to safekeepers
@@ -324,6 +333,9 @@ impl PageServerConf {
             control_plane_api,
             control_plane_api_token,
             control_plane_emergency_mode,
+            import_pgdata_upcall_api,
+            import_pgdata_upcall_api_token,
+            import_pgdata_aws_endpoint_url,
             heatmap_upload_concurrency,
             secondary_download_concurrency,
             ingest_batch_size,
@@ -338,6 +350,8 @@ impl PageServerConf {
             virtual_file_io_engine,
             tenant_config,
             no_sync,
+            wal_receiver_protocol,
+            page_service_pipelining,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -377,6 +391,11 @@ impl PageServerConf {
             image_compression,
             timeline_offloading,
             ephemeral_bytes_per_memory_kb,
+            import_pgdata_upcall_api,
+            import_pgdata_upcall_api_token: import_pgdata_upcall_api_token.map(SecretString::from),
+            import_pgdata_aws_endpoint_url,
+            wal_receiver_protocol,
+            page_service_pipelining,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling

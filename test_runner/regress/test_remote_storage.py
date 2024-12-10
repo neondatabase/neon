@@ -5,7 +5,6 @@ import queue
 import shutil
 import threading
 import time
-from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -36,9 +35,6 @@ from fixtures.utils import (
     wait_until,
 )
 from requests import ReadTimeout
-
-if TYPE_CHECKING:
-    from typing import Optional
 
 
 #
@@ -304,9 +300,9 @@ def test_remote_storage_upload_queue_retries(
     print_gc_result(gc_result)
     assert gc_result["layers_removed"] > 0
 
-    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
-    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
-    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
+    wait_until(lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
+    wait_until(lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
+    wait_until(lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
 
     # let all future operations queue up
     configure_storage_sync_failpoints("return")
@@ -337,16 +333,28 @@ def test_remote_storage_upload_queue_retries(
     # wait for churn thread's data to get stuck in the upload queue
     # Exponential back-off in upload queue, so, gracious timeouts.
 
-    wait_until(30, 1, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="upload"), 0))
-    wait_until(30, 1, lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 1))
-    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
+    wait_until(
+        lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="upload"), 0), timeout=30
+    )
+    wait_until(
+        lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 1), timeout=30
+    )
+    wait_until(
+        lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0), timeout=30
+    )
 
     # unblock churn operations
     configure_storage_sync_failpoints("off")
 
-    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
-    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
-    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
+    wait_until(
+        lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0), timeout=30
+    )
+    wait_until(
+        lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0), timeout=30
+    )
+    wait_until(
+        lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0), timeout=30
+    )
 
     # The churn thread doesn't make progress once it blocks on the first wait_completion() call,
     # so, give it some time to wrap up.
@@ -452,7 +460,7 @@ def test_remote_timeline_client_calls_started_metric(
         for (file_kind, op_kind), observations in calls_started.items():
             log.info(f"ensure_calls_started_grew: {file_kind} {op_kind}: {observations}")
             assert all(
-                x < y for x, y in zip(observations, observations[1:])
+                x < y for x, y in zip(observations, observations[1:], strict=False)
             ), f"observations for {file_kind} {op_kind} did not grow monotonically: {observations}"
 
     def churn(data_pass1, data_pass2):
@@ -584,7 +592,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
             > 0
         )
 
-    wait_until(200, 0.1, assert_compacted_and_uploads_queued)
+    wait_until(assert_compacted_and_uploads_queued)
 
     # Regardless, give checkpoint some time to block for good.
     # Not strictly necessary, but might help uncover failure modes in the future.
@@ -602,9 +610,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         ]
     )
 
-    # Generous timeout, because currently deletions can get blocked waiting for compaction
-    # This can be reduced when https://github.com/neondatabase/neon/issues/4998 is fixed.
-    timeline_delete_wait_completed(client, tenant_id, timeline_id, iterations=30, interval=1)
+    timeline_delete_wait_completed(client, tenant_id, timeline_id)
 
     assert not timeline_path.exists()
 
@@ -731,7 +737,7 @@ def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnv
     # sleep a bit to force the upload task go into exponential backoff
     time.sleep(1)
 
-    q: queue.Queue[Optional[PageserverApiException]] = queue.Queue()
+    q: queue.Queue[PageserverApiException | None] = queue.Queue()
     barrier = threading.Barrier(2)
 
     def create_in_background():
@@ -830,22 +836,16 @@ def wait_upload_queue_empty(
     client: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
 ):
     wait_until(
-        2,
-        1,
         lambda: assert_eq(
             get_queued_count(client, tenant_id, timeline_id, file_kind="layer", op_kind="upload"), 0
         ),
     )
     wait_until(
-        2,
-        1,
         lambda: assert_eq(
             get_queued_count(client, tenant_id, timeline_id, file_kind="index", op_kind="upload"), 0
         ),
     )
     wait_until(
-        2,
-        1,
         lambda: assert_eq(
             get_queued_count(client, tenant_id, timeline_id, file_kind="layer", op_kind="delete"), 0
         ),

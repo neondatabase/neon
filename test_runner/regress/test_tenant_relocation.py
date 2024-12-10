@@ -28,7 +28,7 @@ from fixtures.utils import (
 )
 
 if TYPE_CHECKING:
-    from typing import Any, Optional
+    from typing import Any
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
@@ -78,7 +78,7 @@ def populate_branch(
     tenant_id: TenantId,
     ps_http: PageserverHttpClient,
     create_table: bool,
-    expected_sum: Optional[int],
+    expected_sum: int | None,
 ) -> tuple[TimelineId, Lsn]:
     # insert some data
     with pg_cur(endpoint) as cur:
@@ -298,11 +298,7 @@ def test_tenant_relocation(
         destination_ps.tenant_attach(tenant_id)
 
         # wait for tenant to finish attaching
-        wait_until(
-            number_of_iterations=10,
-            interval=1,
-            func=lambda: assert_tenant_state(destination_http, tenant_id, "Active"),
-        )
+        wait_until(lambda: assert_tenant_state(destination_http, tenant_id, "Active"))
 
         check_timeline_attached(
             destination_http,

@@ -22,21 +22,22 @@ use indexmap::IndexMap;
 use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
 use p256::ecdsa::{Signature, SigningKey};
 use parking_lot::RwLock;
+use postgres_client::tls::NoTlsStream;
+use postgres_client::types::ToSql;
+use postgres_client::AsyncMessage;
 use serde_json::value::RawValue;
 use signature::Signer;
+use tokio::net::TcpStream;
 use tokio::time::Instant;
-use tokio_postgres::tls::NoTlsStream;
-use tokio_postgres::types::ToSql;
-use tokio_postgres::{AsyncMessage, Socket};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use super::backend::HttpConnError;
 use super::conn_pool_lib::{
     Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, DbUserConn,
     EndpointConnPool,
 };
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
 
@@ -44,6 +45,7 @@ pub(crate) const EXT_NAME: &str = "pg_session_jwt";
 pub(crate) const EXT_VERSION: &str = "0.1.2";
 pub(crate) const EXT_SCHEMA: &str = "auth";
 
+#[derive(Clone)]
 pub(crate) struct ClientDataLocal {
     session: tokio::sync::watch::Sender<uuid::Uuid>,
     cancel: CancellationToken,
@@ -88,7 +90,7 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
 
     pub(crate) fn get(
         self: &Arc<Self>,
-        ctx: &RequestMonitoring,
+        ctx: &RequestContext,
         conn_info: &ConnInfo,
     ) -> Result<Option<Client<C>>, HttpConnError> {
         let client = self
@@ -110,7 +112,7 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
                 "pid",
                 tracing::field::display(client.inner.get_process_id()),
             );
-            info!(
+            debug!(
                 cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
                 "local_pool: reusing connection '{conn_info}'"
             );
@@ -159,10 +161,10 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn poll_client<C: ClientInnerExt>(
     global_pool: Arc<LocalConnPool<C>>,
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
-    mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
+    mut connection: postgres_client::Connection<TcpStream, NoTlsStream>,
     key: SigningKey,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
@@ -278,18 +280,18 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     )
 }
 
-impl ClientInnerCommon<tokio_postgres::Client> {
+impl ClientInnerCommon<postgres_client::Client> {
     pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), HttpConnError> {
         if let ClientDataEnum::Local(local_data) = &mut self.data {
             local_data.jti += 1;
             let token = resign_jwt(&local_data.key, payload, local_data.jti)?;
 
             // initiates the auth session
-            self.inner.simple_query("discard all").await?;
+            self.inner.batch_execute("discard all").await?;
             self.inner
-                .query(
+                .execute(
                     "select auth.jwt_session_init($1)",
-                    &[&token as &(dyn ToSql + Sync)],
+                    &[&&*token as &(dyn ToSql + Sync)],
                 )
                 .await?;
 

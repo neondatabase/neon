@@ -351,6 +351,7 @@ pub enum CancellationSource {
 pub enum CancellationOutcome {
     NotFound,
     Found,
+    RateLimitExceeded,
 }
 
 #[derive(LabelGroup)]

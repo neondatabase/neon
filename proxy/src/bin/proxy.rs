@@ -3,14 +3,6 @@ use std::pin::pin;
 use std::sync::Arc;
 
 use anyhow::bail;
-use aws_config::environment::EnvironmentVariableCredentialsProvider;
-use aws_config::imds::credentials::ImdsCredentialsProvider;
-use aws_config::meta::credentials::CredentialsProviderChain;
-use aws_config::meta::region::RegionProviderChain;
-use aws_config::profile::ProfileFileCredentialsProvider;
-use aws_config::provider_config::ProviderConfig;
-use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
-use aws_config::Region;
 use futures::future::Either;
 use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
@@ -53,6 +45,9 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 enum AuthBackendType {
     #[value(name("console"), alias("cplane"))]
     ControlPlane,
+
+    #[value(name("cplane-v1"), alias("control-plane"))]
+    ControlPlaneV1,
 
     #[value(name("link"), alias("control-redirect"))]
     ConsoleRedirect,
@@ -276,7 +271,7 @@ struct SqlOverHttpArgs {
     sql_over_http_cancel_set_shards: usize,
 
     #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
-    sql_over_http_max_request_size_bytes: u64,
+    sql_over_http_max_request_size_bytes: usize,
 
     #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
     sql_over_http_max_response_size_bytes: usize,
@@ -288,6 +283,7 @@ async fn main() -> anyhow::Result<()> {
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
+    // TODO: refactor these to use labels
     info!("Version: {GIT_VERSION}");
     info!("Build_tag: {BUILD_TAG}");
     let neon_metrics = ::metrics::NeonMetrics::new(::metrics::BuildInfo {
@@ -313,39 +309,7 @@ async fn main() -> anyhow::Result<()> {
     };
     info!("Using region: {}", args.aws_region);
 
-    let region_provider =
-        RegionProviderChain::default_provider().or_else(Region::new(args.aws_region.clone()));
-    let provider_conf =
-        ProviderConfig::without_region().with_region(region_provider.region().await);
-    let aws_credentials_provider = {
-        // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
-        CredentialsProviderChain::first_try("env", EnvironmentVariableCredentialsProvider::new())
-            // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
-            .or_else(
-                "profile-sso",
-                ProfileFileCredentialsProvider::builder()
-                    .configure(&provider_conf)
-                    .build(),
-            )
-            // uses "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
-            // needed to access remote extensions bucket
-            .or_else(
-                "token",
-                WebIdentityTokenCredentialsProvider::builder()
-                    .configure(&provider_conf)
-                    .build(),
-            )
-            // uses imds v2
-            .or_else("imds", ImdsCredentialsProvider::builder().build())
-    };
-    let elasticache_credentials_provider = Arc::new(elasticache::CredentialsProvider::new(
-        elasticache::AWSIRSAConfig::new(
-            args.aws_region.clone(),
-            args.redis_cluster_name,
-            args.redis_user_id,
-        ),
-        aws_credentials_provider,
-    ));
+    // TODO: untangle the config args
     let regional_redis_client = match (args.redis_auth_type.as_str(), &args.redis_notifications) {
         ("plain", redis_url) => match redis_url {
             None => {
@@ -360,7 +324,12 @@ async fn main() -> anyhow::Result<()> {
                 ConnectionWithCredentialsProvider::new_with_credentials_provider(
                     host.to_string(),
                     port,
-                    elasticache_credentials_provider.clone(),
+                    elasticache::CredentialsProvider::new(
+                        args.aws_region,
+                        args.redis_cluster_name,
+                        args.redis_user_id,
+                    )
+                    .await,
                 ),
             ),
             (None, None) => {
@@ -427,8 +396,9 @@ async fn main() -> anyhow::Result<()> {
         )?))),
         None => None,
     };
+
     let cancellation_handler = Arc::new(CancellationHandler::<
-        Option<Arc<tokio::sync::Mutex<RedisPublisherClient>>>,
+        Option<Arc<Mutex<RedisPublisherClient>>>,
     >::new(
         cancel_map.clone(),
         redis_publisher,
@@ -515,14 +485,43 @@ async fn main() -> anyhow::Result<()> {
     if let Some(metrics_config) = &config.metric_collection {
         // TODO: Add gc regardles of the metric collection being enabled.
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
-        client_tasks.spawn(usage_metrics::task_backup(
-            &metrics_config.backup_metric_collection_config,
-            cancellation_token.clone(),
-        ));
     }
 
     if let Either::Left(auth::Backend::ControlPlane(api, _)) = &auth_backend {
         if let proxy::control_plane::client::ControlPlaneClient::Neon(api) = &**api {
+            match (redis_notifications_client, regional_redis_client.clone()) {
+                (None, None) => {}
+                (client1, client2) => {
+                    let cache = api.caches.project_info.clone();
+                    if let Some(client) = client1 {
+                        maintenance_tasks.spawn(notifications::task_main(
+                            client,
+                            cache.clone(),
+                            cancel_map.clone(),
+                            args.region.clone(),
+                        ));
+                    }
+                    if let Some(client) = client2 {
+                        maintenance_tasks.spawn(notifications::task_main(
+                            client,
+                            cache.clone(),
+                            cancel_map.clone(),
+                            args.region.clone(),
+                        ));
+                    }
+                    maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+                }
+            }
+            if let Some(regional_redis_client) = regional_redis_client {
+                let cache = api.caches.endpoints_cache.clone();
+                let con = regional_redis_client;
+                let span = tracing::info_span!("endpoints_cache");
+                maintenance_tasks.spawn(
+                    async move { cache.do_read(con, cancellation_token.clone()).await }
+                        .instrument(span),
+                );
+            }
+        } else if let proxy::control_plane::client::ControlPlaneClient::ProxyV1(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
                 (client1, client2) => {
@@ -699,6 +698,65 @@ fn build_auth_backend(
     args: &ProxyCliArgs,
 ) -> anyhow::Result<Either<&'static auth::Backend<'static, ()>, &'static ConsoleRedirectBackend>> {
     match &args.auth_backend {
+        AuthBackendType::ControlPlaneV1 => {
+            let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
+            let project_info_cache_config: ProjectInfoCacheOptions =
+                args.project_info_cache.parse()?;
+            let endpoint_cache_config: config::EndpointCacheConfig =
+                args.endpoint_cache_config.parse()?;
+
+            info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
+            info!(
+                "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
+            );
+            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
+            let caches = Box::leak(Box::new(control_plane::caches::ApiCaches::new(
+                wake_compute_cache_config,
+                project_info_cache_config,
+                endpoint_cache_config,
+            )));
+
+            let config::ConcurrencyLockOptions {
+                shards,
+                limiter,
+                epoch,
+                timeout,
+            } = args.wake_compute_lock.parse()?;
+            info!(?limiter, shards, ?epoch, "Using NodeLocks (wake_compute)");
+            let locks = Box::leak(Box::new(control_plane::locks::ApiLocks::new(
+                "wake_compute_lock",
+                limiter,
+                shards,
+                timeout,
+                epoch,
+                &Metrics::get().wake_compute_lock,
+            )?));
+            tokio::spawn(locks.garbage_collect_worker());
+
+            let url: proxy::url::ApiUrl = args.auth_endpoint.parse()?;
+
+            let endpoint = http::Endpoint::new(url, http::new_client());
+
+            let mut wake_compute_rps_limit = args.wake_compute_limit.clone();
+            RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
+            let wake_compute_endpoint_rate_limiter =
+                Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
+
+            let api = control_plane::client::cplane_proxy_v1::NeonControlPlaneClient::new(
+                endpoint,
+                args.control_plane_token.clone(),
+                caches,
+                locks,
+                wake_compute_endpoint_rate_limiter,
+            );
+
+            let api = control_plane::client::ControlPlaneClient::ProxyV1(api);
+            let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
+            let config = Box::leak(Box::new(auth_backend));
+
+            Ok(Either::Left(config))
+        }
+
         AuthBackendType::ControlPlane => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
@@ -734,13 +792,15 @@ fn build_auth_backend(
             )?));
             tokio::spawn(locks.garbage_collect_worker());
 
-            let url = args.auth_endpoint.parse()?;
+            let url: proxy::url::ApiUrl = args.auth_endpoint.parse()?;
+
             let endpoint = http::Endpoint::new(url, http::new_client());
 
             let mut wake_compute_rps_limit = args.wake_compute_limit.clone();
             RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
             let wake_compute_endpoint_rate_limiter =
                 Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
+
             let api = control_plane::client::neon::NeonControlPlaneClient::new(
                 endpoint,
                 args.control_plane_token.clone(),

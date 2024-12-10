@@ -31,7 +31,7 @@ from h2.settings import SettingCodes
 from typing_extensions import override
 
 if TYPE_CHECKING:
-    from typing import Any, Optional
+    from typing import Any
 
 
 RequestData = collections.namedtuple("RequestData", ["headers", "data"])
@@ -49,7 +49,7 @@ class H2Protocol(asyncio.Protocol):
     def __init__(self):
         config = H2Configuration(client_side=False, header_encoding="utf-8")
         self.conn = H2Connection(config=config)
-        self.transport: Optional[asyncio.Transport] = None
+        self.transport: asyncio.Transport | None = None
         self.stream_data: dict[int, RequestData] = {}
         self.flow_control_futures: dict[int, asyncio.Future[Any]] = {}
 
@@ -61,7 +61,7 @@ class H2Protocol(asyncio.Protocol):
         self.transport.write(self.conn.data_to_send())
 
     @override
-    def connection_lost(self, exc: Optional[Exception]):
+    def connection_lost(self, exc: Exception | None):
         for future in self.flow_control_futures.values():
             future.cancel()
         self.flow_control_futures = {}

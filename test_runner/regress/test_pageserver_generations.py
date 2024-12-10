@@ -11,11 +11,10 @@ of the pageserver are:
 
 from __future__ import annotations
 
-import enum
 import os
 import re
 import time
-from typing import TYPE_CHECKING
+from enum import StrEnum
 
 import pytest
 from fixtures.common_types import TenantId, TimelineId
@@ -35,14 +34,11 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.remote_storage import (
+    LocalFsStorage,
     RemoteStorageKind,
 )
-from fixtures.utils import wait_until
+from fixtures.utils import run_only_on_default_postgres, wait_until
 from fixtures.workload import Workload
-
-if TYPE_CHECKING:
-    from typing import Optional
-
 
 # A tenant configuration that is convenient for generating uploads and deletions
 # without a large amount of postgres traffic.
@@ -64,7 +60,7 @@ TENANT_CONF = {
 
 
 def read_all(
-    env: NeonEnv, tenant_id: Optional[TenantId] = None, timeline_id: Optional[TimelineId] = None
+    env: NeonEnv, tenant_id: TenantId | None = None, timeline_id: TimelineId | None = None
 ):
     if tenant_id is None:
         tenant_id = env.initial_tenant
@@ -285,12 +281,12 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     assert get_deletion_queue_unexpected_errors(ps_http) == 0
 
 
-class KeepAttachment(str, enum.Enum):
+class KeepAttachment(StrEnum):
     KEEP = "keep"
     LOSE = "lose"
 
 
-class ValidateBefore(str, enum.Enum):
+class ValidateBefore(StrEnum):
     VALIDATE = "validate"
     NO_VALIDATE = "no-validate"
 
@@ -356,7 +352,7 @@ def test_deletion_queue_recovery(
         def assert_some_validations():
             assert get_deletion_queue_validated(ps_http) > 0
 
-        wait_until(20, 1, assert_some_validations)
+        wait_until(assert_some_validations)
 
         # The validatated keys statistic advances before the header is written, so we
         # also wait to see the header hit the disk: this seems paranoid but the race
@@ -364,7 +360,7 @@ def test_deletion_queue_recovery(
         def assert_header_written():
             assert (main_pageserver.workdir / "deletion" / "header-01").exists()
 
-        wait_until(20, 1, assert_header_written)
+        wait_until(assert_header_written)
 
         # If we will lose attachment, then our expectation on restart is that only the ones
         # we already validated will execute.  Act like only those were present in the queue.
@@ -386,11 +382,11 @@ def test_deletion_queue_recovery(
     # After restart, issue a flush to kick the deletion frontend to do recovery.
     # It should recover all the operations we submitted before the restart.
     ps_http.deletion_queue_flush(execute=False)
-    wait_until(20, 0.25, lambda: assert_deletions_submitted(before_restart_depth))
+    wait_until(lambda: assert_deletions_submitted(before_restart_depth))
 
     # The queue should drain through completely if we flush it
     ps_http.deletion_queue_flush(execute=True)
-    wait_until(10, 1, lambda: assert_deletion_queue(ps_http, lambda n: n == 0))
+    wait_until(lambda: assert_deletion_queue(ps_http, lambda n: n == 0))
 
     if keep_attachment == KeepAttachment.KEEP:
         # - If we kept the attachment, then our pre-restart deletions should execute
@@ -463,7 +459,11 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env.pageserver.start()
 
     # The pageserver should provide service to clients
-    generate_uploads_and_deletions(env, init=False, pageserver=env.pageserver)
+    # Because it is in emergency mode, it will not attempt to validate deletions required by the initial barrier, and therefore
+    # other files cannot be uploaded b/c it's waiting for the initial barrier to be validated.
+    generate_uploads_and_deletions(
+        env, init=False, pageserver=env.pageserver, wait_until_uploaded=False
+    )
 
     # The pageserver should neither validate nor execute any deletions, it should have
     # loaded the DeletionLists from before though
@@ -564,7 +564,7 @@ def test_multi_attach(
     )
 
     # Initially, the tenant will be attached to the first pageserver (first is default in our test harness)
-    wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[0], tenant_id, "Active"))
+    wait_until(lambda: assert_tenant_state(http_clients[0], tenant_id, "Active"))
     _detail = http_clients[0].timeline_detail(tenant_id, timeline_id)
     with pytest.raises(PageserverApiException):
         http_clients[1].timeline_detail(tenant_id, timeline_id)
@@ -579,8 +579,8 @@ def test_multi_attach(
     pageservers[1].tenant_attach(env.initial_tenant)
     pageservers[2].tenant_attach(env.initial_tenant)
 
-    wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[1], tenant_id, "Active"))
-    wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[2], tenant_id, "Active"))
+    wait_until(lambda: assert_tenant_state(http_clients[1], tenant_id, "Active"))
+    wait_until(lambda: assert_tenant_state(http_clients[2], tenant_id, "Active"))
 
     # Now they all have it attached
     _details = list([c.timeline_detail(tenant_id, timeline_id) for c in http_clients])
@@ -728,3 +728,68 @@ def test_upgrade_generationless_local_file_paths(
     )
     # We should download into the same local path we started with
     assert os.path.exists(victim_path)
+
+
+@run_only_on_default_postgres("Only tests index logic")
+def test_old_index_time_threshold(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Exercise pageserver's detection of trying to load an ancient non-latest index.
+    (see https://github.com/neondatabase/neon/issues/6951)
+    """
+
+    # Run with local_fs because we will interfere with mtimes by local filesystem access
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+    env = neon_env_builder.init_start()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(32)
+
+    # Remember generation 1's index path
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+    index_path = env.pageserver_remote_storage.index_path(tenant_id, timeline_id)
+
+    # Increment generation by detaching+attaching, and write+flush some data to get a new remote index
+    env.storage_controller.tenant_policy_update(tenant_id, {"placement": "Detached"})
+    env.storage_controller.tenant_policy_update(tenant_id, {"placement": {"Attached": 0}})
+    env.storage_controller.reconcile_until_idle()
+    workload.churn_rows(32)
+
+    # A new index should have been written
+    assert env.pageserver_remote_storage.index_path(tenant_id, timeline_id) != index_path
+
+    # Hack the mtime on the generation 1 index
+    log.info(f"Setting old mtime on {index_path}")
+    os.utime(index_path, times=(time.time(), time.time() - 30 * 24 * 3600))
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*Found a newer index while loading an old one.*",
+            ".*Index age exceeds threshold and a newer index exists.*",
+        ]
+    )
+
+    # Detach from storage controller + attach in an old generation directly on the pageserver.
+    workload.stop()
+    env.storage_controller.tenant_policy_update(tenant_id, {"placement": "Detached"})
+    env.storage_controller.reconcile_until_idle()
+    env.storage_controller.tenant_policy_update(tenant_id, {"scheduling": "Stop"})
+    env.storage_controller.allowed_errors.append(".*Scheduling is disabled by policy")
+
+    # The controller would not do this (attach in an old generation): we are doing it to simulate
+    # a hypothetical profound bug in the controller.
+    env.pageserver.http_client().tenant_location_conf(
+        tenant_id, {"generation": 1, "mode": "AttachedSingle", "tenant_conf": {}}
+    )
+
+    # The pageserver should react to this situation by refusing to attach the tenant and putting
+    # it into Broken state
+    env.pageserver.allowed_errors.append(".*tenant is broken.*")
+    with pytest.raises(
+        PageserverApiException,
+        match="tenant is broken: Index age exceeds threshold and a newer index exists",
+    ):
+        env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)

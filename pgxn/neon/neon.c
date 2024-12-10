@@ -15,6 +15,9 @@
 #include "access/subtrans.h"
 #include "access/twophase.h"
 #include "access/xlog.h"
+#if PG_MAJORVERSION_NUM >= 15
+#include "access/xlogrecovery.h"
+#endif
 #include "replication/logical.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
@@ -421,9 +424,7 @@ _PG_init(void)
 
 	pg_init_libpagestore();
 	pg_init_walproposer();
-	WalSender_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
-	LogicalFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
-	SlotFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
+	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitUnstableExtensionsSupport();
 	InitLogicalReplicationMonitor();
@@ -433,6 +434,16 @@ _PG_init(void)
 
 	restore_running_xacts_callback = RestoreRunningXactsFromClog;
 
+
+	DefineCustomBoolVariable(
+							"neon.allow_replica_misconfig",
+							"Allow replica startup when some critical GUCs have smaller value than on primary node",
+							NULL,
+							&allowReplicaMisconfig,
+							true,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
 
 	DefineCustomEnumVariable(
 							"neon.running_xacts_overflow_policy",
@@ -512,7 +523,7 @@ neon_shmem_startup_hook(void)
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 
-#if PG_PG_MAJORVERSION_NUM >= 17
+#if PG_MAJORVERSION_NUM >= 17
 	WAIT_EVENT_NEON_LFC_MAINTENANCE = WaitEventExtensionNew("Neon/FileCache_Maintenance");
 	WAIT_EVENT_NEON_LFC_READ = WaitEventExtensionNew("Neon/FileCache_Read");
 	WAIT_EVENT_NEON_LFC_TRUNCATE = WaitEventExtensionNew("Neon/FileCache_Truncate");

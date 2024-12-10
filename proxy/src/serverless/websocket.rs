@@ -14,7 +14,7 @@ use tracing::warn;
 
 use crate::cancellation::CancellationHandlerMain;
 use crate::config::ProxyConfig;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::error::{io_error, ReportableError};
 use crate::metrics::Metrics;
 use crate::proxy::{handle_client, ClientMode, ErrorSource};
@@ -123,14 +123,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve_websocket(
     config: &'static ProxyConfig,
     auth_backend: &'static crate::auth::Backend<'static, ()>,
-    ctx: RequestMonitoring,
+    ctx: RequestContext,
     websocket: OnUpgrade,
     cancellation_handler: Arc<CancellationHandlerMain>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     hostname: Option<String>,
+    cancellations: tokio_util::task::task_tracker::TaskTracker,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
     let websocket = WebSocketServer::after_handshake(TokioIo::new(websocket));
@@ -149,6 +151,7 @@ pub(crate) async fn serve_websocket(
         ClientMode::Websockets { hostname },
         endpoint_rate_limiter,
         conn_gauge,
+        cancellations,
     ))
     .await;
 

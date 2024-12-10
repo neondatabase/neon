@@ -6,10 +6,12 @@ mod benchutils;
 use std::io::Write as _;
 
 use benchutils::Env;
+use bytes::BytesMut;
 use camino_tempfile::tempfile;
 use criterion::{criterion_group, criterion_main, BatchSize, Bencher, Criterion};
 use itertools::Itertools as _;
 use postgres_ffi::v17::wal_generator::{LogicalMessageGenerator, WalGenerator};
+use pprof::criterion::{Output, PProfProfiler};
 use safekeeper::receive_wal::{self, WalAcceptor};
 use safekeeper::safekeeper::{
     AcceptorProposerMessage, AppendRequest, AppendRequestHeader, ProposerAcceptorMessage,
@@ -22,13 +24,24 @@ const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 const GB: usize = 1024 * MB;
 
+/// Use jemalloc, and configure it to sample allocations for profiles every 1 MB.
+/// This mirrors the configuration in bin/safekeeper.rs.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:20\0";
+
 // Register benchmarks with Criterion.
 criterion_group!(
-    benches,
-    bench_process_msg,
+    name = benches;
+    config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+    targets = bench_process_msg,
     bench_wal_acceptor,
     bench_wal_acceptor_throughput,
-    bench_file_write
+    bench_file_write,
+    bench_bytes_reserve,
 );
 criterion_main!(benches);
 
@@ -334,6 +347,29 @@ fn bench_file_write(c: &mut Criterion) {
                     file.sync_data().await.unwrap();
                 }
             })
+        });
+
+        Ok(())
+    }
+}
+
+/// Benchmarks the cost of memory allocations when receiving WAL messages. This emulates the logic
+/// in FeMessage::parse, which extends the read buffer. It is primarily intended to test jemalloc.
+fn bench_bytes_reserve(c: &mut Criterion) {
+    let mut g = c.benchmark_group("bytes_reserve");
+    for size in [1, 64, KB, 8 * KB, 128 * KB] {
+        g.throughput(criterion::Throughput::Bytes(size as u64));
+        g.bench_function(format!("size={size}"), |b| run_bench(b, size).unwrap());
+    }
+
+    fn run_bench(b: &mut Bencher, size: usize) -> anyhow::Result<()> {
+        let mut bytes = BytesMut::new();
+        let data = vec![0; size];
+
+        b.iter(|| {
+            bytes.reserve(size);
+            bytes.extend_from_slice(&data);
+            bytes.split_to(size).freeze();
         });
 
         Ok(())
