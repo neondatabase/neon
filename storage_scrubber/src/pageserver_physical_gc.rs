@@ -9,6 +9,7 @@ use crate::checks::{
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
 use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId, MAX_RETRIES};
 use async_stream::try_stream;
+use futures::future::Either;
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::remote_timeline_client::manifest::OffloadedTimelineManifest;
@@ -718,9 +719,9 @@ pub async fn pageserver_physical_gc(
 
     let remote_client = Arc::new(remote_client);
     let tenants = if tenant_shard_ids.is_empty() {
-        futures::future::Either::Left(stream_tenants(&remote_client, &target))
+        Either::Left(stream_tenants(&remote_client, &target))
     } else {
-        futures::future::Either::Right(futures::stream::iter(tenant_shard_ids.into_iter().map(Ok)))
+        Either::Right(futures::stream::iter(tenant_shard_ids.into_iter().map(Ok)))
     };
 
     // How many tenants to process in parallel.  We need to be mindful of pageservers
@@ -778,7 +779,7 @@ pub async fn pageserver_physical_gc(
     {
         let timelines = timelines.map_ok(|summary_or_ttid| match summary_or_ttid {
             GcSummaryOrContent::Content((ttid, tenant_manifest_arc)) => {
-                futures::future::Either::Left(gc_timeline(
+                Either::Left(gc_timeline(
                     &remote_client,
                     &min_age,
                     &target,
@@ -789,7 +790,7 @@ pub async fn pageserver_physical_gc(
                 ))
             }
             GcSummaryOrContent::GcSummary(gc_summary) => {
-                futures::future::Either::Right(futures::future::ok(gc_summary))
+                Either::Right(futures::future::ok(gc_summary))
             }
         });
         let mut timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
