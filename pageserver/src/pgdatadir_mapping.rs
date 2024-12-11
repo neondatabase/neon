@@ -1319,18 +1319,23 @@ impl<'a> DatadirModification<'a> {
 
         let buf: Bytes = SlruSegmentDirectory::ser(&SlruSegmentDirectory::default())?.into();
         let empty_dir = Value::Image(buf);
-        self.put(slru_dir_to_key(SlruKind::Clog), empty_dir.clone());
-        self.pending_directory_entries
-            .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
-        self.put(
-            slru_dir_to_key(SlruKind::MultiXactMembers),
-            empty_dir.clone(),
-        );
-        self.pending_directory_entries
-            .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
-        self.put(slru_dir_to_key(SlruKind::MultiXactOffsets), empty_dir);
-        self.pending_directory_entries
-            .push((DirectoryKind::SlruSegment(SlruKind::MultiXactOffsets), 0));
+
+        // Initialize SLRUs on shard 0 only: creating these on other shards would be
+        // harmless but they'd just be dropped on later compaction.
+        if self.tline.tenant_shard_id.is_shard_zero() {
+            self.put(slru_dir_to_key(SlruKind::Clog), empty_dir.clone());
+            self.pending_directory_entries
+                .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
+            self.put(
+                slru_dir_to_key(SlruKind::MultiXactMembers),
+                empty_dir.clone(),
+            );
+            self.pending_directory_entries
+                .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
+            self.put(slru_dir_to_key(SlruKind::MultiXactOffsets), empty_dir);
+            self.pending_directory_entries
+                .push((DirectoryKind::SlruSegment(SlruKind::MultiXactOffsets), 0));
+        }
 
         Ok(())
     }
