@@ -283,7 +283,7 @@ jobs:
           submodules: true
 
       - name: Pytest regression tests
-        continue-on-error: ${{ matrix.lfc_state == 'with-lfc' }}
+        continue-on-error: ${{ matrix.lfc_state == 'with-lfc' && inputs.build-type == 'debug' }}
         uses: ./.github/actions/run-python-test-set
         timeout-minutes: 60
         with:
