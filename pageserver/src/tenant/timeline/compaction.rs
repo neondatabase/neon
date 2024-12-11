@@ -1920,7 +1920,7 @@ impl Timeline {
     /// Key::MIN..Key..MAX to the function indicates a full compaction, though technically, `Key::MAX` is not
     /// part of the range.
     ///
-    /// If `options.compact_below_lsn` is provided, the compaction will only compact layers below or intersect with
+    /// If `options.compact_lsn_range.end` is provided, the compaction will only compact layers below or intersect with
     /// the LSN. Otherwise, it will use the gc cutoff by default.
     pub(crate) async fn compact_with_gc(
         self: &Arc<Self>,
@@ -2005,7 +2005,7 @@ impl Timeline {
                 // to get the truth data.
                 let real_gc_cutoff = *self.get_latest_gc_cutoff_lsn();
                 // The compaction algorithm will keep all keys above the gc_cutoff while keeping only necessary keys below the gc_cutoff for
-                // each of the retain_lsn. Therefore, if the user-provided `compact_below_lsn` is larger than the real gc cutoff, we will use
+                // each of the retain_lsn. Therefore, if the user-provided `compact_lsn_range.end` is larger than the real gc cutoff, we will use
                 // the real cutoff.
                 let mut gc_cutoff = if compact_lsn_range.end == Lsn::MAX {
                     real_gc_cutoff
@@ -2013,7 +2013,7 @@ impl Timeline {
                     compact_lsn_range.end
                 };
                 if gc_cutoff > real_gc_cutoff {
-                    warn!("provided compact_below_lsn={} is larger than the real_gc_cutoff={}, using the real gc cutoff", gc_cutoff, real_gc_cutoff);
+                    warn!("provided compact_lsn_range.end={} is larger than the real_gc_cutoff={}, using the real gc cutoff", gc_cutoff, real_gc_cutoff);
                     gc_cutoff = real_gc_cutoff;
                 }
                 gc_cutoff
