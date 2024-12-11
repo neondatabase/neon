@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from contextlib import closing
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, fork_at_current_lsn
 from fixtures.utils import query_scalar
@@ -294,6 +295,7 @@ def test_vm_bit_clear_on_heap_lock_blackbox(neon_env_builder: NeonEnvBuilder):
     cur.execute("commit transaction")
 
 
+@pytest.mark.timeout(600)  # slow in debug builds
 def test_check_visibility_map(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     """
     Runs pgbench across a few databases on a sharded tenant, then performs a visibility map
