@@ -4,15 +4,17 @@ import os
 import time
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.utils import query_scalar
 
 
 #
 # Test compute node start after clog truncation
 #
-def test_clog_truncate(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_clog_truncate(neon_env_builder: NeonEnvBuilder):
+    # Use a multi-sharded tenant because WAL ingest logic is shard-dependent, and
+    # this test is one of the very few that exercises a CLogTruncate WAL record.
+    env = neon_env_builder.init_start(initial_tenant_shard_count=2)
 
     # set aggressive autovacuum to make sure that truncation will happen
     config = [
