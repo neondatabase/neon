@@ -1,4 +1,5 @@
 use std::{
+    num::NonZeroUsize,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -8,6 +9,8 @@ use std::{
 
 use arc_swap::ArcSwap;
 use utils::leaky_bucket::{LeakyBucketConfig, RateLimiter};
+
+use crate::assert_u64_eq_usize::UsizeIsU64;
 
 /// Throttle for `async` functions.
 ///
@@ -37,11 +40,12 @@ pub struct Inner {
 pub type Config = pageserver_api::models::ThrottleConfig;
 
 pub struct Observation {
+    pub key_count: NonZeroUsize,
     pub wait_time: Duration,
 }
 pub trait Metric {
-    fn accounting_start(&self);
-    fn accounting_finish(&self);
+    fn accounting_start(&self, key_count: NonZeroUsize);
+    fn accounting_finish(&self, key_count: NonZeroUsize);
     fn observe_throttling(&self, observation: &Observation);
 }
 
@@ -127,7 +131,7 @@ where
         self.inner.load().rate_limiter.steady_rps()
     }
 
-    pub async fn throttle(&self, key_count: usize) -> ThrottleResult {
+    pub async fn throttle(&self, key_count: NonZeroUsize) -> ThrottleResult {
         let inner = self.inner.load_full(); // clones the `Inner` Arc
 
         let start = std::time::Instant::now();
@@ -136,11 +140,13 @@ where
             return ThrottleResult::NotThrottled { start };
         }
 
-        self.metric.accounting_start();
-        self.count_accounted_start.fetch_add(1, Ordering::Relaxed);
-        let did_throttle = inner.rate_limiter.acquire(key_count).await;
-        self.count_accounted_finish.fetch_add(1, Ordering::Relaxed);
-        self.metric.accounting_finish();
+        self.metric.accounting_start(key_count);
+        self.count_accounted_start
+            .fetch_add(key_count.get().into_u64(), Ordering::Relaxed);
+        let did_throttle = inner.rate_limiter.acquire(key_count.get()).await;
+        self.count_accounted_finish
+            .fetch_add(key_count.get().into_u64(), Ordering::Relaxed);
+        self.metric.accounting_finish(key_count);
 
         if did_throttle {
             self.count_throttled.fetch_add(1, Ordering::Relaxed);
@@ -148,7 +154,10 @@ where
             let wait_time = now - start;
             self.sum_throttled_usecs
                 .fetch_add(wait_time.as_micros() as u64, Ordering::Relaxed);
-            let observation = Observation { wait_time };
+            let observation = Observation {
+                key_count,
+                wait_time,
+            };
             self.metric.observe_throttling(&observation);
             ThrottleResult::Throttled { start, end: now }
         } else {

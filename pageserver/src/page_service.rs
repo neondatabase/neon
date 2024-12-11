@@ -588,13 +588,14 @@ impl BatchedFeMessage {
                     shard,
                     // 1 token is probably under-estimating because these
                     // request handlers typically do several Timeline::get calls.
-                    1,
+                    NonZeroUsize::new(1).unwrap(),
                     itertools::Either::Left(std::iter::once(timer)),
                 )
             }
             BatchedFeMessage::GetPage { shard, pages, .. } => (
                 shard,
-                pages.len(),
+                NonZeroUsize::new(pages.len())
+                    .expect("a batch has always at least one request in it"),
                 itertools::Either::Right(pages.iter_mut().map(|(_, _, timer)| timer)),
             ),
             BatchedFeMessage::RespondError { .. } => return Ok(()),
