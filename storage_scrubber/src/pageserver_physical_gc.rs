@@ -630,13 +630,7 @@ async fn gc_timeline(
                         manifests: _,
                     } => {
                         if let Some(new_latest_gen) = latest_generation {
-                            let manifest_changed = (
-                                new_latest_gen.generation,
-                                new_latest_gen.listing_object.last_modified,
-                            ) == (
-                                tenant_manifest_info.generation,
-                                tenant_manifest_info.listing_object.last_modified,
-                            );
+                            let manifest_changed = !new_latest_gen.eq_fast(tenant_manifest_info);
                             if manifest_changed {
                                 tracing::debug!(%ttid, "tenant manifest changed since it was loaded, suppressing {} warnings", warnings.len());
                             }
