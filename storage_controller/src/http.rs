@@ -1196,7 +1196,7 @@ impl From<ReconcileError> for ApiError {
 ///
 /// Not used by anything except manual testing.
 async fn handle_get_safekeeper(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let id = parse_request_param::<i64>(&req, "id")?;
 
