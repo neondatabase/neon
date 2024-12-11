@@ -13,6 +13,7 @@ mkdir -p "tlc-results"
 CONFIG_FILE=$(basename -- "$CONFIG")
 outfilename="$SPEC-${CONFIG_FILE}-$(date --utc +%Y-%m-%d--%H-%M-%S)".log
 outfile="tlc-results/$outfilename"
+echo "saving results to $outfile"
 touch $outfile
 
 # Save some info about the run.
