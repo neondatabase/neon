@@ -2314,30 +2314,30 @@ class NeonStorageController(MetricsGetter, LogUtils):
             json=body,
         )
 
-    def get_safekeeper(self, id: int) -> dict[str, Any]:
-        response = self.request(
-            "GET",
-            f"{self.api}/control/v1/safekeeper/{id}",
-            headers=self.headers(TokenScope.ADMIN),
-        )
-        json = response.json()
-        assert isinstance(json, dict)
-        return json
-
-    def get_safekeepers(self) -> list[dict[str, Any]] | None:
+    def get_safekeeper(self, id: int) -> dict[str, Any] | None:
         try:
             response = self.request(
                 "GET",
-                f"{self.api}/control/v1/safekeeper",
+                f"{self.api}/control/v1/safekeeper/{id}",
                 headers=self.headers(TokenScope.ADMIN),
             )
             json = response.json()
-            assert isinstance(json, list)
+            assert isinstance(json, dict)
             return json
         except StorageControllerApiException as e:
             if e.status_code == 404:
                 return None
             raise e
+
+    def get_safekeepers(self) -> list[dict[str, Any]]:
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/safekeeper",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        json = response.json()
+        assert isinstance(json, list)
+        return json
 
     def set_preferred_azs(self, preferred_azs: dict[TenantShardId, str]) -> list[TenantShardId]:
         response = self.request(
