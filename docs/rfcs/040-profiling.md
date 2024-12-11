@@ -177,10 +177,8 @@ Use [net/http/pprof](https://pkg.go.dev/net/http/pprof). Expose it unauthenticat
 
 Parameters:
 
-* `seconds`: duration to collect profile over, in seconds (default `30`).
-
-Does not support a frequency parameter (see [#57488](https://github.com/golang/go/issues/57488));
-always uses 100 Hz.
+* `seconds`: create delta profile over duration, in seconds (default `0`).
+* `gc`: if `1`, garbage collect before taking profile.
 
 Works on Linux and macOS.
 
