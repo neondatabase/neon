@@ -9,6 +9,7 @@ import tarfile
 import threading
 import time
 from collections.abc import Callable, Iterable
+from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -380,15 +381,10 @@ def start_in_background(
             if return_code is not None:
                 error = f"expected subprocess to run but it exited with code {return_code}"
             else:
-                attempts = 10
                 try:
-                    wait_until(
-                        number_of_iterations=attempts,
-                        interval=1,
-                        func=is_started,
-                    )
+                    wait_until(is_started, timeout=10)
                 except Exception:
-                    error = f"Failed to get correct status from subprocess in {attempts} attempts"
+                    error = "Failed to get correct status from subprocess"
         except Exception as e:
             error = f"expected subprocess to start but it failed with exception: {e}"
 
@@ -402,28 +398,31 @@ def start_in_background(
 
 
 def wait_until(
-    number_of_iterations: int,
-    interval: float,
     func: Callable[[], WaitUntilRet],
-    show_intermediate_error: bool = False,
+    name: str | None = None,
+    timeout: float = 20.0,  # seconds
+    interval: float = 0.5,  # seconds
+    status_interval: float = 1.0,  # seconds
 ) -> WaitUntilRet:
     """
     Wait until 'func' returns successfully, without exception. Returns the
     last return value from the function.
     """
+    if name is None:
+        name = getattr(func, "__name__", repr(func))
+    deadline = datetime.now() + timedelta(seconds=timeout)
+    next_status = datetime.now()
     last_exception = None
-    for i in range(number_of_iterations):
+    while datetime.now() <= deadline:
         try:
-            res = func()
+            return func()
         except Exception as e:
-            log.info("waiting for %s iteration %s failed: %s", func, i + 1, e)
+            if datetime.now() >= next_status:
+                log.info("waiting for %s: %s", name, e)
+                next_status = datetime.now() + timedelta(seconds=status_interval)
             last_exception = e
-            if show_intermediate_error:
-                log.info(e)
             time.sleep(interval)
-            continue
-        return res
-    raise Exception(f"timed out while waiting for {func}") from last_exception
+    raise Exception(f"timed out while waiting for {name}") from last_exception
 
 
 def assert_eq(a, b) -> None:

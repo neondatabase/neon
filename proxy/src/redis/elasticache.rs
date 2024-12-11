@@ -1,6 +1,14 @@
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use aws_config::environment::EnvironmentVariableCredentialsProvider;
+use aws_config::imds::credentials::ImdsCredentialsProvider;
 use aws_config::meta::credentials::CredentialsProviderChain;
+use aws_config::meta::region::RegionProviderChain;
+use aws_config::profile::ProfileFileCredentialsProvider;
+use aws_config::provider_config::ProviderConfig;
+use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
+use aws_config::Region;
 use aws_sdk_iam::config::ProvideCredentials;
 use aws_sigv4::http_request::{
     self, SignableBody, SignableRequest, SignatureLocation, SigningSettings,
@@ -45,12 +53,45 @@ pub struct CredentialsProvider {
 }
 
 impl CredentialsProvider {
-    pub fn new(config: AWSIRSAConfig, credentials_provider: CredentialsProviderChain) -> Self {
-        CredentialsProvider {
-            config,
-            credentials_provider,
-        }
+    pub async fn new(
+        aws_region: String,
+        redis_cluster_name: Option<String>,
+        redis_user_id: Option<String>,
+    ) -> Arc<CredentialsProvider> {
+        let region_provider =
+            RegionProviderChain::default_provider().or_else(Region::new(aws_region.clone()));
+        let provider_conf =
+            ProviderConfig::without_region().with_region(region_provider.region().await);
+        let aws_credentials_provider = {
+            // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
+            CredentialsProviderChain::first_try(
+                "env",
+                EnvironmentVariableCredentialsProvider::new(),
+            )
+            // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
+            .or_else(
+                "profile-sso",
+                ProfileFileCredentialsProvider::builder()
+                    .configure(&provider_conf)
+                    .build(),
+            )
+            // uses "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
+            // needed to access remote extensions bucket
+            .or_else(
+                "token",
+                WebIdentityTokenCredentialsProvider::builder()
+                    .configure(&provider_conf)
+                    .build(),
+            )
+            // uses imds v2
+            .or_else("imds", ImdsCredentialsProvider::builder().build())
+        };
+        Arc::new(CredentialsProvider {
+            config: AWSIRSAConfig::new(aws_region, redis_cluster_name, redis_user_id),
+            credentials_provider: aws_credentials_provider,
+        })
     }
+
     pub(crate) async fn provide_credentials(&self) -> anyhow::Result<(String, String)> {
         let aws_credentials = self
             .credentials_provider

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
+use postgres_client::ReadyForQueryStatus;
 use rand::Rng;
-use tokio_postgres::ReadyForQueryStatus;
 use tracing::{debug, info, Span};
 
 use super::backend::HttpConnError;
@@ -683,7 +683,7 @@ pub(crate) trait ClientInnerExt: Sync + Send + 'static {
     fn get_process_id(&self) -> i32;
 }
 
-impl ClientInnerExt for tokio_postgres::Client {
+impl ClientInnerExt for postgres_client::Client {
     fn is_closed(&self) -> bool {
         self.is_closed()
     }

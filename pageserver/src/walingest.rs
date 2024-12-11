@@ -334,14 +334,32 @@ impl WalIngest {
         // replaying it would fail to find the previous image of the page, because
         // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
         // record if it doesn't.
-        let vm_size = get_relsize(modification, vm_rel, ctx).await?;
+        //
+        // TODO: analyze the metrics and tighten this up accordingly. This logic
+        // implicitly assumes that VM pages see explicit WAL writes before
+        // implicit ClearVmBits, and will otherwise silently drop updates.
+        let Some(vm_size) = get_relsize(modification, vm_rel, ctx).await? else {
+            WAL_INGEST
+                .clear_vm_bits_unknown
+                .with_label_values(&["relation"])
+                .inc();
+            return Ok(());
+        };
         if let Some(blknum) = new_vm_blk {
             if blknum >= vm_size {
+                WAL_INGEST
+                    .clear_vm_bits_unknown
+                    .with_label_values(&["new_page"])
+                    .inc();
                 new_vm_blk = None;
             }
         }
         if let Some(blknum) = old_vm_blk {
             if blknum >= vm_size {
+                WAL_INGEST
+                    .clear_vm_bits_unknown
+                    .with_label_values(&["old_page"])
+                    .inc();
                 old_vm_blk = None;
             }
         }
@@ -564,17 +582,21 @@ impl WalIngest {
                 forknum: FSM_FORKNUM,
             };
 
+            // Zero out the last remaining FSM page, if this shard owns it. We are not precise here,
+            // and instead of digging in the FSM bitmap format we just clear the whole page.
             let fsm_logical_page_no = blkno / pg_constants::SLOTS_PER_FSM_PAGE;
             let mut fsm_physical_page_no = fsm_logical_to_physical(fsm_logical_page_no);
-            if blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0 {
-                // Tail of last remaining FSM page has to be zeroed.
-                // We are not precise here and instead of digging in FSM bitmap format just clear the whole page.
+            if blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0
+                && self
+                    .shard
+                    .is_key_local(&rel_block_to_key(rel, fsm_physical_page_no))
+            {
                 modification.put_rel_page_image_zero(rel, fsm_physical_page_no)?;
                 fsm_physical_page_no += 1;
             }
-            let nblocks = get_relsize(modification, rel, ctx).await?;
+            // Truncate this shard's view of the FSM relation size, if it even has one.
+            let nblocks = get_relsize(modification, rel, ctx).await?.unwrap_or(0);
             if nblocks > fsm_physical_page_no {
-                // check if something to do: FSM is larger than truncate position
                 self.put_rel_truncation(modification, rel, fsm_physical_page_no, ctx)
                     .await?;
             }
@@ -598,7 +620,7 @@ impl WalIngest {
             // tail bits in the last remaining map page, representing truncated heap
             // blocks, need to be cleared. This is not only tidy, but also necessary
             // because we don't get a chance to clear the bits if the heap is extended
-            // again.
+            // again. Only do this on the shard that owns the page.
             if (trunc_byte != 0 || trunc_offs != 0)
                 && self.shard.is_key_local(&rel_block_to_key(rel, vm_page_no))
             {
@@ -612,9 +634,9 @@ impl WalIngest {
                 )?;
                 vm_page_no += 1;
             }
-            let nblocks = get_relsize(modification, rel, ctx).await?;
+            // Truncate this shard's view of the VM relation size, if it even has one.
+            let nblocks = get_relsize(modification, rel, ctx).await?.unwrap_or(0);
             if nblocks > vm_page_no {
-                // check if something to do: VM is larger than truncate position
                 self.put_rel_truncation(modification, rel, vm_page_no, ctx)
                     .await?;
             }
@@ -855,22 +877,24 @@ impl WalIngest {
         // will block waiting for the last valid LSN to advance up to
         // it. So we use the previous record's LSN in the get calls
         // instead.
-        for segno in modification
-            .tline
-            .list_slru_segments(SlruKind::Clog, Version::Modified(modification), ctx)
-            .await?
-        {
-            let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
+        if modification.tline.get_shard_identity().is_shard_zero() {
+            for segno in modification
+                .tline
+                .list_slru_segments(SlruKind::Clog, Version::Modified(modification), ctx)
+                .await?
+            {
+                let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
 
-            let may_delete = dispatch_pgversion!(modification.tline.pg_version, {
-                pgv::nonrelfile_utils::slru_may_delete_clogsegment(segpage, pageno)
-            });
+                let may_delete = dispatch_pgversion!(modification.tline.pg_version, {
+                    pgv::nonrelfile_utils::slru_may_delete_clogsegment(segpage, pageno)
+                });
 
-            if may_delete {
-                modification
-                    .drop_slru_segment(SlruKind::Clog, segno, ctx)
-                    .await?;
-                trace!("Drop CLOG segment {:>04X}", segno);
+                if may_delete {
+                    modification
+                        .drop_slru_segment(SlruKind::Clog, segno, ctx)
+                        .await?;
+                    trace!("Drop CLOG segment {:>04X}", segno);
+                }
             }
         }
 
@@ -1025,16 +1049,18 @@ impl WalIngest {
 
         // Delete all the segments except the last one. The last segment can still
         // contain, possibly partially, valid data.
-        while segment != endsegment {
-            modification
-                .drop_slru_segment(SlruKind::MultiXactMembers, segment as u32, ctx)
-                .await?;
+        if modification.tline.get_shard_identity().is_shard_zero() {
+            while segment != endsegment {
+                modification
+                    .drop_slru_segment(SlruKind::MultiXactMembers, segment as u32, ctx)
+                    .await?;
 
-            /* move to next segment, handling wraparound correctly */
-            if segment == maxsegment {
-                segment = 0;
-            } else {
-                segment += 1;
+                /* move to next segment, handling wraparound correctly */
+                if segment == maxsegment {
+                    segment = 0;
+                } else {
+                    segment += 1;
+                }
             }
         }
 
@@ -1372,6 +1398,10 @@ impl WalIngest {
         img: Bytes,
         ctx: &RequestContext,
     ) -> Result<()> {
+        if !self.shard.is_shard_zero() {
+            return Ok(());
+        }
+
         self.handle_slru_extend(modification, kind, segno, blknum, ctx)
             .await?;
         modification.put_slru_page_image(kind, segno, blknum, img)?;
@@ -1430,24 +1460,27 @@ impl WalIngest {
     }
 }
 
+/// Returns the size of the relation as of this modification, or None if the relation doesn't exist.
+///
+/// This is only accurate on shard 0. On other shards, it will return the size up to the highest
+/// page number stored in the shard, or None if the shard does not have any pages for it.
 async fn get_relsize(
     modification: &DatadirModification<'_>,
     rel: RelTag,
     ctx: &RequestContext,
-) -> Result<BlockNumber, PageReconstructError> {
-    let nblocks = if !modification
+) -> Result<Option<BlockNumber>, PageReconstructError> {
+    if !modification
         .tline
         .get_rel_exists(rel, Version::Modified(modification), ctx)
         .await?
     {
-        0
-    } else {
-        modification
-            .tline
-            .get_rel_size(rel, Version::Modified(modification), ctx)
-            .await?
-    };
-    Ok(nblocks)
+        return Ok(None);
+    }
+    modification
+        .tline
+        .get_rel_size(rel, Version::Modified(modification), ctx)
+        .await
+        .map(Some)
 }
 
 #[allow(clippy::bool_assert_comparison)]

@@ -35,6 +35,7 @@ pub async fn task_main(
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
+    let cancellations = tokio_util::task::task_tracker::TaskTracker::new();
 
     while let Some(accept_result) =
         run_until_cancelled(listener.accept(), &cancellation_token).await
@@ -48,6 +49,7 @@ pub async fn task_main(
 
         let session_id = uuid::Uuid::new_v4();
         let cancellation_handler = Arc::clone(&cancellation_handler);
+        let cancellations = cancellations.clone();
 
         debug!(protocol = "tcp", %session_id, "accepted new TCP connection");
 
@@ -96,6 +98,7 @@ pub async fn task_main(
                 cancellation_handler,
                 socket,
                 conn_gauge,
+                cancellations,
             )
             .instrument(ctx.span())
             .boxed()
@@ -127,10 +130,12 @@ pub async fn task_main(
     }
 
     connections.close();
+    cancellations.close();
     drop(listener);
 
     // Drain connections
     connections.wait().await;
+    cancellations.wait().await;
 
     Ok(())
 }
@@ -142,6 +147,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
     conn_gauge: NumClientConnectionsGuard<'static>,
+    cancellations: tokio_util::task::task_tracker::TaskTracker,
 ) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
     debug!(
         protocol = %ctx.protocol(),
@@ -157,21 +163,36 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
     let do_handshake = handshake(ctx, stream, tls, record_handshake_error);
 
-    let (mut stream, params) =
-        match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
-            HandshakeData::Startup(stream, params) => (stream, params),
-            HandshakeData::Cancel(cancel_key_data) => {
-                return Ok(cancellation_handler
-                    .cancel_session(
-                        cancel_key_data,
-                        ctx.session_id(),
-                        &ctx.peer_addr(),
-                        config.authentication_config.ip_allowlist_check_enabled,
-                    )
-                    .await
-                    .map(|()| None)?)
-            }
-        };
+    let (mut stream, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
+        .await??
+    {
+        HandshakeData::Startup(stream, params) => (stream, params),
+        HandshakeData::Cancel(cancel_key_data) => {
+            // spawn a task to cancel the session, but don't wait for it
+            cancellations.spawn({
+                let cancellation_handler_clone = Arc::clone(&cancellation_handler);
+                let session_id = ctx.session_id();
+                let peer_ip = ctx.peer_addr();
+                let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?session_id);
+                cancel_span.follows_from(tracing::Span::current());
+                async move {
+                    drop(
+                        cancellation_handler_clone
+                            .cancel_session(
+                                cancel_key_data,
+                                session_id,
+                                peer_ip,
+                                config.authentication_config.ip_allowlist_check_enabled,
+                            )
+                            .instrument(cancel_span)
+                            .await,
+                    );
+                }
+            });
+
+            return Ok(None);
+        }
+    };
     drop(pause);
 
     ctx.set_db_options(params.clone());
@@ -189,6 +210,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let mut node = connect_to_compute(
         ctx,
         &TcpMechanism {
+            params_compat: true,
             params: &params,
             locks: &config.connect_compute_locks,
         },

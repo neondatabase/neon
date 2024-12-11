@@ -423,7 +423,11 @@ readahead_buffer_resize(int newsize, void *extra)
 	 * ensuring we have received all but the last n requests (n = newsize).
 	 */
 	if (MyPState->n_requests_inflight > newsize)
-		prefetch_wait_for(MyPState->ring_unused - newsize);
+	{
+		Assert(MyPState->ring_unused >= MyPState->n_requests_inflight - newsize);
+		prefetch_wait_for(MyPState->ring_unused - (MyPState->n_requests_inflight - newsize));
+		Assert(MyPState->n_requests_inflight <= newsize);
+	}
 
 	/* construct the new PrefetchState, and copy over the memory contexts */
 	newPState = MemoryContextAllocZero(TopMemoryContext, newprfs_size);
@@ -438,7 +442,8 @@ readahead_buffer_resize(int newsize, void *extra)
 	newPState->ring_last = newsize;
 	newPState->ring_unused = newsize;
 	newPState->ring_receive = newsize;
-	newPState->ring_flush = newsize;
+	newPState->max_shard_no = MyPState->max_shard_no;
+	memcpy(newPState->shard_bitmap, MyPState->shard_bitmap, sizeof(MyPState->shard_bitmap));
 
 	/*
 	 * Copy over the prefetches.
@@ -487,6 +492,7 @@ readahead_buffer_resize(int newsize, void *extra)
 		}
 		newPState->n_unused -= 1;
 	}
+	newPState->ring_flush = newPState->ring_receive;
 
 	MyNeonCounters->getpage_prefetches_buffered =
 		MyPState->n_responses_buffered;
@@ -495,7 +501,12 @@ readahead_buffer_resize(int newsize, void *extra)
 
 	for (; end >= MyPState->ring_last && end != UINT64_MAX; end -= 1)
 	{
-		prefetch_set_unused(end);
+		PrefetchRequest *slot = GetPrfSlot(end);
+		Assert(slot->status != PRFS_REQUESTED);
+		if (slot->status == PRFS_RECEIVED)
+		{
+			pfree(slot->response);
+		}
 	}
 
 	prfh_destroy(MyPState->prf_hash);
@@ -604,6 +615,9 @@ prefetch_read(PrefetchRequest *slot)
 {
 	NeonResponse *response;
 	MemoryContext old;
+	BufferTag	buftag;
+	shardno_t	shard_no;
+	uint64		my_ring_index;
 
 	Assert(slot->status == PRFS_REQUESTED);
 	Assert(slot->response == NULL);
@@ -617,11 +631,29 @@ prefetch_read(PrefetchRequest *slot)
 					   slot->status, slot->response,
 					   (long)slot->my_ring_index, (long)MyPState->ring_receive);
 
+	/*
+	 * Copy the request info so that if an error happens and the prefetch
+	 * queue is flushed during the receive call, we can print the original
+	 * values in the error message
+	 */
+	buftag = slot->buftag;
+	shard_no = slot->shard_no;
+	my_ring_index = slot->my_ring_index;
+
 	old = MemoryContextSwitchTo(MyPState->errctx);
-	response = (NeonResponse *) page_server->receive(slot->shard_no);
+	response = (NeonResponse *) page_server->receive(shard_no);
 	MemoryContextSwitchTo(old);
 	if (response)
 	{
+		/* The slot should still be valid */
+		if (slot->status != PRFS_REQUESTED ||
+			slot->response != NULL ||
+			slot->my_ring_index != MyPState->ring_receive)
+			neon_shard_log(shard_no, ERROR,
+						   "Incorrect prefetch slot state after receive: status=%d response=%p my=%lu receive=%lu",
+						   slot->status, slot->response,
+						   (long) slot->my_ring_index, (long) MyPState->ring_receive);
+
 		/* update prefetch state */
 		MyPState->n_responses_buffered += 1;
 		MyPState->n_requests_inflight -= 1;
@@ -636,11 +668,15 @@ prefetch_read(PrefetchRequest *slot)
 	}
 	else
 	{
-		neon_shard_log(slot->shard_no, LOG,
+		/*
+		 * Note: The slot might no longer be valid, if the connection was lost
+		 * and the prefetch queue was flushed during the receive call
+		 */
+		neon_shard_log(shard_no, LOG,
 					   "No response from reading prefetch entry %lu: %u/%u/%u.%u block %u. This can be caused by a concurrent disconnect",
-					   (long)slot->my_ring_index,
-					   RelFileInfoFmt(BufTagGetNRelFileInfo(slot->buftag)),
-					   slot->buftag.forkNum, slot->buftag.blockNum);
+					   (long) my_ring_index,
+					   RelFileInfoFmt(BufTagGetNRelFileInfo(buftag)),
+					   buftag.forkNum, buftag.blockNum);
 		return false;
 	}
 }
@@ -944,6 +980,9 @@ Retry:
 		Assert(entry == NULL);
 		Assert(slot == NULL);
 
+		/* There should be no buffer overflow */
+		Assert(MyPState->ring_last + readahead_buffer_size >= MyPState->ring_unused);
+
 		/*
 		 * If the prefetch queue is full, we need to make room by clearing the
 		 * oldest slot. If the oldest slot holds a buffer that was already
@@ -958,7 +997,7 @@ Retry:
 		 * a prefetch request kind of goes against the principles of
 		 * prefetching)
 		 */
-		if (MyPState->ring_last + readahead_buffer_size - 1 == MyPState->ring_unused)
+		if (MyPState->ring_last + readahead_buffer_size == MyPState->ring_unused)
 		{
 			uint64		cleanup_index = MyPState->ring_last;
 

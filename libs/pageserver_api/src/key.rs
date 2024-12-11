@@ -24,7 +24,7 @@ pub struct Key {
 
 /// When working with large numbers of Keys in-memory, it is more efficient to handle them as i128 than as
 /// a struct of fields.
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize, Debug)]
 pub struct CompactKey(i128);
 
 /// The storage key size.
@@ -226,6 +226,18 @@ impl Key {
         BE::write_u32(&mut buf[9..13], self.field4);
         buf[13] = self.field5;
         BE::write_u32(&mut buf[14..18], self.field6);
+    }
+}
+
+impl CompactKey {
+    pub fn raw(&self) -> i128 {
+        self.0
+    }
+}
+
+impl From<i128> for CompactKey {
+    fn from(value: i128) -> Self {
+        Self(value)
     }
 }
 
@@ -756,6 +768,11 @@ impl Key {
             && self.field4 == 0
             && self.field5 == 0
             && self.field6 == 1
+    }
+
+    #[inline(always)]
+    pub fn is_aux_file_key(&self) -> bool {
+        self.field1 == AUX_KEY_PREFIX
     }
 
     /// Guaranteed to return `Ok()` if [`Self::is_rel_block_key`] returns `true` for `key`.

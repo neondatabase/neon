@@ -70,7 +70,14 @@ pub const DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT: usize = 100;
 pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
 
 /// As defined in S3 docs
-pub const MAX_KEYS_PER_DELETE: usize = 1000;
+///
+/// <https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html>
+pub const MAX_KEYS_PER_DELETE_S3: usize = 1000;
+
+/// As defined in Azure docs
+///
+/// <https://learn.microsoft.com/en-us/rest/api/storageservices/blob-batch>
+pub const MAX_KEYS_PER_DELETE_AZURE: usize = 256;
 
 const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 
@@ -178,6 +185,15 @@ pub struct DownloadOpts {
     /// The end of the byte range to download, or unbounded. Must be after the
     /// start bound.
     pub byte_end: Bound<u64>,
+    /// Indicate whether we're downloading something small or large: this indirectly controls
+    /// timeouts: for something like an index/manifest/heatmap, we should time out faster than
+    /// for layer files
+    pub kind: DownloadKind,
+}
+
+pub enum DownloadKind {
+    Large,
+    Small,
 }
 
 impl Default for DownloadOpts {
@@ -186,6 +202,7 @@ impl Default for DownloadOpts {
             etag: Default::default(),
             byte_start: Bound::Unbounded,
             byte_end: Bound::Unbounded,
+            kind: DownloadKind::Large,
         }
     }
 }
@@ -329,6 +346,14 @@ pub trait RemoteStorage: Send + Sync + 'static {
         paths: &'a [RemotePath],
         cancel: &CancellationToken,
     ) -> anyhow::Result<()>;
+
+    /// Returns the maximum number of keys that a call to [`Self::delete_objects`] can delete without chunking
+    ///
+    /// The value returned is only an optimization hint, One can pass larger number of objects to
+    /// `delete_objects` as well.
+    ///
+    /// The value is guaranteed to be >= 1.
+    fn max_keys_per_delete(&self) -> usize;
 
     /// Deletes all objects matching the given prefix.
     ///
@@ -523,6 +548,16 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         }
     }
 
+    /// [`RemoteStorage::max_keys_per_delete`]
+    pub fn max_keys_per_delete(&self) -> usize {
+        match self {
+            Self::LocalFs(s) => s.max_keys_per_delete(),
+            Self::AwsS3(s) => s.max_keys_per_delete(),
+            Self::AzureBlob(s) => s.max_keys_per_delete(),
+            Self::Unreliable(s) => s.max_keys_per_delete(),
+        }
+    }
+
     /// See [`RemoteStorage::delete_prefix`]
     pub async fn delete_prefix(
         &self,
@@ -584,6 +619,10 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
 impl GenericRemoteStorage {
     pub async fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
         let timeout = storage_config.timeout;
+
+        // If somkeone overrides timeout to be small without adjusting small_timeout, then adjust it automatically
+        let small_timeout = std::cmp::min(storage_config.small_timeout, timeout);
+
         Ok(match &storage_config.storage {
             RemoteStorageKind::LocalFs { local_path: path } => {
                 info!("Using fs root '{path}' as a remote storage");
@@ -606,7 +645,11 @@ impl GenericRemoteStorage {
                     .unwrap_or("<AZURE_STORAGE_ACCOUNT>");
                 info!("Using azure container '{}' in account '{storage_account}' in region '{}' as a remote storage, prefix in container: '{:?}'",
                       azure_config.container_name, azure_config.container_region, azure_config.prefix_in_container);
-                Self::AzureBlob(Arc::new(AzureBlobStorage::new(azure_config, timeout)?))
+                Self::AzureBlob(Arc::new(AzureBlobStorage::new(
+                    azure_config,
+                    timeout,
+                    small_timeout,
+                )?))
             }
         })
     }

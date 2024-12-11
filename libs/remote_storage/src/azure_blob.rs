@@ -8,15 +8,14 @@ use std::io;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
+use anyhow::Context;
 use anyhow::Result;
 use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
 use azure_core::{Continuable, RetryOptions};
-use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
 use azure_storage_blobs::prelude::ClientBuilder;
@@ -35,6 +34,7 @@ use utils::backoff;
 use utils::backoff::exponential_backoff_duration_seconds;
 
 use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
+use crate::DownloadKind;
 use crate::{
     config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError,
     DownloadOpts, Listing, ListingMode, ListingObject, RemotePath, RemoteStorage, StorageMetadata,
@@ -49,10 +49,17 @@ pub struct AzureBlobStorage {
     concurrency_limiter: ConcurrencyLimiter,
     // Per-request timeout. Accessible for tests.
     pub timeout: Duration,
+
+    // Alternative timeout used for metadata objects which are expected to be small
+    pub small_timeout: Duration,
 }
 
 impl AzureBlobStorage {
-    pub fn new(azure_config: &AzureConfig, timeout: Duration) -> Result<Self> {
+    pub fn new(
+        azure_config: &AzureConfig,
+        timeout: Duration,
+        small_timeout: Duration,
+    ) -> Result<Self> {
         debug!(
             "Creating azure remote storage for azure container {}",
             azure_config.container_name
@@ -68,8 +75,9 @@ impl AzureBlobStorage {
         let credentials = if let Ok(access_key) = env::var("AZURE_STORAGE_ACCESS_KEY") {
             StorageCredentials::access_key(account.clone(), access_key)
         } else {
-            let token_credential = DefaultAzureCredential::default();
-            StorageCredentials::token_credential(Arc::new(token_credential))
+            let token_credential = azure_identity::create_default_credential()
+                .context("trying to obtain Azure default credentials")?;
+            StorageCredentials::token_credential(token_credential)
         };
 
         // we have an outer retry
@@ -94,6 +102,7 @@ impl AzureBlobStorage {
             max_keys_per_list_response,
             concurrency_limiter: ConcurrencyLimiter::new(azure_config.concurrency_limit.get()),
             timeout,
+            small_timeout,
         })
     }
 
@@ -133,6 +142,7 @@ impl AzureBlobStorage {
     async fn download_for_builder(
         &self,
         builder: GetBlobBuilder,
+        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let kind = RequestKind::Get;
@@ -156,7 +166,7 @@ impl AzureBlobStorage {
                 .map_err(to_download_error);
 
             // apply per request timeout
-            let response = tokio_stream::StreamExt::timeout(response, self.timeout);
+            let response = tokio_stream::StreamExt::timeout(response, timeout);
 
             // flatten
             let response = response.map(|res| match res {
@@ -220,6 +230,11 @@ impl AzureBlobStorage {
         let started_at = ScopeGuard::into_inner(started_at);
         let outcome = match &download {
             Ok(_) => AttemptOutcome::Ok,
+            // At this level in the stack 404 and 304 responses do not indicate an error.
+            // There's expected cases when a blob may not exist or hasn't been modified since
+            // the last get (e.g. probing for timeline indices and heatmap downloads).
+            // Callers should handle errors if they are unexpected.
+            Err(DownloadError::NotFound | DownloadError::Unmodified) => AttemptOutcome::Ok,
             Err(_) => AttemptOutcome::Err,
         };
         crate::metrics::BUCKET_METRICS
@@ -410,7 +425,7 @@ impl RemoteStorage for AzureBlobStorage {
         let blob_client = self.client.blob_client(self.relative_path_to_name(key));
         let properties_future = blob_client.get_properties().into_future();
 
-        let properties_future = tokio::time::timeout(self.timeout, properties_future);
+        let properties_future = tokio::time::timeout(self.small_timeout, properties_future);
 
         let res = tokio::select! {
             res = properties_future => res,
@@ -516,7 +531,12 @@ impl RemoteStorage for AzureBlobStorage {
             });
         }
 
-        self.download_for_builder(builder, cancel).await
+        let timeout = match opts.kind {
+            DownloadKind::Small => self.small_timeout,
+            DownloadKind::Large => self.timeout,
+        };
+
+        self.download_for_builder(builder, timeout, cancel).await
     }
 
     async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {
@@ -602,6 +622,10 @@ impl RemoteStorage for AzureBlobStorage {
             .req_seconds
             .observe_elapsed(kind, &res, started_at);
         res
+    }
+
+    fn max_keys_per_delete(&self) -> usize {
+        super::MAX_KEYS_PER_DELETE_AZURE
     }
 
     async fn copy(

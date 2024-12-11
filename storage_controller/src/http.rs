@@ -1452,10 +1452,15 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
     let uri = req.uri().to_string();
     let uri_for_forward = !NOT_FOR_FORWARD.contains(&uri.as_str());
 
+    // Fast return before trying to take any Service locks, if we will never forward anyway
+    if !uri_for_forward {
+        return ForwardOutcome::NotForwarded(req);
+    }
+
     let state = get_state(&req);
     let leadership_status = state.service.get_leadership_status();
 
-    if leadership_status != LeadershipStatus::SteppedDown || !uri_for_forward {
+    if leadership_status != LeadershipStatus::SteppedDown {
         return ForwardOutcome::NotForwarded(req);
     }
 
