@@ -8,6 +8,7 @@ use crate::checks::{
 };
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
 use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId, MAX_RETRIES};
+use async_stream::try_stream;
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::remote_timeline_client::manifest::OffloadedTimelineManifest;
@@ -754,23 +755,18 @@ pub async fn pageserver_physical_gc(
                 }
             };
             let tenant_manifest_arc = Arc::new(tenant_manifest_opt);
-            let summary_from_manifest = Ok(GcSummaryOrContent::<(_, _)>::GcSummary(
-                summary_from_manifest,
-            ));
-            stream_tenant_timelines(remote_client_ref, target_ref, tenant_shard_id)
-                .await
-                .map(|stream| {
-                    stream
-                        .zip(futures::stream::iter(std::iter::repeat(
-                            tenant_manifest_arc,
-                        )))
-                        .map(|(ttid_res, tenant_manifest_arc)| {
-                            ttid_res.map(move |ttid| {
-                                GcSummaryOrContent::Content((ttid, tenant_manifest_arc))
-                            })
-                        })
-                        .chain(futures::stream::iter([summary_from_manifest].into_iter()))
-                })
+            let summary_from_manifest =
+                GcSummaryOrContent::<(_, _)>::GcSummary(summary_from_manifest);
+            let mut timelines = Box::pin(
+                stream_tenant_timelines(remote_client_ref, target_ref, tenant_shard_id).await?,
+            );
+            Ok(try_stream! {
+                while let Some(ttid_res) = timelines.next().await {
+                    let ttid = ttid_res?;
+                    yield GcSummaryOrContent::Content((ttid, tenant_manifest_arc.clone()))
+                }
+                yield summary_from_manifest;
+            })
         }
     });
     let timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
