@@ -4634,8 +4634,6 @@ class StorageScrubber:
         if timeline_lsns is not None:
             args.append("--timeline-lsns")
             args.append(json.dumps(timeline_lsns))
-        if node_kind == NodeKind.PAGESERVER:
-            args.append("--verbose")
         stdout = self.scrubber_cli(args, timeout=30, extra_env=extra_env)
 
         try:
