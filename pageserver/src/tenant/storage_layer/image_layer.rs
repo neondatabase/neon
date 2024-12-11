@@ -887,9 +887,11 @@ impl ImageLayerWriterInner {
         let file = self.blob_writer.into_inner(ctx).await?;
 
         // Write out the index
-        // TODO(yuchen): should we just replace BlockBuf::blocks with one big buffer?
         let mut offset = index_start_blk as u64 * PAGE_SZ as u64;
         let (index_root_blk, block_buf) = self.tree.finish()?;
+
+        // TODO(yuchen): https://github.com/neondatabase/neon/issues/10092
+        // Should we just replace BlockBuf::blocks with one big buffer?
         for buf in block_buf.blocks {
             let (_buf, res) = file.write_all_at(buf.slice_len(), offset, ctx).await;
             res?;

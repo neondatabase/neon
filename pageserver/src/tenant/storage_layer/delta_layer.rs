@@ -117,6 +117,8 @@ impl From<&DeltaLayer> for Summary {
 impl Summary {
     /// Serializes the summary header into an aligned buffer of lenth `PAGE_SZ`.
     pub fn ser_into_page(&self) -> Result<IoBuffer, SerializeError> {
+        let mut buf = bytes::BytesMut::with_capacity(PAGE_SZ);
+        Self::ser_into(&self, &mut buf);
         let mut buf = IoBufferMut::with_capacity(PAGE_SZ);
         Self::ser_into(&self, &mut buf)?;
         // Pad zeroes to the buffer so the length is a multiple of the alignment.
