@@ -100,6 +100,8 @@ use crate::{
 
 use context_iterator::TenantShardContextIterator;
 
+const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
+
 // For operations that should be quick, like attaching a new tenant
 const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -6728,7 +6730,7 @@ impl Service {
             }
 
             waiters = self
-                .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
+                .await_waiters_remainder(waiters, WAITER_FILL_DRAIN_POLL_TIMEOUT)
                 .await;
 
             failpoint_support::sleep_millis_async!("sleepy-drain-loop", &cancel);
@@ -6981,7 +6983,7 @@ impl Service {
             }
 
             waiters = self
-                .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
+                .await_waiters_remainder(waiters, WAITER_FILL_DRAIN_POLL_TIMEOUT)
                 .await;
         }
 
