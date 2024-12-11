@@ -575,7 +575,10 @@ enum BatchedFeMessage {
 }
 
 impl BatchedFeMessage {
-    async fn throttle(&mut self, cancel: &CancellationToken) -> Result<(), QueryError> {
+    async fn throttle_and_record_start_processing(
+        &mut self,
+        cancel: &CancellationToken,
+    ) -> Result<(), QueryError> {
         let (shard, tokens, timers) = match self {
             BatchedFeMessage::Exists { shard, timer, .. }
             | BatchedFeMessage::Nblocks { shard, timer, .. }
@@ -603,7 +606,7 @@ impl BatchedFeMessage {
             }
         };
         for timer in timers {
-            timer.deduct_throttle(&throttled);
+            timer.observe_throttle_done_execution_starting(&throttled);
         }
         Ok(())
     }
@@ -1230,7 +1233,7 @@ impl PageServerHandler {
                 }
             };
 
-            if let Err(cancelled) = msg.throttle(&self.cancel).await {
+            if let Err(cancelled) = msg.throttle_and_record_start_processing(&self.cancel).await {
                 break cancelled;
             }
 
@@ -1397,7 +1400,9 @@ impl PageServerHandler {
                             return Err(e);
                         }
                     };
-                    batch.throttle(&self.cancel).await?;
+                    batch
+                        .throttle_and_record_start_processing(&self.cancel)
+                        .await?;
                     self.pagesteam_handle_batched_message(pgb_writer, batch, &cancel, &ctx)
                         .await?;
                 }
