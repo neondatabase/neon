@@ -363,7 +363,7 @@ jobs:
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
-      contents: read
+      contents: write
     outputs:
       report-url: ${{ steps.create-allure-report.outputs.report-url }}
 
