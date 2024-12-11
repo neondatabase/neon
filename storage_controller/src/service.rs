@@ -7113,6 +7113,12 @@ impl Service {
         global_observed
     }
 
+    pub(crate) async fn safekeepers_list(
+        &self,
+    ) -> Result<Vec<crate::persistence::SafekeeperPersistence>, DatabaseError> {
+        self.persistence.list_safekeepers().await
+    }
+
     pub(crate) async fn get_safekeeper(
         &self,
         id: i64,

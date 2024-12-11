@@ -11,6 +11,7 @@ use diesel::Connection;
 use itertools::Itertools;
 use pageserver_api::controller_api::AvailabilityZone;
 use pageserver_api::controller_api::MetadataHealthRecord;
+use pageserver_api::controller_api::SafekeeperDescribeResponse;
 use pageserver_api::controller_api::ShardSchedulingPolicy;
 use pageserver_api::controller_api::{NodeSchedulingPolicy, PlacementPolicy};
 use pageserver_api::models::TenantConfig;
@@ -104,6 +105,7 @@ pub(crate) enum DatabaseOperation {
     ListMetadataHealth,
     ListMetadataHealthUnhealthy,
     ListMetadataHealthOutdated,
+    ListSafekeepers,
     GetLeader,
     UpdateLeader,
     SetPreferredAzs,
@@ -1011,6 +1013,22 @@ impl Persistence {
         Ok(())
     }
 
+    /// At startup, populate the list of nodes which our shards may be placed on
+    pub(crate) async fn list_safekeepers(&self) -> DatabaseResult<Vec<SafekeeperPersistence>> {
+        let safekeepers: Vec<SafekeeperPersistence> = self
+            .with_measured_conn(
+                DatabaseOperation::ListNodes,
+                move |conn| -> DatabaseResult<_> {
+                    Ok(crate::schema::safekeepers::table.load::<SafekeeperPersistence>(conn)?)
+                },
+            )
+            .await?;
+
+        tracing::info!("list_safekeepers: loaded {} nodes", safekeepers.len());
+
+        Ok(safekeepers)
+    }
+
     pub(crate) async fn safekeeper_get(
         &self,
         id: i64,
@@ -1204,6 +1222,7 @@ pub(crate) struct SafekeeperPersistence {
     /// Zero or negative is not really expected.
     /// Otherwise the number from `release-$(number_of_commits_on_branch)` tag.
     pub(crate) version: i64,
+    pub(crate) instance_id: String,
     pub(crate) host: String,
     pub(crate) port: i32,
     pub(crate) active: bool,
@@ -1222,6 +1241,16 @@ impl SafekeeperPersistence {
             active: self.active,
             http_port: self.http_port,
             availability_zone_id: &self.availability_zone_id,
+        }
+    }
+    pub(crate) fn describe(&self) -> SafekeeperDescribeResponse {
+        SafekeeperDescribeResponse {
+            id: NodeId(self.id as u64),
+            region_id: self.region_id.clone(),
+            availability_zone_id: self.availability_zone_id.clone(),
+            version: self.version as u64,
+            listen_http_addr: self.host.clone(),
+            listen_http_port: self.http_port as u16,
         }
     }
 }
