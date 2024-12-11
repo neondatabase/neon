@@ -1222,7 +1222,6 @@ pub(crate) struct SafekeeperPersistence {
     /// Zero or negative is not really expected.
     /// Otherwise the number from `release-$(number_of_commits_on_branch)` tag.
     pub(crate) version: i64,
-    pub(crate) instance_id: String,
     pub(crate) host: String,
     pub(crate) port: i32,
     pub(crate) active: bool,
