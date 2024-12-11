@@ -37,7 +37,7 @@ message ValueMeta {
 }
 
 message CompactKey {
-  int64 high = 1;
-  int64 low = 2;
+  uint64 high = 1;
+  uint64 low = 2;
 }
 
