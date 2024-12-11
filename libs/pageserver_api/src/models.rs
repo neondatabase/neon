@@ -17,7 +17,7 @@ use std::{
 
 use byteorder::{BigEndian, ReadBytesExt};
 use postgres_ffi::BLCKSZ;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::serde_as;
 use utils::{
     completion,
@@ -325,6 +325,115 @@ impl Default for ShardParameters {
     }
 }
 
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub enum FieldPatch<T> {
+    Upsert(T),
+    Remove,
+    #[default]
+    Noop,
+}
+
+impl<T> FieldPatch<T> {
+    fn is_noop(&self) -> bool {
+        matches!(self, FieldPatch::Noop)
+    }
+
+    pub fn apply(self, target: &mut Option<T>) {
+        match self {
+            Self::Upsert(v) => *target = Some(v),
+            Self::Remove => *target = None,
+            Self::Noop => {}
+        }
+    }
+
+    pub fn map<U, E, F: FnOnce(T) -> Result<U, E>>(self, map: F) -> Result<FieldPatch<U>, E> {
+        match self {
+            Self::Upsert(v) => Ok(FieldPatch::<U>::Upsert(map(v)?)),
+            Self::Remove => Ok(FieldPatch::<U>::Remove),
+            Self::Noop => Ok(FieldPatch::<U>::Noop),
+        }
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for FieldPatch<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::deserialize(deserializer).map(|opt| match opt {
+            None => FieldPatch::Remove,
+            Some(val) => FieldPatch::Upsert(val),
+        })
+    }
+}
+
+impl<T: Serialize> Serialize for FieldPatch<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            FieldPatch::Upsert(val) => serializer.serialize_some(val),
+            FieldPatch::Remove => serializer.serialize_none(),
+            FieldPatch::Noop => unreachable!(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
+#[serde(default)]
+pub struct TenantConfigPatch {
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub checkpoint_distance: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub checkpoint_timeout: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_target_size: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_period: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_threshold: FieldPatch<usize>,
+    // defer parsing compaction_algorithm, like eviction_policy
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_algorithm: FieldPatch<CompactionAlgorithmSettings>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_horizon: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_period: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub image_creation_threshold: FieldPatch<usize>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub pitr_interval: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub walreceiver_connect_timeout: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub lagging_wal_timeout: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub max_lsn_wal_lag: FieldPatch<NonZeroU64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub eviction_policy: FieldPatch<EvictionPolicy>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub min_resident_size_override: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub evictions_low_residence_duration_metric_threshold: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub heatmap_period: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub lazy_slru_download: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub timeline_get_throttle: FieldPatch<ThrottleConfig>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub image_layer_creation_check_threshold: FieldPatch<u8>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub lsn_lease_length: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub lsn_lease_length_for_ts: FieldPatch<String>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub timeline_offloading: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub wal_receiver_protocol_override: FieldPatch<PostgresClientProtocol>,
+}
+
 /// An alternative representation of `pageserver::tenant::TenantConf` with
 /// simpler types.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
@@ -354,6 +463,107 @@ pub struct TenantConfig {
     pub lsn_lease_length_for_ts: Option<String>,
     pub timeline_offloading: Option<bool>,
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
+}
+
+impl TenantConfig {
+    pub fn apply_patch(self, patch: TenantConfigPatch) -> TenantConfig {
+        let Self {
+            mut checkpoint_distance,
+            mut checkpoint_timeout,
+            mut compaction_target_size,
+            mut compaction_period,
+            mut compaction_threshold,
+            mut compaction_algorithm,
+            mut gc_horizon,
+            mut gc_period,
+            mut image_creation_threshold,
+            mut pitr_interval,
+            mut walreceiver_connect_timeout,
+            mut lagging_wal_timeout,
+            mut max_lsn_wal_lag,
+            mut eviction_policy,
+            mut min_resident_size_override,
+            mut evictions_low_residence_duration_metric_threshold,
+            mut heatmap_period,
+            mut lazy_slru_download,
+            mut timeline_get_throttle,
+            mut image_layer_creation_check_threshold,
+            mut lsn_lease_length,
+            mut lsn_lease_length_for_ts,
+            mut timeline_offloading,
+            mut wal_receiver_protocol_override,
+        } = self;
+
+        patch.checkpoint_distance.apply(&mut checkpoint_distance);
+        patch.checkpoint_timeout.apply(&mut checkpoint_timeout);
+        patch
+            .compaction_target_size
+            .apply(&mut compaction_target_size);
+        patch.compaction_period.apply(&mut compaction_period);
+        patch.compaction_threshold.apply(&mut compaction_threshold);
+        patch.compaction_algorithm.apply(&mut compaction_algorithm);
+        patch.gc_horizon.apply(&mut gc_horizon);
+        patch.gc_period.apply(&mut gc_period);
+        patch
+            .image_creation_threshold
+            .apply(&mut image_creation_threshold);
+        patch.pitr_interval.apply(&mut pitr_interval);
+        patch
+            .walreceiver_connect_timeout
+            .apply(&mut walreceiver_connect_timeout);
+        patch.lagging_wal_timeout.apply(&mut lagging_wal_timeout);
+        patch.max_lsn_wal_lag.apply(&mut max_lsn_wal_lag);
+        patch.eviction_policy.apply(&mut eviction_policy);
+        patch
+            .min_resident_size_override
+            .apply(&mut min_resident_size_override);
+        patch
+            .evictions_low_residence_duration_metric_threshold
+            .apply(&mut evictions_low_residence_duration_metric_threshold);
+        patch.heatmap_period.apply(&mut heatmap_period);
+        patch.lazy_slru_download.apply(&mut lazy_slru_download);
+        patch
+            .timeline_get_throttle
+            .apply(&mut timeline_get_throttle);
+        patch
+            .image_layer_creation_check_threshold
+            .apply(&mut image_layer_creation_check_threshold);
+        patch.lsn_lease_length.apply(&mut lsn_lease_length);
+        patch
+            .lsn_lease_length_for_ts
+            .apply(&mut lsn_lease_length_for_ts);
+        patch.timeline_offloading.apply(&mut timeline_offloading);
+        patch
+            .wal_receiver_protocol_override
+            .apply(&mut wal_receiver_protocol_override);
+
+        Self {
+            checkpoint_distance,
+            checkpoint_timeout,
+            compaction_target_size,
+            compaction_period,
+            compaction_threshold,
+            compaction_algorithm,
+            gc_horizon,
+            gc_period,
+            image_creation_threshold,
+            pitr_interval,
+            walreceiver_connect_timeout,
+            lagging_wal_timeout,
+            max_lsn_wal_lag,
+            eviction_policy,
+            min_resident_size_override,
+            evictions_low_residence_duration_metric_threshold,
+            heatmap_period,
+            lazy_slru_download,
+            timeline_get_throttle,
+            image_layer_creation_check_threshold,
+            lsn_lease_length,
+            lsn_lease_length_for_ts,
+            timeline_offloading,
+            wal_receiver_protocol_override,
+        }
+    }
 }
 
 /// The policy for the aux file storage.
@@ -684,6 +894,14 @@ impl TenantConfigRequest {
         let config = TenantConfig::default();
         TenantConfigRequest { tenant_id, config }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantConfigPatchRequest {
+    pub tenant_id: TenantId,
+    #[serde(flatten)]
+    pub config: TenantConfigPatch, // as we have a flattened field, we should reject all unknown fields in it
 }
 
 /// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
@@ -1698,5 +1916,46 @@ mod tests {
                 "Display is the serde serialization"
             );
         }
+    }
+
+    #[test]
+    fn test_tenant_config_patch_request_serde() {
+        let patch_request = TenantConfigPatchRequest {
+            tenant_id: TenantId::from_str("17c6d121946a61e5ab0fe5a2fd4d8215").unwrap(),
+            config: TenantConfigPatch {
+                checkpoint_distance: FieldPatch::Upsert(42),
+                gc_horizon: FieldPatch::Remove,
+                compaction_threshold: FieldPatch::Noop,
+                ..TenantConfigPatch::default()
+            },
+        };
+
+        let json = serde_json::to_string(&patch_request).unwrap();
+
+        let expected = r#"{"tenant_id":"17c6d121946a61e5ab0fe5a2fd4d8215","checkpoint_distance":42,"gc_horizon":null}"#;
+        assert_eq!(json, expected);
+
+        let decoded: TenantConfigPatchRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.tenant_id, patch_request.tenant_id);
+        assert_eq!(decoded.config, patch_request.config);
+
+        // Now apply the patch to a config to demonstrate semantics
+
+        let base = TenantConfig {
+            checkpoint_distance: Some(28),
+            gc_horizon: Some(100),
+            compaction_target_size: Some(1024),
+            ..Default::default()
+        };
+
+        let expected = TenantConfig {
+            checkpoint_distance: Some(42),
+            gc_horizon: None,
+            ..base.clone()
+        };
+
+        let patched = base.apply_patch(decoded.config);
+
+        assert_eq!(patched, expected);
     }
 }

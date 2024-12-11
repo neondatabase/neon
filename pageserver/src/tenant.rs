@@ -68,6 +68,7 @@ use utils::sync::gate::Gate;
 use utils::sync::gate::GateGuard;
 use utils::timeout::timeout_cancellable;
 use utils::timeout::TimeoutCancellableError;
+use utils::try_rcu::ArcSwapExt;
 use utils::zstd::create_zst_tarball;
 use utils::zstd::extract_zst_tarball;
 
@@ -3921,25 +3922,28 @@ impl Tenant {
         }
     }
 
-    pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
+    pub fn update_tenant_config<F: Fn(TenantConfOpt) -> anyhow::Result<TenantConfOpt>>(
+        &self,
+        update: F,
+    ) -> anyhow::Result<TenantConfOpt> {
         // Use read-copy-update in order to avoid overwriting the location config
         // state if this races with [`Tenant::set_new_location_config`]. Note that
         // this race is not possible if both request types come from the storage
         // controller (as they should!) because an exclusive op lock is required
         // on the storage controller side.
 
-        self.tenant_conf.rcu(|inner| {
-            Arc::new(AttachedTenantConf {
-                tenant_conf: new_tenant_conf.clone(),
-                location: inner.location,
-                // Attached location is not changed, no need to update lsn lease deadline.
-                lsn_lease_deadline: inner.lsn_lease_deadline,
-            })
-        });
+        self.tenant_conf
+            .try_rcu(|attached_conf| -> Result<_, anyhow::Error> {
+                Ok(Arc::new(AttachedTenantConf {
+                    tenant_conf: update(attached_conf.tenant_conf.clone())?,
+                    location: attached_conf.location,
+                    lsn_lease_deadline: attached_conf.lsn_lease_deadline,
+                }))
+            })?;
 
-        let updated = self.tenant_conf.load().clone();
+        let updated = self.tenant_conf.load();
 
-        self.tenant_conf_updated(&new_tenant_conf);
+        self.tenant_conf_updated(&updated.tenant_conf);
         // Don't hold self.timelines.lock() during the notifies.
         // There's no risk of deadlock right now, but there could be if we consolidate
         // mutexes in struct Timeline in the future.
@@ -3947,6 +3951,8 @@ impl Tenant {
         for timeline in timelines {
             timeline.tenant_conf_updated(&updated);
         }
+
+        Ok(updated.tenant_conf.clone())
     }
 
     pub(crate) fn set_new_location_config(&self, new_conf: AttachedTenantConf) {
