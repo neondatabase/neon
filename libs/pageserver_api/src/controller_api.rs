@@ -339,16 +339,6 @@ pub enum PlacementPolicy {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateResponse {}
 
-#[derive(Serialize, Deserialize)]
-pub struct SafekeeperDescribeResponse {
-    pub id: NodeId,
-    pub region_id: String,
-    pub availability_zone_id: String,
-    pub version: u64,
-    pub listen_http_addr: String,
-    pub listen_http_port: u16,
-}
-
 /// Metadata health record posted from scrubber.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MetadataHealthRecord {

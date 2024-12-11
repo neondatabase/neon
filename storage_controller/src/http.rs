@@ -869,12 +869,7 @@ async fn handle_safekeeper_list(req: Request<Body>) -> Result<Response<Body>, Ap
 
     let state = get_state(&req);
     let safekeepers = state.service.safekeepers_list().await?;
-    let api_sks = safekeepers
-        .into_iter()
-        .map(|n| n.describe())
-        .collect::<Vec<_>>();
-
-    json_response(StatusCode::OK, api_sks)
+    json_response(StatusCode::OK, safekeepers)
 }
 
 async fn handle_metadata_health_update(req: Request<Body>) -> Result<Response<Body>, ApiError> {
