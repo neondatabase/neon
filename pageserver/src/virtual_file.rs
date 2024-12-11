@@ -975,10 +975,7 @@ impl VirtualFileInner {
     ) -> (FullSlice<B>, Result<usize, Error>) {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
-            Err(e) => {
-                println!("ERRORED :(");
-                return (buf, Err(e));
-            }
+            Err(e) => return (buf, Err(e)),
         };
         observe_duration!(StorageIoOperation::Write, {
             let ((_file_guard, buf), result) =
