@@ -2609,6 +2609,8 @@ impl Service {
 
             if !configs.all_equal() {
                 tracing::error!("Tenant configs for {} are mismatched. ", req.tenant_id);
+                // This can't happen because we atomically update the database records
+                // of all shards to the new value in [`Self::set_tenant_config_and_reconcile`].
                 return Err(ApiError::InternalServerError(anyhow::anyhow!(
                     "Tenant configs for {} are mismatched",
                     req.tenant_id
