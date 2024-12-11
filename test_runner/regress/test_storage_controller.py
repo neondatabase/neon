@@ -58,6 +58,8 @@ from werkzeug.wrappers.response import Response
 if TYPE_CHECKING:
     from typing import Any
 
+    from fixtures.httpserver import ListenAddress
+
 
 def get_node_shard_counts(env: NeonEnv, tenant_ids):
     counts: defaultdict[int, int] = defaultdict(int)
@@ -563,7 +565,7 @@ def test_storage_controller_onboard_detached(neon_env_builder: NeonEnvBuilder):
 def test_storage_controller_compute_hook(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
-    httpserver_listen_address,
+    httpserver_listen_address: ListenAddress,
 ):
     """
     Test that the sharding service calls out to the configured HTTP endpoint on attachment changes
@@ -681,7 +683,7 @@ NOTIFY_FAILURE_LOGS = [
 def test_storage_controller_stuck_compute_hook(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
-    httpserver_listen_address,
+    httpserver_listen_address: ListenAddress,
 ):
     """
     Test the migration process's behavior when the compute hook does not enable it to proceed
@@ -818,7 +820,7 @@ def test_storage_controller_stuck_compute_hook(
 def test_storage_controller_compute_hook_revert(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
-    httpserver_listen_address,
+    httpserver_listen_address: ListenAddress,
 ):
     """
     'revert' in the sense of a migration which gets reversed shortly after, as may happen during

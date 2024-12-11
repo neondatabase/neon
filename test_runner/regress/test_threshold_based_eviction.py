@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -13,12 +14,15 @@ from fixtures.pageserver.http import LayerMapInfo
 from fixtures.remote_storage import RemoteStorageKind
 from pytest_httpserver import HTTPServer
 
+if TYPE_CHECKING:
+    from fixtures.httpserver import ListenAddress
+
 # NB: basic config change tests are in test_tenant_conf.py
 
 
 def test_threshold_based_eviction(
     httpserver: HTTPServer,
-    httpserver_listen_address,
+    httpserver_listen_address: ListenAddress,
     pg_bin: PgBin,
     neon_env_builder: NeonEnvBuilder,
 ):
