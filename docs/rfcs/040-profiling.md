@@ -121,13 +121,14 @@ Works on Linux and macOS.
 
 ### C CPU Profiling
 
-Unclear if there is a C library for in-process pprof profiling.
+[gperftools](https://github.com/gperftools/gperftools) provides in-process CPU profiling with
+pprof output.
 
-Alternatively, can use [eBPF profiling](https://pyroscope.io/blog/ebpf-profiling-pros-cons/),
-potentially together with [pprof-ebpf](https://github.com/cpg1111/pprof-ebpf) to convert them
-to pprof with a sidecar service for HTTP access. This would be Linux-only.
+However, continuous profiling of PostgreSQL is expensive (many computes), and has limited value
+since we don't own the internals anyway.
 
-TODO: explore options.
+Ad hoc profiling might still be useful, but the compute team considers existing tooling sufficient,
+so this is not a priority at the moment.
 
 ## Memory Profiling
 
@@ -184,9 +185,10 @@ Works on Linux and macOS.
 
 ### C Memory Profiling
 
-Unclear if there is a C library for in-process pprof heap profiling.
+[gperftools](https://github.com/gperftools/gperftools) provides in-process CPU profiling with
+pprof output.
 
-TODO: explore options.
+However, PostgreSQL profiling is not a priority at the moment (see C CPU profiling section).
 
 ## Grafana Continuous Profiling
 
@@ -227,7 +229,6 @@ TODO: decide on an optimal sample frequency. Ideally below 1% CPU usage.
 * Which sample frequency should we use for continuous profiles?
 * How long should we retain continuous profiles for?
 * Should we use authentication for profile endpoints?
-* Should we add profiling for C (i.e. PostgreSQL)?
 
 ## Alternatives Considered
 
