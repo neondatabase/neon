@@ -2314,15 +2314,25 @@ class NeonStorageController(MetricsGetter, LogUtils):
             json=body,
         )
 
-    def get_safekeeper(self, id: int) -> dict[str, Any] | None:
+    def get_safekeeper(self, id: int) -> dict[str, Any]:
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/safekeeper/{id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        json = response.json()
+        assert isinstance(json, dict)
+        return json
+
+    def get_safekeepers(self) -> list[dict[str, Any]] | None:
         try:
             response = self.request(
                 "GET",
-                f"{self.api}/control/v1/safekeeper/{id}",
+                f"{self.api}/control/v1/safekeeper",
                 headers=self.headers(TokenScope.ADMIN),
             )
             json = response.json()
-            assert isinstance(json, dict)
+            assert isinstance(json, list)
             return json
         except StorageControllerApiException as e:
             if e.status_code == 404:

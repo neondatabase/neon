@@ -2953,6 +2953,8 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     assert target.get_safekeeper(fake_id) is None
 
+    assert len(target.get_safekeepers()) == 0
+
     body = {
         "active": True,
         "id": fake_id,

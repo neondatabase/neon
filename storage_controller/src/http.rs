@@ -1219,7 +1219,7 @@ async fn handle_get_safekeeper(req: Request<Body>) -> Result<Response<Body>, Api
     match res {
         Ok(b) => json_response(StatusCode::OK, b),
         Err(crate::persistence::DatabaseError::Query(diesel::result::Error::NotFound)) => {
-            Err(ApiError::NotFound("unknown instance_id".into()))
+            Err(ApiError::NotFound("unknown instance id".into()))
         }
         Err(other) => Err(other.into()),
     }
