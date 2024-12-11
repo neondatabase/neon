@@ -578,7 +578,7 @@ async fn gc_timeline(
     target: &RootTarget,
     mode: GcMode,
     ttid: TenantShardTimelineId,
-    accumulator: &Arc<std::sync::Mutex<TenantRefAccumulator>>,
+    accumulator: &std::sync::Mutex<TenantRefAccumulator>,
     tenant_manifest_info: Arc<Option<RemoteTenantManifestInfo>>,
 ) -> anyhow::Result<GcSummary> {
     let mut summary = GcSummary::default();
@@ -729,7 +729,7 @@ pub async fn pageserver_physical_gc(
     const CONCURRENCY: usize = 32;
 
     // Accumulate information about each tenant for cross-shard GC step we'll do at the end
-    let accumulator = Arc::new(std::sync::Mutex::new(TenantRefAccumulator::default()));
+    let accumulator = std::sync::Mutex::new(TenantRefAccumulator::default());
 
     // Generate a stream of TenantTimelineId
     enum GcSummaryOrContent<T> {
@@ -806,8 +806,7 @@ pub async fn pageserver_physical_gc(
         return Ok(summary);
     };
 
-    let (ancestor_shards, ancestor_refs) = Arc::into_inner(accumulator)
-        .unwrap()
+    let (ancestor_shards, ancestor_refs) = accumulator
         .into_inner()
         .unwrap()
         .into_gc_ancestors(client, &mut summary)
