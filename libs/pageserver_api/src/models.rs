@@ -983,12 +983,18 @@ pub struct TimelineInfo {
     pub last_record_lsn: Lsn,
     pub prev_record_lsn: Option<Lsn>,
     pub latest_gc_cutoff_lsn: Lsn,
+
+    /// The LSN that has been flushed to local disk.
     pub disk_consistent_lsn: Lsn,
 
-    /// The LSN that we have succesfully uploaded to remote storage
+    /// The LSN that has been compacted down to L1 on local disk.
+    pub disk_compacted_lsn: Lsn,
+
+    /// The LSN that we have succesfully uploaded to remote storage, according to
+    /// our generation.
     pub remote_consistent_lsn: Lsn,
 
-    /// The LSN that we are advertizing to safekeepers
+    /// The LSN that we are advertizing to safekeepers, with verified generation.
     pub remote_consistent_lsn_visible: Lsn,
 
     /// The LSN from the start of the root timeline (never changes)

@@ -1050,6 +1050,9 @@ components:
         disk_consistent_lsn:
           type: string
           format: hex
+        disk_compacted_lsn:
+          type: string
+          format: hex
         remote_consistent_lsn:
           type: string
           format: hex

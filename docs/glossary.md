@@ -121,6 +121,7 @@ Neon safekeeper LSNs. See [safekeeper protocol section](safekeeper-protocol.md) 
 Neon pageserver LSNs:
 * `last_record_lsn` - the end of last processed WAL record.
 * `disk_consistent_lsn` - data is known to be fully flushed and fsync'd to local disk on pageserver up to this LSN.
+* `disk_compacted_lsn` - data is known to be compacted to L1 on local disk up to this LSN.
 * `remote_consistent_lsn` - The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash.
 TODO: use this name consistently in remote storage code. Now `disk_consistent_lsn` is used and meaning depends on the context.
 * `ancestor_lsn` - LSN of the branch point (the LSN at which this branch was created)

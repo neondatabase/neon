@@ -53,7 +53,7 @@ pub struct InMemoryLayer {
 
     /// This layer contains all the changes from 'start_lsn'. The
     /// start is inclusive.
-    start_lsn: Lsn,
+    pub(crate) start_lsn: Lsn,
 
     /// Frozen layers have an exclusive end LSN.
     /// Writes are only allowed when this is `None`.

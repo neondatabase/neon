@@ -2,7 +2,7 @@
 
 use serde::{de::Visitor, Deserialize, Serialize};
 use std::fmt;
-use std::ops::{Add, AddAssign};
+use std::ops::{Add, AddAssign, Sub};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -292,6 +292,15 @@ impl AddAssign<u64> for Lsn {
     fn add_assign(&mut self, other: u64) {
         // panic if the addition overflows.
         self.0 = self.0.checked_add(other).unwrap();
+    }
+}
+
+impl Sub<u64> for Lsn {
+    type Output = Lsn;
+
+    fn sub(self, other: u64) -> Self::Output {
+        // panic if the addition overflows.
+        Lsn(self.0.checked_sub(other).unwrap())
     }
 }
 

@@ -480,6 +480,7 @@ async fn build_timeline_info_common(
         timeline_id: timeline.timeline_id,
         ancestor_timeline_id,
         ancestor_lsn,
+        disk_compacted_lsn: timeline.get_disk_compacted_lsn().await.unwrap_or(Lsn(0)),
         disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
         remote_consistent_lsn: remote_consistent_lsn_projected,
         remote_consistent_lsn_visible,

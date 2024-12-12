@@ -472,6 +472,15 @@ static DISK_CONSISTENT_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static DISK_COMPACTED_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_disk_compacted_lsn",
+        "Disk compacted LSN grouped by timeline",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) static PROJECTED_REMOTE_CONSISTENT_LSN: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_projected_remote_consistent_lsn",
@@ -2596,6 +2605,7 @@ pub(crate) struct TimelineMetrics {
     pub find_gc_cutoffs_histo: StorageTimeMetrics,
     pub last_record_lsn_gauge: IntGauge,
     pub disk_consistent_lsn_gauge: IntGauge,
+    pub disk_compacted_lsn_gauge: IntGauge,
     pub pitr_history_size: UIntGauge,
     pub archival_size: UIntGauge,
     pub(crate) layer_size_image: UIntGauge,
@@ -2682,6 +2692,10 @@ impl TimelineMetrics {
             .unwrap();
 
         let disk_consistent_lsn_gauge = DISK_CONSISTENT_LSN
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
+        let disk_compacted_lsn_gauge = DISK_COMPACTED_LSN
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
@@ -2790,6 +2804,7 @@ impl TimelineMetrics {
             load_layer_map_histo,
             last_record_lsn_gauge,
             disk_consistent_lsn_gauge,
+            disk_compacted_lsn_gauge,
             pitr_history_size,
             archival_size,
             layer_size_image,
@@ -2855,6 +2870,7 @@ impl TimelineMetrics {
         let shard_id = &self.shard_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = DISK_CONSISTENT_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        let _ = DISK_COMPACTED_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = FLUSH_WAIT_UPLOAD_TIME.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = STANDBY_HORIZON.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         {

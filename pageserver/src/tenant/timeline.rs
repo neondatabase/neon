@@ -1266,6 +1266,27 @@ impl Timeline {
         self.remote_client.remote_consistent_lsn_visible()
     }
 
+    /// Returns the latest LSN that has been compacted down into L1 on disk, or None on shutdown.
+    /// LSNs above it are likely in L0 delta layers. Note that these may not yet be uploaded to S3.
+    ///
+    /// TODO: consider tracking this explicitly instead of recomputing every time.
+    pub(crate) async fn get_disk_compacted_lsn(&self) -> Option<Lsn> {
+        let layers = self.layers.read().await;
+        let Ok(layermap) = layers.layer_map() else {
+            return None;
+        };
+        // Find the lowest LSN in a frozen or L0 delta layer, otherwise use the disk LSN.
+        // TODO: check that this is correct.
+        let frozen_lsns = layermap.frozen_layers.iter().map(|l| l.start_lsn);
+        let delta_lsns = layermap.level0_deltas().iter().map(|l| l.lsn_range.start);
+        let compacted_lsn = frozen_lsns
+            .chain(delta_lsns)
+            .min()
+            .map(|lsn| lsn.saturating_sub(Lsn(1)))
+            .unwrap_or(self.disk_consistent_lsn.load());
+        Some(compacted_lsn)
+    }
+
     /// The sum of the file size of all historic layers in the layer map.
     /// This method makes no distinction between local and remote layers.
     /// Hence, the result **does not represent local filesystem usage**.
@@ -2690,6 +2711,14 @@ impl Timeline {
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
             num_layers, disk_consistent_lsn, total_physical_size
+        );
+
+        // TODO: consider finding a better place for this.
+        self.metrics.disk_compacted_lsn_gauge.set(
+            self.get_disk_compacted_lsn()
+                .await
+                .expect("layermanager must be open during init")
+                .0 as i64,
         );
 
         timer.stop_and_record();
@@ -4822,6 +4851,10 @@ impl Timeline {
             .schedule_compaction_update(&remove_layers, new_deltas)?;
 
         drop_wlock(guard);
+
+        if let Some(lsn) = self.get_disk_compacted_lsn().await {
+            self.metrics.disk_compacted_lsn_gauge.set(lsn.0 as i64);
+        }
 
         Ok(())
     }
