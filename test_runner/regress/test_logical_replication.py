@@ -580,7 +580,7 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg: Van
         config_lines = ["neon.max_file_cache_size = 32MB", "neon.file_cache_size_limit = 32MB"]
     else:
         config_lines = [
-            "shared_buffers = 128MB",
+            "shared_buffers = 32MB",
         ]
     sub = env.endpoints.create(
         "subscriber",
