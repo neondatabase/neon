@@ -3219,7 +3219,7 @@ class NeonProxy(PgProtocol):
                 *["--allow-self-signed-compute", "true"],
             ]
 
-    class Console(AuthBackend):
+    class ProxyV1(AuthBackend):
         def __init__(self, endpoint: str, fixed_rate_limit: int | None = None):
             self.endpoint = endpoint
             self.fixed_rate_limit = fixed_rate_limit
@@ -3227,7 +3227,7 @@ class NeonProxy(PgProtocol):
         def extra_args(self) -> list[str]:
             args = [
                 # Console auth backend params
-                *["--auth-backend", "console"],
+                *["--auth-backend", "cplane-v1"],
                 *["--auth-endpoint", self.endpoint],
                 *["--sql-over-http-pool-opt-in", "false"],
             ]
@@ -3475,13 +3475,13 @@ class NeonProxy(PgProtocol):
 
 
 class NeonAuthBroker:
-    class ControlPlane:
+    class ProxyV1:
         def __init__(self, endpoint: str):
             self.endpoint = endpoint
 
         def extra_args(self) -> list[str]:
             args = [
-                *["--auth-backend", "console"],
+                *["--auth-backend", "cplane-v1"],
                 *["--auth-endpoint", self.endpoint],
             ]
             return args
@@ -3493,7 +3493,7 @@ class NeonAuthBroker:
         http_port: int,
         mgmt_port: int,
         external_http_port: int,
-        auth_backend: NeonAuthBroker.ControlPlane,
+        auth_backend: NeonAuthBroker.ProxyV1,
     ):
         self.domain = "apiauth.localtest.me"  # resolves to 127.0.0.1
         self.host = "127.0.0.1"
@@ -3679,7 +3679,7 @@ def static_auth_broker(
     local_proxy_addr = f"{http2_echoserver.host}:{http2_echoserver.port}"
 
     # return local_proxy addr on ProxyWakeCompute.
-    httpserver.expect_request("/cplane/proxy_wake_compute").respond_with_json(
+    httpserver.expect_request("/cplane/wake_compute").respond_with_json(
         {
             "address": local_proxy_addr,
             "aux": {
@@ -3719,7 +3719,7 @@ def static_auth_broker(
         http_port=http_port,
         mgmt_port=mgmt_port,
         external_http_port=external_http_port,
-        auth_backend=NeonAuthBroker.ControlPlane(httpserver.url_for("/cplane")),
+        auth_backend=NeonAuthBroker.ProxyV1(httpserver.url_for("/cplane")),
     ) as proxy:
         proxy.start()
         yield proxy
