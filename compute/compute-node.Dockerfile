@@ -1170,6 +1170,29 @@ RUN case "${PG_VERSION}" in \
 
 #########################################################################################
 #
+# Layer "pg_repack"
+# compile pg_repack extension
+#
+#########################################################################################
+
+FROM build-deps AS pg-repack-build
+ARG PG_VERSION
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+# pg_repack has not created a new tag with following commit, yet.
+ENV PG_REPACK_VERSION=85b64c6d4f599b2988343c4e7121acab505c9006
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
+
+RUN git clone https://github.com/reorg/pg_repack.git pg_repack-src && \
+    cd pg_repack-src && \
+    git checkout "${PG_REPACK_VERSION}" && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_repack.control
+
+
+#########################################################################################
+#
 # Layer "neon-pg-ext-build"
 # compile neon extensions
 #
@@ -1213,6 +1236,7 @@ COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-repack-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
