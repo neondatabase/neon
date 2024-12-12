@@ -32,7 +32,7 @@ class PageServicePipeliningConfigPipelined(PageServicePipeliningConfig):
 
 
 PS_DIRECT_IO = ["direct"]
-PS_IO_CONCURRENCY = ["serial", "parallel"]
+PS_IO_CONCURRENCY = ["serial", "parallel", "futures-unordered"]
 EXECUTION = ["concurrent-futures"]
 
 NON_BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]

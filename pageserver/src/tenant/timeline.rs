@@ -3419,6 +3419,14 @@ impl Timeline {
             }
         }
 
+        match reconstruct_state.io_concurrency {
+            super::storage_layer::IoConcurrency::Serial => (),
+            super::storage_layer::IoConcurrency::Parallel => (),
+            super::storage_layer::IoConcurrency::FuturesUnordered { ref mut futures } => {
+                while let Some(()) = futures.next().await {}
+            }
+        }
+
         Ok(TimelineVisitOutcome {
             completed_keyspace,
             image_covered_keyspace: image_covered_keyspace.consume_keyspace(),

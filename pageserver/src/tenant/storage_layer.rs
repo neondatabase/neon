@@ -19,7 +19,9 @@ use pageserver_api::value::Value;
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
+use std::future::Future;
 use std::ops::Range;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -153,7 +155,7 @@ pub(crate) struct ValuesReconstructState {
     layers_visited: u32,
     delta_layers_visited: u32,
 
-    io_concurrency: IoConcurrency,
+    pub(crate) io_concurrency: IoConcurrency,
 }
 
 /// The level of IO concurrency to be used on the read path
@@ -161,9 +163,12 @@ pub(crate) struct ValuesReconstructState {
 /// The desired end state is that we always do parallel IO.
 /// This struct and the dispatching in the impl will be removed once
 /// we've built enough confidence.
-enum IoConcurrency {
+pub(crate) enum IoConcurrency {
     Serial,
     Parallel,
+    FuturesUnordered {
+        futures: futures::stream::FuturesUnordered<Pin<Box<dyn Send + Future<Output = ()>>>>,
+    },
 }
 
 impl IoConcurrency {
@@ -175,6 +180,9 @@ impl IoConcurrency {
             IoConcurrency::Serial => fut.await,
             IoConcurrency::Parallel => {
                 tokio::spawn(fut);
+            }
+            IoConcurrency::FuturesUnordered { futures } => {
+                futures.push(Box::pin(fut));
             }
         }
     }
@@ -204,6 +212,9 @@ impl ValuesReconstructState {
                 match IO_CONCURRENCY.as_str() {
                     "parallel" => IoConcurrency::Parallel,
                     "serial" => IoConcurrency::Serial,
+                    "futures-unordered" => IoConcurrency::FuturesUnordered {
+                        futures: futures::stream::FuturesUnordered::new(),
+                    },
                     x => panic!(
                         "Invalid value for NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY: {}",
                         x
