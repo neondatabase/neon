@@ -316,6 +316,10 @@ impl Endpoint {
         // and can cause errors like 'no unpinned buffers available', see
         // <https://github.com/neondatabase/neon/issues/9956>
         conf.append("shared_buffers", "1MB");
+        // Postgres defaults to effective_io_concurrency=1, which does not exercise the pageserver's
+        // batching logic.  Set this to 2 so that we exercise the code a bit without letting
+        // individual tests do a lot of concurrent work on underpowered test machines
+        conf.append("effective_io_concurrency", "2");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
         conf.append("wal_level", "logical");
