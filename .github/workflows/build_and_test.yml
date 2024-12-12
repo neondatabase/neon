@@ -21,8 +21,6 @@ concurrency:
 env:
   RUST_BACKTRACE: 1
   COPT: '-Werror'
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
   # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
   E2E_CONCURRENCY_GROUP: ${{ github.repository }}-e2e-tests-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
 
@@ -362,6 +360,10 @@ jobs:
   create-test-report:
     needs: [ check-permissions, build-and-test-locally, coverage-report, build-build-tools-image, benchmarks ]
     if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
     outputs:
       report-url: ${{ steps.create-allure-report.outputs.report-url }}
 
@@ -382,6 +384,7 @@ jobs:
         uses: ./.github/actions/allure-report-generate
         with:
           store-test-results-into-db: true
+          aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
@@ -413,6 +416,10 @@ jobs:
   coverage-report:
     if: ${{ !startsWith(github.ref_name, 'release') }}
     needs: [ check-permissions, build-build-tools-image, build-and-test-locally ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
     runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -439,12 +446,14 @@ jobs:
         with:
           name: neon-${{ runner.os }}-${{ runner.arch }}-${{ matrix.build_type }}-artifact
           path: /tmp/neon
+          aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Get coverage artifact
         uses: ./.github/actions/download
         with:
           name: coverage-data-artifact
           path: /tmp/coverage
+          aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Merge coverage data
         run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
@@ -575,6 +584,10 @@ jobs:
   neon-image:
     needs: [ neon-image-arch, tag ]
     runs-on: ubuntu-22.04
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
 
     steps:
       - uses: docker/login-action@v3
@@ -589,11 +602,15 @@ jobs:
                                              neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-x64 \
                                              neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-arm64
 
-      - uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Push multi-arch image to ECR
         run: |
@@ -602,6 +619,10 @@ jobs:
 
   compute-node-image-arch:
     needs: [ check-permissions, build-build-tools-image, tag ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -642,11 +663,15 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       - uses: docker/login-action@v3
         with:
@@ -719,6 +744,10 @@ jobs:
 
   compute-node-image:
     needs: [ compute-node-image-arch, tag ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
     runs-on: ubuntu-22.04
 
     strategy:
@@ -763,11 +792,15 @@ jobs:
                                              neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
                                              neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
-      - uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Push multi-arch compute-node-${{ matrix.version.pg }} image to ECR
         run: |
@@ -892,7 +925,9 @@ jobs:
     runs-on: ubuntu-22.04
 
     permissions:
-      id-token: write # for `aws-actions/configure-aws-credentials`
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
 
     env:
       VERSIONS: v14 v15 v16 v17
@@ -903,12 +938,15 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - name: Login to dev ECR
-        uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Copy vm-compute-node images to ECR
         run: |
@@ -1062,7 +1100,10 @@ jobs:
     needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
     # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
     if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute') && !failure() && !cancelled()
-
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
     runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     steps:
@@ -1184,6 +1225,10 @@ jobs:
   # The job runs on `release` branch and copies compatibility data and Neon artifact from the last *release PR* to the latest directory
   promote-compatibility-data:
     needs: [ deploy ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
     # `!failure() && !cancelled()` is required because the workflow transitively depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
     if: github.ref_name == 'release' && !failure() && !cancelled()
 

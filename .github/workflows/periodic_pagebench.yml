@@ -21,6 +21,9 @@ defaults:
   run:
     shell: bash -euo pipefail {0}
 
+permissions:
+  id-token: write # aws-actions/configure-aws-credentials
+
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
@@ -124,11 +127,10 @@ jobs:
         cat "test_log_${GITHUB_RUN_ID}"
 
     - name: Create Allure report
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
