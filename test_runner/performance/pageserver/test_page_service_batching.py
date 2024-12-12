@@ -32,7 +32,7 @@ class PageServicePipeliningConfigPipelined(PageServicePipeliningConfig):
 
 
 PS_IO_CONCURRENCY = ["serial", "parallel"]
-EXECUTION = ["concurrent-futures", "tasks"]
+EXECUTION = ["concurrent-futures"]
 
 NON_BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
 for max_batch_size in [1, 32]:
@@ -40,7 +40,7 @@ for max_batch_size in [1, 32]:
         NON_BATCHABLE.append(PageServicePipeliningConfigPipelined(max_batch_size, execution))
 
 BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
-for max_batch_size in [1, 2, 4, 8, 16, 32]:
+for max_batch_size in [32]:
     for execution in EXECUTION:
         BATCHABLE.append(PageServicePipeliningConfigPipelined(max_batch_size, execution))
 
@@ -50,19 +50,19 @@ for max_batch_size in [1, 2, 4, 8, 16, 32]:
     [
         # non-batchable workloads
         # (A separate benchmark will consider latency).
-        *[
-            (
-                50,
-                config,
-                TARGET_RUNTIME,
-                ps_io_concurrency,
-                1,
-                128,
-                f"not batchable {dataclasses.asdict(config)}",
-            )
-            for config in NON_BATCHABLE
-            for ps_io_concurrency in PS_IO_CONCURRENCY
-        ],
+        # *[
+        #     (
+        #         50,
+        #         config,
+        #         TARGET_RUNTIME,
+        #         ps_io_concurrency,
+        #         1,
+        #         128,
+        #         f"not batchable {dataclasses.asdict(config)}",
+        #     )
+        #     for config in NON_BATCHABLE
+        #     for ps_io_concurrency in PS_IO_CONCURRENCY
+        # ],
         # batchable workloads should show throughput and CPU efficiency improvements
         *[
             (
