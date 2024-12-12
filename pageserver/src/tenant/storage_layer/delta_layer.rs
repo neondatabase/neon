@@ -43,8 +43,9 @@ use crate::tenant::vectored_blob_io::{
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
-use crate::virtual_file::IoBufferMut;
+use crate::virtual_file::owned_buffers_io::write::Buffer;
 use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
+use crate::virtual_file::{IoBuffer, IoBufferMut};
 use crate::TEMP_FILE_SUFFIX;
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -62,7 +63,6 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::str::FromStr;
@@ -70,6 +70,7 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tokio_epoll_uring::IoBuf;
 use tracing::*;
+use utils::bin_ser::SerializeError;
 
 use utils::{
     bin_ser::BeSer,
@@ -114,6 +115,17 @@ impl From<&DeltaLayer> for Summary {
 }
 
 impl Summary {
+    /// Serializes the summary header into an aligned buffer of lenth `PAGE_SZ`.
+    pub fn ser_into_page(&self) -> Result<IoBuffer, SerializeError> {
+        let mut buf = bytes::BytesMut::with_capacity(PAGE_SZ);
+        Self::ser_into(&self, &mut buf);
+        let mut buf = IoBufferMut::with_capacity(PAGE_SZ);
+        Self::ser_into(&self, &mut buf)?;
+        // Pad zeroes to the buffer so the length is a multiple of the alignment.
+        buf.extend_with(0, buf.capacity() - buf.len());
+        Ok(buf.freeze())
+    }
+
     pub(super) fn expected(
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -392,7 +404,7 @@ struct DeltaLayerWriterInner {
 
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
 
-    blob_writer: BlobWriter<true>,
+    blob_writer: BlobWriter,
 
     // Number of key-lsns in the layer.
     num_keys: usize,
@@ -408,6 +420,7 @@ impl DeltaLayerWriterInner {
         tenant_shard_id: TenantShardId,
         key_start: Key,
         lsn_range: Range<Lsn>,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename. We don't know
@@ -419,10 +432,10 @@ impl DeltaLayerWriterInner {
         let path =
             DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
 
-        let mut file = VirtualFile::create(&path, ctx).await?;
-        // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
-        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
+        let file = Arc::new(VirtualFile::create_v2(&path, ctx).await?);
+
+        // Start at PAGE_SZ, make room for the header block
+        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, ctx)?;
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -532,15 +545,15 @@ impl DeltaLayerWriterInner {
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let index_start_blk = self.blob_writer.size().div_ceil(PAGE_SZ as u64) as u32;
 
-        let mut file = self.blob_writer.into_inner(ctx).await?;
+        let file = self.blob_writer.into_inner(ctx).await?;
 
         // Write out the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
-        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
-            .await?;
+        let mut offset = index_start_blk as u64 * PAGE_SZ as u64;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+            let (_buf, res) = file.write_all_at(buf.slice_len(), offset, ctx).await;
             res?;
+            offset += PAGE_SZ as u64;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
         // Fill in the summary on blk 0
@@ -555,11 +568,9 @@ impl DeltaLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here but it's a pain with Slice<T>
-        Summary::ser_into(&summary, &mut buf)?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        // Writes summary at the first block (offset 0).
+        let buf = summary.ser_into_page()?;
+        let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
         res?;
 
         let metadata = file
@@ -636,6 +647,7 @@ impl DeltaLayerWriter {
         tenant_shard_id: TenantShardId,
         key_start: Key,
         lsn_range: Range<Lsn>,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -646,6 +658,7 @@ impl DeltaLayerWriter {
                     tenant_shard_id,
                     key_start,
                     lsn_range,
+                    gate,
                     ctx,
                 )
                 .await?,
@@ -725,7 +738,7 @@ impl Drop for DeltaLayerWriter {
             // We want to remove the virtual file here, so it's fine to not
             // having completely flushed unwritten data.
             let vfile = inner.blob_writer.into_inner_no_flush();
-            vfile.remove();
+            std::fs::remove_file(vfile.path()).expect("failed to remove the virtual file");
         }
     }
 }
@@ -753,7 +766,7 @@ impl DeltaLayer {
     where
         F: Fn(Summary) -> Summary,
     {
-        let mut file = VirtualFile::open_with_options(
+        let file = VirtualFile::open_with_options_v2(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
             ctx,
@@ -770,11 +783,8 @@ impl DeltaLayer {
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here, but it's a pain with Slice<T>
-        Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        let buf = new_summary.ser_into_page().context("serialize")?;
+        let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
         res?;
         Ok(())
     }
@@ -1902,6 +1912,7 @@ pub(crate) mod test {
             harness.tenant_shard_id,
             entries_meta.key_range.start,
             entries_meta.lsn_range.clone(),
+            &timeline.gate,
             &ctx,
         )
         .await?;
@@ -2097,6 +2108,7 @@ pub(crate) mod test {
                 tenant.tenant_shard_id,
                 Key::MIN,
                 Lsn(0x11)..truncate_at,
+                &branch.gate,
                 ctx,
             )
             .await
@@ -2231,6 +2243,7 @@ pub(crate) mod test {
             tenant.tenant_shard_id,
             *key_start,
             (*lsn_min)..lsn_end,
+            &tline.gate,
             ctx,
         )
         .await?;

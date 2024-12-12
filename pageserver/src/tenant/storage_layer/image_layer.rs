@@ -40,8 +40,9 @@ use crate::tenant::vectored_blob_io::{
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
-use crate::virtual_file::IoBufferMut;
+use crate::virtual_file::owned_buffers_io::write::Buffer;
 use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
+use crate::virtual_file::{IoBuffer, IoBufferMut};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
@@ -58,13 +59,14 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::str::FromStr;
+use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 use tracing::*;
+use utils::bin_ser::SerializeError;
 
 use utils::{
     bin_ser::BeSer,
@@ -111,6 +113,15 @@ impl From<&ImageLayer> for Summary {
 }
 
 impl Summary {
+    /// Serializes the summary header into an aligned buffer of lenth `PAGE_SZ`.
+    pub fn ser_into_page(&self) -> Result<IoBuffer, SerializeError> {
+        let mut buf = IoBufferMut::with_capacity(PAGE_SZ);
+        Self::ser_into(&self, &mut buf)?;
+        // Pad zeroes to the buffer so the length is a multiple of the alignment.
+        buf.extend_with(0, buf.capacity() - buf.len());
+        Ok(buf.freeze())
+    }
+
     pub(super) fn expected(
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -348,7 +359,7 @@ impl ImageLayer {
     where
         F: Fn(Summary) -> Summary,
     {
-        let mut file = VirtualFile::open_with_options(
+        let file = VirtualFile::open_with_options_v2(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
             ctx,
@@ -365,11 +376,8 @@ impl ImageLayer {
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here but it's a pain with Slice<T>
-        Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        let buf = new_summary.ser_into_page().context("serialize")?;
+        let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
         res?;
         Ok(())
     }
@@ -724,7 +732,7 @@ struct ImageLayerWriterInner {
     // Number of keys in the layer.
     num_keys: usize,
 
-    blob_writer: BlobWriter<false>,
+    blob_writer: BlobWriter,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 
     #[cfg(feature = "testing")]
@@ -741,6 +749,7 @@ impl ImageLayerWriterInner {
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
@@ -755,19 +764,21 @@ impl ImageLayerWriterInner {
             },
         );
         trace!("creating image layer {}", path);
-        let mut file = {
-            VirtualFile::open_with_options(
-                &path,
-                virtual_file::OpenOptions::new()
-                    .write(true)
-                    .create_new(true),
-                ctx,
+        let file = {
+            Arc::new(
+                VirtualFile::open_with_options_v2(
+                    &path,
+                    virtual_file::OpenOptions::new()
+                        .write(true)
+                        .create_new(true),
+                    ctx,
+                )
+                .await?,
             )
-            .await?
         };
-        // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
-        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
+
+        // Start at `PAGE_SZ` to make room for the header block.
+        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, ctx)?;
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -873,15 +884,18 @@ impl ImageLayerWriterInner {
         crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN.inc_by(self.uncompressed_bytes_chosen);
         crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
 
-        let mut file = self.blob_writer.into_inner();
+        let file = self.blob_writer.into_inner(ctx).await?;
 
         // Write out the index
-        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
-            .await?;
+        let mut offset = index_start_blk as u64 * PAGE_SZ as u64;
         let (index_root_blk, block_buf) = self.tree.finish()?;
+
+        // TODO(yuchen): https://github.com/neondatabase/neon/issues/10092
+        // Should we just replace BlockBuf::blocks with one big buffer?
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+            let (_buf, res) = file.write_all_at(buf.slice_len(), offset, ctx).await;
             res?;
+            offset += PAGE_SZ as u64;
         }
 
         let final_key_range = if let Some(end_key) = end_key {
@@ -902,11 +916,9 @@ impl ImageLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here but it's a pain with Slice<T>
-        Summary::ser_into(&summary, &mut buf)?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        // Writes summary at the first block (offset 0).
+        let buf = summary.ser_into_page()?;
+        let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
         res?;
 
         let metadata = file
@@ -981,12 +993,21 @@ impl ImageLayerWriter {
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(
-                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn, ctx)
-                    .await?,
+                ImageLayerWriterInner::new(
+                    conf,
+                    timeline_id,
+                    tenant_shard_id,
+                    key_range,
+                    lsn,
+                    gate,
+                    ctx,
+                )
+                .await?,
             ),
         })
     }
@@ -1038,7 +1059,8 @@ impl ImageLayerWriter {
 impl Drop for ImageLayerWriter {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
-            inner.blob_writer.into_inner().remove();
+            let vfile = inner.blob_writer.into_inner_no_flush();
+            std::fs::remove_file(vfile.path()).expect("failed to remove the virtual file");
         }
     }
 }
@@ -1198,6 +1220,7 @@ mod test {
                 harness.tenant_shard_id,
                 &range,
                 lsn,
+                &timeline.gate,
                 &ctx,
             )
             .await
@@ -1263,6 +1286,7 @@ mod test {
                 harness.tenant_shard_id,
                 &range,
                 lsn,
+                &timeline.gate,
                 &ctx,
             )
             .await
@@ -1341,6 +1365,7 @@ mod test {
             tenant.tenant_shard_id,
             &key_range,
             lsn,
+            &tline.gate,
             ctx,
         )
         .await?;
