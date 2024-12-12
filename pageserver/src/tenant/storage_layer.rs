@@ -23,6 +23,7 @@ use std::future::Future;
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use utils::lsn::Lsn;
@@ -182,7 +183,13 @@ impl IoConcurrency {
                 tokio::spawn(fut);
             }
             IoConcurrency::FuturesUnordered { futures } => {
-                futures.push(Box::pin(fut));
+                let mut fut = Box::pin(fut);
+                match futures::poll!(&mut fut) {
+                    Poll::Ready(()) => {}
+                    Poll::Pending => {
+                        futures.push(fut);
+                    }
+                }
             }
         }
     }
