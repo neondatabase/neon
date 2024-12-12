@@ -149,7 +149,7 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                     .cancel_session(
                         cancel_session.cancel_key_data,
                         uuid::Uuid::nil(),
-                        &peer_addr,
+                        peer_addr,
                         cancel_session.peer_addr.is_some(),
                     )
                     .await

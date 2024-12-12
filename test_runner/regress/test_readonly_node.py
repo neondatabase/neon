@@ -215,8 +215,6 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 
         # wait for lease renewal before running query.
         _, offset = wait_until(
-            20,
-            0.5,
             lambda: ep_static.assert_log_contains(
                 "lsn_lease_bg_task.*Request succeeded", offset=offset
             ),

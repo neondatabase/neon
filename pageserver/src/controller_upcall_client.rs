@@ -115,6 +115,10 @@ impl ControllerUpcallClient {
 
         Ok(res)
     }
+
+    pub(crate) fn base_url(&self) -> &Url {
+        &self.base_url
+    }
 }
 
 impl ControlPlaneGenerationsApi for ControllerUpcallClient {
@@ -191,13 +195,15 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
 
         let request = ReAttachRequest {
             node_id: self.node_id,
-            register,
+            register: register.clone(),
         };
 
         let response: ReAttachResponse = self.retry_http_forever(&re_attach_path, request).await?;
         tracing::info!(
-            "Received re-attach response with {} tenants",
-            response.tenants.len()
+            "Received re-attach response with {} tenants (node {}, register: {:?})",
+            response.tenants.len(),
+            self.node_id,
+            register,
         );
 
         failpoint_support::sleep_millis_async!("control-plane-client-re-attach");

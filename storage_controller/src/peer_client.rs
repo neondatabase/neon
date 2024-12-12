@@ -1,7 +1,9 @@
 use crate::tenant_shard::ObservedState;
 use pageserver_api::shard::TenantShardId;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
+use std::error::Error as _;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use hyper::Uri;
@@ -17,11 +19,14 @@ pub(crate) struct PeerClient {
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum StorageControllerPeerError {
-    #[error("failed to deserialize error response with status code {0} at {1}: {2}")]
+    #[error(
+        "failed to deserialize error response with status code {0} at {1}: {2}{}",
+        .2.source().map(|e| format!(": {e}")).unwrap_or_default()
+    )]
     DeserializationError(StatusCode, Url, reqwest::Error),
     #[error("storage controller peer API error ({0}): {1}")]
     ApiError(StatusCode, String),
-    #[error("failed to send HTTP request: {0}")]
+    #[error("failed to send HTTP request: {0}{}", .0.source().map(|e| format!(": {e}")).unwrap_or_default())]
     SendError(reqwest::Error),
     #[error("Cancelled")]
     Cancelled,

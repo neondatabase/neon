@@ -350,6 +350,13 @@ impl JwkCacheEntryLock {
         let header = base64::decode_config(header, base64::URL_SAFE_NO_PAD)?;
         let header = serde_json::from_slice::<JwtHeader<'_>>(&header)?;
 
+        let payloadb = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)?;
+        let payload = serde_json::from_slice::<JwtPayload<'_>>(&payloadb)?;
+
+        if let Some(iss) = &payload.issuer {
+            ctx.set_jwt_issuer(iss.as_ref().to_owned());
+        }
+
         let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)?;
 
         let kid = header.key_id.ok_or(JwtError::MissingKeyId)?;
@@ -387,9 +394,6 @@ impl JwkCacheEntryLock {
             }
             key => return Err(JwtError::UnsupportedKeyType(key.into())),
         };
-
-        let payloadb = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)?;
-        let payload = serde_json::from_slice::<JwtPayload<'_>>(&payloadb)?;
 
         tracing::debug!(?payload, "JWT signature valid with claims");
 

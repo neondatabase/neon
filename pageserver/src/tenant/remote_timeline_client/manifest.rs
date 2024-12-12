@@ -43,7 +43,7 @@ impl TenantManifest {
             offloaded_timelines: vec![],
         }
     }
-    pub(crate) fn from_json_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice::<Self>(bytes)
     }
 

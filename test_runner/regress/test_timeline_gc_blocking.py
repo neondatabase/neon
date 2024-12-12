@@ -61,7 +61,7 @@ def test_gc_blocking_by_timeline(neon_env_builder: NeonEnvBuilder, sharded: bool
 
     # deletion unblocks gc
     http.timeline_delete(env.initial_tenant, foo_branch)
-    wait_timeline_detail_404(http, env.initial_tenant, foo_branch, 10, 1.0)
+    wait_timeline_detail_404(http, env.initial_tenant, foo_branch)
 
     wait_for_another_gc_round()
     pss.assert_log_contains(gc_active_line)

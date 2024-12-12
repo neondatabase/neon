@@ -305,7 +305,7 @@ impl std::ops::Add for AffinityScore {
 
 /// Hint for whether this is a sincere attempt to schedule, or a speculative
 /// check for where we _would_ schedule (done during optimization)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum ScheduleMode {
     Normal,
     Speculative,
@@ -319,7 +319,7 @@ impl Default for ScheduleMode {
 
 // For carrying state between multiple calls to [`TenantShard::schedule`], e.g. when calling
 // it for many shards in the same tenant.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ScheduleContext {
     /// Sparse map of nodes: omitting a node implicitly makes its affinity [`AffinityScore::FREE`]
     pub(crate) nodes: HashMap<NodeId, AffinityScore>,
@@ -331,6 +331,14 @@ pub(crate) struct ScheduleContext {
 }
 
 impl ScheduleContext {
+    pub(crate) fn new(mode: ScheduleMode) -> Self {
+        Self {
+            nodes: HashMap::new(),
+            attached_nodes: HashMap::new(),
+            mode,
+        }
+    }
+
     /// Input is a list of nodes we would like to avoid using again within this context.  The more
     /// times a node is passed into this call, the less inclined we are to use it.
     pub(crate) fn avoid(&mut self, nodes: &[NodeId]) {
@@ -354,6 +362,11 @@ impl ScheduleContext {
 
     pub(crate) fn get_node_attachments(&self, node_id: NodeId) -> usize {
         self.attached_nodes.get(&node_id).copied().unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attach_count(&self) -> usize {
+        self.attached_nodes.values().sum()
     }
 }
 

@@ -21,7 +21,7 @@
 //! - Build the image with the following command:
 //!
 //! ```bash
-//! docker buildx build --build-arg DEBIAN_FLAVOR=bullseye-slim --build-arg GIT_VERSION=local --build-arg PG_VERSION=v14 --build-arg BUILD_TAG="$(date --iso-8601=s -u)"  -t localhost:3030/localregistry/compute-node-v14:latest -f compute/Dockerfile.com
+//! docker buildx build --platform linux/amd64 --build-arg DEBIAN_VERSION=bullseye --build-arg GIT_VERSION=local --build-arg PG_VERSION=v14 --build-arg BUILD_TAG="$(date --iso-8601=s -u)" -t localhost:3030/localregistry/compute-node-v14:latest -f compute/compute-node.Dockerfile .
 //! docker push localhost:3030/localregistry/compute-node-v14:latest
 //! ```
 
@@ -132,7 +132,8 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     //
     //  Initialize pgdata
     //
-    let pg_version = match get_pg_version(pg_bin_dir.as_str()) {
+    let pgbin = pg_bin_dir.join("postgres");
+    let pg_version = match get_pg_version(pgbin.as_ref()) {
         PostgresMajorVersion::V14 => 14,
         PostgresMajorVersion::V15 => 15,
         PostgresMajorVersion::V16 => 16,
@@ -155,7 +156,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     //
     // Launch postgres process
     //
-    let mut postgres_proc = tokio::process::Command::new(pg_bin_dir.join("postgres"))
+    let mut postgres_proc = tokio::process::Command::new(pgbin)
         .arg("-D")
         .arg(&pgdata_dir)
         .args(["-c", "wal_level=minimal"])

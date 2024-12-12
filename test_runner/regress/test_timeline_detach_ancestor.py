@@ -203,7 +203,7 @@ def test_ancestor_detach_branched_from(
     )
 
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
-    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
+    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
 
     # because we do the fullbackup from ancestor at the branch_lsn, the zenith.signal is always different
     # as there is always "PREV_LSN: invalid" for "before"
@@ -336,10 +336,10 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
 
     # delete the timelines to confirm detach actually worked
     client.timeline_delete(env.initial_tenant, after)
-    wait_timeline_detail_404(client, env.initial_tenant, after, 10, 1.0)
+    wait_timeline_detail_404(client, env.initial_tenant, after)
 
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
-    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
+    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
 
 
 def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEnvBuilder):
@@ -973,17 +973,17 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
     with ThreadPoolExecutor(max_workers=2) as pool:
         try:
             fut = pool.submit(detach_ancestor)
-            offset = wait_until(10, 1.0, at_failpoint)
+            offset = wait_until(at_failpoint)
 
             delete = pool.submit(start_delete)
 
-            offset = wait_until(10, 1.0, lambda: at_waiting_on_gate_close(offset))
+            offset = wait_until(lambda: at_waiting_on_gate_close(offset))
 
             victim_http.configure_failpoints((pausepoint, "off"))
 
             delete.result()
 
-            assert wait_until(10, 1.0, is_deleted), f"unimplemented mode {mode}"
+            assert wait_until(is_deleted), f"unimplemented mode {mode}"
 
             # TODO: match the error
             with pytest.raises(PageserverApiException) as exc:
@@ -1115,11 +1115,11 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
     with ThreadPoolExecutor(max_workers=1) as pool:
         try:
             fut = pool.submit(detach_timeline)
-            wait_until(10, 1.0, paused_at_failpoint)
+            wait_until(paused_at_failpoint)
 
             # let stuck complete
             stuck_http.configure_failpoints((pausepoint, "off"))
-            wait_until(10, 1.0, first_completed)
+            wait_until(first_completed)
 
             if mode == "delete_reparentable_timeline":
                 assert first_branch is not None
@@ -1127,7 +1127,7 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
                     env.initial_tenant, first_branch
                 )
                 victim_http.configure_failpoints((pausepoint, "off"))
-                wait_until(10, 1.0, first_branch_gone)
+                wait_until(first_branch_gone)
             elif mode == "create_reparentable_timeline":
                 first_branch = create_reparentable_timeline()
                 victim_http.configure_failpoints((pausepoint, "off"))
@@ -1271,11 +1271,11 @@ def test_retryable_500_hit_through_storcon_during_timeline_detach_ancestor(
     with ThreadPoolExecutor(max_workers=1) as pool:
         try:
             fut = pool.submit(detach_timeline)
-            wait_until(10, 1.0, paused_at_failpoint)
+            wait_until(paused_at_failpoint)
 
             # let stuck complete
             stuck_http.configure_failpoints((pausepoint, "off"))
-            wait_until(10, 1.0, first_completed)
+            wait_until(first_completed)
 
             victim_http.configure_failpoints((pausepoint, "off"))
 
@@ -1456,7 +1456,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     # other tests take the "detach? reparent complete", but this only hits
     # "complete".
     http.timeline_delete(env.initial_tenant, env.initial_timeline)
-    wait_timeline_detail_404(http, env.initial_tenant, env.initial_timeline, 20)
+    wait_timeline_detail_404(http, env.initial_tenant, env.initial_timeline)
 
     http.configure_failpoints(("timeline-detach-ancestor::complete_before_uploading", "off"))
 
@@ -1518,7 +1518,7 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
         with ThreadPoolExecutor(max_workers=1) as pool:
             detach = pool.submit(detach_and_get_stuck)
 
-            offset = wait_until(10, 1.0, request_processing_noted_in_log)
+            offset = wait_until(request_processing_noted_in_log)
 
             # make this named fn tor more clear failure test output logging
             def pausepoint_hit_with_gc_paused() -> LogCursor:
@@ -1529,11 +1529,11 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
                 )
                 return at
 
-            offset = wait_until(10, 1.0, pausepoint_hit_with_gc_paused)
+            offset = wait_until(pausepoint_hit_with_gc_paused)
 
             delete_detached()
 
-            wait_timeline_detail_404(http, env.initial_tenant, detached, 10, 1.0)
+            wait_timeline_detail_404(http, env.initial_tenant, detached)
 
             http.configure_failpoints((failpoint, "off"))
 

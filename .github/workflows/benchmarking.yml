@@ -249,7 +249,7 @@ jobs:
 
     # Post both success and failure to the Slack channel
     - name: Post to a Slack channel
-      if: ${{ github.event.schedule }}
+      if: ${{ github.event.schedule && !cancelled() }}
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C06T9AMNDQQ" # on-call-compute-staging-stream

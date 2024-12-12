@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import urllib.parse
+
 import requests
 from requests.adapters import HTTPAdapter
 
@@ -20,7 +22,9 @@ class EndpointHttpClient(requests.Session):
         return res.json()
 
     def database_schema(self, database: str):
-        res = self.get(f"http://localhost:{self.port}/database_schema?database={database}")
+        res = self.get(
+            f"http://localhost:{self.port}/database_schema?database={urllib.parse.quote(database, safe='')}"
+        )
         res.raise_for_status()
         return res.text
 

@@ -1,0 +1,1466 @@
+# Shows LogSafety violation when "don't commit separately entries from previous terms" check is disabled.
+git revision: 4f1ee6331
+Platform: Linux neon-dev-arm64-1 6.8.0-48-generic #48-Ubuntu SMP PREEMPT_DYNAMIC Fri Sep 27 14:35:45 UTC 2024 aarch64 aarch64 aarch64 GNU/Linux
+CPU Info Linux: Neoverse-N1
+CPU Cores Linux: 80
+CPU Info Mac: 
+CPU Cores Mac: 
+Spec: MCProposerAcceptorStatic.tla
+Config: models/MCProposerAcceptorStatic_p2_a3_t4_l4.cfg
+----
+CONSTANTS
+NULL = NULL
+proposers = {p1, p2}
+acceptors = {a1, a2, a3}
+max_term = 4
+max_entries = 4
+SPECIFICATION Spec
+CONSTRAINT StateConstraint
+INVARIANT
+TypeOk
+ElectionSafety
+LogIsMonotonic
+LogSafety
+SYMMETRY ProposerAcceptorSymmetry
+CHECK_DEADLOCK FALSE
+ALIAS Alias
+
+----
+
+TLC2 Version 2.20 of Day Month 20?? (rev: f68cb71)
+Running breadth-first search Model-Checking with fp 12 and seed -5379034126224420237 with 80 workers on 80 cores with 54613MB heap and 61440MB offheap memory [pid: 52295] (Linux 6.8.0-48-generic aarch64, Ubuntu 21.0.4 x86_64, OffHeapDiskFPSet, DiskStateQueue).
+Parsing file /home/arseny/neon/safekeeper/spec/MCProposerAcceptorStatic.tla
+Parsing file /tmp/tlc-4533438058229992850/TLC.tla (jar:file:/home/arseny/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /home/arseny/neon/safekeeper/spec/ProposerAcceptorStatic.tla
+Parsing file /tmp/tlc-4533438058229992850/_TLCTrace.tla (jar:file:/home/arseny/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /tmp/tlc-4533438058229992850/Integers.tla (jar:file:/home/arseny/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Parsing file /tmp/tlc-4533438058229992850/Sequences.tla (jar:file:/home/arseny/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /tmp/tlc-4533438058229992850/FiniteSets.tla (jar:file:/home/arseny/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /tmp/tlc-4533438058229992850/Naturals.tla (jar:file:/home/arseny/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /tmp/tlc-4533438058229992850/TLCExt.tla (jar:file:/home/arseny/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module ProposerAcceptorStatic
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module MCProposerAcceptorStatic
+Starting... (2024-11-06 14:20:26)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2024-11-06 14:20:29.
+Progress(20) at 2024-11-06 14:20:32: 1,011,898 states generated (1,011,898 s/min), 140,947 distinct states found (140,947 ds/min), 60,535 states left on queue.
+Progress(26) at 2024-11-06 14:21:32: 30,146,518 states generated (29,134,620 s/min), 3,742,736 distinct states found (3,601,789 ds/min), 1,438,779 states left on queue.
+Progress(27) at 2024-11-06 14:22:32: 59,362,708 states generated (29,216,190 s/min), 7,210,233 distinct states found (3,467,497 ds/min), 2,708,295 states left on queue.
+Progress(28) at 2024-11-06 14:23:32: 88,589,291 states generated (29,226,583 s/min), 10,552,781 distinct states found (3,342,548 ds/min), 3,874,296 states left on queue.
+Progress(29) at 2024-11-06 14:24:32: 117,894,209 states generated (29,304,918 s/min), 13,932,498 distinct states found (3,379,717 ds/min), 5,069,960 states left on queue.
+Progress(29) at 2024-11-06 14:25:32: 147,338,882 states generated (29,444,673 s/min), 17,180,069 distinct states found (3,247,571 ds/min), 6,146,371 states left on queue.
+Progress(29) at 2024-11-06 14:26:32: 176,498,135 states generated (29,159,253 s/min), 20,547,926 distinct states found (3,367,857 ds/min), 7,338,835 states left on queue.
+Progress(30) at 2024-11-06 14:27:32: 205,957,044 states generated (29,458,909 s/min), 23,661,090 distinct states found (3,113,164 ds/min), 8,293,570 states left on queue.
+Progress(30) at 2024-11-06 14:28:32: 235,390,133 states generated (29,433,089 s/min), 26,892,306 distinct states found (3,231,216 ds/min), 9,369,229 states left on queue.
+Progress(30) at 2024-11-06 14:29:32: 264,571,938 states generated (29,181,805 s/min), 30,176,971 distinct states found (3,284,665 ds/min), 10,493,429 states left on queue.
+Progress(31) at 2024-11-06 14:30:32: 293,928,191 states generated (29,356,253 s/min), 33,296,160 distinct states found (3,119,189 ds/min), 11,463,686 states left on queue.
+Progress(31) at 2024-11-06 14:31:32: 323,436,668 states generated (29,508,477 s/min), 36,347,973 distinct states found (3,051,813 ds/min), 12,365,578 states left on queue.
+Progress(31) at 2024-11-06 14:32:32: 352,943,790 states generated (29,507,122 s/min), 39,465,244 distinct states found (3,117,271 ds/min), 13,349,544 states left on queue.
+Progress(31) at 2024-11-06 14:33:32: 382,292,863 states generated (29,349,073 s/min), 42,654,621 distinct states found (3,189,377 ds/min), 14,384,363 states left on queue.
+Progress(31) at 2024-11-06 14:34:32: 411,385,854 states generated (29,092,991 s/min), 45,941,145 distinct states found (3,286,524 ds/min), 15,509,450 states left on queue.
+Progress(31) at 2024-11-06 14:35:32: 440,738,756 states generated (29,352,902 s/min), 48,984,566 distinct states found (3,043,421 ds/min), 16,419,882 states left on queue.
+Progress(32) at 2024-11-06 14:36:32: 470,251,558 states generated (29,512,802 s/min), 51,925,693 distinct states found (2,941,127 ds/min), 17,211,457 states left on queue.
+Progress(32) at 2024-11-06 14:37:32: 499,714,013 states generated (29,462,455 s/min), 54,955,581 distinct states found (3,029,888 ds/min), 18,114,624 states left on queue.
+Progress(32) at 2024-11-06 14:38:32: 529,254,608 states generated (29,540,595 s/min), 57,938,914 distinct states found (2,983,333 ds/min), 18,996,128 states left on queue.
+Progress(32) at 2024-11-06 14:39:32: 558,774,398 states generated (29,519,790 s/min), 61,072,943 distinct states found (3,134,029 ds/min), 19,975,689 states left on queue.
+Progress(32) at 2024-11-06 14:40:32: 588,134,665 states generated (29,360,267 s/min), 64,148,888 distinct states found (3,075,945 ds/min), 20,922,407 states left on queue.
+Progress(32) at 2024-11-06 14:41:32: 617,464,374 states generated (29,329,709 s/min), 67,306,855 distinct states found (3,157,967 ds/min), 21,928,799 states left on queue.
+Progress(32) at 2024-11-06 14:42:32: 646,525,281 states generated (29,060,907 s/min), 70,425,194 distinct states found (3,118,339 ds/min), 22,895,971 states left on queue.
+Progress(32) at 2024-11-06 14:43:32: 676,054,893 states generated (29,529,612 s/min), 73,351,905 distinct states found (2,926,711 ds/min), 23,703,779 states left on queue.
+Progress(33) at 2024-11-06 14:44:32: 705,581,782 states generated (29,526,889 s/min), 76,200,615 distinct states found (2,848,710 ds/min), 24,414,094 states left on queue.
+Progress(33) at 2024-11-06 14:45:32: 735,069,836 states generated (29,488,054 s/min), 79,168,244 distinct states found (2,967,629 ds/min), 25,255,224 states left on queue.
+Progress(33) at 2024-11-06 14:46:32: 764,659,188 states generated (29,589,352 s/min), 82,024,430 distinct states found (2,856,186 ds/min), 26,011,047 states left on queue.
+Progress(33) at 2024-11-06 14:47:32: 794,276,423 states generated (29,617,235 s/min), 84,974,312 distinct states found (2,949,882 ds/min), 26,868,750 states left on queue.
+Progress(33) at 2024-11-06 14:48:32: 823,875,831 states generated (29,599,408 s/min), 88,004,386 distinct states found (3,030,074 ds/min), 27,771,984 states left on queue.
+Progress(33) at 2024-11-06 14:49:32: 853,138,894 states generated (29,263,063 s/min), 91,006,890 distinct states found (3,002,504 ds/min), 28,636,661 states left on queue.
+Checkpointing of run states/24-11-06-14-20-25.868
+Checkpointing completed at (2024-11-06 14:50:32)
+Progress(33) at 2024-11-06 14:50:32: 882,514,167 states generated (29,375,273 s/min), 94,011,000 distinct states found (3,004,110 ds/min), 29,534,516 states left on queue.
+Progress(33) at 2024-11-06 14:51:32: 911,838,377 states generated (29,324,210 s/min), 97,108,937 distinct states found (3,097,937 ds/min), 30,498,587 states left on queue.
+Progress(33) at 2024-11-06 14:52:32: 940,646,920 states generated (28,808,543 s/min), 100,248,865 distinct states found (3,139,928 ds/min), 31,472,191 states left on queue.
+Progress(33) at 2024-11-06 14:53:32: 970,074,175 states generated (29,427,255 s/min), 103,170,815 distinct states found (2,921,950 ds/min), 32,265,691 states left on queue.
+Progress(33) at 2024-11-06 14:54:32: 999,627,974 states generated (29,553,799 s/min), 106,004,823 distinct states found (2,834,008 ds/min), 33,009,618 states left on queue.
+Progress(34) at 2024-11-06 14:55:32: 1,029,148,983 states generated (29,521,009 s/min), 108,740,783 distinct states found (2,735,960 ds/min), 33,616,222 states left on queue.
+Progress(34) at 2024-11-06 14:56:32: 1,058,582,001 states generated (29,433,018 s/min), 111,612,965 distinct states found (2,872,182 ds/min), 34,375,212 states left on queue.
+Progress(34) at 2024-11-06 14:57:32: 1,088,123,602 states generated (29,541,601 s/min), 114,464,196 distinct states found (2,851,231 ds/min), 35,116,195 states left on queue.
+Progress(34) at 2024-11-06 14:58:32: 1,117,684,936 states generated (29,561,334 s/min), 117,252,198 distinct states found (2,788,002 ds/min), 35,817,205 states left on queue.
+Progress(34) at 2024-11-06 14:59:32: 1,147,356,249 states generated (29,671,313 s/min), 120,014,476 distinct states found (2,762,278 ds/min), 36,517,255 states left on queue.
+Progress(34) at 2024-11-06 15:00:32: 1,176,921,098 states generated (29,564,849 s/min), 122,859,312 distinct states found (2,844,836 ds/min), 37,291,096 states left on queue.
+Progress(34) at 2024-11-06 15:01:32: 1,206,454,440 states generated (29,533,342 s/min), 125,830,942 distinct states found (2,971,630 ds/min), 38,147,762 states left on queue.
+Progress(34) at 2024-11-06 15:02:32: 1,235,721,673 states generated (29,267,233 s/min), 128,869,493 distinct states found (3,038,551 ds/min), 39,035,481 states left on queue.
+Progress(34) at 2024-11-06 15:03:32: 1,265,097,779 states generated (29,376,106 s/min), 131,669,552 distinct states found (2,800,059 ds/min), 39,746,864 states left on queue.
+Progress(34) at 2024-11-06 15:04:32: 1,294,408,098 states generated (29,310,319 s/min), 134,604,630 distinct states found (2,935,078 ds/min), 40,584,235 states left on queue.
+Progress(34) at 2024-11-06 15:05:32: 1,323,792,755 states generated (29,384,657 s/min), 137,579,390 distinct states found (2,974,760 ds/min), 41,446,478 states left on queue.
+Progress(34) at 2024-11-06 15:06:32: 1,353,085,163 states generated (29,292,408 s/min), 140,575,723 distinct states found (2,996,333 ds/min), 42,309,510 states left on queue.
+Progress(34) at 2024-11-06 15:07:32: 1,381,809,417 states generated (28,724,254 s/min), 143,655,566 distinct states found (3,079,843 ds/min), 43,220,682 states left on queue.
+Progress(34) at 2024-11-06 15:08:32: 1,411,255,848 states generated (29,446,431 s/min), 146,482,192 distinct states found (2,826,626 ds/min), 43,944,938 states left on queue.
+Progress(34) at 2024-11-06 15:09:32: 1,440,646,323 states generated (29,390,475 s/min), 149,419,989 distinct states found (2,937,797 ds/min), 44,763,293 states left on queue.
+Progress(34) at 2024-11-06 15:10:32: 1,470,298,568 states generated (29,652,245 s/min), 152,041,419 distinct states found (2,621,430 ds/min), 45,311,911 states left on queue.
+Progress(35) at 2024-11-06 15:11:32: 1,499,747,712 states generated (29,449,144 s/min), 154,696,867 distinct states found (2,655,448 ds/min), 45,842,895 states left on queue.
+Progress(35) at 2024-11-06 15:12:32: 1,529,256,993 states generated (29,509,281 s/min), 157,493,365 distinct states found (2,796,498 ds/min), 46,535,472 states left on queue.
+Progress(35) at 2024-11-06 15:13:32: 1,558,829,306 states generated (29,572,313 s/min), 160,256,575 distinct states found (2,763,210 ds/min), 47,212,471 states left on queue.
+Progress(35) at 2024-11-06 15:14:32: 1,588,345,878 states generated (29,516,572 s/min), 163,002,602 distinct states found (2,746,027 ds/min), 47,862,117 states left on queue.
+Progress(35) at 2024-11-06 15:15:32: 1,617,885,675 states generated (29,539,797 s/min), 165,699,121 distinct states found (2,696,519 ds/min), 48,472,896 states left on queue.
+Progress(35) at 2024-11-06 15:16:32: 1,647,559,965 states generated (29,674,290 s/min), 168,343,286 distinct states found (2,644,165 ds/min), 49,065,377 states left on queue.
+Progress(35) at 2024-11-06 15:17:32: 1,677,033,250 states generated (29,473,285 s/min), 171,134,409 distinct states found (2,791,123 ds/min), 49,823,330 states left on queue.
+Progress(35) at 2024-11-06 15:18:32: 1,706,730,266 states generated (29,697,016 s/min), 173,860,974 distinct states found (2,726,565 ds/min), 50,493,221 states left on queue.
+Error: Invariant LogSafety is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |-> <<>>,
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |-> <<>>,
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [term |-> 0, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a2 :>
+      [term |-> 0, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a3 :>
+      [term |-> 0, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 2: <Vote(p1,a1) line 207, col 2 to line 214, col 27 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |-> <<>>,
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [term |-> 1, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a2 :>
+      [term |-> 0, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a3 :>
+      [term |-> 0, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 3: <RestartProposer(p2,{a1, a2}) line 188, col 3 to line 198, col 44 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |-> <<>>,
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [term |-> 1, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a2 :>
+      [term |-> 0, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a3 :>
+      [term |-> 0, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 4: <Vote(p1,a2) line 207, col 2 to line 214, col 27 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a2 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |-> <<>>,
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [term |-> 1, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a2 :>
+      [term |-> 1, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a3 :>
+      [term |-> 0, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 5: <BecomeLeader(p1) line 222, col 3 to line 245, col 44 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a2 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |-> <<>>,
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [term |-> 1, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a2 :>
+      [term |-> 1, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a3 :>
+      [term |-> 0, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 6: <Vote(p2,a1) line 207, col 2 to line 214, col 27 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a2 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [term |-> 2, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a2 :>
+      [term |-> 1, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a3 :>
+      [term |-> 0, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 7: <TruncateWal(p1,a2) line 280, col 3 to line 293, col 33 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a2 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+        nextSendLsn |-> (a2 :> 1) ] @@
+  p2 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [term |-> 2, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a2 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 0, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 8: <Vote(p2,a3) line 207, col 2 to line 214, col 27 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a2 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+        nextSendLsn |-> (a2 :> 1) ] @@
+  p2 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [term |-> 2, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a2 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 2, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 9: <BecomeLeader(p2) line 222, col 3 to line 245, col 44 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a2 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+        nextSendLsn |-> (a2 :> 1) ] @@
+  p2 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [term |-> 2, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] @@
+  a2 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 2, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 10: <TruncateWal(p2,a1) line 280, col 3 to line 293, col 33 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a2 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+        nextSendLsn |-> (a2 :> 1) ] @@
+  p2 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+        nextSendLsn |-> (a1 :> 1) ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 2, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 11: <RestartProposer(p2,{a1, a2}) line 188, col 3 to line 198, col 44 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a2 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+        nextSendLsn |-> (a2 :> 1) ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |-> <<>>,
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 2, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 12: <Vote(p2,a3) line 207, col 2 to line 214, col 27 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a2 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+        nextSendLsn |-> (a2 :> 1) ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 3, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 13: <NewEntry(p1) line 297, col 3 to line 303, col 44 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<1>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a2 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+        nextSendLsn |-> (a2 :> 1) ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 3, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 14: <NewEntry(p1) line 297, col 3 to line 303, col 44 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a2 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+        nextSendLsn |-> (a2 :> 1) ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 1,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 3, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 15: <AppendEntry(p1,a2) line 307, col 3 to line 319, col 33 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a2 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+        nextSendLsn |-> (a2 :> 2) ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 1,
+        wal |-> <<1>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 3, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 16: <AppendEntry(p1,a2) line 307, col 3 to line 319, col 33 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 1,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a2 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+        nextSendLsn |-> (a2 :> 3) ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 1,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 3, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 17: <RestartProposer(p1,{a1, a3}) line 188, col 3 to line 198, col 44 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |-> <<>>,
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 2,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 1,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 3, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 18: <Vote(p1,a1) line 207, col 2 to line 214, col 27 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 1,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 3, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 19: <Vote(p2,a2) line 207, col 2 to line 214, col 27 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 3, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 20: <BecomeLeader(p2) line 222, col 3 to line 245, col 44 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >>,
+        nextSendLsn |-> <<>> ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>> ] @@
+  a3 :>
+      [term |-> 3, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 21: <TruncateWal(p2,a2) line 280, col 3 to line 293, col 33 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >>,
+        nextSendLsn |-> (a2 :> 3) ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] @@
+  a3 :>
+      [term |-> 3, wal |-> <<>>, termHistory |-> <<[term |-> 0, lsn |-> 1]>>] )
+/\ committed = {}
+
+State 22: <TruncateWal(p2,a3) line 280, col 3 to line 293, col 33 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >>,
+        nextSendLsn |-> (a2 :> 3 @@ a3 :> 1) ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] @@
+  a3 :>
+      [ term |-> 3,
+        wal |-> <<>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] )
+/\ committed = {}
+
+State 23: <AppendEntry(p2,a3) line 307, col 3 to line 319, col 33 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >>,
+        nextSendLsn |-> (a2 :> 3 @@ a3 :> 2) ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] @@
+  a3 :>
+      [ term |-> 3,
+        wal |-> <<1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] )
+/\ committed = {}
+
+State 24: <CommitEntries(p2,{a2, a3}) line 329, col 3 to line 345, col 45 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >>,
+        nextSendLsn |-> (a2 :> 3 @@ a3 :> 2) ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] @@
+  a3 :>
+      [ term |-> 3,
+        wal |-> <<1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] )
+/\ committed = {[term |-> 1, lsn |-> 1]}
+
+State 25: <Vote(p1,a3) line 207, col 2 to line 214, col 27 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        state |-> "campaign",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a3 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 2 ] ),
+        termHistory |-> <<>>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >>,
+        nextSendLsn |-> (a2 :> 3 @@ a3 :> 2) ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] @@
+  a3 :>
+      [ term |-> 4,
+        wal |-> <<1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] )
+/\ committed = {[term |-> 1, lsn |-> 1]}
+
+State 26: <BecomeLeader(p1) line 222, col 3 to line 245, col 44 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a3 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 2 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >>,
+        nextSendLsn |-> <<>> ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >>,
+        nextSendLsn |-> (a2 :> 3 @@ a3 :> 2) ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] @@
+  a3 :>
+      [ term |-> 4,
+        wal |-> <<1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] )
+/\ committed = {[term |-> 1, lsn |-> 1]}
+
+State 27: <TruncateWal(p1,a3) line 280, col 3 to line 293, col 33 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a3 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 2 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >>,
+        nextSendLsn |-> (a3 :> 1) ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >>,
+        nextSendLsn |-> (a2 :> 3 @@ a3 :> 2) ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] @@
+  a3 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >> ] )
+/\ committed = {[term |-> 1, lsn |-> 1]}
+
+State 28: <NewEntry(p1) line 297, col 3 to line 303, col 44 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<4>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a3 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 2 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >>,
+        nextSendLsn |-> (a3 :> 1) ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >>,
+        nextSendLsn |-> (a2 :> 3 @@ a3 :> 2) ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] @@
+  a3 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >> ] )
+/\ committed = {[term |-> 1, lsn |-> 1]}
+
+State 29: <AppendEntry(p1,a3) line 307, col 3 to line 319, col 33 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<4>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a3 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 2 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >>,
+        nextSendLsn |-> (a3 :> 2) ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >>,
+        nextSendLsn |-> (a2 :> 3 @@ a3 :> 2) ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] @@
+  a3 :>
+      [ term |-> 4,
+        wal |-> <<4>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >> ] )
+/\ committed = {[term |-> 1, lsn |-> 1]}
+
+State 30: <TruncateWal(p1,a1) line 280, col 3 to line 293, col 33 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<4>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a3 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 2 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >>,
+        nextSendLsn |-> (a1 :> 1 @@ a3 :> 2) ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >>,
+        nextSendLsn |-> (a2 :> 3 @@ a3 :> 2) ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] @@
+  a3 :>
+      [ term |-> 4,
+        wal |-> <<4>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >> ] )
+/\ committed = {[term |-> 1, lsn |-> 1]}
+
+State 31: <AppendEntry(p1,a1) line 307, col 3 to line 319, col 33 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<4>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a3 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 2 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >>,
+        nextSendLsn |-> (a1 :> 2 @@ a3 :> 2) ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >>,
+        nextSendLsn |-> (a2 :> 3 @@ a3 :> 2) ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<4>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] @@
+  a3 :>
+      [ term |-> 4,
+        wal |-> <<4>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >> ] )
+/\ committed = {[term |-> 1, lsn |-> 1]}
+
+State 32: <CommitEntries(p1,{a1, a3}) line 329, col 3 to line 345, col 45 of module ProposerAcceptorStatic>
+/\ prop_state = ( p1 :>
+      [ term |-> 4,
+        wal |-> <<4>>,
+        state |-> "leader",
+        votes |->
+            ( a1 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 2, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] @@
+              a3 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 2 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >>,
+        nextSendLsn |-> (a1 :> 2 @@ a3 :> 2) ] @@
+  p2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        state |-> "leader",
+        votes |->
+            ( a2 :>
+                  [ termHistory |->
+                        <<[term |-> 0, lsn |-> 1], [term |-> 1, lsn |-> 1]>>,
+                    flushLsn |-> 3 ] @@
+              a3 :>
+                  [ termHistory |-> <<[term |-> 0, lsn |-> 1]>>,
+                    flushLsn |-> 1 ] ),
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >>,
+        nextSendLsn |-> (a2 :> 3 @@ a3 :> 2) ] )
+/\ acc_state = ( a1 :>
+      [ term |-> 4,
+        wal |-> <<4>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >> ] @@
+  a2 :>
+      [ term |-> 3,
+        wal |-> <<1, 1>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 1, lsn |-> 1],
+               [term |-> 3, lsn |-> 3] >> ] @@
+  a3 :>
+      [ term |-> 4,
+        wal |-> <<4>>,
+        termHistory |->
+            << [term |-> 0, lsn |-> 1],
+               [term |-> 2, lsn |-> 1],
+               [term |-> 4, lsn |-> 1] >> ] )
+/\ committed = {[term |-> 1, lsn |-> 1], [term |-> 4, lsn |-> 1]}
+
+1712918117 states generated, 174460942 distinct states found, 50658619 states left on queue.
+The depth of the complete state graph search is 35.
+Finished in 58min 19s at (2024-11-06 15:18:45)
+Trace exploration spec path: ./MCProposerAcceptorStatic_TTrace_1730902825.tla

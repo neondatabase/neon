@@ -30,7 +30,7 @@ def get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str | No
     test_name = request.node.name
     test_dir = top_output_dir / f"{prefix or ''}{test_name.replace('/', '-')}"
 
-    # We rerun flaky tests multiple times, use a separate directory for each run.
+    # We rerun failed tests multiple times, use a separate directory for each run.
     if (suffix := getattr(request.node, "execution_count", None)) is not None:
         test_dir = test_dir.parent / f"{test_dir.name}-{suffix}"
 

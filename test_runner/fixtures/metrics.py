@@ -173,6 +173,7 @@ PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
     counter("pageserver_tenant_throttling_count_accounted_finish"),
     counter("pageserver_tenant_throttling_wait_usecs_sum"),
     counter("pageserver_tenant_throttling_count"),
+    *histogram("pageserver_page_service_batch_size"),
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
     # "pageserver_directory_entries_count", -- only used if above a certain threshold
     # "pageserver_broken_tenants_count" -- used only for broken

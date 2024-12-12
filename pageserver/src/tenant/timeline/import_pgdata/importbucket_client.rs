@@ -4,7 +4,8 @@ use anyhow::Context;
 use bytes::Bytes;
 use postgres_ffi::ControlFileData;
 use remote_storage::{
-    Download, DownloadError, DownloadOpts, GenericRemoteStorage, Listing, ListingObject, RemotePath,
+    Download, DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, Listing,
+    ListingObject, RemotePath,
 };
 use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
@@ -239,6 +240,7 @@ impl RemoteStorageWrapper {
                     .download(
                         path,
                         &DownloadOpts {
+                            kind: DownloadKind::Large,
                             etag: None,
                             byte_start: Bound::Included(start_inclusive),
                             byte_end: Bound::Excluded(end_exclusive)

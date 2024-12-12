@@ -57,9 +57,9 @@ RUN mkdir -p /pgcopydb/bin && \
     mkdir -p /pgcopydb/lib && \
     chmod -R 755 /pgcopydb && \
     chown -R nonroot:nonroot /pgcopydb
-        
-COPY --from=pgcopydb_builder /usr/lib/postgresql/16/bin/pgcopydb /pgcopydb/bin/pgcopydb 
-COPY --from=pgcopydb_builder /pgcopydb/lib/libpq.so.5 /pgcopydb/lib/libpq.so.5 
+
+COPY --from=pgcopydb_builder /usr/lib/postgresql/16/bin/pgcopydb /pgcopydb/bin/pgcopydb
+COPY --from=pgcopydb_builder /pgcopydb/lib/libpq.so.5 /pgcopydb/lib/libpq.so.5
 
 # System deps
 #
@@ -258,14 +258,14 @@ WORKDIR /home/nonroot
 
 # Rust
 # Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
-ENV RUSTC_VERSION=1.82.0
+ENV RUSTC_VERSION=1.83.0
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
 ARG RUSTFILT_VERSION=0.2.1
-ARG CARGO_HAKARI_VERSION=0.9.30
-ARG CARGO_DENY_VERSION=0.16.1
-ARG CARGO_HACK_VERSION=0.6.31
-ARG CARGO_NEXTEST_VERSION=0.9.72
+ARG CARGO_HAKARI_VERSION=0.9.33
+ARG CARGO_DENY_VERSION=0.16.2
+ARG CARGO_HACK_VERSION=0.6.33
+ARG CARGO_NEXTEST_VERSION=0.9.85
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
 	chmod +x rustup-init && \
 	./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
@@ -289,7 +289,7 @@ RUN whoami \
     && cargo --version --verbose \
     && rustup --version --verbose \
     && rustc --version --verbose \
-    && clang --version 
+    && clang --version
 
 RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
     LD_LIBRARY_PATH=/pgcopydb/lib /pgcopydb/bin/pgcopydb --version; \

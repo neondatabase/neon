@@ -356,6 +356,25 @@ async fn timed<Fut: std::future::Future>(
     }
 }
 
+/// Like [`timed`], but the warning timeout only starts after `cancel` has been cancelled.
+async fn timed_after_cancellation<Fut: std::future::Future>(
+    fut: Fut,
+    name: &str,
+    warn_at: std::time::Duration,
+    cancel: &CancellationToken,
+) -> <Fut as std::future::Future>::Output {
+    let mut fut = std::pin::pin!(fut);
+
+    tokio::select! {
+        _ = cancel.cancelled() => {
+            timed(fut, name, warn_at).await
+        }
+        ret = &mut fut => {
+            ret
+        }
+    }
+}
+
 #[cfg(test)]
 mod timed_tests {
     use super::timed;

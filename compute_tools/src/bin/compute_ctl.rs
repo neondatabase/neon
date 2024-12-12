@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::process::exit;
+use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::{thread, time::Duration};
@@ -322,11 +323,19 @@ fn wait_spec(
     } else {
         spec_set = false;
     }
+    let connstr = Url::parse(connstr).context("cannot parse connstr as a URL")?;
+    let conn_conf = postgres::config::Config::from_str(connstr.as_str())
+        .context("cannot build postgres config from connstr")?;
+    let tokio_conn_conf = tokio_postgres::config::Config::from_str(connstr.as_str())
+        .context("cannot build tokio postgres config from connstr")?;
     let compute_node = ComputeNode {
-        connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
+        connstr,
+        conn_conf,
+        tokio_conn_conf,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
         pgversion: get_pg_version_string(pgbin),
+        http_port,
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
@@ -381,7 +390,6 @@ fn wait_spec(
 
     Ok(WaitSpecResult {
         compute,
-        http_port,
         resize_swap_on_bind,
         set_disk_quota_for_fs: set_disk_quota_for_fs.cloned(),
     })
@@ -389,8 +397,6 @@ fn wait_spec(
 
 struct WaitSpecResult {
     compute: Arc<ComputeNode>,
-    // passed through from ProcessCliResult
-    http_port: u16,
     resize_swap_on_bind: bool,
     set_disk_quota_for_fs: Option<String>,
 }
@@ -400,7 +406,6 @@ fn start_postgres(
     #[allow(unused_variables)] matches: &clap::ArgMatches,
     WaitSpecResult {
         compute,
-        http_port,
         resize_swap_on_bind,
         set_disk_quota_for_fs,
     }: WaitSpecResult,
@@ -473,12 +478,10 @@ fn start_postgres(
         }
     }
 
-    let extension_server_port: u16 = http_port;
-
     // Start Postgres
     let mut pg = None;
     if !prestartup_failed {
-        pg = match compute.start_compute(extension_server_port) {
+        pg = match compute.start_compute() {
             Ok(pg) => Some(pg),
             Err(err) => {
                 error!("could not start the compute node: {:#}", err);

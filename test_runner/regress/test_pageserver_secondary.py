@@ -356,7 +356,7 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
         )
         assert destination_lsn >= origin_lsn
 
-    wait_until(100, 0.1, caught_up)
+    wait_until(caught_up)
 
     # The destination should accept writes
     workload.churn_rows(64, pageserver_b.id)
@@ -411,7 +411,7 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
         assert submitted is not None
         assert submitted > 0
 
-    wait_until(10, 0.1, blocked_deletions_drained)
+    wait_until(blocked_deletions_drained)
 
     workload.churn_rows(64, pageserver_b.id)
     workload.validate(pageserver_b.id)
@@ -702,7 +702,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         else:
             timeout = int(deadline - now) + 1
             try:
-                wait_until(timeout, 1, lambda: pageserver.assert_log_contains(expression))
+                wait_until(lambda: pageserver.assert_log_contains(expression), timeout=timeout)
             except:
                 log.error(f"Timed out waiting for '{expression}'")
                 raise

@@ -10,6 +10,7 @@ use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
 use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
+use tokio_util::io::ReaderStream;
 use tracing::{debug, info, info_span, warn, Instrument};
 
 use std::future::Future;
@@ -402,6 +403,69 @@ pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, A
                 .status(200)
                 .header(CONTENT_TYPE, "image/svg+xml")
                 .body(Body::from(body))
+                .map_err(|err| ApiError::InternalServerError(err.into()))
+        }
+    }
+}
+
+/// Generates heap profiles.
+///
+/// This only works with jemalloc on Linux.
+pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    enum Format {
+        Jemalloc,
+        Pprof,
+    }
+
+    // Parameters.
+    let format = match get_query_param(&req, "format")?.as_deref() {
+        None => Format::Pprof,
+        Some("jemalloc") => Format::Jemalloc,
+        Some("pprof") => Format::Pprof,
+        Some(format) => return Err(ApiError::BadRequest(anyhow!("invalid format {format}"))),
+    };
+
+    // Obtain profiler handle.
+    let mut prof_ctl = jemalloc_pprof::PROF_CTL
+        .as_ref()
+        .ok_or(ApiError::InternalServerError(anyhow!(
+            "heap profiling not enabled"
+        )))?
+        .lock()
+        .await;
+    if !prof_ctl.activated() {
+        return Err(ApiError::InternalServerError(anyhow!(
+            "heap profiling not enabled"
+        )));
+    }
+
+    // Take and return the profile.
+    match format {
+        Format::Jemalloc => {
+            // NB: file is an open handle to a tempfile that's already deleted.
+            let file = tokio::task::spawn_blocking(move || prof_ctl.dump())
+                .await
+                .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
+                .map_err(ApiError::InternalServerError)?;
+            let stream = ReaderStream::new(tokio::fs::File::from_std(file));
+            Response::builder()
+                .status(200)
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .header(CONTENT_DISPOSITION, "attachment; filename=\"heap.dump\"")
+                .body(Body::wrap_stream(stream))
+                .map_err(|err| ApiError::InternalServerError(err.into()))
+        }
+
+        Format::Pprof => {
+            let data = tokio::task::spawn_blocking(move || prof_ctl.dump_pprof())
+                .await
+                .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
+                .map_err(ApiError::InternalServerError)?;
+            Response::builder()
+                .status(200)
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .header(CONTENT_DISPOSITION, "attachment; filename=\"heap.pb\"")
+                .body(Body::from(data))
                 .map_err(|err| ApiError::InternalServerError(err.into()))
         }
     }

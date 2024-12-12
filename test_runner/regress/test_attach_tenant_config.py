@@ -64,8 +64,6 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
     )
 
     wait_until(
-        50,
-        0.1,
         lambda: env.pageserver.assert_log_contains(".*Error processing HTTP request: Bad request"),
     )
 

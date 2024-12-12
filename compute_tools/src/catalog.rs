@@ -1,4 +1,3 @@
-use compute_api::responses::CatalogObjects;
 use futures::Stream;
 use postgres::NoTls;
 use std::{path::Path, process::Stdio, result::Result, sync::Arc};
@@ -7,19 +6,17 @@ use tokio::{
     process::Command,
     spawn,
 };
-use tokio_postgres::connect;
 use tokio_stream::{self as stream, StreamExt};
 use tokio_util::codec::{BytesCodec, FramedRead};
 use tracing::warn;
 
 use crate::compute::ComputeNode;
-use crate::pg_helpers::{get_existing_dbs_async, get_existing_roles_async};
+use crate::pg_helpers::{get_existing_dbs_async, get_existing_roles_async, postgres_conf_for_db};
+use compute_api::responses::CatalogObjects;
 
 pub async fn get_dbs_and_roles(compute: &Arc<ComputeNode>) -> anyhow::Result<CatalogObjects> {
-    let connstr = compute.connstr.clone();
-
-    let (client, connection): (tokio_postgres::Client, _) =
-        connect(connstr.as_str(), NoTls).await?;
+    let conf = compute.get_tokio_conn_conf(Some("compute_ctl:get_dbs_and_roles"));
+    let (client, connection): (tokio_postgres::Client, _) = conf.connect(NoTls).await?;
 
     spawn(async move {
         if let Err(e) = connection.await {
@@ -43,6 +40,8 @@ pub enum SchemaDumpError {
     DatabaseDoesNotExist,
     #[error("Failed to execute pg_dump.")]
     IO(#[from] std::io::Error),
+    #[error("Unexpected error.")]
+    Unexpected,
 }
 
 // It uses the pg_dump utility to dump the schema of the specified database.
@@ -60,11 +59,38 @@ pub async fn get_database_schema(
     let pgbin = &compute.pgbin;
     let basepath = Path::new(pgbin).parent().unwrap();
     let pgdump = basepath.join("pg_dump");
-    let mut connstr = compute.connstr.clone();
-    connstr.set_path(dbname);
+
+    // Replace the DB in the connection string and disable it to parts.
+    // This is the only option to handle DBs with special characters.
+    let conf =
+        postgres_conf_for_db(&compute.connstr, dbname).map_err(|_| SchemaDumpError::Unexpected)?;
+    let host = conf
+        .get_hosts()
+        .first()
+        .ok_or(SchemaDumpError::Unexpected)?;
+    let host = match host {
+        tokio_postgres::config::Host::Tcp(ip) => ip.to_string(),
+        #[cfg(unix)]
+        tokio_postgres::config::Host::Unix(path) => path.to_string_lossy().to_string(),
+    };
+    let port = conf
+        .get_ports()
+        .first()
+        .ok_or(SchemaDumpError::Unexpected)?;
+    let user = conf.get_user().ok_or(SchemaDumpError::Unexpected)?;
+    let dbname = conf.get_dbname().ok_or(SchemaDumpError::Unexpected)?;
+
     let mut cmd = Command::new(pgdump)
+        // XXX: this seems to be the only option to deal with DBs with `=` in the name
+        // See <https://www.postgresql.org/message-id/flat/20151023003445.931.91267%40wrigleys.postgresql.org>
+        .env("PGDATABASE", dbname)
+        .arg("--host")
+        .arg(host)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--username")
+        .arg(user)
         .arg("--schema-only")
-        .arg(connstr.as_str())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)

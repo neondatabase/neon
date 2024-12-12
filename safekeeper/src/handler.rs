@@ -212,8 +212,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                 );
 
             if let Some(shard) = self.shard.as_ref() {
-                tracing::Span::current()
-                    .record("shard", tracing::field::display(shard.shard_slug()));
+                if let Some(slug) = shard.shard_slug().strip_prefix("-") {
+                    tracing::Span::current().record("shard", tracing::field::display(slug));
+                }
             }
 
             Ok(())

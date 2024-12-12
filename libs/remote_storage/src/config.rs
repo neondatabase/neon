@@ -24,6 +24,13 @@ pub struct RemoteStorageConfig {
         skip_serializing_if = "is_default_timeout"
     )]
     pub timeout: Duration,
+    /// Alternative timeout used for metadata objects which are expected to be small
+    #[serde(
+        with = "humantime_serde",
+        default = "default_small_timeout",
+        skip_serializing_if = "is_default_small_timeout"
+    )]
+    pub small_timeout: Duration,
 }
 
 impl RemoteStorageKind {
@@ -40,8 +47,16 @@ fn default_timeout() -> Duration {
     RemoteStorageConfig::DEFAULT_TIMEOUT
 }
 
+fn default_small_timeout() -> Duration {
+    RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT
+}
+
 fn is_default_timeout(d: &Duration) -> bool {
     *d == RemoteStorageConfig::DEFAULT_TIMEOUT
+}
+
+fn is_default_small_timeout(d: &Duration) -> bool {
+    *d == RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT
 }
 
 /// A kind of a remote storage to connect to, with its connection configuration.
@@ -184,6 +199,7 @@ fn serialize_storage_class<S: serde::Serializer>(
 
 impl RemoteStorageConfig {
     pub const DEFAULT_TIMEOUT: Duration = std::time::Duration::from_secs(120);
+    pub const DEFAULT_SMALL_TIMEOUT: Duration = std::time::Duration::from_secs(30);
 
     pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<RemoteStorageConfig> {
         Ok(utils::toml_edit_ext::deserialize_item(toml)?)
@@ -219,7 +235,8 @@ timeout = '5s'";
                 storage: RemoteStorageKind::LocalFs {
                     local_path: Utf8PathBuf::from(".")
                 },
-                timeout: Duration::from_secs(5)
+                timeout: Duration::from_secs(5),
+                small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT
             }
         );
     }
@@ -247,7 +264,8 @@ timeout = '5s'";
                     max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
                     upload_storage_class: Some(StorageClass::IntelligentTiering),
                 }),
-                timeout: Duration::from_secs(7)
+                timeout: Duration::from_secs(7),
+                small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT
             }
         );
     }
@@ -299,7 +317,8 @@ timeout = '5s'";
                     concurrency_limit: default_remote_storage_azure_concurrency_limit(),
                     max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
                 }),
-                timeout: Duration::from_secs(7)
+                timeout: Duration::from_secs(7),
+                small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT
             }
         );
     }

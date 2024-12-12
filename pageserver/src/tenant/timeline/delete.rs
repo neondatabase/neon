@@ -298,7 +298,7 @@ impl DeleteTimelineFlow {
                 None, // Ancestor is not needed for deletion.
                 TimelineResources {
                     remote_client,
-                    timeline_get_throttle: tenant.timeline_get_throttle.clone(),
+                    pagestream_throttle: tenant.pagestream_throttle.clone(),
                     l0_flush_global_state: tenant.l0_flush_global_state.clone(),
                 },
                 // Important. We dont pass ancestor above because it can be missing.

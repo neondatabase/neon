@@ -1,0 +1,10 @@
+[package]
+name = "postgres-types2"
+version = "0.1.0"
+edition = "2018"
+license = "MIT/Apache-2.0"
+
+[dependencies]
+bytes.workspace = true
+fallible-iterator.workspace = true
+postgres-protocol2 = { path = "../postgres-protocol2" }

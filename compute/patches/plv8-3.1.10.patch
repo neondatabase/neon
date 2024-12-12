@@ -1,0 +1,42 @@
+commit 46b38d3e46f9cd6c70d9b189dd6ff4abaa17cf5e
+Author: Alexander Bayandin <alexander@neon.tech>
+Date:   Sat Nov 30 18:29:32 2024 +0000
+
+    Fix v8 9.7.37 compilation on Debian 12
+
+diff --git a/patches/code/84cf3230a9680aac3b73c410c2b758760b6d3066.patch b/patches/code/84cf3230a9680aac3b73c410c2b758760b6d3066.patch
+new file mode 100644
+index 0000000..f0a5dc7
+--- /dev/null
++++ b/patches/code/84cf3230a9680aac3b73c410c2b758760b6d3066.patch
+@@ -0,0 +1,30 @@
++From 84cf3230a9680aac3b73c410c2b758760b6d3066 Mon Sep 17 00:00:00 2001
++From: Michael Lippautz <mlippautz@chromium.org>
++Date: Thu, 27 Jan 2022 14:14:11 +0100
++Subject: [PATCH] cppgc: Fix include
++
++Add <utility> to cover for std::exchange.
++
++Bug: v8:12585
++Change-Id: Ida65144e93e466be8914527d0e646f348c136bcb
++Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3420309
++Auto-Submit: Michael Lippautz <mlippautz@chromium.org>
++Reviewed-by: Omer Katz <omerkatz@chromium.org>
++Commit-Queue: Michael Lippautz <mlippautz@chromium.org>
++Cr-Commit-Position: refs/heads/main@{#78820}
++---
++ src/heap/cppgc/prefinalizer-handler.h | 1 +
++ 1 file changed, 1 insertion(+)
++
++diff --git a/src/heap/cppgc/prefinalizer-handler.h b/src/heap/cppgc/prefinalizer-handler.h
++index bc17c99b1838..c82c91ff5a45 100644
++--- a/src/heap/cppgc/prefinalizer-handler.h
+++++ b/src/heap/cppgc/prefinalizer-handler.h
++@@ -5,6 +5,7 @@
++ #ifndef V8_HEAP_CPPGC_PREFINALIZER_HANDLER_H_
++ #define V8_HEAP_CPPGC_PREFINALIZER_HANDLER_H_
++ 
+++#include <utility>
++ #include <vector>
++ 
++ #include "include/cppgc/prefinalizer.h"

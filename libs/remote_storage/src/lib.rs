@@ -178,6 +178,15 @@ pub struct DownloadOpts {
     /// The end of the byte range to download, or unbounded. Must be after the
     /// start bound.
     pub byte_end: Bound<u64>,
+    /// Indicate whether we're downloading something small or large: this indirectly controls
+    /// timeouts: for something like an index/manifest/heatmap, we should time out faster than
+    /// for layer files
+    pub kind: DownloadKind,
+}
+
+pub enum DownloadKind {
+    Large,
+    Small,
 }
 
 impl Default for DownloadOpts {
@@ -186,6 +195,7 @@ impl Default for DownloadOpts {
             etag: Default::default(),
             byte_start: Bound::Unbounded,
             byte_end: Bound::Unbounded,
+            kind: DownloadKind::Large,
         }
     }
 }
@@ -584,6 +594,10 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
 impl GenericRemoteStorage {
     pub async fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
         let timeout = storage_config.timeout;
+
+        // If somkeone overrides timeout to be small without adjusting small_timeout, then adjust it automatically
+        let small_timeout = std::cmp::min(storage_config.small_timeout, timeout);
+
         Ok(match &storage_config.storage {
             RemoteStorageKind::LocalFs { local_path: path } => {
                 info!("Using fs root '{path}' as a remote storage");
@@ -606,7 +620,11 @@ impl GenericRemoteStorage {
                     .unwrap_or("<AZURE_STORAGE_ACCOUNT>");
                 info!("Using azure container '{}' in account '{storage_account}' in region '{}' as a remote storage, prefix in container: '{:?}'",
                       azure_config.container_name, azure_config.container_region, azure_config.prefix_in_container);
-                Self::AzureBlob(Arc::new(AzureBlobStorage::new(azure_config, timeout)?))
+                Self::AzureBlob(Arc::new(AzureBlobStorage::new(
+                    azure_config,
+                    timeout,
+                    small_timeout,
+                )?))
             }
         })
     }

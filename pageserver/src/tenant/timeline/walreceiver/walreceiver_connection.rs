@@ -454,6 +454,10 @@ pub(super) async fn handle_walreceiver_connection(
                     timeline.get_last_record_lsn()
                 );
 
+                if let Some(lsn) = next_record_lsn {
+                    last_rec_lsn = lsn;
+                }
+
                 Some(streaming_lsn)
             }
 
