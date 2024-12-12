@@ -435,7 +435,10 @@ class NeonEnvBuilder:
 
         self.pageserver_virtual_file_io_mode = pageserver_virtual_file_io_mode
 
-        self.pageserver_wal_receiver_protocol = pageserver_wal_receiver_protocol
+        if pageserver_wal_receiver_protocol is not None:
+            self.pageserver_wal_receiver_protocol = pageserver_wal_receiver_protocol
+        else:
+            self.pageserver_wal_receiver_protocol = PageserverWalReceiverProtocol.INTERPRETED
 
         assert test_name.startswith(
             "test_"
