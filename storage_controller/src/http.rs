@@ -879,6 +879,21 @@ async fn handle_cancel_node_fill(req: Request<Body>) -> Result<Response<Body>, A
     json_response(StatusCode::ACCEPTED, ())
 }
 
+async fn handle_safekeeper_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Infra)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let safekeepers = state.service.safekeepers_list().await?;
+    json_response(StatusCode::OK, safekeepers)
+}
+
 async fn handle_metadata_health_update(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Scrubber)?;
 
@@ -1203,7 +1218,7 @@ impl From<ReconcileError> for ApiError {
 ///
 /// Not used by anything except manual testing.
 async fn handle_get_safekeeper(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let id = parse_request_param::<i64>(&req, "id")?;
 
@@ -1221,7 +1236,7 @@ async fn handle_get_safekeeper(req: Request<Body>) -> Result<Response<Body>, Api
     match res {
         Ok(b) => json_response(StatusCode::OK, b),
         Err(crate::persistence::DatabaseError::Query(diesel::result::Error::NotFound)) => {
-            Err(ApiError::NotFound("unknown instance_id".into()))
+            Err(ApiError::NotFound("unknown instance id".into()))
         }
         Err(other) => Err(other.into()),
     }
@@ -1817,6 +1832,21 @@ pub fn make_router(
                 RequestName("control_v1_metadata_health_list_outdated"),
             )
         })
+        // Safekeepers
+        .get("/control/v1/safekeeper", |r| {
+            named_request_span(
+                r,
+                handle_safekeeper_list,
+                RequestName("control_v1_safekeeper_list"),
+            )
+        })
+        .get("/control/v1/safekeeper/:id", |r| {
+            named_request_span(r, handle_get_safekeeper, RequestName("v1_safekeeper"))
+        })
+        .post("/control/v1/safekeeper/:id", |r| {
+            // id is in the body
+            named_request_span(r, handle_upsert_safekeeper, RequestName("v1_safekeeper"))
+        })
         // Tenant Shard operations
         .put("/control/v1/tenant/:tenant_shard_id/migrate", |r| {
             tenant_service_handler(
@@ -1868,13 +1898,6 @@ pub fn make_router(
         })
         .put("/control/v1/step_down", |r| {
             named_request_span(r, handle_step_down, RequestName("control_v1_step_down"))
-        })
-        .get("/control/v1/safekeeper/:id", |r| {
-            named_request_span(r, handle_get_safekeeper, RequestName("v1_safekeeper"))
-        })
-        .post("/control/v1/safekeeper/:id", |r| {
-            // id is in the body
-            named_request_span(r, handle_upsert_safekeeper, RequestName("v1_safekeeper"))
         })
         // Tenant operations
         // The ^/v1/ endpoints act as a "Virtual Pageserver", enabling shard-naive clients to call into

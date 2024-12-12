@@ -2329,6 +2329,16 @@ class NeonStorageController(MetricsGetter, LogUtils):
                 return None
             raise e
 
+    def get_safekeepers(self) -> list[dict[str, Any]]:
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/safekeeper",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        json = response.json()
+        assert isinstance(json, list)
+        return json
+
     def set_preferred_azs(self, preferred_azs: dict[TenantShardId, str]) -> list[TenantShardId]:
         response = self.request(
             "PUT",
