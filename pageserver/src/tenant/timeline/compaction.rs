@@ -1959,15 +1959,28 @@ impl Timeline {
                     );
                 }
             }
-            if generate_image && records_since_last_image > 0 {
+            // Whether to produce an image into the final layer files
+            let produce_image = generate_image && records_since_last_image > 0;
+            // Whether to reconstruct the image. In debug mode, we will generate an image
+            // at every retain_lsn to ensure data is not corrupted, but we won't put the
+            // image into the final layer.
+            let generate_image =
+                produce_image || cfg!(debug_assertions) || cfg!(feature = "testing");
+            if produce_image {
                 records_since_last_image = 0;
+            }
+            let img_and_lsn = if generate_image {
                 let replay_history_for_debug = if cfg!(debug_assertions) {
                     Some(replay_history.clone())
                 } else {
                     None
                 };
                 let replay_history_for_debug_ref = replay_history_for_debug.as_deref();
-                let history = std::mem::take(&mut replay_history);
+                let history = if produce_image {
+                    std::mem::take(&mut replay_history)
+                } else {
+                    replay_history.clone()
+                };
                 let mut img = None;
                 let mut records = Vec::with_capacity(history.len());
                 if let (_, lsn, Value::Image(val)) = history.first().as_ref().unwrap() {
@@ -2006,6 +2019,12 @@ impl Timeline {
                 let state = ValueReconstructState { img, records };
                 let request_lsn = lsn_split_points[i]; // last batch does not generate image so i is always in range
                 let img = self.reconstruct_value(key, request_lsn, state).await?;
+                Some((request_lsn, img))
+            } else {
+                None
+            };
+            if produce_image {
+                let (request_lsn, img) = img_and_lsn.unwrap();
                 replay_history.push((key, request_lsn, Value::Image(img.clone())));
                 retention.push(vec![(request_lsn, Value::Image(img))]);
             } else {
