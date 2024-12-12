@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from collections import defaultdict
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import requests
@@ -26,6 +26,9 @@ from pytest_httpserver import HTTPServer
 from typing_extensions import override
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
+
+if TYPE_CHECKING:
+    from fixtures.httpserver import ListenAddress
 
 
 def test_sharding_smoke(
@@ -759,7 +762,7 @@ def test_sharding_split_smoke(
 def test_sharding_split_stripe_size(
     neon_env_builder: NeonEnvBuilder,
     httpserver: HTTPServer,
-    httpserver_listen_address,
+    httpserver_listen_address: ListenAddress,
     initial_stripe_size: int,
 ):
     """
