@@ -4930,13 +4930,30 @@ def check_restored_datadir_content(
     assert (mismatch, error) == ([], [])
 
 
-def logical_replication_sync(subscriber: PgProtocol, publisher: PgProtocol) -> Lsn:
+def logical_replication_sync(
+    subscriber: PgProtocol,
+    publisher: PgProtocol,
+    sub_dbname: str | None = None,
+    pub_dbname: str | None = None,
+) -> Lsn:
     """Wait logical replication subscriber to sync with publisher."""
-    publisher_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    if pub_dbname is not None:
+        publisher_lsn = Lsn(
+            publisher.safe_psql("SELECT pg_current_wal_flush_lsn()", dbname=pub_dbname)[0][0]
+        )
+    else:
+        publisher_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+
     while True:
-        res = subscriber.safe_psql("select latest_end_lsn from pg_catalog.pg_stat_subscription")[0][
-            0
-        ]
+        if sub_dbname is not None:
+            res = subscriber.safe_psql(
+                "select latest_end_lsn from pg_catalog.pg_stat_subscription", dbname=sub_dbname
+            )[0][0]
+        else:
+            res = subscriber.safe_psql(
+                "select latest_end_lsn from pg_catalog.pg_stat_subscription"
+            )[0][0]
+
         if res:
             log.info(f"subscriber_lsn={res}")
             subscriber_lsn = Lsn(res)
