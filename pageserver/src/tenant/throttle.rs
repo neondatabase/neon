@@ -37,11 +37,12 @@ pub struct Inner {
 pub type Config = pageserver_api::models::ThrottleConfig;
 
 pub struct Observation {
+    pub key_conut: NonZeroUsize,
     pub wait_time: Duration,
 }
 pub trait Metric {
-    fn accounting_start(&self);
-    fn accounting_finish(&self);
+    fn accounting_start(&self, key_count: NonZeroUsize);
+    fn accounting_finish(&self, key_count: NonZeroUsize);
     fn observe_throttling(&self, observation: &Observation);
 }
 
@@ -136,11 +137,11 @@ where
             return ThrottleResult::NotThrottled { start };
         }
 
-        self.metric.accounting_start();
-        self.count_accounted_start.fetch_add(1, Ordering::Relaxed);
+        self.metric.accounting_start(key_count);
+        self.count_accounted_start.fetch_add(key_count, Ordering::Relaxed);
         let did_throttle = inner.rate_limiter.acquire(key_count).await;
-        self.count_accounted_finish.fetch_add(1, Ordering::Relaxed);
-        self.metric.accounting_finish();
+        self.count_accounted_finish.fetch_add(key_count, Ordering::Relaxed);
+        self.metric.accounting_finish(key_count);
 
         if did_throttle {
             self.count_throttled.fetch_add(1, Ordering::Relaxed);
@@ -148,7 +149,7 @@ where
             let wait_time = now - start;
             self.sum_throttled_usecs
                 .fetch_add(wait_time.as_micros() as u64, Ordering::Relaxed);
-            let observation = Observation { wait_time };
+            let observation = Observation { key_conut, wait_time };
             self.metric.observe_throttling(&observation);
             ThrottleResult::Throttled { start, end: now }
         } else {
