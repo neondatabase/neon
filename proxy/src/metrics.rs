@@ -556,6 +556,8 @@ pub enum RedisEventsCount {
     CancelSession,
     PasswordUpdate,
     AllowedIpsUpdate,
+    AllowedVpcEndpointIdsUpdate,
+    BlockPublicOrVpcAccessUpdate,
 }
 
 pub struct ThreadPoolWorkers(usize);

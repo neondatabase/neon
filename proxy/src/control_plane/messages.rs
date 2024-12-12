@@ -238,6 +238,8 @@ pub(crate) struct GetEndpointAccessControl {
     pub(crate) allowed_ips: Option<Vec<IpPattern>>,
     pub(crate) project_id: Option<ProjectIdInt>,
     pub(crate) allowed_vpc_endpoint_ids: Option<Vec<EndpointIdInt>>,
+    pub(crate) block_public_connections: Option<bool>,
+    pub(crate) block_vpc_connections: Option<bool>,
 }
 
 // Manually implement debug to omit sensitive info.
