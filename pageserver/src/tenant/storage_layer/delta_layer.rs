@@ -59,13 +59,13 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::value::Value;
-use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::str::FromStr;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tokio_epoll_uring::IoBuf;
@@ -117,8 +117,6 @@ impl From<&DeltaLayer> for Summary {
 impl Summary {
     /// Serializes the summary header into an aligned buffer of lenth `PAGE_SZ`.
     pub fn ser_into_page(&self) -> Result<IoBuffer, SerializeError> {
-        let mut buf = bytes::BytesMut::with_capacity(PAGE_SZ);
-        Self::ser_into(&self, &mut buf);
         let mut buf = IoBufferMut::with_capacity(PAGE_SZ);
         Self::ser_into(&self, &mut buf)?;
         // Pad zeroes to the buffer so the length is a multiple of the alignment.
@@ -301,19 +299,21 @@ impl DeltaLayer {
         key_start: Key,
         lsn_range: &Range<Lsn>,
     ) -> Utf8PathBuf {
-        let rand_string: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(8)
-            .map(char::from)
-            .collect();
+        // Strongly monotonically increasing suffix number.
+        //
+        // Use this over random string to avoid corruption bugs.
+        // It's unlikely the number will verflow since it is reset after pageserver restarts.
+        static NEXT_TEMP_DISAMBIGUATOR: AtomicU64 = AtomicU64::new(1);
+        let filename_disambiguator =
+            NEXT_TEMP_DISAMBIGUATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         conf.timeline_path(tenant_shard_id, timeline_id)
             .join(format!(
-                "{}-XXX__{:016X}-{:016X}.{}.{}",
+                "{}-XXX__{:016X}-{:016X}.{:X}.{}",
                 key_start,
                 u64::from(lsn_range.start),
                 u64::from(lsn_range.end),
-                rand_string,
+                filename_disambiguator,
                 TEMP_FILE_SUFFIX,
             ))
     }
@@ -550,6 +550,9 @@ impl DeltaLayerWriterInner {
         // Write out the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
         let mut offset = index_start_blk as u64 * PAGE_SZ as u64;
+
+        // TODO(yuchen): https://github.com/neondatabase/neon/issues/10092
+        // Should we just replace BlockBuf::blocks with one big buffer
         for buf in block_buf.blocks {
             let (_buf, res) = file.write_all_at(buf.slice_len(), offset, ctx).await;
             res?;
