@@ -168,8 +168,12 @@ jobs:
     needs: [ check-permissions, build-build-tools-image ]
     strategy:
       matrix:
-        arch: [ x64, arm64 ]
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+        runner:
+          - small
+          - large
+          - small-arm64
+          - large-arm64
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.runner)) }}
 
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -214,7 +218,24 @@ jobs:
           fi
           echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
       - name: Run cargo clippy (debug)
-        run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
+        run: |
+          cargo install hyperfine
+          cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            cp -r target partition-${i}
+          done
+          mv partition-* target
+          /github/home/.cargo/bin/hyperfine --warmup 1 \
+            "parallel --jobs 1 \"cargo hack --feature-powerset --partition {}/1 clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS\" ::: 1" \
+            "parallel --jobs 2 \"cargo hack --feature-powerset --partition {}/2 clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS\" ::: 1 2" \
+            "parallel --jobs 3 \"cargo hack --feature-powerset --partition {}/3 clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS\" ::: 1 2 3" \
+            "parallel --jobs 4 \"cargo hack --feature-powerset --partition {}/4 clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS\" ::: 1 2 3 4" \
+            "parallel --jobs 5 \"cargo hack --feature-powerset --partition {}/5 clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS\" ::: 1 2 3 4 5" \
+            "parallel --jobs 6 \"cargo hack --feature-powerset --partition {}/6 clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS\" ::: 1 2 3 4 5 6" \
+            "parallel --jobs 7 \"cargo hack --feature-powerset --partition {}/7 clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS\" ::: 1 2 3 4 5 6 7" \
+            "parallel --jobs 8 \"cargo hack --feature-powerset --partition {}/8 clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS\" ::: 1 2 3 4 5 6 7 8" \
+            "parallel --jobs 9 \"cargo hack --feature-powerset --partition {}/9 clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS\" ::: 1 2 3 4 5 6 7 8 9" \
+            "parallel --jobs 10 \"cargo hack --feature-powerset --partition {}/10 clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS\" ::: 1 2 3 4 5 6 7 8 9 10"
 
       - name: Check documentation generation
         run: cargo doc --workspace --no-deps --document-private-items
