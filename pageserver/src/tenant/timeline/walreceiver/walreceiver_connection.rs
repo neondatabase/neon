@@ -369,6 +369,13 @@ pub(super) async fn handle_walreceiver_connection(
                 // advances it to its end LSN. 0 is just an initialization placeholder.
                 let mut modification = timeline.begin_modification(Lsn(0));
 
+                if !records.is_empty() {
+                    timeline
+                        .metrics
+                        .wal_records_received
+                        .inc_by(records.len() as u64);
+                }
+
                 for interpreted in records {
                     if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes)
                         && uncommitted_records > 0
@@ -510,6 +517,7 @@ pub(super) async fn handle_walreceiver_connection(
                         }
 
                         // Ingest the records without immediately committing them.
+                        timeline.metrics.wal_records_received.inc();
                         let ingested = walingest
                             .ingest_record(interpreted, &mut modification, &ctx)
                             .await

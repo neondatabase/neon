@@ -44,8 +44,8 @@ use crate::wal_backup_partial::PartialRemoteSegment;
 
 use crate::metrics::{FullTimelineInfo, WalStorageMetrics, MISC_OPERATION_SECONDS};
 use crate::wal_storage::{Storage as wal_storage_iface, WalReader};
+use crate::SafeKeeperConf;
 use crate::{debug_dump, timeline_manager, wal_storage};
-use crate::{GlobalTimelines, SafeKeeperConf};
 
 /// Things safekeeper should know about timeline state on peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -467,6 +467,7 @@ pub struct Timeline {
     walreceivers: Arc<WalReceivers>,
     timeline_dir: Utf8PathBuf,
     manager_ctl: ManagerCtl,
+    conf: Arc<SafeKeeperConf>,
 
     /// Hold this gate from code that depends on the Timeline's non-shut-down state.  While holding
     /// this gate, you must respect [`Timeline::cancel`]
@@ -489,6 +490,7 @@ impl Timeline {
         timeline_dir: &Utf8Path,
         remote_path: &RemotePath,
         shared_state: SharedState,
+        conf: Arc<SafeKeeperConf>,
     ) -> Arc<Self> {
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
             watch::channel(shared_state.sk.state().commit_lsn);
@@ -516,6 +518,7 @@ impl Timeline {
             gate: Default::default(),
             cancel: CancellationToken::default(),
             manager_ctl: ManagerCtl::new(),
+            conf,
             broker_active: AtomicBool::new(false),
             wal_backup_active: AtomicBool::new(false),
             last_removed_segno: AtomicU64::new(0),
@@ -524,11 +527,14 @@ impl Timeline {
     }
 
     /// Load existing timeline from disk.
-    pub fn load_timeline(conf: &SafeKeeperConf, ttid: TenantTimelineId) -> Result<Arc<Timeline>> {
+    pub fn load_timeline(
+        conf: Arc<SafeKeeperConf>,
+        ttid: TenantTimelineId,
+    ) -> Result<Arc<Timeline>> {
         let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
 
-        let shared_state = SharedState::restore(conf, &ttid)?;
-        let timeline_dir = get_timeline_dir(conf, &ttid);
+        let shared_state = SharedState::restore(conf.as_ref(), &ttid)?;
+        let timeline_dir = get_timeline_dir(conf.as_ref(), &ttid);
         let remote_path = remote_timeline_path(&ttid)?;
 
         Ok(Timeline::new(
@@ -536,6 +542,7 @@ impl Timeline {
             &timeline_dir,
             &remote_path,
             shared_state,
+            conf,
         ))
     }
 
@@ -604,8 +611,7 @@ impl Timeline {
         // it is cancelled, so WAL storage won't be opened again.
         shared_state.sk.close_wal_store();
 
-        let conf = GlobalTimelines::get_global_config();
-        if !only_local && conf.is_wal_backup_enabled() {
+        if !only_local && self.conf.is_wal_backup_enabled() {
             // Note: we concurrently delete remote storage data from multiple
             // safekeepers. That's ok, s3 replies 200 if object doesn't exist and we
             // do some retries anyway.
@@ -951,7 +957,7 @@ impl WalResidentTimeline {
 
     pub async fn get_walreader(&self, start_lsn: Lsn) -> Result<WalReader> {
         let (_, persisted_state) = self.get_state().await;
-        let enable_remote_read = GlobalTimelines::get_global_config().is_wal_backup_enabled();
+        let enable_remote_read = self.conf.is_wal_backup_enabled();
 
         WalReader::new(
             &self.ttid,
@@ -1061,7 +1067,6 @@ impl ManagerTimeline {
 
     /// Try to switch state Offloaded->Present.
     pub(crate) async fn switch_to_present(&self) -> anyhow::Result<()> {
-        let conf = GlobalTimelines::get_global_config();
         let mut shared = self.write_shared_state().await;
 
         // trying to restore WAL storage
@@ -1069,7 +1074,7 @@ impl ManagerTimeline {
             &self.ttid,
             &self.timeline_dir,
             shared.sk.state(),
-            conf.no_sync,
+            self.conf.no_sync,
         )?;
 
         // updating control file
@@ -1096,7 +1101,7 @@ impl ManagerTimeline {
         // now we can switch shared.sk to Present, shouldn't fail
         let prev_sk = std::mem::replace(&mut shared.sk, StateSK::Empty);
         let cfile_state = prev_sk.take_state();
-        shared.sk = StateSK::Loaded(SafeKeeper::new(cfile_state, wal_store, conf.my_id)?);
+        shared.sk = StateSK::Loaded(SafeKeeper::new(cfile_state, wal_store, self.conf.my_id)?);
 
         Ok(())
     }

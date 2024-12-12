@@ -268,7 +268,7 @@ impl BucketConfig {
                 config.bucket_name, config.bucket_region
             ),
             RemoteStorageKind::AzureContainer(config) => format!(
-                "bucket {}, storage account {:?}, region {}",
+                "container {}, storage account {:?}, region {}",
                 config.container_name, config.storage_account, config.container_region
             ),
         }

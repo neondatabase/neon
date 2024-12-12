@@ -52,8 +52,8 @@ use pageserver_api::{
         TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
     },
     models::{
-        SecondaryProgress, TenantConfigRequest, TimelineArchivalConfigRequest,
-        TopTenantShardsRequest,
+        SecondaryProgress, TenantConfigPatchRequest, TenantConfigRequest,
+        TimelineArchivalConfigRequest, TopTenantShardsRequest,
     },
 };
 use reqwest::StatusCode;
@@ -100,6 +100,8 @@ use crate::{
 
 use context_iterator::TenantShardContextIterator;
 
+const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
+
 // For operations that should be quick, like attaching a new tenant
 const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -139,6 +141,7 @@ enum TenantOperations {
     Create,
     LocationConfig,
     ConfigSet,
+    ConfigPatch,
     TimeTravelRemoteStorage,
     Delete,
     UpdatePolicy,
@@ -513,6 +516,9 @@ struct ShardUpdate {
 
     /// If this is None, generation is not updated.
     generation: Option<Generation>,
+
+    /// If this is None, scheduling policy is not updated.
+    scheduling_policy: Option<ShardSchedulingPolicy>,
 }
 
 enum StopReconciliationsReason {
@@ -789,7 +795,7 @@ impl Service {
             node_list_futs.push({
                 async move {
                     tracing::info!("Scanning shards on node {node}...");
-                    let timeout = Duration::from_secs(1);
+                    let timeout = Duration::from_secs(5);
                     let response = node
                         .with_client_retries(
                             |client| async move { client.list_location_config().await },
@@ -2376,6 +2382,23 @@ impl Service {
             }
         };
 
+        // Ordinarily we do not update scheduling policy, but when making major changes
+        // like detaching or demoting to secondary-only, we need to force the scheduling
+        // mode to Active, or the caller's expected outcome (detach it) will not happen.
+        let scheduling_policy = match req.config.mode {
+            LocationConfigMode::Detached | LocationConfigMode::Secondary => {
+                // Special case: when making major changes like detaching or demoting to secondary-only,
+                // we need to force the scheduling mode to Active, or nothing will happen.
+                Some(ShardSchedulingPolicy::Active)
+            }
+            LocationConfigMode::AttachedMulti
+            | LocationConfigMode::AttachedSingle
+            | LocationConfigMode::AttachedStale => {
+                // While attached, continue to respect whatever the existing scheduling mode is.
+                None
+            }
+        };
+
         let mut create = true;
         for (shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
             // Saw an existing shard: this is not a creation
@@ -2401,6 +2424,7 @@ impl Service {
                 placement_policy: placement_policy.clone(),
                 tenant_config: req.config.tenant_conf.clone(),
                 generation: set_generation,
+                scheduling_policy,
             });
         }
 
@@ -2497,6 +2521,7 @@ impl Service {
                     placement_policy,
                     tenant_config,
                     generation,
+                    scheduling_policy,
                 } in &updates
                 {
                     self.persistence
@@ -2505,7 +2530,7 @@ impl Service {
                             Some(placement_policy.clone()),
                             Some(tenant_config.clone()),
                             *generation,
-                            None,
+                            *scheduling_policy,
                         )
                         .await?;
                 }
@@ -2521,6 +2546,7 @@ impl Service {
                         placement_policy,
                         tenant_config,
                         generation: update_generation,
+                        scheduling_policy,
                     } in updates
                     {
                         let Some(shard) = tenants.get_mut(&tenant_shard_id) else {
@@ -2537,6 +2563,10 @@ impl Service {
                         shard.config = tenant_config;
                         if let Some(generation) = update_generation {
                             shard.generation = Some(generation);
+                        }
+
+                        if let Some(scheduling_policy) = scheduling_policy {
+                            shard.set_scheduling_policy(scheduling_policy);
                         }
 
                         shard.schedule(scheduler, &mut schedule_context)?;
@@ -2575,6 +2605,55 @@ impl Service {
         Ok(result)
     }
 
+    pub(crate) async fn tenant_config_patch(
+        &self,
+        req: TenantConfigPatchRequest,
+    ) -> Result<(), ApiError> {
+        let _tenant_lock = trace_exclusive_lock(
+            &self.tenant_op_locks,
+            req.tenant_id,
+            TenantOperations::ConfigPatch,
+        )
+        .await;
+
+        let tenant_id = req.tenant_id;
+        let patch = req.config;
+
+        let base = {
+            let locked = self.inner.read().unwrap();
+            let shards = locked
+                .tenants
+                .range(TenantShardId::tenant_range(req.tenant_id));
+
+            let mut configs = shards.map(|(_sid, shard)| &shard.config).peekable();
+
+            let first = match configs.peek() {
+                Some(first) => (*first).clone(),
+                None => {
+                    return Err(ApiError::NotFound(
+                        anyhow::anyhow!("Tenant {} not found", req.tenant_id).into(),
+                    ));
+                }
+            };
+
+            if !configs.all_equal() {
+                tracing::error!("Tenant configs for {} are mismatched. ", req.tenant_id);
+                // This can't happen because we atomically update the database records
+                // of all shards to the new value in [`Self::set_tenant_config_and_reconcile`].
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "Tenant configs for {} are mismatched",
+                    req.tenant_id
+                )));
+            }
+
+            first
+        };
+
+        let updated_config = base.apply_patch(patch);
+        self.set_tenant_config_and_reconcile(tenant_id, updated_config)
+            .await
+    }
+
     pub(crate) async fn tenant_config_set(&self, req: TenantConfigRequest) -> Result<(), ApiError> {
         // We require an exclusive lock, because we are updating persistent and in-memory state
         let _tenant_lock = trace_exclusive_lock(
@@ -2584,12 +2663,32 @@ impl Service {
         )
         .await;
 
-        let tenant_id = req.tenant_id;
-        let config = req.config;
+        let tenant_exists = {
+            let locked = self.inner.read().unwrap();
+            let mut r = locked
+                .tenants
+                .range(TenantShardId::tenant_range(req.tenant_id));
+            r.next().is_some()
+        };
 
+        if !tenant_exists {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Tenant {} not found", req.tenant_id).into(),
+            ));
+        }
+
+        self.set_tenant_config_and_reconcile(req.tenant_id, req.config)
+            .await
+    }
+
+    async fn set_tenant_config_and_reconcile(
+        &self,
+        tenant_id: TenantId,
+        config: TenantConfig,
+    ) -> Result<(), ApiError> {
         self.persistence
             .update_tenant_shard(
-                TenantFilter::Tenant(req.tenant_id),
+                TenantFilter::Tenant(tenant_id),
                 None,
                 Some(config.clone()),
                 None,
@@ -2992,8 +3091,16 @@ impl Service {
 
         let TenantPolicyRequest {
             placement,
-            scheduling,
+            mut scheduling,
         } = req;
+
+        if let Some(PlacementPolicy::Detached | PlacementPolicy::Secondary) = placement {
+            // When someone configures a tenant to detach, we force the scheduling policy to enable
+            // this to take effect.
+            if scheduling.is_none() {
+                scheduling = Some(ShardSchedulingPolicy::Active);
+            }
+        }
 
         self.persistence
             .update_tenant_shard(
@@ -6693,7 +6800,7 @@ impl Service {
             }
 
             waiters = self
-                .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
+                .await_waiters_remainder(waiters, WAITER_FILL_DRAIN_POLL_TIMEOUT)
                 .await;
 
             failpoint_support::sleep_millis_async!("sleepy-drain-loop", &cancel);
@@ -6946,7 +7053,7 @@ impl Service {
             }
 
             waiters = self
-                .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
+                .await_waiters_remainder(waiters, WAITER_FILL_DRAIN_POLL_TIMEOUT)
                 .await;
         }
 
@@ -7076,6 +7183,12 @@ impl Service {
         }
 
         global_observed
+    }
+
+    pub(crate) async fn safekeepers_list(
+        &self,
+    ) -> Result<Vec<crate::persistence::SafekeeperPersistence>, DatabaseError> {
+        self.persistence.list_safekeepers().await
     }
 
     pub(crate) async fn get_safekeeper(

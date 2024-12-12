@@ -255,15 +255,17 @@ jobs:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
-      # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
-      # run without LFC on v17 release only
+      # Run tests on all Postgres versions in release builds and only on the latest version in debug builds.
+      # Run without LFC on v17 release and debug builds only. For all the other cases LFC is enabled. Failure on the
+      # debug build with LFC enabled doesn't block merging.
       test-cfg: |
-        ${{ matrix.build-type == 'release' && '[{"pg_version":"v14", "lfc_state": "without-lfc"},
-                                                {"pg_version":"v15", "lfc_state": "without-lfc"},
-                                                {"pg_version":"v16", "lfc_state": "without-lfc"},
-                                                {"pg_version":"v17", "lfc_state": "without-lfc"},
-                                                {"pg_version":"v17", "lfc_state": "with-lfc"}]'
-                                           || '[{"pg_version":"v17", "lfc_state": "without-lfc"}]' }}
+        ${{ matrix.build-type == 'release' && '[{"pg_version":"v14", "lfc_state": "with-lfc"},
+                                                {"pg_version":"v15", "lfc_state": "with-lfc"},
+                                                {"pg_version":"v16", "lfc_state": "with-lfc"},
+                                                {"pg_version":"v17", "lfc_state": "with-lfc"},
+                                                {"pg_version":"v17", "lfc_state": "without-lfc"}]'
+                                           || '[{"pg_version":"v17", "lfc_state": "without-lfc"},
+                                                {"pg_version":"v17", "lfc_state": "with-lfc" }]' }}
     secrets: inherit
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
@@ -1066,6 +1068,70 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Create git tag and GitHub release
+        if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
+        uses: actions/github-script@v7
+        with:
+          retries: 5
+          script: |
+            const tag = "${{ needs.tag.outputs.build-tag }}";
+
+            try {
+              const existingRef = await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `tags/${tag}`,
+              });
+
+              if (existingRef.data.object.sha !== context.sha) {
+                throw new Error(`Tag ${tag} already exists but points to a different commit (expected: ${context.sha}, actual: ${existingRef.data.object.sha}).`);
+              }
+
+              console.log(`Tag ${tag} already exists and points to ${context.sha} as expected.`);
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+
+              console.log(`Tag ${tag} does not exist. Creating it...`);
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `refs/tags/${tag}`,
+                sha: context.sha,
+              });
+              console.log(`Tag ${tag} created successfully.`);
+            }
+
+            # TODO: check how GitHub releases looks for proxy/compute releases and enable them if they're ok
+            if (context.ref !== 'refs/heads/release') {
+              console.log(`GitHub release skipped for ${context.ref}.`);
+              return;
+            }
+
+            try {
+              const existingRelease = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tag,
+              });
+
+              console.log(`Release for tag ${tag} already exists (ID: ${existingRelease.data.id}).`);
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+
+              console.log(`Release for tag ${tag} does not exist. Creating it...`);
+              await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tag,
+                generate_release_notes: true,
+              });
+              console.log(`Release for tag ${tag} created successfully.`);
+            }
+
       - name: Trigger deploy workflow
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
@@ -1114,35 +1180,6 @@ jobs:
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main', 'release', 'release-proxy' or 'release-compute'"
             exit 1
           fi
-
-      - name: Create git tag
-        if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
-        uses: actions/github-script@v7
-        with:
-          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
-          retries: 5
-          script: |
-            await github.rest.git.createRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: "refs/tags/${{ needs.tag.outputs.build-tag }}",
-              sha: context.sha,
-            })
-
-      # TODO: check how GitHub releases looks for proxy releases and enable it if it's ok
-      - name: Create GitHub release
-        if: github.ref_name == 'release'
-        uses: actions/github-script@v7
-        with:
-          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
-          retries: 5
-          script: |
-            await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: "${{ needs.tag.outputs.build-tag }}",
-              generate_release_notes: true,
-            })
 
   # The job runs on `release` branch and copies compatibility data and Neon artifact from the last *release PR* to the latest directory
   promote-compatibility-data:

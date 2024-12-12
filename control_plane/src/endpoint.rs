@@ -53,6 +53,7 @@ use compute_api::spec::Role;
 use nix::sys::signal::kill;
 use nix::sys::signal::Signal;
 use pageserver_api::shard::ShardStripeSize;
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -618,6 +619,7 @@ impl Endpoint {
             pgbouncer_settings: None,
             shard_stripe_size: Some(shard_stripe_size),
             local_proxy_config: None,
+            reconfigure_concurrency: 1,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
@@ -808,7 +810,7 @@ impl Endpoint {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(120))
             .build()
             .unwrap();
         let response = client
@@ -817,6 +819,7 @@ impl Endpoint {
                 self.http_address.ip(),
                 self.http_address.port()
             ))
+            .header(CONTENT_TYPE.as_str(), "application/json")
             .body(format!(
                 "{{\"spec\":{}}}",
                 serde_json::to_string_pretty(&spec)?

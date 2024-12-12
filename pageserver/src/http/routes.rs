@@ -28,6 +28,7 @@ use pageserver_api::models::LsnLease;
 use pageserver_api::models::LsnLeaseRequest;
 use pageserver_api::models::OffloadedTimelineInfo;
 use pageserver_api::models::ShardParameters;
+use pageserver_api::models::TenantConfigPatchRequest;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantLocationConfigRequest;
 use pageserver_api::models::TenantLocationConfigResponse;
@@ -87,7 +88,7 @@ use crate::tenant::timeline::offload::offload_timeline;
 use crate::tenant::timeline::offload::OffloadError;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::CompactOptions;
-use crate::tenant::timeline::CompactRange;
+use crate::tenant::timeline::CompactRequest;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
@@ -1695,7 +1696,47 @@ async fn update_tenant_config_handler(
     crate::tenant::Tenant::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
         .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
-    tenant.set_new_tenant_config(new_tenant_conf);
+
+    let _ = tenant
+        .update_tenant_config(|_crnt| Ok(new_tenant_conf.clone()))
+        .expect("Closure returns Ok()");
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn patch_tenant_config_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let request_data: TenantConfigPatchRequest = json_request(&mut request).await?;
+    let tenant_id = request_data.tenant_id;
+    check_permission(&request, Some(tenant_id))?;
+
+    let state = get_state(&request);
+
+    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+    let updated = tenant
+        .update_tenant_config(|crnt| crnt.apply_patch(request_data.config.clone()))
+        .map_err(ApiError::BadRequest)?;
+
+    // This is a legacy API that only operates on attached tenants: the preferred
+    // API to use is the location_config/ endpoint, which lets the caller provide
+    // the full LocationConf.
+    let location_conf = LocationConf::attached_single(
+        updated,
+        tenant.get_generation(),
+        &ShardParameters::default(),
+    );
+
+    crate::tenant::Tenant::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
+        .await
+        .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
 
     json_response(StatusCode::OK, ())
 }
@@ -1978,6 +2019,26 @@ async fn timeline_gc_handler(
     json_response(StatusCode::OK, gc_result)
 }
 
+// Cancel scheduled compaction tasks
+async fn timeline_cancel_compact_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
+    async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+        tenant.cancel_scheduled_compaction(timeline_id);
+        json_response(StatusCode::OK, ())
+    }
+    .instrument(info_span!("timeline_cancel_compact", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .await
+}
+
 // Run compaction immediately on given timeline.
 async fn timeline_compact_handler(
     mut request: Request<Body>,
@@ -1987,7 +2048,7 @@ async fn timeline_compact_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    let compact_range = json_request_maybe::<Option<CompactRange>>(&mut request).await?;
+    let compact_request = json_request_maybe::<Option<CompactRequest>>(&mut request).await?;
 
     let state = get_state(&request);
 
@@ -2012,22 +2073,50 @@ async fn timeline_compact_handler(
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
+    let wait_until_scheduled_compaction_done =
+        parse_query_param::<_, bool>(&request, "wait_until_scheduled_compaction_done")?
+            .unwrap_or(false);
+
+    let sub_compaction = compact_request
+        .as_ref()
+        .map(|r| r.sub_compaction)
+        .unwrap_or(false);
     let options = CompactOptions {
-        compact_range,
+        compact_range: compact_request
+            .as_ref()
+            .and_then(|r| r.compact_range.clone()),
+        compact_below_lsn: compact_request.as_ref().and_then(|r| r.compact_below_lsn),
         flags,
+        sub_compaction,
     };
+
+    let scheduled = compact_request
+        .as_ref()
+        .map(|r| r.scheduled)
+        .unwrap_or(false);
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
-        timeline
-            .compact_with_options(&cancel, options, &ctx)
-            .await
-            .map_err(|e| ApiError::InternalServerError(e.into()))?;
-        if wait_until_uploaded {
-            timeline.remote_client.wait_completion().await
-            // XXX map to correct ApiError for the cases where it's due to shutdown
-            .context("wait completion").map_err(ApiError::InternalServerError)?;
+        if scheduled {
+            let tenant = state
+                .tenant_manager
+                .get_attached_tenant_shard(tenant_shard_id)?;
+            let rx = tenant.schedule_compaction(timeline_id, options).await.map_err(ApiError::InternalServerError)?;
+            if wait_until_scheduled_compaction_done {
+                // It is possible that this will take a long time, dropping the HTTP request will not cancel the compaction.
+                rx.await.ok();
+            }
+        } else {
+            timeline
+                .compact_with_options(&cancel, options, &ctx)
+                .await
+                .map_err(|e| ApiError::InternalServerError(e.into()))?;
+            if wait_until_uploaded {
+                timeline.remote_client.wait_completion().await
+                // XXX map to correct ApiError for the cases where it's due to shutdown
+                .context("wait completion").map_err(ApiError::InternalServerError)?;
+            }
         }
         json_response(StatusCode::OK, ())
     }
@@ -2108,16 +2197,20 @@ async fn timeline_checkpoint_handler(
     // By default, checkpoints come with a compaction, but this may be optionally disabled by tests that just want to flush + upload.
     let compact = parse_query_param::<_, bool>(&request, "compact")?.unwrap_or(true);
 
+    let wait_until_flushed: bool =
+        parse_query_param(&request, "wait_until_flushed")?.unwrap_or(true);
+
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
-        timeline
-            .freeze_and_flush()
-            .await
-            .map_err(|e| {
+        if wait_until_flushed {
+            timeline.freeze_and_flush().await
+        } else {
+            timeline.freeze().await.and(Ok(()))
+        }.map_err(|e| {
                 match e {
                     tenant::timeline::FlushLayerError::Cancelled => ApiError::ShuttingDown,
                     other => ApiError::InternalServerError(other.into()),
@@ -3236,6 +3329,9 @@ pub fn make_router(
         .get("/v1/tenant/:tenant_shard_id/synthetic_size", |r| {
             api_handler(r, tenant_size_handler)
         })
+        .patch("/v1/tenant/config", |r| {
+            api_handler(r, patch_tenant_config_handler)
+        })
         .put("/v1/tenant/config", |r| {
             api_handler(r, update_tenant_config_handler)
         })
@@ -3300,6 +3396,10 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",
             |r| api_handler(r, timeline_compact_handler),
+        )
+        .delete(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",
+            |r| api_handler(r, timeline_cancel_compact_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/offload",
