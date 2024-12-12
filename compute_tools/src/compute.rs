@@ -834,7 +834,7 @@ impl ComputeNode {
         conf
     }
 
-    async fn get_maintenance_client(
+    pub async fn get_maintenance_client(
         conf: &tokio_postgres::Config,
     ) -> Result<tokio_postgres::Client> {
         let mut conf = conf.clone();
@@ -954,6 +954,7 @@ impl ComputeNode {
                 info!("Applying phase {:?}", &phase);
                 apply_operations(
                     spec.clone(),
+                    conf.clone(),
                     ctx.clone(),
                     jwks_roles.clone(),
                     phase,
@@ -1017,6 +1018,7 @@ impl ComputeNode {
                 debug!("Applying phase {:?}", &phase);
                 apply_operations(
                     spec.clone(),
+                    conf.clone(),
                     ctx.clone(),
                     jwks_roles.clone(),
                     phase,
@@ -1055,6 +1057,7 @@ impl ComputeNode {
         ] {
             apply_operations(
                 spec.clone(),
+                conf.clone(),
                 ctx.clone(),
                 jwks_roles.clone(),
                 RunInEachDatabase {

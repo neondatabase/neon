@@ -5,7 +5,7 @@ use std::iter::empty;
 use std::iter::once;
 use std::sync::Arc;
 
-use crate::compute::construct_superuser_query;
+use crate::compute::{construct_superuser_query, ComputeNode};
 use crate::pg_helpers::{escape_literal, DatabaseExt, Escaping, GenericOptionsSearch, RoleExt};
 use anyhow::{bail, Result};
 use compute_api::spec::{ComputeFeature, ComputeSpec, Database, PgIdent, Role};
@@ -67,6 +67,8 @@ pub enum ApplySpecPhase {
 pub struct Operation {
     pub query: String,
     pub comment: Option<String>,
+    // if dbname is present, perform query in it
+    pub dbname: Option<String>,
 }
 
 pub struct MutableApplyContext {
@@ -90,6 +92,7 @@ pub struct MutableApplyContext {
 /// - The caller is responsible for limiting and/or applying concurrency.
 pub async fn apply_operations<'a, Fut, F>(
     spec: Arc<ComputeSpec>,
+    conf: Arc<tokio_postgres::Config>,
     ctx: Arc<RwLock<MutableApplyContext>>,
     jwks_roles: Arc<HashSet<String>>,
     apply_spec_phase: ApplySpecPhase,
@@ -120,36 +123,94 @@ where
 
         debug!("Applying phase {:?}", &apply_spec_phase);
 
-        let active_queries = ops
-            .map(|op| {
-                let Operation { comment, query } = op;
-                let inspan = match comment {
-                    None => span.clone(),
-                    Some(comment) => info_span!("phase {}: {}", comment),
-                };
+        // TODO: Is there a way to write this with less nesting?
+        match apply_spec_phase {
+            ApplySpecPhase::RenameAndDeleteDatabases => {
+                // We need to run the operations sequentially, because we need to
+                // drop the database subscriptions before dropping the database.
+                for op in ops {
+                    let Operation {
+                        comment,
+                        query,
+                        dbname,
+                    } = op;
+                    let inspan = match comment {
+                        None => span.clone(),
+                        Some(comment) => info_span!("phase {}: {}", comment),
+                    };
 
-                async {
-                    let query = query;
-                    let res = client.simple_query(&query).await;
-                    debug!(
-                        "{} {}",
-                        if res.is_ok() {
-                            "successfully executed"
-                        } else {
-                            "failed to execute"
-                        },
-                        query
-                    );
-                    res
+                    async {
+                        match dbname {
+                            Some(dbname) => {
+                                debug!("Connecting to DB {}", dbname);
+
+                                let mut aux_conf = (*conf).clone();
+                                aux_conf.dbname(&dbname);
+
+                                // FIXME: handle error instead of unwrap
+                                // I failed to understand the logic of error types here
+                                // and convert anyhow::Error to tokio_postgres::Error
+                                let new_client = ComputeNode::get_maintenance_client(&aux_conf)
+                                    .await
+                                    .unwrap();
+                                let res = new_client.simple_query(&query).await;
+                                match res {
+                                    Ok(_) => debug!("successfully executed {}", query),
+                                    Err(ref e) => {
+                                        debug!("failed to execute {}: {}", query, e);
+                                    }
+                                };
+                                res
+                            }
+                            None => {
+                                let res = client.simple_query(&query).await;
+                                match res {
+                                    Ok(_) => debug!("successfully executed {}", query),
+                                    Err(ref e) => {
+                                        debug!("failed to execute {}: {}", query, e);
+                                    }
+                                };
+                                res
+                            }
+                        }
+                    }
+                    .instrument(inspan)
+                    .await?;
                 }
-                .instrument(inspan)
-            })
-            .collect::<Vec<_>>();
+            }
+            _ => {
+                let active_queries = ops
+                    .map(|op| {
+                        let Operation { comment, query, .. } = op;
+                        let inspan = match comment {
+                            None => span.clone(),
+                            Some(comment) => info_span!("phase {}: {}", comment),
+                        };
 
-        drop(ctx);
+                        async {
+                            let query = query;
+                            let res = client.simple_query(&query).await;
+                            debug!(
+                                "{} {}",
+                                if res.is_ok() {
+                                    "successfully executed"
+                                } else {
+                                    "failed to execute"
+                                },
+                                query
+                            );
+                            res
+                        }
+                        .instrument(inspan)
+                    })
+                    .collect::<Vec<_>>();
 
-        for it in join_all(active_queries).await {
-            drop(it?);
+                drop(ctx);
+
+                for it in join_all(active_queries).await {
+                    drop(it?);
+                }
+            }
         }
 
         debug!("Completed phase {:?}", &apply_spec_phase);
@@ -179,6 +240,7 @@ async fn get_operations<'a>(
             Ok(Box::new(once(Operation {
                 query,
                 comment: None,
+                dbname: None,
             })))
         }
         ApplySpecPhase::DropInvalidDatabases => {
@@ -209,6 +271,7 @@ async fn get_operations<'a>(
                 .map(|db| Operation {
                     query: format!("DROP DATABASE IF EXISTS {}", db.name.pg_quote()),
                     comment: Some(format!("Dropping invalid database {}", db.name)),
+                    dbname: None,
                 });
 
             Ok(Box::new(operations))
@@ -241,6 +304,7 @@ async fn get_operations<'a>(
                                 new_name.pg_quote()
                             ),
                             comment: Some(format!("renaming role '{}' to '{}'", op.name, new_name)),
+                            dbname: None,
                         })
                     }
                 });
@@ -272,6 +336,7 @@ async fn get_operations<'a>(
                                         role.to_pg_options(),
                                     ),
                                     comment: None,
+                                    dbname: None,
                                 })
                             } else {
                                 None
@@ -294,6 +359,7 @@ async fn get_operations<'a>(
                             Some(Operation {
                                 query,
                                 comment: Some(format!("creating role {}", role.name)),
+                                dbname: None,
                             })
                         }
                     }
@@ -324,15 +390,19 @@ async fn get_operations<'a>(
                                 datname = &op.name.pg_quote()
                             );
 
+                            let drop_subscription_query: String = format!(
+                                include_str!("sql/drop_subscription_for_drop_dbs.sql"),
+                                datname_str = escape_literal(&op.name),
+                            );
+
                             // Use FORCE to drop database even if there are active connections.
                             // We run this from `cloud_admin`, so it should have enough privileges.
+                            //
                             // NB: there could be other db states, which prevent us from dropping
                             // the database. For example, if db is used by any active subscription
                             // or replication slot.
-                            // TODO: deal with it once we allow logical replication. Proper fix should
-                            // involve returning an error code to the control plane, so it could
-                            // figure out that this is a non-retryable error, return it to the user
-                            // and fail operation permanently.
+                            // Such cases are handled with the extra operations.
+                            // We do all the cleanup before actually dropping the database.
                             let drop_db_query: String = format!(
                                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                                 &op.name.pg_quote()
@@ -347,10 +417,20 @@ async fn get_operations<'a>(
                                         "optionally clearing template flags for DB {}",
                                         op.name,
                                     )),
+                                    dbname: None,
+                                },
+                                Operation {
+                                    query: drop_subscription_query,
+                                    comment: Some(format!(
+                                        "optionally dropping subscriptions for DB {}",
+                                        op.name,
+                                    )),
+                                    dbname: Some(op.name.clone()),
                                 },
                                 Operation {
                                     query: drop_db_query,
                                     comment: Some(format!("deleting database {}", op.name,)),
+                                    dbname: None,
                                 },
                             ])
                         }
@@ -371,6 +451,7 @@ async fn get_operations<'a>(
                                         "renaming database '{}' to '{}'",
                                         op.name, new_name
                                     )),
+                                    dbname: None,
                                 }])
                             } else {
                                 None
@@ -412,6 +493,7 @@ async fn get_operations<'a>(
                                     "changing database owner of database {} to {}",
                                     db.name, db.owner
                                 )),
+                                dbname: None,
                             }])
                         } else {
                             None
@@ -427,6 +509,7 @@ async fn get_operations<'a>(
                                     db.to_pg_options(),
                                 ),
                                 comment: None,
+                                dbname: None,
                             },
                             Operation {
                                 query: format!(
@@ -434,6 +517,7 @@ async fn get_operations<'a>(
                                     db.name.pg_quote()
                                 ),
                                 comment: None,
+                                dbname: None,
                             },
                         ])
                     }
@@ -473,11 +557,13 @@ async fn get_operations<'a>(
                                             quoted, new_owner,
                                         ),
                                         comment: None,
+                                        dbname: None,
                                     },
                                     // This now will only drop privileges of the role
                                     Operation {
                                         query: format!("DROP OWNED BY {}", quoted),
                                         comment: None,
+                                        dbname: None,
                                     },
                                 ])
                             })
@@ -512,10 +598,12 @@ async fn get_operations<'a>(
                                 db_owner = db.owner.pg_quote()
                             ),
                             comment: None,
+                            dbname: None,
                         },
                         Operation {
                             query: String::from(include_str!("sql/default_grants.sql")),
                             comment: None,
+                            dbname: None,
                         },
                     ]
                     .into_iter();
@@ -553,18 +641,21 @@ async fn get_operations<'a>(
                         Operation {
                             query: String::from("CREATE EXTENSION IF NOT EXISTS anon CASCADE"),
                             comment: Some(String::from("creating anon extension")),
+                            dbname: None,
                         },
                         // Initialize anon extension
                         // This also requires superuser privileges, so users cannot do it themselves.
                         Operation {
                             query: String::from("SELECT anon.init()"),
                             comment: Some(String::from("initializing anon extension data")),
+                            dbname: None,
                         },
                         Operation {
                             query: format!("GRANT ALL ON SCHEMA anon TO {}", db_owner),
                             comment: Some(String::from(
                                 "granting anon extension schema permissions",
                             )),
+                            dbname: None,
                         },
                         Operation {
                             query: format!(
@@ -574,6 +665,7 @@ async fn get_operations<'a>(
                             comment: Some(String::from(
                                 "granting anon extension schema functions permissions",
                             )),
+                            dbname: None,
                         },
                         // We need this, because some functions are defined as SECURITY DEFINER.
                         // In Postgres SECURITY DEFINER functions are executed with the privileges
@@ -589,6 +681,7 @@ async fn get_operations<'a>(
                             comment: Some(String::from(
                                 "change anon extension functions owner to database_owner",
                             )),
+                            dbname: None,
                         },
                         Operation {
                             query: format!(
@@ -598,6 +691,7 @@ async fn get_operations<'a>(
                             comment: Some(String::from(
                                 "granting anon extension tables permissions",
                             )),
+                            dbname: None,
                         },
                         Operation {
                             query: format!(
@@ -607,6 +701,7 @@ async fn get_operations<'a>(
                             comment: Some(String::from(
                                 "granting anon extension sequences permissions",
                             )),
+                            dbname: None,
                         },
                     ]
                     .into_iter();
@@ -623,6 +718,7 @@ async fn get_operations<'a>(
                     return Ok(Box::new(once(Operation {
                         query: String::from("CREATE EXTENSION IF NOT EXISTS pg_stat_statements"),
                         comment: Some(String::from("create system extensions")),
+                        dbname: None,
                     })));
                 }
             }
@@ -633,26 +729,31 @@ async fn get_operations<'a>(
                 Operation {
                     query: String::from("CREATE SCHEMA IF NOT EXISTS neon"),
                     comment: Some(String::from("init: add schema for extension")),
+                    dbname: None,
                 },
                 Operation {
                     query: String::from("CREATE EXTENSION IF NOT EXISTS neon WITH SCHEMA neon"),
                     comment: Some(String::from(
                         "init: install the extension if not already installed",
                     )),
+                    dbname: None,
                 },
                 Operation {
                     query: String::from(
                         "UPDATE pg_extension SET extrelocatable = true WHERE extname = 'neon'",
                     ),
                     comment: Some(String::from("compat/fix: make neon relocatable")),
+                    dbname: None,
                 },
                 Operation {
                     query: String::from("ALTER EXTENSION neon SET SCHEMA neon"),
                     comment: Some(String::from("compat/fix: alter neon extension schema")),
+                    dbname: None,
                 },
                 Operation {
                     query: String::from("ALTER EXTENSION neon UPDATE"),
                     comment: Some(String::from("compat/update: update neon extension version")),
+                    dbname: None,
                 },
             ]
             .into_iter();
@@ -662,6 +763,7 @@ async fn get_operations<'a>(
         ApplySpecPhase::CreateAvailabilityCheck => Ok(Box::new(once(Operation {
             query: String::from(include_str!("sql/add_availabilitycheck_tables.sql")),
             comment: None,
+            dbname: None,
         }))),
         ApplySpecPhase::DropRoles => {
             let operations = spec
@@ -672,6 +774,7 @@ async fn get_operations<'a>(
                 .map(|op| Operation {
                     query: format!("DROP ROLE IF EXISTS {}", op.name.pg_quote()),
                     comment: None,
+                    dbname: None,
                 });
 
             Ok(Box::new(operations))
