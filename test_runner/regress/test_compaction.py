@@ -146,9 +146,8 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     for i in range(1, churn_rounds + 1):
         if i % 10 == 0:
             log.info(f"Running churn round {i}/{churn_rounds} ...")
-
-        if (i - 1) % 10 == 0:
-            # Run gc-compaction every 10 rounds to ensure the test doesn't take too long time.
+        if (i - 1) % 10 == 0 or (i - 1) % 10 == 1:
+            # Run gc-compaction twice every 10 rounds to ensure the test doesn't take too long time.
             ps_http.timeline_compact(
                 tenant_id,
                 timeline_id,
