@@ -104,13 +104,6 @@ impl PageserverUtilization {
         score >= 2 * Self::UTILIZATION_FULL
     }
 
-    /// The inverse of [`Self::score`].  Higher values are more affine to scheduling more work on this node.
-    ///
-    /// This uses the same threshold as [`Self::is_overloaded`] as a definition of "full".
-    pub fn free(&self) -> RawScore {
-        self.free_space_bytes
-    }
-
     pub fn adjust_shard_count_max(&mut self, shard_count: u32) {
         if self.shard_count < shard_count {
             self.shard_count = shard_count;
