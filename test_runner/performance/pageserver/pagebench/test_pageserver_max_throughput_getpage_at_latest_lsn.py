@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import dataclasses
 import json
 from pathlib import Path
+import sys
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -234,6 +238,7 @@ def setup_tenant_template(env: NeonEnv, pg_bin: PgBin, scale: int):
     return (template_tenant, template_timeline, config)
 
 
+
 def run_pagebench_benchmark(
     env: NeonEnv, pg_bin: PgBin, record, duration_secs: int, n_clients: int
 ):
@@ -242,6 +247,59 @@ def run_pagebench_benchmark(
     """
 
     ps_http = env.pageserver.http_client()
+
+    @dataclass
+    class Metrics:
+        time: float
+        pageserver_cpu_seconds_total: float
+        pageserver_layers_visited_per_vectored_read_global_buckets: dict[int, int]
+
+        def __sub__(self, other: "Metrics") -> "Metrics":
+            return Metrics(
+                time=self.time - other.time,
+                pageserver_cpu_seconds_total=self.pageserver_cpu_seconds_total
+                - other.pageserver_cpu_seconds_total,
+                pageserver_layers_visited_per_vectored_read_global_buckets={
+                    k: v - other.pageserver_layers_visited_per_vectored_read_global_buckets[k]
+                    for k, v in self.pageserver_layers_visited_per_vectored_read_global_buckets.items()
+                },
+            )
+
+        def normalize(self, by) -> "Metrics":
+            return Metrics(
+                time=self.time / by,
+                pageserver_cpu_seconds_total=self.pageserver_cpu_seconds_total / by,
+                pageserver_layers_visited_per_vectored_read_global_buckets={
+                    k: v / by
+                    for k, v in self.pageserver_layers_visited_per_vectored_read_global_buckets.items()
+                },
+            )
+
+    def get_metrics() -> Metrics:
+        pageserver_metrics = ps_http.get_metrics()
+        def parse_le_label(s):
+            try:
+                return int(s)
+            except ValueError:
+                if s == "+Inf":
+                    return sys.maxsize
+                else:
+                    raise
+        return Metrics(
+            time=time.time(),
+            pageserver_cpu_seconds_total=pageserver_metrics.query_one(
+                "libmetrics_process_cpu_seconds_highres"
+            ).value,
+            pageserver_layers_visited_per_vectored_read_global_buckets={
+                parse_le_label(sample.labels["le"]): int(sample.value)
+                for sample in pageserver_metrics.query_all(
+                    "pageserver_layers_visited_per_vectored_read_global_bucket"
+                )
+            },
+        )
+
+    metrics_before = get_metrics()
+
     cmd = [
         str(env.neon_binpath / "pagebench"),
         "get-page-latest-lsn",
@@ -266,6 +324,15 @@ def run_pagebench_benchmark(
 
     total = results["total"]
 
+    metrics_after = get_metrics()
+
+    metrics = metrics_after - metrics_before
+
+
+    #
+    # Record the results
+    #
+
     metric = "request_count"
     record(
         metric,
@@ -283,10 +350,22 @@ def run_pagebench_benchmark(
     )
 
     metric = "latency_percentiles"
-    for k, v in total[metric].items():
+    for bucket, v in total[metric].items():
         record(
-            f"{metric}.{k}",
+            f"{metric}.{bucket}",
             metric_value=humantime_to_ms(v),
             unit="ms",
             report=MetricReport.LOWER_IS_BETTER,
         )
+
+    for metric, value in dataclasses.asdict(metrics).items():
+        if isinstance(value, dict):
+            for bucket, v in value.items():
+                record(
+                    f"counters.{metric}.{bucket}",
+                    metric_value=v,
+                    unit="",
+                    report=MetricReport.TEST_PARAM,
+                )
+        else:
+            record(f"counters.{metric}", metric_value=value, unit="", report=MetricReport.TEST_PARAM)
