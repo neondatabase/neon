@@ -11,7 +11,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
 from fixtures.utils import humantime_to_ms
 
-TARGET_RUNTIME = 30
+TARGET_RUNTIME = 5
 
 
 @dataclass
@@ -31,6 +31,7 @@ class PageServicePipeliningConfigPipelined(PageServicePipeliningConfig):
     mode: str = "pipelined"
 
 
+PS_IO_CONCURRENCY = ["serial", "parallel"]
 EXECUTION = ["concurrent-futures", "tasks"]
 
 NON_BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
@@ -45,7 +46,7 @@ for max_batch_size in [1, 2, 4, 8, 16, 32]:
 
 
 @pytest.mark.parametrize(
-    "tablesize_mib, pipelining_config, target_runtime, effective_io_concurrency, readhead_buffer_size, name",
+    "tablesize_mib, pipelining_config, target_runtime, ps_io_concurrency, effective_io_concurrency, readhead_buffer_size, name",
     [
         # non-batchable workloads
         # (A separate benchmark will consider latency).
@@ -54,11 +55,13 @@ for max_batch_size in [1, 2, 4, 8, 16, 32]:
                 50,
                 config,
                 TARGET_RUNTIME,
+                ps_io_concurrency,
                 1,
                 128,
                 f"not batchable {dataclasses.asdict(config)}",
             )
             for config in NON_BATCHABLE
+            for ps_io_concurrency in PS_IO_CONCURRENCY
         ],
         # batchable workloads should show throughput and CPU efficiency improvements
         *[
@@ -66,11 +69,13 @@ for max_batch_size in [1, 2, 4, 8, 16, 32]:
                 50,
                 config,
                 TARGET_RUNTIME,
+                ps_io_concurrency,
                 100,
                 128,
                 f"batchable {dataclasses.asdict(config)}",
             )
             for config in BATCHABLE
+            for ps_io_concurrency in PS_IO_CONCURRENCY
         ],
     ],
 )
@@ -80,6 +85,7 @@ def test_throughput(
     tablesize_mib: int,
     pipelining_config: PageServicePipeliningConfig,
     target_runtime: int,
+    ps_io_concurrency: str,
     effective_io_concurrency: int,
     readhead_buffer_size: int,
     name: str,
@@ -117,7 +123,19 @@ def test_throughput(
         }
     )
     # For storing configuration as a metric, insert a fake 0 with labels with actual data
-    params.update({"pipelining_config": (0, {"labels": dataclasses.asdict(pipelining_config)})})
+    params.update(
+        {
+            "config": (
+                0,
+                {
+                    "labels": {
+                        "pipelining_config": dataclasses.asdict(pipelining_config),
+                        "ps_io_concurrency": ps_io_concurrency,
+                    }
+                },
+            )
+        }
+    )
 
     log.info("params: %s", params)
 
@@ -231,7 +249,10 @@ def test_throughput(
     env.pageserver.patch_config_toml_nonrecursive(
         {"page_service_pipelining": dataclasses.asdict(pipelining_config)}
     )
-    env.pageserver.restart()
+    env.pageserver.stop()
+    env.pageserver.start(
+        extra_env_vars={"NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY": ps_io_concurrency}
+    )
     metrics = workload()
 
     log.info("Results: %s", metrics)
@@ -266,14 +287,19 @@ for max_batch_size in [1, 32]:
 
 
 @pytest.mark.parametrize(
-    "pipelining_config,name",
-    [(config, f"{dataclasses.asdict(config)}") for config in PRECISION_CONFIGS],
+    "pipelining_config,ps_io_concurrency,name",
+    [
+        (config, ps_io_concurrency, f"{dataclasses.asdict(config)}")
+        for config in PRECISION_CONFIGS
+        for ps_io_concurrency in PS_IO_CONCURRENCY
+    ],
 )
 def test_latency(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
     pipelining_config: PageServicePipeliningConfig,
+    ps_io_concurrency: str,
     name: str,
 ):
     """
@@ -322,6 +348,11 @@ def test_latency(
 
     for sk in env.safekeepers:
         sk.stop()
+
+    env.pageserver.stop()
+    env.pageserver.start(
+        extra_env_vars={"NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY": ps_io_concurrency}
+    )
 
     #
     # Run single-threaded pagebench (TODO: dedup with other benchmark code)

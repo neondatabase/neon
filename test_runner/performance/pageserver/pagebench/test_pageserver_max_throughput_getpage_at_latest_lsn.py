@@ -56,13 +56,14 @@ def test_pageserver_characterize_throughput_with_n_tenants(
 # For reference, the space usage of the snapshots:
 # sudo du -hs /instance_store/neon/test_output/shared-snapshots/*
 # 19G	/instance_store/neon/test_output/shared-snapshots/max_throughput_latest_lsn-1-136
-@pytest.mark.parametrize("duration", [20 * 60])
+@pytest.mark.parametrize("duration", [20])
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(2048)])
 # we use 1 client to characterize latencies, and 64 clients to characterize throughput/scalability
 # we use 64 clients because typically for a high number of connections we recommend the connection pooler
 # which by default uses 64 connections
 @pytest.mark.parametrize("n_clients", [1, 64])
 @pytest.mark.parametrize("n_tenants", [1])
+@pytest.mark.parametrize("io_concurrency", ["serial", "parallel"])
 @pytest.mark.timeout(2400)
 @skip_on_ci(
     "This test needs lot of resources and should run on dedicated HW, not in github action runners as part of CI"
@@ -75,9 +76,17 @@ def test_pageserver_characterize_latencies_with_1_client_and_throughput_with_man
     pgbench_scale: int,
     duration: int,
     n_clients: int,
+    io_concurrency: str,
 ):
     setup_and_run_pagebench_benchmark(
-        neon_env_builder, zenbenchmark, pg_bin, n_tenants, pgbench_scale, duration, n_clients
+        neon_env_builder,
+        zenbenchmark,
+        pg_bin,
+        n_tenants,
+        pgbench_scale,
+        duration,
+        n_clients,
+        io_concurrency,
     )
 
 
@@ -89,6 +98,7 @@ def setup_and_run_pagebench_benchmark(
     pgbench_scale: int,
     duration: int,
     n_clients: int,
+    io_concurrency: str = "serial",
 ):
     def record(metric, **kwargs):
         zenbenchmark.record(
@@ -104,6 +114,14 @@ def setup_and_run_pagebench_benchmark(
             "pgbench_scale": (pgbench_scale, {"unit": ""}),
             "duration": (duration, {"unit": "s"}),
             "n_clients": (n_clients, {"unit": ""}),
+            "config": (
+                0,
+                {
+                    "labels": {
+                        "io_concurrency": io_concurrency,
+                    }
+                },
+            ),
         }
     )
 
@@ -124,7 +142,14 @@ def setup_and_run_pagebench_benchmark(
     )
 
     for param, (value, kwargs) in params.items():
-        record(param, metric_value=value, report=MetricReport.TEST_PARAM, **kwargs)
+        record(
+            param,
+            metric_value=value,
+            report=MetricReport.TEST_PARAM,
+            labels=kwargs.pop("labels", None),
+            unit=kwargs.pop("unit", ""),
+            **kwargs,
+        )
 
     def setup_wrapper(env: NeonEnv):
         return setup_tenant_template(env, pg_bin, pgbench_scale)
@@ -136,6 +161,7 @@ def setup_and_run_pagebench_benchmark(
         setup_wrapper,
         # https://github.com/neondatabase/neon/issues/8070
         timeout_in_seconds=60,
+        extra_ps_env_vars={"NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY": io_concurrency},
     )
 
     env.pageserver.allowed_errors.append(
@@ -144,6 +170,10 @@ def setup_and_run_pagebench_benchmark(
         # https://github.com/neondatabase/neon/issues/6724
         r".*query handler for.*pagestream.*failed: unexpected message: CopyFail during COPY.*"
     )
+
+    import pdb
+
+    pdb.set_trace()
 
     run_pagebench_benchmark(env, pg_bin, record, duration, n_clients)
 
