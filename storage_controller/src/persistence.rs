@@ -104,6 +104,7 @@ pub(crate) enum DatabaseOperation {
     ListMetadataHealth,
     ListMetadataHealthUnhealthy,
     ListMetadataHealthOutdated,
+    ListSafekeepers,
     GetLeader,
     UpdateLeader,
     SetPreferredAzs,
@@ -1009,6 +1010,22 @@ impl Persistence {
         }
 
         Ok(())
+    }
+
+    /// At startup, populate the list of nodes which our shards may be placed on
+    pub(crate) async fn list_safekeepers(&self) -> DatabaseResult<Vec<SafekeeperPersistence>> {
+        let safekeepers: Vec<SafekeeperPersistence> = self
+            .with_measured_conn(
+                DatabaseOperation::ListNodes,
+                move |conn| -> DatabaseResult<_> {
+                    Ok(crate::schema::safekeepers::table.load::<SafekeeperPersistence>(conn)?)
+                },
+            )
+            .await?;
+
+        tracing::info!("list_safekeepers: loaded {} nodes", safekeepers.len());
+
+        Ok(safekeepers)
     }
 
     pub(crate) async fn safekeeper_get(

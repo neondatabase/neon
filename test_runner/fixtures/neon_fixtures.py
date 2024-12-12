@@ -435,7 +435,10 @@ class NeonEnvBuilder:
 
         self.pageserver_virtual_file_io_mode = pageserver_virtual_file_io_mode
 
-        self.pageserver_wal_receiver_protocol = pageserver_wal_receiver_protocol
+        if pageserver_wal_receiver_protocol is not None:
+            self.pageserver_wal_receiver_protocol = pageserver_wal_receiver_protocol
+        else:
+            self.pageserver_wal_receiver_protocol = PageserverWalReceiverProtocol.INTERPRETED
 
         assert test_name.startswith(
             "test_"
@@ -2329,6 +2332,16 @@ class NeonStorageController(MetricsGetter, LogUtils):
                 return None
             raise e
 
+    def get_safekeepers(self) -> list[dict[str, Any]]:
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/safekeeper",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        json = response.json()
+        assert isinstance(json, list)
+        return json
+
     def set_preferred_azs(self, preferred_azs: dict[TenantShardId, str]) -> list[TenantShardId]:
         response = self.request(
             "PUT",
@@ -3209,7 +3222,7 @@ class NeonProxy(PgProtocol):
                 *["--allow-self-signed-compute", "true"],
             ]
 
-    class Console(AuthBackend):
+    class ProxyV1(AuthBackend):
         def __init__(self, endpoint: str, fixed_rate_limit: int | None = None):
             self.endpoint = endpoint
             self.fixed_rate_limit = fixed_rate_limit
@@ -3217,7 +3230,7 @@ class NeonProxy(PgProtocol):
         def extra_args(self) -> list[str]:
             args = [
                 # Console auth backend params
-                *["--auth-backend", "console"],
+                *["--auth-backend", "cplane-v1"],
                 *["--auth-endpoint", self.endpoint],
                 *["--sql-over-http-pool-opt-in", "false"],
             ]
@@ -3465,13 +3478,13 @@ class NeonProxy(PgProtocol):
 
 
 class NeonAuthBroker:
-    class ControlPlane:
+    class ProxyV1:
         def __init__(self, endpoint: str):
             self.endpoint = endpoint
 
         def extra_args(self) -> list[str]:
             args = [
-                *["--auth-backend", "console"],
+                *["--auth-backend", "cplane-v1"],
                 *["--auth-endpoint", self.endpoint],
             ]
             return args
@@ -3483,7 +3496,7 @@ class NeonAuthBroker:
         http_port: int,
         mgmt_port: int,
         external_http_port: int,
-        auth_backend: NeonAuthBroker.ControlPlane,
+        auth_backend: NeonAuthBroker.ProxyV1,
     ):
         self.domain = "apiauth.localtest.me"  # resolves to 127.0.0.1
         self.host = "127.0.0.1"
@@ -3669,7 +3682,7 @@ def static_auth_broker(
     local_proxy_addr = f"{http2_echoserver.host}:{http2_echoserver.port}"
 
     # return local_proxy addr on ProxyWakeCompute.
-    httpserver.expect_request("/cplane/proxy_wake_compute").respond_with_json(
+    httpserver.expect_request("/cplane/wake_compute").respond_with_json(
         {
             "address": local_proxy_addr,
             "aux": {
@@ -3709,7 +3722,7 @@ def static_auth_broker(
         http_port=http_port,
         mgmt_port=mgmt_port,
         external_http_port=external_http_port,
-        auth_backend=NeonAuthBroker.ControlPlane(httpserver.url_for("/cplane")),
+        auth_backend=NeonAuthBroker.ProxyV1(httpserver.url_for("/cplane")),
     ) as proxy:
         proxy.start()
         yield proxy
@@ -4556,6 +4569,7 @@ class StorageScrubber:
     def __init__(self, env: NeonEnv, log_dir: Path):
         self.env = env
         self.log_dir = log_dir
+        self.allowed_errors: list[str] = []
 
     def scrubber_cli(
         self, args: list[str], timeout, extra_env: dict[str, str] | None = None
@@ -4633,18 +4647,69 @@ class StorageScrubber:
         if timeline_lsns is not None:
             args.append("--timeline-lsns")
             args.append(json.dumps(timeline_lsns))
+        if node_kind == NodeKind.PAGESERVER:
+            args.append("--verbose")
         stdout = self.scrubber_cli(args, timeout=30, extra_env=extra_env)
 
         try:
             summary = json.loads(stdout)
-            # summary does not contain "with_warnings" if node_kind is the safekeeper
-            no_warnings = "with_warnings" not in summary or not summary["with_warnings"]
-            healthy = not summary["with_errors"] and no_warnings
+            healthy = self._check_run_healthy(summary)
             return healthy, summary
         except:
             log.error("Failed to decode JSON output from `scan-metadata`.  Dumping stdout:")
             log.error(stdout)
             raise
+
+    def _check_line_allowed(self, line: str) -> bool:
+        for a in self.allowed_errors:
+            try:
+                if re.match(a, line):
+                    return True
+            except re.error:
+                log.error(f"Invalid regex: '{a}'")
+                raise
+        return False
+
+    def _check_line_list_allowed(self, lines: list[str]) -> bool:
+        for line in lines:
+            if not self._check_line_allowed(line):
+                return False
+        return True
+
+    def _check_run_healthy(self, summary: dict[str, Any]) -> bool:
+        # summary does not contain "with_warnings" if node_kind is the safekeeper
+        healthy = True
+        with_warnings = summary.get("with_warnings", None)
+        if with_warnings is not None:
+            if isinstance(with_warnings, list):
+                if len(with_warnings) > 0:
+                    # safekeeper scan_metadata output is a list of tenants
+                    healthy = False
+            else:
+                for _, warnings in with_warnings.items():
+                    assert (
+                        len(warnings) > 0
+                    ), "with_warnings value should not be empty, running without verbose mode?"
+                    if not self._check_line_list_allowed(warnings):
+                        healthy = False
+                        break
+        if not healthy:
+            return healthy
+        with_errors = summary.get("with_errors", None)
+        if with_errors is not None:
+            if isinstance(with_errors, list):
+                if len(with_errors) > 0:
+                    # safekeeper scan_metadata output is a list of tenants
+                    healthy = False
+            else:
+                for _, errors in with_errors.items():
+                    assert (
+                        len(errors) > 0
+                    ), "with_errors value should not be empty, running without verbose mode?"
+                    if not self._check_line_list_allowed(errors):
+                        healthy = False
+                        break
+        return healthy
 
     def tenant_snapshot(self, tenant_id: TenantId, output_path: Path):
         stdout = self.scrubber_cli(

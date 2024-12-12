@@ -41,7 +41,7 @@ use crate::tenant::storage_layer::{
 use crate::tenant::timeline::ImageLayerCreationOutcome;
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
-use crate::tenant::{DeltaLayer, MaybeOffloaded};
+use crate::tenant::{gc_block, DeltaLayer, MaybeOffloaded};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 use pageserver_api::config::tenant_conf_defaults::{
     DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD,
@@ -63,9 +63,12 @@ use super::CompactionError;
 const COMPACTION_DELTA_THRESHOLD: usize = 5;
 
 /// A scheduled compaction task.
-pub struct ScheduledCompactionTask {
+pub(crate) struct ScheduledCompactionTask {
     pub options: CompactOptions,
+    /// The channel to send the compaction result. If this is a subcompaction, the last compaction job holds the sender.
     pub result_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Hold the GC block. If this is a subcompaction, the last compaction job holds the gc block guard.
+    pub gc_block: Option<gc_block::Guard>,
 }
 
 pub struct GcCompactionJobDescription {
@@ -1768,8 +1771,7 @@ impl Timeline {
         let compact_below_lsn = if let Some(compact_below_lsn) = options.compact_below_lsn {
             compact_below_lsn
         } else {
-            let gc_info = self.gc_info.read().unwrap();
-            gc_info.cutoffs.select_min() // use the real gc cutoff
+            *self.get_latest_gc_cutoff_lsn() // use the real gc cutoff
         };
         let mut compact_jobs = Vec::new();
         // For now, we simply use the key partitioning information; we should do a more fine-grained partitioning
@@ -1962,7 +1964,11 @@ impl Timeline {
             let gc_info = self.gc_info.read().unwrap();
             let mut retain_lsns_below_horizon = Vec::new();
             let gc_cutoff = {
-                let real_gc_cutoff = gc_info.cutoffs.select_min();
+                // Currently, gc-compaction only kicks in after the legacy gc has updated the gc_cutoff.
+                // Therefore, it can only clean up data that cannot be cleaned up with legacy gc, instead of
+                // cleaning everything that theoritically it could. In the future, it should use `self.gc_info`
+                // to get the truth data.
+                let real_gc_cutoff = *self.get_latest_gc_cutoff_lsn();
                 // The compaction algorithm will keep all keys above the gc_cutoff while keeping only necessary keys below the gc_cutoff for
                 // each of the retain_lsn. Therefore, if the user-provided `compact_below_lsn` is larger than the real gc cutoff, we will use
                 // the real cutoff.

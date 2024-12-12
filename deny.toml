@@ -42,6 +42,7 @@ allow = [
     "MPL-2.0",
     "OpenSSL",
     "Unicode-DFS-2016",
+    "Unicode-3.0",
 ]
 confidence-threshold = 0.8
 exceptions = [

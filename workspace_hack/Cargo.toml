@@ -33,6 +33,7 @@ deranged = { version = "0.3", default-features = false, features = ["powerfmt", 
 digest = { version = "0.10", features = ["mac", "oid", "std"] }
 either = { version = "1" }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
+form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-executor = { version = "0.3" }
 futures-io = { version = "0.3" }
@@ -78,6 +79,7 @@ sha2 = { version = "0.10", features = ["asm", "oid"] }
 signature = { version = "2", default-features = false, features = ["digest", "rand_core", "std"] }
 smallvec = { version = "1", default-features = false, features = ["const_new", "write"] }
 spki = { version = "0.7", default-features = false, features = ["pem", "std"] }
+stable_deref_trait = { version = "1" }
 subtle = { version = "2" }
 sync_wrapper = { version = "0.1", default-features = false, features = ["futures"] }
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "use_std"] }
@@ -105,6 +107,7 @@ anyhow = { version = "1", features = ["backtrace"] }
 bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
+displaydoc = { version = "0.2" }
 either = { version = "1" }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }

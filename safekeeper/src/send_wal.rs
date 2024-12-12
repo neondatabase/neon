@@ -10,7 +10,6 @@ use crate::timeline::WalResidentTimeline;
 use crate::wal_reader_stream::WalReaderStreamBuilder;
 use crate::wal_service::ConnectionId;
 use crate::wal_storage::WalReader;
-use crate::GlobalTimelines;
 use anyhow::{bail, Context as AnyhowContext};
 use bytes::Bytes;
 use futures::future::Either;
@@ -400,7 +399,10 @@ impl SafekeeperPostgresHandler {
         start_pos: Lsn,
         term: Option<Term>,
     ) -> Result<(), QueryError> {
-        let tli = GlobalTimelines::get(self.ttid).map_err(|e| QueryError::Other(e.into()))?;
+        let tli = self
+            .global_timelines
+            .get(self.ttid)
+            .map_err(|e| QueryError::Other(e.into()))?;
         let residence_guard = tli.wal_residence_guard().await?;
 
         if let Err(end) = self

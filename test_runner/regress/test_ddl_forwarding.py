@@ -15,6 +15,8 @@ from werkzeug.wrappers.response import Response
 if TYPE_CHECKING:
     from typing import Any, Self
 
+    from fixtures.httpserver import ListenAddress
+
 
 def handle_db(dbs, roles, operation):
     if operation["op"] == "set":
@@ -120,7 +122,7 @@ class DdlForwardingContext:
 
 @pytest.fixture(scope="function")
 def ddl(
-    httpserver: HTTPServer, vanilla_pg: VanillaPostgres, httpserver_listen_address: tuple[str, int]
+    httpserver: HTTPServer, vanilla_pg: VanillaPostgres, httpserver_listen_address: ListenAddress
 ):
     (host, port) = httpserver_listen_address
     with DdlForwardingContext(httpserver, vanilla_pg, host, port) as ddl:
