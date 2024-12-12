@@ -1022,46 +1022,50 @@ impl DeltaLayerInner {
 
             let read_from = self.file.clone();
             let read_ctx = ctx.attached_child();
-            reconstruct_state.spawn_io(async move {
-                let vectored_blob_reader = VectoredBlobReader::new(&read_from);
-                let buf = IoBufferMut::with_capacity(buf_size);
+            reconstruct_state
+                .spawn_io(async move {
+                    let vectored_blob_reader = VectoredBlobReader::new(&read_from);
+                    let buf = IoBufferMut::with_capacity(buf_size);
 
-                let res = vectored_blob_reader.read_blobs(&read, buf, &read_ctx).await;
-                match res {
-                    Ok(blobs_buf) => {
-                        let view = BufView::new_slice(&blobs_buf.buf);
-                        for meta in blobs_buf.blobs.iter().rev() {
-                            let sender = senders.remove(&(meta.meta.key, meta.meta.lsn)).unwrap();
+                    let res = vectored_blob_reader.read_blobs(&read, buf, &read_ctx).await;
+                    match res {
+                        Ok(blobs_buf) => {
+                            let view = BufView::new_slice(&blobs_buf.buf);
+                            for meta in blobs_buf.blobs.iter().rev() {
+                                let sender =
+                                    senders.remove(&(meta.meta.key, meta.meta.lsn)).unwrap();
 
-                            if Some(meta.meta.key) == ignore_key_with_err {
-                                continue;
-                            }
-
-                            let blob_read = meta.read(&view).await;
-                            let blob_read = match blob_read {
-                                Ok(buf) => buf,
-                                Err(e) => {
-                                    ignore_key_with_err = Some(meta.meta.key);
-
-                                    let _ = sender.send(Err(e));
+                                if Some(meta.meta.key) == ignore_key_with_err {
                                     continue;
                                 }
-                            };
 
-                            let _ = sender
-                                .send(Ok(OnDiskValue::WalRecordOrImage(blob_read.into_bytes())));
-                        }
+                                let blob_read = meta.read(&view).await;
+                                let blob_read = match blob_read {
+                                    Ok(buf) => buf,
+                                    Err(e) => {
+                                        ignore_key_with_err = Some(meta.meta.key);
 
-                        assert!(senders.is_empty());
-                    }
-                    Err(err) => {
-                        for (_, sender) in senders {
-                            let _ = sender
-                                .send(Err(std::io::Error::new(err.kind(), "vec read failed")));
+                                        let _ = sender.send(Err(e));
+                                        continue;
+                                    }
+                                };
+
+                                let _ = sender.send(Ok(OnDiskValue::WalRecordOrImage(
+                                    blob_read.into_bytes(),
+                                )));
+                            }
+
+                            assert!(senders.is_empty());
+                        }
+                        Err(err) => {
+                            for (_, sender) in senders {
+                                let _ = sender
+                                    .send(Err(std::io::Error::new(err.kind(), "vec read failed")));
+                            }
                         }
                     }
-                }
-            });
+                })
+                .await;
         }
     }
 

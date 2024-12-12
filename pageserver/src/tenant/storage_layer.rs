@@ -162,27 +162,17 @@ pub(crate) struct ValuesReconstructState {
 /// This struct and the dispatching in the impl will be removed once
 /// we've built enough confidence.
 enum IoConcurrency {
-    Serial {
-        prev_io: Option<tokio::task::JoinHandle<()>>,
-    },
+    Serial,
     Parallel,
 }
 
 impl IoConcurrency {
-    pub(crate) fn spawn_io<F>(&mut self, fut: F)
+    pub(crate) async fn spawn_io<F>(&mut self, fut: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
         match self {
-            IoConcurrency::Serial { prev_io } => {
-                let prev = prev_io.take();
-                *prev_io = Some(tokio::spawn(async move {
-                    if let Some(prev) = prev {
-                        prev.await.unwrap();
-                    }
-                    fut.await;
-                }));
-            }
+            IoConcurrency::Serial => fut.await,
             IoConcurrency::Parallel => {
                 tokio::spawn(fut);
             }
@@ -213,7 +203,7 @@ impl ValuesReconstructState {
                     });
                 match IO_CONCURRENCY.as_str() {
                     "parallel" => IoConcurrency::Parallel,
-                    "serial" => IoConcurrency::Serial { prev_io: None },
+                    "serial" => IoConcurrency::Serial,
                     x => panic!(
                         "Invalid value for NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY: {}",
                         x
@@ -232,17 +222,17 @@ impl ValuesReconstructState {
             layers_visited: 0,
             delta_layers_visited: 0,
             io_concurrency: match io_concurrency {
-                SelectedIoConcurrency::Serial => IoConcurrency::Serial { prev_io: None },
+                SelectedIoConcurrency::Serial => IoConcurrency::Serial,
                 SelectedIoConcurrency::Parallel => IoConcurrency::Parallel,
             },
         }
     }
 
-    pub(crate) fn spawn_io<F>(&mut self, fut: F)
+    pub(crate) async fn spawn_io<F>(&mut self, fut: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        self.io_concurrency.spawn_io(fut);
+        self.io_concurrency.spawn_io(fut).await;
     }
 
     pub(crate) fn on_layer_visited(&mut self, layer: &ReadableLayer) {

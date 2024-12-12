@@ -626,39 +626,43 @@ impl ImageLayerInner {
 
             let read_from = self.file.clone();
             let read_ctx = ctx.attached_child();
-            reconstruct_state.spawn_io(async move {
-                let buf = IoBufferMut::with_capacity(buf_size);
-                let vectored_blob_reader = VectoredBlobReader::new(&read_from);
-                let res = vectored_blob_reader.read_blobs(&read, buf, &read_ctx).await;
+            reconstruct_state
+                .spawn_io(async move {
+                    let buf = IoBufferMut::with_capacity(buf_size);
+                    let vectored_blob_reader = VectoredBlobReader::new(&read_from);
+                    let res = vectored_blob_reader.read_blobs(&read, buf, &read_ctx).await;
 
-                match res {
-                    Ok(blobs_buf) => {
-                        let view = BufView::new_slice(&blobs_buf.buf);
-                        for meta in blobs_buf.blobs.iter() {
-                            let sender = senders.remove(&(meta.meta.key, meta.meta.lsn)).unwrap();
-                            let img_buf = meta.read(&view).await;
+                    match res {
+                        Ok(blobs_buf) => {
+                            let view = BufView::new_slice(&blobs_buf.buf);
+                            for meta in blobs_buf.blobs.iter() {
+                                let sender =
+                                    senders.remove(&(meta.meta.key, meta.meta.lsn)).unwrap();
+                                let img_buf = meta.read(&view).await;
 
-                            let img_buf = match img_buf {
-                                Ok(img_buf) => img_buf,
-                                Err(e) => {
-                                    let _ = sender.send(Err(e));
-                                    continue;
-                                }
-                            };
+                                let img_buf = match img_buf {
+                                    Ok(img_buf) => img_buf,
+                                    Err(e) => {
+                                        let _ = sender.send(Err(e));
+                                        continue;
+                                    }
+                                };
 
-                            let _ = sender.send(Ok(OnDiskValue::RawImage(img_buf.into_bytes())));
+                                let _ =
+                                    sender.send(Ok(OnDiskValue::RawImage(img_buf.into_bytes())));
+                            }
+
+                            assert!(senders.is_empty());
                         }
-
-                        assert!(senders.is_empty());
-                    }
-                    Err(err) => {
-                        for (_, sender) in senders {
-                            let _ = sender
-                                .send(Err(std::io::Error::new(err.kind(), "vec read failed")));
+                        Err(err) => {
+                            for (_, sender) in senders {
+                                let _ = sender
+                                    .send(Err(std::io::Error::new(err.kind(), "vec read failed")));
+                            }
                         }
                     }
-                }
-            });
+                })
+                .await;
         }
     }
 

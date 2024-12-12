@@ -477,38 +477,42 @@ impl InMemoryLayer {
 
         let read_from = inner.file.clone();
         let read_ctx = ctx.attached_child();
-        reconstruct_state.spawn_io(async move {
-            let locked = read_from.read().await;
-            let f = vectored_dio_read::execute(
-                &*locked,
-                reads
-                    .iter()
-                    .flat_map(|(_, value_reads)| value_reads.iter().map(|v| &v.read)),
-                &read_ctx,
-            );
-            send_future::SendFuture::send(f) // https://github.com/rust-lang/rust/issues/96865
-                .await;
+        reconstruct_state
+            .spawn_io(async move {
+                let locked = read_from.read().await;
+                let f = vectored_dio_read::execute(
+                    &*locked,
+                    reads
+                        .iter()
+                        .flat_map(|(_, value_reads)| value_reads.iter().map(|v| &v.read)),
+                    &read_ctx,
+                );
+                send_future::SendFuture::send(f) // https://github.com/rust-lang/rust/issues/96865
+                    .await;
 
-            for (key, value_reads) in reads {
-                for ValueRead { entry_lsn, read } in value_reads {
-                    let sender = senders
-                        .remove(&(key, entry_lsn))
-                        .expect("sender must exist");
-                    match read.into_result().expect("we run execute() above") {
-                        Err(e) => {
-                            let _ = sender
-                                .send(Err(std::io::Error::new(e.kind(), "dio vec read failed")));
-                        }
-                        Ok(value_buf) => {
-                            let _ =
-                                sender.send(Ok(OnDiskValue::WalRecordOrImage(value_buf.into())));
+                for (key, value_reads) in reads {
+                    for ValueRead { entry_lsn, read } in value_reads {
+                        let sender = senders
+                            .remove(&(key, entry_lsn))
+                            .expect("sender must exist");
+                        match read.into_result().expect("we run execute() above") {
+                            Err(e) => {
+                                let _ = sender.send(Err(std::io::Error::new(
+                                    e.kind(),
+                                    "dio vec read failed",
+                                )));
+                            }
+                            Ok(value_buf) => {
+                                let _ = sender
+                                    .send(Ok(OnDiskValue::WalRecordOrImage(value_buf.into())));
+                            }
                         }
                     }
                 }
-            }
 
-            assert!(senders.is_empty());
-        });
+                assert!(senders.is_empty());
+            })
+            .await;
 
         Ok(())
     }
