@@ -31,6 +31,7 @@ class PageServicePipeliningConfigPipelined(PageServicePipeliningConfig):
     mode: str = "pipelined"
 
 
+PS_DIRECT_IO = ["direct"]
 PS_IO_CONCURRENCY = ["serial", "parallel"]
 EXECUTION = ["concurrent-futures"]
 
@@ -46,7 +47,7 @@ for max_batch_size in [32]:
 
 
 @pytest.mark.parametrize(
-    "tablesize_mib, pipelining_config, target_runtime, ps_io_concurrency, effective_io_concurrency, readhead_buffer_size, name",
+    "tablesize_mib, pipelining_config, target_runtime, ps_io_concurrency, ps_direct_io_mode, effective_io_concurrency, readhead_buffer_size, name",
     [
         # non-batchable workloads
         # (A separate benchmark will consider latency).
@@ -56,6 +57,7 @@ for max_batch_size in [32]:
         #         config,
         #         TARGET_RUNTIME,
         #         ps_io_concurrency,
+        #         ps_direct_io_mode,
         #         1,
         #         128,
         #         f"not batchable {dataclasses.asdict(config)}",
@@ -70,12 +72,14 @@ for max_batch_size in [32]:
                 config,
                 TARGET_RUNTIME,
                 ps_io_concurrency,
+                ps_direct_io_mode,
                 100,
                 128,
                 f"batchable {dataclasses.asdict(config)}",
             )
             for config in BATCHABLE
             for ps_io_concurrency in PS_IO_CONCURRENCY
+            for ps_direct_io_mode in PS_DIRECT_IO
         ],
     ],
 )
@@ -86,6 +90,7 @@ def test_throughput(
     pipelining_config: PageServicePipeliningConfig,
     target_runtime: int,
     ps_io_concurrency: str,
+    ps_direct_io_mode: str,
     effective_io_concurrency: int,
     readhead_buffer_size: int,
     name: str,
@@ -131,6 +136,7 @@ def test_throughput(
                     "labels": {
                         "pipelining_config": dataclasses.asdict(pipelining_config),
                         "ps_io_concurrency": ps_io_concurrency,
+                        "direct_io": ps_direct_io_mode,
                     }
                 },
             )
@@ -247,7 +253,10 @@ def test_throughput(
         return (after - before).normalize(iters - 1)
 
     env.pageserver.patch_config_toml_nonrecursive(
-        {"page_service_pipelining": dataclasses.asdict(pipelining_config)}
+        {
+            "page_service_pipelining": dataclasses.asdict(pipelining_config),
+            "virtual_file_io_mode": ps_direct_io_mode,
+        }
     )
     env.pageserver.stop()
     env.pageserver.start(
