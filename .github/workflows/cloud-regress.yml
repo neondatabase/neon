@@ -19,14 +19,15 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: true
 
+permissions:
+  id-token: write # aws-actions/configure-aws-credentials
+
 jobs:
   regress:
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
     strategy:
       fail-fast: false
       matrix:
@@ -78,6 +79,7 @@ jobs:
           name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
           path: /tmp/neon/
           prefix: latest
+          aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Create a new branch
         id: create-branch
@@ -107,6 +109,8 @@ jobs:
         id: create-allure-report
         if: ${{ !cancelled() }}
         uses: ./.github/actions/allure-report-generate
+        with:
+          aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Post to a Slack channel
         if: ${{ github.event.schedule && failure() }}
