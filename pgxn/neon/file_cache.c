@@ -641,9 +641,10 @@ lfc_prewarm(FileCacheStateEntry* fs, size_t n_entries)
 				};
 				shard_no = get_shard_number(&fs[chunk_no].key);
 				while (!page_server->send(shard_no, (NeonRequest *) &request)
-					   || !page_server->flush(shard_no))
+					|| !page_server->flush(shard_no))
 				{
-					/* do nothing */
+					/* page server disconnected: all previusly sent prefetch requests are lost */
+					n_sent = 0;
 				}
 				n_sent += 1;
 			}
@@ -663,10 +664,21 @@ lfc_prewarm(FileCacheStateEntry* fs, size_t n_entries)
 			resp = page_server->receive(shard_no);
 			lfc_ctl->prewarm_curr_chunk = chunk_no;
 
-			if (resp->tag != T_NeonGetPageResponse)
+			switch (resp->tag)
 			{
-				elog(LOG, "LFC: unexpected response type: %d", resp->tag);
-				return;
+				case T_NeonGetPageResponse:
+					break;
+				case T_NeonErrorResponse:
+				{
+					/* Prefech can request page which is already dropped so PS can respond with error: just ignore it */
+					NeonErrorResponse *err_resp = (NeonErrorResponse *) resp;
+					elog(LOG, "LFC: page server failed to load page %u of relation %u/%u/%u.%u: %s",
+						 fs[chunk_no].key.blockNum + offs_in_chunk, RelFileInfoFmt(BufTagGetNRelFileInfo(fs[chunk_no].key)), fs[chunk_no].key.forkNum, err_resp->message);
+					continue;
+				}
+				default:
+					elog(LOG, "LFC: unexpected response type: %d", resp->tag);
+					return;
 			}
 
 			hash = get_hash_value(lfc_hash, &fs[chunk_no].key);
