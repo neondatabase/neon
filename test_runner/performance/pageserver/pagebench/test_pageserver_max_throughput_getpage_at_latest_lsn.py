@@ -61,9 +61,10 @@ def test_pageserver_characterize_throughput_with_n_tenants(
 # we use 1 client to characterize latencies, and 64 clients to characterize throughput/scalability
 # we use 64 clients because typically for a high number of connections we recommend the connection pooler
 # which by default uses 64 connections
-@pytest.mark.parametrize("n_clients", [1, 64])
+@pytest.mark.parametrize("n_clients", [1])
 @pytest.mark.parametrize("n_tenants", [1])
-@pytest.mark.parametrize("io_concurrency", ["serial", "parallel"])
+@pytest.mark.parametrize("io_concurrency", ["serial", "parallel", "futures-unordered"])
+@pytest.mark.parametrize("ps_direct_io_mode", ["direct"])
 @pytest.mark.timeout(2400)
 @skip_on_ci(
     "This test needs lot of resources and should run on dedicated HW, not in github action runners as part of CI"
@@ -77,6 +78,7 @@ def test_pageserver_characterize_latencies_with_1_client_and_throughput_with_man
     duration: int,
     n_clients: int,
     io_concurrency: str,
+    ps_direct_io_mode: str,
 ):
     setup_and_run_pagebench_benchmark(
         neon_env_builder,
@@ -87,6 +89,7 @@ def test_pageserver_characterize_latencies_with_1_client_and_throughput_with_man
         duration,
         n_clients,
         io_concurrency,
+        ps_direct_io_mode,
     )
 
 
@@ -99,6 +102,7 @@ def setup_and_run_pagebench_benchmark(
     duration: int,
     n_clients: int,
     io_concurrency: str = "serial",
+    ps_direct_io_mode: str = "buffered",
 ):
     def record(metric, **kwargs):
         zenbenchmark.record(
@@ -119,6 +123,7 @@ def setup_and_run_pagebench_benchmark(
                 {
                     "labels": {
                         "io_concurrency": io_concurrency,
+                        "ps_direct_io_mode": ps_direct_io_mode,
                     }
                 },
             ),
@@ -131,6 +136,7 @@ def setup_and_run_pagebench_benchmark(
     neon_env_builder.pageserver_config_override = (
         f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
     )
+    neon_env_builder.pageserver_virtual_file_io_mode = ps_direct_io_mode
     params.update(
         {
             "pageserver_config_override.page_cache_size": (
@@ -170,10 +176,6 @@ def setup_and_run_pagebench_benchmark(
         # https://github.com/neondatabase/neon/issues/6724
         r".*query handler for.*pagestream.*failed: unexpected message: CopyFail during COPY.*"
     )
-
-    import pdb
-
-    pdb.set_trace()
 
     run_pagebench_benchmark(env, pg_bin, record, duration, n_clients)
 
