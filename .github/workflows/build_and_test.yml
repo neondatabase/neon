@@ -254,16 +254,14 @@ jobs:
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
       # Run tests on all Postgres versions in release builds and only on the latest version in debug builds.
-      # Run without LFC on v17 release and debug builds only. For all the other cases LFC is enabled. Failure on the
-      # debug build with LFC enabled doesn't block merging.
+      # Run without LFC on v17 release and debug builds only. For all the other cases LFC is enabled.
       test-cfg: |
         ${{ matrix.build-type == 'release' && '[{"pg_version":"v14", "lfc_state": "with-lfc"},
                                                 {"pg_version":"v15", "lfc_state": "with-lfc"},
                                                 {"pg_version":"v16", "lfc_state": "with-lfc"},
                                                 {"pg_version":"v17", "lfc_state": "with-lfc"},
                                                 {"pg_version":"v17", "lfc_state": "without-lfc"}]'
-                                           || '[{"pg_version":"v17", "lfc_state": "without-lfc"},
-                                                {"pg_version":"v17", "lfc_state": "with-lfc" }]' }}
+                                           || '[{"pg_version":"v17", "lfc_state": "without-lfc" }]' }}
     secrets: inherit
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
