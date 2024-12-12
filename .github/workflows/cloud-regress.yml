@@ -116,7 +116,7 @@ jobs:
         if: ${{ github.event.schedule && failure() }}
         uses: slackapi/slack-github-action@v1
         with:
-          channel-id: "C033QLM5P7D" # on-call-staging-stream
+          channel-id: ${{ vars.SLACK_ON_CALL_QA_STAGING_STREAM }}
           slack-message: |
             Periodic pg_regress on staging: ${{ job.status }}
             <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
