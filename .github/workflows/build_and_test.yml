@@ -1143,7 +1143,7 @@ jobs:
               console.log(`Tag ${tag} created successfully.`);
             }
 
-            # TODO: check how GitHub releases looks for proxy/compute releases and enable them if they're ok
+            // TODO: check how GitHub releases looks for proxy/compute releases and enable them if they're ok
             if (context.ref !== 'refs/heads/release') {
               console.log(`GitHub release skipped for ${context.ref}.`);
               return;
