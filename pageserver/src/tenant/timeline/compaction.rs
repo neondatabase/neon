@@ -1110,7 +1110,7 @@ impl Timeline {
                 return Err(CompactionError::ShuttingDown);
             }
 
-            let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
+            let same_key = prev_key == Some(key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
                 let mut next_key_size = 0u64;
@@ -2904,7 +2904,7 @@ impl CompactionLayer<Key> for ResidentDeltaLayer {
 impl CompactionDeltaLayer<TimelineAdaptor> for ResidentDeltaLayer {
     type DeltaEntry<'a> = DeltaEntry<'a>;
 
-    async fn load_keys<'a>(&self, ctx: &RequestContext) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
+    async fn load_keys(&self, ctx: &RequestContext) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
         self.0.get_as_delta(ctx).await?.index_entries(ctx).await
     }
 }

@@ -5864,7 +5864,7 @@ enum OpenLayerAction {
     None,
 }
 
-impl<'a> TimelineWriter<'a> {
+impl TimelineWriter<'_> {
     async fn handle_open_layer_action(
         &mut self,
         at: Lsn,

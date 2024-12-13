@@ -318,7 +318,7 @@ struct NetworkReader<'a, IO> {
     global_timelines: Arc<GlobalTimelines>,
 }
 
-impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
+impl<IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'_, IO> {
     async fn read_first_message(
         &mut self,
     ) -> Result<(WalResidentTimeline, ProposerAcceptorMessage), CopyStreamHandlerEnd> {
