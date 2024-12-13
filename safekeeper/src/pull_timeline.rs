@@ -5,6 +5,8 @@ use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
 use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
 use safekeeper_api::{models::TimelineStatus, Term};
+use safekeeper_client::mgmt_api;
+use safekeeper_client::mgmt_api::Client;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::min,
@@ -22,7 +24,6 @@ use tracing::{error, info, instrument};
 use crate::{
     control_file::CONTROL_FILE_NAME,
     debug_dump,
-    http::client::{self, Client},
     state::{EvictionState, TimelinePersistentState},
     timeline::{Timeline, WalResidentTimeline},
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
@@ -419,7 +420,7 @@ pub async fn handle_request(
     let http_hosts = request.http_hosts.clone();
 
     // Figure out statuses of potential donors.
-    let responses: Vec<Result<TimelineStatus, client::Error>> =
+    let responses: Vec<Result<TimelineStatus, mgmt_api::Error>> =
         futures::future::join_all(http_hosts.iter().map(|url| async {
             let cclient = Client::new(url.clone(), sk_auth_token.clone());
             let info = cclient

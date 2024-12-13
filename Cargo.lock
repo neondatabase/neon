@@ -5535,6 +5535,7 @@ dependencies = [
  "remote_storage",
  "reqwest",
  "safekeeper_api",
+ "safekeeper_client",
  "scopeguard",
  "sd-notify",
  "serde",
@@ -5570,6 +5571,18 @@ dependencies = [
  "serde",
  "tokio",
  "utils",
+]
+
+[[package]]
+name = "safekeeper_client"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "safekeeper_api",
+ "serde",
+ "thiserror",
+ "utils",
+ "workspace_hack",
 ]
 
 [[package]]
