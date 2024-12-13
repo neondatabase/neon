@@ -7,7 +7,7 @@ inputs:
     type: boolean
     required: false
     default: false
-  aws_oicd_role_arn:
+  aws-oicd-role-arn:
     description: 'the OIDC role arn to (re-)acquire for allure report upload - if not set call must acquire OIDC role'
     required: false
     default: ''
@@ -85,11 +85,11 @@ runs:
         ALLURE_ZIP_SHA256: b071858fb2fa542c65d8f152c5c40d26267b2dfb74df1f1608a589ecca38e777
 
     - name: (Re-)configure AWS credentials # necessary to upload reports to S3 after a long-running test
-      if: ${{ !cancelled() && (inputs.aws_oicd_role_arn != '') }}
+      if: ${{ !cancelled() && (inputs.aws-oicd-role-arn != '') }}
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-region: eu-central-1
-        role-to-assume: ${{ inputs.aws_oicd_role_arn }}
+        role-to-assume: ${{ inputs.aws-oicd-role-arn }}
         role-duration-seconds: 3600 # 1 hour should be more than enough to upload report
 
     # Potentially we could have several running build for the same key (for example, for the main branch), so we use improvised lock for this
