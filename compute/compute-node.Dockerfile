@@ -941,7 +941,8 @@ RUN apt update && apt install --no-install-recommends --no-install-suggests -y \
 
 FROM pg-onnx-build AS pgrag-pg-build
 
-RUN apt-get install -y protobuf-compiler && \
+RUN apt update && apt install --no-install-recommends --no-install-suggests -y protobuf-compiler \
+    && apt clean && rm -rf /var/lib/apt/lists/* && \
     wget https://github.com/neondatabase-labs/pgrag/archive/refs/tags/v0.0.0.tar.gz -O pgrag.tar.gz &&  \
     echo "2cbe394c1e74fc8bcad9b52d5fbbfb783aef834ca3ce44626cfd770573700bb4 pgrag.tar.gz" | sha256sum --check && \
     mkdir pgrag-src && cd pgrag-src && tar xzf ../pgrag.tar.gz --strip-components=1 -C . && \
@@ -1536,8 +1537,7 @@ RUN apt update && \
         procps \
         ca-certificates \
         $VERSION_INSTALLS && \
-    && apt clean && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 
 # s5cmd 2.2.2 from https://github.com/peak/s5cmd/releases/tag/v2.2.2
