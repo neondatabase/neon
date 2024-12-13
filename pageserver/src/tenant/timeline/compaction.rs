@@ -1821,10 +1821,12 @@ impl Timeline {
         let mut compact_jobs = Vec::new();
         // For now, we simply use the key partitioning information; we should do a more fine-grained partitioning
         // by estimating the amount of files read for a compaction job. We should also partition on LSN.
-        let Ok(partition) = self.partitioning.try_lock() else {
-            bail!("failed to acquire partition lock");
+        let ((dense_ks, sparse_ks), _) = {
+            let Ok(partition) = self.partitioning.try_lock() else {
+                bail!("failed to acquire partition lock");
+            };
+            partition.clone()
         };
-        let ((dense_ks, sparse_ks), _) = &*partition;
         // Truncate the key range to be within user specified compaction range.
         fn truncate_to(
             source_start: &Key,
