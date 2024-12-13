@@ -929,13 +929,14 @@ FROM rust-extensions-build-pgrx12 AS pg-onnx-build
 # Install it using virtual environment, because Python 3.11 (the default version on Debian 12 (Bookworm)) complains otherwise
 RUN apt update && apt install --no-install-recommends --no-install-suggests -y \
     python3 python3-pip python3-venv && \
-    && apt clean && rm -rf /var/lib/apt/lists/* && \
+    apt clean && rm -rf /var/lib/apt/lists/* && \
     python3 -m venv venv && \
     . venv/bin/activate && \
     python3 -m pip install cmake==3.30.5 && \
     wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.gz -O onnxruntime.tar.gz && \
     mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
-    ./build.sh --config Release --parallel --skip_submodule_sync --skip_tests --allow_running_as_root
+    ./build.sh --config Release --parallel --cmake_generator Ninja \
+    --skip_submodule_sync --skip_tests --allow_running_as_root
 
 
 FROM pg-onnx-build AS pgrag-pg-build
