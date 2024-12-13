@@ -14,6 +14,7 @@ use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use postgres_ffi::XLogSegNo;
 use postgres_ffi::MAX_SEND_SIZE;
+use safekeeper_api::models::WalSenderState;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -25,7 +26,6 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
 use crate::safekeeper::TermHistory;
-use crate::send_wal::WalSenderState;
 use crate::state::TimelineMemState;
 use crate::state::TimelinePersistentState;
 use crate::timeline::get_timeline_dir;

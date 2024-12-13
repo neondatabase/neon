@@ -99,6 +99,7 @@ jobs:
           BENCHMARK_CONNSTR: ${{steps.create-branch.outputs.dsn}}
 
       - name: Delete branch
+        if: always()
         uses: ./.github/actions/neon-branch-delete
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}

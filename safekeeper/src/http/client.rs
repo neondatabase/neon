@@ -8,14 +8,13 @@
 //! etc.
 
 use reqwest::{IntoUrl, Method, StatusCode};
+use safekeeper_api::models::TimelineStatus;
 use std::error::Error as _;
 use utils::{
     http::error::HttpErrorBody,
     id::{NodeId, TenantId, TimelineId},
     logging::SecretString,
 };
-
-use super::routes::TimelineStatus;
 
 #[derive(Debug, Clone)]
 pub struct Client {
