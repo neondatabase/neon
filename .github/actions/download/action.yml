@@ -15,10 +15,21 @@ inputs:
   prefix:
     description: "S3 prefix. Default is '${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}'"
     required: false
+  aws_oicd_role_arn:
+    description: "the OIDC role arn for aws auth"
+    required: false
+    default: ""
 
 runs:
   using: "composite"
   steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ inputs.aws_oicd_role_arn }}
+        role-duration-seconds: 3600
+
     - name: Download artifact
       id: download-artifact
       shell: bash -euxo pipefail {0}

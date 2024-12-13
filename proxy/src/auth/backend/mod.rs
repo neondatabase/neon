@@ -74,10 +74,6 @@ impl std::fmt::Display for Backend<'_, ()> {
                     .debug_tuple("ControlPlane::ProxyV1")
                     .field(&endpoint.url())
                     .finish(),
-                ControlPlaneClient::Neon(endpoint) => fmt
-                    .debug_tuple("ControlPlane::Neon")
-                    .field(&endpoint.url())
-                    .finish(),
                 #[cfg(any(test, feature = "testing"))]
                 ControlPlaneClient::PostgresMock(endpoint) => fmt
                     .debug_tuple("ControlPlane::PostgresMock")
