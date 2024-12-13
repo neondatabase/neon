@@ -189,10 +189,6 @@ impl VirtualFile {
         self.inner.metadata().await
     }
 
-    pub fn remove(self) {
-        self.inner.remove();
-    }
-
     pub async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
         self.inner.seek(pos).await
     }
@@ -756,12 +752,6 @@ impl VirtualFileInner {
         Ok(FileGuard {
             slot_guard: slot_guard.downgrade(),
         })
-    }
-
-    pub fn remove(self) {
-        let path = self.path.clone();
-        drop(self);
-        std::fs::remove_file(path).expect("failed to remove the virtual file");
     }
 
     pub async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {

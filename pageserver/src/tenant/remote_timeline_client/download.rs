@@ -246,7 +246,7 @@ async fn download_object<'a>(
                         };
                         buffered.write_buffered_borrowed(&chunk, ctx).await?;
                     }
-                    let inner = buffered.shutdown(ctx).await?;
+                    let inner = buffered.shutdown(|_| None).await?;
                     Ok(inner)
                 }
                 .await?;

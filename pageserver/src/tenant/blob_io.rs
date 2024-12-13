@@ -312,18 +312,15 @@ impl BlobWriter {
     ///
     /// This function flushes the internal buffer before giving access
     /// to the underlying `VirtualFile`.
-    pub async fn into_inner(self, ctx: &RequestContext) -> Result<VirtualFile, Error> {
-        let (_, file) = self.writer.shutdown(ctx).await?;
-
-        Ok(file)
-    }
-
-    /// Access the underlying `VirtualFile`.
     ///
-    /// Unlike [`into_inner`](Self::into_inner), this doesn't flush
-    /// the internal buffer before giving access.
-    pub fn into_inner_no_flush(self) -> Arc<VirtualFile> {
-        self.writer.shutdown_no_flush()
+    /// The caller can use the `handle_tail` function to change the tail of the buffer before flushing it to disk.
+    /// The buffer will not be flushed to disk if handle_tail returns `None`.
+    pub async fn into_inner(
+        self,
+        handle_tail: impl FnMut(IoBufferMut) -> Option<IoBufferMut>,
+    ) -> Result<VirtualFile, Error> {
+        let (_, file) = self.writer.shutdown(handle_tail).await?;
+        Ok(file)
     }
 }
 
@@ -374,7 +371,7 @@ pub(crate) mod tests {
             let (_, res) = wtr.write_blob(vec![0; PAGE_SZ].slice_len(), ctx).await;
             let offs = res?;
             println!("Writing final blob at offs={offs}");
-            wtr.into_inner(ctx).await?;
+            wtr.into_inner(|_| None).await?;
         }
         Ok((temp_dir, pathbuf, offsets))
     }

@@ -109,41 +109,28 @@ where
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub async fn shutdown(mut self, ctx: &RequestContext) -> std::io::Result<(u64, W)> {
-        let buf = self.tail_mut();
-        let len = buf.pending();
-        let cap = buf.cap();
-        if len < cap {
-            // pad zeros to the next io alignment requirement.
-            let count = len.next_multiple_of(B::ALIGN).min(cap) - len;
-            buf.extend_with(0, count);
-        }
-        if let Some(control) = self.flush(ctx).await? {
-            control.release().await;
-        }
-
+    pub async fn shutdown(
+        self,
+        mut handle_tail: impl FnMut(B) -> Option<B>,
+    ) -> std::io::Result<(u64, W)> {
         let Self {
-            tail: buf,
+            tail,
             writer,
             mut flush_handle,
-            submit_offset: bytes_amount,
+            submit_offset,
         } = self;
-        flush_handle.shutdown().await?;
-        assert!(buf.is_some());
-        let writer = Arc::into_inner(writer).expect("writer is the only strong reference");
-        Ok((bytes_amount, writer))
-    }
 
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub fn shutdown_no_flush(self) -> Arc<W> {
-        let Self {
-            tail: _,
-            writer,
-            flush_handle,
-            submit_offset: _,
-        } = self;
-        flush_handle.shutdown_no_flush();
-        writer
+        let ctx = flush_handle.shutdown().await?;
+        let buf = tail.expect("must not use after an error");
+        let writer = Arc::into_inner(writer).expect("writer is the only strong reference");
+        let mut bytes_amount = submit_offset;
+        if let Some(buf) = handle_tail(buf) {
+            bytes_amount += buf.pending() as u64;
+            let _ = writer
+                .write_all_at(buf.flush(), submit_offset, &ctx)
+                .await?;
+        }
+        Ok((bytes_amount, writer))
     }
 
     /// Gets a immutable reference to the tail in-memory buffer.
@@ -353,11 +340,11 @@ mod tests {
         writer.write_buffered_borrowed(b"j", ctx).await?;
         writer.write_buffered_borrowed(b"klmno", ctx).await?;
 
-        let (_, recorder) = writer.shutdown(ctx).await?;
+        let (_, recorder) = writer.shutdown(|buf| Some(buf)).await?;
         assert_eq!(
             recorder.get_writes(),
             {
-                let expect: &[&[u8]] = &[b"ab", b"cd", b"ef", b"gh", b"ij", b"kl", b"mn", b"o\0"];
+                let expect: &[&[u8]] = &[b"ab", b"cd", b"ef", b"gh", b"ij", b"kl", b"mn", b"o"];
                 expect
             }
             .iter()

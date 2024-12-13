@@ -55,7 +55,6 @@ use pageserver_api::key::{Key, KEY_SIZE};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_api::value::Value;
-use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs::File;
@@ -741,6 +740,8 @@ struct ImageLayerWriterInner {
     blob_writer: BlobWriter,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 
+    _gate_guard: utils::sync::gate::GateGuard,
+
     #[cfg(feature = "testing")]
     last_written_key: Key,
 }
@@ -805,6 +806,8 @@ impl ImageLayerWriterInner {
             num_keys: 0,
             #[cfg(feature = "testing")]
             last_written_key: Key::MIN,
+
+            _gate_guard: gate.enter()?,
         };
 
         Ok(writer)
@@ -890,7 +893,19 @@ impl ImageLayerWriterInner {
         crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN.inc_by(self.uncompressed_bytes_chosen);
         crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
 
-        let file = self.blob_writer.into_inner(ctx).await?;
+        let file = self
+            .blob_writer
+            .into_inner(|mut buf| {
+                let len = buf.pending();
+                let cap = buf.cap();
+
+                // pad zeros to the next io alignment requirement.
+                let count = len.next_multiple_of(PAGE_SZ).min(cap) - len;
+                buf.extend_with(0, count);
+
+                Some(buf)
+            })
+            .await?;
 
         // Write out the index
         let mut offset = index_start_blk as u64 * PAGE_SZ as u64;
@@ -1064,10 +1079,37 @@ impl ImageLayerWriter {
 
 impl Drop for ImageLayerWriter {
     fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            let vfile = inner.blob_writer.into_inner_no_flush();
-            std::fs::remove_file(vfile.path()).expect("failed to remove the virtual file");
-        }
+        let Some(inner) = self.inner.take() else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            let ImageLayerWriterInner {
+                blob_writer,
+                _gate_guard,
+                ..
+            } = inner;
+
+            let vfile = match blob_writer
+                .into_inner(|_| None)
+                .await
+                .maybe_fatal_err("failed to access inner virtual file")
+            {
+                Ok(vfile) => vfile,
+                Err(e) => {
+                    error!(err=%e, "failed to remove image layer writer file");
+                    drop(_gate_guard);
+                    return;
+                }
+            };
+
+            if let Err(e) = std::fs::remove_file(vfile.path())
+                .maybe_fatal_err("failed to remove the virtual file")
+            {
+                error!(err=%e, path=%vfile.path(), "failed to remove image layer writer file");
+            }
+            drop(_gate_guard);
+        });
     }
 }
 
