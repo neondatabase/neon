@@ -40,7 +40,7 @@ pub use ::utils::shard::*;
 
 /// The ShardIdentity contains enough information to map a [`Key`] to a [`ShardNumber`],
 /// and to check whether that [`ShardNumber`] is the same as the current shard.
-#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash, Debug)]
 pub struct ShardIdentity {
     pub number: ShardNumber,
     pub count: ShardCount,
@@ -49,7 +49,7 @@ pub struct ShardIdentity {
 }
 
 /// Stripe size in number of pages
-#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash, Debug)]
 pub struct ShardStripeSize(pub u32);
 
 impl Default for ShardStripeSize {
@@ -59,7 +59,7 @@ impl Default for ShardStripeSize {
 }
 
 /// Layout version: for future upgrades where we might change how the key->shard mapping works
-#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash, Debug)]
 pub struct ShardLayout(u8);
 
 const LAYOUT_V1: ShardLayout = ShardLayout(1);

@@ -278,6 +278,8 @@ async fn import_wal(
 
     let mut walingest = WalIngest::new(tline, startpoint, ctx).await?;
 
+    let shard = vec![*tline.get_shard_identity()];
+
     while last_lsn <= endpoint {
         // FIXME: assume postgresql tli 1 for now
         let filename = XLogFileName(1, segno, WAL_SEGMENT_SIZE);
@@ -312,12 +314,16 @@ async fn import_wal(
         let mut modification = tline.begin_modification(last_lsn);
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                let interpreted = InterpretedWalRecord::from_bytes_filtered(
+                let (got_shard, interpreted) = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
-                    tline.get_shard_identity(),
+                    &shard,
                     lsn,
                     tline.pg_version,
-                )?;
+                )?
+                .pop()
+                .unwrap();
+
+                assert_eq!(got_shard, *tline.get_shard_identity());
 
                 walingest
                     .ingest_record(interpreted, &mut modification, ctx)
@@ -411,6 +417,7 @@ pub async fn import_wal_from_tar(
     let mut offset = start_lsn.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = start_lsn;
     let mut walingest = WalIngest::new(tline, start_lsn, ctx).await?;
+    let shard = vec![*tline.get_shard_identity()];
 
     // Ingest wal until end_lsn
     info!("importing wal until {}", end_lsn);
@@ -457,12 +464,16 @@ pub async fn import_wal_from_tar(
         let mut modification = tline.begin_modification(last_lsn);
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                let interpreted = InterpretedWalRecord::from_bytes_filtered(
+                let (got_shard, interpreted) = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
-                    tline.get_shard_identity(),
+                    &shard,
                     lsn,
                     tline.pg_version,
-                )?;
+                )?
+                .pop()
+                .unwrap();
+
+                assert_eq!(got_shard, *tline.get_shard_identity());
 
                 walingest
                     .ingest_record(interpreted, &mut modification, ctx)

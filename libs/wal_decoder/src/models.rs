@@ -48,7 +48,7 @@ pub mod proto {
     tonic::include_proto!("interpreted_wal");
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Copy, Clone, Serialize, Deserialize)]
 pub enum FlushUncommittedRecords {
     Yes,
     No,
