@@ -1280,6 +1280,12 @@ jobs:
           echo "run-id=${run_id}" | tee -a ${GITHUB_OUTPUT}
           echo "commit-sha=${last_commit_sha}" | tee -a ${GITHUB_OUTPUT}
 
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
       - name: Promote compatibility snapshot and Neon artifact
         env:
           BUCKET: neon-github-public-dev
