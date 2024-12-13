@@ -1014,7 +1014,7 @@ index fc42d418bf..e38f517574 100644
  CREATE SCHEMA addr_nsp;
  SET search_path TO 'addr_nsp';
 diff --git a/src/test/regress/expected/password.out b/src/test/regress/expected/password.out
-index 924d6e001d..5ab3fae66e 100644
+index 924d6e001d..e0b597a8f9 100644
 --- a/src/test/regress/expected/password.out
 +++ b/src/test/regress/expected/password.out
 @@ -12,13 +12,11 @@ SET password_encryption = 'md5'; -- ok
@@ -1025,13 +1025,13 @@ index 924d6e001d..5ab3fae66e 100644
 -ALTER ROLE regress_passwd1 PASSWORD 'role_pwd1';
 -CREATE ROLE regress_passwd2;
 -ALTER ROLE regress_passwd2 PASSWORD 'role_pwd2';
-+CREATE ROLE regress_passwd1 PASSWORD 'eOdn+jRk93NVsW1hdnW8vGTnS7qumGAPNxbTDA5OnEqAPpo0MZG11EqCrOrZUz';
-+CREATE ROLE regress_passwd2 PASSWORD 'eOdn+jRk93NVsW1hdnW8vGTnS7qumGAPNxbTDA5OnEqAPpo0MZG11EqCrOrZUz';
++CREATE ROLE regress_passwd1 PASSWORD NEON_PASSWORD_PLACEHOLDER;
++CREATE ROLE regress_passwd2 PASSWORD NEON_PASSWORD_PLACEHOLDER;
  SET password_encryption = 'scram-sha-256';
 -CREATE ROLE regress_passwd3 PASSWORD 'role_pwd3';
 -CREATE ROLE regress_passwd4 PASSWORD NULL;
-+CREATE ROLE regress_passwd3 PASSWORD 'eOdn+jRk93NVsW1hdnW8vGTnS7qumGAPNxbTDA5OnEqAPpo0MZG11EqCrOrZUz';
-+CREATE ROLE regress_passwd4 PASSWORD 'eOdn+jRk93NVsW1hdnW8vGTnS7qumGAPNxbTDA5OnEqAPpo0MZG11EqCrOrZUz';
++CREATE ROLE regress_passwd3 PASSWORD NEON_PASSWORD_PLACEHOLDER;
++CREATE ROLE regress_passwd4 PASSWORD NEON_PASSWORD_PLACEHOLDER;
  -- check list of created entries
  --
  -- The scram secret will look something like:
@@ -1057,11 +1057,11 @@ index 924d6e001d..5ab3fae66e 100644
 --- already encrypted, use as they are
 -ALTER ROLE regress_passwd1 PASSWORD 'md5cd3578025fe2c3d7ed1b9a9b26238b70';
 -ALTER ROLE regress_passwd3 PASSWORD 'SCRAM-SHA-256$4096:VLK4RMaQLCvNtQ==$6YtlR4t69SguDiwFvbVgVZtuz6gpJQQqUMZ7IQJK5yI=:ps75jrHeYU4lXCcXI4O8oIdJ3eO8o2jirjruw9phBTo=';
-+ALTER ROLE regress_passwd2 PASSWORD 'eOdn+jRk93NVsW1hdnW8vGTnS7qumGAPNxbTDA5OnEqAPpo0MZG11EqCrOrZUz';
++ALTER ROLE regress_passwd2 PASSWORD NEON_PASSWORD_PLACEHOLDER;
  SET password_encryption = 'scram-sha-256';
  -- create SCRAM secret
 -ALTER ROLE  regress_passwd4 PASSWORD 'foo';
-+ALTER ROLE  regress_passwd4 PASSWORD 'eOdn+jRk93NVsW1hdnW8vGTnS7qumGAPNxbTDA5OnEqAPpo0MZG11EqCrOrZUz';
++ALTER ROLE  regress_passwd4 PASSWORD NEON_PASSWORD_PLACEHOLDER;
  -- already encrypted with MD5, use as it is
 -CREATE ROLE regress_passwd5 PASSWORD 'md5e73a4b11df52a6068f8b39f90be36023';
 --- This looks like a valid SCRAM-SHA-256 secret, but it is not
@@ -1074,11 +1074,11 @@ index 924d6e001d..5ab3fae66e 100644
 --- invalid length
 -CREATE ROLE regress_passwd8 PASSWORD 'md501234567890123456789012345678901zz';
 +-- Neon does not support encrypted passwords, use unencrypted instead
-+CREATE ROLE regress_passwd5 PASSWORD 'eOdn+jRk93NVsW1hdnW8vGTnS7qumGAPNxbTDA5OnEqAPpo0MZG11EqCrOrZUz';
++CREATE ROLE regress_passwd5 PASSWORD NEON_PASSWORD_PLACEHOLDER;
 +-- Neon does not support encrypted passwords, use unencrypted instead
-+CREATE ROLE regress_passwd6 PASSWORD 'eOdn+jRk93NVsW1hdnW8vGTnS7qumGAPNxbTDA5OnEqAPpo0MZG11EqCrOrZUz';
-+CREATE ROLE regress_passwd7 PASSWORD 'eOdn+jRk93NVsW1hdnW8vGTnS7qumGAPNxbTDA5OnEqAPpo0MZG11EqCrOrZUz';
-+CREATE ROLE regress_passwd8 PASSWORD 'eOdn+jRk93NVsW1hdnW8vGTnS7qumGAPNxbTDA5OnEqAPpo0MZG11EqCrOrZUz';
++CREATE ROLE regress_passwd6 PASSWORD NEON_PASSWORD_PLACEHOLDER;
++CREATE ROLE regress_passwd7 PASSWORD NEON_PASSWORD_PLACEHOLDER;
++CREATE ROLE regress_passwd8 PASSWORD NEON_PASSWORD_PLACEHOLDER;
  -- Changing the SCRAM iteration count
  SET scram_iterations = 1024;
  CREATE ROLE regress_passwd9 PASSWORD 'alterediterationcount';
@@ -1088,8 +1088,8 @@ index 924d6e001d..5ab3fae66e 100644
  -----------------+---------------------------------------------------
 - regress_passwd1 | md5cd3578025fe2c3d7ed1b9a9b26238b70
 - regress_passwd2 | md5dfa155cadd5f4ad57860162f3fab9cdb
-+ regress_passwd1 | md5ec6bdfa35df901de1a53dc3dd5c2e54c
-+ regress_passwd2 | md5b170866df502b236ff5d2df6afc5a02b
++ regress_passwd1 | NEON_MD5_PLACEHOLDER
++ regress_passwd2 | NEON_MD5_PLACEHOLDER
   regress_passwd3 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey>
   regress_passwd4 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey>
 - regress_passwd5 | md5e73a4b11df52a6068f8b39f90be36023
@@ -1123,9 +1123,9 @@ index 924d6e001d..5ab3fae66e 100644
 -CREATE ROLE regress_passwd_sha_len1 PASSWORD 'SCRAM-SHA-256$4096:A6xHKoH/494E941doaPOYg==$Ky+A30sewHIH3VHQLRN9vYsuzlgNyGNKCh37dy96RqwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:COPdlNiIkrsacU5QoxydEuOH6e/KfiipeETb/bPw8ZI=';
 -CREATE ROLE regress_passwd_sha_len2 PASSWORD 'SCRAM-SHA-256$4096:A6xHKoH/494E941doaPOYg==$Ky+A30sewHIH3VHQLRN9vYsuzlgNyGNKCh37dy96Rqw=:COPdlNiIkrsacU5QoxydEuOH6e/KfiipeETb/bPw8ZIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 +-- Neon does not support encrypted passwords, use unencrypted instead
-+CREATE ROLE regress_passwd_sha_len0 PASSWORD 'eOdn+jRk93NVsW1hdnW8vGTnS7qumGAPNxbTDA5OnEqAPpo0MZG11EqCrOrZUz';
-+CREATE ROLE regress_passwd_sha_len1 PASSWORD 'eOdn+jRk93NVsW1hdnW8vGTnS7qumGAPNxbTDA5OnEqAPpo0MZG11EqCrOrZUz';
-+CREATE ROLE regress_passwd_sha_len2 PASSWORD 'eOdn+jRk93NVsW1hdnW8vGTnS7qumGAPNxbTDA5OnEqAPpo0MZG11EqCrOrZUz';
++CREATE ROLE regress_passwd_sha_len0 PASSWORD NEON_PASSWORD_PLACEHOLDER;
++CREATE ROLE regress_passwd_sha_len1 PASSWORD NEON_PASSWORD_PLACEHOLDER;
++CREATE ROLE regress_passwd_sha_len2 PASSWORD NEON_PASSWORD_PLACEHOLDER;
  -- Check that the invalid secrets were re-hashed. A re-hashed secret
  -- should not contain the original salt.
  SELECT rolname, rolpassword not like '%A6xHKoH/494E941doaPOYg==%' as is_rolpassword_rehashed
