@@ -1922,14 +1922,18 @@ impl Timeline {
             output
         }
 
+        let mut key_exist = false;
         for (i, split_for_lsn) in split_history.into_iter().enumerate() {
             // TODO: there could be image keys inside the splits, and we can compute records_since_last_image accordingly.
             records_since_last_image += split_for_lsn.len();
-            let generate_image = if i == 0 && !has_ancestor {
+            // Whether to produce an image into the final layer files
+            let produce_image = if i == 0 && !has_ancestor {
                 // We always generate images for the first batch (below horizon / lowest retain_lsn)
                 true
             } else if i == batch_cnt - 1 {
                 // Do not generate images for the last batch (above horizon)
+                false
+            } else if records_since_last_image == 0 {
                 false
             } else if records_since_last_image >= delta_threshold_cnt {
                 // Generate images when there are too many records
@@ -1945,32 +1949,36 @@ impl Timeline {
                     break;
                 }
             }
-            if let Some((_, _, val)) = replay_history.first() {
-                if !val.will_init() {
-                    return Err(anyhow::anyhow!("invalid history, no base image")).with_context(
-                        || {
-                            generate_debug_trace(
-                                Some(&replay_history),
-                                full_history,
-                                retain_lsn_below_horizon,
-                                horizon,
-                            )
-                        },
-                    );
-                }
+            if replay_history.is_empty() && !key_exist {
+                // The key does not exist at earlier LSN, we can skip this iteration.
+                retention.push(Vec::new());
+                continue;
+            } else {
+                key_exist = true;
             }
-            // Whether to produce an image into the final layer files
-            let produce_image = generate_image && records_since_last_image > 0;
+            let Some((_, _, val)) = replay_history.first() else {
+                unreachable!("replay history should not be empty once it exists")
+            };
+            if !val.will_init() {
+                return Err(anyhow::anyhow!("invalid history, no base image")).with_context(|| {
+                    generate_debug_trace(
+                        Some(&replay_history),
+                        full_history,
+                        retain_lsn_below_horizon,
+                        horizon,
+                    )
+                });
+            }
             // Whether to reconstruct the image. In debug mode, we will generate an image
             // at every retain_lsn to ensure data is not corrupted, but we won't put the
             // image into the final layer.
-            let generate_image =
-                produce_image || cfg!(debug_assertions) || cfg!(feature = "testing");
+            let debug_mode = cfg!(debug_assertions) || cfg!(feature = "testing");
+            let generate_image = produce_image || debug_mode;
             if produce_image {
                 records_since_last_image = 0;
             }
             let img_and_lsn = if generate_image {
-                let replay_history_for_debug = if cfg!(debug_assertions) {
+                let replay_history_for_debug = if debug_mode {
                     Some(replay_history.clone())
                 } else {
                     None
@@ -2017,7 +2025,13 @@ impl Timeline {
                 }
                 records.reverse();
                 let state = ValueReconstructState { img, records };
-                let request_lsn = lsn_split_points[i]; // last batch does not generate image so i is always in range
+                // last batch does not generate image so i is always in range, unless we force generate
+                // an image during testing
+                let request_lsn = if i >= lsn_split_points.len() {
+                    Lsn::MAX
+                } else {
+                    lsn_split_points[i]
+                };
                 let img = self.reconstruct_value(key, request_lsn, state).await?;
                 Some((request_lsn, img))
             } else {
@@ -2417,7 +2431,7 @@ impl Timeline {
                 .first()
                 .copied()
                 .unwrap_or(job_desc.gc_cutoff);
-            if cfg!(debug_assertions) {
+            if cfg!(debug_assertions) || cfg!(feature = "testing") {
                 assert_eq!(
                     res,
                     job_desc
