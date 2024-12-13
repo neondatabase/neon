@@ -16,7 +16,7 @@ use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Context;
 use anyhow::Result;
 use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
-use azure_core::{Continuable, RetryOptions, HttpClient, TransportOptions};
+use azure_core::{Continuable, HttpClient, RetryOptions, TransportOptions};
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
 use azure_storage_blobs::prelude::ClientBuilder;
