@@ -57,6 +57,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
         keepalive_ticker.reset();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Batch>(2);
+        let shard = vec![self.shard];
 
         loop {
             tokio::select! {
@@ -80,14 +81,19 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
                         assert!(next_record_lsn.is_aligned());
                         max_next_record_lsn = Some(next_record_lsn);
 
+
                         // Deserialize and interpret WAL record
-                        let interpreted = InterpretedWalRecord::from_bytes_filtered(
+                        let (shard_id, interpreted) = InterpretedWalRecord::from_bytes_filtered(
                             recdata,
-                            &self.shard,
+                            &shard,
                             next_record_lsn,
                             self.pg_version,
                         )
-                        .with_context(|| "Failed to interpret WAL")?;
+                        .with_context(|| "Failed to interpret WAL")?
+                        .pop()
+                        .unwrap();
+
+                        assert_eq!(shard_id, self.shard);
 
                         if !interpreted.is_empty() {
                             records.push(interpreted);
