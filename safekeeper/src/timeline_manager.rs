@@ -14,7 +14,7 @@ use std::{
 
 use futures::channel::oneshot;
 use postgres_ffi::XLogSegNo;
-use safekeeper_api::Term;
+use safekeeper_api::{models::PeerInfo, Term};
 use serde::{Deserialize, Serialize};
 use tokio::{
     task::{JoinError, JoinHandle},
@@ -35,7 +35,7 @@ use crate::{
     remove_wal::calc_horizon_lsn,
     send_wal::WalSenders,
     state::TimelineState,
-    timeline::{ManagerTimeline, PeerInfo, ReadGuardSharedState, StateSK, WalResidentTimeline},
+    timeline::{ManagerTimeline, ReadGuardSharedState, StateSK, WalResidentTimeline},
     timeline_guard::{AccessService, GuardId, ResidenceGuard},
     timelines_set::{TimelineSetGuard, TimelinesSet},
     wal_backup::{self, WalBackupTaskHandle},

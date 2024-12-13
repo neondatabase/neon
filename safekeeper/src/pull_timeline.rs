@@ -4,7 +4,7 @@ use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
 use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
-use safekeeper_api::Term;
+use safekeeper_api::{models::TimelineStatus, Term};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::min,
@@ -22,10 +22,7 @@ use tracing::{error, info, instrument};
 use crate::{
     control_file::CONTROL_FILE_NAME,
     debug_dump,
-    http::{
-        client::{self, Client},
-        routes::TimelineStatus,
-    },
+    http::client::{self, Client},
     state::{EvictionState, TimelinePersistentState},
     timeline::{Timeline, WalResidentTimeline},
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},

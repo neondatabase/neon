@@ -8,13 +8,13 @@
 
 use anyhow::Context;
 use postgres_backend::QueryError;
-use safekeeper_api::Term;
+use safekeeper_api::{ServerInfo, Term};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::*;
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::safekeeper::{AcceptorProposerMessage, AppendResponse, ServerInfo};
+use crate::safekeeper::{AcceptorProposerMessage, AppendResponse};
 use crate::safekeeper::{
     AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerElected,
 };

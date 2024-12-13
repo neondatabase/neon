@@ -1,8 +1,9 @@
 use hyper::{Body, Request, Response, StatusCode};
+use safekeeper_api::models::AcceptorStateStatus;
 use safekeeper_api::models::SafekeeperStatus;
 use safekeeper_api::models::TermSwitchApiEntry;
-use safekeeper_api::Term;
-use serde::{Deserialize, Serialize};
+use safekeeper_api::models::TimelineStatus;
+use safekeeper_api::ServerInfo;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::Write as _;
@@ -39,10 +40,7 @@ use utils::{
 };
 
 use crate::debug_dump::TimelineDigestRequest;
-use crate::receive_wal::WalReceiverState;
-use crate::safekeeper::{ServerInfo, TermLsn};
-use crate::send_wal::WalSenderState;
-use crate::timeline::PeerInfo;
+use crate::safekeeper::TermLsn;
 use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
@@ -68,42 +66,6 @@ fn get_global_timelines(request: &Request<Body>) -> Arc<GlobalTimelines> {
         .data::<Arc<GlobalTimelines>>()
         .expect("unknown state type")
         .clone()
-}
-
-impl From<TermSwitchApiEntry> for TermLsn {
-    fn from(api_val: TermSwitchApiEntry) -> Self {
-        TermLsn {
-            term: api_val.term,
-            lsn: api_val.lsn,
-        }
-    }
-}
-
-/// Augment AcceptorState with last_log_term for convenience
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AcceptorStateStatus {
-    pub term: Term,
-    pub epoch: Term, // aka last_log_term, old `epoch` name is left for compatibility
-    pub term_history: Vec<TermSwitchApiEntry>,
-}
-
-/// Info about timeline on safekeeper ready for reporting.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TimelineStatus {
-    pub tenant_id: TenantId,
-    pub timeline_id: TimelineId,
-    pub acceptor_state: AcceptorStateStatus,
-    pub pg_info: ServerInfo,
-    pub flush_lsn: Lsn,
-    pub timeline_start_lsn: Lsn,
-    pub local_start_lsn: Lsn,
-    pub commit_lsn: Lsn,
-    pub backup_lsn: Lsn,
-    pub peer_horizon_lsn: Lsn,
-    pub remote_consistent_lsn: Lsn,
-    pub peers: Vec<PeerInfo>,
-    pub walsenders: Vec<WalSenderState>,
-    pub walreceivers: Vec<WalReceiverState>,
 }
 
 fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Result<(), ApiError> {
@@ -174,6 +136,15 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
         .map(|tli| tli.ttid)
         .collect();
     json_response(StatusCode::OK, res)
+}
+
+impl From<TermSwitchApiEntry> for TermLsn {
+    fn from(api_val: TermSwitchApiEntry) -> Self {
+        TermLsn {
+            term: api_val.term,
+            lsn: api_val.lsn,
+        }
+    }
 }
 
 /// Report info about timeline.
