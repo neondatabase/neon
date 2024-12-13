@@ -8,6 +8,7 @@ use std::io;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -15,7 +16,7 @@ use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Context;
 use anyhow::Result;
 use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
-use azure_core::{Continuable, RetryOptions};
+use azure_core::{Continuable, RetryOptions, HttpClient, TransportOptions};
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
 use azure_storage_blobs::prelude::ClientBuilder;
@@ -81,8 +82,9 @@ impl AzureBlobStorage {
         };
 
         // we have an outer retry
-        let builder = ClientBuilder::new(account, credentials).retry(RetryOptions::none());
-
+        let builder = ClientBuilder::new(account, credentials)
+            .retry(RetryOptions::none())
+            .transport(TransportOptions::new(reqwest_client(small_timeout)));
         let client = builder.container_client(azure_config.container_name.to_owned());
 
         let max_keys_per_list_response =
@@ -259,6 +261,16 @@ impl AzureBlobStorage {
     pub fn container_name(&self) -> &str {
         &self.container_name
     }
+}
+
+fn reqwest_client(timeout: Duration) -> Arc<dyn HttpClient> {
+    let client = reqwest::ClientBuilder::new()
+        .pool_max_idle_per_host(0)
+        .read_timeout(timeout)
+        .connect_timeout(timeout)
+        .build()
+        .expect("failed to build `reqwest` client");
+    Arc::new(client)
 }
 
 fn to_azure_metadata(metadata: StorageMetadata) -> Metadata {
