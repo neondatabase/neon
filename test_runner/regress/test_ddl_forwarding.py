@@ -60,7 +60,7 @@ def ddl_forward_handler(
     if request.json is None:
         log.info("Received invalid JSON")
         return Response(status=400)
-    json: dict[str, str] = request.json
+    json: dict[str, list[str]] = request.json
     # Handle roles first
     for operation in json.get("roles", []):
         handle_role(dbs, roles, operation)
