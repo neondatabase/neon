@@ -4061,12 +4061,12 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<((KeyPartitioning, SparseKeyPartitioning), Lsn), CompactionError> {
         let Ok(mut partitioning_guard) = self.partitioning.try_lock() else {
-            // NB: there are three callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
+            // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
-            // The third caller is `gc_compaction_split_jobs` for gc-compaction where it uses the repartition
-            // data to determine the split jobs. In the future, it might use its own heuristics, but for now,
-            // we should allow concurrent access to it and let the caller retry compaction.
+            // Note that there are a third "caller" that will take the `partitioning` lock. It is `gc_compaction_split_jobs` for
+            // gc-compaction where it uses the repartition data to determine the split jobs. In the future, it might use its own
+            // heuristics, but for now, we should allow concurrent access to it and let the caller retry compaction.
             return Err(CompactionError::Other(anyhow!(
                 "repartition() called concurrently, this is rare and a retry should be fine"
             )));
