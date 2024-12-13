@@ -7,8 +7,6 @@ use serde::{Deserialize, Serialize};
 /// Public API types
 pub mod models;
 
-pub mod send_wal;
-
 /// Consensus logical timestamp. Note: it is a part of sk control file.
 pub type Term = u64;
 pub const INVALID_TERM: Term = 0;
