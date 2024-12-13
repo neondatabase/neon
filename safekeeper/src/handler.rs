@@ -4,6 +4,8 @@
 use anyhow::Context;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
+use safekeeper_api::models::ConnectionId;
+use safekeeper_api::Term;
 use std::future::Future;
 use std::str::{self, FromStr};
 use std::sync::Arc;
@@ -16,9 +18,7 @@ use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
 use crate::metrics::{TrafficMetrics, PG_QUERIES_GAUGE};
-use crate::safekeeper::Term;
 use crate::timeline::TimelineError;
-use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
 use postgres_backend::PostgresBackend;
 use postgres_backend::QueryError;

@@ -254,16 +254,14 @@ jobs:
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
       # Run tests on all Postgres versions in release builds and only on the latest version in debug builds.
-      # Run without LFC on v17 release and debug builds only. For all the other cases LFC is enabled. Failure on the
-      # debug build with LFC enabled doesn't block merging.
+      # Run without LFC on v17 release and debug builds only. For all the other cases LFC is enabled.
       test-cfg: |
         ${{ matrix.build-type == 'release' && '[{"pg_version":"v14", "lfc_state": "with-lfc"},
                                                 {"pg_version":"v15", "lfc_state": "with-lfc"},
                                                 {"pg_version":"v16", "lfc_state": "with-lfc"},
                                                 {"pg_version":"v17", "lfc_state": "with-lfc"},
                                                 {"pg_version":"v17", "lfc_state": "without-lfc"}]'
-                                           || '[{"pg_version":"v17", "lfc_state": "without-lfc"},
-                                                {"pg_version":"v17", "lfc_state": "with-lfc" }]' }}
+                                           || '[{"pg_version":"v17", "lfc_state": "without-lfc" }]' }}
     secrets: inherit
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
@@ -305,6 +303,11 @@ jobs:
   benchmarks:
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     needs: [ check-permissions, build-and-test-locally, build-build-tools-image, get-benchmarks-durations ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
+      pull-requests: write
     runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -345,6 +348,11 @@ jobs:
   report-benchmarks-failures:
     needs: [ benchmarks, create-test-report ]
     if: github.ref_name == 'main' && failure() && needs.benchmarks.result == 'failure'
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
+      pull-requests: write
     runs-on: ubuntu-22.04
 
     steps:
@@ -1026,6 +1034,11 @@ jobs:
   trigger-custom-extensions-build-and-wait:
     needs: [ check-permissions, tag ]
     runs-on: ubuntu-22.04
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
+      pull-requests: write
     steps:
       - name: Set PR's status to pending and request a remote CI test
         run: |
@@ -1145,7 +1158,7 @@ jobs:
               console.log(`Tag ${tag} created successfully.`);
             }
 
-            # TODO: check how GitHub releases looks for proxy/compute releases and enable them if they're ok
+            // TODO: check how GitHub releases looks for proxy/compute releases and enable them if they're ok
             if (context.ref !== 'refs/heads/release') {
               console.log(`GitHub release skipped for ${context.ref}.`);
               return;

@@ -9,9 +9,7 @@ use crate::metrics::{
 };
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
-use crate::safekeeper::ServerInfo;
 use crate::timeline::WalResidentTimeline;
-use crate::wal_service::ConnectionId;
 use crate::GlobalTimelines;
 use anyhow::{anyhow, Context};
 use bytes::BytesMut;
@@ -23,8 +21,8 @@ use postgres_backend::PostgresBackend;
 use postgres_backend::PostgresBackendReader;
 use postgres_backend::QueryError;
 use pq_proto::BeMessage;
-use serde::Deserialize;
-use serde::Serialize;
+use safekeeper_api::models::{ConnectionId, WalReceiverState, WalReceiverStatus};
+use safekeeper_api::ServerInfo;
 use std::future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -169,21 +167,6 @@ impl WalReceiversShared {
     fn get_num(&self) -> usize {
         self.slots.iter().flatten().count()
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalReceiverState {
-    /// None means it is recovery initiated by us (this safekeeper).
-    pub conn_id: Option<ConnectionId>,
-    pub status: WalReceiverStatus,
-}
-
-/// Walreceiver status. Currently only whether it passed voting stage and
-/// started receiving the stream, but it is easy to add more if needed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WalReceiverStatus {
-    Voting,
-    Streaming,
 }
 
 /// Scope guard to access slot in WalReceivers registry and unregister from
