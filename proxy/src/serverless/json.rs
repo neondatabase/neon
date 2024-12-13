@@ -204,7 +204,10 @@ fn pg_array_parse_inner(
 
         if c == '\\' {
             escaped = true;
-            (i, c) = pg_array_chr.next().unwrap();
+            let Some(x) = pg_array_chr.next() else {
+                return Err(JsonConversionError::UnbalancedArray);
+            };
+            (i, c) = x;
         }
 
         match c {
@@ -254,6 +257,7 @@ fn pg_array_parse_inner(
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::unwrap_used)]
     use serde_json::json;
 
     use super::*;

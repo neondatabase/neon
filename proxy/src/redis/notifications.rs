@@ -6,6 +6,7 @@ use pq_proto::CancelKeyData;
 use redis::aio::PubSub;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
@@ -13,7 +14,6 @@ use crate::cache::project_info::ProjectInfoCache;
 use crate::cancellation::{CancelMap, CancellationHandler};
 use crate::intern::{ProjectIdInt, RoleNameInt};
 use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
-use tracing::Instrument;
 
 const CPLANE_CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
 pub(crate) const PROXY_CHANNEL_NAME: &str = "neondb-proxy-to-proxy-updates";

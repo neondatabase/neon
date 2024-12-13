@@ -83,7 +83,7 @@ impl<Id: InternId> StringInterner<Id> {
     pub(crate) fn new() -> Self {
         StringInterner {
             inner: ThreadedRodeo::with_capacity_memory_limits_and_hasher(
-                Capacity::new(2500, NonZeroUsize::new(1 << 16).unwrap()),
+                Capacity::new(2500, NonZeroUsize::new(1 << 16).expect("value is nonzero")),
                 // unbounded
                 MemoryLimits::for_memory_usage(usize::MAX),
                 BuildHasherDefault::<FxHasher>::default(),
@@ -208,6 +208,7 @@ impl From<ProjectId> for ProjectIdInt {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::unwrap_used)]
     use std::sync::OnceLock;
 
     use super::InternId;

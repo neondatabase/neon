@@ -12,6 +12,7 @@ use tracing::info;
 
 use crate::config::EndpointCacheConfig;
 use crate::context::RequestContext;
+use crate::ext::LockExt;
 use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
 use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
 use crate::rate_limiter::GlobalRateLimiter;
@@ -96,7 +97,7 @@ impl EndpointsCache {
 
         // If the limiter allows, we can pretend like it's valid
         // (incase it is, due to redis channel lag).
-        if self.limiter.lock().unwrap().check() {
+        if self.limiter.lock_propagate_poison().check() {
             return true;
         }
 
@@ -259,6 +260,7 @@ impl EndpointsCache {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::unwrap_used)]
     use super::*;
 
     #[test]

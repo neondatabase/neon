@@ -777,6 +777,8 @@ impl From<&jose_jwk::Key> for KeyType {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::unwrap_used)]
+
     use std::future::IntoFuture;
     use std::net::SocketAddr;
     use std::time::SystemTime;

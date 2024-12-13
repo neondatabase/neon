@@ -366,6 +366,7 @@ impl Cache for ProjectInfoCacheImpl {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::unwrap_used)]
     use super::*;
     use crate::scram::ServerSecret;
     use crate::types::ProjectId;

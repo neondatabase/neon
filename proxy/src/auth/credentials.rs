@@ -251,6 +251,7 @@ fn project_name_valid(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::unwrap_used)]
     use serde_json::json;
     use ComputeUserInfoParseError::*;
 

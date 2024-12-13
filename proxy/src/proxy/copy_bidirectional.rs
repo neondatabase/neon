@@ -258,6 +258,7 @@ impl CopyBuffer {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::unwrap_used)]
     use tokio::io::AsyncWriteExt;
 
     use super::*;

@@ -186,6 +186,7 @@ impl fmt::Debug for OwnedServerFirstMessage {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::unwrap_used)]
     use super::*;
 
     #[test]
