@@ -435,6 +435,14 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
             ]
         )
 
+    env.storage_scrubber.allowed_errors.extend(
+        [
+            # Unclcean shutdowns of pageserver can legitimately result in orphan layers
+            # (https://github.com/neondatabase/neon/issues/9988#issuecomment-2520558211)
+            f".*Orphan layer detected: tenants/{tenant_id}/.*"
+        ]
+    )
+
     class TimelineState:
         def __init__(self):
             self.timeline_id = TimelineId.generate()
