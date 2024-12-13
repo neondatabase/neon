@@ -85,7 +85,7 @@ const parseReportJson = async ({ reportJsonUrl, fetch }) => {
                     arch = "unknown"
                 }
                 let lfcState = ""
-                if (test.parameters[1] == "True") {
+                if (test.parameters.includes("'with-lfc'")) {
                     lfcState = "with-lfc"
                 } else {
                     lfcState = "without-lfc"
