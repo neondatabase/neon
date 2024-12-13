@@ -1,11 +1,12 @@
 //! Code to deal with safekeeper control file upgrades
 use crate::{
-    safekeeper::{AcceptorState, PgUuid, ServerInfo, Term, TermHistory, TermLsn},
+    safekeeper::{AcceptorState, PgUuid, ServerInfo, TermHistory, TermLsn},
     state::{EvictionState, PersistedPeers, TimelinePersistentState},
     wal_backup_partial,
 };
 use anyhow::{bail, Result};
 use pq_proto::SystemId;
+use safekeeper_api::Term;
 use serde::{Deserialize, Serialize};
 use tracing::*;
 use utils::{

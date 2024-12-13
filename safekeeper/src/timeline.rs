@@ -5,6 +5,7 @@ use anyhow::{anyhow, bail, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use remote_storage::RemotePath;
 use safekeeper_api::models::TimelineTermBumpResponse;
+use safekeeper_api::Term;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{self};
 use tokio_util::sync::CancellationToken;
@@ -31,9 +32,7 @@ use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use crate::control_file;
 use crate::rate_limit::RateLimiter;
 use crate::receive_wal::WalReceivers;
-use crate::safekeeper::{
-    AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, Term, TermLsn,
-};
+use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, TermLsn};
 use crate::send_wal::WalSenders;
 use crate::state::{EvictionState, TimelineMemState, TimelinePersistentState, TimelineState};
 use crate::timeline_guard::ResidenceGuard;

@@ -8,6 +8,7 @@
 
 use anyhow::Context;
 use postgres_backend::QueryError;
+use safekeeper_api::Term;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::*;
@@ -17,7 +18,7 @@ use crate::safekeeper::{AcceptorProposerMessage, AppendResponse, ServerInfo};
 use crate::safekeeper::{
     AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerElected,
 };
-use crate::safekeeper::{Term, TermHistory, TermLsn};
+use crate::safekeeper::{TermHistory, TermLsn};
 use crate::state::TimelinePersistentState;
 use crate::timeline::WalResidentTimeline;
 use postgres_backend::PostgresBackend;

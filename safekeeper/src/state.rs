@@ -5,7 +5,7 @@ use std::{cmp::max, ops::Deref};
 
 use anyhow::{bail, Result};
 use postgres_ffi::WAL_SEGMENT_SIZE;
-use safekeeper_api::models::TimelineTermBumpResponse;
+use safekeeper_api::{models::TimelineTermBumpResponse, Term};
 use serde::{Deserialize, Serialize};
 use utils::{
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -15,8 +15,7 @@ use utils::{
 use crate::{
     control_file,
     safekeeper::{
-        AcceptorState, PersistedPeerInfo, PgUuid, ServerInfo, Term, TermHistory,
-        UNKNOWN_SERVER_VERSION,
+        AcceptorState, PersistedPeerInfo, PgUuid, ServerInfo, TermHistory, UNKNOWN_SERVER_VERSION,
     },
     timeline::TimelineError,
     wal_backup_partial::{self},

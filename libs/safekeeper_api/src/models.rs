@@ -5,6 +5,13 @@ use utils::{
     lsn::Lsn,
 };
 
+use crate::Term;
+
+#[derive(Debug, Serialize)]
+pub struct SafekeeperStatus {
+    pub id: NodeId,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {
     pub tenant_id: TenantId,
@@ -16,6 +23,14 @@ pub struct TimelineCreateRequest {
     pub commit_lsn: Lsn,
     // If not passed, it is assigned to the beginning of commit_lsn segment.
     pub local_start_lsn: Option<Lsn>,
+}
+
+/// Same as TermLsn, but serializes LSN using display serializer
+/// in Postgres format, i.e. 0/FFFFFFFF. Used only for the API response.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TermSwitchApiEntry {
+    pub term: Term,
+    pub lsn: Lsn,
 }
 
 fn lsn_invalid() -> Lsn {

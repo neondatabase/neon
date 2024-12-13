@@ -4,7 +4,7 @@
 use crate::handler::SafekeeperPostgresHandler;
 use crate::metrics::RECEIVED_PS_FEEDBACKS;
 use crate::receive_wal::WalReceivers;
-use crate::safekeeper::{Term, TermLsn};
+use crate::safekeeper::TermLsn;
 use crate::send_interpreted_wal::InterpretedWalSender;
 use crate::timeline::WalResidentTimeline;
 use crate::wal_reader_stream::WalReaderStreamBuilder;
@@ -19,6 +19,7 @@ use postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
 use postgres_ffi::get_current_timestamp;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
+use safekeeper_api::Term;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::failpoint_support;

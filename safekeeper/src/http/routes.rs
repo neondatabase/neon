@@ -1,4 +1,7 @@
 use hyper::{Body, Request, Response, StatusCode};
+use safekeeper_api::models::SafekeeperStatus;
+use safekeeper_api::models::TermSwitchApiEntry;
+use safekeeper_api::Term;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -31,13 +34,12 @@ use utils::{
         request::{ensure_no_body, parse_request_param},
         RequestExt, RouterBuilder,
     },
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
+    id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
 };
 
 use crate::debug_dump::TimelineDigestRequest;
 use crate::receive_wal::WalReceiverState;
-use crate::safekeeper::Term;
 use crate::safekeeper::{ServerInfo, TermLsn};
 use crate::send_wal::WalSenderState;
 use crate::timeline::PeerInfo;
@@ -45,11 +47,6 @@ use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 use crate::{copy_timeline, debug_dump, patch_control_file, pull_timeline};
-
-#[derive(Debug, Serialize)]
-struct SafekeeperStatus {
-    id: NodeId,
-}
 
 /// Healthcheck handler.
 async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -73,14 +70,6 @@ fn get_global_timelines(request: &Request<Body>) -> Arc<GlobalTimelines> {
         .clone()
 }
 
-/// Same as TermLsn, but serializes LSN using display serializer
-/// in Postgres format, i.e. 0/FFFFFFFF. Used only for the API response.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct TermSwitchApiEntry {
-    pub term: Term,
-    pub lsn: Lsn,
-}
-
 impl From<TermSwitchApiEntry> for TermLsn {
     fn from(api_val: TermSwitchApiEntry) -> Self {
         TermLsn {
@@ -94,7 +83,7 @@ impl From<TermSwitchApiEntry> for TermLsn {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AcceptorStateStatus {
     pub term: Term,
-    pub epoch: Term, // aka last_log_term
+    pub epoch: Term, // aka last_log_term, old `epoch` name is left for compatibility
     pub term_history: Vec<TermSwitchApiEntry>,
 }
 

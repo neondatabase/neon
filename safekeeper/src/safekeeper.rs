@@ -5,6 +5,8 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use postgres_ffi::{TimeLineID, MAX_SEND_SIZE};
+use safekeeper_api::Term;
+use safekeeper_api::INVALID_TERM;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
@@ -30,10 +32,6 @@ use utils::{
 
 const SK_PROTOCOL_VERSION: u32 = 2;
 pub const UNKNOWN_SERVER_VERSION: u32 = 0;
-
-/// Consensus logical timestamp.
-pub type Term = u64;
-pub const INVALID_TERM: Term = 0;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TermLsn {
