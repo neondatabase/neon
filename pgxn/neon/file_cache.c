@@ -1162,6 +1162,14 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 
+	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
+
+	if (!LFC_ENABLED())
+	{
+		LWLockRelease(lfc_lock);
+		return;
+	}
+
 	/*
 	 * For every chunk that has blocks we're interested in, we
 	 * 1. get the chunk header
@@ -1188,14 +1196,6 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
 		hash = get_hash_value(lfc_hash, &tag);
 
-		LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
-
-		if (!LFC_ENABLED())
-		{
-			LWLockRelease(lfc_lock);
-			return;
-		}
-
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
 
 		if (found)
@@ -1208,8 +1208,13 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				 * But clearing `prewarm_requested` flag also will not allow `lfc_prewarm` to fix it result.
 				 */
 				entry->prewarm_requested = false;
-				LWLockRelease(lfc_lock);
-				return;
+				/* cleanup all affected pages of the chunk: we do not know which one of them is conflicting with prewarm */
+				for (int i = 0; i < blocks_in_chunk; i++)
+				{
+					lfc_ctl->used_pages -= ((entry->bitmap[(chunk_offs + i) >> 5] >> ((chunk_offs + i) & 31)) & 1);
+					entry->bitmap[(chunk_offs + i) >> 5] &= ~(1 << ((chunk_offs + i) & 31));
+				}
+				goto next_chunk;
 			}
 			/*
 			 * Unlink entry from LRU list to pin it for the duration of IO
@@ -1290,6 +1295,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		if (rc != BLCKSZ * blocks_in_chunk)
 		{
 			lfc_disable("write");
+			return;
 		}
 		else
 		{
@@ -1319,12 +1325,13 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				}
 			}
 
-			LWLockRelease(lfc_lock);
 		}
+	  next_chunk:
 		blkno += blocks_in_chunk;
 		buf_offset += blocks_in_chunk;
 		nblocks -= blocks_in_chunk;
 	}
+	LWLockRelease(lfc_lock);
 }
 
 typedef struct
