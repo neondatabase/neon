@@ -13,6 +13,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
         config_lines=[
             "autovacuum = off",
             "shared_buffers=1MB",
+            "neon.file_cache_path='file.cache'",
             "neon.max_file_cache_size=1GB",
             "neon.file_cache_size_limit=1GB",
             "neon.file_cache_prewarm_limit=1000",
