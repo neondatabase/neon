@@ -673,7 +673,7 @@ lfc_prewarm(FileCacheStateEntry* fs, size_t n_entries)
 					/* Prefech can request page which is already dropped so PS can respond with error: just ignore it */
 					NeonErrorResponse *err_resp = (NeonErrorResponse *) resp;
 					elog(LOG, "LFC: page server failed to load page %u of relation %u/%u/%u.%u: %s",
-						 fs[chunk_no].key.blockNum + offs_in_chunk, RelFileInfoFmt(BufTagGetNRelFileInfo(fs[chunk_no].key)), fs[chunk_no].key.forkNum, err_resp->message);
+						 fs[chunk_no].key.blockNum + (BlockNumber)offs_in_chunk, RelFileInfoFmt(BufTagGetNRelFileInfo(fs[chunk_no].key)), fs[chunk_no].key.forkNum, err_resp->message);
 					continue;
 				}
 				default:
