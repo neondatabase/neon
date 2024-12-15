@@ -3,6 +3,7 @@ import time
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
+from fixtures.utils import USE_LFC
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
