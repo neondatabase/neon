@@ -750,7 +750,6 @@ fn build_auth_backend(
 
 #[cfg(test)]
 mod tests {
-    #![expect(clippy::unwrap_used)]
     use std::time::Duration;
 
     use clap::Parser;
