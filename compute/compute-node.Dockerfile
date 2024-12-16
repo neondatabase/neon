@@ -1556,10 +1556,12 @@ RUN apt update && \
         locales \
         procps \
         ca-certificates \
-        awscli \
+        python python-dev python-pip \
         $VERSION_INSTALLS && \
     apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
+
+RUN pip install awscli==2.17.5
 
 # s5cmd 2.2.2 from https://github.com/peak/s5cmd/releases/tag/v2.2.2
 # used by fast_import
