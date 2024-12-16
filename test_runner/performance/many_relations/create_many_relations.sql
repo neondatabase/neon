@@ -107,8 +107,6 @@ END;
 $$;
 
 -- next we create a procedure that can add the child partitions (one per day) to each of the operations tables
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
 CREATE OR REPLACE PROCEDURE create_operations_partitions(
     table_name TEXT, 
     start_date DATE,
@@ -172,7 +170,7 @@ BEGIN
             ''project_1'',                                   -- project_id
             ''branch_1'',                                    -- branch_id
             ''endpoint_1'',                                  -- endpoint_id
-            uuid_generate_v4(),                              -- unique id
+            ''e8bba687-0df9-4291-bfcd-7d5f6aa7c158'',          -- unique id
             1,                                               -- status
             ''SYNTHETIC_ACTION'',                            -- action
             gs::timestamp + interval ''0 ms'',               -- created_at

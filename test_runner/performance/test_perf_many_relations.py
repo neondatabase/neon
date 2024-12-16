@@ -29,4 +29,4 @@ def test_perf_many_relations(neon_with_baseline: PgCompare, num_relations: int):
 
     # prepare some base tables and the plpgsql procedures that we use to create the tables
     sql_file = Path(__file__).parent / "many_relations" / "create_many_relations.sql"
-    env.pg_bin.run(["psql", env.pg.connstr(),"-f", str(sql_file)])
+    env.pg_bin.run_capture(["psql", env.pg.connstr(),"-f", str(sql_file)])
