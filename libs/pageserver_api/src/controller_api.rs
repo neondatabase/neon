@@ -372,6 +372,9 @@ pub struct MetadataHealthListOutdatedResponse {
     pub health_records: Vec<MetadataHealthRecord>,
 }
 
+/// Publicly exposed safekeeper description
+///
+/// The `active` flag which we have in the DB is not included on purpose: it is deprecated.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SafekeeperDescribeResponse {
     pub id: NodeId,

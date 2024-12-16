@@ -1243,6 +1243,7 @@ impl SafekeeperPersistence {
         }
     }
     pub(crate) fn as_describe_response(&self) -> SafekeeperDescribeResponse {
+        // omit the `active` flag on purpose: it is deprecated.
         SafekeeperDescribeResponse {
             id: NodeId(self.id as u64),
             region_id: self.region_id.clone(),
