@@ -113,6 +113,8 @@ jobs:
         uses: ./.github/actions/allure-report-generate
         with:
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        env:
+          REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
       - name: Post to a Slack channel
         if: ${{ github.event.schedule && failure() }}
