@@ -4,6 +4,7 @@ use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
 use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
+use safekeeper_api::{models::TimelineStatus, Term};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::min,
@@ -21,11 +22,7 @@ use tracing::{error, info, instrument};
 use crate::{
     control_file::CONTROL_FILE_NAME,
     debug_dump,
-    http::{
-        client::{self, Client},
-        routes::TimelineStatus,
-    },
-    safekeeper::Term,
+    http::client::{self, Client},
     state::{EvictionState, TimelinePersistentState},
     timeline::{Timeline, WalResidentTimeline},
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
@@ -409,8 +406,9 @@ pub struct DebugDumpResponse {
 pub async fn handle_request(
     request: Request,
     sk_auth_token: Option<SecretString>,
+    global_timelines: Arc<GlobalTimelines>,
 ) -> Result<Response> {
-    let existing_tli = GlobalTimelines::get(TenantTimelineId::new(
+    let existing_tli = global_timelines.get(TenantTimelineId::new(
         request.tenant_id,
         request.timeline_id,
     ));
@@ -453,13 +451,14 @@ pub async fn handle_request(
     assert!(status.tenant_id == request.tenant_id);
     assert!(status.timeline_id == request.timeline_id);
 
-    pull_timeline(status, safekeeper_host, sk_auth_token).await
+    pull_timeline(status, safekeeper_host, sk_auth_token, global_timelines).await
 }
 
 async fn pull_timeline(
     status: TimelineStatus,
     host: String,
     sk_auth_token: Option<SecretString>,
+    global_timelines: Arc<GlobalTimelines>,
 ) -> Result<Response> {
     let ttid = TenantTimelineId::new(status.tenant_id, status.timeline_id);
     info!(
@@ -472,7 +471,7 @@ async fn pull_timeline(
         status.acceptor_state.epoch
     );
 
-    let conf = &GlobalTimelines::get_global_config();
+    let conf = &global_timelines.get_global_config();
 
     let (_tmp_dir, tli_dir_path) = create_temp_timeline_dir(conf, ttid).await?;
 
@@ -531,7 +530,9 @@ async fn pull_timeline(
     assert!(status.commit_lsn <= status.flush_lsn);
 
     // Finally, load the timeline.
-    let _tli = GlobalTimelines::load_temp_timeline(ttid, &tli_dir_path, false).await?;
+    let _tli = global_timelines
+        .load_temp_timeline(ttid, &tli_dir_path, false)
+        .await?;
 
     Ok(Response {
         safekeeper_host: host,

@@ -59,6 +59,8 @@ from werkzeug.wrappers.response import Response
 if TYPE_CHECKING:
     from typing import Any
 
+    from fixtures.httpserver import ListenAddress
+
 
 def get_node_shard_counts(env: NeonEnv, tenant_ids):
     counts: defaultdict[int, int] = defaultdict(int)
@@ -564,7 +566,7 @@ def test_storage_controller_onboard_detached(neon_env_builder: NeonEnvBuilder):
 def test_storage_controller_compute_hook(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
-    httpserver_listen_address,
+    httpserver_listen_address: ListenAddress,
 ):
     """
     Test that the sharding service calls out to the configured HTTP endpoint on attachment changes
@@ -685,7 +687,7 @@ NOTIFY_FAILURE_LOGS = [
 def test_storage_controller_stuck_compute_hook(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
-    httpserver_listen_address,
+    httpserver_listen_address: ListenAddress,
 ):
     """
     Test the migration process's behavior when the compute hook does not enable it to proceed
@@ -823,7 +825,7 @@ def test_storage_controller_stuck_compute_hook(
 def test_storage_controller_compute_hook_revert(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
-    httpserver_listen_address,
+    httpserver_listen_address: ListenAddress,
 ):
     """
     'revert' in the sense of a migration which gets reversed shortly after, as may happen during
@@ -1773,7 +1775,7 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     # Modify a tenant's config
     storcon_cli(
         [
-            "tenant-config",
+            "patch-tenant-config",
             "--tenant-id",
             str(env.initial_tenant),
             "--config",
@@ -2141,7 +2143,7 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
     env.start()
 
     tenant_count = 10
-    shard_count_per_tenant = 8
+    shard_count_per_tenant = 16
     tenant_ids = []
 
     for _ in range(0, tenant_count):
@@ -2408,7 +2410,7 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
 
     # Make a change to the tenant config to trigger a slow reconcile
     virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
-    virtual_ps_http.patch_tenant_config_client_side(tid, {"compaction_threshold": 5}, None)
+    virtual_ps_http.update_tenant_config(tid, {"compaction_threshold": 5}, None)
     env.storage_controller.allowed_errors.extend(
         [
             ".*Accepted configuration update but reconciliation failed.*",
@@ -2958,6 +2960,8 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     assert target.get_safekeeper(fake_id) is None
 
+    assert len(target.get_safekeepers()) == 0
+
     body = {
         "active": True,
         "id": fake_id,
@@ -2975,6 +2979,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     inserted = target.get_safekeeper(fake_id)
     assert inserted is not None
+    assert target.get_safekeepers() == [inserted]
     assert eq_safekeeper_records(body, inserted)
 
     # error out if pk is changed (unexpected)
@@ -2986,6 +2991,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     assert exc.value.status_code == 400
 
     inserted_again = target.get_safekeeper(fake_id)
+    assert target.get_safekeepers() == [inserted_again]
     assert inserted_again is not None
     assert eq_safekeeper_records(inserted, inserted_again)
 
@@ -2994,6 +3000,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     body["version"] += 1
     target.on_safekeeper_deploy(fake_id, body)
     inserted_now = target.get_safekeeper(fake_id)
+    assert target.get_safekeepers() == [inserted_now]
     assert inserted_now is not None
 
     assert eq_safekeeper_records(body, inserted_now)

@@ -810,7 +810,7 @@ impl Endpoint {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(120))
             .build()
             .unwrap();
         let response = client

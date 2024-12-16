@@ -5,6 +5,9 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use postgres_ffi::{TimeLineID, MAX_SEND_SIZE};
+use safekeeper_api::models::HotStandbyFeedback;
+use safekeeper_api::Term;
+use safekeeper_api::INVALID_TERM;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
@@ -16,7 +19,6 @@ use tracing::*;
 
 use crate::control_file;
 use crate::metrics::MISC_OPERATION_SECONDS;
-use crate::send_wal::HotStandbyFeedback;
 
 use crate::state::TimelineState;
 use crate::wal_storage;
@@ -30,10 +32,6 @@ use utils::{
 
 const SK_PROTOCOL_VERSION: u32 = 2;
 pub const UNKNOWN_SERVER_VERSION: u32 = 0;
-
-/// Consensus logical timestamp.
-pub type Term = u64;
-pub const INVALID_TERM: Term = 0;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TermLsn {
@@ -196,16 +194,6 @@ impl AcceptorState {
             None => 0,
         }
     }
-}
-
-/// Information about Postgres. Safekeeper gets it once and then verifies
-/// all further connections from computes match.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServerInfo {
-    /// Postgres server version
-    pub pg_version: u32,
-    pub system_id: SystemId,
-    pub wal_seg_size: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1041,6 +1029,7 @@ where
 mod tests {
     use futures::future::BoxFuture;
     use postgres_ffi::{XLogSegNo, WAL_SEGMENT_SIZE};
+    use safekeeper_api::ServerInfo;
 
     use super::*;
     use crate::state::{EvictionState, PersistedPeers, TimelinePersistentState};
