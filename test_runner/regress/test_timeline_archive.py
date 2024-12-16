@@ -426,6 +426,7 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
             [
                 ".*removing local file.*because it has unexpected length.*",
                 ".*__temp.*",
+                ".*method=POST path=\\S+/timeline .*: Not activating a Stopping timeline.*",
                 # FIXME: there are still anyhow::Error paths in timeline creation/deletion which
                 # generate 500 results when called during shutdown (https://github.com/neondatabase/neon/issues/9768)
                 ".*InternalServerError.*",
