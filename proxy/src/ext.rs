@@ -31,8 +31,11 @@ impl<T> TaskExt<T> for Result<T, JoinError> {
     fn propagate_task_panic(self) -> T {
         match self {
             Ok(t) => t,
+            // Using resume_unwind prevents the panic hook being called twice.
+            // Since we use this for structured concurrency, there is only
+            // 1 logical panic, so this is more correct.
             Err(e) if e.is_panic() => resume_unwind(e.into_panic()),
-            Err(_e) => panic!("task was cancelled unexpectedly"),
+            Err(e) => panic!("unexpected task error: {e}"),
         }
     }
 }
