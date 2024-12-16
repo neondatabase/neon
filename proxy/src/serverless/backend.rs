@@ -268,7 +268,11 @@ impl PoolingBackend {
 
         if !self.local_pool.initialized(&conn_info) {
             // only install and grant usage one at a time.
-            let _permit = local_backend.initialize.acquire().await.unwrap();
+            let _permit = local_backend
+                .initialize
+                .acquire()
+                .await
+                .expect("semaphore should never be closed");
 
             // check again for race
             if !self.local_pool.initialized(&conn_info) {

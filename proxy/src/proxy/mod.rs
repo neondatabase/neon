@@ -488,7 +488,7 @@ impl NeonOptions {
 
 pub(crate) fn neon_option(bytes: &str) -> Option<(&str, &str)> {
     static RE: OnceCell<Regex> = OnceCell::new();
-    let re = RE.get_or_init(|| Regex::new(r"^neon_(\w+):(.+)").unwrap());
+    let re = RE.get_or_init(|| Regex::new(r"^neon_(\w+):(.+)").expect("regex should be correct"));
 
     let cap = re.captures(bytes)?;
     let (_, [k, v]) = cap.extract();
