@@ -174,7 +174,6 @@ impl MockControlPlane {
                 branch_id: (&BranchId::from("branch")).into(),
                 cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
             },
-            allow_self_signed_compute: false,
         };
 
         Ok(node)

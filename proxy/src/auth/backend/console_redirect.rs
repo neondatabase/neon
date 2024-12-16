@@ -187,7 +187,6 @@ async fn authenticate(
         NodeInfo {
             config,
             aux: db_info.aux,
-            allow_self_signed_compute: false, // caller may override
         },
         db_info.allowed_ips,
     ))
