@@ -2546,8 +2546,36 @@ impl Timeline {
         );
 
         // Step 3: Place back to the layer map.
+
+        // First, do a sanity check to ensure the newly-created layer map does not contain overlaps.
+        let all_layers = {
+            let guard = self.layers.read().await;
+            let layer_map = guard.layer_map()?;
+            layer_map.iter_historic_layers().collect_vec()
+        };
+
+        let mut final_layers = all_layers
+            .iter()
+            .map(|layer| layer.layer_name())
+            .collect::<HashSet<_>>();
+        for layer in &layer_selection {
+            final_layers.remove(&layer.layer_desc().layer_name());
+        }
+        for layer in &compact_to {
+            final_layers.insert(layer.layer_desc().layer_name());
+        }
+        let final_layers = final_layers.into_iter().collect_vec();
+
+        // TODO: move this check before we call `finish` on image layer writers. However, this will require us to get the layer name before we finish
+        // the writer, so potentially, we will need a function like `ImageLayerBatchWriter::get_all_pending_layer_keys` to get all the keys that are
+        // in the writer before finalizing the persistent layers. Now we would leave some dangling layers on the disk if the check fails.
+        if let Some(err) = check_valid_layermap(&final_layers) {
+            bail!("gc-compaction layer map check failed after compaction because {}, compaction result not applied to the layer map due to potential data loss", err);
+        }
+
+        // Between the sanity check and this compaction update, there could be new layers being flushed, but it should be fine because we only
+        // operate on L1 layers.
         {
-            // TODO: sanity check if the layer map is valid (i.e., should not have overlaps)
             let mut guard = self.layers.write().await;
             guard
                 .open_mut()?
