@@ -1043,7 +1043,7 @@ async fn main() -> anyhow::Result<()> {
                     sk.host,
                     format!("{}", sk.port),
                     format!("{}", sk.http_port),
-                    format!("{}", sk.availability_zone_id),
+                    sk.availability_zone_id.to_string(),
                 ]);
             }
             println!("{table}");
