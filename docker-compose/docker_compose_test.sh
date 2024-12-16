@@ -36,10 +36,10 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     cleanup
     PG_TEST_VERSION=$((pg_version < 16 ? 16 : pg_version))
     # The support of pg_anon not yet added to PG17, so we have to remove the corresponding option
-    if [ $pg_version -eq 17 ]; then
+    if [ "${pg_version}" -ne 17 ]; then
       SPEC_PATH="compute_wrapper/var/db/postgres/specs"
       mv $SPEC_PATH/spec.json $SPEC_PATH/spec.bak
-      jq 'del(.cluster.settings[] | select (.name == "session_preload_libraries"))' $SPEC_PATH/spec.bak > $SPEC_PATH/spec.json
+      jq '.cluster.settings += [{"name": "session_preload_libraries","value": "anon","vartype": "string"}]' "${SPEC_PATH}/spec.bak" > "${SPEC_PATH}/spec.json"
     fi
     PG_VERSION=$pg_version PG_TEST_VERSION=$PG_TEST_VERSION docker compose --profile test-extensions -f $COMPOSE_FILE up --build -d
 
@@ -107,7 +107,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     fi
     cleanup
     # The support of pg_anon not yet added to PG17, so we have to remove the corresponding option
-    if [ $pg_version -eq 17 ]; then
-      mv $SPEC_PATH/spec.bak $SPEC_PATH/spec.json
+    if [ "$pg_version" -ne 17 ]; then
+      mv "$SPEC_PATH/spec.bak" "$SPEC_PATH/spec.json"
     fi
 done
