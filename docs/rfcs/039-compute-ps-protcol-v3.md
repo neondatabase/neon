@@ -33,9 +33,11 @@ We already changed protocol version from V1 to V2 when replaced single request L
 (request LSN,not modified since LSN). It was done by introducing new command codes.
 So there was no explicit check for protocol version: if server receives new command,
 it assumes that it is new protocol version. After both clients and servers were upgraded to new version,
-new command codes were removed. Now V21 version of protocol is not supported.
-
+new command codes were removed. Then version was added to "pagestream" command used to perform handshake.
 Client has `neon.protocol_version` GUC specifying which protocol version it should use.
+So client informs server about protocol version it is going to use, but server can not ask the client to use some other protocol version,
+it can only reject connection request if it is not supporting this protocol version.
+
 
 ## Requirements
 
@@ -46,13 +48,13 @@ Client has `neon.protocol_version` GUC specifying which protocol version it shou
 
 - Detect page corruption (include CRC)
 - Support of vector operation (merge several requests into one)
-- Forward compatibility: support new clients with page server
+- Forward compatibility: support new clients with old page server
 
 
 ## Solution
 
 Include in response extra fields making it possible to verify that response corresponds to the particular request.
-Such extra fields may include:
+Such extra fields include:
 
 - tablespace OID
 - database OID
@@ -62,48 +64,21 @@ Such extra fields may include:
 - request LSN
 - last modified LSN
 
-All this fields can be replaced just with one field: request ID. But we have to somehow store this request ID in case of prefetch,
-and bugs in prefetch logical can once again cause undetected mismatch of request and response.
-From the other hand, if all the fields above in request and response are matched,
-then no data corruption can happen even if request was no actually sent by our backend.
+In addition to this fields, we also introduce unique auto-incremented `request_id`.
+It is combined from `backend_id` and local auto-incremented counter.
+There is some probability of collision if backend is restarted, but it is not critical as far as we have all other fields included in response.
+`request_id` can be used for better tracking and associating log messages produced by client and page server.
 
-Disadvantage of this solution is increase of response size. But it is very unlikely that it can have any impact on
-network traffic and performance. Sending extra tens bytes doesn't significantly affect packet size if it includes page image.
-And other cases (relation/database size) are less frequent and actually speed of network round-trip almost not depends
-on response size.
-
-Request ID can also be used to match log messages produced by client and server.
-Now sure how important it is, because we will not dump all requests and responses in any case, just errors.
-
-If we prefer to use request ID, then the question is how to generate it. Two possibilities:
-1. Use atomic variable in shared memory
-2. Combine backend ID or process id with locally incremented counter. The problem here is that after
-backend restart, it's ID (or even pid) can be reused and so generated ID will not be unique.
-It will not cause problem with verifying responses, because unlikely than one process will receive
-responses to another process, but may complicate matching messages at client and server side.
-
-Another question: do we need to extend all responses or only `getpage` response? Corruption can happen only with mismatch
-of `getpage` responses. And only `getpage` requests are used by prefetch. But for extra safety it is better to check all responses,
-and there are no drawbacks except may be some extra coding.
+Although only mismatch of `getpage` request can cause data corruption, we want to extend responses for all other commands: get  relation/db size, check presence of relation.
 
 
 ## Compatibility
 
-Current client-server protocol doesn't include handshake and protocol version.
+We will change handshake command freom "pagestream_v2" to "pagestream_v3". With V3 version of protocol server should
+reply with extended responses. Request/response tags will not be changed.
 
-We can follow the same approach as with V1->V2 upgrade: introduce new command and response codes.
-For example, new codes can be produced by shifting old ones by 1000 (1->1001). If page server receives
-new request code then it responds with new response (included extra information allowing to verify
-response). When server receives old request code, it responds with old response.
+To prevent forward compatibility issues (when new client tries to access old server), deploy of this PR should be done in three steps:
+1. Deploy of new server recognizing V3 protocol version
+2. Deploy of new client which is able to send V3 commands, but by default still using V2.
+3. After one release cycle when no rollback to previous PS version is possible, we can switch default version of protocol to V3, by changing `neon.protocol_version` GUC in project settings.
 
-We should deploy new page server and new client with `neon.protocol_version=2` and wait for some time
-to ensure that we do not need to rollback to previous version. After it and ensuring that new page server
-version is used in all regions we can start bumping protocol version to 3 for clients. Once we make sure
-that all clients and [age servers are supporting new protocol version, we can drop V2 support
-and eliminate the logic of handling new tags (as it was done for V1 protocol).
-
-
-Alternatively we can introduce new `handshake` command and response. They can be send on establishing
-connection to page server to negotiate used protocol version. In this case in future we do not need
-this trick with introducing new tags (adding shift) and provide not only backward, but also forward
-compatibility (make it possible for new client to work with old servers).
