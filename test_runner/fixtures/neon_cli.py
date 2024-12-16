@@ -400,6 +400,7 @@ class NeonLocalCli(AbstractNeonCli):
         timeout_in_seconds: int | None = None,
         instance_id: int | None = None,
         base_port: int | None = None,
+        handle_ps_local_disk_loss: Optional[bool] = None,
     ):
         cmd = ["storage_controller", "start"]
         if timeout_in_seconds is not None:
@@ -408,6 +409,10 @@ class NeonLocalCli(AbstractNeonCli):
             cmd.append(f"--instance-id={instance_id}")
         if base_port is not None:
             cmd.append(f"--base-port={base_port}")
+        if handle_ps_local_disk_loss is not None:
+            cmd.append(
+                f"--handle-ps-local-disk-loss={'true' if handle_ps_local_disk_loss else 'false'}"
+            )
         return self.raw_cli(cmd)
 
     def storage_controller_stop(self, immediate: bool, instance_id: int | None = None):
