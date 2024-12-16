@@ -35,7 +35,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     echo "clean up containers if exists"
     cleanup
     PG_TEST_VERSION=$((pg_version < 16 ? 16 : pg_version))
-    # The support of pg_anon not yet added to PG17, so we have to remove the corresponding option
+    # The support of pg_anon not yet added to PG17, so we have to add the corresponding option
     if [ "${pg_version}" -ne 17 ]; then
       SPEC_PATH="compute_wrapper/var/db/postgres/specs"
       mv $SPEC_PATH/spec.json $SPEC_PATH/spec.bak
@@ -106,7 +106,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         fi
     fi
     cleanup
-    # The support of pg_anon not yet added to PG17, so we have to remove the corresponding option
+    # Restore the original spec.json
     if [ "$pg_version" -ne 17 ]; then
       mv "$SPEC_PATH/spec.bak" "$SPEC_PATH/spec.json"
     fi
