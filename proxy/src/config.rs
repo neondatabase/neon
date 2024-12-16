@@ -95,6 +95,7 @@ pub fn configure_tls(
     key_path: &str,
     cert_path: &str,
     certs_dir: Option<&String>,
+    allow_tls_keylogfile: bool,
 ) -> anyhow::Result<TlsConfig> {
     let mut cert_resolver = CertResolver::new();
 
@@ -134,6 +135,11 @@ pub fn configure_tls(
             .with_cert_resolver(cert_resolver.clone());
 
     config.alpn_protocols = vec![PG_ALPN_PROTOCOL.to_vec()];
+
+    if allow_tls_keylogfile {
+        // KeyLogFile will check for the SSLKEYLOGFILE environment variable.
+        config.key_log = Arc::new(rustls::KeyLogFile::new());
+    }
 
     Ok(TlsConfig {
         config: Arc::new(config),
