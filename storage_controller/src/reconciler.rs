@@ -1,6 +1,6 @@
 use crate::pageserver_client::PageserverClient;
 use crate::persistence::Persistence;
-use crate::service;
+use crate::{compute_hook, service};
 use pageserver_api::controller_api::{AvailabilityZone, PlacementPolicy};
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
@@ -8,6 +8,7 @@ use pageserver_api::models::{
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_client::mgmt_api;
 use reqwest::StatusCode;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -835,10 +836,12 @@ impl Reconciler {
             let result = self
                 .compute_hook
                 .notify(
-                    self.tenant_shard_id,
-                    node.get_id(),
-                    self.shard.stripe_size,
-                    self.preferred_az.as_ref(),
+                    compute_hook::ShardUpdate {
+                        tenant_shard_id: self.tenant_shard_id,
+                        node_id: node.get_id(),
+                        stripe_size: self.shard.stripe_size,
+                        preferred_az: self.preferred_az.as_ref().map(Cow::Borrowed),
+                    },
                     &self.cancel,
                 )
                 .await;
