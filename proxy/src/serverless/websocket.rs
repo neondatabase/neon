@@ -178,8 +178,8 @@ pub(crate) async fn serve_websocket(
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
-    #![expect(clippy::unwrap_used)]
     use std::pin::pin;
 
     use framed_websockets::WebSocketServer;

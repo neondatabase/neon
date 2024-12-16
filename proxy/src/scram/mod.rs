@@ -57,8 +57,8 @@ fn sha256<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
-    #![expect(clippy::unwrap_used)]
     use super::threadpool::ThreadPool;
     use super::{Exchange, ServerSecret};
     use crate::intern::EndpointIdInt;

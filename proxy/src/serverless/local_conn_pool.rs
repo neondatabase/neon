@@ -364,8 +364,8 @@ fn sign_jwt(sk: &SigningKey, payload: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
-    #![expect(clippy::unwrap_used)]
     use p256::ecdsa::SigningKey;
     use typed_json::json;
 

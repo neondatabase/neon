@@ -396,8 +396,8 @@ impl NetworkEndianIpv6 {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
-    #![expect(clippy::unwrap_used)]
     use tokio::io::AsyncReadExt;
 
     use crate::protocol2::{

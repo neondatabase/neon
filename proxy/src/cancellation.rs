@@ -284,8 +284,8 @@ impl<P> Drop for Session<P> {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
-    #![expect(clippy::unwrap_used)]
     use super::*;
 
     #[tokio::test]

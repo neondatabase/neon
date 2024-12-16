@@ -207,8 +207,8 @@ impl From<ProjectId> for ProjectIdInt {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
-    #![expect(clippy::unwrap_used)]
     use std::sync::OnceLock;
 
     use super::InternId;
