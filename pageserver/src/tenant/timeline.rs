@@ -144,19 +144,15 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
+use super::config::TenantConf;
+use super::remote_timeline_client::index::IndexPart;
+use super::remote_timeline_client::RemoteTimelineClient;
+use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
+use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
+use super::upload_queue::NotInitialized;
+use super::GcError;
 use super::{
-    config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
-    MaybeOffloaded,
-};
-use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
-use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
-use super::{
-    remote_timeline_client::RemoteTimelineClient, remote_timeline_client::WaitCompletionError,
-    storage_layer::ReadableLayer,
-};
-use super::{
-    secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
-    GcError,
+    debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf, MaybeOffloaded,
 };
 
 #[cfg(test)]
@@ -780,30 +776,71 @@ pub(crate) enum CompactFlags {
 #[serde_with::serde_as]
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct CompactRequest {
-    pub compact_range: Option<CompactRange>,
-    pub compact_below_lsn: Option<Lsn>,
+    pub compact_key_range: Option<CompactKeyRange>,
+    pub compact_lsn_range: Option<CompactLsnRange>,
     /// Whether the compaction job should be scheduled.
     #[serde(default)]
     pub scheduled: bool,
     /// Whether the compaction job should be split across key ranges.
     #[serde(default)]
     pub sub_compaction: bool,
+    /// Max job size for each subcompaction job.
+    pub sub_compaction_max_job_size_mb: Option<u64>,
 }
 
 #[serde_with::serde_as]
 #[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct CompactRange {
+pub(crate) struct CompactLsnRange {
+    pub start: Lsn,
+    pub end: Lsn,
+}
+
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct CompactKeyRange {
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub start: Key,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub end: Key,
 }
 
-impl From<Range<Key>> for CompactRange {
-    fn from(range: Range<Key>) -> Self {
-        CompactRange {
+impl From<Range<Lsn>> for CompactLsnRange {
+    fn from(range: Range<Lsn>) -> Self {
+        Self {
             start: range.start,
             end: range.end,
+        }
+    }
+}
+
+impl From<Range<Key>> for CompactKeyRange {
+    fn from(range: Range<Key>) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+        }
+    }
+}
+
+impl From<CompactLsnRange> for Range<Lsn> {
+    fn from(range: CompactLsnRange) -> Self {
+        range.start..range.end
+    }
+}
+
+impl From<CompactKeyRange> for Range<Key> {
+    fn from(range: CompactKeyRange) -> Self {
+        range.start..range.end
+    }
+}
+
+impl CompactLsnRange {
+    #[cfg(test)]
+    #[cfg(feature = "testing")]
+    pub fn above(lsn: Lsn) -> Self {
+        Self {
+            start: lsn,
+            end: Lsn::MAX,
         }
     }
 }
@@ -812,14 +849,17 @@ impl From<Range<Key>> for CompactRange {
 pub(crate) struct CompactOptions {
     pub flags: EnumSet<CompactFlags>,
     /// If set, the compaction will only compact the key range specified by this option.
-    /// This option is only used by GC compaction.
-    pub compact_range: Option<CompactRange>,
-    /// If set, the compaction will only compact the LSN below this value.
-    /// This option is only used by GC compaction.
-    pub compact_below_lsn: Option<Lsn>,
+    /// This option is only used by GC compaction. For the full explanation, see [`compaction::GcCompactJob`].
+    pub compact_key_range: Option<CompactKeyRange>,
+    /// If set, the compaction will only compact the LSN within this value.
+    /// This option is only used by GC compaction. For the full explanation, see [`compaction::GcCompactJob`].
+    pub compact_lsn_range: Option<CompactLsnRange>,
     /// Enable sub-compaction (split compaction job across key ranges).
     /// This option is only used by GC compaction.
     pub sub_compaction: bool,
+    /// Set job size for the GC compaction.
+    /// This option is only used by GC compaction.
+    pub sub_compaction_max_job_size_mb: Option<u64>,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1641,9 +1681,10 @@ impl Timeline {
             cancel,
             CompactOptions {
                 flags,
-                compact_range: None,
-                compact_below_lsn: None,
+                compact_key_range: None,
+                compact_lsn_range: None,
                 sub_compaction: false,
+                sub_compaction_max_job_size_mb: None,
             },
             ctx,
         )
@@ -3852,24 +3893,6 @@ impl Timeline {
             // release lock on 'layers'
         };
 
-        // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
-        // This makes us refuse ingest until the new layers have been persisted to the remote
-        let start = Instant::now();
-        self.remote_client
-            .wait_completion()
-            .await
-            .map_err(|e| match e {
-                WaitCompletionError::UploadQueueShutDownOrStopped
-                | WaitCompletionError::NotInitialized(
-                    NotInitialized::ShuttingDown | NotInitialized::Stopped,
-                ) => FlushLayerError::Cancelled,
-                WaitCompletionError::NotInitialized(NotInitialized::Uninitialized) => {
-                    FlushLayerError::Other(anyhow!(e).into())
-                }
-            })?;
-        let duration = start.elapsed().as_secs_f64();
-        self.metrics.flush_wait_upload_time_gauge_add(duration);
-
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
         // We still schedule the upload, resulting in an error, but ideally we'd somehow avoid this
@@ -4019,8 +4042,11 @@ impl Timeline {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
+            // Note that there are a third "caller" that will take the `partitioning` lock. It is `gc_compaction_split_jobs` for
+            // gc-compaction where it uses the repartition data to determine the split jobs. In the future, it might use its own
+            // heuristics, but for now, we should allow concurrent access to it and let the caller retry compaction.
             return Err(CompactionError::Other(anyhow!(
-                "repartition() called concurrently, this should not happen"
+                "repartition() called concurrently, this is rare and a retry should be fine"
             )));
         };
         let ((dense_partition, sparse_partition), partition_lsn) = &*partitioning_guard;
