@@ -61,12 +61,8 @@ jobs:
           v_strings_only_as_json_array=$(echo ${{ steps.files_changed.outputs.chnages }} | jq '.[]|select(test("v\\d+"))' | jq --slurp -c)
           echo "changes=${v_strings_only_as_json_array}" | tee -a "${GITHUB_OUTPUT}"
 
-  gather-rust-build-stats:
-    needs: [ check-permissions, build-build-tools-image ]
-    permissions:
-      id-token: write # aws-actions/configure-aws-credentials
-      statuses: write
-      contents: write
+  check-macos-build:
+    needs: [ check-permissions, files-changed ]
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
@@ -78,6 +74,10 @@ jobs:
 
   gather-rust-build-stats:
     needs: [ check-permissions, build-build-tools-image, files-changed ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
     if: |
       (needs.files-changed.outputs.v17 == 'true' || needs.files-changed.outputs.rebuild_everything == 'true') && (
         contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
