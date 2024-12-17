@@ -1208,6 +1208,7 @@ impl PageServerHandler {
     {
         let cancel = self.cancel.clone();
         let err = loop {
+            trace!("waiting for message");
             let msg = Self::pagestream_read_message(
                 &mut pgb_reader,
                 tenant_id,
@@ -1218,6 +1219,7 @@ impl PageServerHandler {
                 request_span.clone(),
             )
             .await;
+            trace!(is_err = msg.is_err(), "message received");
             let msg = match msg {
                 Ok(msg) => msg,
                 Err(e) => break e,
@@ -1229,10 +1231,11 @@ impl PageServerHandler {
                     return ((pgb_reader, timeline_handles), Ok(()));
                 }
             };
-
+            trace!("throttling message");
             if let Err(cancelled) = msg.throttle(&self.cancel).await {
                 break cancelled;
             }
+            trace!("handling message");
 
             let err = self
                 .pagesteam_handle_batched_message(pgb_writer, msg, &cancel, ctx)
@@ -1241,6 +1244,7 @@ impl PageServerHandler {
                 Ok(()) => {}
                 Err(e) => break e,
             }
+            trace!("message handled");
         };
         ((pgb_reader, timeline_handles), Err(err))
     }

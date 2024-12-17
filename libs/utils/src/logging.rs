@@ -1,9 +1,11 @@
-use std::str::FromStr;
+use std::{num::NonZeroUsize, str::FromStr};
 
 use anyhow::Context;
 use metrics::{IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, VariantNames};
+
+use crate::env;
 
 #[derive(EnumString, strum_macros::Display, VariantNames, Eq, PartialEq, Debug, Clone, Copy)]
 #[strum(serialize_all = "snake_case")]
@@ -133,6 +135,20 @@ pub fn init(
     });
     let r = r.with(
         TracingEventCountLayer(&TRACING_EVENT_COUNT_METRIC).with_filter(rust_log_env_filter()),
+    );
+    let r = r.with(
+        if let Some(n) = env::var("NEON_ENABLE_TOKIO_CONSOLE_SUBSCRIBER") {
+            let n: NonZeroUsize = n;
+            use console_subscriber::ConsoleLayer;
+            Some(
+                console_subscriber::Builder::default()
+                    .event_buffer_capacity(n.get() * ConsoleLayer::DEFAULT_EVENT_BUFFER_CAPACITY)
+                    .client_buffer_capacity(n.get() * ConsoleLayer::DEFAULT_CLIENT_BUFFER_CAPACITY)
+                    .spawn(),
+            )
+        } else {
+            None
+        },
     );
     match tracing_error_layer_enablement {
         TracingErrorLayerEnablement::EnableWithRustLogFilter => r

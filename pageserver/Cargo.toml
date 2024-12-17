@@ -57,7 +57,7 @@ sysinfo.workspace = true
 tokio-tar.workspace = true
 thiserror.workspace = true
 tikv-jemallocator.workspace = true
-tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time"] }
+tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time", "tracing"] }
 tokio-epoll-uring.workspace = true
 tokio-io-timeout.workspace = true
 tokio-postgres.workspace = true

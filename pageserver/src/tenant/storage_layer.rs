@@ -22,9 +22,11 @@ use std::collections::{BinaryHeap, HashMap};
 use std::future::Future;
 use std::ops::Range;
 use std::pin::Pin;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{trace, Instrument};
 
 use utils::lsn::Lsn;
 
@@ -177,6 +179,15 @@ impl IoConcurrency {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
+        static IO_NUM: AtomicUsize = AtomicUsize::new(0);
+        let io_num = IO_NUM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let fut = async move {
+            trace!("start");
+            scopeguard::defer!({ trace!("end") });
+            fut.await
+        }
+        .instrument(tracing::trace_span!("spawned_io", %io_num));
+        tracing::trace!(%io_num, "spawning IO");
         match self {
             IoConcurrency::Serial => fut.await,
             IoConcurrency::Parallel => {

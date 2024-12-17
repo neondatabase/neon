@@ -4,12 +4,14 @@
 
 use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::context::RequestContext;
+use crate::log_if_slow;
 use crate::page_cache::{self, FileId, PageReadGuard, PageWriteGuard, ReadBufResult, PAGE_SZ};
 #[cfg(test)]
 use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
 use std::ops::Deref;
+use std::time::Duration;
 
 /// This is implemented by anything that can read 8 kB (PAGE_SZ)
 /// blocks, using the page cache
@@ -211,19 +213,27 @@ impl<'a> FileBlockReader<'a> {
         ctx: &RequestContext,
     ) -> Result<BlockLease<'b>, std::io::Error> {
         let cache = page_cache::get();
-        match cache
-            .read_immutable_buf(self.file_id, blknum, ctx)
-            .await
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to read immutable buf: {e:#}"),
-                )
-            })? {
+        match log_if_slow(
+            "read_immutable_buf",
+            Duration::from_secs(1),
+            cache.read_immutable_buf(self.file_id, blknum, ctx),
+        )
+        .await
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to read immutable buf: {e:#}"),
+            )
+        })? {
             ReadBufResult::Found(guard) => Ok(guard.into()),
             ReadBufResult::NotFound(write_guard) => {
                 // Read the page from disk into the buffer
-                let write_guard = self.fill_buffer(write_guard, blknum, ctx).await?;
+                let write_guard = log_if_slow(
+                    "fill_buffer",
+                    Duration::from_secs(1),
+                    self.fill_buffer(write_guard, blknum, ctx),
+                )
+                .await?;
                 Ok(write_guard.mark_valid().into())
             }
         }

@@ -15,6 +15,8 @@ pub(super) mod tokio_epoll_uring_ext;
 use tokio_epoll_uring::IoBuf;
 use tracing::Instrument;
 
+use crate::log_if_slow;
+
 pub(crate) use super::api::IoEngineKind;
 #[derive(Clone, Copy)]
 #[repr(u8)]
@@ -109,7 +111,7 @@ pub(crate) fn get() -> IoEngine {
 
 use std::{
     os::unix::prelude::FileExt,
-    sync::atomic::{AtomicU8, Ordering},
+    sync::atomic::{AtomicU8, Ordering}, time::Duration,
 };
 
 use super::{
@@ -149,8 +151,18 @@ impl IoEngine {
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                let system = tokio_epoll_uring_ext::thread_local_system().await;
-                let (resources, res) = system.read(file_guard, offset, slice).await;
+                let system = log_if_slow(
+                    "thread_local_system",
+                    Duration::from_secs(1),
+                    tokio_epoll_uring_ext::thread_local_system(),
+                )
+                .await;
+                let (resources, res) = log_if_slow(
+                    "system.read",
+                    Duration::from_secs(1),
+                    system.read(file_guard, offset, slice),
+                )
+                .await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
         }

@@ -12,6 +12,7 @@
 //! src/backend/storage/file/fd.c
 //!
 use crate::context::RequestContext;
+use crate::log_if_slow;
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 
 use crate::page_cache::{PageWriteGuard, PAGE_SZ};
@@ -28,6 +29,7 @@ use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
+use std::time::Duration;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
@@ -934,10 +936,11 @@ impl VirtualFileInner {
     where
         Buf: tokio_epoll_uring::IoBufMut + Send,
     {
-        let file_guard = match self.lock_file().await {
-            Ok(file_guard) => file_guard,
-            Err(e) => return (buf, Err(e)),
-        };
+        let file_guard =
+            match log_if_slow("lock_file", Duration::from_secs(1), self.lock_file()).await {
+                Ok(file_guard) => file_guard,
+                Err(e) => return (buf, Err(e)),
+            };
 
         observe_duration!(StorageIoOperation::Read, {
             let ((_file_guard, buf), res) = io_engine::get().read_at(file_guard, offset, buf).await;
