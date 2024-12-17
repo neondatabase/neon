@@ -8,6 +8,7 @@ use std::io;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -15,6 +16,8 @@ use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Context;
 use anyhow::Result;
 use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
+use azure_core::HttpClient;
+use azure_core::TransportOptions;
 use azure_core::{Continuable, RetryOptions};
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
@@ -80,8 +83,13 @@ impl AzureBlobStorage {
             StorageCredentials::token_credential(token_credential)
         };
 
-        // we have an outer retry
-        let builder = ClientBuilder::new(account, credentials).retry(RetryOptions::none());
+        let builder = ClientBuilder::new(account, credentials)
+            // we have an outer retry
+            .retry(RetryOptions::none())
+            // Customize transport to configure conneciton pooling
+            .transport(TransportOptions::new(Self::reqwest_client(
+                azure_config.conn_pool_size,
+            )));
 
         let client = builder.container_client(azure_config.container_name.to_owned());
 
@@ -104,6 +112,14 @@ impl AzureBlobStorage {
             timeout,
             small_timeout,
         })
+    }
+
+    fn reqwest_client(conn_pool_size: usize) -> Arc<dyn HttpClient> {
+        let client = reqwest::ClientBuilder::new()
+            .pool_max_idle_per_host(conn_pool_size)
+            .build()
+            .expect("failed to build `reqwest` client");
+        Arc::new(client)
     }
 
     pub fn relative_path_to_name(&self, path: &RemotePath) -> String {

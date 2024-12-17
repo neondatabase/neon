@@ -5062,6 +5062,7 @@ dependencies = [
  "once_cell",
  "pin-project-lite",
  "rand 0.8.5",
+ "reqwest",
  "scopeguard",
  "serde",
  "serde_json",
