@@ -191,13 +191,6 @@ impl ClientMode {
         }
     }
 
-    pub(crate) fn allow_self_signed_compute(&self, config: &ProxyConfig) -> bool {
-        match self {
-            ClientMode::Tcp => config.allow_self_signed_compute,
-            ClientMode::Websockets { .. } => false,
-        }
-    }
-
     fn hostname<'a, S>(&'a self, s: &'a Stream<S>) -> Option<&'a str> {
         match self {
             ClientMode::Tcp => s.sni_hostname(),
@@ -355,9 +348,10 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             params_compat,
             params: &params,
             locks: &config.connect_compute_locks,
+            // only used for console redirect testing.
+            allow_self_signed_compute: false,
         },
         &user_info,
-        mode.allow_self_signed_compute(config),
         config.wake_compute_retry_config,
         config.connect_to_compute_retry_config,
     )
@@ -494,7 +488,7 @@ impl NeonOptions {
 
 pub(crate) fn neon_option(bytes: &str) -> Option<(&str, &str)> {
     static RE: OnceCell<Regex> = OnceCell::new();
-    let re = RE.get_or_init(|| Regex::new(r"^neon_(\w+):(.+)").unwrap());
+    let re = RE.get_or_init(|| Regex::new(r"^neon_(\w+):(.+)").expect("regex should be correct"));
 
     let cap = re.captures(bytes)?;
     let (_, [k, v]) = cap.extract();

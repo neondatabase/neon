@@ -11,6 +11,7 @@ members = [
     "pageserver/pagebench",
     "proxy",
     "safekeeper",
+    "safekeeper/client",
     "storage_broker",
     "storage_controller",
     "storage_controller/client",
@@ -233,6 +234,7 @@ postgres_initdb = { path = "./libs/postgres_initdb" }
 pq_proto = { version = "0.1", path = "./libs/pq_proto/" }
 remote_storage = { version = "0.1", path = "./libs/remote_storage/" }
 safekeeper_api = { version = "0.1", path = "./libs/safekeeper_api" }
+safekeeper_client = { path = "./safekeeper/client" }
 desim = { version = "0.1", path = "./libs/desim" }
 storage_broker = { version = "0.1", path = "./storage_broker/" } # Note: main broker code is inside the binary crate, so linking with the library shouldn't be heavy.
 storage_controller_client = { path = "./storage_controller/client" }
