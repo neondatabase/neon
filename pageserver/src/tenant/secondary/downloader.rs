@@ -35,7 +35,7 @@ use super::{
         self, period_jitter, period_warmup, Completion, JobGenerator, SchedulingResult,
         TenantBackgroundJobs,
     },
-    SecondaryTenant,
+    GetTenantError, SecondaryTenant, SecondaryTenantError,
 };
 
 use crate::tenant::{
@@ -49,7 +49,7 @@ use futures::Future;
 use metrics::UIntGauge;
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
-use remote_storage::{DownloadError, DownloadOpts, Etag, GenericRemoteStorage};
+use remote_storage::{DownloadError, DownloadKind, DownloadOpts, Etag, GenericRemoteStorage};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
@@ -470,15 +470,16 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         result
     }
 
-    fn on_command(&mut self, command: DownloadCommand) -> anyhow::Result<PendingDownload> {
+    fn on_command(
+        &mut self,
+        command: DownloadCommand,
+    ) -> Result<PendingDownload, SecondaryTenantError> {
         let tenant_shard_id = command.get_tenant_shard_id();
 
         let tenant = self
             .tenant_manager
-            .get_secondary_tenant_shard(*tenant_shard_id);
-        let Some(tenant) = tenant else {
-            return Err(anyhow::anyhow!("Not found or not in Secondary mode"));
-        };
+            .get_secondary_tenant_shard(*tenant_shard_id)
+            .ok_or(GetTenantError::ShardNotFound(*tenant_shard_id))?;
 
         Ok(PendingDownload {
             target_time: None,
@@ -946,6 +947,7 @@ impl<'a> TenantDownloader<'a> {
         let cancel = &self.secondary_state.cancel;
         let opts = DownloadOpts {
             etag: prev_etag.cloned(),
+            kind: DownloadKind::Small,
             ..Default::default()
         };
 
@@ -1181,6 +1183,7 @@ impl<'a> TenantDownloader<'a> {
             &layer.name,
             &layer.metadata,
             &local_path,
+            &self.secondary_state.gate,
             &self.secondary_state.cancel,
             ctx,
         )

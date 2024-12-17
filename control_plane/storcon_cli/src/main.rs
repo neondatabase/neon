@@ -9,8 +9,8 @@ use pageserver_api::{
     },
     models::{
         EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
-        ShardParameters, TenantConfig, TenantConfigRequest, TenantShardSplitRequest,
-        TenantShardSplitResponse,
+        ShardParameters, TenantConfig, TenantConfigPatchRequest, TenantConfigRequest,
+        TenantShardSplitRequest, TenantShardSplitResponse,
     },
     shard::{ShardStripeSize, TenantShardId},
 };
@@ -116,9 +116,19 @@ enum Command {
         #[arg(long)]
         tenant_shard_id: TenantShardId,
     },
-    /// Modify the pageserver tenant configuration of a tenant: this is the configuration structure
+    /// Set the pageserver tenant configuration of a tenant: this is the configuration structure
     /// that is passed through to pageservers, and does not affect storage controller behavior.
-    TenantConfig {
+    /// Any previous tenant configs are overwritten.
+    SetTenantConfig {
+        #[arg(long)]
+        tenant_id: TenantId,
+        #[arg(long)]
+        config: String,
+    },
+    /// Patch the pageserver tenant configuration of a tenant. Any fields with null values in the
+    /// provided JSON are unset from the tenant config and all fields with non-null values are set.
+    /// Unspecified fields are not changed.
+    PatchTenantConfig {
         #[arg(long)]
         tenant_id: TenantId,
         #[arg(long)]
@@ -549,25 +559,47 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
         }
-        Command::TenantConfig { tenant_id, config } => {
+        Command::SetTenantConfig { tenant_id, config } => {
             let tenant_conf = serde_json::from_str(&config)?;
 
             vps_client
-                .tenant_config(&TenantConfigRequest {
+                .set_tenant_config(&TenantConfigRequest {
+                    tenant_id,
+                    config: tenant_conf,
+                })
+                .await?;
+        }
+        Command::PatchTenantConfig { tenant_id, config } => {
+            let tenant_conf = serde_json::from_str(&config)?;
+
+            vps_client
+                .patch_tenant_config(&TenantConfigPatchRequest {
                     tenant_id,
                     config: tenant_conf,
                 })
                 .await?;
         }
         Command::TenantDescribe { tenant_id } => {
-            let describe_response = storcon_client
+            let TenantDescribeResponse {
+                tenant_id,
+                shards,
+                stripe_size,
+                policy,
+                config,
+            } = storcon_client
                 .dispatch::<(), TenantDescribeResponse>(
                     Method::GET,
                     format!("control/v1/tenant/{tenant_id}"),
                     None,
                 )
                 .await?;
-            let shards = describe_response.shards;
+            println!("Tenant {tenant_id}");
+            let mut table = comfy_table::Table::new();
+            table.add_row(["Policy", &format!("{:?}", policy)]);
+            table.add_row(["Stripe size", &format!("{:?}", stripe_size)]);
+            table.add_row(["Config", &serde_json::to_string_pretty(&config).unwrap()]);
+            println!("{table}");
+            println!("Shards:");
             let mut table = comfy_table::Table::new();
             table.set_header(["Shard", "Attached", "Secondary", "Last error", "status"]);
             for shard in shards {
@@ -724,7 +756,7 @@ async fn main() -> anyhow::Result<()> {
             threshold,
         } => {
             vps_client
-                .tenant_config(&TenantConfigRequest {
+                .set_tenant_config(&TenantConfigRequest {
                     tenant_id,
                     config: TenantConfig {
                         eviction_policy: Some(EvictionPolicy::LayerAccessThreshold(

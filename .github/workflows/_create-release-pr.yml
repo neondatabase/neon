@@ -21,7 +21,7 @@ defaults:
     shell: bash -euo pipefail {0}
 
 jobs:
-  create-storage-release-branch:
+  create-release-branch:
     runs-on: ubuntu-22.04
 
     permissions:

@@ -23,6 +23,7 @@ use utils::backoff;
 use super::{RequestContextInner, LOG_CHAN};
 use crate::config::remote_storage_from_toml;
 use crate::context::LOG_CHAN_DISCONNECT;
+use crate::ext::TaskExt;
 
 #[derive(clap::Args, Clone, Debug)]
 pub struct ParquetUploadArgs {
@@ -87,6 +88,8 @@ pub(crate) struct RequestData {
     branch: Option<String>,
     pg_options: Option<String>,
     auth_method: Option<&'static str>,
+    jwt_issuer: Option<String>,
+
     error: Option<&'static str>,
     /// Success is counted if we form a HTTP response with sql rows inside
     /// Or if we make it to proxy_pass
@@ -138,7 +141,9 @@ impl From<&RequestContextInner> for RequestData {
                 super::AuthMethod::ScramSha256 => "scram_sha_256",
                 super::AuthMethod::ScramSha256Plus => "scram_sha_256_plus",
                 super::AuthMethod::Cleartext => "cleartext",
+                super::AuthMethod::Jwt => "jwt",
             }),
+            jwt_issuer: value.jwt_issuer.clone(),
             protocol: value.protocol.as_str(),
             region: value.region,
             error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
@@ -167,7 +172,9 @@ pub async fn worker(
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    LOG_CHAN.set(tx.downgrade()).unwrap();
+    LOG_CHAN
+        .set(tx.downgrade())
+        .expect("only one worker should set the channel");
 
     // setup row stream that will close on cancellation
     let cancellation_token2 = cancellation_token.clone();
@@ -203,7 +210,9 @@ pub async fn worker(
         config.parquet_upload_disconnect_events_remote_storage
     {
         let (tx_disconnect, mut rx_disconnect) = mpsc::unbounded_channel();
-        LOG_CHAN_DISCONNECT.set(tx_disconnect.downgrade()).unwrap();
+        LOG_CHAN_DISCONNECT
+            .set(tx_disconnect.downgrade())
+            .expect("only one worker should set the channel");
 
         // setup row stream that will close on cancellation
         tokio::spawn(async move {
@@ -322,7 +331,7 @@ where
         Ok::<_, parquet::errors::ParquetError>((rows, w, rg_meta))
     })
     .await
-    .unwrap()?;
+    .propagate_task_panic()?;
 
     rows.clear();
     Ok((rows, w, rg_meta))
@@ -348,7 +357,7 @@ async fn upload_parquet(
             Ok((buffer, metadata))
         })
         .await
-        .unwrap()?;
+        .propagate_task_panic()?;
 
     let data = buffer.split().freeze();
 
@@ -398,13 +407,14 @@ async fn upload_parquet(
     .err();
 
     if let Some(err) = maybe_err {
-        tracing::warn!(%id, %err, "failed to upload request data");
+        tracing::error!(%id, error = ?err, "failed to upload request data");
     }
 
     Ok(buffer.writer())
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use std::net::Ipv4Addr;
     use std::num::NonZeroUsize;
@@ -486,6 +496,7 @@ mod tests {
                     upload_storage_class: None,
                 }),
                 timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+                small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT,
             })
         );
         assert_eq!(parquet_upload.parquet_upload_row_group_size, 100);
@@ -518,6 +529,7 @@ mod tests {
             branch: Some(hex::encode(rng.gen::<[u8; 16]>())),
             pg_options: None,
             auth_method: None,
+            jwt_issuer: None,
             protocol: ["tcp", "ws", "http"][rng.gen_range(0..3)],
             region: "us-east-1",
             error: None,
@@ -545,6 +557,7 @@ mod tests {
                 local_path: tmpdir.to_path_buf(),
             },
             timeout: std::time::Duration::from_secs(120),
+            small_timeout: std::time::Duration::from_secs(30),
         };
         let storage = GenericRemoteStorage::from_config(&remote_storage_config)
             .await
@@ -597,15 +610,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1312632, 3, 6000),
-                (1312621, 3, 6000),
-                (1312680, 3, 6000),
-                (1312637, 3, 6000),
-                (1312773, 3, 6000),
-                (1312610, 3, 6000),
-                (1312404, 3, 6000),
-                (1312639, 3, 6000),
-                (437848, 1, 2000)
+                (1313105, 3, 6000),
+                (1313094, 3, 6000),
+                (1313153, 3, 6000),
+                (1313110, 3, 6000),
+                (1313246, 3, 6000),
+                (1313083, 3, 6000),
+                (1312877, 3, 6000),
+                (1313112, 3, 6000),
+                (438020, 1, 2000)
             ]
         );
 
@@ -637,11 +650,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1203465, 5, 10000),
-                (1203189, 5, 10000),
-                (1203490, 5, 10000),
-                (1203475, 5, 10000),
-                (1203729, 5, 10000)
+                (1204324, 5, 10000),
+                (1204048, 5, 10000),
+                (1204349, 5, 10000),
+                (1204334, 5, 10000),
+                (1204588, 5, 10000)
             ]
         );
 
@@ -666,15 +679,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1312632, 3, 6000),
-                (1312621, 3, 6000),
-                (1312680, 3, 6000),
-                (1312637, 3, 6000),
-                (1312773, 3, 6000),
-                (1312610, 3, 6000),
-                (1312404, 3, 6000),
-                (1312639, 3, 6000),
-                (437848, 1, 2000)
+                (1313105, 3, 6000),
+                (1313094, 3, 6000),
+                (1313153, 3, 6000),
+                (1313110, 3, 6000),
+                (1313246, 3, 6000),
+                (1313083, 3, 6000),
+                (1312877, 3, 6000),
+                (1313112, 3, 6000),
+                (438020, 1, 2000)
             ]
         );
 
@@ -711,7 +724,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(657696, 2, 3001), (657410, 2, 3000), (657206, 2, 2999)]
+            [(658014, 2, 3001), (657728, 2, 3000), (657524, 2, 2999)]
         );
 
         tmpdir.close().unwrap();

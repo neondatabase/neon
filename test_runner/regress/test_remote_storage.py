@@ -300,9 +300,9 @@ def test_remote_storage_upload_queue_retries(
     print_gc_result(gc_result)
     assert gc_result["layers_removed"] > 0
 
-    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
-    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
-    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
+    wait_until(lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
+    wait_until(lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
+    wait_until(lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
 
     # let all future operations queue up
     configure_storage_sync_failpoints("return")
@@ -333,16 +333,28 @@ def test_remote_storage_upload_queue_retries(
     # wait for churn thread's data to get stuck in the upload queue
     # Exponential back-off in upload queue, so, gracious timeouts.
 
-    wait_until(30, 1, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="upload"), 0))
-    wait_until(30, 1, lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 1))
-    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
+    wait_until(
+        lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="upload"), 0), timeout=30
+    )
+    wait_until(
+        lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 1), timeout=30
+    )
+    wait_until(
+        lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0), timeout=30
+    )
 
     # unblock churn operations
     configure_storage_sync_failpoints("off")
 
-    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
-    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
-    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
+    wait_until(
+        lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0), timeout=30
+    )
+    wait_until(
+        lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0), timeout=30
+    )
+    wait_until(
+        lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0), timeout=30
+    )
 
     # The churn thread doesn't make progress once it blocks on the first wait_completion() call,
     # so, give it some time to wrap up.
@@ -580,7 +592,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
             > 0
         )
 
-    wait_until(200, 0.1, assert_compacted_and_uploads_queued)
+    wait_until(assert_compacted_and_uploads_queued)
 
     # Regardless, give checkpoint some time to block for good.
     # Not strictly necessary, but might help uncover failure modes in the future.
@@ -598,9 +610,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         ]
     )
 
-    # Generous timeout, because currently deletions can get blocked waiting for compaction
-    # This can be reduced when https://github.com/neondatabase/neon/issues/4998 is fixed.
-    timeline_delete_wait_completed(client, tenant_id, timeline_id, iterations=30, interval=1)
+    timeline_delete_wait_completed(client, tenant_id, timeline_id)
 
     assert not timeline_path.exists()
 
@@ -774,74 +784,20 @@ def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnv
         create_thread.join()
 
 
-def test_paused_upload_stalls_checkpoint(
-    neon_env_builder: NeonEnvBuilder,
-):
-    """
-    This test checks that checkpoints block on uploads to remote storage.
-    """
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
-
-    env = neon_env_builder.init_start(
-        initial_tenant_conf={
-            # Set a small compaction threshold
-            "compaction_threshold": "3",
-            # Disable GC
-            "gc_period": "0s",
-            # disable PITR
-            "pitr_interval": "0s",
-        }
-    )
-
-    env.pageserver.allowed_errors.append(
-        f".*PUT.* path=/v1/tenant/{env.initial_tenant}/timeline.* request was dropped before completing"
-    )
-
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
-
-    client = env.pageserver.http_client()
-    layers_at_creation = client.layer_map_info(tenant_id, timeline_id)
-    deltas_at_creation = len(layers_at_creation.delta_layers())
-    assert (
-        deltas_at_creation == 1
-    ), "are you fixing #5863? make sure we end up with 2 deltas at the end of endpoint lifecycle"
-
-    # Make new layer uploads get stuck.
-    # Note that timeline creation waits for the initial layers to reach remote storage.
-    # So at this point, the `layers_at_creation` are in remote storage.
-    client.configure_failpoints(("before-upload-layer-pausable", "pause"))
-
-    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
-        # Build two tables with some data inside
-        endpoint.safe_psql("CREATE TABLE foo AS SELECT x FROM generate_series(1, 10000) g(x)")
-        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
-
-        with pytest.raises(ReadTimeout):
-            client.timeline_checkpoint(tenant_id, timeline_id, timeout=5)
-        client.configure_failpoints(("before-upload-layer-pausable", "off"))
-
-
 def wait_upload_queue_empty(
     client: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
 ):
     wait_until(
-        2,
-        1,
         lambda: assert_eq(
             get_queued_count(client, tenant_id, timeline_id, file_kind="layer", op_kind="upload"), 0
         ),
     )
     wait_until(
-        2,
-        1,
         lambda: assert_eq(
             get_queued_count(client, tenant_id, timeline_id, file_kind="index", op_kind="upload"), 0
         ),
     )
     wait_until(
-        2,
-        1,
         lambda: assert_eq(
             get_queued_count(client, tenant_id, timeline_id, file_kind="layer", op_kind="delete"), 0
         ),

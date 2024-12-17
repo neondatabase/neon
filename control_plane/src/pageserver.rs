@@ -415,6 +415,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'timeline_offloading' as bool")?,
+            wal_receiver_protocol_override: settings
+                .remove("wal_receiver_protocol_override")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("parse `wal_receiver_protocol_override` from json")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -430,7 +435,7 @@ impl PageServerNode {
     ) -> anyhow::Result<()> {
         let config = Self::parse_config(settings)?;
         self.http_client
-            .tenant_config(&models::TenantConfigRequest { tenant_id, config })
+            .set_tenant_config(&models::TenantConfigRequest { tenant_id, config })
             .await?;
 
         Ok(())

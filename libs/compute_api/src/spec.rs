@@ -19,6 +19,10 @@ pub type PgIdent = String;
 /// String type alias representing Postgres extension version
 pub type ExtVersion = String;
 
+fn default_reconfigure_concurrency() -> usize {
+    1
+}
+
 /// Cluster spec or configuration represented as an optional number of
 /// delta operations + final cluster state description.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -67,7 +71,7 @@ pub struct ComputeSpec {
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
 
-    /// An optinal hint that can be passed to speed up startup time if we know
+    /// An optional hint that can be passed to speed up startup time if we know
     /// that no pg catalog mutations (like role creation, database creation,
     /// extension creation) need to be done on the actual database to start.
     #[serde(default)] // Default false
@@ -86,9 +90,7 @@ pub struct ComputeSpec {
     // etc. GUCs in cluster.settings. TODO: Once the control plane has been
     // updated to fill these fields, we can make these non optional.
     pub tenant_id: Option<TenantId>,
-
     pub timeline_id: Option<TimelineId>,
-
     pub pageserver_connstring: Option<String>,
 
     #[serde(default)]
@@ -113,6 +115,20 @@ pub struct ComputeSpec {
     /// Local Proxy configuration used for JWT authentication
     #[serde(default)]
     pub local_proxy_config: Option<LocalProxySpec>,
+
+    /// Number of concurrent connections during the parallel RunInEachDatabase
+    /// phase of the apply config process.
+    ///
+    /// We need a higher concurrency during reconfiguration in case of many DBs,
+    /// but instance is already running and used by client. We can easily get out of
+    /// `max_connections` limit, and the current code won't handle that.
+    ///
+    /// Default is 1, but also allow control plane to override this value for specific
+    /// projects. It's also recommended to bump `superuser_reserved_connections` +=
+    /// `reconfigure_concurrency` for such projects to ensure that we always have
+    /// enough spare connections for reconfiguration process to succeed.
+    #[serde(default = "default_reconfigure_concurrency")]
+    pub reconfigure_concurrency: usize,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -315,6 +331,9 @@ mod tests {
 
         // Features list defaults to empty vector.
         assert!(spec.features.is_empty());
+
+        // Reconfigure concurrency defaults to 1.
+        assert_eq!(spec.reconfigure_concurrency, 1);
     }
 
     #[test]

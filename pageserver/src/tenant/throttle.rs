@@ -1,18 +1,13 @@
 use std::{
-    str::FromStr,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::{Duration, Instant},
 };
 
 use arc_swap::ArcSwap;
-use enumset::EnumSet;
-use tracing::{error, warn};
 use utils::leaky_bucket::{LeakyBucketConfig, RateLimiter};
-
-use crate::{context::RequestContext, task_mgr::TaskKind};
 
 /// Throttle for `async` functions.
 ///
@@ -35,7 +30,7 @@ pub struct Throttle<M: Metric> {
 }
 
 pub struct Inner {
-    task_kinds: EnumSet<TaskKind>,
+    enabled: bool,
     rate_limiter: Arc<RateLimiter>,
 }
 
@@ -63,6 +58,11 @@ pub struct Stats {
     pub sum_throttled_usecs: u64,
 }
 
+pub enum ThrottleResult {
+    NotThrottled { start: Instant },
+    Throttled { start: Instant, end: Instant },
+}
+
 impl<M> Throttle<M>
 where
     M: Metric,
@@ -79,26 +79,12 @@ where
     }
     fn new_inner(config: Config) -> Inner {
         let Config {
-            task_kinds,
+            enabled,
             initial,
             refill_interval,
             refill_amount,
             max,
         } = config;
-        let task_kinds: EnumSet<TaskKind> = task_kinds
-            .iter()
-            .filter_map(|s| match TaskKind::from_str(s) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    // TODO: avoid this failure mode
-                    error!(
-                        "cannot parse task kind, ignoring for rate limiting {}",
-                        utils::error::report_compact_sources(&e)
-                    );
-                    None
-                }
-            })
-            .collect();
 
         // steady rate, we expect `refill_amount` requests per `refill_interval`.
         // dividing gives us the rps.
@@ -112,7 +98,7 @@ where
         let rate_limiter = RateLimiter::with_initial_tokens(config, f64::from(initial_tokens));
 
         Inner {
-            task_kinds,
+            enabled: enabled.is_enabled(),
             rate_limiter: Arc::new(rate_limiter),
         }
     }
@@ -141,12 +127,14 @@ where
         self.inner.load().rate_limiter.steady_rps()
     }
 
-    pub async fn throttle(&self, ctx: &RequestContext, key_count: usize) -> Option<Duration> {
+    pub async fn throttle(&self, key_count: usize) -> ThrottleResult {
         let inner = self.inner.load_full(); // clones the `Inner` Arc
-        if !inner.task_kinds.contains(ctx.task_kind()) {
-            return None;
-        };
+
         let start = std::time::Instant::now();
+
+        if !inner.enabled {
+            return ThrottleResult::NotThrottled { start };
+        }
 
         self.metric.accounting_start();
         self.count_accounted_start.fetch_add(1, Ordering::Relaxed);
@@ -162,22 +150,9 @@ where
                 .fetch_add(wait_time.as_micros() as u64, Ordering::Relaxed);
             let observation = Observation { wait_time };
             self.metric.observe_throttling(&observation);
-            match ctx.micros_spent_throttled.add(wait_time) {
-                Ok(res) => res,
-                Err(error) => {
-                    use once_cell::sync::Lazy;
-                    use utils::rate_limit::RateLimit;
-                    static WARN_RATE_LIMIT: Lazy<Mutex<RateLimit>> =
-                        Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-                    let mut guard = WARN_RATE_LIMIT.lock().unwrap();
-                    guard.call(move || {
-                        warn!(error, "error adding time spent throttled; this message is logged at a global rate limit");
-                    });
-                }
-            }
-            Some(wait_time)
+            ThrottleResult::Throttled { start, end: now }
         } else {
-            None
+            ThrottleResult::NotThrottled { start }
         }
     }
 }

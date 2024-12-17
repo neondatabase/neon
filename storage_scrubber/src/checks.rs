@@ -4,17 +4,21 @@ use itertools::Itertools;
 use pageserver::tenant::checks::check_valid_layermap;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
+use pageserver::tenant::remote_timeline_client::manifest::TenantManifest;
 use pageserver_api::shard::ShardIndex;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use utils::generation::Generation;
 use utils::id::TimelineId;
+use utils::shard::TenantShardId;
 
 use crate::cloud_admin_api::BranchData;
 use crate::metadata_stream::stream_listing;
 use crate::{download_object_with_retries, RootTarget, TenantShardTimelineId};
 use futures_util::StreamExt;
-use pageserver::tenant::remote_timeline_client::{parse_remote_index_path, remote_layer_path};
+use pageserver::tenant::remote_timeline_client::{
+    parse_remote_index_path, parse_remote_tenant_manifest_path, remote_layer_path,
+};
 use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::IndexPart;
 use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
@@ -128,7 +132,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
 
                     let layer_names = index_part.layer_metadata.keys().cloned().collect_vec();
                     if let Some(err) = check_valid_layermap(&layer_names) {
-                        result.errors.push(format!(
+                        result.warnings.push(format!(
                             "index_part.json contains invalid layer map structure: {err}"
                         ));
                     }
@@ -526,4 +530,142 @@ async fn list_timeline_blobs_impl(
         unused_index_keys: index_part_keys,
         unknown_keys,
     }))
+}
+
+pub(crate) struct RemoteTenantManifestInfo {
+    pub(crate) generation: Generation,
+    pub(crate) manifest: TenantManifest,
+    pub(crate) listing_object: ListingObject,
+}
+
+pub(crate) enum ListTenantManifestResult {
+    WithErrors {
+        errors: Vec<(String, String)>,
+        #[allow(dead_code)]
+        unknown_keys: Vec<ListingObject>,
+    },
+    NoErrors {
+        latest_generation: Option<RemoteTenantManifestInfo>,
+        manifests: Vec<(Generation, ListingObject)>,
+    },
+}
+
+/// Lists the tenant manifests in remote storage and parses the latest one, returning a [`ListTenantManifestResult`] object.
+pub(crate) async fn list_tenant_manifests(
+    remote_client: &GenericRemoteStorage,
+    tenant_id: TenantShardId,
+    root_target: &RootTarget,
+) -> anyhow::Result<ListTenantManifestResult> {
+    let mut errors = Vec::new();
+    let mut unknown_keys = Vec::new();
+
+    let mut tenant_root_target = root_target.tenant_root(&tenant_id);
+    let original_prefix = tenant_root_target.prefix_in_bucket.clone();
+    const TENANT_MANIFEST_STEM: &str = "tenant-manifest";
+    tenant_root_target.prefix_in_bucket += TENANT_MANIFEST_STEM;
+    tenant_root_target.delimiter = String::new();
+
+    let mut manifests: Vec<(Generation, ListingObject)> = Vec::new();
+
+    let prefix_str = &original_prefix
+        .strip_prefix("/")
+        .unwrap_or(&original_prefix);
+
+    let mut stream = std::pin::pin!(stream_listing(remote_client, &tenant_root_target));
+    'outer: while let Some(obj) = stream.next().await {
+        let (key, Some(obj)) = obj? else {
+            panic!("ListingObject not specified");
+        };
+
+        'err: {
+            // TODO a let chain would be nicer here.
+            let Some(name) = key.object_name() else {
+                break 'err;
+            };
+            if !name.starts_with(TENANT_MANIFEST_STEM) {
+                break 'err;
+            }
+            let Some(generation) = parse_remote_tenant_manifest_path(key.clone()) else {
+                break 'err;
+            };
+            tracing::debug!("tenant manifest {key}");
+            manifests.push((generation, obj));
+            continue 'outer;
+        }
+        tracing::info!("Listed an unknown key: {key}");
+        unknown_keys.push(obj);
+    }
+
+    if !unknown_keys.is_empty() {
+        errors.push(((*prefix_str).to_owned(), "unknown keys listed".to_string()));
+
+        return Ok(ListTenantManifestResult::WithErrors {
+            errors,
+            unknown_keys,
+        });
+    }
+
+    if manifests.is_empty() {
+        tracing::debug!("No manifest for timeline.");
+
+        return Ok(ListTenantManifestResult::NoErrors {
+            latest_generation: None,
+            manifests,
+        });
+    }
+
+    // Find the manifest with the highest generation
+    let (latest_generation, latest_listing_object) = manifests
+        .iter()
+        .max_by_key(|i| i.0)
+        .map(|(g, obj)| (*g, obj.clone()))
+        .unwrap();
+
+    manifests.retain(|(gen, _obj)| gen != &latest_generation);
+
+    let manifest_bytes =
+        match download_object_with_retries(remote_client, &latest_listing_object.key).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                // It is possible that the tenant gets deleted in-between we list the objects
+                // and we download the manifest file.
+                errors.push((
+                    latest_listing_object.key.get_path().as_str().to_owned(),
+                    format!("failed to download tenant-manifest.json: {e}"),
+                ));
+                return Ok(ListTenantManifestResult::WithErrors {
+                    errors,
+                    unknown_keys,
+                });
+            }
+        };
+
+    match TenantManifest::from_json_bytes(&manifest_bytes) {
+        Ok(manifest) => {
+            return Ok(ListTenantManifestResult::NoErrors {
+                latest_generation: Some(RemoteTenantManifestInfo {
+                    generation: latest_generation,
+                    manifest,
+                    listing_object: latest_listing_object,
+                }),
+                manifests,
+            });
+        }
+        Err(parse_error) => errors.push((
+            latest_listing_object.key.get_path().as_str().to_owned(),
+            format!("tenant-manifest.json body parsing error: {parse_error}"),
+        )),
+    }
+
+    if errors.is_empty() {
+        errors.push((
+            (*prefix_str).to_owned(),
+            "Unexpected: no errors did not lead to a successfully parsed blob return".to_string(),
+        ));
+    }
+
+    Ok(ListTenantManifestResult::WithErrors {
+        errors,
+        unknown_keys,
+    })
 }

@@ -472,6 +472,7 @@ impl TenantShard {
         tenant_shard_id: TenantShardId,
         shard: ShardIdentity,
         policy: PlacementPolicy,
+        preferred_az_id: Option<AvailabilityZone>,
     ) -> Self {
         metrics::METRICS_REGISTRY
             .metrics_group
@@ -495,7 +496,7 @@ impl TenantShard {
             last_error: Arc::default(),
             pending_compute_notification: false,
             scheduling_policy: ShardSchedulingPolicy::default(),
-            preferred_az_id: None,
+            preferred_az_id,
         }
     }
 
@@ -1571,16 +1572,24 @@ pub(crate) mod tests {
             )
             .unwrap(),
             policy,
+            None,
         )
     }
 
-    fn make_test_tenant(
+    pub(crate) fn make_test_tenant(
         policy: PlacementPolicy,
         shard_count: ShardCount,
         preferred_az: Option<AvailabilityZone>,
     ) -> Vec<TenantShard> {
-        let tenant_id = TenantId::generate();
+        make_test_tenant_with_id(TenantId::generate(), policy, shard_count, preferred_az)
+    }
 
+    pub(crate) fn make_test_tenant_with_id(
+        tenant_id: TenantId,
+        policy: PlacementPolicy,
+        shard_count: ShardCount,
+        preferred_az: Option<AvailabilityZone>,
+    ) -> Vec<TenantShard> {
         (0..shard_count.count())
             .map(|i| {
                 let shard_number = ShardNumber(i);
@@ -1590,7 +1599,7 @@ pub(crate) mod tests {
                     shard_number,
                     shard_count,
                 };
-                let mut ts = TenantShard::new(
+                TenantShard::new(
                     tenant_shard_id,
                     ShardIdentity::new(
                         shard_number,
@@ -1599,13 +1608,8 @@ pub(crate) mod tests {
                     )
                     .unwrap(),
                     policy.clone(),
-                );
-
-                if let Some(az) = &preferred_az {
-                    ts.set_preferred_az(az.clone());
-                }
-
-                ts
+                    preferred_az.clone(),
+                )
             })
             .collect()
     }

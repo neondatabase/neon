@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::process::exit;
+use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::{thread, time::Duration};
@@ -58,7 +59,7 @@ use compute_tools::compute::{
     forward_termination_signal, ComputeNode, ComputeState, ParsedSpec, PG_PID,
 };
 use compute_tools::configurator::launch_configurator;
-use compute_tools::extension_server::get_pg_version;
+use compute_tools::extension_server::get_pg_version_string;
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -245,47 +246,48 @@ fn try_spec_from_cli(
     let compute_id = matches.get_one::<String>("compute-id");
     let control_plane_uri = matches.get_one::<String>("control-plane-uri");
 
-    let spec;
-    let mut live_config_allowed = false;
-    match spec_json {
-        // First, try to get cluster spec from the cli argument
-        Some(json) => {
-            info!("got spec from cli argument {}", json);
-            spec = Some(serde_json::from_str(json)?);
-        }
-        None => {
-            // Second, try to read it from the file if path is provided
-            if let Some(sp) = spec_path {
-                let path = Path::new(sp);
-                let file = File::open(path)?;
-                spec = Some(serde_json::from_reader(file)?);
-                live_config_allowed = true;
-            } else if let Some(id) = compute_id {
-                if let Some(cp_base) = control_plane_uri {
-                    live_config_allowed = true;
-                    spec = match get_spec_from_control_plane(cp_base, id) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!("cannot get response from control plane: {}", e);
-                            panic!("neither spec nor confirmation that compute is in the Empty state was received");
-                        }
-                    };
-                } else {
-                    panic!("must specify both --control-plane-uri and --compute-id or none");
-                }
-            } else {
-                panic!(
-                    "compute spec should be provided by one of the following ways: \
-                    --spec OR --spec-path OR --control-plane-uri and --compute-id"
-                );
-            }
-        }
+    // First, try to get cluster spec from the cli argument
+    if let Some(spec_json) = spec_json {
+        info!("got spec from cli argument {}", spec_json);
+        return Ok(CliSpecParams {
+            spec: Some(serde_json::from_str(spec_json)?),
+            live_config_allowed: false,
+        });
+    }
+
+    // Second, try to read it from the file if path is provided
+    if let Some(spec_path) = spec_path {
+        let file = File::open(Path::new(spec_path))?;
+        return Ok(CliSpecParams {
+            spec: Some(serde_json::from_reader(file)?),
+            live_config_allowed: true,
+        });
+    }
+
+    let Some(compute_id) = compute_id else {
+        panic!(
+            "compute spec should be provided by one of the following ways: \
+                --spec OR --spec-path OR --control-plane-uri and --compute-id"
+        );
+    };
+    let Some(control_plane_uri) = control_plane_uri else {
+        panic!("must specify both --control-plane-uri and --compute-id or none");
     };
 
-    Ok(CliSpecParams {
-        spec,
-        live_config_allowed,
-    })
+    match get_spec_from_control_plane(control_plane_uri, compute_id) {
+        Ok(spec) => Ok(CliSpecParams {
+            spec,
+            live_config_allowed: true,
+        }),
+        Err(e) => {
+            error!(
+                "cannot get response from control plane: {}\n\
+                neither spec nor confirmation that compute is in the Empty state was received",
+                e
+            );
+            Err(e)
+        }
+    }
 }
 
 struct CliSpecParams {
@@ -322,11 +324,19 @@ fn wait_spec(
     } else {
         spec_set = false;
     }
+    let connstr = Url::parse(connstr).context("cannot parse connstr as a URL")?;
+    let conn_conf = postgres::config::Config::from_str(connstr.as_str())
+        .context("cannot build postgres config from connstr")?;
+    let tokio_conn_conf = tokio_postgres::config::Config::from_str(connstr.as_str())
+        .context("cannot build tokio postgres config from connstr")?;
     let compute_node = ComputeNode {
-        connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
+        connstr,
+        conn_conf,
+        tokio_conn_conf,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
-        pgversion: get_pg_version(pgbin),
+        pgversion: get_pg_version_string(pgbin),
+        http_port,
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
@@ -381,7 +391,6 @@ fn wait_spec(
 
     Ok(WaitSpecResult {
         compute,
-        http_port,
         resize_swap_on_bind,
         set_disk_quota_for_fs: set_disk_quota_for_fs.cloned(),
     })
@@ -389,8 +398,6 @@ fn wait_spec(
 
 struct WaitSpecResult {
     compute: Arc<ComputeNode>,
-    // passed through from ProcessCliResult
-    http_port: u16,
     resize_swap_on_bind: bool,
     set_disk_quota_for_fs: Option<String>,
 }
@@ -400,7 +407,6 @@ fn start_postgres(
     #[allow(unused_variables)] matches: &clap::ArgMatches,
     WaitSpecResult {
         compute,
-        http_port,
         resize_swap_on_bind,
         set_disk_quota_for_fs,
     }: WaitSpecResult,
@@ -473,12 +479,10 @@ fn start_postgres(
         }
     }
 
-    let extension_server_port: u16 = http_port;
-
     // Start Postgres
     let mut pg = None;
     if !prestartup_failed {
-        pg = match compute.start_compute(extension_server_port) {
+        pg = match compute.start_compute() {
             Ok(pg) => Some(pg),
             Err(err) => {
                 error!("could not start the compute node: {:#}", err);

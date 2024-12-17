@@ -8,7 +8,7 @@ use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 use tracing::field::display;
-use tracing::{debug, info_span, Span};
+use tracing::{debug, error, info_span, Span};
 use try_lock::TryLock;
 use uuid::Uuid;
 
@@ -57,6 +57,7 @@ struct RequestContextInner {
     application: Option<SmolStr>,
     error_kind: Option<ErrorKind>,
     pub(crate) auth_method: Option<AuthMethod>,
+    jwt_issuer: Option<String>,
     success: bool,
     pub(crate) cold_start_info: ColdStartInfo,
     pg_options: Option<StartupMessageParams>,
@@ -79,6 +80,7 @@ pub(crate) enum AuthMethod {
     ScramSha256,
     ScramSha256Plus,
     Cleartext,
+    Jwt,
 }
 
 impl Clone for RequestContext {
@@ -100,6 +102,7 @@ impl Clone for RequestContext {
             application: inner.application.clone(),
             error_kind: inner.error_kind,
             auth_method: inner.auth_method.clone(),
+            jwt_issuer: inner.jwt_issuer.clone(),
             success: inner.success,
             rejected: inner.rejected,
             cold_start_info: inner.cold_start_info,
@@ -148,6 +151,7 @@ impl RequestContext {
             application: None,
             error_kind: None,
             auth_method: None,
+            jwt_issuer: None,
             success: false,
             rejected: None,
             cold_start_info: ColdStartInfo::Unknown,
@@ -246,6 +250,11 @@ impl RequestContext {
         this.auth_method = Some(auth_method);
     }
 
+    pub(crate) fn set_jwt_issuer(&self, jwt_issuer: String) {
+        let mut this = self.0.try_lock().expect("should not deadlock");
+        this.jwt_issuer = Some(jwt_issuer);
+    }
+
     pub fn has_private_peer_addr(&self) -> bool {
         self.0
             .try_lock()
@@ -272,11 +281,14 @@ impl RequestContext {
         this.success = true;
     }
 
-    pub fn log_connect(&self) {
-        self.0
-            .try_lock()
-            .expect("should not deadlock")
-            .log_connect();
+    pub fn log_connect(self) -> DisconnectLogger {
+        let mut this = self.0.into_inner();
+        this.log_connect();
+
+        // close current span.
+        this.span = Span::none();
+
+        DisconnectLogger(this)
     }
 
     pub(crate) fn protocol(&self) -> Protocol {
@@ -411,10 +423,13 @@ impl RequestContextInner {
                     outcome,
                 });
         }
+
         if let Some(tx) = self.sender.take() {
-            tx.send(RequestData::from(&*self))
-                .inspect_err(|e| debug!("tx send failed: {e}"))
-                .ok();
+            // If type changes, this error handling needs to be updated.
+            let tx: mpsc::UnboundedSender<RequestData> = tx;
+            if let Err(e) = tx.send(RequestData::from(&*self)) {
+                error!("log_connect channel send failed: {e}");
+            }
         }
     }
 
@@ -423,9 +438,11 @@ impl RequestContextInner {
         // Here we log the length of the session.
         self.disconnect_timestamp = Some(Utc::now());
         if let Some(tx) = self.disconnect_sender.take() {
-            tx.send(RequestData::from(&*self))
-                .inspect_err(|e| debug!("tx send failed: {e}"))
-                .ok();
+            // If type changes, this error handling needs to be updated.
+            let tx: mpsc::UnboundedSender<RequestData> = tx;
+            if let Err(e) = tx.send(RequestData::from(&*self)) {
+                error!("log_disconnect channel send failed: {e}");
+            }
         }
     }
 }
@@ -434,8 +451,14 @@ impl Drop for RequestContextInner {
     fn drop(&mut self) {
         if self.sender.is_some() {
             self.log_connect();
-        } else {
-            self.log_disconnect();
         }
+    }
+}
+
+pub struct DisconnectLogger(RequestContextInner);
+
+impl Drop for DisconnectLogger {
+    fn drop(&mut self) {
+        self.0.log_disconnect();
     }
 }

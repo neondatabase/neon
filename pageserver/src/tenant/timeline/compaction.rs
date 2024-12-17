@@ -16,7 +16,6 @@ use super::{
 
 use anyhow::{anyhow, bail, Context};
 use bytes::Bytes;
-use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::key::KEY_SIZE;
@@ -30,7 +29,6 @@ use utils::id::TimelineId;
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
 use crate::statvfs::Statvfs;
-use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::batch_split_writer::{
     BatchWriterResult, SplitDeltaLayerWriter, SplitImageLayerWriter,
@@ -43,7 +41,7 @@ use crate::tenant::storage_layer::{
 use crate::tenant::timeline::ImageLayerCreationOutcome;
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
-use crate::tenant::{DeltaLayer, MaybeOffloaded};
+use crate::tenant::{gc_block, DeltaLayer, MaybeOffloaded};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 use pageserver_api::config::tenant_conf_defaults::{
     DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD,
@@ -64,16 +62,69 @@ use super::CompactionError;
 /// Maximum number of deltas before generating an image layer in bottom-most compaction.
 const COMPACTION_DELTA_THRESHOLD: usize = 5;
 
+/// A scheduled compaction task.
+pub(crate) struct ScheduledCompactionTask {
+    /// It's unfortunate that we need to store a compact options struct here because the only outer
+    /// API we can call here is `compact_with_options` which does a few setup calls before starting the
+    /// actual compaction job... We should refactor this to store `GcCompactionJob` in the future.
+    pub options: CompactOptions,
+    /// The channel to send the compaction result. If this is a subcompaction, the last compaction job holds the sender.
+    pub result_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Hold the GC block. If this is a subcompaction, the last compaction job holds the gc block guard.
+    pub gc_block: Option<gc_block::Guard>,
+}
+
+/// A job description for the gc-compaction job. This structure describes the rectangle range that the job will
+/// process. The exact layers that need to be compacted/rewritten will be generated when `compact_with_gc` gets
+/// called.
+#[derive(Debug, Clone)]
+pub(crate) struct GcCompactJob {
+    pub dry_run: bool,
+    /// The key range to be compacted. The compaction algorithm will only regenerate key-value pairs within this range
+    /// [left inclusive, right exclusive), and other pairs will be rewritten into new files if necessary.
+    pub compact_key_range: Range<Key>,
+    /// The LSN range to be compacted. The compaction algorithm will use this range to determine the layers to be
+    /// selected for the compaction, and it does not guarantee the generated layers will have exactly the same LSN range
+    /// as specified here. The true range being compacted is `min_lsn/max_lsn` in [`GcCompactionJobDescription`].
+    /// min_lsn will always <= the lower bound specified here, and max_lsn will always >= the upper bound specified here.
+    pub compact_lsn_range: Range<Lsn>,
+}
+
+impl GcCompactJob {
+    pub fn from_compact_options(options: CompactOptions) -> Self {
+        GcCompactJob {
+            dry_run: options.flags.contains(CompactFlags::DryRun),
+            compact_key_range: options
+                .compact_key_range
+                .map(|x| x.into())
+                .unwrap_or(Key::MIN..Key::MAX),
+            compact_lsn_range: options
+                .compact_lsn_range
+                .map(|x| x.into())
+                .unwrap_or(Lsn::INVALID..Lsn::MAX),
+        }
+    }
+}
+
+/// A job description for the gc-compaction job. This structure is generated when `compact_with_gc` is called
+/// and contains the exact layers we want to compact.
 pub struct GcCompactionJobDescription {
     /// All layers to read in the compaction job
     selected_layers: Vec<Layer>,
-    /// GC cutoff of the job
+    /// GC cutoff of the job. This is the lowest LSN that will be accessed by the read/GC path and we need to
+    /// keep all deltas <= this LSN or generate an image == this LSN.
     gc_cutoff: Lsn,
-    /// LSNs to retain for the job
+    /// LSNs to retain for the job. Read path will use this LSN so we need to keep deltas <= this LSN or
+    /// generate an image == this LSN.
     retain_lsns_below_horizon: Vec<Lsn>,
-    /// Maximum layer LSN processed in this compaction
+    /// Maximum layer LSN processed in this compaction, that is max(end_lsn of layers). Exclusive. All data
+    /// \>= this LSN will be kept and will not be rewritten.
     max_layer_lsn: Lsn,
-    /// Only compact layers overlapping with this range
+    /// Minimum layer LSN processed in this compaction, that is min(start_lsn of layers). Inclusive.
+    /// All access below (strict lower than `<`) this LSN will be routed through the normal read path instead of
+    /// k-merge within gc-compaction.
+    min_layer_lsn: Lsn,
+    /// Only compact layers overlapping with this range.
     compaction_key_range: Range<Key>,
     /// When partial compaction is enabled, these layers need to be rewritten to ensure no overlap.
     /// This field is here solely for debugging. The field will not be read once the compaction
@@ -292,7 +343,7 @@ impl Timeline {
             )));
         }
 
-        if options.compact_range.is_some() {
+        if options.compact_key_range.is_some() || options.compact_lsn_range.is_some() {
             // maybe useful in the future? could implement this at some point
             return Err(CompactionError::Other(anyhow!(
                 "compaction range is not supported for legacy compaction for now"
@@ -1059,7 +1110,7 @@ impl Timeline {
                 return Err(CompactionError::ShuttingDown);
             }
 
-            let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
+            let same_key = prev_key == Some(key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
                 let mut next_key_size = 0u64;
@@ -1174,11 +1225,12 @@ impl Timeline {
                     .await
                     .map_err(CompactionError::Other)?;
             } else {
-                debug!(
-                    "Dropping key {} during compaction (it belongs on shard {:?})",
-                    key,
-                    self.shard_identity.get_shard_number(&key)
-                );
+                let shard = self.shard_identity.shard_index();
+                let owner = self.shard_identity.get_shard_number(&key);
+                if cfg!(debug_assertions) {
+                    panic!("key {key} does not belong on shard {shard}, owned by {owner}");
+                }
+                debug!("dropping key {key} during compaction (it belongs on shard {owner})");
             }
 
             if !new_layers.is_empty() {
@@ -1746,22 +1798,114 @@ impl Timeline {
         Ok(())
     }
 
-    pub(crate) async fn compact_with_gc(
+    /// Split a gc-compaction job into multiple compaction jobs. The split is based on the key range and the estimated size of the compaction job.
+    /// The function returns a list of compaction jobs that can be executed separately. If the upper bound of the compact LSN
+    /// range is not specified, we will use the latest gc_cutoff as the upper bound, so that all jobs in the jobset acts
+    /// like a full compaction of the specified keyspace.
+    pub(crate) async fn gc_compaction_split_jobs(
         self: &Arc<Self>,
-        cancel: &CancellationToken,
-        options: CompactOptions,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        self.partial_compact_with_gc(
-            options
-                .compact_range
-                .map(|range| range.start..range.end)
-                .unwrap_or_else(|| Key::MIN..Key::MAX),
-            cancel,
-            options.flags,
-            ctx,
-        )
-        .await
+        job: GcCompactJob,
+        sub_compaction_max_job_size_mb: Option<u64>,
+    ) -> anyhow::Result<Vec<GcCompactJob>> {
+        let compact_below_lsn = if job.compact_lsn_range.end != Lsn::MAX {
+            job.compact_lsn_range.end
+        } else {
+            *self.get_latest_gc_cutoff_lsn() // use the real gc cutoff
+        };
+
+        // Split compaction job to about 4GB each
+        const GC_COMPACT_MAX_SIZE_MB: u64 = 4 * 1024;
+        let sub_compaction_max_job_size_mb =
+            sub_compaction_max_job_size_mb.unwrap_or(GC_COMPACT_MAX_SIZE_MB);
+
+        let mut compact_jobs = Vec::new();
+        // For now, we simply use the key partitioning information; we should do a more fine-grained partitioning
+        // by estimating the amount of files read for a compaction job. We should also partition on LSN.
+        let ((dense_ks, sparse_ks), _) = {
+            let Ok(partition) = self.partitioning.try_lock() else {
+                bail!("failed to acquire partition lock");
+            };
+            partition.clone()
+        };
+        // Truncate the key range to be within user specified compaction range.
+        fn truncate_to(
+            source_start: &Key,
+            source_end: &Key,
+            target_start: &Key,
+            target_end: &Key,
+        ) -> Option<(Key, Key)> {
+            let start = source_start.max(target_start);
+            let end = source_end.min(target_end);
+            if start < end {
+                Some((*start, *end))
+            } else {
+                None
+            }
+        }
+        let mut split_key_ranges = Vec::new();
+        let ranges = dense_ks
+            .parts
+            .iter()
+            .map(|partition| partition.ranges.iter())
+            .chain(sparse_ks.parts.iter().map(|x| x.0.ranges.iter()))
+            .flatten()
+            .cloned()
+            .collect_vec();
+        for range in ranges.iter() {
+            let Some((start, end)) = truncate_to(
+                &range.start,
+                &range.end,
+                &job.compact_key_range.start,
+                &job.compact_key_range.end,
+            ) else {
+                continue;
+            };
+            split_key_ranges.push((start, end));
+        }
+        split_key_ranges.sort();
+        let guard = self.layers.read().await;
+        let layer_map = guard.layer_map()?;
+        let mut current_start = None;
+        let ranges_num = split_key_ranges.len();
+        for (idx, (start, end)) in split_key_ranges.into_iter().enumerate() {
+            if current_start.is_none() {
+                current_start = Some(start);
+            }
+            let start = current_start.unwrap();
+            if start >= end {
+                // We have already processed this partition.
+                continue;
+            }
+            let res = layer_map.range_search(start..end, compact_below_lsn);
+            let total_size = res.found.keys().map(|x| x.layer.file_size()).sum::<u64>();
+            if total_size > sub_compaction_max_job_size_mb * 1024 * 1024 || ranges_num == idx + 1 {
+                // Try to extend the compaction range so that we include at least one full layer file.
+                let extended_end = res
+                    .found
+                    .keys()
+                    .map(|layer| layer.layer.key_range.end)
+                    .min();
+                // It is possible that the search range does not contain any layer files when we reach the end of the loop.
+                // In this case, we simply use the specified key range end.
+                let end = if let Some(extended_end) = extended_end {
+                    extended_end.max(end)
+                } else {
+                    end
+                };
+                info!(
+                    "splitting compaction job: {}..{}, estimated_size={}",
+                    start, end, total_size
+                );
+                compact_jobs.push(GcCompactJob {
+                    dry_run: job.dry_run,
+                    compact_key_range: start..end,
+                    compact_lsn_range: job.compact_lsn_range.start..compact_below_lsn,
+                });
+                current_start = Some(end);
+            }
+        }
+        drop(guard);
+        Ok(compact_jobs)
     }
 
     /// An experimental compaction building block that combines compaction with garbage collection.
@@ -1771,17 +1915,49 @@ impl Timeline {
     /// layers and image layers, which generates image layers on the gc horizon, drop deltas below gc horizon,
     /// and create delta layers with all deltas >= gc horizon.
     ///
-    /// If `key_range` is provided, it will only compact the keys within the range, aka partial compaction.
+    /// If `options.compact_range` is provided, it will only compact the keys within the range, aka partial compaction.
     /// Partial compaction will read and process all layers overlapping with the key range, even if it might
     /// contain extra keys. After the gc-compaction phase completes, delta layers that are not fully contained
     /// within the key range will be rewritten to ensure they do not overlap with the delta layers. Providing
     /// Key::MIN..Key..MAX to the function indicates a full compaction, though technically, `Key::MAX` is not
     /// part of the range.
-    pub(crate) async fn partial_compact_with_gc(
+    ///
+    /// If `options.compact_lsn_range.end` is provided, the compaction will only compact layers below or intersect with
+    /// the LSN. Otherwise, it will use the gc cutoff by default.
+    pub(crate) async fn compact_with_gc(
         self: &Arc<Self>,
-        compaction_key_range: Range<Key>,
         cancel: &CancellationToken,
-        flags: EnumSet<CompactFlags>,
+        options: CompactOptions,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let sub_compaction = options.sub_compaction;
+        let job = GcCompactJob::from_compact_options(options.clone());
+        if sub_compaction {
+            info!("running enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs");
+            let jobs = self
+                .gc_compaction_split_jobs(job, options.sub_compaction_max_job_size_mb)
+                .await?;
+            let jobs_len = jobs.len();
+            for (idx, job) in jobs.into_iter().enumerate() {
+                info!(
+                    "running enhanced gc bottom-most compaction, sub-compaction {}/{}",
+                    idx + 1,
+                    jobs_len
+                );
+                self.compact_with_gc_inner(cancel, job, ctx).await?;
+            }
+            if jobs_len == 0 {
+                info!("no jobs to run, skipping gc bottom-most compaction");
+            }
+            return Ok(());
+        }
+        self.compact_with_gc_inner(cancel, job, ctx).await
+    }
+
+    async fn compact_with_gc_inner(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        job: GcCompactJob,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Block other compaction/GC tasks from running for now. GC-compaction could run along
@@ -1803,13 +1979,11 @@ impl Timeline {
         )
         .await?;
 
-        let dry_run = flags.contains(CompactFlags::DryRun);
+        let dry_run = job.dry_run;
+        let compact_key_range = job.compact_key_range;
+        let compact_lsn_range = job.compact_lsn_range;
 
-        if compaction_key_range == (Key::MIN..Key::MAX) {
-            info!("running enhanced gc bottom-most compaction, dry_run={dry_run}, compaction_key_range={}..{}", compaction_key_range.start, compaction_key_range.end);
-        } else {
-            info!("running enhanced gc bottom-most compaction, dry_run={dry_run}");
-        }
+        info!("running enhanced gc bottom-most compaction, dry_run={dry_run}, compact_key_range={}..{}, compact_lsn_range={}..{}", compact_key_range.start, compact_key_range.end, compact_lsn_range.start, compact_lsn_range.end);
 
         scopeguard::defer! {
             info!("done enhanced gc bottom-most compaction");
@@ -1826,7 +2000,26 @@ impl Timeline {
             let layers = guard.layer_map()?;
             let gc_info = self.gc_info.read().unwrap();
             let mut retain_lsns_below_horizon = Vec::new();
-            let gc_cutoff = gc_info.cutoffs.select_min();
+            let gc_cutoff = {
+                // Currently, gc-compaction only kicks in after the legacy gc has updated the gc_cutoff.
+                // Therefore, it can only clean up data that cannot be cleaned up with legacy gc, instead of
+                // cleaning everything that theoritically it could. In the future, it should use `self.gc_info`
+                // to get the truth data.
+                let real_gc_cutoff = *self.get_latest_gc_cutoff_lsn();
+                // The compaction algorithm will keep all keys above the gc_cutoff while keeping only necessary keys below the gc_cutoff for
+                // each of the retain_lsn. Therefore, if the user-provided `compact_lsn_range.end` is larger than the real gc cutoff, we will use
+                // the real cutoff.
+                let mut gc_cutoff = if compact_lsn_range.end == Lsn::MAX {
+                    real_gc_cutoff
+                } else {
+                    compact_lsn_range.end
+                };
+                if gc_cutoff > real_gc_cutoff {
+                    warn!("provided compact_lsn_range.end={} is larger than the real_gc_cutoff={}, using the real gc cutoff", gc_cutoff, real_gc_cutoff);
+                    gc_cutoff = real_gc_cutoff;
+                }
+                gc_cutoff
+            };
             for (lsn, _timeline_id, _is_offloaded) in &gc_info.retain_lsns {
                 if lsn < &gc_cutoff {
                     retain_lsns_below_horizon.push(*lsn);
@@ -1839,14 +2032,32 @@ impl Timeline {
             }
             let mut selected_layers: Vec<Layer> = Vec::new();
             drop(gc_info);
-            // Pick all the layers intersect or below the gc_cutoff, get the largest LSN in the selected layers.
+            // Firstly, pick all the layers intersect or below the gc_cutoff, get the largest LSN in the selected layers.
             let Some(max_layer_lsn) = layers
                 .iter_historic_layers()
                 .filter(|desc| desc.get_lsn_range().start <= gc_cutoff)
                 .map(|desc| desc.get_lsn_range().end)
                 .max()
             else {
-                info!("no layers to compact with gc");
+                info!("no layers to compact with gc: no historic layers below gc_cutoff, gc_cutoff={}", gc_cutoff);
+                return Ok(());
+            };
+            // Next, if the user specifies compact_lsn_range.start, we need to filter some layers out. All the layers (strictly) below
+            // the min_layer_lsn computed as below will be filtered out and the data will be accessed using the normal read path, as if
+            // it is a branch.
+            let Some(min_layer_lsn) = layers
+                .iter_historic_layers()
+                .filter(|desc| {
+                    if compact_lsn_range.start == Lsn::INVALID {
+                        true // select all layers below if start == Lsn(0)
+                    } else {
+                        desc.get_lsn_range().end > compact_lsn_range.start // strictly larger than compact_above_lsn
+                    }
+                })
+                .map(|desc| desc.get_lsn_range().start)
+                .min()
+            else {
+                info!("no layers to compact with gc: no historic layers above compact_above_lsn, compact_above_lsn={}", compact_lsn_range.end);
                 return Ok(());
             };
             // Then, pick all the layers that are below the max_layer_lsn. This is to ensure we can pick all single-key
@@ -1854,22 +2065,22 @@ impl Timeline {
             let mut rewrite_layers = Vec::new();
             for desc in layers.iter_historic_layers() {
                 if desc.get_lsn_range().end <= max_layer_lsn
-                    && overlaps_with(&desc.get_key_range(), &compaction_key_range)
+                    && desc.get_lsn_range().start >= min_layer_lsn
+                    && overlaps_with(&desc.get_key_range(), &compact_key_range)
                 {
                     // If the layer overlaps with the compaction key range, we need to read it to obtain all keys within the range,
                     // even if it might contain extra keys
                     selected_layers.push(guard.get_from_desc(&desc));
                     // If the layer is not fully contained within the key range, we need to rewrite it if it's a delta layer (it's fine
                     // to overlap image layers)
-                    if desc.is_delta()
-                        && !fully_contains(&compaction_key_range, &desc.get_key_range())
+                    if desc.is_delta() && !fully_contains(&compact_key_range, &desc.get_key_range())
                     {
                         rewrite_layers.push(desc);
                     }
                 }
             }
             if selected_layers.is_empty() {
-                info!("no layers to compact with gc");
+                info!("no layers to compact with gc: no layers within the key range, gc_cutoff={}, key_range={}..{}", gc_cutoff, compact_key_range.start, compact_key_range.end);
                 return Ok(());
             }
             retain_lsns_below_horizon.sort();
@@ -1877,13 +2088,20 @@ impl Timeline {
                 selected_layers,
                 gc_cutoff,
                 retain_lsns_below_horizon,
+                min_layer_lsn,
                 max_layer_lsn,
-                compaction_key_range,
+                compaction_key_range: compact_key_range,
                 rewrite_layers,
             }
         };
-        let lowest_retain_lsn = if self.ancestor_timeline.is_some() {
-            Lsn(self.ancestor_lsn.0 + 1)
+        let (has_data_below, lowest_retain_lsn) = if compact_lsn_range.start != Lsn::INVALID {
+            // If we only compact above some LSN, we should get the history from the current branch below the specified LSN.
+            // We use job_desc.min_layer_lsn as if it's the lowest branch point.
+            (true, job_desc.min_layer_lsn)
+        } else if self.ancestor_timeline.is_some() {
+            // In theory, we can also use min_layer_lsn here, but using ancestor LSN makes sure the delta layers cover the
+            // LSN ranges all the way to the ancestor timeline.
+            (true, self.ancestor_lsn)
         } else {
             let res = job_desc
                 .retain_lsns_below_horizon
@@ -1901,17 +2119,19 @@ impl Timeline {
                         .unwrap_or(job_desc.gc_cutoff)
                 );
             }
-            res
+            (false, res)
         };
         info!(
-            "picked {} layers for compaction ({} layers need rewriting) with max_layer_lsn={} gc_cutoff={} lowest_retain_lsn={}, key_range={}..{}",
+            "picked {} layers for compaction ({} layers need rewriting) with max_layer_lsn={} min_layer_lsn={} gc_cutoff={} lowest_retain_lsn={}, key_range={}..{}, has_data_below={}",
             job_desc.selected_layers.len(),
             job_desc.rewrite_layers.len(),
             job_desc.max_layer_lsn,
+            job_desc.min_layer_lsn,
             job_desc.gc_cutoff,
             lowest_retain_lsn,
             job_desc.compaction_key_range.start,
-            job_desc.compaction_key_range.end
+            job_desc.compaction_key_range.end,
+            has_data_below,
         );
 
         for layer in &job_desc.selected_layers {
@@ -1936,14 +2156,15 @@ impl Timeline {
 
         // Step 1: construct a k-merge iterator over all layers.
         // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
-        let layer_names = job_desc
-            .selected_layers
-            .iter()
-            .map(|layer| layer.layer_desc().layer_name())
-            .collect_vec();
-        if let Some(err) = check_valid_layermap(&layer_names) {
-            warn!("gc-compaction layer map check failed because {}, this is normal if partial compaction is not finished yet", err);
-        }
+        // disable the check for now because we need to adjust the check for partial compactions, will enable later.
+        // let layer_names = job_desc
+        //     .selected_layers
+        //     .iter()
+        //     .map(|layer| layer.layer_desc().layer_name())
+        //     .collect_vec();
+        // if let Some(err) = check_valid_layermap(&layer_names) {
+        //     warn!("gc-compaction layer map check failed because {}, this is normal if partial compaction is not finished yet", err);
+        // }
         // The maximum LSN we are processing in this compaction loop
         let end_lsn = job_desc
             .selected_layers
@@ -1954,10 +2175,22 @@ impl Timeline {
         let mut delta_layers = Vec::new();
         let mut image_layers = Vec::new();
         let mut downloaded_layers = Vec::new();
+        let mut total_downloaded_size = 0;
+        let mut total_layer_size = 0;
         for layer in &job_desc.selected_layers {
+            if layer.needs_download().await?.is_some() {
+                total_downloaded_size += layer.layer_desc().file_size;
+            }
+            total_layer_size += layer.layer_desc().file_size;
             let resident_layer = layer.download_and_keep_resident().await?;
             downloaded_layers.push(resident_layer);
         }
+        info!(
+            "finish downloading layers, downloaded={}, total={}, ratio={:.2}",
+            total_downloaded_size,
+            total_layer_size,
+            total_downloaded_size as f64 / total_layer_size as f64
+        );
         for resident_layer in &downloaded_layers {
             if resident_layer.layer_desc().is_delta() {
                 let layer = resident_layer.get_as_delta(ctx).await?;
@@ -1980,7 +2213,7 @@ impl Timeline {
 
         // Only create image layers when there is no ancestor branches. TODO: create covering image layer
         // when some condition meet.
-        let mut image_layer_writer = if self.ancestor_timeline.is_none() {
+        let mut image_layer_writer = if !has_data_below {
             Some(
                 SplitImageLayerWriter::new(
                     self.conf,
@@ -2013,7 +2246,11 @@ impl Timeline {
         }
         let mut delta_layer_rewriters = HashMap::<Arc<PersistentLayerKey>, RewritingLayers>::new();
 
-        /// Returns None if there is no ancestor branch. Throw an error when the key is not found.
+        /// When compacting not at a bottom range (=`[0,X)`) of the root branch, we "have data below" (`has_data_below=true`).
+        /// The two cases are compaction in ancestor branches and when `compact_lsn_range.start` is set.
+        /// In those cases, we need to pull up data from below the LSN range we're compaction.
+        ///
+        /// This function unifies the cases so that later code doesn't have to think about it.
         ///
         /// Currently, we always get the ancestor image for each key in the child branch no matter whether the image
         /// is needed for reconstruction. This should be fixed in the future.
@@ -2021,17 +2258,19 @@ impl Timeline {
         /// Furthermore, we should do vectored get instead of a single get, or better, use k-merge for ancestor
         /// images.
         async fn get_ancestor_image(
-            tline: &Arc<Timeline>,
+            this_tline: &Arc<Timeline>,
             key: Key,
             ctx: &RequestContext,
+            has_data_below: bool,
+            history_lsn_point: Lsn,
         ) -> anyhow::Result<Option<(Key, Lsn, Bytes)>> {
-            if tline.ancestor_timeline.is_none() {
+            if !has_data_below {
                 return Ok(None);
             };
             // This function is implemented as a get of the current timeline at ancestor LSN, therefore reusing
             // as much existing code as possible.
-            let img = tline.get(key, tline.ancestor_lsn, ctx).await?;
-            Ok(Some((key, tline.ancestor_lsn, img)))
+            let img = this_tline.get(key, history_lsn_point, ctx).await?;
+            Ok(Some((key, history_lsn_point, img)))
         }
 
         // Actually, we can decide not to write to the image layer at all at this point because
@@ -2048,6 +2287,11 @@ impl Timeline {
                 // This is not handled in the filter iterator because shard is determined by hash.
                 // Therefore, it does not give us any performance benefit to do things like skip
                 // a whole layer file as handling key spaces (ranges).
+                if cfg!(debug_assertions) {
+                    let shard = self.shard_identity.shard_index();
+                    let owner = self.shard_identity.get_shard_number(&key);
+                    panic!("key {key} does not belong on shard {shard}, owned by {owner}");
+                }
                 continue;
             }
             if !job_desc.compaction_key_range.contains(&key) {
@@ -2110,7 +2354,8 @@ impl Timeline {
                         job_desc.gc_cutoff,
                         &job_desc.retain_lsns_below_horizon,
                         COMPACTION_DELTA_THRESHOLD,
-                        get_ancestor_image(self, *last_key, ctx).await?,
+                        get_ancestor_image(self, *last_key, ctx, has_data_below, lowest_retain_lsn)
+                            .await?,
                     )
                     .await?;
                 retention
@@ -2139,7 +2384,7 @@ impl Timeline {
                 job_desc.gc_cutoff,
                 &job_desc.retain_lsns_below_horizon,
                 COMPACTION_DELTA_THRESHOLD,
-                get_ancestor_image(self, last_key, ctx).await?,
+                get_ancestor_image(self, last_key, ctx, has_data_below, lowest_retain_lsn).await?,
             )
             .await?;
         retention
@@ -2659,7 +2904,7 @@ impl CompactionLayer<Key> for ResidentDeltaLayer {
 impl CompactionDeltaLayer<TimelineAdaptor> for ResidentDeltaLayer {
     type DeltaEntry<'a> = DeltaEntry<'a>;
 
-    async fn load_keys<'a>(&self, ctx: &RequestContext) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
+    async fn load_keys(&self, ctx: &RequestContext) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
         self.0.get_as_delta(ctx).await?.index_entries(ctx).await
     }
 }

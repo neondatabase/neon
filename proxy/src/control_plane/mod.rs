@@ -67,28 +67,21 @@ pub(crate) struct NodeInfo {
 
     /// Labels for proxy's metrics.
     pub(crate) aux: MetricsAuxInfo,
-
-    /// Whether we should accept self-signed certificates (for testing)
-    pub(crate) allow_self_signed_compute: bool,
 }
 
 impl NodeInfo {
     pub(crate) async fn connect(
         &self,
         ctx: &RequestContext,
+        allow_self_signed_compute: bool,
         timeout: Duration,
     ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
         self.config
-            .connect(
-                ctx,
-                self.allow_self_signed_compute,
-                self.aux.clone(),
-                timeout,
-            )
+            .connect(ctx, allow_self_signed_compute, self.aux.clone(), timeout)
             .await
     }
+
     pub(crate) fn reuse_settings(&mut self, other: Self) {
-        self.allow_self_signed_compute = other.allow_self_signed_compute;
         self.config.reuse_password(other.config);
     }
 

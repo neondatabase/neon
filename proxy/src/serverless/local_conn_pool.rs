@@ -22,12 +22,13 @@ use indexmap::IndexMap;
 use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
 use p256::ecdsa::{Signature, SigningKey};
 use parking_lot::RwLock;
+use postgres_client::tls::NoTlsStream;
+use postgres_client::types::ToSql;
+use postgres_client::AsyncMessage;
 use serde_json::value::RawValue;
 use signature::Signer;
+use tokio::net::TcpStream;
 use tokio::time::Instant;
-use tokio_postgres::tls::NoTlsStream;
-use tokio_postgres::types::ToSql;
-use tokio_postgres::{AsyncMessage, Socket};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
@@ -163,7 +164,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
-    mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
+    mut connection: postgres_client::Connection<TcpStream, NoTlsStream>,
     key: SigningKey,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
@@ -178,7 +179,6 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
         info!(cold_start_info = cold_start_info.as_str(), %conn_info, %session_id, "new connection");
     });
     let pool = Arc::downgrade(&global_pool);
-    let pool_clone = pool.clone();
 
     let db_user = conn_info.db_and_user();
     let idle = global_pool.get_idle_timeout();
@@ -272,25 +272,21 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
         }),
     };
 
-    Client::new(
-        inner,
-        conn_info,
-        Arc::downgrade(&pool_clone.upgrade().unwrap().global_pool),
-    )
+    Client::new(inner, conn_info, Arc::downgrade(&global_pool.global_pool))
 }
 
-impl ClientInnerCommon<tokio_postgres::Client> {
+impl ClientInnerCommon<postgres_client::Client> {
     pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), HttpConnError> {
         if let ClientDataEnum::Local(local_data) = &mut self.data {
             local_data.jti += 1;
             let token = resign_jwt(&local_data.key, payload, local_data.jti)?;
 
             // initiates the auth session
-            self.inner.simple_query("discard all").await?;
+            self.inner.batch_execute("discard all").await?;
             self.inner
-                .query(
+                .execute(
                     "select auth.jwt_session_init($1)",
-                    &[&token as &(dyn ToSql + Sync)],
+                    &[&&*token as &(dyn ToSql + Sync)],
                 )
                 .await?;
 
@@ -320,7 +316,8 @@ fn resign_jwt(sk: &SigningKey, payload: &[u8], jti: u64) -> Result<String, HttpC
     let mut buffer = itoa::Buffer::new();
 
     // encode the jti integer to a json rawvalue
-    let jti = serde_json::from_str::<&RawValue>(buffer.format(jti)).unwrap();
+    let jti = serde_json::from_str::<&RawValue>(buffer.format(jti))
+        .expect("itoa formatted integer should be guaranteed valid json");
 
     // update the jti in-place
     let payload =
@@ -367,6 +364,7 @@ fn sign_jwt(sk: &SigningKey, payload: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use p256::ecdsa::SigningKey;
     use typed_json::json;

@@ -3,7 +3,7 @@ name: Create Release Branch
 on:
   schedule:
     # It should be kept in sync with if-condition in jobs
-    - cron: '0 6 * * MON' # Storage release
+    - cron: '0 6 * * FRI' # Storage release
     - cron: '0 6 * * THU' # Proxy release
   workflow_dispatch:
     inputs:
@@ -15,6 +15,10 @@ on:
         type: boolean
         description: 'Create Proxy release PR'
         required: false
+      create-compute-release-branch:
+        type: boolean
+        description: 'Create Compute release PR'
+        required: false
 
 # No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
 permissions: {}
@@ -25,20 +29,20 @@ defaults:
 
 jobs:
   create-storage-release-branch:
-    if: ${{ github.event.schedule == '0 6 * * MON' || format('{0}', inputs.create-storage-release-branch) == 'true' }}
+    if: ${{ github.event.schedule == '0 6 * * FRI' || inputs.create-storage-release-branch }}
 
     permissions:
       contents: write
 
     uses: ./.github/workflows/_create-release-pr.yml
     with:
-      component-name: 'Storage & Compute'
+      component-name: 'Storage'
       release-branch: 'release'
     secrets:
       ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
 
   create-proxy-release-branch:
-    if: ${{ github.event.schedule == '0 6 * * THU' || format('{0}', inputs.create-proxy-release-branch) == 'true' }}
+    if: ${{ github.event.schedule == '0 6 * * THU' || inputs.create-proxy-release-branch }}
 
     permissions:
       contents: write
@@ -47,5 +51,18 @@ jobs:
     with:
       component-name: 'Proxy'
       release-branch: 'release-proxy'
+    secrets:
+      ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
+
+  create-compute-release-branch:
+    if: inputs.create-compute-release-branch
+
+    permissions:
+      contents: write
+
+    uses: ./.github/workflows/_create-release-pr.yml
+    with:
+      component-name: 'Compute'
+      release-branch: 'release-compute'
     secrets:
       ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}

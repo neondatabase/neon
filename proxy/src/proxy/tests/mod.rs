@@ -1,4 +1,5 @@
 //! A group of high-level tests for connection establishing logic and auth.
+#![allow(clippy::unimplemented, clippy::unwrap_used)]
 
 mod mitm;
 
@@ -7,14 +8,13 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use http::StatusCode;
+use postgres_client::config::SslMode;
+use postgres_client::tls::{MakeTlsConnect, NoTls};
 use retry::{retry_after, ShouldRetryWakeCompute};
 use rstest::rstest;
 use rustls::crypto::ring;
 use rustls::pki_types;
 use tokio::io::DuplexStream;
-use tokio_postgres::config::SslMode;
-use tokio_postgres::tls::{MakeTlsConnect, NoTls};
-use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
@@ -29,6 +29,7 @@ use crate::control_plane::{
     self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo, NodeInfoCache,
 };
 use crate::error::ErrorKind;
+use crate::postgres_rustls::MakeRustlsConnect;
 use crate::types::{BranchId, EndpointId, ProjectId};
 use crate::{sasl, scram};
 
@@ -204,7 +205,7 @@ async fn handshake_tls_is_enforced_by_proxy() -> anyhow::Result<()> {
     let (_, server_config) = generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
-    let client_err = tokio_postgres::Config::new()
+    let client_err = postgres_client::Config::new("test".to_owned(), 5432)
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Disable)
@@ -233,7 +234,7 @@ async fn handshake_tls() -> anyhow::Result<()> {
         generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Require)
@@ -249,10 +250,10 @@ async fn handshake_raw() -> anyhow::Result<()> {
 
     let proxy = tokio::spawn(dummy_proxy(client, None, NoAuth));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
         .user("john_doe")
         .dbname("earth")
-        .options("project=generic-project-name")
+        .set_param("options", "project=generic-project-name")
         .ssl_mode(SslMode::Prefer)
         .connect_raw(server, NoTls)
         .await?;
@@ -296,8 +297,8 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
         Scram::new(password).await?,
     ));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
-        .channel_binding(tokio_postgres::config::ChannelBinding::Require)
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
+        .channel_binding(postgres_client::config::ChannelBinding::Require)
         .user("user")
         .dbname("db")
         .password(password)
@@ -320,8 +321,8 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
         Scram::new("password").await?,
     ));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
-        .channel_binding(tokio_postgres::config::ChannelBinding::Disable)
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
+        .channel_binding(postgres_client::config::ChannelBinding::Disable)
         .user("user")
         .dbname("db")
         .password("password")
@@ -348,7 +349,7 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
         .map(char::from)
         .collect();
 
-    let _client_err = tokio_postgres::Config::new()
+    let _client_err = postgres_client::Config::new("test".to_owned(), 5432)
         .user("user")
         .dbname("db")
         .password(&password) // no password will match the mocked secret
@@ -546,14 +547,13 @@ impl TestControlPlaneClient for TestConnectMechanism {
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
-        config: compute::ConnCfg::new(),
+        config: compute::ConnCfg::new("test".to_owned(), 5432),
         aux: MetricsAuxInfo {
             endpoint_id: (&EndpointId::from("endpoint")).into(),
             project_id: (&ProjectId::from("project")).into(),
             branch_id: (&BranchId::from("branch")).into(),
             cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
         },
-        allow_self_signed_compute: false,
     };
     let (_, node2) = cache.insert_unit("key".into(), Ok(node.clone()));
     node2.map(|()| node)
@@ -588,7 +588,7 @@ async fn connect_to_compute_success() {
         max_retries: 5,
         backoff_factor: 2.0,
     };
-    connect_to_compute(&ctx, &mechanism, &user_info, false, config, config)
+    connect_to_compute(&ctx, &mechanism, &user_info, config, config)
         .await
         .unwrap();
     mechanism.verify();
@@ -606,7 +606,7 @@ async fn connect_to_compute_retry() {
         max_retries: 5,
         backoff_factor: 2.0,
     };
-    connect_to_compute(&ctx, &mechanism, &user_info, false, config, config)
+    connect_to_compute(&ctx, &mechanism, &user_info, config, config)
         .await
         .unwrap();
     mechanism.verify();
@@ -625,7 +625,7 @@ async fn connect_to_compute_non_retry_1() {
         max_retries: 5,
         backoff_factor: 2.0,
     };
-    connect_to_compute(&ctx, &mechanism, &user_info, false, config, config)
+    connect_to_compute(&ctx, &mechanism, &user_info, config, config)
         .await
         .unwrap_err();
     mechanism.verify();
@@ -644,7 +644,7 @@ async fn connect_to_compute_non_retry_2() {
         max_retries: 5,
         backoff_factor: 2.0,
     };
-    connect_to_compute(&ctx, &mechanism, &user_info, false, config, config)
+    connect_to_compute(&ctx, &mechanism, &user_info, config, config)
         .await
         .unwrap();
     mechanism.verify();
@@ -674,7 +674,6 @@ async fn connect_to_compute_non_retry_3() {
         &ctx,
         &mechanism,
         &user_info,
-        false,
         wake_compute_retry_config,
         connect_to_compute_retry_config,
     )
@@ -696,7 +695,7 @@ async fn wake_retry() {
         max_retries: 5,
         backoff_factor: 2.0,
     };
-    connect_to_compute(&ctx, &mechanism, &user_info, false, config, config)
+    connect_to_compute(&ctx, &mechanism, &user_info, config, config)
         .await
         .unwrap();
     mechanism.verify();
@@ -715,7 +714,7 @@ async fn wake_non_retry() {
         max_retries: 5,
         backoff_factor: 2.0,
     };
-    connect_to_compute(&ctx, &mechanism, &user_info, false, config, config)
+    connect_to_compute(&ctx, &mechanism, &user_info, config, config)
         .await
         .unwrap_err();
     mechanism.verify();

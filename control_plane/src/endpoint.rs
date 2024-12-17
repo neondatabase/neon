@@ -53,6 +53,7 @@ use compute_api::spec::Role;
 use nix::sys::signal::kill;
 use nix::sys::signal::Signal;
 use pageserver_api::shard::ShardStripeSize;
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -310,6 +311,10 @@ impl Endpoint {
         conf.append("wal_log_hints", "off");
         conf.append("max_replication_slots", "10");
         conf.append("hot_standby", "on");
+        // Set to 1MB to both exercise getPage requests/LFC, and still have enough room for
+        // Postgres to operate. Everything smaller might be not enough for Postgres under load,
+        // and can cause errors like 'no unpinned buffers available', see
+        // <https://github.com/neondatabase/neon/issues/9956>
         conf.append("shared_buffers", "1MB");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
@@ -614,6 +619,7 @@ impl Endpoint {
             pgbouncer_settings: None,
             shard_stripe_size: Some(shard_stripe_size),
             local_proxy_config: None,
+            reconfigure_concurrency: 1,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
@@ -804,7 +810,7 @@ impl Endpoint {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(120))
             .build()
             .unwrap();
         let response = client
@@ -813,6 +819,7 @@ impl Endpoint {
                 self.http_address.ip(),
                 self.http_address.port()
             ))
+            .header(CONTENT_TYPE.as_str(), "application/json")
             .body(format!(
                 "{{\"spec\":{}}}",
                 serde_json::to_string_pretty(&spec)?

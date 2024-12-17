@@ -7,12 +7,15 @@ use metrics::{
     IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
+use pageserver_api::config::{
+    PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
+    PageServiceProtocolPipelinedExecutionStrategy,
+};
 use pageserver_api::shard::TenantShardId;
 use postgres_backend::{is_expected_io_error, QueryError};
 use pq_proto::framed::ConnectionError;
 use strum::{EnumCount, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
-use tracing::warn;
 use utils::id::TimelineId;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
@@ -213,31 +216,16 @@ impl<'a> ScanLatencyOngoingRecording<'a> {
         ScanLatencyOngoingRecording { parent, start }
     }
 
-    pub(crate) fn observe(self, throttled: Option<Duration>) {
+    pub(crate) fn observe(self) {
         let elapsed = self.start.elapsed();
-        let ex_throttled = if let Some(throttled) = throttled {
-            elapsed.checked_sub(throttled)
-        } else {
-            Some(elapsed)
-        };
-        if let Some(ex_throttled) = ex_throttled {
-            self.parent.observe(ex_throttled.as_secs_f64());
-        } else {
-            use utils::rate_limit::RateLimit;
-            static LOGGED: Lazy<Mutex<RateLimit>> =
-                Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-            let mut rate_limit = LOGGED.lock().unwrap();
-            rate_limit.call(|| {
-                warn!("error deducting time spent throttled; this message is logged at a global rate limit");
-            });
-        }
+        self.parent.observe(elapsed.as_secs_f64());
     }
 }
 
 pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| {
     let inner = register_histogram_vec!(
         "pageserver_get_vectored_seconds",
-        "Time spent in get_vectored, excluding time spent in timeline_get_throttle.",
+        "Time spent in get_vectored.",
         &["task_kind"],
         CRITICAL_OP_BUCKETS.into(),
     )
@@ -260,7 +248,7 @@ pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| 
 pub(crate) static SCAN_LATENCY: Lazy<ScanLatency> = Lazy::new(|| {
     let inner = register_histogram_vec!(
         "pageserver_scan_seconds",
-        "Time spent in scan, excluding time spent in timeline_get_throttle.",
+        "Time spent in scan.",
         &["task_kind"],
         CRITICAL_OP_BUCKETS.into(),
     )
@@ -466,6 +454,24 @@ static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static DISK_CONSISTENT_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_disk_consistent_lsn",
+        "Disk consistent LSN grouped by timeline",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static PROJECTED_REMOTE_CONSISTENT_LSN: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_projected_remote_consistent_lsn",
+        "Projected remote consistent LSN grouped by timeline",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 static PITR_HISTORY_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_pitr_history_size",
@@ -649,6 +655,35 @@ pub(crate) static COMPRESSION_IMAGE_OUTPUT_BYTES: Lazy<IntCounter> = Lazy::new(|
     register_int_counter!(
         "pageserver_compression_image_out_bytes_total",
         "Size of compressed image layer written"
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_relsize_cache_entries",
+        "Number of entries in the relation size cache",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!("pageserver_relsize_cache_hits", "Relation size cache hits",)
+        .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_relsize_cache_misses",
+        "Relation size cache misses",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_CACHE_MISSES_OLD: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_relsize_cache_misses_old",
+        "Relation size cache misses where the lookup LSN is older than the last relation update"
     )
     .expect("failed to define a metric")
 });
@@ -1178,49 +1213,162 @@ pub(crate) mod virtual_file_io_engine {
     });
 }
 
-struct GlobalAndPerTimelineHistogramTimer<'a, 'c> {
-    global_latency_histo: &'a Histogram,
+pub(crate) struct SmgrOpTimer(Option<SmgrOpTimerInner>);
+pub(crate) struct SmgrOpTimerInner {
+    global_execution_latency_histo: Histogram,
+    per_timeline_execution_latency_histo: Option<Histogram>,
 
-    // Optional because not all op types are tracked per-timeline
-    per_timeline_latency_histo: Option<&'a Histogram>,
+    global_batch_wait_time: Histogram,
+    per_timeline_batch_wait_time: Histogram,
 
-    ctx: &'c RequestContext,
-    start: std::time::Instant,
-    op: SmgrQueryType,
-    count: usize,
+    global_flush_in_progress_micros: IntCounter,
+    per_timeline_flush_in_progress_micros: IntCounter,
+
+    timings: SmgrOpTimerState,
 }
 
-impl Drop for GlobalAndPerTimelineHistogramTimer<'_, '_> {
-    fn drop(&mut self) {
-        let elapsed = self.start.elapsed();
-        let ex_throttled = self
-            .ctx
-            .micros_spent_throttled
-            .close_and_checked_sub_from(elapsed);
-        let ex_throttled = match ex_throttled {
-            Ok(res) => res,
-            Err(error) => {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<enum_map::EnumMap<SmgrQueryType, RateLimit>>> =
-                    Lazy::new(|| {
-                        Mutex::new(enum_map::EnumMap::from_array(std::array::from_fn(|_| {
-                            RateLimit::new(Duration::from_secs(10))
-                        })))
-                    });
-                let mut guard = LOGGED.lock().unwrap();
-                let rate_limit = &mut guard[self.op];
-                rate_limit.call(|| {
-                    warn!(op=?self.op, error, "error deducting time spent throttled; this message is logged at a global rate limit");
-                });
-                elapsed
-            }
-        };
+#[derive(Debug)]
+enum SmgrOpTimerState {
+    Received {
+        received_at: Instant,
+    },
+    ThrottleDoneExecutionStarting {
+        received_at: Instant,
+        throttle_started_at: Instant,
+        started_execution_at: Instant,
+    },
+}
 
-        for _ in 0..self.count {
-            self.global_latency_histo
-                .observe(ex_throttled.as_secs_f64());
-            if let Some(per_timeline_getpage_histo) = self.per_timeline_latency_histo {
-                per_timeline_getpage_histo.observe(ex_throttled.as_secs_f64());
+pub(crate) struct SmgrOpFlushInProgress {
+    flush_started_at: Instant,
+    global_micros: IntCounter,
+    per_timeline_micros: IntCounter,
+}
+
+impl SmgrOpTimer {
+    pub(crate) fn observe_throttle_done_execution_starting(&mut self, throttle: &ThrottleResult) {
+        let inner = self.0.as_mut().expect("other public methods consume self");
+        match (&mut inner.timings, throttle) {
+            (SmgrOpTimerState::Received { received_at }, throttle) => match throttle {
+                ThrottleResult::NotThrottled { start } => {
+                    inner.timings = SmgrOpTimerState::ThrottleDoneExecutionStarting {
+                        received_at: *received_at,
+                        throttle_started_at: *start,
+                        started_execution_at: *start,
+                    };
+                }
+                ThrottleResult::Throttled { start, end } => {
+                    inner.timings = SmgrOpTimerState::ThrottleDoneExecutionStarting {
+                        received_at: *start,
+                        throttle_started_at: *start,
+                        started_execution_at: *end,
+                    };
+                }
+            },
+            (x, _) => panic!("called in unexpected state: {x:?}"),
+        }
+    }
+
+    pub(crate) fn observe_smgr_op_completion_and_start_flushing(mut self) -> SmgrOpFlushInProgress {
+        let (flush_start, inner) = self
+            .smgr_op_end()
+            .expect("this method consume self, and the only other caller is drop handler");
+        let SmgrOpTimerInner {
+            global_flush_in_progress_micros,
+            per_timeline_flush_in_progress_micros,
+            ..
+        } = inner;
+        SmgrOpFlushInProgress {
+            flush_started_at: flush_start,
+            global_micros: global_flush_in_progress_micros,
+            per_timeline_micros: per_timeline_flush_in_progress_micros,
+        }
+    }
+
+    /// Returns `None`` if this method has already been called, `Some` otherwise.
+    fn smgr_op_end(&mut self) -> Option<(Instant, SmgrOpTimerInner)> {
+        let inner = self.0.take()?;
+
+        let now = Instant::now();
+
+        let batch;
+        let execution;
+        let throttle;
+        match inner.timings {
+            SmgrOpTimerState::Received { received_at } => {
+                batch = (now - received_at).as_secs_f64();
+                // TODO: use label for dropped requests.
+                // This is quite rare in practice, only during tenant/pageservers shutdown.
+                throttle = Duration::ZERO;
+                execution = Duration::ZERO.as_secs_f64();
+            }
+            SmgrOpTimerState::ThrottleDoneExecutionStarting {
+                received_at,
+                throttle_started_at,
+                started_execution_at,
+            } => {
+                batch = (throttle_started_at - received_at).as_secs_f64();
+                throttle = started_execution_at - throttle_started_at;
+                execution = (now - started_execution_at).as_secs_f64();
+            }
+        }
+
+        // update time spent in batching
+        inner.global_batch_wait_time.observe(batch);
+        inner.per_timeline_batch_wait_time.observe(batch);
+
+        // time spent in throttle metric is updated by throttle impl
+        let _ = throttle;
+
+        // update metrics for execution latency
+        inner.global_execution_latency_histo.observe(execution);
+        if let Some(per_timeline_execution_latency_histo) =
+            &inner.per_timeline_execution_latency_histo
+        {
+            per_timeline_execution_latency_histo.observe(execution);
+        }
+
+        Some((now, inner))
+    }
+}
+
+impl Drop for SmgrOpTimer {
+    fn drop(&mut self) {
+        self.smgr_op_end();
+    }
+}
+
+impl SmgrOpFlushInProgress {
+    pub(crate) async fn measure<Fut, O>(mut self, mut fut: Fut) -> O
+    where
+        Fut: std::future::Future<Output = O>,
+    {
+        let mut fut = std::pin::pin!(fut);
+
+        let now = Instant::now();
+        // Whenever observe_guard gets called, or dropped,
+        // it adds the time elapsed since its last call to metrics.
+        // Last call is tracked in `now`.
+        let mut observe_guard = scopeguard::guard(
+            || {
+                let elapsed = now - self.flush_started_at;
+                self.global_micros
+                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
+                self.per_timeline_micros
+                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
+                self.flush_started_at = now;
+            },
+            |mut observe| {
+                observe();
+            },
+        );
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(10), &mut fut).await {
+                Ok(v) => return v,
+                Err(_timeout) => {
+                    (*observe_guard)();
+                }
             }
         }
     }
@@ -1251,6 +1399,12 @@ pub(crate) struct SmgrQueryTimePerTimeline {
     global_latency: [Histogram; SmgrQueryType::COUNT],
     per_timeline_getpage_started: IntCounter,
     per_timeline_getpage_latency: Histogram,
+    global_batch_size: Histogram,
+    per_timeline_batch_size: Histogram,
+    global_flush_in_progress_micros: IntCounter,
+    per_timeline_flush_in_progress_micros: IntCounter,
+    global_batch_wait_time: Histogram,
+    per_timeline_batch_wait_time: Histogram,
 }
 
 static SMGR_QUERY_STARTED_GLOBAL: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -1273,12 +1427,15 @@ static SMGR_QUERY_STARTED_PER_TENANT_TIMELINE: Lazy<IntCounterVec> = Lazy::new(|
     .expect("failed to define a metric")
 });
 
+// Alias so all histograms recording per-timeline smgr timings use the same buckets.
+static SMGR_QUERY_TIME_PER_TENANT_TIMELINE_BUCKETS: &[f64] = CRITICAL_OP_BUCKETS;
+
 static SMGR_QUERY_TIME_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_smgr_query_seconds",
-        "Time spent on smgr query handling, aggegated by query type and tenant/timeline.",
+        "Time spent _executing_ smgr query handling, excluding batch and throttle delays.",
         &["smgr_query_type", "tenant_id", "shard_id", "timeline_id"],
-        CRITICAL_OP_BUCKETS.into(),
+        SMGR_QUERY_TIME_PER_TENANT_TIMELINE_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
@@ -1336,9 +1493,118 @@ static SMGR_QUERY_TIME_GLOBAL_BUCKETS: Lazy<Vec<f64>> = Lazy::new(|| {
 static SMGR_QUERY_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_smgr_query_seconds_global",
-        "Time spent on smgr query handling, aggregated by query type.",
+        "Like pageserver_smgr_query_seconds, but aggregated to instance level.",
         &["smgr_query_type"],
         SMGR_QUERY_TIME_GLOBAL_BUCKETS.clone(),
+    )
+    .expect("failed to define a metric")
+});
+
+static PAGE_SERVICE_BATCH_SIZE_BUCKETS_GLOBAL: Lazy<Vec<f64>> = Lazy::new(|| {
+    (1..=u32::try_from(Timeline::MAX_GET_VECTORED_KEYS).unwrap())
+        .map(|v| v.into())
+        .collect()
+});
+
+static PAGE_SERVICE_BATCH_SIZE_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_page_service_batch_size_global",
+        "Batch size of pageserver page service requests",
+        PAGE_SERVICE_BATCH_SIZE_BUCKETS_GLOBAL.clone(),
+    )
+    .expect("failed to define a metric")
+});
+
+static PAGE_SERVICE_BATCH_SIZE_BUCKETS_PER_TIMELINE: Lazy<Vec<f64>> = Lazy::new(|| {
+    let mut buckets = Vec::new();
+    for i in 0.. {
+        let bucket = 1 << i;
+        if bucket > u32::try_from(Timeline::MAX_GET_VECTORED_KEYS).unwrap() {
+            break;
+        }
+        buckets.push(bucket.into());
+    }
+    buckets
+});
+
+static PAGE_SERVICE_BATCH_SIZE_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_page_service_batch_size",
+        "Batch size of pageserver page service requests",
+        &["tenant_id", "shard_id", "timeline_id"],
+        PAGE_SERVICE_BATCH_SIZE_BUCKETS_PER_TIMELINE.clone()
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_page_service_config_max_batch_size",
+        "Configured maximum batch size for the server-side batching functionality of page_service. \
+         Labels expose more of the configuration parameters.",
+        &["mode", "execution"]
+    )
+    .expect("failed to define a metric")
+});
+
+fn set_page_service_config_max_batch_size(conf: &PageServicePipeliningConfig) {
+    PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE.reset();
+    let (label_values, value) = match conf {
+        PageServicePipeliningConfig::Serial => (["serial", "-"], 1),
+        PageServicePipeliningConfig::Pipelined(PageServicePipeliningConfigPipelined {
+            max_batch_size,
+            execution,
+        }) => {
+            let mode = "pipelined";
+            let execution = match execution {
+                PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures => {
+                    "concurrent-futures"
+                }
+                PageServiceProtocolPipelinedExecutionStrategy::Tasks => "tasks",
+            };
+            ([mode, execution], max_batch_size.get())
+        }
+    };
+    PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE
+        .with_label_values(&label_values)
+        .set(value.try_into().unwrap());
+}
+
+static PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_page_service_pagestream_flush_in_progress_micros",
+        "Counter that sums up the microseconds that a pagestream response was being flushed into the TCP connection. \
+         If the flush is particularly slow, this counter will be updated periodically to make slow flushes \
+         easily discoverable in monitoring. \
+         Hence, this is NOT a completion latency historgram.",
+        &["tenant_id", "shard_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
+static PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS_GLOBAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_page_service_pagestream_flush_in_progress_micros_global",
+        "Like pageserver_page_service_pagestream_flush_in_progress_seconds, but instance-wide.",
+    )
+    .expect("failed to define a metric")
+});
+
+static PAGE_SERVICE_SMGR_BATCH_WAIT_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_page_service_pagestream_batch_wait_time_seconds",
+        "Time a request spent waiting in its batch until the batch moved to throttle&execution.",
+        &["tenant_id", "shard_id", "timeline_id"],
+        SMGR_QUERY_TIME_PER_TENANT_TIMELINE_BUCKETS.into(),
+    )
+    .expect("failed to define a metric")
+});
+
+static PAGE_SERVICE_SMGR_BATCH_WAIT_TIME_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_page_service_pagestream_batch_wait_time_seconds_global",
+        "Like pageserver_page_service_pagestream_batch_wait_time_seconds, but aggregated to instance level.",
+        SMGR_QUERY_TIME_GLOBAL_BUCKETS.to_vec(),
     )
     .expect("failed to define a metric")
 });
@@ -1378,77 +1644,71 @@ impl SmgrQueryTimePerTimeline {
             ])
             .unwrap();
 
+        let global_batch_size = PAGE_SERVICE_BATCH_SIZE_GLOBAL.clone();
+        let per_timeline_batch_size = PAGE_SERVICE_BATCH_SIZE_PER_TENANT_TIMELINE
+            .get_metric_with_label_values(&[&tenant_id, &shard_slug, &timeline_id])
+            .unwrap();
+
+        let global_batch_wait_time = PAGE_SERVICE_SMGR_BATCH_WAIT_TIME_GLOBAL.clone();
+        let per_timeline_batch_wait_time = PAGE_SERVICE_SMGR_BATCH_WAIT_TIME
+            .get_metric_with_label_values(&[&tenant_id, &shard_slug, &timeline_id])
+            .unwrap();
+
+        let global_flush_in_progress_micros =
+            PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS_GLOBAL.clone();
+        let per_timeline_flush_in_progress_micros = PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS
+            .get_metric_with_label_values(&[&tenant_id, &shard_slug, &timeline_id])
+            .unwrap();
+
         Self {
             global_started,
             global_latency,
             per_timeline_getpage_latency,
             per_timeline_getpage_started,
+            global_batch_size,
+            per_timeline_batch_size,
+            global_flush_in_progress_micros,
+            per_timeline_flush_in_progress_micros,
+            global_batch_wait_time,
+            per_timeline_batch_wait_time,
         }
     }
-    pub(crate) fn start_timer<'c: 'a, 'a>(
-        &'a self,
-        op: SmgrQueryType,
-        ctx: &'c RequestContext,
-    ) -> Option<impl Drop + 'a> {
-        self.start_timer_many(op, 1, ctx)
-    }
-    pub(crate) fn start_timer_many<'c: 'a, 'a>(
-        &'a self,
-        op: SmgrQueryType,
-        count: usize,
-        ctx: &'c RequestContext,
-    ) -> Option<impl Drop + 'a> {
-        let start = Instant::now();
-
+    pub(crate) fn start_smgr_op(&self, op: SmgrQueryType, received_at: Instant) -> SmgrOpTimer {
         self.global_started[op as usize].inc();
-
-        // We subtract time spent throttled from the observed latency.
-        match ctx.micros_spent_throttled.open() {
-            Ok(()) => (),
-            Err(error) => {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<enum_map::EnumMap<SmgrQueryType, RateLimit>>> =
-                    Lazy::new(|| {
-                        Mutex::new(enum_map::EnumMap::from_array(std::array::from_fn(|_| {
-                            RateLimit::new(Duration::from_secs(10))
-                        })))
-                    });
-                let mut guard = LOGGED.lock().unwrap();
-                let rate_limit = &mut guard[op];
-                rate_limit.call(|| {
-                    warn!(?op, error, "error opening micros_spent_throttled; this message is logged at a global rate limit");
-                });
-            }
-        }
 
         let per_timeline_latency_histo = if matches!(op, SmgrQueryType::GetPageAtLsn) {
             self.per_timeline_getpage_started.inc();
-            Some(&self.per_timeline_getpage_latency)
+            Some(self.per_timeline_getpage_latency.clone())
         } else {
             None
         };
 
-        Some(GlobalAndPerTimelineHistogramTimer {
-            global_latency_histo: &self.global_latency[op as usize],
-            per_timeline_latency_histo,
-            ctx,
-            start,
-            op,
-            count,
-        })
+        SmgrOpTimer(Some(SmgrOpTimerInner {
+            global_execution_latency_histo: self.global_latency[op as usize].clone(),
+            per_timeline_execution_latency_histo: per_timeline_latency_histo,
+            timings: SmgrOpTimerState::Received { received_at },
+            global_flush_in_progress_micros: self.global_flush_in_progress_micros.clone(),
+            per_timeline_flush_in_progress_micros: self
+                .per_timeline_flush_in_progress_micros
+                .clone(),
+            global_batch_wait_time: self.global_batch_wait_time.clone(),
+            per_timeline_batch_wait_time: self.per_timeline_batch_wait_time.clone(),
+        }))
+    }
+
+    pub(crate) fn observe_getpage_batch_start(&self, batch_size: usize) {
+        self.global_batch_size.observe(batch_size as f64);
+        self.per_timeline_batch_size.observe(batch_size as f64);
     }
 }
 
 #[cfg(test)]
 mod smgr_query_time_tests {
+    use std::time::Instant;
+
     use pageserver_api::shard::TenantShardId;
     use strum::IntoEnumIterator;
     use utils::id::{TenantId, TimelineId};
-
-    use crate::{
-        context::{DownloadBehavior, RequestContext},
-        task_mgr::TaskKind,
-    };
 
     // Regression test, we used hard-coded string constants before using an enum.
     #[test]
@@ -1493,8 +1753,7 @@ mod smgr_query_time_tests {
             let (pre_global, pre_per_tenant_timeline) = get_counts();
             assert_eq!(pre_per_tenant_timeline, 0);
 
-            let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Download);
-            let timer = metrics.start_timer(*op, &ctx);
+            let timer = metrics.start_smgr_op(*op, Instant::now());
             drop(timer);
 
             let (post_global, post_per_tenant_timeline) = get_counts();
@@ -1541,58 +1800,24 @@ pub(crate) static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|
     }
 });
 
-pub(crate) struct BasebackupQueryTimeOngoingRecording<'a, 'c> {
+pub(crate) struct BasebackupQueryTimeOngoingRecording<'a> {
     parent: &'a BasebackupQueryTime,
-    ctx: &'c RequestContext,
     start: std::time::Instant,
 }
 
 impl BasebackupQueryTime {
-    pub(crate) fn start_recording<'c: 'a, 'a>(
-        &'a self,
-        ctx: &'c RequestContext,
-    ) -> BasebackupQueryTimeOngoingRecording<'a, 'a> {
+    pub(crate) fn start_recording(&self) -> BasebackupQueryTimeOngoingRecording<'_> {
         let start = Instant::now();
-        match ctx.micros_spent_throttled.open() {
-            Ok(()) => (),
-            Err(error) => {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<RateLimit>> =
-                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-                let mut rate_limit = LOGGED.lock().unwrap();
-                rate_limit.call(|| {
-                    warn!(error, "error opening micros_spent_throttled; this message is logged at a global rate limit");
-                });
-            }
-        }
         BasebackupQueryTimeOngoingRecording {
             parent: self,
-            ctx,
             start,
         }
     }
 }
 
-impl BasebackupQueryTimeOngoingRecording<'_, '_> {
+impl BasebackupQueryTimeOngoingRecording<'_> {
     pub(crate) fn observe<T>(self, res: &Result<T, QueryError>) {
-        let elapsed = self.start.elapsed();
-        let ex_throttled = self
-            .ctx
-            .micros_spent_throttled
-            .close_and_checked_sub_from(elapsed);
-        let ex_throttled = match ex_throttled {
-            Ok(ex_throttled) => ex_throttled,
-            Err(error) => {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<RateLimit>> =
-                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-                let mut rate_limit = LOGGED.lock().unwrap();
-                rate_limit.call(|| {
-                    warn!(error, "error deducting time spent throttled; this message is logged at a global rate limit");
-                });
-                elapsed
-            }
-        };
+        let elapsed = self.start.elapsed().as_secs_f64();
         // If you want to change categorize of a specific error, also change it in `log_query_error`.
         let metric = match res {
             Ok(_) => &self.parent.ok,
@@ -1603,7 +1828,7 @@ impl BasebackupQueryTimeOngoingRecording<'_, '_> {
             }
             Err(_) => &self.parent.error,
         };
-        metric.observe(ex_throttled.as_secs_f64());
+        metric.observe(elapsed);
     }
 }
 
@@ -2106,6 +2331,7 @@ pub(crate) struct WalIngestMetrics {
     pub(crate) records_committed: IntCounter,
     pub(crate) records_filtered: IntCounter,
     pub(crate) gap_blocks_zeroed_on_rel_extend: IntCounter,
+    pub(crate) clear_vm_bits_unknown: IntCounterVec,
 }
 
 pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
@@ -2134,6 +2360,21 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMet
         "Total number of zero gap blocks written on relation extends"
     )
     .expect("failed to define a metric"),
+    clear_vm_bits_unknown: register_int_counter_vec!(
+        "pageserver_wal_ingest_clear_vm_bits_unknown",
+        "Number of ignored ClearVmBits operations due to unknown pages/relations",
+        &["entity"],
+    )
+    .expect("failed to define a metric"),
+});
+
+pub(crate) static PAGESERVER_TIMELINE_WAL_RECORDS_RECEIVED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_timeline_wal_records_received",
+        "Number of WAL records received per shard",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
 });
 
 pub(crate) static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
@@ -2343,7 +2584,8 @@ pub(crate) struct TimelineMetrics {
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub find_gc_cutoffs_histo: StorageTimeMetrics,
-    pub last_record_gauge: IntGauge,
+    pub last_record_lsn_gauge: IntGauge,
+    pub disk_consistent_lsn_gauge: IntGauge,
     pub pitr_history_size: UIntGauge,
     pub archival_size: UIntGauge,
     pub(crate) layer_size_image: UIntGauge,
@@ -2361,6 +2603,7 @@ pub(crate) struct TimelineMetrics {
     pub evictions_with_low_residence_duration: std::sync::RwLock<EvictionsWithLowResidenceDuration>,
     /// Number of valid LSN leases.
     pub valid_lsn_lease_count_gauge: UIntGauge,
+    pub wal_records_received: IntCounter,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -2421,7 +2664,11 @@ impl TimelineMetrics {
             &shard_id,
             &timeline_id,
         );
-        let last_record_gauge = LAST_RECORD_LSN
+        let last_record_lsn_gauge = LAST_RECORD_LSN
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
+        let disk_consistent_lsn_gauge = DISK_CONSISTENT_LSN
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
@@ -2511,6 +2758,10 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
+        let wal_records_received = PAGESERVER_TIMELINE_WAL_RECORDS_RECEIVED
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -2523,7 +2774,8 @@ impl TimelineMetrics {
             garbage_collect_histo,
             find_gc_cutoffs_histo,
             load_layer_map_histo,
-            last_record_gauge,
+            last_record_lsn_gauge,
+            disk_consistent_lsn_gauge,
             pitr_history_size,
             archival_size,
             layer_size_image,
@@ -2541,6 +2793,7 @@ impl TimelineMetrics {
                 evictions_with_low_residence_duration,
             ),
             valid_lsn_lease_count_gauge,
+            wal_records_received,
             shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
@@ -2579,6 +2832,7 @@ impl TimelineMetrics {
         let timeline_id = &self.timeline_id;
         let shard_id = &self.shard_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        let _ = DISK_CONSISTENT_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = STANDBY_HORIZON.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
@@ -2663,6 +2917,26 @@ impl TimelineMetrics {
             shard_id,
             timeline_id,
         ]);
+        let _ = PAGE_SERVICE_BATCH_SIZE_PER_TENANT_TIMELINE.remove_label_values(&[
+            tenant_id,
+            shard_id,
+            timeline_id,
+        ]);
+        let _ = PAGESERVER_TIMELINE_WAL_RECORDS_RECEIVED.remove_label_values(&[
+            tenant_id,
+            shard_id,
+            timeline_id,
+        ]);
+        let _ = PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS.remove_label_values(&[
+            tenant_id,
+            shard_id,
+            timeline_id,
+        ]);
+        let _ = PAGE_SERVICE_SMGR_BATCH_WAIT_TIME.remove_label_values(&[
+            tenant_id,
+            shard_id,
+            timeline_id,
+        ]);
     }
 }
 
@@ -2688,10 +2962,13 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
 use crate::task_mgr::TaskKind;
 use crate::tenant::mgr::TenantSlot;
 use crate::tenant::tasks::BackgroundLoopKind;
+use crate::tenant::throttle::ThrottleResult;
+use crate::tenant::Timeline;
 
 /// Maintain a per timeline gauge in addition to the global gauge.
 pub(crate) struct PerTimelineRemotePhysicalSizeGauge {
@@ -2734,6 +3011,7 @@ pub(crate) struct RemoteTimelineClientMetrics {
     calls: Mutex<HashMap<(&'static str, &'static str), IntCounterPair>>,
     bytes_started_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
     bytes_finished_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
+    pub(crate) projected_remote_consistent_lsn_gauge: UIntGauge,
 }
 
 impl RemoteTimelineClientMetrics {
@@ -2748,6 +3026,10 @@ impl RemoteTimelineClientMetrics {
                 .unwrap(),
         );
 
+        let projected_remote_consistent_lsn_gauge = PROJECTED_REMOTE_CONSISTENT_LSN
+            .get_metric_with_label_values(&[&tenant_id_str, &shard_id_str, &timeline_id_str])
+            .unwrap();
+
         RemoteTimelineClientMetrics {
             tenant_id: tenant_id_str,
             shard_id: shard_id_str,
@@ -2756,6 +3038,7 @@ impl RemoteTimelineClientMetrics {
             bytes_started_counter: Mutex::new(HashMap::default()),
             bytes_finished_counter: Mutex::new(HashMap::default()),
             remote_physical_size_gauge,
+            projected_remote_consistent_lsn_gauge,
         }
     }
 
@@ -2969,6 +3252,7 @@ impl Drop for RemoteTimelineClientMetrics {
             calls,
             bytes_started_counter,
             bytes_finished_counter,
+            projected_remote_consistent_lsn_gauge,
         } = self;
         for ((a, b), _) in calls.get_mut().unwrap().drain() {
             let mut res = [Ok(()), Ok(())];
@@ -2997,6 +3281,14 @@ impl Drop for RemoteTimelineClientMetrics {
         {
             let _ = remote_physical_size_gauge; // use to avoid 'unused' warning in desctructuring above
             let _ = REMOTE_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        }
+        {
+            let _ = projected_remote_consistent_lsn_gauge;
+            let _ = PROJECTED_REMOTE_CONSISTENT_LSN.remove_label_values(&[
+                tenant_id,
+                shard_id,
+                timeline_id,
+            ]);
         }
     }
 }
@@ -3248,7 +3540,7 @@ pub(crate) mod tenant_throttling {
     use once_cell::sync::Lazy;
     use utils::shard::TenantShardId;
 
-    use crate::tenant::{self, throttle::Metric};
+    use crate::tenant::{self};
 
     struct GlobalAndPerTenantIntCounter {
         global: IntCounter,
@@ -3267,7 +3559,7 @@ pub(crate) mod tenant_throttling {
         }
     }
 
-    pub(crate) struct TimelineGet {
+    pub(crate) struct Metrics<const KIND: usize> {
         count_accounted_start: GlobalAndPerTenantIntCounter,
         count_accounted_finish: GlobalAndPerTenantIntCounter,
         wait_time: GlobalAndPerTenantIntCounter,
@@ -3340,40 +3632,41 @@ pub(crate) mod tenant_throttling {
         .unwrap()
     });
 
-    const KIND: &str = "timeline_get";
+    const KINDS: &[&str] = &["pagestream"];
+    pub type Pagestream = Metrics<0>;
 
-    impl TimelineGet {
+    impl<const KIND: usize> Metrics<KIND> {
         pub(crate) fn new(tenant_shard_id: &TenantShardId) -> Self {
             let per_tenant_label_values = &[
-                KIND,
+                KINDS[KIND],
                 &tenant_shard_id.tenant_id.to_string(),
                 &tenant_shard_id.shard_slug().to_string(),
             ];
-            TimelineGet {
+            Metrics {
                 count_accounted_start: {
                     GlobalAndPerTenantIntCounter {
-                        global: COUNT_ACCOUNTED_START.with_label_values(&[KIND]),
+                        global: COUNT_ACCOUNTED_START.with_label_values(&[KINDS[KIND]]),
                         per_tenant: COUNT_ACCOUNTED_START_PER_TENANT
                             .with_label_values(per_tenant_label_values),
                     }
                 },
                 count_accounted_finish: {
                     GlobalAndPerTenantIntCounter {
-                        global: COUNT_ACCOUNTED_FINISH.with_label_values(&[KIND]),
+                        global: COUNT_ACCOUNTED_FINISH.with_label_values(&[KINDS[KIND]]),
                         per_tenant: COUNT_ACCOUNTED_FINISH_PER_TENANT
                             .with_label_values(per_tenant_label_values),
                     }
                 },
                 wait_time: {
                     GlobalAndPerTenantIntCounter {
-                        global: WAIT_USECS.with_label_values(&[KIND]),
+                        global: WAIT_USECS.with_label_values(&[KINDS[KIND]]),
                         per_tenant: WAIT_USECS_PER_TENANT
                             .with_label_values(per_tenant_label_values),
                     }
                 },
                 count_throttled: {
                     GlobalAndPerTenantIntCounter {
-                        global: WAIT_COUNT.with_label_values(&[KIND]),
+                        global: WAIT_COUNT.with_label_values(&[KINDS[KIND]]),
                         per_tenant: WAIT_COUNT_PER_TENANT
                             .with_label_values(per_tenant_label_values),
                     }
@@ -3396,15 +3689,17 @@ pub(crate) mod tenant_throttling {
             &WAIT_USECS_PER_TENANT,
             &WAIT_COUNT_PER_TENANT,
         ] {
-            let _ = m.remove_label_values(&[
-                KIND,
-                &tenant_shard_id.tenant_id.to_string(),
-                &tenant_shard_id.shard_slug().to_string(),
-            ]);
+            for kind in KINDS {
+                let _ = m.remove_label_values(&[
+                    kind,
+                    &tenant_shard_id.tenant_id.to_string(),
+                    &tenant_shard_id.shard_slug().to_string(),
+                ]);
+            }
         }
     }
 
-    impl Metric for TimelineGet {
+    impl<const KIND: usize> tenant::throttle::Metric for Metrics<KIND> {
         #[inline(always)]
         fn accounting_start(&self) {
             self.count_accounted_start.inc();
@@ -3503,7 +3798,9 @@ pub(crate) fn set_tokio_runtime_setup(setup: &str, num_threads: NonZeroUsize) {
         .set(u64::try_from(num_threads.get()).unwrap());
 }
 
-pub fn preinitialize_metrics() {
+pub fn preinitialize_metrics(conf: &'static PageServerConf) {
+    set_page_service_config_max_batch_size(&conf.page_service_pipelining);
+
     // Python tests need these and on some we do alerting.
     //
     // FIXME(4813): make it so that we have no top level metrics as this fn will easily fall out of
@@ -3525,6 +3822,7 @@ pub fn preinitialize_metrics() {
         &REMOTE_ONDEMAND_DOWNLOADED_BYTES,
         &CIRCUIT_BREAKERS_BROKEN,
         &CIRCUIT_BREAKERS_UNBROKEN,
+        &PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS_GLOBAL,
     ]
     .into_iter()
     .for_each(|c| {
@@ -3571,6 +3869,8 @@ pub fn preinitialize_metrics() {
         &WAL_REDO_RECORDS_HISTOGRAM,
         &WAL_REDO_BYTES_HISTOGRAM,
         &WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
+        &PAGE_SERVICE_BATCH_SIZE_GLOBAL,
+        &PAGE_SERVICE_SMGR_BATCH_WAIT_TIME_GLOBAL,
     ]
     .into_iter()
     .for_each(|h| {

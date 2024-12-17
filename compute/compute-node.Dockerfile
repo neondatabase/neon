@@ -14,6 +14,9 @@ ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
 FROM debian:$DEBIAN_FLAVOR AS build-deps
 ARG DEBIAN_VERSION
 
+# Use strict mode for bash to catch errors early
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
 RUN case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):
       # The h3_pg extension needs a cmake 3.20+, but Debian bullseye has 3.18.
@@ -106,6 +109,7 @@ RUN cd postgres && \
 #
 #########################################################################################
 FROM build-deps AS postgis-build
+ARG DEBIAN_VERSION
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 RUN apt update && \
@@ -122,12 +126,12 @@ RUN apt update && \
 # and also we must check backward compatibility with older versions of PostGIS.
 #
 # Use new version only for v17
-RUN case "${PG_VERSION}" in \
-    "v17") \
+RUN case "${DEBIAN_VERSION}" in \
+    "bookworm") \
         export SFCGAL_VERSION=1.4.1 \
         export SFCGAL_CHECKSUM=1800c8a26241588f11cddcf433049e9b9aea902e923414d2ecef33a3295626c3 \
     ;; \
-    "v14" | "v15" | "v16") \
+    "bullseye") \
         export SFCGAL_VERSION=1.3.10 \
         export SFCGAL_CHECKSUM=4e39b3b2adada6254a7bdba6d297bb28e1a9835a9f879b74f37e2dab70203232 \
     ;; \
@@ -228,6 +232,8 @@ FROM build-deps AS plv8-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+COPY compute/patches/plv8-3.1.10.patch /plv8-3.1.10.patch
+
 RUN apt update && \
     apt install --no-install-recommends -y ninja-build python3-dev libncurses5 binutils clang
 
@@ -239,8 +245,6 @@ RUN apt update && \
 #
 # Use new version only for v17
 # because since v3.2, plv8 doesn't include plcoffee and plls extensions
-ENV PLV8_TAG=v3.2.3
-
 RUN case "${PG_VERSION}" in \
     "v17") \
         export PLV8_TAG=v3.2.3 \
@@ -255,8 +259,9 @@ RUN case "${PG_VERSION}" in \
     git clone --recurse-submodules --depth 1 --branch ${PLV8_TAG} https://github.com/plv8/plv8.git plv8-src && \
     tar -czf plv8.tar.gz --exclude .git plv8-src && \
     cd plv8-src && \
+    if [[ "${PG_VERSION}" < "v17" ]]; then patch -p1 < /plv8-3.1.10.patch; fi && \
     # generate and copy upgrade scripts
-    mkdir -p upgrade && ./generate_upgrade.sh 3.1.10 && \
+    mkdir -p upgrade && ./generate_upgrade.sh ${PLV8_TAG#v} && \
     cp upgrade/* /usr/local/pgsql/share/extension/ && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -353,10 +358,10 @@ COPY compute/patches/pgvector.patch /pgvector.patch
 # because we build the images on different machines than where we run them.
 # Pass OPTFLAGS="" to remove it.
 #
-# vector 0.7.4 supports v17
-# last release v0.7.4 - Aug 5, 2024
-RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.7.4.tar.gz -O pgvector.tar.gz && \
-    echo "0341edf89b1924ae0d552f617e14fb7f8867c0194ed775bcc44fa40288642583 pgvector.tar.gz" | sha256sum --check && \
+# vector >0.7.4 supports v17
+# last release v0.8.0 - Oct 30, 2024
+RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.0.tar.gz -O pgvector.tar.gz && \
+    echo "867a2c328d4928a5a9d6f052cd3bc78c7d60228a9b914ad32aa3db88e9de27b0 pgvector.tar.gz" | sha256sum --check && \
     mkdir pgvector-src && cd pgvector-src && tar xzf ../pgvector.tar.gz --strip-components=1 -C . && \
     patch -p1 < /pgvector.patch && \
     make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
@@ -1319,7 +1324,7 @@ FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.1 AS postgres-exporter
 
 # Keep the version the same as in build-tools.Dockerfile and
 # test_runner/regress/test_compute_metrics.py.
-FROM burningalchemist/sql_exporter:0.13.1 AS sql-exporter
+FROM burningalchemist/sql_exporter:0.16.0 AS sql-exporter
 
 #########################################################################################
 #
@@ -1362,15 +1367,12 @@ RUN make PG_VERSION="${PG_VERSION}" -C compute
 
 FROM neon-pg-ext-build AS neon-pg-ext-test
 ARG PG_VERSION
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    mkdir /ext-src
+RUN mkdir /ext-src
 
 #COPY --from=postgis-build /postgis.tar.gz /ext-src/
 #COPY --from=postgis-build /sfcgal/* /usr
 COPY --from=plv8-build /plv8.tar.gz /ext-src/
-COPY --from=h3-pg-build /h3-pg.tar.gz /ext-src/
+#COPY --from=h3-pg-build /h3-pg.tar.gz /ext-src/
 COPY --from=unit-pg-build /postgresql-unit.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.patch /ext-src/
@@ -1390,7 +1392,7 @@ COPY --from=hll-pg-build /hll.tar.gz /ext-src
 COPY --from=plpgsql-check-pg-build /plpgsql_check.tar.gz /ext-src
 #COPY --from=timescaledb-pg-build /timescaledb.tar.gz /ext-src
 COPY --from=pg-hint-plan-pg-build /pg_hint_plan.tar.gz /ext-src
-COPY compute/patches/pg_hint_plan.patch /ext-src
+COPY compute/patches/pg_hint_plan_${PG_VERSION}.patch /ext-src
 COPY --from=pg-cron-pg-build /pg_cron.tar.gz /ext-src
 COPY compute/patches/pg_cron.patch /ext-src
 #COPY --from=pg-pgx-ulid-build /home/nonroot/pgx_ulid.tar.gz /ext-src
@@ -1400,38 +1402,23 @@ COPY --from=pg-roaringbitmap-pg-build /pg_roaringbitmap.tar.gz /ext-src
 COPY --from=pg-semver-pg-build /pg_semver.tar.gz /ext-src
 #COPY --from=pg-embedding-pg-build /home/nonroot/pg_embedding-src/ /ext-src
 #COPY --from=wal2json-pg-build /wal2json_2_5.tar.gz /ext-src
-COPY --from=pg-anon-pg-build /pg_anon.tar.gz /ext-src
+#pg_anon is not supported yet for pg v17 so, don't fail if nothing found
+COPY --from=pg-anon-pg-build /pg_anon.tar.g? /ext-src
 COPY compute/patches/pg_anon.patch /ext-src
 COPY --from=pg-ivm-build /pg_ivm.tar.gz /ext-src
 COPY --from=pg-partman-build /pg_partman.tar.gz /ext-src
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    cd /ext-src/ && for f in *.tar.gz; \
+RUN cd /ext-src/ && for f in *.tar.gz; \
     do echo $f; dname=$(echo $f | sed 's/\.tar.*//')-src; \
     rm -rf $dname; mkdir $dname; tar xzf $f --strip-components=1 -C $dname \
     || exit 1; rm -f $f; done
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    cd /ext-src/rum-src && patch -p1 <../rum.patch
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan.patch
+RUN cd /ext-src/rum-src && patch -p1 <../rum.patch
+RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
+RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan_${PG_VERSION}.patch
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    patch -p1 </ext-src/pg_anon.patch
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    patch -p1 </ext-src/pg_cron.patch
+    echo "postgresql_anonymizer does not yet support PG17" && exit 0;; \
+    esac && patch -p1 </ext-src/pg_anon.patch
+RUN patch -p1 </ext-src/pg_cron.patch
 ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
 ENV PGPORT=55433

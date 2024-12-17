@@ -3,14 +3,6 @@ use std::pin::pin;
 use std::sync::Arc;
 
 use anyhow::bail;
-use aws_config::environment::EnvironmentVariableCredentialsProvider;
-use aws_config::imds::credentials::ImdsCredentialsProvider;
-use aws_config::meta::credentials::CredentialsProviderChain;
-use aws_config::meta::region::RegionProviderChain;
-use aws_config::profile::ProfileFileCredentialsProvider;
-use aws_config::provider_config::ProviderConfig;
-use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
-use aws_config::Region;
 use futures::future::Either;
 use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
@@ -51,8 +43,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Clone, Debug, ValueEnum)]
 enum AuthBackendType {
-    #[value(name("console"), alias("cplane"))]
-    ControlPlane,
+    #[value(name("cplane-v1"), alias("control-plane"))]
+    ControlPlaneV1,
 
     #[value(name("link"), alias("control-redirect"))]
     ConsoleRedirect,
@@ -113,6 +105,9 @@ struct ProxyCliArgs {
     /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
     #[clap(short = 'c', long, alias = "ssl-cert")]
     tls_cert: Option<String>,
+    /// Allow writing TLS session keys to the given file pointed to by the environment variable `SSLKEYLOGFILE`.
+    #[clap(long, alias = "allow-ssl-keylogfile")]
+    allow_tls_keylogfile: bool,
     /// path to directory with TLS certificates for client postgres connections
     #[clap(long)]
     certs_dir: Option<String>,
@@ -314,39 +309,7 @@ async fn main() -> anyhow::Result<()> {
     };
     info!("Using region: {}", args.aws_region);
 
-    let region_provider =
-        RegionProviderChain::default_provider().or_else(Region::new(args.aws_region.clone()));
-    let provider_conf =
-        ProviderConfig::without_region().with_region(region_provider.region().await);
-    let aws_credentials_provider = {
-        // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
-        CredentialsProviderChain::first_try("env", EnvironmentVariableCredentialsProvider::new())
-            // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
-            .or_else(
-                "profile-sso",
-                ProfileFileCredentialsProvider::builder()
-                    .configure(&provider_conf)
-                    .build(),
-            )
-            // uses "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
-            // needed to access remote extensions bucket
-            .or_else(
-                "token",
-                WebIdentityTokenCredentialsProvider::builder()
-                    .configure(&provider_conf)
-                    .build(),
-            )
-            // uses imds v2
-            .or_else("imds", ImdsCredentialsProvider::builder().build())
-    };
-    let elasticache_credentials_provider = Arc::new(elasticache::CredentialsProvider::new(
-        elasticache::AWSIRSAConfig::new(
-            args.aws_region.clone(),
-            args.redis_cluster_name,
-            args.redis_user_id,
-        ),
-        aws_credentials_provider,
-    ));
+    // TODO: untangle the config args
     let regional_redis_client = match (args.redis_auth_type.as_str(), &args.redis_notifications) {
         ("plain", redis_url) => match redis_url {
             None => {
@@ -361,7 +324,12 @@ async fn main() -> anyhow::Result<()> {
                 ConnectionWithCredentialsProvider::new_with_credentials_provider(
                     host.to_string(),
                     port,
-                    elasticache_credentials_provider.clone(),
+                    elasticache::CredentialsProvider::new(
+                        args.aws_region,
+                        args.redis_cluster_name,
+                        args.redis_user_id,
+                    )
+                    .await,
                 ),
             ),
             (None, None) => {
@@ -517,14 +485,10 @@ async fn main() -> anyhow::Result<()> {
     if let Some(metrics_config) = &config.metric_collection {
         // TODO: Add gc regardles of the metric collection being enabled.
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
-        client_tasks.spawn(usage_metrics::task_backup(
-            &metrics_config.backup_metric_collection_config,
-            cancellation_token.clone(),
-        ));
     }
 
     if let Either::Left(auth::Backend::ControlPlane(api, _)) = &auth_backend {
-        if let proxy::control_plane::client::ControlPlaneClient::Neon(api) = &**api {
+        if let proxy::control_plane::client::ControlPlaneClient::ProxyV1(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
                 (client1, client2) => {
@@ -594,6 +558,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             key_path,
             cert_path,
             args.certs_dir.as_ref(),
+            args.allow_tls_keylogfile,
         )?),
         (None, None) => None,
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
@@ -701,7 +666,7 @@ fn build_auth_backend(
     args: &ProxyCliArgs,
 ) -> anyhow::Result<Either<&'static auth::Backend<'static, ()>, &'static ConsoleRedirectBackend>> {
     match &args.auth_backend {
-        AuthBackendType::ControlPlane => {
+        AuthBackendType::ControlPlaneV1 => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
@@ -736,23 +701,25 @@ fn build_auth_backend(
             )?));
             tokio::spawn(locks.garbage_collect_worker());
 
-            let url = args.auth_endpoint.parse()?;
+            let url: proxy::url::ApiUrl = args.auth_endpoint.parse()?;
+
             let endpoint = http::Endpoint::new(url, http::new_client());
 
             let mut wake_compute_rps_limit = args.wake_compute_limit.clone();
             RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
             let wake_compute_endpoint_rate_limiter =
                 Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
-            let api = control_plane::client::neon::NeonControlPlaneClient::new(
+
+            let api = control_plane::client::cplane_proxy_v1::NeonControlPlaneClient::new(
                 endpoint,
                 args.control_plane_token.clone(),
                 caches,
                 locks,
                 wake_compute_endpoint_rate_limiter,
             );
-            let api = control_plane::client::ControlPlaneClient::Neon(api);
-            let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
 
+            let api = control_plane::client::ControlPlaneClient::ProxyV1(api);
+            let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
             let config = Box::leak(Box::new(auth_backend));
 
             Ok(Either::Left(config))

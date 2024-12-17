@@ -48,7 +48,7 @@ pub struct TenantCreateResponse {
     pub shards: Vec<TenantCreateResponseShard>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeRegisterRequest {
     pub node_id: NodeId,
 
@@ -75,7 +75,7 @@ pub struct TenantPolicyRequest {
     pub scheduling: Option<ShardSchedulingPolicy>,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct AvailabilityZone(pub String);
 
 impl Display for AvailabilityZone {
@@ -245,6 +245,17 @@ impl From<NodeAvailability> for NodeAvailabilityWrapper {
     }
 }
 
+/// Scheduling policy enables us to selectively disable some automatic actions that the
+/// controller performs on a tenant shard. This is only set to a non-default value by
+/// human intervention, and it is reset to the default value (Active) when the tenant's
+/// placement policy is modified away from Attached.
+///
+/// The typical use of a non-Active scheduling policy is one of:
+/// - Pinnning a shard to a node (i.e. migrating it there & setting a non-Active scheduling policy)
+/// - Working around a bug (e.g. if something is flapping and we need to stop it until the bug is fixed)
+///
+/// If you're not sure which policy to use to pin a shard to its current location, you probably
+/// want Pause.
 #[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum ShardSchedulingPolicy {
     // Normal mode: the tenant's scheduled locations may be updated at will, including

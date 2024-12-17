@@ -21,7 +21,7 @@
 //! - Build the image with the following command:
 //!
 //! ```bash
-//! docker buildx build --build-arg DEBIAN_FLAVOR=bullseye-slim --build-arg GIT_VERSION=local --build-arg PG_VERSION=v14 --build-arg BUILD_TAG="$(date --iso-8601=s -u)"  -t localhost:3030/localregistry/compute-node-v14:latest -f compute/Dockerfile.com
+//! docker buildx build --platform linux/amd64 --build-arg DEBIAN_VERSION=bullseye --build-arg GIT_VERSION=local --build-arg PG_VERSION=v14 --build-arg BUILD_TAG="$(date --iso-8601=s -u)" -t localhost:3030/localregistry/compute-node-v14:latest -f compute/compute-node.Dockerfile .
 //! docker push localhost:3030/localregistry/compute-node-v14:latest
 //! ```
 
@@ -29,6 +29,7 @@ use anyhow::Context;
 use aws_config::BehaviorVersion;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
+use compute_tools::extension_server::{get_pg_version, PostgresMajorVersion};
 use nix::unistd::Pid;
 use tracing::{info, info_span, warn, Instrument};
 use utils::fs_ext::is_directory_empty;
@@ -131,11 +132,18 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     //
     //  Initialize pgdata
     //
+    let pgbin = pg_bin_dir.join("postgres");
+    let pg_version = match get_pg_version(pgbin.as_ref()) {
+        PostgresMajorVersion::V14 => 14,
+        PostgresMajorVersion::V15 => 15,
+        PostgresMajorVersion::V16 => 16,
+        PostgresMajorVersion::V17 => 17,
+    };
     let superuser = "cloud_admin"; // XXX: this shouldn't be hard-coded
     postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
         superuser,
         locale: "en_US.UTF-8", // XXX: this shouldn't be hard-coded,
-        pg_version: 140000, // XXX: this shouldn't be hard-coded but derived from which compute image we're running in
+        pg_version,
         initdb_bin: pg_bin_dir.join("initdb").as_ref(),
         library_search_path: &pg_lib_dir, // TODO: is this right? Prob works in compute image, not sure about neon_local.
         pgdata: &pgdata_dir,
@@ -148,7 +156,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     //
     // Launch postgres process
     //
-    let mut postgres_proc = tokio::process::Command::new(pg_bin_dir.join("postgres"))
+    let mut postgres_proc = tokio::process::Command::new(pgbin)
         .arg("-D")
         .arg(&pgdata_dir)
         .args(["-c", "wal_level=minimal"])

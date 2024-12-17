@@ -50,9 +50,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
     fs_ext, pausable_failpoint,
+    postgres_client::PostgresClientProtocol,
     sync::gate::{Gate, GateGuard},
 };
-use wal_decoder::serialized_batch::SerializedValueBatch;
+use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -143,19 +144,15 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
+use super::config::TenantConf;
+use super::remote_timeline_client::index::IndexPart;
+use super::remote_timeline_client::RemoteTimelineClient;
+use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
+use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
+use super::upload_queue::NotInitialized;
+use super::GcError;
 use super::{
-    config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
-    MaybeOffloaded,
-};
-use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
-use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
-use super::{
-    remote_timeline_client::RemoteTimelineClient, remote_timeline_client::WaitCompletionError,
-    storage_layer::ReadableLayer,
-};
-use super::{
-    secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
-    GcError,
+    debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf, MaybeOffloaded,
 };
 
 #[cfg(test)]
@@ -207,8 +204,8 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
     pub remote_client: RemoteTimelineClient,
-    pub timeline_get_throttle:
-        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
+    pub pagestream_throttle:
+        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::Pagestream>>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
@@ -410,9 +407,9 @@ pub struct Timeline {
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     gc_lock: tokio::sync::Mutex<()>,
 
-    /// Cloned from [`super::Tenant::timeline_get_throttle`] on construction.
-    timeline_get_throttle:
-        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
+    /// Cloned from [`super::Tenant::pagestream_throttle`] on construction.
+    pub(crate) pagestream_throttle:
+        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::Pagestream>>,
 
     /// Size estimator for aux file v2
     pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
@@ -767,7 +764,7 @@ pub enum GetLogicalSizePriority {
     Background,
 }
 
-#[derive(enumset::EnumSetType)]
+#[derive(Debug, enumset::EnumSetType)]
 pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
@@ -778,17 +775,91 @@ pub(crate) enum CompactFlags {
 
 #[serde_with::serde_as]
 #[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct CompactRange {
+pub(crate) struct CompactRequest {
+    pub compact_key_range: Option<CompactKeyRange>,
+    pub compact_lsn_range: Option<CompactLsnRange>,
+    /// Whether the compaction job should be scheduled.
+    #[serde(default)]
+    pub scheduled: bool,
+    /// Whether the compaction job should be split across key ranges.
+    #[serde(default)]
+    pub sub_compaction: bool,
+    /// Max job size for each subcompaction job.
+    pub sub_compaction_max_job_size_mb: Option<u64>,
+}
+
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct CompactLsnRange {
+    pub start: Lsn,
+    pub end: Lsn,
+}
+
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct CompactKeyRange {
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub start: Key,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub end: Key,
 }
 
-#[derive(Clone, Default)]
+impl From<Range<Lsn>> for CompactLsnRange {
+    fn from(range: Range<Lsn>) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+        }
+    }
+}
+
+impl From<Range<Key>> for CompactKeyRange {
+    fn from(range: Range<Key>) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+        }
+    }
+}
+
+impl From<CompactLsnRange> for Range<Lsn> {
+    fn from(range: CompactLsnRange) -> Self {
+        range.start..range.end
+    }
+}
+
+impl From<CompactKeyRange> for Range<Key> {
+    fn from(range: CompactKeyRange) -> Self {
+        range.start..range.end
+    }
+}
+
+impl CompactLsnRange {
+    #[cfg(test)]
+    #[cfg(feature = "testing")]
+    pub fn above(lsn: Lsn) -> Self {
+        Self {
+            start: lsn,
+            end: Lsn::MAX,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub(crate) struct CompactOptions {
     pub flags: EnumSet<CompactFlags>,
-    pub compact_range: Option<CompactRange>,
+    /// If set, the compaction will only compact the key range specified by this option.
+    /// This option is only used by GC compaction. For the full explanation, see [`compaction::GcCompactJob`].
+    pub compact_key_range: Option<CompactKeyRange>,
+    /// If set, the compaction will only compact the LSN within this value.
+    /// This option is only used by GC compaction. For the full explanation, see [`compaction::GcCompactJob`].
+    pub compact_lsn_range: Option<CompactLsnRange>,
+    /// Enable sub-compaction (split compaction job across key ranges).
+    /// This option is only used by GC compaction.
+    pub sub_compaction: bool,
+    /// Set job size for the GC compaction.
+    /// This option is only used by GC compaction.
+    pub sub_compaction_max_job_size_mb: Option<u64>,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -893,10 +964,11 @@ pub(crate) enum ShutdownMode {
     /// While we are flushing, we continue to accept read I/O for LSNs ingested before
     /// the call to [`Timeline::shutdown`].
     FreezeAndFlush,
-    /// Only flush the layers to the remote storage without freezing any open layers. This is the
-    /// mode used by ancestor detach and any other operations that reloads a tenant but not increasing
-    /// the generation number.
-    Flush,
+    /// Only flush the layers to the remote storage without freezing any open layers. Flush the deletion
+    /// queue. This is the mode used by ancestor detach and any other operations that reloads a tenant
+    /// but not increasing the generation number. Note that this mode cannot be used at tenant shutdown,
+    /// as flushing the deletion queue at that time will cause shutdown-in-progress errors.
+    Reload,
     /// Shut down immediately, without waiting for any open layers to flush.
     Hard,
 }
@@ -947,7 +1019,7 @@ impl Timeline {
     /// If a remote layer file is needed, it is downloaded as part of this
     /// call.
     ///
-    /// This method enforces [`Self::timeline_get_throttle`] internally.
+    /// This method enforces [`Self::pagestream_throttle`] internally.
     ///
     /// NOTE: It is considered an error to 'get' a key that doesn't exist. The
     /// abstraction above this needs to store suitable metadata to track what
@@ -974,8 +1046,6 @@ impl Timeline {
         // already checked the key against the shard_identity when looking up the Timeline from
         // page_service.
         debug_assert!(!self.shard_identity.is_key_disposable(&key));
-
-        self.timeline_get_throttle.throttle(ctx, 1).await;
 
         let keyspace = KeySpace {
             ranges: vec![key..key.next()],
@@ -1056,13 +1126,6 @@ impl Timeline {
             .for_task_kind(ctx.task_kind())
             .map(|metric| (metric, Instant::now()));
 
-        // start counting after throttle so that throttle time
-        // is always less than observation time
-        let throttled = self
-            .timeline_get_throttle
-            .throttle(ctx, key_count as usize)
-            .await;
-
         let res = self
             .get_vectored_impl(
                 keyspace.clone(),
@@ -1074,23 +1137,7 @@ impl Timeline {
 
         if let Some((metric, start)) = start {
             let elapsed = start.elapsed();
-            let ex_throttled = if let Some(throttled) = throttled {
-                elapsed.checked_sub(throttled)
-            } else {
-                Some(elapsed)
-            };
-
-            if let Some(ex_throttled) = ex_throttled {
-                metric.observe(ex_throttled.as_secs_f64());
-            } else {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<RateLimit>> =
-                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-                let mut rate_limit = LOGGED.lock().unwrap();
-                rate_limit.call(|| {
-                    warn!("error deducting time spent throttled; this message is logged at a global rate limit");
-                });
-            }
+            metric.observe(elapsed.as_secs_f64());
         }
 
         res
@@ -1135,14 +1182,6 @@ impl Timeline {
             .for_task_kind(ctx.task_kind())
             .map(ScanLatencyOngoingRecording::start_recording);
 
-        // start counting after throttle so that throttle time
-        // is always less than observation time
-        let throttled = self
-            .timeline_get_throttle
-            // assume scan = 1 quota for now until we find a better way to process this
-            .throttle(ctx, 1)
-            .await;
-
         let vectored_res = self
             .get_vectored_impl(
                 keyspace.clone(),
@@ -1153,7 +1192,7 @@ impl Timeline {
             .await;
 
         if let Some(recording) = start {
-            recording.observe(throttled);
+            recording.observe();
         }
 
         vectored_res
@@ -1464,23 +1503,31 @@ impl Timeline {
         Ok(lease)
     }
 
-    /// Flush to disk all data that was written with the put_* functions
+    /// Freeze the current open in-memory layer. It will be written to disk on next iteration.
+    /// Returns the flush request ID which can be awaited with wait_flush_completion().
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
+    pub(crate) async fn freeze(&self) -> Result<u64, FlushLayerError> {
+        self.freeze0().await
+    }
+
+    /// Freeze and flush the open in-memory layer, waiting for it to be written to disk.
     #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
     pub(crate) async fn freeze_and_flush(&self) -> Result<(), FlushLayerError> {
         self.freeze_and_flush0().await
     }
 
+    /// Freeze the current open in-memory layer. It will be written to disk on next iteration.
+    /// Returns the flush request ID which can be awaited with wait_flush_completion().
+    pub(crate) async fn freeze0(&self) -> Result<u64, FlushLayerError> {
+        let mut g = self.write_lock.lock().await;
+        let to_lsn = self.get_last_record_lsn();
+        self.freeze_inmem_layer_at(to_lsn, &mut g).await
+    }
+
     // This exists to provide a non-span creating version of `freeze_and_flush` we can call without
     // polluting the span hierarchy.
     pub(crate) async fn freeze_and_flush0(&self) -> Result<(), FlushLayerError> {
-        let token = {
-            // Freeze the current open in-memory layer. It will be written to disk on next
-            // iteration.
-            let mut g = self.write_lock.lock().await;
-
-            let to_lsn = self.get_last_record_lsn();
-            self.freeze_inmem_layer_at(to_lsn, &mut g).await?
-        };
+        let token = self.freeze0().await?;
         self.wait_flush_completion(token).await
     }
 
@@ -1634,7 +1681,10 @@ impl Timeline {
             cancel,
             CompactOptions {
                 flags,
-                compact_range: None,
+                compact_key_range: None,
+                compact_lsn_range: None,
+                sub_compaction: false,
+                sub_compaction_max_job_size_mb: None,
             },
             ctx,
         )
@@ -1817,7 +1867,7 @@ impl Timeline {
             }
         }
 
-        if let ShutdownMode::Flush = mode {
+        if let ShutdownMode::Reload = mode {
             // drain the upload queue
             self.remote_client.shutdown().await;
             if !self.remote_client.no_pending_work() {
@@ -2178,6 +2228,21 @@ impl Timeline {
             )
     }
 
+    /// Resolve the effective WAL receiver protocol to use for this tenant.
+    ///
+    /// Priority order is:
+    /// 1. Tenant config override
+    /// 2. Default value for tenant config override
+    /// 3. Pageserver config override
+    /// 4. Pageserver config default
+    pub fn resolve_wal_receiver_protocol(&self) -> PostgresClientProtocol {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .wal_receiver_protocol_override
+            .or(self.conf.default_tenant_conf.wal_receiver_protocol_override)
+            .unwrap_or(self.conf.wal_receiver_protocol)
+    }
+
     pub(super) fn tenant_conf_updated(&self, new_conf: &AttachedTenantConf) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
@@ -2354,7 +2419,7 @@ impl Timeline {
 
                 standby_horizon: AtomicLsn::new(0),
 
-                timeline_get_throttle: resources.timeline_get_throttle,
+                pagestream_throttle: resources.pagestream_throttle,
 
                 aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
 
@@ -2375,7 +2440,7 @@ impl Timeline {
 
             result
                 .metrics
-                .last_record_gauge
+                .last_record_lsn_gauge
                 .set(disk_consistent_lsn.0 as i64);
             result
         })
@@ -2470,7 +2535,7 @@ impl Timeline {
         *guard = Some(WalReceiver::start(
             Arc::clone(self),
             WalReceiverConf {
-                protocol: self.conf.wal_receiver_protocol,
+                protocol: self.resolve_wal_receiver_protocol(),
                 wal_connect_timeout,
                 lagging_wal_timeout,
                 max_lsn_wal_lag,
@@ -3471,7 +3536,6 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
-        let gate_guard = self.gate.enter().context("enter gate for inmem layer")?;
 
         let last_record_lsn = self.get_last_record_lsn();
         ensure!(
@@ -3488,7 +3552,7 @@ impl Timeline {
                 self.conf,
                 self.timeline_id,
                 self.tenant_shard_id,
-                gate_guard,
+                &self.gate,
                 ctx,
             )
             .await?;
@@ -3498,7 +3562,7 @@ impl Timeline {
     pub(crate) fn finish_write(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
 
-        self.metrics.last_record_gauge.set(new_lsn.0 as i64);
+        self.metrics.last_record_lsn_gauge.set(new_lsn.0 as i64);
         self.last_record_lsn.advance(new_lsn);
     }
 
@@ -3829,21 +3893,6 @@ impl Timeline {
             // release lock on 'layers'
         };
 
-        // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
-        // This makes us refuse ingest until the new layers have been persisted to the remote.
-        self.remote_client
-            .wait_completion()
-            .await
-            .map_err(|e| match e {
-                WaitCompletionError::UploadQueueShutDownOrStopped
-                | WaitCompletionError::NotInitialized(
-                    NotInitialized::ShuttingDown | NotInitialized::Stopped,
-                ) => FlushLayerError::Cancelled,
-                WaitCompletionError::NotInitialized(NotInitialized::Uninitialized) => {
-                    FlushLayerError::Other(anyhow!(e).into())
-                }
-            })?;
-
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
         // We still schedule the upload, resulting in an error, but ideally we'd somehow avoid this
@@ -3863,6 +3912,10 @@ impl Timeline {
     fn set_disk_consistent_lsn(&self, new_value: Lsn) -> bool {
         let old_value = self.disk_consistent_lsn.fetch_max(new_value);
         assert!(new_value >= old_value, "disk_consistent_lsn must be growing monotonously at runtime; current {old_value}, offered {new_value}");
+
+        self.metrics
+            .disk_consistent_lsn_gauge
+            .set(new_value.0 as i64);
         new_value != old_value
     }
 
@@ -3989,8 +4042,11 @@ impl Timeline {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
+            // Note that there are a third "caller" that will take the `partitioning` lock. It is `gc_compaction_split_jobs` for
+            // gc-compaction where it uses the repartition data to determine the split jobs. In the future, it might use its own
+            // heuristics, but for now, we should allow concurrent access to it and let the caller retry compaction.
             return Err(CompactionError::Other(anyhow!(
-                "repartition() called concurrently, this should not happen"
+                "repartition() called concurrently, this is rare and a retry should be fine"
             )));
         };
         let ((dense_partition, sparse_partition), partition_lsn) = &*partitioning_guard;
@@ -5786,7 +5842,7 @@ enum OpenLayerAction {
     None,
 }
 
-impl<'a> TimelineWriter<'a> {
+impl TimelineWriter<'_> {
     async fn handle_open_layer_action(
         &mut self,
         at: Lsn,
@@ -5899,6 +5955,23 @@ impl<'a> TimelineWriter<'a> {
     ) -> anyhow::Result<()> {
         if !batch.has_data() {
             return Ok(());
+        }
+
+        // In debug builds, assert that we don't write any keys that don't belong to this shard.
+        // We don't assert this in release builds, since key ownership policies may change over
+        // time. Stray keys will be removed during compaction.
+        if cfg!(debug_assertions) {
+            for metadata in &batch.metadata {
+                if let ValueMeta::Serialized(metadata) = metadata {
+                    let key = Key::from_compact(metadata.key);
+                    assert!(
+                        self.shard_identity.is_key_local(&key)
+                            || self.shard_identity.is_key_global(&key),
+                        "key {key} does not belong on shard {}",
+                        self.shard_identity.shard_index()
+                    );
+                }
+            }
         }
 
         let batch_max_lsn = batch.max_lsn;

@@ -269,7 +269,7 @@ class PgProtocol:
             for match in re.finditer(r"-c(\w*)=(\w*)", options):
                 key = match.group(1)
                 val = match.group(2)
-                if "server_options" in conn_options:
+                if "server_settings" in conn_options:
                     conn_options["server_settings"].update({key: val})
                 else:
                     conn_options["server_settings"] = {key: val}
@@ -308,6 +308,31 @@ class PgProtocol:
         Execute query returning single row with single column.
         """
         return self.safe_psql(query, log_query=log_query)[0][0]
+
+
+class PageserverWalReceiverProtocol(StrEnum):
+    VANILLA = "vanilla"
+    INTERPRETED = "interpreted"
+
+    @staticmethod
+    def to_config_key_value(proto) -> tuple[str, dict[str, Any]]:
+        if proto == PageserverWalReceiverProtocol.VANILLA:
+            return (
+                "wal_receiver_protocol",
+                {
+                    "type": "vanilla",
+                },
+            )
+        elif proto == PageserverWalReceiverProtocol.INTERPRETED:
+            return (
+                "wal_receiver_protocol",
+                {
+                    "type": "interpreted",
+                    "args": {"format": "protobuf", "compression": {"zstd": {"level": 1}}},
+                },
+            )
+        else:
+            raise ValueError(f"Unknown protocol type: {proto}")
 
 
 class NeonEnvBuilder:
@@ -356,6 +381,7 @@ class NeonEnvBuilder:
         safekeeper_extra_opts: list[str] | None = None,
         storage_controller_port_override: int | None = None,
         pageserver_virtual_file_io_mode: str | None = None,
+        pageserver_wal_receiver_protocol: PageserverWalReceiverProtocol | None = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -408,6 +434,11 @@ class NeonEnvBuilder:
         self.storage_controller_port_override = storage_controller_port_override
 
         self.pageserver_virtual_file_io_mode = pageserver_virtual_file_io_mode
+
+        if pageserver_wal_receiver_protocol is not None:
+            self.pageserver_wal_receiver_protocol = pageserver_wal_receiver_protocol
+        else:
+            self.pageserver_wal_receiver_protocol = PageserverWalReceiverProtocol.INTERPRETED
 
         assert test_name.startswith(
             "test_"
@@ -1023,6 +1054,7 @@ class NeonEnv:
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
+        self.pageserver_wal_receiver_protocol = config.pageserver_wal_receiver_protocol
 
         # Create the neon_local's `NeonLocalInitConf`
         cfg: dict[str, Any] = {
@@ -1066,6 +1098,17 @@ class NeonEnv:
                 # the pageserver taking a long time to start up due to syncfs flushing other tests' data
                 "no_sync": True,
             }
+
+            # Batching (https://github.com/neondatabase/neon/issues/9377):
+            # enable batching by default in tests and benchmarks.
+            # Compat tests are exempt because old versions fail to parse the new config.
+            if not config.compatibility_neon_binpath:
+                ps_cfg["page_service_pipelining"] = {
+                    "mode": "pipelined",
+                    "execution": "concurrent-futures",
+                    "max_batch_size": 32,
+                }
+
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
             if config.pageserver_default_tenant_config_compaction_algorithm is not None:
@@ -1091,6 +1134,13 @@ class NeonEnv:
 
             if self.pageserver_virtual_file_io_mode is not None:
                 ps_cfg["virtual_file_io_mode"] = self.pageserver_virtual_file_io_mode
+
+            if self.pageserver_wal_receiver_protocol is not None:
+                key, value = PageserverWalReceiverProtocol.to_config_key_value(
+                    self.pageserver_wal_receiver_protocol
+                )
+                if key not in ps_cfg:
+                    ps_cfg[key] = value
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
@@ -1700,7 +1750,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         def storage_controller_ready():
             assert self.ready() is True
 
-        wait_until(30, 1, storage_controller_ready)
+        wait_until(storage_controller_ready)
         return time.time() - t1
 
     def attach_hook_issue(
@@ -2282,6 +2332,16 @@ class NeonStorageController(MetricsGetter, LogUtils):
                 return None
             raise e
 
+    def get_safekeepers(self) -> list[dict[str, Any]]:
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/safekeeper",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        json = response.json()
+        assert isinstance(json, list)
+        return json
+
     def set_preferred_azs(self, preferred_azs: dict[TenantShardId, str]) -> list[TenantShardId]:
         response = self.request(
             "PUT",
@@ -2538,7 +2598,7 @@ class NeonPageserver(PgProtocol, LogUtils):
             log.info(f"any_unstable={any_unstable}")
             assert not any_unstable
 
-        wait_until(20, 0.5, complete)
+        wait_until(complete)
 
     def __enter__(self) -> Self:
         return self
@@ -3162,7 +3222,7 @@ class NeonProxy(PgProtocol):
                 *["--allow-self-signed-compute", "true"],
             ]
 
-    class Console(AuthBackend):
+    class ProxyV1(AuthBackend):
         def __init__(self, endpoint: str, fixed_rate_limit: int | None = None):
             self.endpoint = endpoint
             self.fixed_rate_limit = fixed_rate_limit
@@ -3170,7 +3230,7 @@ class NeonProxy(PgProtocol):
         def extra_args(self) -> list[str]:
             args = [
                 # Console auth backend params
-                *["--auth-backend", "console"],
+                *["--auth-backend", "cplane-v1"],
                 *["--auth-endpoint", self.endpoint],
                 *["--sql-over-http-pool-opt-in", "false"],
             ]
@@ -3418,13 +3478,13 @@ class NeonProxy(PgProtocol):
 
 
 class NeonAuthBroker:
-    class ControlPlane:
+    class ProxyV1:
         def __init__(self, endpoint: str):
             self.endpoint = endpoint
 
         def extra_args(self) -> list[str]:
             args = [
-                *["--auth-backend", "console"],
+                *["--auth-backend", "cplane-v1"],
                 *["--auth-endpoint", self.endpoint],
             ]
             return args
@@ -3436,7 +3496,7 @@ class NeonAuthBroker:
         http_port: int,
         mgmt_port: int,
         external_http_port: int,
-        auth_backend: NeonAuthBroker.ControlPlane,
+        auth_backend: NeonAuthBroker.ProxyV1,
     ):
         self.domain = "apiauth.localtest.me"  # resolves to 127.0.0.1
         self.host = "127.0.0.1"
@@ -3622,7 +3682,7 @@ def static_auth_broker(
     local_proxy_addr = f"{http2_echoserver.host}:{http2_echoserver.port}"
 
     # return local_proxy addr on ProxyWakeCompute.
-    httpserver.expect_request("/cplane/proxy_wake_compute").respond_with_json(
+    httpserver.expect_request("/cplane/wake_compute").respond_with_json(
         {
             "address": local_proxy_addr,
             "aux": {
@@ -3662,7 +3722,7 @@ def static_auth_broker(
         http_port=http_port,
         mgmt_port=mgmt_port,
         external_http_port=external_http_port,
-        auth_backend=NeonAuthBroker.ControlPlane(httpserver.url_for("/cplane")),
+        auth_backend=NeonAuthBroker.ProxyV1(httpserver.url_for("/cplane")),
     ) as proxy:
         proxy.start()
         yield proxy
@@ -3765,12 +3825,11 @@ class Endpoint(PgProtocol, LogUtils):
                     assert size_to_bytes(size) >= size_to_bytes(
                         "1MB"
                     ), "LFC size cannot be set less than 1MB"
-            # shared_buffers = 512kB to make postgres use LFC intensively
-            # neon.max_file_cache_size and neon.file_cache size limit are
-            # set to 1MB because small LFC is better for testing (helps to find more problems)
+            lfc_path_escaped = str(lfc_path).replace("'", "''")
             config_lines = [
-                "shared_buffers = 512kB",
-                f"neon.file_cache_path = '{self.lfc_path()}'",
+                f"neon.file_cache_path = '{lfc_path_escaped}'",
+                # neon.max_file_cache_size and neon.file_cache size limits are
+                # set to 1MB because small LFC is better for testing (helps to find more problems)
                 "neon.max_file_cache_size = 1MB",
                 "neon.file_cache_size_limit = 1MB",
             ] + config_lines
@@ -3898,6 +3957,35 @@ class Endpoint(PgProtocol, LogUtils):
             log.info(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
+    def respec_deep(self, **kwargs: Any) -> None:
+        """
+        Update the endpoint.json file taking into account nested keys.
+        It does one level deep update. Should enough for most cases.
+        Distinct method from respec() to do not break existing functionality.
+        NOTE: This method also updates the spec.json file, not endpoint.json.
+        We need it because neon_local also writes to spec.json, so intended
+        use-case is i) start endpoint with some config, ii) respec_deep(),
+        iii) call reconfigure() to apply the changes.
+        """
+        config_path = os.path.join(self.endpoint_path(), "spec.json")
+        with open(config_path) as f:
+            data_dict: dict[str, Any] = json.load(f)
+
+        log.info("Current compute spec: %s", json.dumps(data_dict, indent=4))
+
+        for key, value in kwargs.items():
+            if isinstance(value, dict):
+                if key not in data_dict:
+                    data_dict[key] = value
+                else:
+                    data_dict[key] = {**data_dict[key], **value}
+            else:
+                data_dict[key] = value
+
+        with open(config_path, "w") as file:
+            log.info("Updating compute spec to: %s", json.dumps(data_dict, indent=4))
+            json.dump(data_dict, file, indent=4)
+
     # Please note: Migrations only run if pg_skip_catalog_updates is false
     def wait_for_migrations(self, num_migrations: int = 11):
         with self.cursor() as cur:
@@ -3907,7 +3995,7 @@ class Endpoint(PgProtocol, LogUtils):
                 migration_id: int = cur.fetchall()[0][0]
                 assert migration_id >= num_migrations
 
-            wait_until(20, 0.5, check_migrations_done)
+            wait_until(check_migrations_done)
 
     # Mock the extension part of spec passed from control plane for local testing
     # endpooint.rs adds content of this file as a part of the spec.json
@@ -4339,6 +4427,10 @@ class Safekeeper(LogUtils):
         log.info(f"sk {self.id} flush LSN: {flush_lsn}")
         return flush_lsn
 
+    def get_commit_lsn(self, tenant_id: TenantId, timeline_id: TimelineId) -> Lsn:
+        timeline_status = self.http_client().timeline_status(tenant_id, timeline_id)
+        return timeline_status.commit_lsn
+
     def pull_timeline(
         self, srcs: list[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId
     ) -> dict[str, Any]:
@@ -4419,12 +4511,10 @@ class Safekeeper(LogUtils):
             )
             assert stat.remote_consistent_lsn >= lsn and stat.backup_lsn >= lsn.segment_lsn()
 
-        # xxx: max wait is long because we might be waiting for reconnection from
-        # pageserver to this safekeeper
-        wait_until(30, 1, are_lsns_advanced)
+        wait_until(are_lsns_advanced)
         client.checkpoint(tenant_id, timeline_id)
         if wait_wal_removal:
-            wait_until(30, 1, are_segments_removed)
+            wait_until(are_segments_removed)
 
     def wait_until_paused(self, failpoint: str):
         msg = f"at failpoint {failpoint}"
@@ -4433,7 +4523,7 @@ class Safekeeper(LogUtils):
             log.info(f"waiting for hitting failpoint {failpoint}")
             self.assert_log_contains(msg)
 
-        wait_until(20, 0.5, paused)
+        wait_until(paused)
 
 
 class NeonBroker(LogUtils):
@@ -4479,6 +4569,7 @@ class StorageScrubber:
     def __init__(self, env: NeonEnv, log_dir: Path):
         self.env = env
         self.log_dir = log_dir
+        self.allowed_errors: list[str] = []
 
     def scrubber_cli(
         self, args: list[str], timeout, extra_env: dict[str, str] | None = None
@@ -4556,18 +4647,69 @@ class StorageScrubber:
         if timeline_lsns is not None:
             args.append("--timeline-lsns")
             args.append(json.dumps(timeline_lsns))
+        if node_kind == NodeKind.PAGESERVER:
+            args.append("--verbose")
         stdout = self.scrubber_cli(args, timeout=30, extra_env=extra_env)
 
         try:
             summary = json.loads(stdout)
-            # summary does not contain "with_warnings" if node_kind is the safekeeper
-            no_warnings = "with_warnings" not in summary or not summary["with_warnings"]
-            healthy = not summary["with_errors"] and no_warnings
+            healthy = self._check_run_healthy(summary)
             return healthy, summary
         except:
             log.error("Failed to decode JSON output from `scan-metadata`.  Dumping stdout:")
             log.error(stdout)
             raise
+
+    def _check_line_allowed(self, line: str) -> bool:
+        for a in self.allowed_errors:
+            try:
+                if re.match(a, line):
+                    return True
+            except re.error:
+                log.error(f"Invalid regex: '{a}'")
+                raise
+        return False
+
+    def _check_line_list_allowed(self, lines: list[str]) -> bool:
+        for line in lines:
+            if not self._check_line_allowed(line):
+                return False
+        return True
+
+    def _check_run_healthy(self, summary: dict[str, Any]) -> bool:
+        # summary does not contain "with_warnings" if node_kind is the safekeeper
+        healthy = True
+        with_warnings = summary.get("with_warnings", None)
+        if with_warnings is not None:
+            if isinstance(with_warnings, list):
+                if len(with_warnings) > 0:
+                    # safekeeper scan_metadata output is a list of tenants
+                    healthy = False
+            else:
+                for _, warnings in with_warnings.items():
+                    assert (
+                        len(warnings) > 0
+                    ), "with_warnings value should not be empty, running without verbose mode?"
+                    if not self._check_line_list_allowed(warnings):
+                        healthy = False
+                        break
+        if not healthy:
+            return healthy
+        with_errors = summary.get("with_errors", None)
+        if with_errors is not None:
+            if isinstance(with_errors, list):
+                if len(with_errors) > 0:
+                    # safekeeper scan_metadata output is a list of tenants
+                    healthy = False
+            else:
+                for _, errors in with_errors.items():
+                    assert (
+                        len(errors) > 0
+                    ), "with_errors value should not be empty, running without verbose mode?"
+                    if not self._check_line_list_allowed(errors):
+                        healthy = False
+                        break
+        return healthy
 
     def tenant_snapshot(self, tenant_id: TenantId, output_path: Path):
         stdout = self.scrubber_cli(
@@ -4882,6 +5024,33 @@ def wait_for_last_flush_lsn(
 
     # Return the lowest LSN that has been ingested by all shards
     return min(results)
+
+
+def wait_for_commit_lsn(
+    env: NeonEnv,
+    tenant: TenantId,
+    timeline: TimelineId,
+    lsn: Lsn,
+) -> Lsn:
+    # TODO: it would be better to poll this in the compute, but there's no API for it. See:
+    # https://github.com/neondatabase/neon/issues/9758
+    "Wait for the given LSN to be committed on any Safekeeper"
+
+    max_commit_lsn = Lsn(0)
+    for i in range(1000):
+        for sk in env.safekeepers:
+            commit_lsn = sk.get_commit_lsn(tenant, timeline)
+            if commit_lsn >= lsn:
+                log.info(f"{tenant}/{timeline} at commit_lsn {commit_lsn}")
+                return commit_lsn
+            max_commit_lsn = max(max_commit_lsn, commit_lsn)
+
+        if i % 10 == 0:
+            log.info(
+                f"{tenant}/{timeline} waiting for commit_lsn to reach {lsn}, now {max_commit_lsn}"
+            )
+        time.sleep(0.1)
+    raise Exception(f"timed out while waiting for commit_lsn to reach {lsn}, was {max_commit_lsn}")
 
 
 def flush_ep_to_pageserver(

@@ -471,14 +471,14 @@ async fn ingest_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken
 
             // TODO: rename the background loop kind to something more generic, like, tenant housekeeping.
             // Or just spawn another background loop for this throttle, it's not like it's super costly.
-            info_span!(parent: None, "timeline_get_throttle", tenant_id=%tenant.tenant_shard_id, shard_id=%tenant.tenant_shard_id.shard_slug()).in_scope(|| {
+            info_span!(parent: None, "pagestream_throttle", tenant_id=%tenant.tenant_shard_id, shard_id=%tenant.tenant_shard_id.shard_slug()).in_scope(|| {
                 let now = Instant::now();
                 let prev = std::mem::replace(&mut last_throttle_flag_reset_at, now);
-                let Stats { count_accounted_start, count_accounted_finish, count_throttled, sum_throttled_usecs} = tenant.timeline_get_throttle.reset_stats();
+                let Stats { count_accounted_start, count_accounted_finish, count_throttled, sum_throttled_usecs} = tenant.pagestream_throttle.reset_stats();
                 if count_throttled == 0 {
                     return;
                 }
-                let allowed_rps = tenant.timeline_get_throttle.steady_rps();
+                let allowed_rps = tenant.pagestream_throttle.steady_rps();
                 let delta = now - prev;
                 info!(
                     n_seconds=%format_args!("{:.3}", delta.as_secs_f64()),

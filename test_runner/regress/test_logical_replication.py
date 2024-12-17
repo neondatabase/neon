@@ -207,7 +207,7 @@ def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg: VanillaPostgre
     log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
 
-    wait_until(number_of_iterations=10, interval=2, func=partial(slot_removed, endpoint))
+    wait_until(partial(slot_removed, endpoint))
 
 
 def test_ondemand_wal_download_in_replication_slot_funcs(neon_env_builder: NeonEnvBuilder):
@@ -519,7 +519,7 @@ def test_replication_shutdown(neon_simple_env: NeonEnv):
             assert len(res) == 4
             assert [r[0] for r in res] == [10, 20, 30, 40]
 
-        wait_until(10, 0.5, check_that_changes_propagated)
+        wait_until(check_that_changes_propagated)
 
 
 def logical_replication_wait_flush_lsn_sync(publisher: PgProtocol) -> Lsn:
@@ -549,7 +549,7 @@ select sent_lsn, flush_lsn, pg_current_wal_flush_lsn() from pg_stat_replication 
         )
         assert flush_lsn >= publisher_flush_lsn
 
-    wait_until(30, 0.5, check_caughtup)
+    wait_until(check_caughtup)
     return publisher_flush_lsn
 
 
@@ -573,17 +573,18 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg: Van
     vanilla_pg.safe_psql("create extension neon;")
 
     env.create_branch("subscriber")
-    # We want all data to fit into shared_buffers because later we stop
-    # safekeeper and insert more; this shouldn't cause page requests as they
-    # will be stuck.
+    # We want all data to fit into shared_buffers or LFC cache because later we
+    # stop safekeeper and insert more; this shouldn't cause page requests as
+    # they will be stuck.
+    if USE_LFC:
+        config_lines = ["neon.max_file_cache_size = 32MB", "neon.file_cache_size_limit = 32MB"]
+    else:
+        config_lines = [
+            "shared_buffers = 32MB",
+        ]
     sub = env.endpoints.create(
         "subscriber",
-        config_lines=[
-            "neon.max_file_cache_size = 32MB",
-            "neon.file_cache_size_limit = 32MB",
-        ]
-        if USE_LFC
-        else [],
+        config_lines=config_lines,
     )
     sub.start()
 

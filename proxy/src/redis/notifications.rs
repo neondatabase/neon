@@ -6,6 +6,7 @@ use pq_proto::CancelKeyData;
 use redis::aio::PubSub;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
@@ -143,15 +144,18 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                 let peer_addr = cancel_session
                     .peer_addr
                     .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?cancel_session.session_id);
+                cancel_span.follows_from(tracing::Span::current());
                 // This instance of cancellation_handler doesn't have a RedisPublisherClient so it can't publish the message.
                 match self
                     .cancellation_handler
                     .cancel_session(
                         cancel_session.cancel_key_data,
                         uuid::Uuid::nil(),
-                        &peer_addr,
+                        peer_addr,
                         cancel_session.peer_addr.is_some(),
                     )
+                    .instrument(cancel_span)
                     .await
                 {
                     Ok(()) => {}

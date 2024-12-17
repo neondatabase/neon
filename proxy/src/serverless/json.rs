@@ -1,6 +1,6 @@
+use postgres_client::types::{Kind, Type};
+use postgres_client::Row;
 use serde_json::{Map, Value};
-use tokio_postgres::types::{Kind, Type};
-use tokio_postgres::Row;
 
 //
 // Convert json non-string types to strings, so that they can be passed to Postgres
@@ -61,7 +61,7 @@ fn json_array_to_pg_array(value: &Value) -> Option<String> {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum JsonConversionError {
     #[error("internal error compute returned invalid data: {0}")]
-    AsTextError(tokio_postgres::Error),
+    AsTextError(postgres_client::Error),
     #[error("parse int error: {0}")]
     ParseIntError(#[from] std::num::ParseIntError),
     #[error("parse float error: {0}")]
@@ -204,7 +204,10 @@ fn pg_array_parse_inner(
 
         if c == '\\' {
             escaped = true;
-            (i, c) = pg_array_chr.next().unwrap();
+            let Some(x) = pg_array_chr.next() else {
+                return Err(JsonConversionError::UnbalancedArray);
+            };
+            (i, c) = x;
         }
 
         match c {
@@ -253,6 +256,7 @@ fn pg_array_parse_inner(
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use serde_json::json;
 

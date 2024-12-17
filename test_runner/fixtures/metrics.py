@@ -152,6 +152,8 @@ PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
     "pageserver_resident_physical_size",
     "pageserver_io_operations_bytes_total",
     "pageserver_last_record_lsn",
+    "pageserver_disk_consistent_lsn",
+    "pageserver_projected_remote_consistent_lsn",
     "pageserver_standby_horizon",
     "pageserver_smgr_query_seconds_bucket",
     "pageserver_smgr_query_seconds_count",
@@ -172,6 +174,10 @@ PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
     counter("pageserver_tenant_throttling_count_accounted_finish"),
     counter("pageserver_tenant_throttling_wait_usecs_sum"),
     counter("pageserver_tenant_throttling_count"),
+    counter("pageserver_timeline_wal_records_received"),
+    counter("pageserver_page_service_pagestream_flush_in_progress_micros"),
+    *histogram("pageserver_page_service_batch_size"),
+    *histogram("pageserver_page_service_pagestream_batch_wait_time_seconds"),
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
     # "pageserver_directory_entries_count", -- only used if above a certain threshold
     # "pageserver_broken_tenants_count" -- used only for broken

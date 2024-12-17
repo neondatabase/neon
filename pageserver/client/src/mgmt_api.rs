@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, error::Error as _};
 
 use bytes::Bytes;
 use detach_ancestor::AncestorDetached;
@@ -25,10 +25,10 @@ pub struct Client {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("send request: {0}")]
+    #[error("send request: {0}{}", .0.source().map(|e| format!(": {e}")).unwrap_or_default())]
     SendRequest(reqwest::Error),
 
-    #[error("receive body: {0}")]
+    #[error("receive body: {0}{}", .0.source().map(|e| format!(": {e}")).unwrap_or_default())]
     ReceiveBody(reqwest::Error),
 
     #[error("receive error body: {0}")]
@@ -270,9 +270,15 @@ impl Client {
         Ok(body)
     }
 
-    pub async fn tenant_config(&self, req: &TenantConfigRequest) -> Result<()> {
+    pub async fn set_tenant_config(&self, req: &TenantConfigRequest) -> Result<()> {
         let uri = format!("{}/v1/tenant/config", self.mgmt_api_endpoint);
         self.request(Method::PUT, &uri, req).await?;
+        Ok(())
+    }
+
+    pub async fn patch_tenant_config(&self, req: &TenantConfigPatchRequest) -> Result<()> {
+        let uri = format!("{}/v1/tenant/config", self.mgmt_api_endpoint);
+        self.request(Method::PATCH, &uri, req).await?;
         Ok(())
     }
 

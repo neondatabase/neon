@@ -222,19 +222,13 @@ pub(crate) struct UserFacingMessage {
 }
 
 /// Response which holds client's auth secret, e.g. [`crate::scram::ServerSecret`].
-/// Returned by the `/proxy_get_role_secret` API method.
+/// Returned by the `/get_endpoint_access_control` API method.
 #[derive(Deserialize)]
-pub(crate) struct GetRoleSecret {
+pub(crate) struct GetEndpointAccessControl {
     pub(crate) role_secret: Box<str>,
     pub(crate) allowed_ips: Option<Vec<IpPattern>>,
     pub(crate) project_id: Option<ProjectIdInt>,
-}
-
-// Manually implement debug to omit sensitive info.
-impl fmt::Debug for GetRoleSecret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GetRoleSecret").finish_non_exhaustive()
-    }
+    pub(crate) allowed_vpc_endpoint_ids: Option<Vec<EndpointIdInt>>,
 }
 
 /// Response which holds compute node's `host:port` pair.
@@ -467,18 +461,18 @@ mod tests {
         let json = json!({
             "role_secret": "secret",
         });
-        serde_json::from_str::<GetRoleSecret>(&json.to_string())?;
+        serde_json::from_str::<GetEndpointAccessControl>(&json.to_string())?;
         let json = json!({
             "role_secret": "secret",
             "allowed_ips": ["8.8.8.8"],
         });
-        serde_json::from_str::<GetRoleSecret>(&json.to_string())?;
+        serde_json::from_str::<GetEndpointAccessControl>(&json.to_string())?;
         let json = json!({
             "role_secret": "secret",
             "allowed_ips": ["8.8.8.8"],
             "project_id": "project",
         });
-        serde_json::from_str::<GetRoleSecret>(&json.to_string())?;
+        serde_json::from_str::<GetEndpointAccessControl>(&json.to_string())?;
 
         Ok(())
     }
