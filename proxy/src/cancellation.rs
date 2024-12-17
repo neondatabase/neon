@@ -4,7 +4,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use once_cell::sync::OnceCell;
-use postgres_client::{tls::MakeTlsConnect, CancelToken};
+use postgres_client::tls::MakeTlsConnect;
+use postgres_client::CancelToken;
 use pq_proto::CancelKeyData;
 use rustls::crypto::ring;
 use thiserror::Error;
@@ -14,16 +15,15 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::auth::{check_peer_addr_is_in_list, IpPattern};
+use crate::compute::load_certs;
 use crate::error::ReportableError;
 use crate::ext::LockExt;
 use crate::metrics::{CancellationRequest, CancellationSource, Metrics};
+use crate::postgres_rustls::MakeRustlsConnect;
 use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::cancellation_publisher::{
     CancellationPublisher, CancellationPublisherMut, RedisPublisherClient,
 };
-
-use crate::compute::load_certs;
-use crate::postgres_rustls::MakeRustlsConnect;
 
 pub type CancelMap = Arc<DashMap<CancelKeyData, Option<CancelClosure>>>;
 pub type CancellationHandlerMain = CancellationHandler<Option<Arc<Mutex<RedisPublisherClient>>>>;
