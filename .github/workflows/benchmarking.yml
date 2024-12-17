@@ -363,7 +363,7 @@ jobs:
     secrets: inherit
 
   pgbench-compare:
-    if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
+    if: ${{ github.event.inputs.run_only_pgvector_tests == 'true' || github.event.inputs.run_only_pgvector_tests == null }}
     needs: [ generate-matrices, prepare_AWS_RDS_databases ]
     permissions:
       contents: write
@@ -539,6 +539,7 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   pgbench-pgvector:
+    if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     permissions:
       contents: write
       statuses: write
