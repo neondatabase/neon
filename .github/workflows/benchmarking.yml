@@ -263,7 +263,7 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   generate-matrices:
-    if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
+    if: ${{ github.event.inputs.run_only_pgvector_tests == 'true' || github.event.inputs.run_only_pgvector_tests == null }}
     # Create matrices for the benchmarking jobs, so we run benchmarks on rds only once a week (on Saturday)
     #
     # Available platforms:
