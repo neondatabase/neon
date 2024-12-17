@@ -3122,6 +3122,23 @@ impl Tenant {
         }
     }
 
+    pub(crate) fn get_scheduled_compaction_tasks(
+        &self,
+        timeline_id: TimelineId,
+    ) -> Vec<CompactOptions> {
+        use itertools::Itertools;
+        let guard = self.scheduled_compaction_tasks.lock().unwrap();
+        guard
+            .get(&timeline_id)
+            .map(|tline_pending_tasks| {
+                tline_pending_tasks
+                    .iter()
+                    .map(|x| x.options.clone())
+                    .collect_vec()
+            })
+            .unwrap_or_default()
+    }
+
     /// Schedule a compaction task for a timeline.
     pub(crate) async fn schedule_compaction(
         &self,

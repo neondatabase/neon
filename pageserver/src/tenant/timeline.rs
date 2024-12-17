@@ -789,14 +789,14 @@ pub(crate) struct CompactRequest {
 }
 
 #[serde_with::serde_as]
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct CompactLsnRange {
     pub start: Lsn,
     pub end: Lsn,
 }
 
 #[serde_with::serde_as]
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct CompactKeyRange {
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub start: Key,
