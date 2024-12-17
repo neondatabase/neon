@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 import pytest
-from fixtures.compare_fixtures import PgCompare
+from fixtures.compare_fixtures import RemoteCompare
 from fixtures.log_helper import log
 
 
@@ -18,7 +18,8 @@ def get_num_relations(default: int = 1000) -> list[int]:
 
 
 @pytest.mark.parametrize("num_relations", get_num_relations())
-def test_perf_many_relations(neon_with_baseline: PgCompare, num_relations: int):
+@pytest.mark.remote_cluster
+def test_perf_many_relations(remote_compare: RemoteCompare, num_relations: int):
     """
     Test creating many relations in a single database.
     We use partitioned tables with child tables, indexes and constraints to have a realistic schema.
@@ -26,7 +27,7 @@ def test_perf_many_relations(neon_with_baseline: PgCompare, num_relations: int):
 
     see many_relations/create_many_relations.sql
     """
-    env = neon_with_baseline
+    env = remote_compare
 
     # prepare some base tables and the plpgsql procedures that we use to create the tables
     sql_file = Path(__file__).parent / "many_relations" / "create_many_relations.sql"
