@@ -22,7 +22,7 @@ use crate::redis::cancellation_publisher::{
     CancellationPublisher, CancellationPublisherMut, RedisPublisherClient,
 };
 
-use crate::compute::{load_certs, AcceptEverythingVerifier};
+use crate::compute::load_certs;
 use crate::postgres_rustls::MakeRustlsConnect;
 
 pub type CancelMap = Arc<DashMap<CancelKeyData, Option<CancelClosure>>>;
@@ -240,7 +240,6 @@ pub struct CancelClosure {
     cancel_token: CancelToken,
     ip_allowlist: Vec<IpPattern>,
     hostname: String, // for pg_sni router
-    allow_self_signed_compute: bool,
 }
 
 impl CancelClosure {
@@ -249,45 +248,34 @@ impl CancelClosure {
         cancel_token: CancelToken,
         ip_allowlist: Vec<IpPattern>,
         hostname: String,
-        allow_self_signed_compute: bool,
     ) -> Self {
         Self {
             socket_addr,
             cancel_token,
             ip_allowlist,
             hostname,
-            allow_self_signed_compute,
         }
     }
     /// Cancels the query running on user's compute node.
     pub(crate) async fn try_cancel_query(self) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
 
-        let client_config = if self.allow_self_signed_compute {
-            // Allow all certificates for creating the connection. Used only for tests
-            let verifier = Arc::new(AcceptEverythingVerifier);
-            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .expect("ring should support the default protocol versions")
-                .dangerous()
-                .with_custom_certificate_verifier(verifier)
-        } else {
-            let root_store = TLS_ROOTS
-                .get_or_try_init(load_certs)
-                .map_err(|_e| {
-                    CancelError::IO(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "TLS root store initialization failed".to_string(),
-                    ))
-                })?
-                .clone();
+        let root_store = TLS_ROOTS
+            .get_or_try_init(load_certs)
+            .map_err(|_e| {
+                CancelError::IO(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "TLS root store initialization failed".to_string(),
+                ))
+            })?
+            .clone();
+
+        let client_config =
             rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
                 .with_safe_default_protocol_versions()
                 .expect("ring should support the default protocol versions")
                 .with_root_certificates(root_store)
-        };
-
-        let client_config = client_config.with_no_client_auth();
+                .with_no_client_auth();
 
         let mut mk_tls = crate::postgres_rustls::MakeRustlsConnect::new(client_config);
         let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
