@@ -95,7 +95,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
             FAILED=$(tail -1 testout.txt)
             for d in ${FAILED}
             do
-                mkdir "$d"
+                mkdir "${d}"
                 docker cp "${TEST_CONTAINER_NAME}:/ext-src/${d}/regression.diffs" "${d}" || true
                 docker cp "${TEST_CONTAINER_NAME}:/ext-src/${d}/regression.out" "${d}" || true
                 cat "${d}/regression.out" "${d}/regression.diffs" || true
