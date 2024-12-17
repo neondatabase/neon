@@ -749,7 +749,7 @@ impl RemoteTimelineClient {
         // ahead of what's _actually_ on the remote during index upload.
         upload_queue.dirty.metadata = metadata.clone();
 
-        self.schedule_index_upload(upload_queue)?;
+        self.schedule_index_upload(upload_queue);
 
         Ok(())
     }
@@ -770,7 +770,7 @@ impl RemoteTimelineClient {
 
         upload_queue.dirty.metadata.apply(update);
 
-        self.schedule_index_upload(upload_queue)?;
+        self.schedule_index_upload(upload_queue);
 
         Ok(())
     }
@@ -809,7 +809,7 @@ impl RemoteTimelineClient {
         if let Some(archived_at_set) = need_upload_scheduled {
             let intended_archived_at = archived_at_set.then(|| Utc::now().naive_utc());
             upload_queue.dirty.archived_at = intended_archived_at;
-            self.schedule_index_upload(upload_queue)?;
+            self.schedule_index_upload(upload_queue);
         }
 
         let need_wait = need_change(&upload_queue.clean.0.archived_at, state).is_some();
@@ -824,7 +824,7 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
         upload_queue.dirty.import_pgdata = state;
-        self.schedule_index_upload(upload_queue)?;
+        self.schedule_index_upload(upload_queue);
         Ok(())
     }
 
@@ -843,17 +843,14 @@ impl RemoteTimelineClient {
         let upload_queue = guard.initialized_mut()?;
 
         if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
-            self.schedule_index_upload(upload_queue)?;
+            self.schedule_index_upload(upload_queue);
         }
 
         Ok(())
     }
 
     /// Launch an index-file upload operation in the background (internal function)
-    fn schedule_index_upload(
-        self: &Arc<Self>,
-        upload_queue: &mut UploadQueueInitialized,
-    ) -> Result<(), NotInitialized> {
+    fn schedule_index_upload(self: &Arc<Self>, upload_queue: &mut UploadQueueInitialized) {
         let disk_consistent_lsn = upload_queue.dirty.metadata.disk_consistent_lsn();
         // fix up the duplicated field
         upload_queue.dirty.disk_consistent_lsn = disk_consistent_lsn;
@@ -880,7 +877,6 @@ impl RemoteTimelineClient {
 
         // Launch the task immediately, if possible
         self.launch_queued_tasks(upload_queue);
-        Ok(())
     }
 
     /// Reparent this timeline to a new parent.
@@ -909,7 +905,7 @@ impl RemoteTimelineClient {
                 upload_queue.dirty.metadata.reparent(new_parent);
                 upload_queue.dirty.lineage.record_previous_ancestor(&prev);
 
-                self.schedule_index_upload(upload_queue)?;
+                self.schedule_index_upload(upload_queue);
 
                 Some(self.schedule_barrier0(upload_queue))
             }
@@ -948,7 +944,7 @@ impl RemoteTimelineClient {
                     assert!(prev.is_none(), "copied layer existed already {layer}");
                 }
 
-                self.schedule_index_upload(upload_queue)?;
+                self.schedule_index_upload(upload_queue);
 
                 Some(self.schedule_barrier0(upload_queue))
             }
@@ -1004,7 +1000,7 @@ impl RemoteTimelineClient {
                     upload_queue.dirty.gc_blocking = current
                         .map(|x| x.with_reason(reason))
                         .or_else(|| Some(index::GcBlocking::started_now_for(reason)));
-                    self.schedule_index_upload(upload_queue)?;
+                    self.schedule_index_upload(upload_queue);
                     Some(self.schedule_barrier0(upload_queue))
                 }
             }
@@ -1057,8 +1053,7 @@ impl RemoteTimelineClient {
                     upload_queue.dirty.gc_blocking =
                         current.as_ref().and_then(|x| x.without_reason(reason));
                     assert!(wanted(upload_queue.dirty.gc_blocking.as_ref()));
-                    // FIXME: bogus ?
-                    self.schedule_index_upload(upload_queue)?;
+                    self.schedule_index_upload(upload_queue);
                     Some(self.schedule_barrier0(upload_queue))
                 }
             }
@@ -1125,8 +1120,8 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
-        let with_metadata = self
-            .schedule_unlinking_of_layers_from_index_part0(upload_queue, names.iter().cloned())?;
+        let with_metadata =
+            self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names.iter().cloned());
 
         self.schedule_deletion_of_unlinked0(upload_queue, with_metadata);
 
@@ -1153,7 +1148,7 @@ impl RemoteTimelineClient {
 
         let names = gc_layers.iter().map(|x| x.layer_desc().layer_name());
 
-        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names)?;
+        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
 
         self.launch_queued_tasks(upload_queue);
 
@@ -1166,7 +1161,7 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
         names: I,
-    ) -> Result<Vec<(LayerName, LayerFileMetadata)>, NotInitialized>
+    ) -> Vec<(LayerName, LayerFileMetadata)>
     where
         I: IntoIterator<Item = LayerName>,
     {
@@ -1208,10 +1203,10 @@ impl RemoteTimelineClient {
         // index_part update, because that needs to be uploaded before we can actually delete the
         // files.
         if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
-            self.schedule_index_upload(upload_queue)?;
+            self.schedule_index_upload(upload_queue);
         }
 
-        Ok(with_metadata)
+        with_metadata
     }
 
     /// Schedules deletion for layer files which have previously been unlinked from the
@@ -1302,7 +1297,7 @@ impl RemoteTimelineClient {
 
         let names = compacted_from.iter().map(|x| x.layer_desc().layer_name());
 
-        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names)?;
+        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
         self.launch_queued_tasks(upload_queue);
 
         Ok(())

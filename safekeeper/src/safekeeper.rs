@@ -125,10 +125,7 @@ impl TermHistory {
             );
             last_common_idx = Some(i);
         }
-        let last_common_idx = match last_common_idx {
-            None => return None, // no common point
-            Some(lci) => lci,
-        };
+        let last_common_idx = last_common_idx?;
         // Now find where it ends at both prop and sk and take min. End of
         // (common) term is the start of the next except it is the last one;
         // there it is flush_lsn in case of safekeeper or, in case of proposer

@@ -195,7 +195,6 @@ impl PoolingBackend {
                 locks: &self.config.connect_compute_locks,
             },
             &backend,
-            false, // do not allow self signed compute for http flow
             self.config.wake_compute_retry_config,
             self.config.connect_to_compute_retry_config,
         )
@@ -237,7 +236,6 @@ impl PoolingBackend {
                 locks: &self.config.connect_compute_locks,
             },
             &backend,
-            false, // do not allow self signed compute for http flow
             self.config.wake_compute_retry_config,
             self.config.connect_to_compute_retry_config,
         )
@@ -270,7 +268,11 @@ impl PoolingBackend {
 
         if !self.local_pool.initialized(&conn_info) {
             // only install and grant usage one at a time.
-            let _permit = local_backend.initialize.acquire().await.unwrap();
+            let _permit = local_backend
+                .initialize
+                .acquire()
+                .await
+                .expect("semaphore should never be closed");
 
             // check again for race
             if !self.local_pool.initialized(&conn_info) {

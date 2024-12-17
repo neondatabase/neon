@@ -181,9 +181,9 @@ impl RemoteStorage for UnreliableWrapper {
         self.delete_inner(path, true, cancel).await
     }
 
-    async fn delete_objects<'a>(
+    async fn delete_objects(
         &self,
-        paths: &'a [RemotePath],
+        paths: &[RemotePath],
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         self.attempt(RemoteOp::DeleteObjects(paths.to_vec()))?;
