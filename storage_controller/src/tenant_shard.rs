@@ -1198,6 +1198,7 @@ impl TenantShard {
             detach,
             reconciler_config,
             config: self.config.clone(),
+            preferred_az: self.preferred_az_id.clone(),
             observed: self.observed.clone(),
             original_observed: self.observed.clone(),
             compute_hook: compute_hook.clone(),
