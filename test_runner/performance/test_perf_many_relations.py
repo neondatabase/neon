@@ -61,4 +61,4 @@ def test_perf_many_relations(remote_compare: RemoteCompare, num_relations: int):
         with env.zenbenchmark.record_duration(
             f"CREATE_TABLE/{current_table}/{num_relations_to_create}"
         ):
-            env.pg_bin.run_capture(["psql", env.pg.connstr(), "-c", sql])
+            env.pg_bin.run_capture(["psql", env.pg.connstr(options="-cstatement_timeout=1000"), "-c", sql])
