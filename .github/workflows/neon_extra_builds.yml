@@ -61,9 +61,6 @@ jobs:
           v_strings_only_as_json_array=$(echo ${{ steps.files_changed.outputs.chnages }} | jq '.[]|select(test("v\\d+"))' | jq --slurp -c)
           echo "changes=${v_strings_only_as_json_array}" | tee -a "${GITHUB_OUTPUT}"
 
-  check-macos-build:
-    needs: [ check-permissions, files-changed ]
-
   gather-rust-build-stats:
     needs: [ check-permissions, build-build-tools-image ]
     permissions:
