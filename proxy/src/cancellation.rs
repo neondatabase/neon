@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::auth::{check_peer_addr_is_in_list, IpPattern};
 use crate::error::ReportableError;
+use crate::ext::LockExt;
 use crate::metrics::{CancellationRequest, CancellationSource, Metrics};
 use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::cancellation_publisher::{
@@ -114,7 +115,7 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
                 IpAddr::V4(ip) => IpNet::V4(Ipv4Net::new_assert(ip, 24).trunc()), // use defaut mask here
                 IpAddr::V6(ip) => IpNet::V6(Ipv6Net::new_assert(ip, 64).trunc()),
             };
-            if !self.limiter.lock().unwrap().check(subnet_key, 1) {
+            if !self.limiter.lock_propagate_poison().check(subnet_key, 1) {
                 // log only the subnet part of the IP address to know which subnet is rate limited
                 tracing::warn!("Rate limit exceeded. Skipping cancellation message, {subnet_key}");
                 Metrics::get()
@@ -283,6 +284,7 @@ impl<P> Drop for Session<P> {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
