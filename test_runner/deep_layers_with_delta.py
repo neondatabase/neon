@@ -128,7 +128,8 @@ print(f"Need {need_pages} pages, {need_rows} rows")
 cur.execute(f"INSERT INTO data SELECT i,'row'||i FROM generate_series(1, {need_rows}) as i")
 
 # every iteration updates one tuple in each page
-for i in range( 0, 20):
+delta_stack_height = 20
+for i in range( 0, delta_stack_height):
     print(i)
     cur.execute(f"UPDATE data set row = row||',u' where id % 6 = {i%6}")
     print("modified rows", cur.rowcount)
