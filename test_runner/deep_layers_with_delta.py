@@ -86,7 +86,7 @@ timeline_id = timlines[0]["timeline_id"]
 config = {
     "gc_period": "0s",  # disable periodic gc
     "checkpoint_timeout": "10 years",
-    "compaction_period": "0s",  # disable periodic compaction so we control when it happens
+    "compaction_period": "1h",  # doesn't matter, but 0 value will kill walredo every 10s
     "compaction_threshold": 100000, # we just want L0s
     "compaction_target_size": 134217728,
     "checkpoint_distance": 268435456,
