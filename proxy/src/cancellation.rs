@@ -3,8 +3,10 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use postgres_client::{CancelToken, NoTls};
+use once_cell::sync::OnceCell;
+use postgres_client::{tls::MakeTlsConnect, CancelToken};
 use pq_proto::CancelKeyData;
+use rustls::crypto::ring;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -19,6 +21,9 @@ use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::cancellation_publisher::{
     CancellationPublisher, CancellationPublisherMut, RedisPublisherClient,
 };
+
+use crate::compute::{load_certs, AcceptEverythingVerifier};
+use crate::postgres_rustls::MakeRustlsConnect;
 
 pub type CancelMap = Arc<DashMap<CancelKeyData, Option<CancelClosure>>>;
 pub type CancellationHandlerMain = CancellationHandler<Option<Arc<Mutex<RedisPublisherClient>>>>;
@@ -174,7 +179,10 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
                 source: self.from,
                 kind: crate::metrics::CancellationOutcome::Found,
             });
-        info!("cancelling query per user's request using key {key}");
+        info!(
+            "cancelling query per user's request using key {key}, hostname {}, address: {}",
+            cancel_closure.hostname, cancel_closure.socket_addr
+        );
         cancel_closure.try_cancel_query().await
     }
 
@@ -221,6 +229,8 @@ impl<P: CancellationPublisherMut> CancellationHandler<Option<Arc<Mutex<P>>>> {
     }
 }
 
+static TLS_ROOTS: OnceCell<Arc<rustls::RootCertStore>> = OnceCell::new();
+
 /// This should've been a [`std::future::Future`], but
 /// it's impossible to name a type of an unboxed future
 /// (we'd need something like `#![feature(type_alias_impl_trait)]`).
@@ -229,6 +239,8 @@ pub struct CancelClosure {
     socket_addr: SocketAddr,
     cancel_token: CancelToken,
     ip_allowlist: Vec<IpPattern>,
+    hostname: String, // for pg_sni router
+    allow_self_signed_compute: bool,
 }
 
 impl CancelClosure {
@@ -236,17 +248,60 @@ impl CancelClosure {
         socket_addr: SocketAddr,
         cancel_token: CancelToken,
         ip_allowlist: Vec<IpPattern>,
+        hostname: String,
+        allow_self_signed_compute: bool,
     ) -> Self {
         Self {
             socket_addr,
             cancel_token,
             ip_allowlist,
+            hostname,
+            allow_self_signed_compute,
         }
     }
     /// Cancels the query running on user's compute node.
     pub(crate) async fn try_cancel_query(self) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
-        self.cancel_token.cancel_query_raw(socket, NoTls).await?;
+
+        let client_config = if self.allow_self_signed_compute {
+            // Allow all certificates for creating the connection. Used only for tests
+            let verifier = Arc::new(AcceptEverythingVerifier);
+            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .expect("ring should support the default protocol versions")
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+        } else {
+            let root_store = TLS_ROOTS
+                .get_or_try_init(load_certs)
+                .map_err(|_e| {
+                    CancelError::IO(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "TLS root store initialization failed".to_string(),
+                    ))
+                })?
+                .clone();
+            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .expect("ring should support the default protocol versions")
+                .with_root_certificates(root_store)
+        };
+
+        let client_config = client_config.with_no_client_auth();
+
+        let mut mk_tls = crate::postgres_rustls::MakeRustlsConnect::new(client_config);
+        let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
+            &mut mk_tls,
+            &self.hostname,
+        )
+        .map_err(|e| {
+            CancelError::IO(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
+
+        self.cancel_token.cancel_query_raw(socket, tls).await?;
         debug!("query was cancelled");
         Ok(())
     }
