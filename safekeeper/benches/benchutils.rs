@@ -6,7 +6,7 @@ use safekeeper::safekeeper::{ProposerAcceptorMessage, ProposerElected, SafeKeepe
 use safekeeper::state::{TimelinePersistentState, TimelineState};
 use safekeeper::timeline::{get_timeline_dir, SharedState, StateSK, Timeline};
 use safekeeper::timelines_set::TimelinesSet;
-use safekeeper::wal_backup::remote_timeline_path;
+use safekeeper::wal_backup::{remote_timeline_path, WalBackup};
 use safekeeper::{control_file, wal_storage, SafeKeeperConf};
 use tokio::fs::create_dir_all;
 use utils::id::{NodeId, TenantTimelineId};
@@ -90,12 +90,15 @@ impl Env {
         let safekeeper = self.make_safekeeper(node_id, ttid).await?;
         let shared_state = SharedState::new(StateSK::Loaded(safekeeper));
 
+        let wal_backup = Arc::new(WalBackup::default());
+
         let timeline = Timeline::new(
             ttid,
             &timeline_dir,
             &remote_path,
             shared_state,
             conf.clone(),
+            wal_backup,
         );
         timeline.bootstrap(
             &mut timeline.write_shared_state().await,

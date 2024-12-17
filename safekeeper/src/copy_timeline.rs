@@ -14,7 +14,6 @@ use crate::{
     state::TimelinePersistentState,
     timeline::{TimelineError, WalResidentTimeline},
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
-    wal_backup::copy_s3_segments,
     wal_storage::{wal_file_paths, WalReader},
     GlobalTimelines,
 };
@@ -127,14 +126,16 @@ pub async fn handle_request(
     assert!(first_ondisk_segment <= last_segment);
     assert!(first_ondisk_segment >= first_segment);
 
-    copy_s3_segments(
-        wal_seg_size,
-        &request.source_ttid,
-        &request.destination_ttid,
-        first_segment,
-        first_ondisk_segment,
-    )
-    .await?;
+    source_tli
+        .wal_backup
+        .copy_s3_segments(
+            wal_seg_size,
+            &request.source_ttid,
+            &request.destination_ttid,
+            first_segment,
+            first_ondisk_segment,
+        )
+        .await?;
 
     copy_disk_segments(
         &source_tli,

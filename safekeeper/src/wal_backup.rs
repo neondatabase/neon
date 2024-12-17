@@ -25,7 +25,7 @@ use tokio::fs::File;
 
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::{watch, OnceCell};
+use tokio::sync::watch;
 use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};
@@ -174,33 +174,33 @@ fn determine_offloader(
     }
 }
 
-static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::const_new();
-
-// Storage must be configured and initialized when this is called.
-fn get_configured_remote_storage() -> &'static GenericRemoteStorage {
-    REMOTE_STORAGE
-        .get()
-        .expect("failed to get remote storage")
-        .as_ref()
-        .unwrap()
+pub struct WalBackup {
+    storage: Option<GenericRemoteStorage>,
 }
 
-pub async fn init_remote_storage(conf: &SafeKeeperConf) {
-    // TODO: refactor REMOTE_STORAGE to avoid using global variables, and provide
-    // dependencies to all tasks instead.
-    REMOTE_STORAGE
-        .get_or_init(|| async {
-            if let Some(conf) = conf.remote_storage.as_ref() {
-                Some(
-                    GenericRemoteStorage::from_config(conf)
-                        .await
-                        .expect("failed to create remote storage"),
-                )
-            } else {
-                None
-            }
-        })
-        .await;
+impl Default for WalBackup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WalBackup {
+    pub fn new() -> Self {
+        Self { storage: None }
+    }
+
+    pub async fn init(mut self, conf: &SafeKeeperConf) -> Result<Self> {
+        if let Some(remote_storage) = conf.remote_storage.as_ref() {
+            let storage = GenericRemoteStorage::from_config(remote_storage).await?;
+            self.storage = Some(storage);
+        }
+        Ok(self)
+    }
+
+    // Storage must be configured and initialized when this is called.
+    fn get_configured_remote_storage(&self) -> &GenericRemoteStorage {
+        self.storage.as_ref().expect("failed to get remote storage")
+    }
 }
 
 struct WalBackupTask {
@@ -347,7 +347,12 @@ async fn backup_lsn_range(
     loop {
         let added_task = match iter.next() {
             Some(s) => {
-                uploads.push_back(backup_single_segment(s, timeline_dir, remote_timeline_path));
+                uploads.push_back(backup_single_segment(
+                    &timeline.wal_backup,
+                    s,
+                    timeline_dir,
+                    remote_timeline_path,
+                ));
                 true
             }
             None => false,
@@ -383,6 +388,7 @@ async fn backup_lsn_range(
 }
 
 async fn backup_single_segment(
+    wal_backup: &WalBackup,
     seg: &Segment,
     timeline_dir: &Utf8Path,
     remote_timeline_path: &RemotePath,
@@ -390,7 +396,9 @@ async fn backup_single_segment(
     let segment_file_path = seg.file_path(timeline_dir)?;
     let remote_segment_path = seg.remote_path(remote_timeline_path);
 
-    let res = backup_object(&segment_file_path, &remote_segment_path, seg.size()).await;
+    let res = wal_backup
+        .backup_object(&segment_file_path, &remote_segment_path, seg.size())
+        .await;
     if res.is_ok() {
         BACKED_UP_SEGMENTS.inc();
     } else {
@@ -449,232 +457,231 @@ fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
     res
 }
 
-async fn backup_object(
-    source_file: &Utf8Path,
-    target_file: &RemotePath,
-    size: usize,
-) -> Result<()> {
-    let storage = get_configured_remote_storage();
+impl WalBackup {
+    async fn backup_object(
+        &self,
+        source_file: &Utf8Path,
+        target_file: &RemotePath,
+        size: usize,
+    ) -> Result<()> {
+        let storage = self.get_configured_remote_storage();
 
-    let file = File::open(&source_file)
-        .await
-        .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
+        let file = File::open(&source_file)
+            .await
+            .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
 
-    let file = tokio_util::io::ReaderStream::with_capacity(file, BUFFER_SIZE);
+        let file = tokio_util::io::ReaderStream::with_capacity(file, BUFFER_SIZE);
 
-    let cancel = CancellationToken::new();
+        let cancel = CancellationToken::new();
 
-    storage
-        .upload_storage_object(file, size, target_file, &cancel)
-        .await
-}
-
-pub(crate) async fn backup_partial_segment(
-    source_file: &Utf8Path,
-    target_file: &RemotePath,
-    size: usize,
-) -> Result<()> {
-    let storage = get_configured_remote_storage();
-
-    let file = File::open(&source_file)
-        .await
-        .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
-
-    // limiting the file to read only the first `size` bytes
-    let limited_file = tokio::io::AsyncReadExt::take(file, size as u64);
-
-    let file = tokio_util::io::ReaderStream::with_capacity(limited_file, BUFFER_SIZE);
-
-    let cancel = CancellationToken::new();
-
-    storage
-        .upload(
-            file,
-            size,
-            target_file,
-            Some(StorageMetadata::from([("sk_type", "partial_segment")])),
-            &cancel,
-        )
-        .await
-}
-
-pub(crate) async fn copy_partial_segment(
-    source: &RemotePath,
-    destination: &RemotePath,
-) -> Result<()> {
-    let storage = get_configured_remote_storage();
-    let cancel = CancellationToken::new();
-
-    storage.copy_object(source, destination, &cancel).await
-}
-
-pub async fn read_object(
-    file_path: &RemotePath,
-    offset: u64,
-) -> anyhow::Result<Pin<Box<dyn tokio::io::AsyncRead + Send + Sync>>> {
-    let storage = REMOTE_STORAGE
-        .get()
-        .context("Failed to get remote storage")?
-        .as_ref()
-        .context("No remote storage configured")?;
-
-    info!("segment download about to start from remote path {file_path:?} at offset {offset}");
-
-    let cancel = CancellationToken::new();
-
-    let opts = DownloadOpts {
-        byte_start: std::ops::Bound::Included(offset),
-        ..Default::default()
-    };
-    let download = storage
-        .download(file_path, &opts, &cancel)
-        .await
-        .with_context(|| {
-            format!("Failed to open WAL segment download stream for remote path {file_path:?}")
-        })?;
-
-    let reader = tokio_util::io::StreamReader::new(download.download_stream);
-
-    let reader = tokio::io::BufReader::with_capacity(BUFFER_SIZE, reader);
-
-    Ok(Box::pin(reader))
-}
-
-/// Delete WAL files for the given timeline. Remote storage must be configured
-/// when called.
-pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
-    let storage = get_configured_remote_storage();
-    let remote_path = remote_timeline_path(ttid)?;
-
-    // see DEFAULT_MAX_KEYS_PER_LIST_RESPONSE
-    // const Option unwrap is not stable, otherwise it would be const.
-    let batch_size: NonZeroU32 = NonZeroU32::new(1000).unwrap();
-
-    // A backoff::retry is used here for two reasons:
-    // - To provide a backoff rather than busy-polling the API on errors
-    // - To absorb transient 429/503 conditions without hitting our error
-    //   logging path for issues deleting objects.
-    //
-    // Note: listing segments might take a long time if there are many of them.
-    // We don't currently have http requests timeout cancellation, but if/once
-    // we have listing should get streaming interface to make progress.
-
-    let cancel = CancellationToken::new(); // not really used
-    backoff::retry(
-        || async {
-            // Do list-delete in batch_size batches to make progress even if there a lot of files.
-            // Alternatively we could make remote storage list return iterator, but it is more complicated and
-            // I'm not sure deleting while iterating is expected in s3.
-            loop {
-                let files = storage
-                    .list(
-                        Some(&remote_path),
-                        ListingMode::NoDelimiter,
-                        Some(batch_size),
-                        &cancel,
-                    )
-                    .await?
-                    .keys
-                    .into_iter()
-                    .map(|o| o.key)
-                    .collect::<Vec<_>>();
-                if files.is_empty() {
-                    return Ok(()); // done
-                }
-                // (at least) s3 results are sorted, so can log min/max:
-                // "List results are always returned in UTF-8 binary order."
-                info!(
-                    "deleting batch of {} WAL segments [{}-{}]",
-                    files.len(),
-                    files.first().unwrap().object_name().unwrap_or(""),
-                    files.last().unwrap().object_name().unwrap_or("")
-                );
-                storage.delete_objects(&files, &cancel).await?;
-            }
-        },
-        // consider TimeoutOrCancel::caused_by_cancel when using cancellation
-        |_| false,
-        3,
-        10,
-        "executing WAL segments deletion batch",
-        &cancel,
-    )
-    .await
-    .ok_or_else(|| anyhow::anyhow!("canceled"))
-    .and_then(|x| x)?;
-
-    Ok(())
-}
-
-/// Used by wal_backup_partial.
-pub async fn delete_objects(paths: &[RemotePath]) -> Result<()> {
-    let cancel = CancellationToken::new(); // not really used
-    let storage = get_configured_remote_storage();
-    storage.delete_objects(paths, &cancel).await
-}
-
-/// Copy segments from one timeline to another. Used in copy_timeline.
-pub async fn copy_s3_segments(
-    wal_seg_size: usize,
-    src_ttid: &TenantTimelineId,
-    dst_ttid: &TenantTimelineId,
-    from_segment: XLogSegNo,
-    to_segment: XLogSegNo,
-) -> Result<()> {
-    const SEGMENTS_PROGRESS_REPORT_INTERVAL: u64 = 1024;
-
-    let storage = REMOTE_STORAGE
-        .get()
-        .expect("failed to get remote storage")
-        .as_ref()
-        .unwrap();
-
-    let remote_dst_path = remote_timeline_path(dst_ttid)?;
-
-    let cancel = CancellationToken::new();
-
-    let files = storage
-        .list(
-            Some(&remote_dst_path),
-            ListingMode::NoDelimiter,
-            None,
-            &cancel,
-        )
-        .await?
-        .keys;
-
-    let uploaded_segments = &files
-        .iter()
-        .filter_map(|o| o.key.object_name().map(ToOwned::to_owned))
-        .collect::<HashSet<_>>();
-
-    debug!(
-        "these segments have already been uploaded: {:?}",
-        uploaded_segments
-    );
-
-    for segno in from_segment..to_segment {
-        if segno % SEGMENTS_PROGRESS_REPORT_INTERVAL == 0 {
-            info!("copied all segments from {} until {}", from_segment, segno);
-        }
-
-        let segment_name = XLogFileName(PG_TLI, segno, wal_seg_size);
-        if uploaded_segments.contains(&segment_name) {
-            continue;
-        }
-        debug!("copying segment {}", segment_name);
-
-        let from = remote_timeline_path(src_ttid)?.join(&segment_name);
-        let to = remote_dst_path.join(&segment_name);
-
-        storage.copy_object(&from, &to, &cancel).await?;
+        storage
+            .upload_storage_object(file, size, target_file, &cancel)
+            .await
     }
 
-    info!(
-        "finished copying segments from {} until {}",
-        from_segment, to_segment
-    );
-    Ok(())
+    pub(crate) async fn backup_partial_segment(
+        &self,
+        source_file: &Utf8Path,
+        target_file: &RemotePath,
+        size: usize,
+    ) -> Result<()> {
+        let storage = self.get_configured_remote_storage();
+
+        let file = File::open(&source_file)
+            .await
+            .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
+
+        // limiting the file to read only the first `size` bytes
+        let limited_file = tokio::io::AsyncReadExt::take(file, size as u64);
+
+        let file = tokio_util::io::ReaderStream::with_capacity(limited_file, BUFFER_SIZE);
+
+        let cancel = CancellationToken::new();
+
+        storage
+            .upload(
+                file,
+                size,
+                target_file,
+                Some(StorageMetadata::from([("sk_type", "partial_segment")])),
+                &cancel,
+            )
+            .await
+    }
+
+    pub(crate) async fn copy_partial_segment(
+        &self,
+        source: &RemotePath,
+        destination: &RemotePath,
+    ) -> Result<()> {
+        let storage = self.get_configured_remote_storage();
+        let cancel = CancellationToken::new();
+
+        storage.copy_object(source, destination, &cancel).await
+    }
+
+    pub async fn read_object(
+        &self,
+        file_path: &RemotePath,
+        offset: u64,
+    ) -> anyhow::Result<Pin<Box<dyn tokio::io::AsyncRead + Send + Sync>>> {
+        let storage = self.get_configured_remote_storage();
+
+        info!("segment download about to start from remote path {file_path:?} at offset {offset}");
+
+        let cancel = CancellationToken::new();
+
+        let opts = DownloadOpts {
+            byte_start: std::ops::Bound::Included(offset),
+            ..Default::default()
+        };
+        let download = storage
+            .download(file_path, &opts, &cancel)
+            .await
+            .with_context(|| {
+                format!("Failed to open WAL segment download stream for remote path {file_path:?}")
+            })?;
+
+        let reader = tokio_util::io::StreamReader::new(download.download_stream);
+
+        let reader = tokio::io::BufReader::with_capacity(BUFFER_SIZE, reader);
+
+        Ok(Box::pin(reader))
+    }
+
+    /// Delete WAL files for the given timeline. Remote storage must be configured
+    /// when called.
+    pub async fn delete_timeline(&self, ttid: &TenantTimelineId) -> Result<()> {
+        let storage = self.get_configured_remote_storage();
+        let remote_path = remote_timeline_path(ttid)?;
+
+        // see DEFAULT_MAX_KEYS_PER_LIST_RESPONSE
+        // const Option unwrap is not stable, otherwise it would be const.
+        let batch_size: NonZeroU32 = NonZeroU32::new(1000).unwrap();
+
+        // A backoff::retry is used here for two reasons:
+        // - To provide a backoff rather than busy-polling the API on errors
+        // - To absorb transient 429/503 conditions without hitting our error
+        //   logging path for issues deleting objects.
+        //
+        // Note: listing segments might take a long time if there are many of them.
+        // We don't currently have http requests timeout cancellation, but if/once
+        // we have listing should get streaming interface to make progress.
+
+        let cancel = CancellationToken::new(); // not really used
+        backoff::retry(
+            || async {
+                // Do list-delete in batch_size batches to make progress even if there a lot of files.
+                // Alternatively we could make remote storage list return iterator, but it is more complicated and
+                // I'm not sure deleting while iterating is expected in s3.
+                loop {
+                    let files = storage
+                        .list(
+                            Some(&remote_path),
+                            ListingMode::NoDelimiter,
+                            Some(batch_size),
+                            &cancel,
+                        )
+                        .await?
+                        .keys
+                        .into_iter()
+                        .map(|o| o.key)
+                        .collect::<Vec<_>>();
+                    if files.is_empty() {
+                        return Ok(()); // done
+                    }
+                    // (at least) s3 results are sorted, so can log min/max:
+                    // "List results are always returned in UTF-8 binary order."
+                    info!(
+                        "deleting batch of {} WAL segments [{}-{}]",
+                        files.len(),
+                        files.first().unwrap().object_name().unwrap_or(""),
+                        files.last().unwrap().object_name().unwrap_or("")
+                    );
+                    storage.delete_objects(&files, &cancel).await?;
+                }
+            },
+            // consider TimeoutOrCancel::caused_by_cancel when using cancellation
+            |_| false,
+            3,
+            10,
+            "executing WAL segments deletion batch",
+            &cancel,
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("canceled"))
+        .and_then(|x| x)?;
+
+        Ok(())
+    }
+
+    /// Used by wal_backup_partial.
+    pub async fn delete_objects(&self, paths: &[RemotePath]) -> Result<()> {
+        let cancel = CancellationToken::new(); // not really used
+        let storage = self.get_configured_remote_storage();
+        storage.delete_objects(paths, &cancel).await
+    }
+
+    /// Copy segments from one timeline to another. Used in copy_timeline.
+    pub async fn copy_s3_segments(
+        &self,
+        wal_seg_size: usize,
+        src_ttid: &TenantTimelineId,
+        dst_ttid: &TenantTimelineId,
+        from_segment: XLogSegNo,
+        to_segment: XLogSegNo,
+    ) -> Result<()> {
+        const SEGMENTS_PROGRESS_REPORT_INTERVAL: u64 = 1024;
+
+        let storage = self.get_configured_remote_storage();
+
+        let remote_dst_path = remote_timeline_path(dst_ttid)?;
+
+        let cancel = CancellationToken::new();
+
+        let files = storage
+            .list(
+                Some(&remote_dst_path),
+                ListingMode::NoDelimiter,
+                None,
+                &cancel,
+            )
+            .await?
+            .keys;
+
+        let uploaded_segments = &files
+            .iter()
+            .filter_map(|o| o.key.object_name().map(ToOwned::to_owned))
+            .collect::<HashSet<_>>();
+
+        debug!(
+            "these segments have already been uploaded: {:?}",
+            uploaded_segments
+        );
+
+        for segno in from_segment..to_segment {
+            if segno % SEGMENTS_PROGRESS_REPORT_INTERVAL == 0 {
+                info!("copied all segments from {} until {}", from_segment, segno);
+            }
+
+            let segment_name = XLogFileName(PG_TLI, segno, wal_seg_size);
+            if uploaded_segments.contains(&segment_name) {
+                continue;
+            }
+            debug!("copying segment {}", segment_name);
+
+            let from = remote_timeline_path(src_ttid)?.join(&segment_name);
+            let to = remote_dst_path.join(&segment_name);
+
+            storage.copy_object(&from, &to, &cancel).await?;
+        }
+
+        info!(
+            "finished copying segments from {} until {}",
+            from_segment, to_segment
+        );
+        Ok(())
+    }
 }
 
 /// Get S3 (remote_storage) prefix path used for timeline files.

@@ -27,7 +27,6 @@ use crate::{
     state::{EvictionState, TimelinePersistentState},
     timeline::{Timeline, WalResidentTimeline},
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
-    wal_backup,
     wal_storage::open_wal_file,
     GlobalTimelines,
 };
@@ -218,11 +217,12 @@ impl Timeline {
         // Optimistically try to copy the partial segment to the destination's path: this
         // can fail if the timeline was un-evicted and modified in the background.
         let remote_timeline_path = &self.remote_path;
-        wal_backup::copy_partial_segment(
-            &replace.previous.remote_path(remote_timeline_path),
-            &replace.current.remote_path(remote_timeline_path),
-        )
-        .await?;
+        self.wal_backup
+            .copy_partial_segment(
+                &replace.previous.remote_path(remote_timeline_path),
+                &replace.current.remote_path(remote_timeline_path),
+            )
+            .await?;
 
         // Since the S3 copy succeeded with the path given in our control file snapshot, and
         // we are sending that snapshot in our response, we are giving the caller a consistent
@@ -285,11 +285,12 @@ impl WalResidentTimeline {
             );
 
             let remote_timeline_path = &self.tli.remote_path;
-            wal_backup::copy_partial_segment(
-                &replace.previous.remote_path(remote_timeline_path),
-                &replace.current.remote_path(remote_timeline_path),
-            )
-            .await?;
+            self.wal_backup
+                .copy_partial_segment(
+                    &replace.previous.remote_path(remote_timeline_path),
+                    &replace.current.remote_path(remote_timeline_path),
+                )
+                .await?;
         }
 
         let buf = control_store
