@@ -1,4 +1,4 @@
-commit 20075447e24f06b5ba6f5fbbe5f92dcc19908ab6
+commit e22cdb9e3b373e2bb2ecb61ac41c5a56be1fdb5e
 Author: Alexey Masterov <alexeymasterov@neon.tech>
 Date:   Tue Dec 17 10:25:00 2024 +0100
 
@@ -6,13 +6,13 @@ Date:   Tue Dec 17 10:25:00 2024 +0100
 
 diff --git a/test.sh b/test.sh
 new file mode 100755
-index 0000000..07fc55a
+index 0000000..47beef2
 --- /dev/null
 +++ b/test.sh
 @@ -0,0 +1,12 @@
 +#!/bin/bash
 +set -ex
-+dropdb contrib_regression
++dropdb --if-exists contrib_regression
 +createdb contrib_regression
 +PGXS="$(dirname "$(pg_config --pgxs)" )"
 +REGRESS="${PGXS}/../test/regress/pg_regress"
