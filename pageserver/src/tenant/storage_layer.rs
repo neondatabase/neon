@@ -12,6 +12,8 @@ pub mod merge_iterator;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
 use bytes::Bytes;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use pageserver_api::key::{Key, NON_INHERITED_SPARSE_RANGE};
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use pageserver_api::record::NeonWalRecord;
@@ -26,7 +28,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio_util::sync::CancellationToken;
 use tracing::{trace, Instrument};
+use utils::sync::gate::GateGuard;
 
 use utils::lsn::Lsn;
 
@@ -170,11 +174,250 @@ pub(crate) enum IoConcurrency {
     Serial,
     Parallel,
     FuturesUnordered {
-        futures: futures::stream::FuturesUnordered<Pin<Box<dyn Send + Future<Output = ()>>>>,
+        ios_tx: tokio::sync::mpsc::UnboundedSender<IoFuture>,
+        barriers_tx: tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
+        cancel_task_on_drop: Arc<tokio_util::sync::DropGuard>,
     },
 }
 
+type IoFuture = Pin<Box<dyn Send + Future<Output = ()>>>;
+
+pub(crate) enum SelectedIoConcurrency {
+    Serial,
+    Parallel,
+    FuturesUnordered(GateGuard),
+}
+
+impl std::fmt::Debug for IoConcurrency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IoConcurrency::Serial => write!(f, "Serial"),
+            IoConcurrency::Parallel => write!(f, "Parallel"),
+            IoConcurrency::FuturesUnordered { .. } => write!(f, "FuturesUnordered"),
+        }
+    }
+}
+
+impl std::fmt::Debug for SelectedIoConcurrency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SelectedIoConcurrency::Serial => write!(f, "Serial"),
+            SelectedIoConcurrency::Parallel => write!(f, "Parallel"),
+            SelectedIoConcurrency::FuturesUnordered(_) => write!(f, "FuturesUnordered"),
+        }
+    }
+}
+
 impl IoConcurrency {
+    #[deprecated]
+    pub(crate) fn todo() -> Self {
+        // To test futuresunordered, we can create a gate guard here and Box::leak it
+        Self::spawn(SelectedIoConcurrency::Serial)
+    }
+    pub(crate) fn spawn_from_env(gate_guard: GateGuard) -> IoConcurrency {
+        static IO_CONCURRENCY: once_cell::sync::Lazy<String> = once_cell::sync::Lazy::new(|| {
+            std::env::var("NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY")
+                .unwrap_or_else(|_| "serial".to_string())
+        });
+        let selected = match IO_CONCURRENCY.as_str() {
+            "parallel" => SelectedIoConcurrency::Parallel, // TODO: clonable gateguard, pass through Arc<Gate>? ?
+            "serial" => SelectedIoConcurrency::Serial,
+            "futures-unordered" => SelectedIoConcurrency::FuturesUnordered(gate_guard),
+            x => panic!(
+                "Invalid value for NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY: {}",
+                x
+            ),
+        };
+        Self::spawn(selected)
+    }
+
+    pub(crate) fn spawn(io_concurrency: SelectedIoConcurrency) -> Self {
+        match io_concurrency {
+            SelectedIoConcurrency::Serial => IoConcurrency::Serial,
+            SelectedIoConcurrency::Parallel => IoConcurrency::Parallel,
+            SelectedIoConcurrency::FuturesUnordered(gate_guard) => {
+                let (barriers_tx, barrier_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (ios_tx, ios_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (cancel, _cancel_task_on_drop) = {
+                    let t = CancellationToken::new();
+                    (t.clone(), Arc::new(t.drop_guard()))
+                };
+                static TASK_ID: AtomicUsize = AtomicUsize::new(0);
+                let task_id = TASK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let span =
+                    tracing::trace_span!(parent: None, "futures_unordered_io", task_id = task_id);
+                trace!(task_id, "spawning");
+                tokio::spawn(async move {
+                    trace!("start");
+                    scopeguard::defer!({ trace!("end") });
+                    type IosRx = tokio::sync::mpsc::UnboundedReceiver<IoFuture>;
+                    type BarrierReqRx =
+                        tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<()>>;
+                    type BarrierDoneTx = tokio::sync::oneshot::Sender<()>;
+                    enum State {
+                        Waiting {
+                            // invariant: is_empty(), but we recycle the allocation
+                            empty_futures: FuturesUnordered<IoFuture>,
+                            ios_rx: IosRx,
+                            barrier_rx: BarrierReqRx,
+                        },
+                        Executing {
+                            futures: FuturesUnordered<IoFuture>,
+                            ios_rx: IosRx,
+                            barrier_rx: BarrierReqRx,
+                        },
+                        Barriering {
+                            futures: FuturesUnordered<IoFuture>,
+                            ios_rx: IosRx,
+                            barrier_rx: BarrierReqRx,
+                            barrier_done: BarrierDoneTx,
+                        },
+                        ShuttingDown {
+                            futures: FuturesUnordered<IoFuture>,
+                            barrier_done: Option<BarrierDoneTx>,
+                        },
+                    }
+                    let mut state = State::Waiting {
+                        empty_futures: FuturesUnordered::new(),
+                        ios_rx,
+                        barrier_rx,
+                    };
+                    loop {
+                        match state {
+                            State::Waiting {
+                                empty_futures,
+                                mut ios_rx,
+                                mut barrier_rx,
+                            } => {
+                                assert!(empty_futures.is_empty());
+                                tokio::select! {
+                                    () = cancel.cancelled() => {
+                                        state = State::ShuttingDown { futures: empty_futures, barrier_done: None };
+                                    }
+                                    fut = ios_rx.recv() => {
+                                        if let Some(fut) = fut {
+                                            empty_futures.push(fut);
+                                            state = State::Executing { futures: empty_futures, ios_rx, barrier_rx };
+                                        } else {
+                                            state = State::ShuttingDown { futures: empty_futures, barrier_done: None }
+                                        }
+                                    }
+                                    barrier_done = barrier_rx.recv() => {
+                                        if let Some(barrier_done) = barrier_done {
+                                            state = State::Barriering { futures: empty_futures, ios_rx, barrier_rx, barrier_done };
+                                        } else {
+                                            state = State::ShuttingDown { futures: empty_futures, barrier_done: None };
+                                        }
+                                    }
+                                }
+                            }
+                            State::Executing {
+                                mut futures,
+                                mut ios_rx,
+                                mut barrier_rx,
+                            } => {
+                                tokio::select! {
+                                    () = cancel.cancelled() => {
+                                        state = State::ShuttingDown { futures, barrier_done: None };
+                                    }
+                                    res = futures.next() => {
+                                        assert!(res.is_some());
+                                        if futures.is_empty() {
+                                            state = State::Waiting { empty_futures: futures, ios_rx, barrier_rx };
+                                        } else {
+                                            state = State::Executing { futures, ios_rx, barrier_rx };
+                                        }
+                                    }
+                                    fut = ios_rx.recv() => {
+                                        if let Some(fut) = fut {
+                                            futures.push(fut);
+                                            state =  State::Executing { futures, ios_rx, barrier_rx };
+                                        } else {
+                                            state = State::ShuttingDown { futures, barrier_done: None };
+                                        }
+                                    }
+                                    barrier_done = barrier_rx.recv() => {
+                                        if let Some(barrier_done) = barrier_done {
+                                            state = State::Barriering { futures, ios_rx, barrier_rx, barrier_done };
+                                        } else {
+                                            state = State::ShuttingDown { futures, barrier_done: None };
+                                        }
+                                    }
+                                }
+                            }
+                            State::Barriering {
+                                mut futures,
+                                ios_rx,
+                                barrier_rx,
+                                barrier_done,
+                            } => {
+                                if futures.is_empty() {
+                                    barrier_done.send(()).unwrap();
+                                    state = State::Waiting {
+                                        empty_futures: futures,
+                                        ios_rx,
+                                        barrier_rx,
+                                    };
+                                } else {
+                                    tokio::select! {
+                                        () = cancel.cancelled() => {
+                                            state = State::ShuttingDown { futures, barrier_done: Some(barrier_done) };
+                                        }
+                                        res = futures.next() => {
+                                            assert!(res.is_some());
+                                            if futures.is_empty() {
+                                                barrier_done.send(()).unwrap();
+                                                state = State::Waiting { empty_futures: futures , ios_rx, barrier_rx };
+                                            } else {
+                                                state = State::Barriering { futures, ios_rx, barrier_rx, barrier_done };
+                                            }
+                                        }
+                                        // in barriering mode, we don't accept new IOs or new barrier requests
+                                    }
+                                }
+                            }
+                            State::ShuttingDown {
+                                mut futures,
+                                barrier_done,
+                            } => {
+                                trace!("shutting down");
+                                while let Some(()) = futures.next().await {
+                                    // drain
+                                }
+                                if let Some(barrier_done) = barrier_done {
+                                    barrier_done.send(()).unwrap();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    drop(gate_guard); // drop it right before we exitlast
+                }.instrument(span));
+                IoConcurrency::FuturesUnordered {
+                    ios_tx,
+                    barriers_tx,
+                    cancel_task_on_drop: _cancel_task_on_drop,
+                }
+            }
+        }
+    }
+
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            IoConcurrency::Serial => IoConcurrency::Serial,
+            IoConcurrency::Parallel => IoConcurrency::Parallel,
+            IoConcurrency::FuturesUnordered {
+                ios_tx,
+                barriers_tx,
+                cancel_task_on_drop,
+            } => IoConcurrency::FuturesUnordered {
+                ios_tx: ios_tx.clone(),
+                barriers_tx: barriers_tx.clone(),
+                cancel_task_on_drop: cancel_task_on_drop.clone(),
+            },
+        }
+    }
+
     pub(crate) async fn spawn_io<F>(&mut self, fut: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
@@ -193,12 +436,16 @@ impl IoConcurrency {
             IoConcurrency::Parallel => {
                 tokio::spawn(fut);
             }
-            IoConcurrency::FuturesUnordered { futures } => {
+            IoConcurrency::FuturesUnordered { ios_tx, .. } => {
                 let mut fut = Box::pin(fut);
-                match futures::poll!(&mut fut) {
-                    Poll::Ready(()) => {}
-                    Poll::Pending => {
-                        futures.push(fut);
+                // opportunistic poll to give some boost (unproven if it helps, but sounds like a good idea)
+                if let Poll::Ready(()) = futures::poll!(&mut fut) {
+                    return;
+                }
+                match ios_tx.send(fut) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        unreachable!("the io task must have exited, likely it panicked")
                     }
                 }
             }
@@ -206,54 +453,15 @@ impl IoConcurrency {
     }
 }
 
-#[cfg(test)]
-#[derive(Debug, Copy, Clone)]
-pub(crate) enum SelectedIoConcurrency {
-    Serial,
-    Parallel,
-}
-
 impl ValuesReconstructState {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(io_concurrency: IoConcurrency) -> Self {
         Self {
             keys: HashMap::new(),
             keys_done: KeySpaceRandomAccum::new(),
             keys_with_image_coverage: None,
             layers_visited: 0,
             delta_layers_visited: 0,
-            io_concurrency: {
-                static IO_CONCURRENCY: once_cell::sync::Lazy<String> =
-                    once_cell::sync::Lazy::new(|| {
-                        std::env::var("NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY")
-                            .unwrap_or_else(|_| "serial".to_string())
-                    });
-                match IO_CONCURRENCY.as_str() {
-                    "parallel" => IoConcurrency::Parallel,
-                    "serial" => IoConcurrency::Serial,
-                    "futures-unordered" => IoConcurrency::FuturesUnordered {
-                        futures: futures::stream::FuturesUnordered::new(),
-                    },
-                    x => panic!(
-                        "Invalid value for NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY: {}",
-                        x
-                    ),
-                }
-            },
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_with_io_concurrency(io_concurrency: SelectedIoConcurrency) -> Self {
-        Self {
-            keys: HashMap::new(),
-            keys_done: KeySpaceRandomAccum::new(),
-            keys_with_image_coverage: None,
-            layers_visited: 0,
-            delta_layers_visited: 0,
-            io_concurrency: match io_concurrency {
-                SelectedIoConcurrency::Serial => IoConcurrency::Serial,
-                SelectedIoConcurrency::Parallel => IoConcurrency::Parallel,
-            },
+            io_concurrency,
         }
     }
 
@@ -342,12 +550,6 @@ impl ValuesReconstructState {
             self.keys_done.consume_keyspace(),
             self.keys_with_image_coverage.take(),
         )
-    }
-}
-
-impl Default for ValuesReconstructState {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

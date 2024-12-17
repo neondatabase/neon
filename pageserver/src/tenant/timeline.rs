@@ -78,7 +78,8 @@ use crate::{
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
         storage_layer::{
-            inmemory_layer::IndexEntry, PersistentLayerDesc, ValueReconstructSituation,
+            inmemory_layer::IndexEntry, IoConcurrency, PersistentLayerDesc,
+            ValueReconstructSituation,
         },
     },
     walingest::WalLagCooldown,
@@ -1014,7 +1015,7 @@ impl Timeline {
             ranges: vec![key..key.next()],
         };
 
-        let mut reconstruct_state = ValuesReconstructState::new();
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::todo());
 
         let vectored_res = self
             .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
@@ -1057,6 +1058,7 @@ impl Timeline {
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
+        io_concurrency: super::storage_layer::IoConcurrency,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         if !lsn.is_valid() {
@@ -1091,7 +1093,7 @@ impl Timeline {
             .get_vectored_impl(
                 keyspace.clone(),
                 lsn,
-                &mut ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(io_concurrency),
                 ctx,
             )
             .await;
@@ -1147,7 +1149,7 @@ impl Timeline {
             .get_vectored_impl(
                 keyspace.clone(),
                 lsn,
-                &mut ValuesReconstructState::default(),
+                &mut ValuesReconstructState::new(IoConcurrency::todo()),
                 ctx,
             )
             .await;
@@ -3429,17 +3431,33 @@ impl Timeline {
             }
         }
 
-        match reconstruct_state.io_concurrency {
+        // TODO: internalize
+        trace!("waiting for futures to complete");
+        match &reconstruct_state.io_concurrency {
             super::storage_layer::IoConcurrency::Serial => (),
             super::storage_layer::IoConcurrency::Parallel => (),
-            super::storage_layer::IoConcurrency::FuturesUnordered { ref mut futures } => {
-                trace!("waiting for futures to complete");
-                while let Some(()) = futures.next().await {
-                    trace!("future completed");
+            super::storage_layer::IoConcurrency::FuturesUnordered { barriers_tx, .. } => {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                match barriers_tx.send(tx) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        return Err(GetVectoredError::Other(anyhow::anyhow!(
+                            "concurrent io task dropped its barriers_rx, likely it panicked"
+                        )));
+                    }
                 }
-                trace!("futures completed");
+                match rx.await {
+                    Ok(()) => {}
+                    Err(_) => {
+                        return Err(GetVectoredError::Other(anyhow::anyhow!(
+                            "concurrent io task dropped the barrier_done, likely it panicked"
+                        )));
+                    }
+                }
+
             }
         }
+        trace!("futures completed");
 
         Ok(TimelineVisitOutcome {
             completed_keyspace,
@@ -4182,7 +4200,12 @@ impl Timeline {
                     || (last_key_in_range && key_request_accum.raw_size() > 0)
                 {
                     let results = self
-                        .get_vectored(key_request_accum.consume_keyspace(), lsn, ctx)
+                        .get_vectored(
+                            key_request_accum.consume_keyspace(),
+                            lsn,
+                            IoConcurrency::todo(),
+                            ctx,
+                        )
                         .await?;
 
                     if self.cancel.is_cancelled() {
@@ -4263,7 +4286,7 @@ impl Timeline {
         start: Key,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         // Metadata keys image layer creation.
-        let mut reconstruct_state = ValuesReconstructState::default();
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::todo());
         let begin = Instant::now();
         let data = self
             .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
@@ -5757,12 +5780,14 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<(Key, Bytes)>> {
+        use super::storage_layer::SelectedIoConcurrency;
+
         let mut all_data = Vec::new();
         let guard = self.layers.read().await;
         for layer in guard.layer_map()?.iter_historic_layers() {
             if !layer.is_delta() && layer.image_layer_lsn() == lsn {
                 let layer = guard.get_from_desc(&layer);
-                let mut reconstruct_data = ValuesReconstructState::default();
+                let mut reconstruct_data = ValuesReconstructState::new(IoConcurrency::todo());
                 layer
                     .get_values_reconstruct_data(
                         KeySpace::single(Key::MIN..Key::MAX),

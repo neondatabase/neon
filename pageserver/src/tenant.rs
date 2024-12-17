@@ -5720,7 +5720,7 @@ mod tests {
     use pageserver_api::value::Value;
     use pageserver_compaction::helpers::overlaps_with;
     use rand::{thread_rng, Rng};
-    use storage_layer::{PersistentLayerKey, SelectedIoConcurrency};
+    use storage_layer::{IoConcurrency, PersistentLayerKey, SelectedIoConcurrency};
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
     use timeline::{CompactOptions, DeltaLayerTestDesc};
@@ -6563,6 +6563,12 @@ mod tests {
 
         for io_concurrency_level in io_concurrency_levels {
             for read in reads.clone() {
+                // The type is not Copy() because FuturesUnordered variant is not Copy.
+                let io_concurrency_level = match io_concurrency_level {
+                    SelectedIoConcurrency::Serial => SelectedIoConcurrency::Serial,
+                    SelectedIoConcurrency::Parallel => SelectedIoConcurrency::Parallel,
+                    SelectedIoConcurrency::FuturesUnordered(_) => unreachable!("not used"),
+                };
                 info!(
                     "Doing vectored read on {:?} with IO concurrency {:?}",
                     read, io_concurrency_level
@@ -6572,7 +6578,9 @@ mod tests {
                     .get_vectored_impl(
                         read.clone(),
                         reads_lsn,
-                        &mut ValuesReconstructState::new_with_io_concurrency(io_concurrency_level),
+                        &mut ValuesReconstructState::new(IoConcurrency::spawn(
+                            io_concurrency_level,
+                        )),
                         &ctx,
                     )
                     .await;
@@ -6655,7 +6663,7 @@ mod tests {
             .get_vectored_impl(
                 aux_keyspace.clone(),
                 read_lsn,
-                &mut ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(IoConcurrency::todo()),
                 &ctx,
             )
             .await;
@@ -6803,7 +6811,7 @@ mod tests {
             .get_vectored_impl(
                 read.clone(),
                 current_lsn,
-                &mut ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(IoConcurrency::todo()),
                 &ctx,
             )
             .await?;
@@ -6938,7 +6946,7 @@ mod tests {
                         ranges: vec![child_gap_at_key..child_gap_at_key.next()],
                     },
                     query_lsn,
-                    &mut ValuesReconstructState::new(),
+                    &mut ValuesReconstructState::new(IoConcurrency::todo()),
                     &ctx,
                 )
                 .await;
@@ -7437,7 +7445,7 @@ mod tests {
                 .get_vectored_impl(
                     keyspace.clone(),
                     lsn,
-                    &mut ValuesReconstructState::default(),
+                    &mut ValuesReconstructState::new(IoConcurrency::todo()),
                     &ctx,
                 )
                 .await?
@@ -7627,7 +7635,7 @@ mod tests {
             lsn: Lsn,
             ctx: &RequestContext,
         ) -> anyhow::Result<(BTreeMap<Key, Result<Bytes, PageReconstructError>>, usize)> {
-            let mut reconstruct_state = ValuesReconstructState::default();
+            let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::todo());
             let res = tline
                 .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
                 .await?;
@@ -7851,7 +7859,7 @@ mod tests {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Option<Bytes>, GetVectoredError> {
-        let mut reconstruct_state = ValuesReconstructState::new();
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::todo());
         let mut res = tline
             .get_vectored_impl(
                 KeySpace::single(key..key.next()),

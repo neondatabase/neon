@@ -25,6 +25,7 @@ use tokio_tar::{Builder, EntryType, Header};
 
 use crate::context::RequestContext;
 use crate::pgdatadir_mapping::Version;
+use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::Timeline;
 use pageserver_api::reltag::{RelTag, SlruKind};
 
@@ -303,7 +304,17 @@ where
             for part in slru_partitions.parts {
                 let blocks = self
                     .timeline
-                    .get_vectored(part, self.lsn, self.ctx)
+                    .get_vectored(
+                        part,
+                        self.lsn,
+                        IoConcurrency::spawn_from_env(
+                            self.timeline
+                                .gate
+                                .enter()
+                                .map_err(|e| BasebackupError::Server(e.into()))?,
+                        ),
+                        self.ctx,
+                    )
                     .await
                     .map_err(|e| BasebackupError::Server(e.into()))?;
 
