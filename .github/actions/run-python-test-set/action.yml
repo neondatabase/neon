@@ -169,7 +169,7 @@ runs:
         fi
 
         if [[ $BUILD_TYPE == "debug" && $RUNNER_ARCH == 'X64' ]]; then
-          cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
+          cov_prefix=()
         else
           cov_prefix=()
         fi
