@@ -65,8 +65,8 @@ pub fn symbolize(mut profile: Profile) -> anyhow::Result<Profile> {
             // Strip the Rust monomorphization suffix from the symbol name.
             static SUFFIX_REGEX: Lazy<Regex> =
                 Lazy::new(|| Regex::new("::h[0-9a-f]{16}$").expect("invalid regex"));
-            if let Cow::Owned(stripped) = SUFFIX_REGEX.replace(&name, "") {
-                name = stripped;
+            if let Some(m) = SUFFIX_REGEX.find(&name) {
+                name.truncate(m.start());
             }
 
             let function_id = match functions.get(&name) {
