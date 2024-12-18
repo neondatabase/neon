@@ -564,7 +564,7 @@ pub fn make_router(
     if conf.http_auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
             const ALLOWLIST_ROUTES: &[&str] =
-                &["/v1/status", "/metrics", "/profile/cpu", "profile/heap"];
+                &["/v1/status", "/metrics", "/profile/cpu", "/profile/heap"];
             if ALLOWLIST_ROUTES.contains(&request.uri().path()) {
                 None
             } else {
