@@ -51,7 +51,6 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeTravelError;
-use serde_json::json;
 use tenant_size_model::{svg::SvgBranchKind, SizeResult, StorageModel};
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
@@ -98,8 +97,8 @@ use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::DEFAULT_PG_VERSION;
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
-    StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
-    TimelineInfo,
+    CompactInfoResponse, StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest,
+    TimelineGcRequest, TimelineInfo,
 };
 use utils::{
     auth::SwappableJwtAuth,
@@ -2056,11 +2055,11 @@ async fn timeline_compact_info_handler(
         let res = tenant.get_scheduled_compaction_tasks(timeline_id);
         let mut resp = Vec::new();
         for item in res {
-            resp.push(json!({
-                "compact_key_range": item.compact_key_range,
-                "compact_lsn_range": item.compact_lsn_range,
-                "sub_compaction": item.sub_compaction
-        }));
+            resp.push(CompactInfoResponse {
+                compact_key_range: item.compact_key_range,
+                compact_lsn_range: item.compact_lsn_range,
+                sub_compaction: item.sub_compaction,
+            });
         }
         json_response(StatusCode::OK, resp)
     }

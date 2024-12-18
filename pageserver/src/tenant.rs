@@ -5777,11 +5777,11 @@ mod tests {
     use utils::id::TenantId;
 
     #[cfg(feature = "testing")]
+    use models::CompactLsnRange;
+    #[cfg(feature = "testing")]
     use pageserver_api::record::NeonWalRecord;
     #[cfg(feature = "testing")]
     use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
-    #[cfg(feature = "testing")]
-    use timeline::CompactLsnRange;
     #[cfg(feature = "testing")]
     use timeline::GcInfo;
 
@@ -9651,7 +9651,7 @@ mod tests {
     #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_on_branch() -> anyhow::Result<()> {
-        use timeline::CompactLsnRange;
+        use models::CompactLsnRange;
 
         let harness = TenantHarness::create("test_simple_bottom_most_compaction_on_branch").await?;
         let (tenant, ctx) = harness.load().await;
