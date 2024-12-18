@@ -102,7 +102,9 @@ impl MockControlPlane {
                     Some(s) => {
                         info!("got allowed_ips: {s}");
                         s.split(',')
-                            .map(|s| IpPattern::from_str(s).unwrap())
+                            .map(|s| {
+                                IpPattern::from_str(s).expect("mocked ip pattern should be correct")
+                            })
                             .collect()
                     }
                     None => vec![],

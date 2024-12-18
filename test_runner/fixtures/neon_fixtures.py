@@ -134,6 +134,9 @@ DEFAULT_BRANCH_NAME: str = "main"
 
 BASE_PORT: int = 15000
 
+# By default we create pageservers with this phony AZ
+DEFAULT_AZ_ID: str = "us-east-2a"
+
 
 @pytest.fixture(scope="session")
 def neon_api_key() -> str:
@@ -1093,7 +1096,7 @@ class NeonEnv:
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
                 # Default which can be overriden with `NeonEnvBuilder.pageserver_config_override`
-                "availability_zone": "us-east-2a",
+                "availability_zone": DEFAULT_AZ_ID,
                 # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
                 # the pageserver taking a long time to start up due to syncfs flushing other tests' data
                 "no_sync": True,
