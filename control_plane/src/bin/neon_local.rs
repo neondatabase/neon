@@ -19,6 +19,7 @@ use control_plane::storage_controller::{
     NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
 };
 use control_plane::{broker, local_env};
+use nix::fcntl::{flock, FlockArg};
 use pageserver_api::config::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
@@ -36,6 +37,8 @@ use safekeeper_api::{
 };
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
+use std::fs::File;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
@@ -689,6 +692,21 @@ struct TimelineTreeEl {
     pub children: BTreeSet<TimelineId>,
 }
 
+/// A flock-based guard over the neon_local repository directory
+struct RepoLock {
+    _file: File,
+}
+
+impl RepoLock {
+    fn new() -> Result<Self> {
+        let repo_dir = File::open(local_env::base_path())?;
+        let repo_dir_fd = repo_dir.as_raw_fd();
+        flock(repo_dir_fd, FlockArg::LockExclusive)?;
+
+        Ok(Self { _file: repo_dir })
+    }
+}
+
 // Main entry point for the 'neon_local' CLI utility
 //
 // This utility helps to manage neon installation. That includes following:
@@ -700,9 +718,14 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Check for 'neon init' command first.
-    let subcommand_result = if let NeonLocalCmd::Init(args) = cli.command {
-        handle_init(&args).map(|env| Some(Cow::Owned(env)))
+    let (subcommand_result, _lock) = if let NeonLocalCmd::Init(args) = cli.command {
+        (handle_init(&args).map(|env| Some(Cow::Owned(env))), None)
     } else {
+        // This tool uses a collection of simple files to store its state, and consequently
+        // it is not generally safe to run multiple commands concurrently.  Rather than expect
+        // all callers to know this, use a lock file to protect against concurrent execution.
+        let _repo_lock = RepoLock::new().unwrap();
+
         // all other commands need an existing config
         let env = LocalEnv::load_config(&local_env::base_path()).context("Error loading config")?;
         let original_env = env.clone();
@@ -728,11 +751,12 @@ fn main() -> Result<()> {
             NeonLocalCmd::Mappings(subcmd) => handle_mappings(&subcmd, env),
         };
 
-        if &original_env != env {
+        let subcommand_result = if &original_env != env {
             subcommand_result.map(|()| Some(Cow::Borrowed(env)))
         } else {
             subcommand_result.map(|()| None)
-        }
+        };
+        (subcommand_result, Some(_repo_lock))
     };
 
     match subcommand_result {
