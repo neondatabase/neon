@@ -5,10 +5,6 @@ use super::s3_uri::S3Uri;
 
 pub(crate) async fn sync(local: &Utf8Path, remote: &S3Uri) -> anyhow::Result<()> {
     let mut builder = tokio::process::Command::new("aws");
-    // s5cmd uses an old version of aws-sdk-go v1, hence doesn't support AWS_ENDPOINT_URL
-    if let Some(val) = std::env::var_os("AWS_ENDPOINT_URL") {
-        builder.arg("--endpoint-url").arg(val);
-    }
     builder
         .arg("s3")
         .arg("sync")
