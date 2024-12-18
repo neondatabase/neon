@@ -129,9 +129,6 @@ struct ProxyCliArgs {
     /// lock for `connect_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
     #[clap(long, default_value = config::ConcurrencyLockOptions::DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK)]
     connect_compute_lock: String,
-    /// Allow self-signed certificates for compute nodes (for testing)
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    allow_self_signed_compute: bool,
     #[clap(flatten)]
     sql_over_http: SqlOverHttpArgs,
     /// timeout for scram authentication protocol
@@ -564,9 +561,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
 
-    if args.allow_self_signed_compute {
-        warn!("allowing self-signed compute certificates");
-    }
     let backup_metric_collection_config = config::MetricBackupCollectionConfig {
         interval: args.metric_backup_collection_interval,
         remote_storage_config: args.metric_backup_collection_remote_storage.clone(),
@@ -641,7 +635,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     let config = ProxyConfig {
         tls_config,
         metric_collection,
-        allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
         authentication_config,
         proxy_protocol_v2: args.proxy_protocol_v2,

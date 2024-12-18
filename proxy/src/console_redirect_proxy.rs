@@ -213,7 +213,6 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             params_compat: true,
             params: &params,
             locks: &config.connect_compute_locks,
-            allow_self_signed_compute: config.allow_self_signed_compute,
         },
         &user_info,
         config.wake_compute_retry_config,
