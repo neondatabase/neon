@@ -334,7 +334,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     {
         let status_dir = working_directory.join("status");
         std::fs::create_dir(&status_dir).context("create status directory")?;
-        let status_file = status_dir.join("status");
+        let status_file = status_dir.join("pgdata");
         std::fs::write(&status_file, serde_json::json!({"done": true}).to_string())
             .context("write status file")?;
         aws_s3_sync::sync(&status_dir, &s3_prefix.append("/status/"))
