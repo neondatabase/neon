@@ -105,6 +105,9 @@ struct ProxyCliArgs {
     /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
     #[clap(short = 'c', long, alias = "ssl-cert")]
     tls_cert: Option<String>,
+    /// Allow writing TLS session keys to the given file pointed to by the environment variable `SSLKEYLOGFILE`.
+    #[clap(long, alias = "allow-ssl-keylogfile")]
+    allow_tls_keylogfile: bool,
     /// path to directory with TLS certificates for client postgres connections
     #[clap(long)]
     certs_dir: Option<String>,
@@ -126,9 +129,6 @@ struct ProxyCliArgs {
     /// lock for `connect_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
     #[clap(long, default_value = config::ConcurrencyLockOptions::DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK)]
     connect_compute_lock: String,
-    /// Allow self-signed certificates for compute nodes (for testing)
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    allow_self_signed_compute: bool,
     #[clap(flatten)]
     sql_over_http: SqlOverHttpArgs,
     /// timeout for scram authentication protocol
@@ -555,14 +555,12 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             key_path,
             cert_path,
             args.certs_dir.as_ref(),
+            args.allow_tls_keylogfile,
         )?),
         (None, None) => None,
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
 
-    if args.allow_self_signed_compute {
-        warn!("allowing self-signed compute certificates");
-    }
     let backup_metric_collection_config = config::MetricBackupCollectionConfig {
         interval: args.metric_backup_collection_interval,
         remote_storage_config: args.metric_backup_collection_remote_storage.clone(),
@@ -637,7 +635,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     let config = ProxyConfig {
         tls_config,
         metric_collection,
-        allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
         authentication_config,
         proxy_protocol_v2: args.proxy_protocol_v2,

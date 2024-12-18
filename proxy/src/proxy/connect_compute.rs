@@ -104,7 +104,6 @@ pub(crate) async fn connect_to_compute<M: ConnectMechanism, B: ComputeConnectBac
     ctx: &RequestContext,
     mechanism: &M,
     user_info: &B,
-    allow_self_signed_compute: bool,
     wake_compute_retry_config: RetryConfig,
     connect_to_compute_retry_config: RetryConfig,
 ) -> Result<M::Connection, M::Error>
@@ -117,7 +116,6 @@ where
         wake_compute(&mut num_retries, ctx, user_info, wake_compute_retry_config).await?;
 
     node_info.set_keys(user_info.get_keys());
-    node_info.allow_self_signed_compute = allow_self_signed_compute;
     mechanism.update_connect_config(&mut node_info.config);
 
     // try once

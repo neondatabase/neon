@@ -25,7 +25,6 @@ use crate::types::Host;
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
     pub metric_collection: Option<MetricCollectionConfig>,
-    pub allow_self_signed_compute: bool,
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
     pub proxy_protocol_v2: ProxyProtocolV2,
@@ -95,6 +94,7 @@ pub fn configure_tls(
     key_path: &str,
     cert_path: &str,
     certs_dir: Option<&String>,
+    allow_tls_keylogfile: bool,
 ) -> anyhow::Result<TlsConfig> {
     let mut cert_resolver = CertResolver::new();
 
@@ -134,6 +134,11 @@ pub fn configure_tls(
             .with_cert_resolver(cert_resolver.clone());
 
     config.alpn_protocols = vec![PG_ALPN_PROTOCOL.to_vec()];
+
+    if allow_tls_keylogfile {
+        // KeyLogFile will check for the SSLKEYLOGFILE environment variable.
+        config.key_log = Arc::new(rustls::KeyLogFile::new());
+    }
 
     Ok(TlsConfig {
         config: Arc::new(config),
@@ -221,15 +226,10 @@ impl CertResolver {
     ) -> anyhow::Result<()> {
         let priv_key = {
             let key_bytes = std::fs::read(key_path)
-                .context(format!("Failed to read TLS keys at '{key_path}'"))?;
-            let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..]).collect_vec();
-
-            ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
-            PrivateKeyDer::Pkcs8(
-                keys.pop()
-                    .unwrap()
-                    .context(format!("Failed to parse TLS keys at '{key_path}'"))?,
-            )
+                .with_context(|| format!("Failed to read TLS keys at '{key_path}'"))?;
+            rustls_pemfile::private_key(&mut &key_bytes[..])
+                .with_context(|| format!("Failed to parse TLS keys at '{key_path}'"))?
+                .with_context(|| format!("Failed to parse TLS keys at '{key_path}'"))?
         };
 
         let cert_chain_bytes = std::fs::read(cert_path)

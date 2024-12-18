@@ -22,8 +22,8 @@
     clippy::string_add,
     clippy::string_to_string,
     clippy::todo,
-    // TODO: consider clippy::unimplemented
-    // TODO: consider clippy::unwrap_used
+    clippy::unimplemented,
+    clippy::unwrap_used,
 )]
 // List of permanently allowed lints.
 #![allow(
@@ -82,6 +82,7 @@ pub mod console_redirect_proxy;
 pub mod context;
 pub mod control_plane;
 pub mod error;
+mod ext;
 pub mod http;
 pub mod intern;
 pub mod jemalloc;

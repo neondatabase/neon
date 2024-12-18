@@ -16,6 +16,7 @@ from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    DEFAULT_AZ_ID,
     NeonEnv,
     NeonEnvBuilder,
     NeonPageserver,
@@ -599,6 +600,7 @@ def test_storage_controller_compute_hook(
         "tenant_id": str(env.initial_tenant),
         "stripe_size": None,
         "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
+        "preferred_az": DEFAULT_AZ_ID,
     }
     assert notifications[0] == expect
 
@@ -616,6 +618,7 @@ def test_storage_controller_compute_hook(
         "tenant_id": str(env.initial_tenant),
         "stripe_size": None,
         "shards": [{"node_id": int(env.pageservers[1].id), "shard_number": 0}],
+        "preferred_az": DEFAULT_AZ_ID,
     }
 
     def received_migration_notification():
@@ -643,6 +646,7 @@ def test_storage_controller_compute_hook(
             {"node_id": int(env.pageservers[1].id), "shard_number": 0},
             {"node_id": int(env.pageservers[1].id), "shard_number": 1},
         ],
+        "preferred_az": DEFAULT_AZ_ID,
     }
 
     def received_split_notification():
@@ -714,6 +718,7 @@ def test_storage_controller_stuck_compute_hook(
         "tenant_id": str(env.initial_tenant),
         "stripe_size": None,
         "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
+        "preferred_az": DEFAULT_AZ_ID,
     }
     assert notifications[0] == expect
 
@@ -3004,7 +3009,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 def eq_safekeeper_records(a: dict[str, Any], b: dict[str, Any]) -> bool:
     compared = [dict(a), dict(b)]
 
-    masked_keys = ["created_at", "updated_at"]
+    masked_keys = ["created_at", "updated_at", "active"]
 
     for d in compared:
         # keep deleting these in case we are comparing the body as it will be uploaded by real scripts

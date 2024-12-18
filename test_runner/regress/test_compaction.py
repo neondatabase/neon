@@ -134,6 +134,10 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     }
 
     env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
+    env.pageserver.allowed_errors.append(
+        r".*failed to acquire partition lock during gc-compaction.*"
+    )
+    env.pageserver.allowed_errors.append(r".*repartition() called concurrently.*")
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
