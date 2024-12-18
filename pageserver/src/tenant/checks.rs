@@ -47,25 +47,26 @@ pub fn check_valid_layermap(metadata: &[LayerName]) -> Option<String> {
         }
     }
     for (idx, layer) in all_delta_layers.iter().enumerate() {
-        if layer.key_range.start.next() != layer.key_range.end {
-            let lsn_range = layer.lsn_range.clone();
-            let intersects = lsn_split_point.range(lsn_range).collect_vec();
-            if intersects.len() > 1 {
-                // A slow path to check if the layer intersects with any other delta layer.
-                for (other_idx, other_layer) in all_delta_layers.iter().enumerate() {
-                    if other_idx == idx {
-                        // do not check self intersects with self
-                        continue;
-                    }
-                    if overlaps_with(&layer.lsn_range, &other_layer.lsn_range)
-                        && overlaps_with(&layer.key_range, &other_layer.key_range)
-                    {
-                        let err = format!(
+        if layer.key_range.start.next() == layer.key_range.end {
+            continue;
+        }
+        let lsn_range = layer.lsn_range.clone();
+        let intersects = lsn_split_point.range(lsn_range).collect_vec();
+        if intersects.len() > 1 {
+            // A slow path to check if the layer intersects with any other delta layer.
+            for (other_idx, other_layer) in all_delta_layers.iter().enumerate() {
+                if other_idx == idx {
+                    // do not check self intersects with self
+                    continue;
+                }
+                if overlaps_with(&layer.lsn_range, &other_layer.lsn_range)
+                    && overlaps_with(&layer.key_range, &other_layer.key_range)
+                {
+                    let err = format!(
                             "layer violates the layer map LSN split assumption: layer {} intersects with layer {}",
                             layer, other_layer
                         );
-                        return Some(err);
-                    }
+                    return Some(err);
                 }
             }
         }
