@@ -26,7 +26,7 @@ use crate::config::{CertResolver, RetryConfig};
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{
-    self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo, NodeInfoCache,
+    self, CachedAllowedIps, CachedAllowedVpcEndpointIds, CachedNodeInfo, NodeInfo, NodeInfoCache,
 };
 use crate::error::ErrorKind;
 use crate::postgres_rustls::MakeRustlsConnect;
@@ -533,10 +533,13 @@ impl TestControlPlaneClient for TestConnectMechanism {
         }
     }
 
-    fn get_allowed_ips_and_secret(
+    fn get_allowed_ips(&self) -> Result<CachedAllowedIps, control_plane::errors::GetAuthInfoError> {
+        unimplemented!("not used in tests")
+    }
+
+    fn get_allowed_vpc_endpoint_ids(
         &self,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), control_plane::errors::GetAuthInfoError>
-    {
+    ) -> Result<CachedAllowedVpcEndpointIds, control_plane::errors::GetAuthInfoError> {
         unimplemented!("not used in tests")
     }
 
