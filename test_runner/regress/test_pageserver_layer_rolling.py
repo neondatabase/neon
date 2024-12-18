@@ -42,7 +42,7 @@ async def run_worker_for_tenant(
 
         loop = asyncio.get_running_loop()
         sql = await loop.run_in_executor(
-            None, lambda ep=ep: ep.safe_psql("SELECT pg_current_wal_flush_lsn()")
+            None, lambda ep: ep.safe_psql("SELECT pg_current_wal_flush_lsn()"), ep
         )
         last_flush_lsn = Lsn(sql[0][0])
         return last_flush_lsn
@@ -52,7 +52,7 @@ async def run_worker(env: NeonEnv, tenant_conf, entries: int) -> tuple[TenantId,
     loop = asyncio.get_running_loop()
     # capture tenant_conf by specifying `tenant_conf=tenant_conf`, otherwise it will be evaluated to some random value
     tenant, timeline = await loop.run_in_executor(
-        None, lambda tenant_conf=tenant_conf, env=env: env.create_tenant(conf=tenant_conf)
+        None, lambda tenant_conf, env: env.create_tenant(conf=tenant_conf), tenant_conf, env
     )
     last_flush_lsn = await run_worker_for_tenant(env, entries, tenant)
     return tenant, timeline, last_flush_lsn
