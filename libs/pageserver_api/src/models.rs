@@ -2018,7 +2018,9 @@ mod tests {
         ];
         for msg in messages {
             let bytes = msg.serialize();
-            let reconstructed = PagestreamFeMessage::parse(&mut bytes.reader()).unwrap();
+            let reconstructed =
+                PagestreamFeMessage::parse(&mut bytes.reader(), PagestreamProtocolVersion::V3)
+                    .unwrap();
             assert!(msg == reconstructed);
         }
     }
