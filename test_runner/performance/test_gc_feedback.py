@@ -144,7 +144,7 @@ def gc_feedback_impl(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
     with layer_map_path.open("w") as f:
         f.write(json.dumps(client.timeline_layer_map_info(tenant_id, timeline_id)))
 
-    # We should have collected all garbages
+    # We should have collected all garbage
     if mode == "normal":
         # in theory we should get physical size ~= logical size, but given that gc interval is 10s,
         # and the layer has indexes that might contribute to the fluctuation, we allow a small margin
