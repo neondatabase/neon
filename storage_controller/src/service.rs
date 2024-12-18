@@ -46,10 +46,11 @@ use pageserver_api::{
     controller_api::{
         AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
         NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
-        ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
-        TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard,
-        TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse,
-        TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
+        SafekeeperDescribeResponse, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
+        ShardsPreferredAzsResponse, TenantCreateRequest, TenantCreateResponse,
+        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
+        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
+        TenantShardMigrateResponse,
     },
     models::{
         SecondaryProgress, TenantConfigPatchRequest, TenantConfigRequest,
@@ -7169,15 +7170,24 @@ impl Service {
 
     pub(crate) async fn safekeepers_list(
         &self,
-    ) -> Result<Vec<crate::persistence::SafekeeperPersistence>, DatabaseError> {
-        self.persistence.list_safekeepers().await
+    ) -> Result<Vec<SafekeeperDescribeResponse>, DatabaseError> {
+        Ok(self
+            .persistence
+            .list_safekeepers()
+            .await?
+            .into_iter()
+            .map(|v| v.as_describe_response())
+            .collect::<Vec<_>>())
     }
 
     pub(crate) async fn get_safekeeper(
         &self,
         id: i64,
-    ) -> Result<crate::persistence::SafekeeperPersistence, DatabaseError> {
-        self.persistence.safekeeper_get(id).await
+    ) -> Result<SafekeeperDescribeResponse, DatabaseError> {
+        self.persistence
+            .safekeeper_get(id)
+            .await
+            .map(|v| v.as_describe_response())
     }
 
     pub(crate) async fn upsert_safekeeper(
