@@ -738,6 +738,18 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         assert res_json is None
 
+    def timeline_compact_info(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Any:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        return res_json
+
     def timeline_compact(
         self,
         tenant_id: TenantId | TenantShardId,
@@ -749,7 +761,6 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         enhanced_gc_bottom_most_compaction=False,
         body: dict[str, Any] | None = None,
     ):
-        self.is_testing_enabled_or_skip()
         query = {}
         if force_repartition:
             query["force_repartition"] = "true"

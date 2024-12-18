@@ -6,6 +6,7 @@ pub mod utilization;
 use camino::Utf8PathBuf;
 pub use utilization::PageserverUtilization;
 
+use core::ops::Range;
 use std::{
     collections::HashMap,
     fmt::Display,
@@ -28,6 +29,7 @@ use utils::{
 };
 
 use crate::{
+    key::Key,
     reltag::RelTag,
     shard::{ShardCount, ShardStripeSize, TenantShardId},
 };
@@ -208,6 +210,68 @@ pub enum TimelineState {
     Stopping,
     /// The timeline is broken and not operational (previous states: Loading or Active).
     Broken { reason: String, backtrace: String },
+}
+
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CompactLsnRange {
+    pub start: Lsn,
+    pub end: Lsn,
+}
+
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CompactKeyRange {
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub start: Key,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub end: Key,
+}
+
+impl From<Range<Lsn>> for CompactLsnRange {
+    fn from(range: Range<Lsn>) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+        }
+    }
+}
+
+impl From<Range<Key>> for CompactKeyRange {
+    fn from(range: Range<Key>) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+        }
+    }
+}
+
+impl From<CompactLsnRange> for Range<Lsn> {
+    fn from(range: CompactLsnRange) -> Self {
+        range.start..range.end
+    }
+}
+
+impl From<CompactKeyRange> for Range<Key> {
+    fn from(range: CompactKeyRange) -> Self {
+        range.start..range.end
+    }
+}
+
+impl CompactLsnRange {
+    pub fn above(lsn: Lsn) -> Self {
+        Self {
+            start: lsn,
+            end: Lsn::MAX,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CompactInfoResponse {
+    pub compact_key_range: Option<CompactKeyRange>,
+    pub compact_lsn_range: Option<CompactLsnRange>,
+    pub sub_compaction: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

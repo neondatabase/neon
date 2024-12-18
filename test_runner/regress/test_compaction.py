@@ -176,6 +176,12 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
 
         workload.churn_rows(row_count, env.pageserver.id)
 
+    def compaction_finished():
+        queue_depth = len(ps_http.timeline_compact_info(tenant_id, timeline_id))
+        assert queue_depth == 0
+
+    wait_until(compaction_finished, timeout=60)
+
     # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
     env.pageserver.assert_log_contains(
         "scheduled_compact_timeline.*picked .* layers for compaction"
