@@ -90,7 +90,7 @@ jobs:
         run: |
           CARGO_FEATURES="--features testing"
           if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
-            cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
+            cov_prefix=""
             CARGO_FLAGS="--locked"
           elif [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix=""
