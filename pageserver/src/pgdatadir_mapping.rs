@@ -1242,7 +1242,7 @@ pub struct DatadirModification<'a> {
     pending_metadata_bytes: usize,
 }
 
-impl<'a> DatadirModification<'a> {
+impl DatadirModification<'_> {
     // When a DatadirModification is committed, we do a monolithic serialization of all its contents.  WAL records can
     // contain multiple pages, so the pageserver's record-based batch size isn't sufficient to bound this allocation: we
     // additionally specify a limit on how much payload a DatadirModification may contain before it should be committed.
@@ -1263,7 +1263,7 @@ impl<'a> DatadirModification<'a> {
     pub(crate) fn has_dirty_data(&self) -> bool {
         self.pending_data_batch
             .as_ref()
-            .map_or(false, |b| b.has_data())
+            .is_some_and(|b| b.has_data())
     }
 
     /// Set the current lsn
@@ -1319,18 +1319,23 @@ impl<'a> DatadirModification<'a> {
 
         let buf: Bytes = SlruSegmentDirectory::ser(&SlruSegmentDirectory::default())?.into();
         let empty_dir = Value::Image(buf);
-        self.put(slru_dir_to_key(SlruKind::Clog), empty_dir.clone());
-        self.pending_directory_entries
-            .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
-        self.put(
-            slru_dir_to_key(SlruKind::MultiXactMembers),
-            empty_dir.clone(),
-        );
-        self.pending_directory_entries
-            .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
-        self.put(slru_dir_to_key(SlruKind::MultiXactOffsets), empty_dir);
-        self.pending_directory_entries
-            .push((DirectoryKind::SlruSegment(SlruKind::MultiXactOffsets), 0));
+
+        // Initialize SLRUs on shard 0 only: creating these on other shards would be
+        // harmless but they'd just be dropped on later compaction.
+        if self.tline.tenant_shard_id.is_shard_zero() {
+            self.put(slru_dir_to_key(SlruKind::Clog), empty_dir.clone());
+            self.pending_directory_entries
+                .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
+            self.put(
+                slru_dir_to_key(SlruKind::MultiXactMembers),
+                empty_dir.clone(),
+            );
+            self.pending_directory_entries
+                .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
+            self.put(slru_dir_to_key(SlruKind::MultiXactOffsets), empty_dir);
+            self.pending_directory_entries
+                .push((DirectoryKind::SlruSegment(SlruKind::MultiXactOffsets), 0));
+        }
 
         Ok(())
     }
@@ -2225,7 +2230,7 @@ impl<'a> DatadirModification<'a> {
                 assert!(!self
                     .pending_data_batch
                     .as_ref()
-                    .map_or(false, |b| b.updates_key(&key)));
+                    .is_some_and(|b| b.updates_key(&key)));
             }
         }
 
@@ -2294,7 +2299,7 @@ pub enum Version<'a> {
     Modified(&'a DatadirModification<'a>),
 }
 
-impl<'a> Version<'a> {
+impl Version<'_> {
     async fn get(
         &self,
         timeline: &Timeline,
