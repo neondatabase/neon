@@ -946,7 +946,7 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
     } else {
         // User (likely interactive) did not provide a description of the environment, give them the default
         NeonLocalInitConf {
-            control_plane_api: Some(Some(DEFAULT_PAGESERVER_CONTROL_PLANE_API.parse().unwrap())),
+            control_plane_api: Some(DEFAULT_PAGESERVER_CONTROL_PLANE_API.parse().unwrap()),
             broker: NeonBroker {
                 listen_addr: DEFAULT_BROKER_ADDR.parse().unwrap(),
             },
@@ -1742,18 +1742,15 @@ async fn handle_start_all_impl(
             broker::start_broker_process(env, &retry_timeout).await
         });
 
-        // Only start the storage controller if the pageserver is configured to need it
-        if env.control_plane_api.is_some() {
-            js.spawn(async move {
-                let storage_controller = StorageController::from_env(env);
-                storage_controller
-                    .start(NeonStorageControllerStartArgs::with_default_instance_id(
-                        retry_timeout,
-                    ))
-                    .await
-                    .map_err(|e| e.context("start storage_controller"))
-            });
-        }
+        js.spawn(async move {
+            let storage_controller = StorageController::from_env(env);
+            storage_controller
+                .start(NeonStorageControllerStartArgs::with_default_instance_id(
+                    retry_timeout,
+                ))
+                .await
+                .map_err(|e| e.context("start storage_controller"))
+        });
 
         for ps_conf in &env.pageservers {
             js.spawn(async move {
@@ -1797,10 +1794,6 @@ async fn neon_start_status_check(
 ) -> anyhow::Result<()> {
     const RETRY_INTERVAL: Duration = Duration::from_millis(100);
     const NOTICE_AFTER_RETRIES: Duration = Duration::from_secs(5);
-
-    if env.control_plane_api.is_none() {
-        return Ok(());
-    }
 
     let storcon = StorageController::from_env(env);
 
