@@ -134,6 +134,9 @@ DEFAULT_BRANCH_NAME: str = "main"
 
 BASE_PORT: int = 15000
 
+# By default we create pageservers with this phony AZ
+DEFAULT_AZ_ID: str = "us-east-2a"
+
 
 @pytest.fixture(scope="session")
 def neon_api_key() -> str:
@@ -435,7 +438,10 @@ class NeonEnvBuilder:
 
         self.pageserver_virtual_file_io_mode = pageserver_virtual_file_io_mode
 
-        self.pageserver_wal_receiver_protocol = pageserver_wal_receiver_protocol
+        if pageserver_wal_receiver_protocol is not None:
+            self.pageserver_wal_receiver_protocol = pageserver_wal_receiver_protocol
+        else:
+            self.pageserver_wal_receiver_protocol = PageserverWalReceiverProtocol.INTERPRETED
 
         assert test_name.startswith(
             "test_"
@@ -1090,7 +1096,7 @@ class NeonEnv:
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
                 # Default which can be overriden with `NeonEnvBuilder.pageserver_config_override`
-                "availability_zone": "us-east-2a",
+                "availability_zone": DEFAULT_AZ_ID,
                 # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
                 # the pageserver taking a long time to start up due to syncfs flushing other tests' data
                 "no_sync": True,
@@ -3219,7 +3225,7 @@ class NeonProxy(PgProtocol):
                 *["--allow-self-signed-compute", "true"],
             ]
 
-    class Console(AuthBackend):
+    class ProxyV1(AuthBackend):
         def __init__(self, endpoint: str, fixed_rate_limit: int | None = None):
             self.endpoint = endpoint
             self.fixed_rate_limit = fixed_rate_limit
@@ -3227,7 +3233,7 @@ class NeonProxy(PgProtocol):
         def extra_args(self) -> list[str]:
             args = [
                 # Console auth backend params
-                *["--auth-backend", "console"],
+                *["--auth-backend", "cplane-v1"],
                 *["--auth-endpoint", self.endpoint],
                 *["--sql-over-http-pool-opt-in", "false"],
             ]
@@ -3475,13 +3481,13 @@ class NeonProxy(PgProtocol):
 
 
 class NeonAuthBroker:
-    class ControlPlane:
+    class ProxyV1:
         def __init__(self, endpoint: str):
             self.endpoint = endpoint
 
         def extra_args(self) -> list[str]:
             args = [
-                *["--auth-backend", "console"],
+                *["--auth-backend", "cplane-v1"],
                 *["--auth-endpoint", self.endpoint],
             ]
             return args
@@ -3493,7 +3499,7 @@ class NeonAuthBroker:
         http_port: int,
         mgmt_port: int,
         external_http_port: int,
-        auth_backend: NeonAuthBroker.ControlPlane,
+        auth_backend: NeonAuthBroker.ProxyV1,
     ):
         self.domain = "apiauth.localtest.me"  # resolves to 127.0.0.1
         self.host = "127.0.0.1"
@@ -3679,7 +3685,7 @@ def static_auth_broker(
     local_proxy_addr = f"{http2_echoserver.host}:{http2_echoserver.port}"
 
     # return local_proxy addr on ProxyWakeCompute.
-    httpserver.expect_request("/cplane/proxy_wake_compute").respond_with_json(
+    httpserver.expect_request("/cplane/wake_compute").respond_with_json(
         {
             "address": local_proxy_addr,
             "aux": {
@@ -3719,7 +3725,7 @@ def static_auth_broker(
         http_port=http_port,
         mgmt_port=mgmt_port,
         external_http_port=external_http_port,
-        auth_backend=NeonAuthBroker.ControlPlane(httpserver.url_for("/cplane")),
+        auth_backend=NeonAuthBroker.ProxyV1(httpserver.url_for("/cplane")),
     ) as proxy:
         proxy.start()
         yield proxy

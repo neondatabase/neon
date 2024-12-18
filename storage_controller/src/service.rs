@@ -18,7 +18,7 @@ use crate::{
     background_node_operations::{
         Drain, Fill, Operation, OperationError, OperationHandler, MAX_RECONCILES_PER_OPERATION,
     },
-    compute_hook::NotifyError,
+    compute_hook::{self, NotifyError},
     drain_utils::{self, TenantShardDrain, TenantShardIterator},
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
     leadership::Leadership,
@@ -656,11 +656,14 @@ impl Service {
                     // emit a compute notification for this. In the case where our observed state does not
                     // yet match our intent, we will eventually reconcile, and that will emit a compute notification.
                     if let Some(attached_at) = tenant_shard.stably_attached() {
-                        compute_notifications.push((
-                            *tenant_shard_id,
-                            attached_at,
-                            tenant_shard.shard.stripe_size,
-                        ));
+                        compute_notifications.push(compute_hook::ShardUpdate {
+                            tenant_shard_id: *tenant_shard_id,
+                            node_id: attached_at,
+                            stripe_size: tenant_shard.shard.stripe_size,
+                            preferred_az: tenant_shard
+                                .preferred_az()
+                                .map(|az| Cow::Owned(az.clone())),
+                        });
                     }
                 }
             }
@@ -1582,6 +1585,7 @@ impl Service {
                             attach_req.tenant_shard_id,
                             ShardIdentity::unsharded(),
                             PlacementPolicy::Attached(0),
+                            None,
                         ),
                     );
                     tracing::info!("Inserted shard {} in memory", attach_req.tenant_shard_id);
@@ -2109,6 +2113,16 @@ impl Service {
             )
         };
 
+        let preferred_az_id = {
+            let locked = self.inner.read().unwrap();
+            // Idempotency: take the existing value if the tenant already exists
+            if let Some(shard) = locked.tenants.get(create_ids.first().unwrap()) {
+                shard.preferred_az().cloned()
+            } else {
+                locked.scheduler.get_az_for_new_tenant()
+            }
+        };
+
         // Ordering: we persist tenant shards before creating them on the pageserver.  This enables a caller
         // to clean up after themselves by issuing a tenant deletion if something goes wrong and we restart
         // during the creation, rather than risking leaving orphan objects in S3.
@@ -2128,7 +2142,7 @@ impl Service {
                 splitting: SplitState::default(),
                 scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
                     .unwrap(),
-                preferred_az_id: None,
+                preferred_az_id: preferred_az_id.as_ref().map(|az| az.to_string()),
             })
             .collect();
 
@@ -2164,6 +2178,7 @@ impl Service {
                     &create_req.shard_parameters,
                     create_req.config.clone(),
                     placement_policy.clone(),
+                    preferred_az_id.as_ref(),
                     &mut schedule_context,
                 )
                 .await;
@@ -2173,44 +2188,6 @@ impl Service {
                 InitialShardScheduleOutcome::NotScheduled => {}
                 InitialShardScheduleOutcome::ShardScheduleError(err) => {
                     schedule_error = Some(err);
-                }
-            }
-        }
-
-        let preferred_azs = {
-            let locked = self.inner.read().unwrap();
-            response_shards
-                .iter()
-                .filter_map(|resp| {
-                    let az_id = locked
-                        .nodes
-                        .get(&resp.node_id)
-                        .map(|n| n.get_availability_zone_id().clone())?;
-
-                    Some((resp.shard_id, az_id))
-                })
-                .collect::<Vec<_>>()
-        };
-
-        // Note that we persist the preferred AZ for the new shards separately.
-        // In theory, we could "peek" the scheduler to determine where the shard will
-        // land, but the subsequent "real" call into the scheduler might select a different
-        // node. Hence, we do this awkward update to keep things consistent.
-        let updated = self
-            .persistence
-            .set_tenant_shard_preferred_azs(preferred_azs)
-            .await
-            .map_err(|err| {
-                ApiError::InternalServerError(anyhow::anyhow!(
-                    "Failed to persist preferred az ids: {err}"
-                ))
-            })?;
-
-        {
-            let mut locked = self.inner.write().unwrap();
-            for (tid, az_id) in updated {
-                if let Some(shard) = locked.tenants.get_mut(&tid) {
-                    shard.set_preferred_az(az_id);
                 }
             }
         }
@@ -2245,6 +2222,7 @@ impl Service {
 
     /// Helper for tenant creation that does the scheduling for an individual shard. Covers both the
     /// case of a new tenant and a pre-existing one.
+    #[allow(clippy::too_many_arguments)]
     async fn do_initial_shard_scheduling(
         &self,
         tenant_shard_id: TenantShardId,
@@ -2252,6 +2230,7 @@ impl Service {
         shard_params: &ShardParameters,
         config: TenantConfig,
         placement_policy: PlacementPolicy,
+        preferred_az_id: Option<&AvailabilityZone>,
         schedule_context: &mut ScheduleContext,
     ) -> InitialShardScheduleOutcome {
         let mut locked = self.inner.write().unwrap();
@@ -2261,10 +2240,6 @@ impl Service {
         match tenants.entry(tenant_shard_id) {
             Entry::Occupied(mut entry) => {
                 tracing::info!("Tenant shard {tenant_shard_id} already exists while creating");
-
-                // TODO: schedule() should take an anti-affinity expression that pushes
-                // attached and secondary locations (independently) away frorm those
-                // pageservers also holding a shard for this tenant.
 
                 if let Err(err) = entry.get_mut().schedule(scheduler, schedule_context) {
                     return InitialShardScheduleOutcome::ShardScheduleError(err);
@@ -2289,6 +2264,7 @@ impl Service {
                     tenant_shard_id,
                     ShardIdentity::from_params(tenant_shard_id.shard_number, shard_params),
                     placement_policy,
+                    preferred_az_id.cloned(),
                 ));
 
                 state.generation = initial_generation;
@@ -4256,7 +4232,8 @@ impl Service {
                         },
                     );
 
-                    let mut child_state = TenantShard::new(child, child_shard, policy.clone());
+                    let mut child_state =
+                        TenantShard::new(child, child_shard, policy.clone(), preferred_az.clone());
                     child_state.intent = IntentState::single(scheduler, Some(pageserver));
                     child_state.observed = ObservedState {
                         locations: child_observed,
@@ -4812,7 +4789,15 @@ impl Service {
         for (child_id, child_ps, stripe_size) in child_locations {
             if let Err(e) = self
                 .compute_hook
-                .notify(child_id, child_ps, stripe_size, &self.cancel)
+                .notify(
+                    compute_hook::ShardUpdate {
+                        tenant_shard_id: child_id,
+                        node_id: child_ps,
+                        stripe_size,
+                        preferred_az: preferred_az_id.as_ref().map(Cow::Borrowed),
+                    },
+                    &self.cancel,
+                )
                 .await
             {
                 tracing::warn!("Failed to update compute of {}->{} during split, proceeding anyway to complete split ({e})",
@@ -6899,10 +6884,7 @@ impl Service {
         let mut plan = Vec::new();
 
         for (node_id, attached) in nodes_by_load {
-            let available = locked
-                .nodes
-                .get(&node_id)
-                .map_or(false, |n| n.is_available());
+            let available = locked.nodes.get(&node_id).is_some_and(|n| n.is_available());
             if !available {
                 continue;
             }

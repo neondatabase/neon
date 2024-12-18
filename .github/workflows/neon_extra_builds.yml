@@ -143,6 +143,10 @@ jobs:
 
   gather-rust-build-stats:
     needs: [ check-permissions, build-build-tools-image ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
@@ -177,13 +181,18 @@ jobs:
       - name: Produce the build stats
         run: PQ_LIB_DIR=$(pwd)/pg_install/v17/lib cargo build --all --release --timings -j$(nproc)
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
       - name: Upload the build stats
         id: upload-stats
         env:
           BUCKET: neon-github-public-dev
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
         run: |
           REPORT_URL=https://${BUCKET}.s3.amazonaws.com/build-stats/${SHA}/${GITHUB_RUN_ID}/cargo-timing.html
           aws s3 cp --only-show-errors ./target/cargo-timings/cargo-timing.html "s3://${BUCKET}/build-stats/${SHA}/${GITHUB_RUN_ID}/"

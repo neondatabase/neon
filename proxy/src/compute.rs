@@ -319,6 +319,8 @@ impl ConnCfg {
                 secret_key,
             },
             vec![],
+            host.to_string(),
+            allow_self_signed_compute,
         );
 
         let connection = PostgresConnection {
@@ -350,7 +352,7 @@ fn filtered_options(options: &str) -> Option<String> {
     Some(options)
 }
 
-fn load_certs() -> Result<Arc<rustls::RootCertStore>, Vec<rustls_native_certs::Error>> {
+pub(crate) fn load_certs() -> Result<Arc<rustls::RootCertStore>, Vec<rustls_native_certs::Error>> {
     let der_certs = rustls_native_certs::load_native_certs();
 
     if !der_certs.errors.is_empty() {
@@ -364,7 +366,7 @@ fn load_certs() -> Result<Arc<rustls::RootCertStore>, Vec<rustls_native_certs::E
 static TLS_ROOTS: OnceCell<Arc<rustls::RootCertStore>> = OnceCell::new();
 
 #[derive(Debug)]
-struct AcceptEverythingVerifier;
+pub(crate) struct AcceptEverythingVerifier;
 impl ServerCertVerifier for AcceptEverythingVerifier {
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         use rustls::SignatureScheme;
