@@ -364,6 +364,7 @@ compact_prefetch_buffers(void)
 		target_slot->shard_no = source_slot->shard_no;
 		target_slot->status = source_slot->status;
 		target_slot->response = source_slot->response;
+		target_slot->reqid = source_slot->reqid;
 		target_slot->request_lsns = source_slot->request_lsns;
 		target_slot->my_ring_index = empty_ring_index;
 
@@ -2373,7 +2374,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 					if (resp->reqid != request.req.reqid ||
 						resp->lsn != request.req.lsn ||
 						resp->not_modified_since != request.req.not_modified_since ||
-						RelFileInfoEquals(exists_resp->rinfo, request.rinfo) ||
+						!RelFileInfoEquals(exists_resp->rinfo, request.rinfo) ||
 						exists_resp->forknum != forkNum)
 					{
 						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
@@ -3029,7 +3030,7 @@ Retry:
 					if (resp->reqid != slot->reqid ||
 						resp->lsn != slot->request_lsns.request_lsn ||
 						resp->not_modified_since != slot->request_lsns.not_modified_since ||
-						RelFileInfoEquals(getpage_resp->rinfo, rinfo) ||
+						!RelFileInfoEquals(getpage_resp->rinfo, rinfo) ||
 						getpage_resp->forknum != forkNum ||
 						getpage_resp->blkno != base_blockno + i)
 					{
@@ -3561,7 +3562,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 					if (resp->reqid != request.req.reqid ||
 						resp->lsn != request.req.lsn ||
 						resp->not_modified_since != request.req.not_modified_since ||
-						RelFileInfoEquals(relsize_resp->rinfo, request.rinfo) ||
+						!RelFileInfoEquals(relsize_resp->rinfo, request.rinfo) ||
 						relsize_resp->forknum != forknum)
 					{
 						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
