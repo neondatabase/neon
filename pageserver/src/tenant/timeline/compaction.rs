@@ -1823,7 +1823,7 @@ impl Timeline {
         // by estimating the amount of files read for a compaction job. We should also partition on LSN.
         let ((dense_ks, sparse_ks), _) = {
             let Ok(partition) = self.partitioning.try_lock() else {
-                bail!("failed to acquire partition lock");
+                bail!("failed to acquire partition lock during gc-compaction");
             };
             partition.clone()
         };
