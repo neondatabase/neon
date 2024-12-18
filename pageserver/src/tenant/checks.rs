@@ -30,7 +30,7 @@ use super::storage_layer::LayerName;
 /// If layer 2 and 4 contain the same single key, this is also a valid layer map.
 ///
 /// However, if a partial compaction is still going on, it is possible that we get a layer map not satisfying the above condition.
-/// Therefore, we fallback to simply check if any of the two delta layers overlap. (See "a slow path...")
+/// Therefore, we fallback to simply check if any of the two delta layers overlap. (See "A slow path...")
 pub fn check_valid_layermap(metadata: &[LayerName]) -> Option<String> {
     let mut lsn_split_point = BTreeSet::new(); // TODO: use a better data structure (range tree / range set?)
     let mut all_delta_layers = Vec::new();
