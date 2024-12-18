@@ -1409,7 +1409,7 @@ ARG DEBIAN_VERSION
 RUN mkdir /ext-src
 
 # This is required for the PostGIS test
-RUN case $DEBIAN_VERSION in \
+RUN apt-get upfdate && case $DEBIAN_VERSION in \
       bullseye) \
         apt-get install -y libproj19 libgdal28; \
       ;; \
