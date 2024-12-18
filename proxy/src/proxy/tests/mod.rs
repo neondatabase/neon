@@ -13,7 +13,7 @@ use postgres_client::tls::{MakeTlsConnect, NoTls};
 use retry::{retry_after, ShouldRetryWakeCompute};
 use rstest::rstest;
 use rustls::crypto::ring;
-use rustls::pki_types;
+use rustls::{pki_types, RootCertStore};
 use tokio::io::DuplexStream;
 
 use super::connect_compute::ConnectMechanism;
@@ -22,7 +22,7 @@ use super::*;
 use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned,
 };
-use crate::config::{CertResolver, RetryConfig};
+use crate::config::{CertResolver, ComputeConfig, RetryConfig};
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{
@@ -67,7 +67,7 @@ fn generate_certs(
 }
 
 struct ClientConfig<'a> {
-    config: rustls::ClientConfig,
+    config: Arc<rustls::ClientConfig>,
     hostname: &'a str,
 }
 
@@ -120,6 +120,7 @@ fn generate_tls_config<'a>(
                     store
                 })
                 .with_no_client_auth();
+        let config = Arc::new(config);
 
         ClientConfig { config, hostname }
     };
@@ -468,7 +469,7 @@ impl ConnectMechanism for TestConnectMechanism {
         &self,
         _ctx: &RequestContext,
         _node_info: &control_plane::CachedNodeInfo,
-        _timeout: std::time::Duration,
+        _config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
         let mut counter = self.counter.lock().unwrap();
         let action = self.sequence[*counter];
@@ -576,6 +577,29 @@ fn helper_create_connect_info(
     user_info
 }
 
+fn config() -> ComputeConfig {
+    let retry = RetryConfig {
+        base_delay: Duration::from_secs(1),
+        max_retries: 5,
+        backoff_factor: 2.0,
+    };
+
+    let root_store = RootCertStore::empty();
+
+    let client_config =
+        rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring should support the default protocol versions")
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+    ComputeConfig {
+        retry,
+        tls: Arc::new(client_config),
+        timeout: Duration::from_secs(2),
+    }
+}
+
 #[tokio::test]
 async fn connect_to_compute_success() {
     let _ = env_logger::try_init();
@@ -583,12 +607,8 @@ async fn connect_to_compute_success() {
     let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    let config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
-    connect_to_compute(&ctx, &mechanism, &user_info, config, config)
+    let config = config();
+    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
         .await
         .unwrap();
     mechanism.verify();
@@ -601,12 +621,8 @@ async fn connect_to_compute_retry() {
     let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    let config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
-    connect_to_compute(&ctx, &mechanism, &user_info, config, config)
+    let config = config();
+    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
         .await
         .unwrap();
     mechanism.verify();
@@ -620,12 +636,8 @@ async fn connect_to_compute_non_retry_1() {
     let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Fail]);
     let user_info = helper_create_connect_info(&mechanism);
-    let config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
-    connect_to_compute(&ctx, &mechanism, &user_info, config, config)
+    let config = config();
+    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
         .await
         .unwrap_err();
     mechanism.verify();
@@ -639,12 +651,8 @@ async fn connect_to_compute_non_retry_2() {
     let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Fail, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    let config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
-    connect_to_compute(&ctx, &mechanism, &user_info, config, config)
+    let config = config();
+    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
         .await
         .unwrap();
     mechanism.verify();
@@ -665,17 +673,13 @@ async fn connect_to_compute_non_retry_3() {
         max_retries: 1,
         backoff_factor: 2.0,
     };
-    let connect_to_compute_retry_config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
+    let config = config();
     connect_to_compute(
         &ctx,
         &mechanism,
         &user_info,
         wake_compute_retry_config,
-        connect_to_compute_retry_config,
+        &config,
     )
     .await
     .unwrap_err();
@@ -690,12 +694,8 @@ async fn wake_retry() {
     let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![WakeRetry, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    let config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
-    connect_to_compute(&ctx, &mechanism, &user_info, config, config)
+    let config = config();
+    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
         .await
         .unwrap();
     mechanism.verify();
@@ -709,12 +709,8 @@ async fn wake_non_retry() {
     let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![WakeRetry, WakeFail]);
     let user_info = helper_create_connect_info(&mechanism);
-    let config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
-    connect_to_compute(&ctx, &mechanism, &user_info, config, config)
+    let config = config();
+    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
         .await
         .unwrap_err();
     mechanism.verify();
