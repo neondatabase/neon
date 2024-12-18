@@ -1240,7 +1240,7 @@ ARG PG_VERSION
 # COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
 # COPY --from=pg-session-jwt-build /usr/local/pgsql/ /usr/local/pgsql/
 # COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-uuidv7-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-uuidv7-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 # COPY --from=pg-roaringbitmap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 # COPY --from=pg-semver-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 # COPY --from=pg-embedding-pg-build /usr/local/pgsql/ /usr/local/pgsql/
