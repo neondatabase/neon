@@ -5,7 +5,6 @@ use std::task::{ready, Poll};
 
 use futures::future::poll_fn;
 use futures::Future;
-use postgres_client::tls::NoTlsStream;
 use postgres_client::AsyncMessage;
 use smallvec::SmallVec;
 use tokio::net::TcpStream;
@@ -26,6 +25,7 @@ use super::conn_pool_lib::{
 use crate::context::RequestContext;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::Metrics;
+use crate::postgres_rustls::RustlsStream;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnInfoWithAuth {
@@ -58,7 +58,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
-    mut connection: postgres_client::Connection<TcpStream, NoTlsStream>,
+    mut connection: postgres_client::Connection<TcpStream, RustlsStream<tokio::net::TcpStream>>,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 ) -> Client<C> {

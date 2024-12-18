@@ -30,6 +30,7 @@ use crate::control_plane::locks::ApiLocks;
 use crate::control_plane::CachedNodeInfo;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
+use crate::postgres_rustls::MakeRustlsConnect;
 use crate::proxy::connect_compute::ConnectMechanism;
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
@@ -514,7 +515,9 @@ impl ConnectMechanism for TokioMechanism {
             .connect_timeout(compute_config.timeout);
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let res = config.connect(postgres_client::NoTls).await;
+        let res = config
+            .connect(MakeRustlsConnect::new(&compute_config.tls))
+            .await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 
@@ -560,6 +563,10 @@ impl ConnectMechanism for HyperMechanism {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
         let port = node_info.config.get_port();
+
+        // TODO(conrad): how would we roll-out TLS for these connections?
+        // Postgres has negotiation, but no such thing for HTTP.
+        // Assume https, fall back to http (on the same port)?
         let res = connect_http2(&host, port, config.timeout).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
