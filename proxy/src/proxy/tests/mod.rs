@@ -67,16 +67,15 @@ fn generate_certs(
 }
 
 struct ClientConfig<'a> {
-    config: Arc<rustls::ClientConfig>,
+    config: MakeRustlsConnect,
     hostname: &'a str,
 }
 
-type TlsConnect<S> = <MakeRustlsConnect as MakeTlsConnect<S>>::TlsConnect;
+type TlsConnect<'a, S> = <MakeRustlsConnect as MakeTlsConnect<S>>::TlsConnect<'a>;
 
 impl ClientConfig<'_> {
-    fn make_tls_connect(self) -> anyhow::Result<TlsConnect<DuplexStream>> {
-        let mut mk = MakeRustlsConnect::new(self.config);
-        let tls = MakeTlsConnect::<DuplexStream>::make_tls_connect(&mut mk, self.hostname)?;
+    fn make_tls_connect(&self) -> anyhow::Result<TlsConnect<DuplexStream>> {
+        let tls = MakeTlsConnect::<DuplexStream>::make_tls_connect(&self.config, self.hostname)?;
         Ok(tls)
     }
 }
@@ -122,7 +121,10 @@ fn generate_tls_config<'a>(
                 .with_no_client_auth();
         let config = Arc::new(config);
 
-        ClientConfig { config, hostname }
+        ClientConfig {
+            config: MakeRustlsConnect::new(config),
+            hostname,
+        }
     };
 
     Ok((client_config, tls_config))

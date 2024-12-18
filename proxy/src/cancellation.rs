@@ -271,9 +271,9 @@ impl CancelClosure {
     ) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
 
-        let mut mk_tls = crate::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
+        let mk_tls = crate::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
         let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
-            &mut mk_tls,
+            &mk_tls,
             &self.hostname,
         )
         .map_err(|e| {

@@ -10,7 +10,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 pub async fn connect<T>(
-    mut tls: T,
+    tls: T,
     config: &Config,
 ) -> Result<(Client, Connection<TcpStream, T::Stream>), Error>
 where

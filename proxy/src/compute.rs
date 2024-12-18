@@ -251,10 +251,9 @@ impl ConnCfg {
         let (socket_addr, stream, host) = self.connect_raw(config.timeout).await?;
         drop(pause);
 
-        let mut mk_tls = crate::postgres_rustls::MakeRustlsConnect::new(config.tls.clone());
+        let mk_tls = crate::postgres_rustls::MakeRustlsConnect::new(config.tls.clone());
         let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
-            &mut mk_tls,
-            host,
+            &mk_tls, host,
         )?;
 
         // connect_raw() will not use TLS if sslmode is "disable"

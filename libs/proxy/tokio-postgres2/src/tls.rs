@@ -39,14 +39,14 @@ pub trait MakeTlsConnect<S> {
     /// The stream type created by the `TlsConnect` implementation.
     type Stream: TlsStream + Unpin;
     /// The `TlsConnect` implementation created by this type.
-    type TlsConnect: TlsConnect<S, Stream = Self::Stream>;
+    type TlsConnect<'a>: TlsConnect<S, Stream = Self::Stream> where Self: 'a;
     /// The error type returned by the `TlsConnect` implementation.
     type Error: Into<Box<dyn Error + Sync + Send>>;
 
     /// Creates a new `TlsConnect`or.
     ///
     /// The domain name is provided for certificate verification and SNI.
-    fn make_tls_connect(&mut self, domain: &str) -> Result<Self::TlsConnect, Self::Error>;
+    fn make_tls_connect<'a>(&'a self, domain: &str) -> Result<Self::TlsConnect<'a>, Self::Error>;
 }
 
 /// An asynchronous function wrapping a stream in a TLS session.
@@ -81,10 +81,10 @@ pub struct NoTls;
 
 impl<S> MakeTlsConnect<S> for NoTls {
     type Stream = NoTlsStream;
-    type TlsConnect = NoTls;
+    type TlsConnect<'a> = NoTls;
     type Error = NoTlsError;
 
-    fn make_tls_connect(&mut self, _: &str) -> Result<NoTls, NoTlsError> {
+    fn make_tls_connect(&self, _: &str) -> Result<NoTls, NoTlsError> {
         Ok(NoTls)
     }
 }

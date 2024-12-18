@@ -9,7 +9,7 @@ use std::io;
 pub(crate) async fn cancel_query<T>(
     config: Option<SocketConfig>,
     ssl_mode: SslMode,
-    mut tls: T,
+    tls: T,
     process_id: i32,
     secret_key: i32,
 ) -> Result<(), Error>
