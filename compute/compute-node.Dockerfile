@@ -1405,10 +1405,21 @@ RUN make PG_VERSION="${PG_VERSION}" -C compute
 
 FROM neon-pg-ext-build AS neon-pg-ext-test
 ARG PG_VERSION
+ARG DEBIAN_VERSION
 RUN mkdir /ext-src
 
 # This is required for the PostGIS test
-RUN apt-get install -y libproj19 libgdal28
+RUN case $DEBIAN_VERSION in \
+      bullseye) \
+        apt-get install -y libproj19 libgdal28; \
+      ;; \
+      bookworm) \
+        apt-get install -y libgdal32 libproj25; \
+      ;; \
+      *) \
+        echo "Unknown Debian version ${DEBIAN_VERSION}" && exit 1 \
+      ;; \
+    esac && \
 
 #COPY --from=postgis-build /postgis.tar.gz /ext-src/
 COPY --from=postgis-build /postgis-src/ /ext-src/postgis-src
