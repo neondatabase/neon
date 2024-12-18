@@ -1578,6 +1578,7 @@ RUN set -ex; \
     echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
     unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
     /tmp/awscliv2/aws/install; \
+    rm -rf /tmp/awscliv2.zip /tmp/awscliv2; \
     true
 
 ENV LANG=en_US.utf8
