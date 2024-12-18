@@ -2472,7 +2472,7 @@ mod tests {
             PageServiceCmd::PageStream(PageStreamCmd {
                 tenant_id,
                 timeline_id,
-                PagestreamProtocolVersion::V2,
+                protocol_version: PagestreamProtocolVersion::V2,
             })
         );
         let cmd = PageServiceCmd::parse(&format!("basebackup {tenant_id} {timeline_id}")).unwrap();
