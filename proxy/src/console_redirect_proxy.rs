@@ -115,7 +115,7 @@ pub async fn task_main(
                 Ok(Some(p)) => {
                     ctx.set_success();
                     let _disconnect = ctx.log_connect();
-                    match p.proxy_pass().await {
+                    match p.proxy_pass(&config.connect_to_compute).await {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
                             error!(?session_id, "per-client task finished with an IO error from the client: {e:#}");
@@ -216,7 +216,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         },
         &user_info,
         config.wake_compute_retry_config,
-        config.connect_to_compute_retry_config,
+        &config.connect_to_compute,
     )
     .or_else(|e| stream.throw_error(e))
     .await?;
