@@ -10,6 +10,7 @@ use remote_storage::RemoteStorageConfig;
 use rustls::crypto::ring::{self, sign};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
+use tokio_rustls::TlsConnector;
 use tracing::{error, info};
 use x509_parser::oid_registry;
 
@@ -37,7 +38,7 @@ pub struct ProxyConfig {
 
 pub struct ComputeConfig {
     pub retry: RetryConfig,
-    pub tls: Arc<rustls::ClientConfig>,
+    pub tls: TlsConnector,
     pub timeout: Duration,
 }
 

@@ -15,6 +15,7 @@ use rstest::rstest;
 use rustls::crypto::ring;
 use rustls::{pki_types, RootCertStore};
 use tokio::io::DuplexStream;
+use tokio_rustls::TlsConnector;
 
 use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
@@ -67,15 +68,16 @@ fn generate_certs(
 }
 
 struct ClientConfig<'a> {
-    config: MakeRustlsConnect,
+    config: TlsConnector,
     hostname: &'a str,
 }
 
-type TlsConnect<'a, S> = <MakeRustlsConnect as MakeTlsConnect<S>>::TlsConnect<'a>;
+type TlsConnect<'a, S> = <MakeRustlsConnect<'a> as MakeTlsConnect<S>>::TlsConnect;
 
 impl ClientConfig<'_> {
     fn make_tls_connect(&self) -> anyhow::Result<TlsConnect<DuplexStream>> {
-        let tls = MakeTlsConnect::<DuplexStream>::make_tls_connect(&self.config, self.hostname)?;
+        let mk = MakeRustlsConnect::new(&self.config);
+        let tls = MakeTlsConnect::<DuplexStream>::make_tls_connect(mk, self.hostname)?;
         Ok(tls)
     }
 }
@@ -122,7 +124,7 @@ fn generate_tls_config<'a>(
         let config = Arc::new(config);
 
         ClientConfig {
-            config: MakeRustlsConnect::new(config),
+            config: TlsConnector::from(config),
             hostname,
         }
     };
@@ -597,7 +599,7 @@ fn config() -> ComputeConfig {
 
     ComputeConfig {
         retry,
-        tls: Arc::new(client_config),
+        tls: Arc::new(client_config).into(),
         timeout: Duration::from_secs(2),
     }
 }

@@ -271,9 +271,8 @@ impl CancelClosure {
     ) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
 
-        let mk_tls = crate::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
         let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
-            &mk_tls,
+            crate::postgres_rustls::MakeRustlsConnect::new(&compute_config.tls),
             &self.hostname,
         )
         .map_err(|e| {
@@ -349,7 +348,7 @@ mod tests {
 
         ComputeConfig {
             retry,
-            tls: Arc::new(client_config),
+            tls: Arc::new(client_config).into(),
             timeout: Duration::from_secs(2),
         }
     }

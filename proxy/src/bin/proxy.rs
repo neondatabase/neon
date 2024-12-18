@@ -650,7 +650,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 
     let compute_config = ComputeConfig {
         retry: config::RetryConfig::parse(&args.connect_to_compute_retry)?,
-        tls: Arc::new(client_config),
+        tls: Arc::new(client_config).into(),
         timeout: Duration::from_secs(2),
     };
 
