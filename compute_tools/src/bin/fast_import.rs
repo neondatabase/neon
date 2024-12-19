@@ -220,6 +220,9 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // NEVER MERGE THIS
+    info!("source connection string: {}", source_connection_string);
+
     //
     // Start the work
     //
