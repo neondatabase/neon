@@ -585,6 +585,7 @@ impl Endpoint {
             features: self.features.clone(),
             swap_size_bytes: None,
             disk_quota_bytes: None,
+            disable_lfc_resizing: None,
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
