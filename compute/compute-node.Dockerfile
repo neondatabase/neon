@@ -1419,7 +1419,7 @@ RUN apt-get update && case $DEBIAN_VERSION in \
       *) \
         echo "Unknown Debian version ${DEBIAN_VERSION}" && exit 1 \
       ;; \
-    esac && \
+    esac
 
 #COPY --from=postgis-build /postgis.tar.gz /ext-src/
 COPY --from=postgis-build /postgis-src/ /ext-src/postgis-src
