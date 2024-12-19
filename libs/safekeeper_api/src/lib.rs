@@ -4,6 +4,7 @@ use const_format::formatcp;
 use pq_proto::SystemId;
 use serde::{Deserialize, Serialize};
 
+pub mod membership;
 /// Public API types
 pub mod models;
 
