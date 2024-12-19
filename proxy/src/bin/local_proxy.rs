@@ -13,7 +13,9 @@ use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::local::{LocalBackend, JWKS_ROLE_MAP};
 use proxy::auth::{self};
 use proxy::cancellation::CancellationHandlerMain;
-use proxy::config::{self, AuthenticationConfig, HttpConfig, ProxyConfig, RetryConfig};
+use proxy::config::{
+    self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig,
+};
 use proxy::control_plane::locks::ApiLocks;
 use proxy::control_plane::messages::{EndpointJwksResponse, JwksSettings};
 use proxy::http::health_server::AppMetrics;
@@ -32,6 +34,8 @@ project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
 use clap::Parser;
+use rustls::crypto::ring;
+use rustls::RootCertStore;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
@@ -209,6 +213,7 @@ async fn main() -> anyhow::Result<()> {
         http_listener,
         shutdown.clone(),
         Arc::new(CancellationHandlerMain::new(
+            &config.connect_to_compute,
             Arc::new(DashMap::new()),
             None,
             proxy::metrics::CancellationSource::Local,
@@ -268,6 +273,22 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         max_response_size_bytes: args.sql_over_http.sql_over_http_max_response_size_bytes,
     };
 
+    // local_proxy won't use TLS to talk to postgres.
+    let root_store = RootCertStore::empty();
+
+    let client_config =
+        rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring should support the default protocol versions")
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+    let compute_config = ComputeConfig {
+        retry: RetryConfig::parse(RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES)?,
+        tls: Arc::new(client_config),
+        timeout: Duration::from_secs(2),
+    };
+
     Ok(Box::leak(Box::new(ProxyConfig {
         tls_config: None,
         metric_collection: None,
@@ -289,9 +310,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         region: "local".into(),
         wake_compute_retry_config: RetryConfig::parse(RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)?,
         connect_compute_locks,
-        connect_to_compute_retry_config: RetryConfig::parse(
-            RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES,
-        )?,
+        connect_to_compute: compute_config,
     })))
 }
 

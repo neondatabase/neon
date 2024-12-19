@@ -3,11 +3,9 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use once_cell::sync::OnceCell;
 use postgres_client::tls::MakeTlsConnect;
 use postgres_client::CancelToken;
 use pq_proto::CancelKeyData;
-use rustls::crypto::ring;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -15,7 +13,7 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::auth::{check_peer_addr_is_in_list, IpPattern};
-use crate::compute::load_certs;
+use crate::config::ComputeConfig;
 use crate::error::ReportableError;
 use crate::ext::LockExt;
 use crate::metrics::{CancellationRequest, CancellationSource, Metrics};
@@ -35,6 +33,7 @@ type IpSubnetKey = IpNet;
 ///
 /// If `CancellationPublisher` is available, cancel request will be used to publish the cancellation key to other proxy instances.
 pub struct CancellationHandler<P> {
+    compute_config: &'static ComputeConfig,
     map: CancelMap,
     client: P,
     /// This field used for the monitoring purposes.
@@ -183,7 +182,7 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
             "cancelling query per user's request using key {key}, hostname {}, address: {}",
             cancel_closure.hostname, cancel_closure.socket_addr
         );
-        cancel_closure.try_cancel_query().await
+        cancel_closure.try_cancel_query(self.compute_config).await
     }
 
     #[cfg(test)]
@@ -198,8 +197,13 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
 }
 
 impl CancellationHandler<()> {
-    pub fn new(map: CancelMap, from: CancellationSource) -> Self {
+    pub fn new(
+        compute_config: &'static ComputeConfig,
+        map: CancelMap,
+        from: CancellationSource,
+    ) -> Self {
         Self {
+            compute_config,
             map,
             client: (),
             from,
@@ -214,8 +218,14 @@ impl CancellationHandler<()> {
 }
 
 impl<P: CancellationPublisherMut> CancellationHandler<Option<Arc<Mutex<P>>>> {
-    pub fn new(map: CancelMap, client: Option<Arc<Mutex<P>>>, from: CancellationSource) -> Self {
+    pub fn new(
+        compute_config: &'static ComputeConfig,
+        map: CancelMap,
+        client: Option<Arc<Mutex<P>>>,
+        from: CancellationSource,
+    ) -> Self {
         Self {
+            compute_config,
             map,
             client,
             from,
@@ -228,8 +238,6 @@ impl<P: CancellationPublisherMut> CancellationHandler<Option<Arc<Mutex<P>>>> {
         }
     }
 }
-
-static TLS_ROOTS: OnceCell<Arc<rustls::RootCertStore>> = OnceCell::new();
 
 /// This should've been a [`std::future::Future`], but
 /// it's impossible to name a type of an unboxed future
@@ -257,27 +265,13 @@ impl CancelClosure {
         }
     }
     /// Cancels the query running on user's compute node.
-    pub(crate) async fn try_cancel_query(self) -> Result<(), CancelError> {
+    pub(crate) async fn try_cancel_query(
+        self,
+        compute_config: &ComputeConfig,
+    ) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
 
-        let root_store = TLS_ROOTS
-            .get_or_try_init(load_certs)
-            .map_err(|_e| {
-                CancelError::IO(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "TLS root store initialization failed".to_string(),
-                ))
-            })?
-            .clone();
-
-        let client_config =
-            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .expect("ring should support the default protocol versions")
-                .with_root_certificates(root_store)
-                .with_no_client_auth();
-
-        let mut mk_tls = crate::postgres_rustls::MakeRustlsConnect::new(client_config);
+        let mut mk_tls = crate::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
         let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
             &mut mk_tls,
             &self.hostname,
@@ -329,11 +323,41 @@ impl<P> Drop for Session<P> {
 #[cfg(test)]
 #[expect(clippy::unwrap_used)]
 mod tests {
+    use std::time::Duration;
+
+    use rustls::crypto::ring;
+    use rustls::RootCertStore;
+
     use super::*;
+    use crate::config::RetryConfig;
+
+    fn config() -> ComputeConfig {
+        let retry = RetryConfig {
+            base_delay: Duration::from_secs(1),
+            max_retries: 5,
+            backoff_factor: 2.0,
+        };
+
+        let root_store = RootCertStore::empty();
+
+        let client_config =
+            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .expect("ring should support the default protocol versions")
+                .with_root_certificates(root_store)
+                .with_no_client_auth();
+
+        ComputeConfig {
+            retry,
+            tls: Arc::new(client_config),
+            timeout: Duration::from_secs(2),
+        }
+    }
 
     #[tokio::test]
     async fn check_session_drop() -> anyhow::Result<()> {
         let cancellation_handler = Arc::new(CancellationHandler::<()>::new(
+            Box::leak(Box::new(config())),
             CancelMap::default(),
             CancellationSource::FromRedis,
         ));
@@ -349,8 +373,11 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_session_noop_regression() {
-        let handler =
-            CancellationHandler::<()>::new(CancelMap::default(), CancellationSource::Local);
+        let handler = CancellationHandler::<()>::new(
+            Box::leak(Box::new(config())),
+            CancelMap::default(),
+            CancellationSource::Local,
+        );
         handler
             .cancel_session(
                 CancelKeyData {

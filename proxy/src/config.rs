@@ -32,7 +32,13 @@ pub struct ProxyConfig {
     pub handshake_timeout: Duration,
     pub wake_compute_retry_config: RetryConfig,
     pub connect_compute_locks: ApiLocks<Host>,
-    pub connect_to_compute_retry_config: RetryConfig,
+    pub connect_to_compute: ComputeConfig,
+}
+
+pub struct ComputeConfig {
+    pub retry: RetryConfig,
+    pub tls: Arc<rustls::ClientConfig>,
+    pub timeout: Duration,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq)]

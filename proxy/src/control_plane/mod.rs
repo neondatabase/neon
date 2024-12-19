@@ -10,13 +10,13 @@ pub mod client;
 pub(crate) mod errors;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
 use crate::auth::IpPattern;
 use crate::cache::project_info::ProjectInfoCacheImpl;
 use crate::cache::{Cached, TimedLru};
+use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ControlPlaneErrorMessage, MetricsAuxInfo};
 use crate::intern::ProjectIdInt;
@@ -73,9 +73,9 @@ impl NodeInfo {
     pub(crate) async fn connect(
         &self,
         ctx: &RequestContext,
-        timeout: Duration,
+        config: &ComputeConfig,
     ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
-        self.config.connect(ctx, self.aux.clone(), timeout).await
+        self.config.connect(ctx, self.aux.clone(), config).await
     }
 
     pub(crate) fn reuse_settings(&mut self, other: Self) {
