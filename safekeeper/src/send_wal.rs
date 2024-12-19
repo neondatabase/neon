@@ -28,6 +28,7 @@ use utils::failpoint_support;
 use utils::id::TenantTimelineId;
 use utils::pageserver_feedback::PageserverFeedback;
 use utils::postgres_client::PostgresClientProtocol;
+use wal_decoder::codec::encoder_from_proto;
 
 use std::cmp::{max, min};
 use std::net::SocketAddr;
@@ -430,9 +431,9 @@ impl SafekeeperPostgresHandler {
                     wal_sender_guard: ws_guard.clone(),
                 };
 
+                let encoder = encoder_from_proto(format, compression);
                 let sender = InterpretedWalSender {
-                    format,
-                    compression,
+                    encoder,
                     pgb,
                     wal_stream_builder,
                     end_watch_view,

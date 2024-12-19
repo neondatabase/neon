@@ -7369,6 +7369,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-compression",
+ "async-trait",
  "bytes",
  "pageserver_api",
  "postgres_ffi",
