@@ -264,6 +264,8 @@ pub(super) async fn handle_walreceiver_connection(
 
     let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx).await?;
 
+    let shard = vec![*timeline.get_shard_identity()];
+
     let interpreted_proto_config = match protocol {
         PostgresClientProtocol::Vanilla => None,
         PostgresClientProtocol::Interpreted {
@@ -494,12 +496,16 @@ pub(super) async fn handle_walreceiver_connection(
                         }
 
                         // Deserialize and interpret WAL record
-                        let interpreted = InterpretedWalRecord::from_bytes_filtered(
+                        let (got_shard, interpreted) = InterpretedWalRecord::from_bytes_filtered(
                             recdata,
-                            modification.tline.get_shard_identity(),
+                            &shard,
                             next_record_lsn,
                             modification.tline.pg_version,
-                        )?;
+                        )?
+                        .pop()
+                        .unwrap();
+
+                        assert_eq!(got_shard, *modification.tline.get_shard_identity());
 
                         if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes)
                             && uncommitted_records > 0
