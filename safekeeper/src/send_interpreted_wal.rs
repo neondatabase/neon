@@ -4,6 +4,7 @@ use anyhow::Context;
 use futures::StreamExt;
 use pageserver_api::shard::ShardIdentity;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend};
+use postgres_ffi::waldecoder::WalDecodeError;
 use postgres_ffi::MAX_SEND_SIZE;
 use postgres_ffi::{get_current_timestamp, waldecoder::WalStreamDecoder};
 use pq_proto::{BeMessage, InterpretedWalRecordsBody, WalSndKeepAlive};
@@ -18,104 +19,45 @@ use wal_decoder::wire_format::ToWireFormat;
 use crate::send_wal::EndWatchView;
 use crate::wal_reader_stream::{WalBytes, WalReaderStreamBuilder};
 
-/// Shard-aware interpreted record sender.
+/// Shard-aware interpreted record reader.
 /// This is used for sending WAL to the pageserver. Said WAL
 /// is pre-interpreted and filtered for the shard.
+pub(crate) struct InterpretedWalReader {
+    pub(crate) wal_stream_builder: WalReaderStreamBuilder,
+    pub(crate) tx: tokio::sync::mpsc::Sender<Batch>,
+    pub(crate) shard: ShardIdentity,
+    pub(crate) pg_version: u32,
+}
+
 pub(crate) struct InterpretedWalSender<'a, IO> {
     pub(crate) format: InterpretedFormat,
     pub(crate) compression: Option<Compression>,
-    pub(crate) pgb: &'a mut PostgresBackend<IO>,
-    pub(crate) wal_stream_builder: WalReaderStreamBuilder,
-    pub(crate) end_watch_view: EndWatchView,
-    pub(crate) shard: ShardIdentity,
-    pub(crate) pg_version: u32,
     pub(crate) appname: Option<String>,
-}
 
-struct Batch {
-    wal_end_lsn: Lsn,
-    available_wal_end_lsn: Lsn,
-    records: InterpretedWalRecords,
+    pub(crate) start_lsn: Lsn,
+
+    pub(crate) pgb: &'a mut PostgresBackend<IO>,
+    pub(crate) end_watch_view: EndWatchView,
+    pub(crate) rx: tokio::sync::mpsc::Receiver<Batch>,
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
-    /// Send interpreted WAL to a receiver.
-    /// Stops when an error occurs or the receiver is caught up and there's no active compute.
-    ///
-    /// Err(CopyStreamHandlerEnd) is always returned; Result is used only for ?
-    /// convenience.
-    pub(crate) async fn run(self) -> Result<(), CopyStreamHandlerEnd> {
-        let mut wal_position = self.wal_stream_builder.start_pos();
-        let mut wal_decoder =
-            WalStreamDecoder::new(self.wal_stream_builder.start_pos(), self.pg_version);
-
-        let stream = self.wal_stream_builder.build(MAX_SEND_SIZE).await?;
-        let mut stream = std::pin::pin!(stream);
-
+    pub(crate) async fn run(mut self) -> Result<(), CopyStreamHandlerEnd> {
         let mut keepalive_ticker = tokio::time::interval(Duration::from_secs(1));
         keepalive_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         keepalive_ticker.reset();
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Batch>(2);
-        let shard = vec![self.shard];
+        let mut wal_position = self.start_lsn;
 
         loop {
             tokio::select! {
-                // Get some WAL from the stream and then: decode, interpret and push it down the
-                // pipeline.
-                wal = stream.next(), if tx.capacity() > 0 => {
-                    let WalBytes { wal, wal_start_lsn: _, wal_end_lsn, available_wal_end_lsn } = match wal {
-                        Some(some) => some?,
-                        None => { break; }
-                    };
-
-                    wal_position = wal_end_lsn;
-                    wal_decoder.feed_bytes(&wal);
-
-                    let mut records = Vec::new();
-                    let mut max_next_record_lsn = None;
-                    while let Some((next_record_lsn, recdata)) = wal_decoder
-                        .poll_decode()
-                        .with_context(|| "Failed to decode WAL")?
-                    {
-                        assert!(next_record_lsn.is_aligned());
-                        max_next_record_lsn = Some(next_record_lsn);
-
-
-                        // Deserialize and interpret WAL record
-                        let interpreted = InterpretedWalRecord::from_bytes_filtered(
-                            recdata,
-                            &shard,
-                            next_record_lsn,
-                            self.pg_version,
-                        )
-                        .with_context(|| "Failed to interpret WAL")?
-                        .remove(&self.shard)
-                        .unwrap();
-
-                        if !interpreted.is_empty() {
-                            records.push(interpreted);
-                        }
-                    }
-
-                    let max_next_record_lsn = match max_next_record_lsn {
-                        Some(lsn) => lsn,
-                        None => { continue; }
-                    };
-
-                    let batch = InterpretedWalRecords {
-                        records,
-                        next_record_lsn: Some(max_next_record_lsn),
-                    };
-
-                    tx.send(Batch {wal_end_lsn, available_wal_end_lsn, records: batch}).await.unwrap();
-                },
-                // For a previously interpreted batch, serialize it and push it down the wire.
-                batch = rx.recv() => {
+                batch = self.rx.recv() => {
                     let batch = match batch {
                         Some(b) => b,
                         None => { break; }
                     };
+
+                    wal_position = batch.wal_end_lsn;
 
                     let buf = batch
                         .records
@@ -148,10 +90,127 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
             }
         }
 
+        // The loop above ends when the receiver is caught up and there's no more WAL to send
+        // OR when [`InterpretedWalReader`] encountered a failure.
+        if wal_position.0 < self.end_watch_view.get().0 {
+            Err(CopyStreamHandlerEnd::ServerInitiated(format!(
+                "ending streaming to {:?} at {} due to interpreted WAL reader error",
+                self.appname, wal_position,
+            )))
+        } else {
+            Err(CopyStreamHandlerEnd::ServerInitiated(format!(
+                "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
+                self.appname, wal_position,
+            )))
+        }
+    }
+}
+
+pub(crate) struct Batch {
+    wal_end_lsn: Lsn,
+    available_wal_end_lsn: Lsn,
+    records: InterpretedWalRecords,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum InterpretedWalReaderError {
+    /// Handler initiates the end of streaming.
+    #[error("decode error: {0}")]
+    Decode(#[from] WalDecodeError),
+    #[error("read or interpret error: {0}")]
+    ReadOrInterpret(#[from] anyhow::Error),
+    #[error("no receivers available")]
+    NoReceivers,
+}
+
+impl InterpretedWalReader {
+    /// Send interpreted WAL to a receiver.
+    /// Stops when an error occurs or the receiver is caught up and there's no active compute.
+    ///
+    /// Err(CopyStreamHandlerEnd) is always returned; Result is used only for ?
+    /// convenience.
+    pub(crate) async fn run(self) -> Result<(), InterpretedWalReaderError> {
+        let mut wal_decoder =
+            WalStreamDecoder::new(self.wal_stream_builder.start_pos(), self.pg_version);
+
+        let stream = self.wal_stream_builder.build(MAX_SEND_SIZE).await?;
+        let mut stream = std::pin::pin!(stream);
+
+        let mut keepalive_ticker = tokio::time::interval(Duration::from_secs(1));
+        keepalive_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        keepalive_ticker.reset();
+
+        let shard = vec![self.shard];
+
+        loop {
+            let WalBytes {
+                wal,
+                wal_start_lsn: _,
+                wal_end_lsn,
+                available_wal_end_lsn,
+            } = match stream.next().await {
+                Some(some) => some.map_err(InterpretedWalReaderError::ReadOrInterpret)?,
+                None => {
+                    break;
+                }
+            };
+
+            wal_decoder.feed_bytes(&wal);
+
+            let mut records = Vec::new();
+            let mut max_next_record_lsn = None;
+            while let Some((next_record_lsn, recdata)) = wal_decoder
+                .poll_decode()
+                .with_context(|| "Failed to decode WAL")?
+            {
+                assert!(next_record_lsn.is_aligned());
+                max_next_record_lsn = Some(next_record_lsn);
+
+                // Deserialize and interpret WAL record
+                let interpreted = InterpretedWalRecord::from_bytes_filtered(
+                    recdata,
+                    &shard,
+                    next_record_lsn,
+                    self.pg_version,
+                )
+                .with_context(|| "Failed to interpret WAL")?
+                .remove(&self.shard)
+                .unwrap();
+
+                if !interpreted.is_empty() {
+                    records.push(interpreted);
+                }
+            }
+
+            let max_next_record_lsn = match max_next_record_lsn {
+                Some(lsn) => lsn,
+                None => {
+                    continue;
+                }
+            };
+
+            let batch = InterpretedWalRecords {
+                records,
+                next_record_lsn: Some(max_next_record_lsn),
+            };
+
+            self.tx
+                .send(Batch {
+                    wal_end_lsn,
+                    available_wal_end_lsn,
+                    records: batch,
+                })
+                .await
+                .map_err(|_err| InterpretedWalReaderError::NoReceivers)?;
+        }
+
+        Ok(())
+
+        // TODO: move to network sender
         // The loop above ends when the receiver is caught up and there's no more WAL to send.
-        Err(CopyStreamHandlerEnd::ServerInitiated(format!(
-            "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
-            self.appname, wal_position,
-        )))
+        // Err(CopyStreamHandlerEnd::ServerInitiated(format!(
+        //     "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
+        //     self.appname, wal_position,
+        // )))
     }
 }
