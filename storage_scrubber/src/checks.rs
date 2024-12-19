@@ -310,7 +310,7 @@ pub(crate) enum BlobDataParseResult {
         index_part_generation: Generation,
         s3_layers: HashSet<(LayerName, Generation)>,
     },
-    /// The remains of a deleted Timeline (i.e. an initdb archive only)
+    /// The remains of an uncleanly deleted Timeline or aborted timeline creation(e.g. an initdb archive only, or some layer without an index)
     Relic,
     Incorrect {
         errors: Vec<String>,
@@ -346,7 +346,7 @@ pub(crate) async fn list_timeline_blobs(
     match res {
         ListTimelineBlobsResult::Ready(data) => Ok(data),
         ListTimelineBlobsResult::MissingIndexPart(_) => {
-            // Retry if index is missing.
+            // Retry if listing raced with removal of an index
             let data = list_timeline_blobs_impl(remote_client, id, root_target)
                 .await?
                 .into_data();
@@ -358,7 +358,7 @@ pub(crate) async fn list_timeline_blobs(
 enum ListTimelineBlobsResult {
     /// Blob data is ready to be intepreted.
     Ready(RemoteTimelineBlobData),
-    /// List timeline blobs has layer files but is missing [`IndexPart`].
+    /// The listing contained an index but when we tried to fetch it, we couldn't
     MissingIndexPart(RemoteTimelineBlobData),
 }
 
@@ -467,19 +467,19 @@ async fn list_timeline_blobs_impl(
     match index_part_object.as_ref() {
         Some(selected) => index_part_keys.retain(|k| k != selected),
         None => {
-            // It is possible that the branch gets deleted after we got some layer files listed
-            // and we no longer have the index file in the listing.
-            errors.push(
+            // This case does not indicate corruption, but it should be very unusual.  It can
+            // happen if:
+            // - timeline creation is in progress (first layer is written before index is written)
+            // - timeline deletion happened while a stale pageserver was still attached, it might upload
+            //   a layer after the deletion is done.
+            tracing::info!(
                 "S3 list response got no index_part.json file but still has layer files"
-                    .to_string(),
             );
-            return Ok(ListTimelineBlobsResult::MissingIndexPart(
-                RemoteTimelineBlobData {
-                    blob_data: BlobDataParseResult::Incorrect { errors, s3_layers },
-                    unused_index_keys: index_part_keys,
-                    unknown_keys,
-                },
-            ));
+            return Ok(ListTimelineBlobsResult::Ready(RemoteTimelineBlobData {
+                blob_data: BlobDataParseResult::Relic,
+                unused_index_keys: index_part_keys,
+                unknown_keys,
+            }));
         }
     }
 
