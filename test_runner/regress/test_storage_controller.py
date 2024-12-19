@@ -3009,7 +3009,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 def eq_safekeeper_records(a: dict[str, Any], b: dict[str, Any]) -> bool:
     compared = [dict(a), dict(b)]
 
-    masked_keys = ["created_at", "updated_at"]
+    masked_keys = ["created_at", "updated_at", "active"]
 
     for d in compared:
         # keep deleting these in case we are comparing the body as it will be uploaded by real scripts

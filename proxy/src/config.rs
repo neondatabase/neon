@@ -25,7 +25,6 @@ use crate::types::Host;
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
     pub metric_collection: Option<MetricCollectionConfig>,
-    pub allow_self_signed_compute: bool,
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
     pub proxy_protocol_v2: ProxyProtocolV2,

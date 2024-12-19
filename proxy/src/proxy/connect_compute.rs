@@ -73,9 +73,6 @@ pub(crate) struct TcpMechanism<'a> {
 
     /// connect_to_compute concurrency lock
     pub(crate) locks: &'static ApiLocks<Host>,
-
-    /// Whether we should accept self-signed certificates (for testing)
-    pub(crate) allow_self_signed_compute: bool,
 }
 
 #[async_trait]
@@ -93,11 +90,7 @@ impl ConnectMechanism for TcpMechanism<'_> {
     ) -> Result<PostgresConnection, Self::Error> {
         let host = node_info.config.get_host();
         let permit = self.locks.get_permit(&host).await?;
-        permit.release_result(
-            node_info
-                .connect(ctx, self.allow_self_signed_compute, timeout)
-                .await,
-        )
+        permit.release_result(node_info.connect(ctx, timeout).await)
     }
 
     fn update_connect_config(&self, config: &mut compute::ConnCfg) {

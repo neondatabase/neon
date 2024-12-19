@@ -73,12 +73,9 @@ impl NodeInfo {
     pub(crate) async fn connect(
         &self,
         ctx: &RequestContext,
-        allow_self_signed_compute: bool,
         timeout: Duration,
     ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
-        self.config
-            .connect(ctx, allow_self_signed_compute, self.aux.clone(), timeout)
-            .await
+        self.config.connect(ctx, self.aux.clone(), timeout).await
     }
 
     pub(crate) fn reuse_settings(&mut self, other: Self) {

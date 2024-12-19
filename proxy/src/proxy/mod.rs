@@ -348,8 +348,6 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             params_compat,
             params: &params,
             locks: &config.connect_compute_locks,
-            // only used for console redirect testing.
-            allow_self_signed_compute: false,
         },
         &user_info,
         config.wake_compute_retry_config,
