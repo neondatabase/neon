@@ -16,7 +16,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
-use crate::auth::{self, validate_password_and_exchange, AuthError, ComputeUserInfoMaybeEndpoint};
+use crate::auth::{
+    self, validate_password_and_exchange, AuthError, ComputeUserInfoMaybeEndpoint, IpPattern,
+};
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
@@ -131,7 +133,7 @@ pub(crate) struct ComputeUserInfoNoEndpoint {
     pub(crate) options: NeonOptions,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct ComputeUserInfo {
     pub(crate) endpoint: EndpointId,
     pub(crate) user: RoleName,
@@ -244,6 +246,21 @@ impl AuthenticationConfig {
     }
 }
 
+#[async_trait::async_trait]
+pub(crate) trait BackendAuth {
+    async fn auth_ips(
+        &self,
+        user_info: &ComputeUserInfo,
+        session_id: &uuid::Uuid,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError>;
+
+    async fn get_allowed_ips(
+        &self,
+        user_info: &ComputeUserInfo,
+        session_id: &uuid::Uuid,
+    ) -> auth::Result<Vec<auth::IpPattern>>;
+}
+
 /// True to its name, this function encapsulates our current auth trade-offs.
 /// Here, we choose the appropriate auth flow based on circumstances.
 ///
@@ -256,7 +273,7 @@ async fn auth_quirks(
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-) -> auth::Result<ComputeCredentials> {
+) -> auth::Result<(ComputeCredentials, Option<Vec<IpPattern>>)> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
@@ -315,7 +332,7 @@ async fn auth_quirks(
     )
     .await
     {
-        Ok(keys) => Ok(keys),
+        Ok(keys) => Ok((keys, Some(allowed_ips.as_ref().clone()))),
         Err(e) => {
             if e.is_password_failed() {
                 // The password could have been changed, so we invalidate the cache.
@@ -385,7 +402,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    ) -> auth::Result<Backend<'a, ComputeCredentials>> {
+    ) -> auth::Result<(Backend<'a, ComputeCredentials>, Option<Vec<IpPattern>>)> {
         let res = match self {
             Self::ControlPlane(api, user_info) => {
                 debug!(
@@ -394,7 +411,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
                     "performing authentication using the console"
                 );
 
-                let credentials = auth_quirks(
+                let (credentials, ip_allowlist) = auth_quirks(
                     ctx,
                     &*api,
                     user_info,
@@ -404,7 +421,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
                     endpoint_rate_limiter,
                 )
                 .await?;
-                Backend::ControlPlane(api, credentials)
+                Ok((Backend::ControlPlane(api, credentials), ip_allowlist))
             }
             Self::Local(_) => {
                 return Err(auth::AuthError::bad_auth_method("invalid for local proxy"))
@@ -413,7 +430,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
 
         // TODO: replace with some metric
         info!("user successfully authenticated");
-        Ok(res)
+        res
     }
 }
 
@@ -438,6 +455,32 @@ impl Backend<'_, ComputeUserInfo> {
             }
             Self::Local(_) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
         }
+    }
+}
+
+//ComputeUserInfoMaybeEndpoint
+#[async_trait::async_trait]
+impl BackendAuth for Backend<'_, ()> {
+    async fn auth_ips(
+        &self,
+        user_info: &ComputeUserInfo,
+        session_id: &uuid::Uuid,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
+        match self {
+            Self::ControlPlane(api, ()) => api.get_allowed_ips(user_info, session_id).await,
+            Self::Local(_) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
+        }
+    }
+
+    async fn get_allowed_ips(
+        &self,
+        user_info: &ComputeUserInfo,
+        session_id: &uuid::Uuid,
+    ) -> auth::Result<Vec<auth::IpPattern>> {
+        self.auth_ips(user_info, session_id)
+            .await
+            .map(|(ips, _)| ips.as_ref().clone())
+            .map_err(|e| e.into())
     }
 }
 
@@ -503,6 +546,20 @@ mod tests {
             _user_info: &super::ComputeUserInfo,
         ) -> Result<CachedRoleSecret, control_plane::errors::GetAuthInfoError> {
             Ok(CachedRoleSecret::new_uncached(Some(self.secret.clone())))
+        }
+
+        async fn get_allowed_ips(
+            &self,
+            _user_info: &super::ComputeUserInfo,
+            _session_id: &uuid::Uuid,
+        ) -> Result<
+            (CachedAllowedIps, Option<CachedRoleSecret>),
+            control_plane::errors::GetAuthInfoError,
+        > {
+            Ok((
+                CachedAllowedIps::new_uncached(Arc::new(self.ips.clone())),
+                Some(CachedRoleSecret::new_uncached(Some(self.secret.clone()))),
+            ))
         }
 
         async fn get_allowed_ips_and_secret(
@@ -786,7 +843,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(creds.info.endpoint, "my-endpoint");
+        assert_eq!(creds.0.info.endpoint, "my-endpoint");
 
         handle.await.unwrap();
     }

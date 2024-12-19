@@ -272,25 +272,24 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         HandshakeData::Cancel(cancel_key_data) => {
             // spawn a task to cancel the session, but don't wait for it
             cancellations.spawn({
-                let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-                let session_id = ctx.session_id();
-                let peer_ip = ctx.peer_addr();
-                let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?session_id);
-                cancel_span.follows_from(tracing::Span::current());
-                async move {
-                    drop(
+                    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
+                    let session_id = ctx.session_id();
+                    let peer_ip = ctx.peer_addr();
+                    let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?session_id);
+                    cancel_span.follows_from(tracing::Span::current());
+                    async move {
                         cancellation_handler_clone
-                            .cancel_session(
-                                cancel_key_data,
-                                session_id,
-                                peer_ip,
-                                config.authentication_config.ip_allowlist_check_enabled,
-                            )
-                            .instrument(cancel_span)
-                            .await,
-                    );
-                }
-            });
+                                .cancel_session_auth(
+                                    cancel_key_data,
+                                    session_id,
+                                    peer_ip,
+                                    config.authentication_config.ip_allowlist_check_enabled,
+                                    auth_backend,
+                                )
+                                .await
+                                .inspect_err(|e | debug!(error = ?e, "cancel_session failed")).ok();
+                    }.instrument(cancel_span)
+                });
 
             return Ok(None);
         }
@@ -315,7 +314,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     };
 
     let user = user_info.get_user().to_owned();
-    let user_info = match user_info
+    let (user_info, ip_allowlist) = match user_info
         .authenticate(
             ctx,
             &mut stream,
@@ -356,6 +355,8 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     .or_else(|e| stream.throw_error(e))
     .await?;
 
+    node.cancel_closure
+        .set_ip_allowlist(ip_allowlist.unwrap_or_default());
     let session = cancellation_handler.get_session();
     prepare_client_connection(&node, &session, &mut stream).await?;
 

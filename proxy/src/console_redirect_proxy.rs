@@ -21,7 +21,7 @@ use crate::proxy::{
 
 pub async fn task_main(
     config: &'static ProxyConfig,
-    backend: &'static ConsoleRedirectBackend,
+    backend: &'static ConsoleRedirectBackend<'static>,
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -142,7 +142,7 @@ pub async fn task_main(
 
 pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
-    backend: &'static ConsoleRedirectBackend,
+    backend: &'static ConsoleRedirectBackend<'static>,
     ctx: &RequestContext,
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
@@ -170,25 +170,24 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         HandshakeData::Cancel(cancel_key_data) => {
             // spawn a task to cancel the session, but don't wait for it
             cancellations.spawn({
-                let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-                let session_id = ctx.session_id();
-                let peer_ip = ctx.peer_addr();
-                let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?session_id);
-                cancel_span.follows_from(tracing::Span::current());
-                async move {
-                    drop(
+                    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
+                    let session_id = ctx.session_id();
+                    let peer_ip = ctx.peer_addr();
+                    let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?session_id);
+                    cancel_span.follows_from(tracing::Span::current());
+                    async move {
                         cancellation_handler_clone
-                            .cancel_session(
+                            .cancel_session_auth(
                                 cancel_key_data,
                                 session_id,
                                 peer_ip,
                                 config.authentication_config.ip_allowlist_check_enabled,
+                                backend,
                             )
-                            .instrument(cancel_span)
-                            .await,
-                    );
-                }
-            });
+                            .await
+                            .inspect_err(|e | debug!(error = ?e, "cancel_session failed")).ok();
+                    }.instrument(cancel_span)
+                });
 
             return Ok(None);
         }
