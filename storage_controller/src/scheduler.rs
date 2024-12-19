@@ -371,8 +371,8 @@ impl ScheduleContext {
         }
     }
 
-    /// Imagine we migrated our attached location to the given node.  Return a new context that
-    /// reflects this.
+    /// Remove `shard`'s contributions to this context.  This is useful when considering scheduling
+    /// this shard afresh, where we don't want it to e.g. experience anti-affinity to its current location.
     pub(crate) fn project_detach(&self, shard: &TenantShard) -> Self {
         let mut new_context = self.clone();
 
