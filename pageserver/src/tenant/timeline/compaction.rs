@@ -2581,6 +2581,13 @@ impl Timeline {
                 .open_mut()?
                 .finish_gc_compaction(&layer_selection, &compact_to, &self.metrics)
         };
+
+        // Schedule an index-only upload to update the `latest_gc_cutoff` in the index_part.json.
+        // Otherwise, after restart, the index_part only contains the old `latest_gc_cutoff` and
+        // find_gc_cutoffs will try accessing things below the cutoff. TODO: ideally, this should
+        // be batched into `schedule_compaction_update`.
+        let disk_consistent_lsn = self.disk_consistent_lsn.load();
+        self.schedule_uploads(disk_consistent_lsn, None)?;
         self.remote_client
             .schedule_compaction_update(&layer_selection, &compact_to)?;
 
