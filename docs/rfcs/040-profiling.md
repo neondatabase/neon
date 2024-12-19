@@ -167,8 +167,6 @@ Parameters:
 
 * `format`: profile output format (`pprof` or `jemalloc`; default `pprof`).
 
-TODO: the profile is [not yet symbolized](https://github.com/neondatabase/neon/issues/9964).
-
 Works on Linux only.
 
 ### Go Memory Profiling
