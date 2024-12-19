@@ -180,6 +180,14 @@ impl Debug for AzureConfig {
     }
 }
 
+/// Gcs bucket coordinates and access credentials to manage the bucket contents (read and write).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcsConfig {
+    pub bucket_name: String,
+    /// A "subfolder" in the bucket, to use the same bucket separately by multiple remote storage users at once.
+    pub prefix_in_bucket: Option<String>,
+}
+
 fn deserialize_storage_class<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<StorageClass>, D::Error> {
