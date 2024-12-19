@@ -3,7 +3,6 @@ use std::sync::Arc;
 use async_stream::try_stream;
 use bytes::Bytes;
 use futures::Stream;
-use postgres_backend::CopyStreamHandlerEnd;
 use safekeeper_api::Term;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -51,7 +50,7 @@ impl WalReaderStreamBuilder {
     pub(crate) async fn build(
         self,
         buffer_size: usize,
-    ) -> anyhow::Result<impl Stream<Item = Result<WalBytes, CopyStreamHandlerEnd>>> {
+    ) -> anyhow::Result<impl Stream<Item = anyhow::Result<WalBytes>>> {
         // TODO(vlad): The code below duplicates functionality from [`crate::send_wal`].
         // We can make the raw WAL sender use this stream too and remove the duplication.
         let Self {
