@@ -106,11 +106,11 @@ impl<R: RecordGenerator> WalGenerator<R> {
     const TIMELINE_ID: u32 = 1;
 
     /// Creates a new WAL generator with the given record generator.
-    pub fn new(record_generator: R) -> WalGenerator<R> {
+    pub fn new(record_generator: R, start_lsn: Lsn) -> WalGenerator<R> {
         Self {
             record_generator,
-            lsn: Lsn(0),
-            prev_lsn: Lsn(0),
+            lsn: start_lsn,
+            prev_lsn: start_lsn,
         }
     }
 
