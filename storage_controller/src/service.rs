@@ -6244,12 +6244,17 @@ impl Service {
 
                 // Fast path: we may quickly identify shards that don't have any possible optimisations
                 if !shard.maybe_optimizable(scheduler, &schedule_context) {
-                    debug_assert!(shard
-                        .optimize_attachment(scheduler, &schedule_context)
-                        .is_none());
-                    debug_assert!(shard
-                        .optimize_secondary(scheduler, &schedule_context)
-                        .is_none());
+                    if cfg!(feature = "testing") {
+                        // Check that maybe_optimizable doesn't disagree with the actual optimization functions.
+                        // Only do this in testing builds because it is not a correctness-critical check, so we shouldn't
+                        // panic in prod if we hit this, or spend cycles on it in prod.
+                        assert!(shard
+                            .optimize_attachment(scheduler, &schedule_context)
+                            .is_none());
+                        assert!(shard
+                            .optimize_secondary(scheduler, &schedule_context)
+                            .is_none());
+                    }
                     continue;
                 }
 
