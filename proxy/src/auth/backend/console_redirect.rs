@@ -1,16 +1,18 @@
 use async_trait::async_trait;
 use postgres_client::config::SslMode;
 use pq_proto::BeMessage as Be;
+use std::fmt;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, info_span};
 
-use super::ComputeCredentialKeys;
+use super::{ComputeCredentialKeys, ControlPlaneApi};
+use crate::auth::backend::{BackendIpAllowlist, ComputeUserInfo};
 use crate::auth::IpPattern;
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
-use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
+use crate::control_plane::{self, client::cplane_proxy_v1, CachedNodeInfo, NodeInfo};
 use crate::error::{ReportableError, UserFacingError};
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::stream::PqStream;
@@ -31,6 +33,13 @@ pub(crate) enum ConsoleRedirectError {
 #[derive(Debug)]
 pub struct ConsoleRedirectBackend {
     console_uri: reqwest::Url,
+    api: cplane_proxy_v1::NeonControlPlaneClient,
+}
+
+impl fmt::Debug for cplane_proxy_v1::NeonControlPlaneClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "NeonControlPlaneClient")
+    }
 }
 
 impl UserFacingError for ConsoleRedirectError {
@@ -71,9 +80,24 @@ pub(crate) fn new_psql_session_id() -> String {
     hex::encode(rand::random::<[u8; 8]>())
 }
 
+#[async_trait]
+impl BackendIpAllowlist for ConsoleRedirectBackend {
+    async fn get_allowed_ips(
+        &self,
+        ctx: &RequestContext,
+        user_info: &ComputeUserInfo,
+    ) -> auth::Result<Vec<auth::IpPattern>> {
+        self.api
+            .get_allowed_ips_and_secret(ctx, user_info)
+            .await
+            .map(|(ips, _)| ips.as_ref().clone())
+            .map_err(|e| e.into())
+    }
+}
+
 impl ConsoleRedirectBackend {
-    pub fn new(console_uri: reqwest::Url) -> Self {
-        Self { console_uri }
+    pub fn new(console_uri: reqwest::Url, api: cplane_proxy_v1::NeonControlPlaneClient) -> Self {
+        Self { console_uri, api }
     }
 
     pub(crate) async fn authenticate(
