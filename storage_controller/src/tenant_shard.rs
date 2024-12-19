@@ -568,7 +568,7 @@ impl TenantShard {
             return Ok((false, node_id));
         }
 
-        if let Some(promote_secondary) = scheduler.node_preferred(&self.intent.secondary) {
+        if let Some(promote_secondary) = self.preferred_secondary(scheduler) {
             // Promote a secondary
             tracing::debug!("Promoted secondary {} to attached", promote_secondary);
             self.intent.promote_attached(scheduler, promote_secondary);
@@ -703,7 +703,7 @@ impl TenantShard {
     ) -> Result<(), ScheduleError> {
         let promote_to = match promote_to {
             Some(node) => node,
-            None => match scheduler.node_preferred(self.intent.get_secondary()) {
+            None => match self.preferred_secondary(scheduler) {
                 Some(node) => node,
                 None => {
                     return Err(ScheduleError::ImpossibleConstraint);
@@ -1086,6 +1086,43 @@ impl TenantShard {
         }
 
         true
+    }
+
+    /// When a shard has several secondary locations, we need to pick one in situations where
+    /// we promote one of them to an attached location:
+    ///  - When draining a node for restart
+    ///  - When responding to a node failure
+    ///
+    /// In this context, 'preferred' does not mean the node with the best scheduling score: instead
+    /// we want to pick the node which is best for use _temporarily_ while the previous attached location
+    /// is unavailable (e.g. because it's down or deploying).  That means we prefer to use secondary
+    /// locations in a non-preferred AZ, as they're more likely to have awarm cache than a temporary
+    /// secondary in the preferred AZ (which are usually only created for migrations, and if they exist
+    /// they're probably not warmed up yet). The latter behavior is based oni
+    ///
+    /// If the input is empty, or all the nodes are not elegible for scheduling, return None: the
+    /// caller needs to a pick a node some other way.
+    pub(crate) fn preferred_secondary(&self, scheduler: &Scheduler) -> Option<NodeId> {
+        let candidates = scheduler.filter_usable_nodes(&self.intent.secondary);
+
+        // We will sort candidates to prefer nodes which are _not_ in our preferred AZ, i.e. we prefer
+        // to migrate to a long-lived secondary location (which would have been scheduled in a non-preferred AZ),
+        // rather than a short-lived secondary location being used for optimization/migration (which would have
+        // been scheduled in our preferred AZ).
+        let mut candidates = candidates
+            .iter()
+            .map(|(node_id, node_az)| {
+                if node_az == &self.preferred_az_id {
+                    (1, *node_id)
+                } else {
+                    (0, *node_id)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        candidates.sort();
+
+        candidates.first().map(|i| i.1)
     }
 
     /// Query whether the tenant's observed state for attached node matches its intent state, and if so,

@@ -636,35 +636,6 @@ impl Scheduler {
         }
     }
 
-    /// Where we have several nodes to choose from, for example when picking a secondary location
-    /// to promote to an attached location, this method may be used to pick the best choice based
-    /// on the scheduler's knowledge of utilization and availability.
-    ///
-    /// If the input is empty, or all the nodes are not elegible for scheduling, return None: the
-    /// caller can pick a node some other way.
-    pub(crate) fn node_preferred(&self, nodes: &[NodeId]) -> Option<NodeId> {
-        if nodes.is_empty() {
-            return None;
-        }
-
-        // TODO: When the utilization score returned by the pageserver becomes meaningful,
-        // schedule based on that instead of the shard count.
-        let node = nodes
-            .iter()
-            .map(|node_id| {
-                let may_schedule = self
-                    .nodes
-                    .get(node_id)
-                    .map(|n| !matches!(n.may_schedule, MaySchedule::No))
-                    .unwrap_or(false);
-                (*node_id, may_schedule)
-            })
-            .max_by_key(|(_n, may_schedule)| *may_schedule);
-
-        // If even the preferred node has may_schedule==false, return None
-        node.and_then(|(node_id, may_schedule)| if may_schedule { Some(node_id) } else { None })
-    }
-
     /// Calculate a single node's score, used in optimizer logic to compare specific
     /// nodes' scores.
     pub(crate) fn compute_node_score<Score>(
@@ -833,6 +804,28 @@ impl Scheduler {
 
     pub(crate) fn get_node_az(&self, node_id: &NodeId) -> Option<AvailabilityZone> {
         self.nodes.get(node_id).map(|n| n.az.clone())
+    }
+
+    /// For use when choosing a preferred secondary location: filter out nodes that are not
+    /// available, and gather their AZs.
+    pub(crate) fn filter_usable_nodes(
+        &self,
+        nodes: &[NodeId],
+    ) -> Vec<(NodeId, Option<AvailabilityZone>)> {
+        nodes
+            .iter()
+            .filter_map(|node_id| {
+                let node = self
+                    .nodes
+                    .get(node_id)
+                    .expect("Referenced nodes always exist");
+                if matches!(node.may_schedule, MaySchedule::Yes(_)) {
+                    Some((*node_id, Some(node.az.clone())))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Unit test access to internal state
