@@ -40,6 +40,27 @@ pub(crate) enum Notification {
         allowed_ips_update: AllowedIpsUpdate,
     },
     #[serde(
+        rename = "/block_public_or_vpc_access_updated",
+        deserialize_with = "deserialize_json_string"
+    )]
+    BlockPublicOrVpcAccessUpdated {
+        block_public_or_vpc_access_updated: BlockPublicOrVpcAccessUpdated,
+    },
+    #[serde(
+        rename = "/allowed_vpc_endpoints_updated_for_org",
+        deserialize_with = "deserialize_json_string"
+    )]
+    AllowedVpcEndpointsUpdatedForOrg {
+        allowed_vpc_endpoints_updated_for_org: AllowedVpcEndpointsUpdatedForOrg,
+    },
+    #[serde(
+        rename = "/allowed_vpc_endpoints_updated_for_projects",
+        deserialize_with = "deserialize_json_string"
+    )]
+    AllowedVpcEndpointsUpdatedForProjects {
+        allowed_vpc_endpoints_updated_for_projects: AllowedVpcEndpointsUpdatedForProjects,
+    },
+    #[serde(
         rename = "/password_updated",
         deserialize_with = "deserialize_json_string"
     )]
@@ -51,6 +72,24 @@ pub(crate) enum Notification {
 pub(crate) struct AllowedIpsUpdate {
     project_id: ProjectIdInt,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub(crate) struct BlockPublicOrVpcAccessUpdated {
+    project_id: ProjectIdInt,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub(crate) struct AllowedVpcEndpointsUpdatedForOrg {
+    // TODO: change type once the implementation is more fully fledged.
+    // See e.g. https://github.com/neondatabase/neon/pull/10073.
+    account_id: ProjectIdInt,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub(crate) struct AllowedVpcEndpointsUpdatedForProjects {
+    project_ids: Vec<ProjectIdInt>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub(crate) struct PasswordUpdate {
     project_id: ProjectIdInt,
@@ -164,7 +203,11 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                     }
                 }
             }
-            Notification::AllowedIpsUpdate { .. } | Notification::PasswordUpdate { .. } => {
+            Notification::AllowedIpsUpdate { .. }
+            | Notification::PasswordUpdate { .. }
+            | Notification::BlockPublicOrVpcAccessUpdated { .. }
+            | Notification::AllowedVpcEndpointsUpdatedForOrg { .. }
+            | Notification::AllowedVpcEndpointsUpdatedForProjects { .. } => {
                 invalidate_cache(self.cache.clone(), msg.clone());
                 if matches!(msg, Notification::AllowedIpsUpdate { .. }) {
                     Metrics::get()
@@ -177,6 +220,8 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                         .redis_events_count
                         .inc(RedisEventsCount::PasswordUpdate);
                 }
+                // TODO: add additional metrics for the other event types.
+
                 // It might happen that the invalid entry is on the way to be cached.
                 // To make sure that the entry is invalidated, let's repeat the invalidation in INVALIDATION_LAG seconds.
                 // TODO: include the version (or the timestamp) in the message and invalidate only if the entry is cached before the message.
@@ -203,6 +248,15 @@ fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
                 password_update.role_name,
             ),
         Notification::Cancel(_) => unreachable!("cancel message should be handled separately"),
+        Notification::BlockPublicOrVpcAccessUpdated { .. } => {
+            // https://github.com/neondatabase/neon/pull/10073
+        }
+        Notification::AllowedVpcEndpointsUpdatedForOrg { .. } => {
+            // https://github.com/neondatabase/neon/pull/10073
+        }
+        Notification::AllowedVpcEndpointsUpdatedForProjects { .. } => {
+            // https://github.com/neondatabase/neon/pull/10073
+        }
     }
 }
 
