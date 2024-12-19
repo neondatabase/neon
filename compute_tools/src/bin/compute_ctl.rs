@@ -60,7 +60,7 @@ use compute_tools::compute::{
 };
 use compute_tools::configurator::launch_configurator;
 use compute_tools::extension_server::get_pg_version_string;
-use compute_tools::http::api::launch_http_server;
+use compute_tools::http::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
