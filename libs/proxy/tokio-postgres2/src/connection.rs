@@ -258,6 +258,7 @@ where
 
     fn poll_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         if self.state != State::Closing {
+            cx.waker().wake_by_ref();
             return Poll::Pending;
         }
 
