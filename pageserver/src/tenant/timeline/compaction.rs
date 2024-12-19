@@ -29,6 +29,7 @@ use utils::id::TimelineId;
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
 use crate::statvfs::Statvfs;
+use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::batch_split_writer::{
     BatchWriterResult, SplitDeltaLayerWriter, SplitImageLayerWriter,
@@ -2156,15 +2157,14 @@ impl Timeline {
 
         // Step 1: construct a k-merge iterator over all layers.
         // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
-        // disable the check for now because we need to adjust the check for partial compactions, will enable later.
-        // let layer_names = job_desc
-        //     .selected_layers
-        //     .iter()
-        //     .map(|layer| layer.layer_desc().layer_name())
-        //     .collect_vec();
-        // if let Some(err) = check_valid_layermap(&layer_names) {
-        //     warn!("gc-compaction layer map check failed because {}, this is normal if partial compaction is not finished yet", err);
-        // }
+        let layer_names = job_desc
+            .selected_layers
+            .iter()
+            .map(|layer| layer.layer_desc().layer_name())
+            .collect_vec();
+        if let Some(err) = check_valid_layermap(&layer_names) {
+            bail!("gc-compaction layer map check failed because {}, cannot proceed with compaction due to potential data loss", err);
+        }
         // The maximum LSN we are processing in this compaction loop
         let end_lsn = job_desc
             .selected_layers
@@ -2546,8 +2546,36 @@ impl Timeline {
         );
 
         // Step 3: Place back to the layer map.
+
+        // First, do a sanity check to ensure the newly-created layer map does not contain overlaps.
+        let all_layers = {
+            let guard = self.layers.read().await;
+            let layer_map = guard.layer_map()?;
+            layer_map.iter_historic_layers().collect_vec()
+        };
+
+        let mut final_layers = all_layers
+            .iter()
+            .map(|layer| layer.layer_name())
+            .collect::<HashSet<_>>();
+        for layer in &layer_selection {
+            final_layers.remove(&layer.layer_desc().layer_name());
+        }
+        for layer in &compact_to {
+            final_layers.insert(layer.layer_desc().layer_name());
+        }
+        let final_layers = final_layers.into_iter().collect_vec();
+
+        // TODO: move this check before we call `finish` on image layer writers. However, this will require us to get the layer name before we finish
+        // the writer, so potentially, we will need a function like `ImageLayerBatchWriter::get_all_pending_layer_keys` to get all the keys that are
+        // in the writer before finalizing the persistent layers. Now we would leave some dangling layers on the disk if the check fails.
+        if let Some(err) = check_valid_layermap(&final_layers) {
+            bail!("gc-compaction layer map check failed after compaction because {}, compaction result not applied to the layer map due to potential data loss", err);
+        }
+
+        // Between the sanity check and this compaction update, there could be new layers being flushed, but it should be fine because we only
+        // operate on L1 layers.
         {
-            // TODO: sanity check if the layer map is valid (i.e., should not have overlaps)
             let mut guard = self.layers.write().await;
             guard
                 .open_mut()?
