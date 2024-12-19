@@ -214,6 +214,19 @@ impl super::ControlPlaneApi for MockControlPlane {
         ))
     }
 
+    async fn get_allowed_ips(
+        &self,
+        user_info: &ComputeUserInfo,
+        _session_id: &uuid::Uuid,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
+        Ok((
+            Cached::new_uncached(Arc::new(
+                self.do_get_auth_info(user_info).await?.allowed_ips,
+            )),
+            None,
+        ))
+    }
+
     async fn get_allowed_ips_and_secret(
         &self,
         _ctx: &RequestContext,

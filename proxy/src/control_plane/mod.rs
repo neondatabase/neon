@@ -110,6 +110,12 @@ pub(crate) trait ControlPlaneApi {
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
+    async fn get_allowed_ips(
+        &self,
+        user_info: &ComputeUserInfo,
+        session_id: &uuid::Uuid,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError>;
+
     async fn get_allowed_ips_and_secret(
         &self,
         ctx: &RequestContext,

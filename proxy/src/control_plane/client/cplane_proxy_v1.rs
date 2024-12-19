@@ -29,7 +29,92 @@ use crate::rate_limiter::WakeComputeRateLimiter;
 use crate::types::{EndpointCacheKey, EndpointId};
 use crate::{compute, http, scram};
 
-const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
+pub(crate) const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
+
+// This client is only used for authentication in ConsoleRedirect proxy
+// and only in case of cancellation requests
+#[derive(Clone)]
+pub struct AuthControlPlaneClient {
+    endpoint: http::Endpoint,
+    pub caches: &'static ApiCaches, // we don't use it, just for consistency with other clients
+    // put in a shared ref so we don't copy secrets all over in memory
+    jwt: Arc<str>,
+}
+
+impl AuthControlPlaneClient {
+    /// Construct an API object containing the auth parameters.
+    pub fn new(endpoint: http::Endpoint, jwt: Arc<str>, caches: &'static ApiCaches) -> Self {
+        Self {
+            endpoint,
+            caches,
+            jwt,
+        }
+    }
+
+    pub(crate) async fn do_get_auth_req(
+        &self,
+        user_info: &ComputeUserInfo,
+        session_id: &uuid::Uuid,
+    ) -> Result<AuthInfo, GetAuthInfoError> {
+        let request_id = session_id.to_string();
+        async {
+            let request = self
+                .endpoint
+                .get_path("proxy_get_role_secret")
+                .header(X_REQUEST_ID, &request_id)
+                .header(AUTHORIZATION, format!("Bearer {}", &self.jwt))
+                .query(&[("session_id", session_id)])
+                .query(&[
+                    ("application_name", "auth_cancellation"),
+                    ("project", user_info.endpoint.as_str()),
+                    ("role", user_info.user.as_str()),
+                ])
+                .build()?;
+
+            debug!(url = request.url().as_str(), "sending http request");
+            // TODO: use some latency timer here
+            let start = Instant::now();
+            let response = self.endpoint.execute(request).await?;
+            info!(duration = ?start.elapsed(), "received http response");
+            let body = match parse_body::<GetEndpointAccessControl>(response).await {
+                Ok(body) => body,
+                // Error 404 is special: it's ok not to have a secret.
+                // TODO(anna): retry
+                Err(e) => {
+                    return if e.get_reason().is_not_found() {
+                        // TODO: refactor this because it's weird
+                        // this is a failure to authenticate but we return Ok.
+                        Ok(AuthInfo::default())
+                    } else {
+                        Err(e.into())
+                    };
+                }
+            };
+
+            let secret = if body.role_secret.is_empty() {
+                None
+            } else {
+                let secret = scram::ServerSecret::parse(&body.role_secret)
+                    .map(AuthSecret::Scram)
+                    .ok_or(GetAuthInfoError::BadSecret)?;
+                Some(secret)
+            };
+            let allowed_ips = body.allowed_ips.unwrap_or_default();
+            Metrics::get()
+                .proxy
+                .allowed_ips_number
+                .observe(allowed_ips.len() as f64);
+            Ok(AuthInfo {
+                secret,
+                allowed_ips,
+                project_id: body.project_id,
+            })
+        }
+        .inspect_err(|e| tracing::debug!(error = ?e))
+        .instrument(info_span!("do_get_auth_info"))
+        .await
+    }
+}
 
 #[derive(Clone)]
 pub struct NeonControlPlaneClient {
@@ -78,27 +163,43 @@ impl NeonControlPlaneClient {
             info!("endpoint is not valid, skipping the request");
             return Ok(AuthInfo::default());
         }
-        let request_id = ctx.session_id().to_string();
-        let application_name = ctx.console_application_name();
+        self.do_get_auth_req(user_info, &ctx.session_id(), Some(ctx))
+            .await
+    }
+
+    async fn do_get_auth_req(
+        &self,
+        user_info: &ComputeUserInfo,
+        session_id: &uuid::Uuid,
+        ctx: Option<&RequestContext>,
+    ) -> Result<AuthInfo, GetAuthInfoError> {
+        let request_id = session_id.to_string();
         async {
             let request = self
                 .endpoint
-                .get_path("get_endpoint_access_control")
+                .get_path("proxy_get_role_secret")
                 .header(X_REQUEST_ID, &request_id)
                 .header(AUTHORIZATION, format!("Bearer {}", &self.jwt))
-                .query(&[("session_id", ctx.session_id())])
+                .query(&[("session_id", session_id)])
                 .query(&[
-                    ("application_name", application_name.as_str()),
-                    ("endpointish", user_info.endpoint.as_str()),
+                    ("application_name", "auth_cancellation"),
+                    ("project", user_info.endpoint.as_str()),
                     ("role", user_info.user.as_str()),
                 ])
                 .build()?;
 
             debug!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
-            let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
-            let response = self.endpoint.execute(request).await?;
-            drop(pause);
+            let response = match ctx {
+                Some(ctx) => {
+                    let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
+                    let rsp = self.endpoint.execute(request).await;
+                    drop(pause);
+                    rsp?
+                }
+                None => self.endpoint.execute(request).await?,
+            };
+
             info!(duration = ?start.elapsed(), "received http response");
             let body = match parse_body::<GetEndpointAccessControl>(response).await {
                 Ok(body) => body,
@@ -294,6 +395,49 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
         }
         // When we just got a secret, we don't need to invalidate it.
         Ok(Cached::new_uncached(auth_info.secret))
+    }
+
+    async fn get_allowed_ips(
+        &self,
+        user_info: &ComputeUserInfo,
+        session_id: &uuid::Uuid,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
+        let normalized_ep = &user_info.endpoint.normalize();
+        if let Some(allowed_ips) = self.caches.project_info.get_allowed_ips(normalized_ep) {
+            Metrics::get()
+                .proxy
+                .allowed_ips_cache_misses
+                .inc(CacheOutcome::Hit);
+            return Ok((allowed_ips, None));
+        }
+
+        Metrics::get()
+            .proxy
+            .allowed_ips_cache_misses
+            .inc(CacheOutcome::Miss);
+
+        let auth_info = self.do_get_auth_req(user_info, session_id, None).await?;
+
+        let allowed_ips = Arc::new(auth_info.allowed_ips);
+        let user = &user_info.user;
+        if let Some(project_id) = auth_info.project_id {
+            let normalized_ep_int = normalized_ep.into();
+            self.caches.project_info.insert_role_secret(
+                project_id,
+                normalized_ep_int,
+                user.into(),
+                auth_info.secret.clone(),
+            );
+            self.caches.project_info.insert_allowed_ips(
+                project_id,
+                normalized_ep_int,
+                allowed_ips.clone(),
+            );
+        }
+        Ok((
+            Cached::new_uncached(allowed_ips),
+            Some(Cached::new_uncached(auth_info.secret)),
+        ))
     }
 
     async fn get_allowed_ips_and_secret(

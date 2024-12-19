@@ -657,7 +657,9 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 /// auth::Backend is created at proxy startup, and lives forever.
 fn build_auth_backend(
     args: &ProxyCliArgs,
-) -> anyhow::Result<Either<&'static auth::Backend<'static, ()>, &'static ConsoleRedirectBackend>> {
+) -> anyhow::Result<
+    Either<&'static auth::Backend<'static, ()>, &'static ConsoleRedirectBackend<'static>>,
+> {
     match &args.auth_backend {
         AuthBackendType::ControlPlaneV1 => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
@@ -735,9 +737,35 @@ fn build_auth_backend(
         }
 
         AuthBackendType::ConsoleRedirect => {
-            let url = args.uri.parse()?;
-            let backend = ConsoleRedirectBackend::new(url);
+            let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
+            let project_info_cache_config: ProjectInfoCacheOptions =
+                args.project_info_cache.parse()?;
+            let endpoint_cache_config: config::EndpointCacheConfig =
+                args.endpoint_cache_config.parse()?;
 
+            info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
+            info!(
+                "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
+            );
+            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
+
+            let caches = Box::leak(Box::new(control_plane::caches::ApiCaches::new(
+                wake_compute_cache_config,
+                project_info_cache_config,
+                endpoint_cache_config,
+            )));
+
+            let url = args.uri.clone().parse()?;
+            let ep_url: proxy::url::ApiUrl = args.auth_endpoint.parse()?;
+            let endpoint = http::Endpoint::new(ep_url, http::new_client());
+
+            let api = control_plane::client::cplane_proxy_v1::AuthControlPlaneClient::new(
+                endpoint,
+                args.control_plane_token.clone(),
+                caches,
+            );
+
+            let backend = ConsoleRedirectBackend::new(url, api);
             let config = Box::leak(Box::new(backend));
 
             Ok(Either::Right(config))

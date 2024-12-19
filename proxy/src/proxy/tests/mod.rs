@@ -533,6 +533,15 @@ impl TestControlPlaneClient for TestConnectMechanism {
         }
     }
 
+    fn get_allowed_ips(
+        &self,
+        _user_info: &ComputeUserInfo,
+        _session_id: &uuid::Uuid,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), control_plane::errors::GetAuthInfoError>
+    {
+        unimplemented!("not used in tests")
+    }
+
     fn get_allowed_ips_and_secret(
         &self,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), control_plane::errors::GetAuthInfoError>

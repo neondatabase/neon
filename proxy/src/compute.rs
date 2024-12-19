@@ -16,6 +16,7 @@ use thiserror::Error;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
 
+use crate::auth::backend::ComputeUserInfo;
 use crate::auth::parse_endpoint_param;
 use crate::cancellation::CancelClosure;
 use crate::context::RequestContext;
@@ -26,7 +27,9 @@ use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
 use crate::postgres_rustls::MakeRustlsConnect;
 use crate::proxy::neon_option;
+use crate::proxy::NeonOptions;
 use crate::types::Host;
+use crate::types::{EndpointId, RoleName};
 
 pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 
@@ -298,6 +301,28 @@ impl ConnCfg {
             self.0.get_ssl_mode()
         );
 
+        let compute_info = match parameters.get("user") {
+            Some(user) => {
+                match parameters.get("database") {
+                    Some(database) => {
+                        ComputeUserInfo {
+                            user: RoleName::from(user),
+                            options: NeonOptions::default(), // just a shim, we don't need options
+                            endpoint: EndpointId::from(database),
+                        }
+                    }
+                    None => {
+                        warn!("compute node didn't return database name");
+                        ComputeUserInfo::default()
+                    }
+                }
+            }
+            None => {
+                warn!("compute node didn't return user name");
+                ComputeUserInfo::default()
+            }
+        };
+
         // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
         // Yet another reason to rework the connection establishing code.
         let cancel_closure = CancelClosure::new(
@@ -308,8 +333,9 @@ impl ConnCfg {
                 process_id,
                 secret_key,
             },
-            vec![],
+            vec![], // TODO: deprecated, will be removed
             host.to_string(),
+            compute_info,
         );
 
         let connection = PostgresConnection {
