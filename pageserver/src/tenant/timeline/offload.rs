@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use pageserver_api::models::TenantState;
+
 use super::delete::{delete_local_timeline_directory, DeleteTimelineFlow, DeletionGuard};
 use super::Timeline;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -70,6 +72,15 @@ pub(crate) async fn offload_timeline(
 
     {
         let mut offloaded_timelines = tenant.timelines_offloaded.lock().unwrap();
+        if matches!(
+            tenant.current_state(),
+            TenantState::Stopping { .. } | TenantState::Broken { .. }
+        ) {
+            // Cancel the operation if the tenant is shutting down. Do this while the
+            // timelines_offloaded lock is held to prevent a race with Tenant::shutdown
+            // for defusing the lock
+            return Err(OffloadError::Cancelled);
+        }
         offloaded_timelines.insert(
             timeline.timeline_id,
             Arc::new(
