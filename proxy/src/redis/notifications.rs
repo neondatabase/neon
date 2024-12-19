@@ -12,6 +12,7 @@ use uuid::Uuid;
 use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::cache::project_info::ProjectInfoCache;
 use crate::cancellation::{CancelMap, CancellationHandler};
+use crate::config::ProxyConfig;
 use crate::intern::{ProjectIdInt, RoleNameInt};
 use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
 
@@ -249,6 +250,7 @@ async fn handle_messages<C: ProjectInfoCache + Send + Sync + 'static>(
 /// Handle console's invalidation messages.
 #[tracing::instrument(name = "redis_notifications", skip_all)]
 pub async fn task_main<C>(
+    config: &'static ProxyConfig,
     redis: ConnectionWithCredentialsProvider,
     cache: Arc<C>,
     cancel_map: CancelMap,
@@ -258,6 +260,7 @@ where
     C: ProjectInfoCache + Send + Sync + 'static,
 {
     let cancellation_handler = Arc::new(CancellationHandler::<()>::new(
+        &config.connect_to_compute,
         cancel_map,
         crate::metrics::CancellationSource::FromRedis,
     ));
