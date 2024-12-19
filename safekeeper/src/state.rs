@@ -1,20 +1,22 @@
 //! Defines per timeline data stored persistently (SafeKeeperPersistentState)
 //! and its wrapper with in memory layer (SafekeeperState).
 
-use std::{cmp::max, ops::Deref};
+use std::{cmp::max, ops::Deref, time::SystemTime};
 
 use anyhow::{bail, Result};
 use postgres_ffi::WAL_SEGMENT_SIZE;
-use safekeeper_api::{models::TimelineTermBumpResponse, ServerInfo, Term};
+use safekeeper_api::{
+    membership::Configuration, models::TimelineTermBumpResponse, ServerInfo, Term,
+};
 use serde::{Deserialize, Serialize};
 use utils::{
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
+    id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
 };
 
 use crate::{
     control_file,
-    safekeeper::{AcceptorState, PersistedPeerInfo, PgUuid, TermHistory, UNKNOWN_SERVER_VERSION},
+    safekeeper::{AcceptorState, PgUuid, TermHistory, UNKNOWN_SERVER_VERSION},
     timeline::TimelineError,
     wal_backup_partial::{self},
 };
@@ -27,6 +29,8 @@ pub struct TimelinePersistentState {
     pub tenant_id: TenantId,
     #[serde(with = "hex")]
     pub timeline_id: TimelineId,
+    /// Membership configuration.
+    pub mconf: Configuration,
     /// persistent acceptor state
     pub acceptor_state: AcceptorState,
     /// information about server
@@ -58,21 +62,14 @@ pub struct TimelinePersistentState {
     /// pushed to s3. We don't remove WAL beyond it. Persisted only for
     /// informational purposes, we receive it from pageserver (or broker).
     pub remote_consistent_lsn: Lsn,
-    /// Peers and their state as we remember it. Knowing peers themselves is
-    /// fundamental; but state is saved here only for informational purposes and
-    /// obviously can be stale. (Currently not saved at all, but let's provision
-    /// place to have less file version upgrades).
-    pub peers: PersistedPeers,
     /// Holds names of partial segments uploaded to remote storage. Used to
     /// clean up old objects without leaving garbage in remote storage.
     pub partial_backup: wal_backup_partial::State,
     /// Eviction state of the timeline. If it's Offloaded, we should download
     /// WAL files from remote storage to serve the timeline.
     pub eviction_state: EvictionState,
+    pub creation_ts: SystemTime,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PersistedPeers(pub Vec<(NodeId, PersistedPeerInfo)>);
 
 /// State of the local WAL files. Used to track current timeline state,
 /// that can be either WAL files are present on disk or last partial segment
@@ -89,8 +86,8 @@ pub enum EvictionState {
 impl TimelinePersistentState {
     pub fn new(
         ttid: &TenantTimelineId,
+        mconf: Configuration,
         server_info: ServerInfo,
-        peers: Vec<NodeId>,
         commit_lsn: Lsn,
         local_start_lsn: Lsn,
     ) -> anyhow::Result<TimelinePersistentState> {
@@ -113,6 +110,7 @@ impl TimelinePersistentState {
         Ok(TimelinePersistentState {
             tenant_id: ttid.tenant_id,
             timeline_id: ttid.timeline_id,
+            mconf,
             acceptor_state: AcceptorState {
                 term: 0,
                 term_history: TermHistory::empty(),
@@ -125,26 +123,21 @@ impl TimelinePersistentState {
             backup_lsn: local_start_lsn,
             peer_horizon_lsn: local_start_lsn,
             remote_consistent_lsn: Lsn(0),
-            peers: PersistedPeers(
-                peers
-                    .iter()
-                    .map(|p| (*p, PersistedPeerInfo::new()))
-                    .collect(),
-            ),
             partial_backup: wal_backup_partial::State::default(),
             eviction_state: EvictionState::Present,
+            creation_ts: SystemTime::now(),
         })
     }
 
     pub fn empty() -> Self {
         TimelinePersistentState::new(
             &TenantTimelineId::empty(),
+            Configuration::empty(),
             ServerInfo {
                 pg_version: 170000, /* Postgres server version (major * 10000) */
                 system_id: 0,       /* Postgres system identifier */
                 wal_seg_size: WAL_SEGMENT_SIZE as u32,
             },
-            vec![],
             Lsn::INVALID,
             Lsn::INVALID,
         )

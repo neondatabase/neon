@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use camino::Utf8PathBuf;
 use postgres_ffi::{MAX_SEND_SIZE, WAL_SEGMENT_SIZE};
+use safekeeper_api::membership::Configuration;
 use std::sync::Arc;
 use tokio::{
     fs::OpenOptions,
@@ -147,8 +148,8 @@ pub async fn handle_request(
 
     let mut new_state = TimelinePersistentState::new(
         &request.destination_ttid,
+        Configuration::empty(),
         state.server.clone(),
-        vec![],
         request.until_lsn,
         start_lsn,
     )?;
