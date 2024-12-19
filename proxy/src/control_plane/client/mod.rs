@@ -55,6 +55,20 @@ impl ControlPlaneApi for ControlPlaneClient {
         }
     }
 
+    async fn get_allowed_ips(
+        &self,
+        user_info: &ComputeUserInfo,
+        session_id: &uuid::Uuid,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
+        match self {
+            Self::ProxyV1(api) => api.get_allowed_ips(user_info, session_id).await,
+            #[cfg(any(test, feature = "testing"))]
+            Self::PostgresMock(api) => api.get_allowed_ips(user_info, session_id).await,
+            #[cfg(test)]
+            Self::Test(api) => api.get_allowed_ips(user_info, session_id),
+        }
+    }
+
     async fn get_allowed_ips_and_secret(
         &self,
         ctx: &RequestContext,
@@ -101,6 +115,12 @@ impl ControlPlaneApi for ControlPlaneClient {
 #[cfg(test)]
 pub(crate) trait TestControlPlaneClient: Send + Sync + 'static {
     fn wake_compute(&self) -> Result<CachedNodeInfo, errors::WakeComputeError>;
+
+    fn get_allowed_ips(
+        &self,
+        user_info: &ComputeUserInfo,
+        session_id: &uuid::Uuid,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError>;
 
     fn get_allowed_ips_and_secret(
         &self,
