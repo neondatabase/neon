@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
+
 import requests
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import NeonEnv, logical_replication_sync
 
 TEST_DB_NAMES = [
     {
@@ -136,3 +138,115 @@ def test_compute_create_databases(neon_simple_env: NeonEnv):
             assert curr_db is not None
             assert len(curr_db) == 1
             assert curr_db[0] == db["name"]
+
+
+def test_dropdb_with_subscription(neon_simple_env: NeonEnv):
+    """
+    Test that compute_ctl can drop a database that has a logical replication subscription.
+    """
+    env = neon_simple_env
+
+    # Create and start endpoint so that neon_local put all the generated
+    # stuff into the spec.json file.
+    endpoint = env.endpoints.create_start("main")
+
+    TEST_DB_NAMES = [
+        {
+            "name": "neondb",
+            "owner": "cloud_admin",
+        },
+        {
+            "name": "subscriber_db",
+            "owner": "cloud_admin",
+        },
+        {
+            "name": "publisher_db",
+            "owner": "cloud_admin",
+        },
+    ]
+
+    # Update the spec.json file to create the databases
+    # and reconfigure the endpoint to apply the changes.
+    endpoint.respec_deep(
+        **{
+            "skip_pg_catalog_updates": False,
+            "cluster": {
+                "databases": TEST_DB_NAMES,
+            },
+        }
+    )
+    endpoint.reconfigure()
+
+    # connect to the publisher_db and create a publication
+    with endpoint.cursor(dbname="publisher_db") as cursor:
+        cursor.execute("CREATE PUBLICATION mypub FOR ALL TABLES")
+        cursor.execute("select pg_catalog.pg_create_logical_replication_slot('mysub', 'pgoutput');")
+        cursor.execute("CREATE TABLE t(a int)")
+        cursor.execute("INSERT INTO t VALUES (1)")
+
+    # connect to the subscriber_db and create a subscription
+    # Note that we need to create subscription with
+    connstr = endpoint.connstr(dbname="publisher_db").replace("'", "''")
+    with endpoint.cursor(dbname="subscriber_db") as cursor:
+        cursor.execute("CREATE TABLE t(a int)")
+        cursor.execute(
+            f"CREATE SUBSCRIPTION mysub CONNECTION '{connstr}' PUBLICATION mypub  WITH (create_slot = false) "
+        )
+
+    # wait for the subscription to be active
+    logical_replication_sync(
+        endpoint, endpoint, sub_dbname="subscriber_db", pub_dbname="publisher_db"
+    )
+
+    # Check that replication is working
+    with endpoint.cursor(dbname="subscriber_db") as cursor:
+        cursor.execute("SELECT * FROM t")
+        rows = cursor.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == 1
+
+    # drop the subscriber_db from the list
+    TEST_DB_NAMES_NEW = [
+        {
+            "name": "neondb",
+            "owner": "cloud_admin",
+        },
+        {
+            "name": "publisher_db",
+            "owner": "cloud_admin",
+        },
+    ]
+    # Update the spec.json file to drop the database
+    # and reconfigure the endpoint to apply the changes.
+    endpoint.respec_deep(
+        **{
+            "skip_pg_catalog_updates": False,
+            "cluster": {
+                "databases": TEST_DB_NAMES_NEW,
+            },
+            "delta_operations": [
+                {"action": "delete_db", "name": "subscriber_db"},
+                # also test the case when we try to delete a non-existent database
+                # shouldn't happen in normal operation,
+                # but can occur when failed operations are retried
+                {"action": "delete_db", "name": "nonexistent_db"},
+            ],
+        }
+    )
+
+    logging.info("Reconfiguring the endpoint to drop the subscriber_db")
+    endpoint.reconfigure()
+
+    # Check that the subscriber_db is dropped
+    with endpoint.cursor() as cursor:
+        cursor.execute("SELECT datname FROM pg_database WHERE datname = %s", ("subscriber_db",))
+        catalog_db = cursor.fetchone()
+        assert catalog_db is None
+
+    # Check that we can still connect to the publisher_db
+    with endpoint.cursor(dbname="publisher_db") as cursor:
+        cursor.execute("SELECT * FROM current_database()")
+        curr_db = cursor.fetchone()
+        assert curr_db is not None
+        assert len(curr_db) == 1
+        assert curr_db[0] == "publisher_db"
