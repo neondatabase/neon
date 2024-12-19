@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use fail::fail_point;
 use postgres::Client;
 use tracing::info;
 
@@ -65,10 +66,35 @@ impl<'m> MigrationRunner<'m> {
                 };
             }
 
+            // We use this fail point in order to check that failing in the
+            // middle of applying a series of migrations fails in an expected
+            // manner
+            {
+                let fail = (|| {
+                    fail_point!("compute-migration", |migration_id| {
+                        migration_id!(current_migration)
+                            == migration_id.unwrap().parse::<i64>().unwrap()
+                    });
+
+                    false
+                })();
+
+                if fail {
+                    return Err(anyhow::anyhow!(
+                        "the current migration was configured to fail because of a failpoint"
+                    ));
+                }
+            }
+
             let migration = self.migrations[current_migration];
 
             if migration.starts_with("-- SKIP") {
                 info!("Skipping migration id={}", migration_id!(current_migration));
+
+                // Even though we are skipping the migration, updating the
+                // migration ID should help keep logic easy to understand when
+                // trying to understand the state of a cluster.
+                self.update_migration_id(migration_id!(current_migration))?;
             } else {
                 info!(
                     "Running migration id={}:\n{}\n",
@@ -87,7 +113,6 @@ impl<'m> MigrationRunner<'m> {
                     )
                 })?;
 
-                // Migration IDs start at 1
                 self.update_migration_id(migration_id!(current_migration))?;
 
                 self.client
