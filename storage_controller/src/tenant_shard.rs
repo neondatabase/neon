@@ -951,9 +951,13 @@ impl TenantShard {
         // to our current location. See if we have a secondary location in the preferred location already: if not,
         // then create one.
         if let Some(replacement) = replacement {
-            // Reject candidate replacements that are not in our preferred AZ: it is not worth the effort
-            // to migrate to a better location when we know there will be some even better location in future (we assume
-            // that if there are no appropriate locations in our preferred AZ now, then there will be eventually).
+            // If we are currently in non-preferred AZ, then the scheduler might suggest a location that is better, but still
+            // not in our preferred AZ.  Migration has a cost in resources an impact to the workload, so we want to avoid doing
+            // multiple hops where we might go to some other AZ before eventually finding a suitable location in our preferred
+            // AZ: skip this optimization if it is not in our final, preferred AZ.
+            //
+            // This should be a transient state, there should always be capacity eventually in our preferred AZ (even if nodes
+            // there are too overloaded for scheduler to suggest them, more should be provisioned eventually).
             if self.preferred_az_id.is_some()
                 && scheduler.get_node_az(&replacement) != self.preferred_az_id
             {
@@ -961,6 +965,12 @@ impl TenantShard {
                     "Candidate node {replacement} is not in preferred AZ {:?}",
                     self.preferred_az_id
                 );
+
+                // This should only happen if our current location is not in the preferred AZ, otherwise
+                // [`Self::find_better_location`]` should have rejected any other location outside the preferred Az, because
+                // AZ is the highest priority part of NodeAttachmentSchedulingScore.
+                debug_assert!(scheduler.get_node_az(&attached) != self.preferred_az_id);
+
                 return None;
             }
 
