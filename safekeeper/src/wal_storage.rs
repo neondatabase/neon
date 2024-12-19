@@ -18,6 +18,7 @@ use std::cmp::{max, min};
 use std::future::Future;
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
+use std::sync::Arc;
 use tokio::fs::{self, remove_file, File, OpenOptions};
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -28,7 +29,7 @@ use crate::metrics::{
     time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS, WAL_STORAGE_OPERATION_SECONDS,
 };
 use crate::state::TimelinePersistentState;
-use crate::wal_backup::{read_object, remote_timeline_path};
+use crate::wal_backup::{remote_timeline_path, WalBackup};
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::XLogFileName;
 use pq_proto::SystemId;
@@ -640,6 +641,7 @@ pub struct WalReader {
 
     // S3 will be used to read WAL if LSN is not available locally
     enable_remote_read: bool,
+    wal_backup: Arc<WalBackup>,
 
     // We don't have WAL locally if LSN is less than local_start_lsn
     local_start_lsn: Lsn,
@@ -659,6 +661,7 @@ impl WalReader {
         state: &TimelinePersistentState,
         start_pos: Lsn,
         enable_remote_read: bool,
+        wal_backup: Arc<WalBackup>,
     ) -> Result<Self> {
         if state.server.wal_seg_size == 0 || state.local_start_lsn == Lsn(0) {
             bail!("state uninitialized, no data to read");
@@ -688,6 +691,7 @@ impl WalReader {
             pos: start_pos,
             wal_segment: None,
             enable_remote_read,
+            wal_backup,
             local_start_lsn: state.local_start_lsn,
             timeline_start_lsn: state.timeline_start_lsn,
             pg_version: state.server.pg_version / 10000,
@@ -808,7 +812,10 @@ impl WalReader {
         // Try to open remote file, if remote reads are enabled
         if self.enable_remote_read {
             let remote_wal_file_path = self.remote_path.join(&wal_file_name);
-            return read_object(&remote_wal_file_path, xlogoff as u64).await;
+            return self
+                .wal_backup
+                .read_object(&remote_wal_file_path, xlogoff as u64)
+                .await;
         }
 
         bail!("WAL segment is not found")

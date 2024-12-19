@@ -20,7 +20,6 @@ use crate::{
     },
     rate_limit::rand_duration,
     timeline_manager::{Manager, StateSnapshot},
-    wal_backup,
     wal_backup_partial::{self, PartialRemoteSegment},
     wal_storage::wal_file_paths,
 };
@@ -195,7 +194,7 @@ async fn redownload_partial_segment(
         remote_segfile, tmp_file
     );
 
-    let mut reader = wal_backup::read_object(&remote_segfile, 0).await?;
+    let mut reader = mgr.tli.wal_backup.read_object(&remote_segfile, 0).await?;
     let mut file = File::create(&tmp_file).await?;
 
     let actual_len = tokio::io::copy(&mut reader, &mut file).await?;
@@ -275,7 +274,7 @@ async fn do_validation(
 
     let remote_segfile = remote_segment_path(mgr, partial);
     let mut remote_reader: std::pin::Pin<Box<dyn AsyncRead + Send + Sync>> =
-        wal_backup::read_object(&remote_segfile, 0).await?;
+        mgr.tli.wal_backup.read_object(&remote_segfile, 0).await?;
 
     // remote segment should have bytes excatly up to `flush_lsn`
     let expected_remote_size = partial.flush_lsn.segment_offset(mgr.wal_seg_size);
