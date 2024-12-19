@@ -5,7 +5,6 @@ use futures::StreamExt;
 use pageserver_api::shard::ShardIdentity;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend};
 use postgres_ffi::waldecoder::WalDecodeError;
-use postgres_ffi::MAX_SEND_SIZE;
 use postgres_ffi::{get_current_timestamp, waldecoder::WalStreamDecoder};
 use pq_proto::{BeMessage, InterpretedWalRecordsBody, WalSndKeepAlive};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -17,13 +16,13 @@ use wal_decoder::models::{InterpretedWalRecord, InterpretedWalRecords};
 use wal_decoder::wire_format::ToWireFormat;
 
 use crate::send_wal::EndWatchView;
-use crate::wal_reader_stream::{WalBytes, WalReaderStreamBuilder};
+use crate::wal_reader_stream::{WalBytes, StreamingWalReader};
 
 /// Shard-aware interpreted record reader.
 /// This is used for sending WAL to the pageserver. Said WAL
 /// is pre-interpreted and filtered for the shard.
 pub(crate) struct InterpretedWalReader {
-    pub(crate) wal_stream_builder: WalReaderStreamBuilder,
+    pub(crate) wal_stream: StreamingWalReader,
     pub(crate) tx: tokio::sync::mpsc::Sender<Batch>,
     pub(crate) shard: ShardIdentity,
     pub(crate) pg_version: u32,
@@ -129,12 +128,8 @@ impl InterpretedWalReader {
     ///
     /// Err(CopyStreamHandlerEnd) is always returned; Result is used only for ?
     /// convenience.
-    pub(crate) async fn run(self) -> Result<(), InterpretedWalReaderError> {
-        let mut wal_decoder =
-            WalStreamDecoder::new(self.wal_stream_builder.start_pos(), self.pg_version);
-
-        let stream = self.wal_stream_builder.build(MAX_SEND_SIZE).await?;
-        let mut stream = std::pin::pin!(stream);
+    pub(crate) async fn run(mut self, start_pos: Lsn) -> Result<(), InterpretedWalReaderError> {
+        let mut wal_decoder = WalStreamDecoder::new(start_pos, self.pg_version);
 
         let mut keepalive_ticker = tokio::time::interval(Duration::from_secs(1));
         keepalive_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -148,7 +143,7 @@ impl InterpretedWalReader {
                 wal_start_lsn: _,
                 wal_end_lsn,
                 available_wal_end_lsn,
-            } = match stream.next().await {
+            } = match self.wal_stream.next().await {
                 Some(some) => some.map_err(InterpretedWalReaderError::ReadOrInterpret)?,
                 None => {
                     break;

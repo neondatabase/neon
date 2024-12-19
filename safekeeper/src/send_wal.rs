@@ -7,7 +7,7 @@ use crate::receive_wal::WalReceivers;
 use crate::safekeeper::TermLsn;
 use crate::send_interpreted_wal::{Batch, InterpretedWalReader, InterpretedWalSender};
 use crate::timeline::WalResidentTimeline;
-use crate::wal_reader_stream::WalReaderStreamBuilder;
+use crate::wal_reader_stream::StreamingWalReader;
 use crate::wal_storage::WalReader;
 use anyhow::{bail, Context as AnyhowContext};
 use bytes::Bytes;
@@ -477,19 +477,18 @@ impl SafekeeperPostgresHandler {
             } => {
                 let pg_version = tli.tli.get_state().await.1.server.pg_version / 10000;
                 let end_watch_view = end_watch.view();
-                let wal_stream_builder = WalReaderStreamBuilder {
-                    tli: tli.wal_residence_guard().await?,
+                let wal_stream = StreamingWalReader::new(
+                    tli.wal_residence_guard().await?,
+                    term,
                     start_pos,
                     end_pos,
-                    term,
                     end_watch,
-                    wal_sender_guard: ws_guard.clone(),
-                };
+                    MAX_SEND_SIZE);
 
                 let (tx, rx) = tokio::sync::mpsc::channel::<Batch>(2);
 
                 let reader = InterpretedWalReader {
-                    wal_stream_builder,
+                    wal_stream,
                     tx,
                     shard: self.shard.unwrap(),
                     pg_version,
@@ -506,7 +505,7 @@ impl SafekeeperPostgresHandler {
                 };
 
                 Either::Right(async {
-                    let (reader_res, sender_res) = tokio::join!(reader.run(), sender.run());
+                    let (reader_res, sender_res) = tokio::join!(reader.run(start_pos), sender.run());
                     if let Err(err) = reader_res {
                         tracing::error!("Interpreted WAL reader encountered error: {err}");
                     }
