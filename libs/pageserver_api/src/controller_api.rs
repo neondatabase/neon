@@ -387,6 +387,7 @@ pub struct SafekeeperDescribeResponse {
     pub port: i32,
     pub http_port: i32,
     pub availability_zone_id: String,
+    pub scheduling_policy: Option<String>,
 }
 
 #[cfg(test)]
