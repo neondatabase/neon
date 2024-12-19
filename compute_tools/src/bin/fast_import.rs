@@ -189,11 +189,25 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         format!("host=localhost port=5432 user={superuser} dbname=postgres");
     loop {
         let res = tokio_postgres::connect(&restore_pg_connstring, tokio_postgres::NoTls).await;
-        if res.is_ok() {
+        if let Ok((client, connection)) = res {
             info!("postgres is ready, could connect to it");
+
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("connection error: {}", e);
+                }
+            });
+
+            client
+                .execute("CREATE DATABASE neondb", &[])
+                .await
+                .context("create database neondb")?;
+
             break;
         }
     }
+
+    let restore_pg_connstring = restore_pg_connstring.replace("dbname=postgres", "dbname=neondb");
 
     //
     // Decrypt connection string
