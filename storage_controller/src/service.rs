@@ -6261,7 +6261,7 @@ impl Service {
                 // TODO: optimization calculations are relatively expensive: create some fast-path for
                 // the common idle case (avoiding the search on tenants that we have recently checked)
                 if let Some(optimization) =
-                    // If idle, maybe ptimize attachments: if a shard has a secondary location that is preferable to
+                    // If idle, maybe optimize attachments: if a shard has a secondary location that is preferable to
                     // its primary location based on soft constraints, cut it over.
                     shard.optimize_attachment(scheduler, &schedule_context)
                 {
