@@ -118,7 +118,13 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     });
     let global_timelines = get_global_timelines(&request);
     global_timelines
-        .create(ttid, server_info, request_data.commit_lsn, local_start_lsn)
+        .create(
+            ttid,
+            request_data.mconf,
+            server_info,
+            request_data.commit_lsn,
+            local_start_lsn,
+        )
         .await
         .map_err(ApiError::InternalServerError)?;
 

@@ -11,7 +11,7 @@ use utils::{
     pageserver_feedback::PageserverFeedback,
 };
 
-use crate::{ServerInfo, Term};
+use crate::{membership::Configuration, ServerInfo, Term};
 
 #[derive(Debug, Serialize)]
 pub struct SafekeeperStatus {
@@ -22,7 +22,7 @@ pub struct SafekeeperStatus {
 pub struct TimelineCreateRequest {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
-    pub peer_ids: Option<Vec<NodeId>>,
+    pub mconf: Configuration,
     pub pg_version: u32,
     pub system_id: Option<u64>,
     pub wal_seg_size: Option<u32>,
