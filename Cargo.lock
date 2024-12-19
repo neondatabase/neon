@@ -5709,6 +5709,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "const_format",
+ "pageserver_api",
  "postgres_ffi",
  "pq_proto",
  "serde",
