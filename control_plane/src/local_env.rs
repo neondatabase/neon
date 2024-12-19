@@ -180,7 +180,7 @@ impl NeonStorageControllerConf {
     const DEFAULT_MAX_WARMING_UP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
     // Very tight heartbeat interval to speed up tests
-    const DEFAULT_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+    const DEFAULT_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
 }
 
 impl Default for NeonStorageControllerConf {
