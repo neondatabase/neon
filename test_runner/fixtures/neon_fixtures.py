@@ -4600,6 +4600,8 @@ class StorageScrubber:
         ]
         args = base_args + args
 
+        log.info(f"Invoking scrubber command {args}")
+
         (output_path, stdout, status_code) = subprocess_capture(
             self.log_dir,
             args,
