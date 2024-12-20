@@ -1807,7 +1807,7 @@ impl RemoteTimelineClient {
     /// TODO: consider limiting the number of in-progress tasks, beyond what remote_storage does,
     /// to avoid tenants starving other tenants.
     fn launch_queued_tasks(self: &Arc<Self>, upload_queue: &mut UploadQueueInitialized) {
-        while let Some(mut next_op) = upload_queue.next_ready() {
+        while let Some((mut next_op, coalesced_ops)) = upload_queue.next_ready() {
             debug!("starting op: {next_op}");
 
             // Prepare upload.
@@ -1845,6 +1845,7 @@ impl RemoteTimelineClient {
             let task = Arc::new(UploadTask {
                 task_id: upload_task_id,
                 op: next_op,
+                coalesced_ops,
                 retries: AtomicU32::new(0),
             });
             upload_queue
@@ -2210,6 +2211,9 @@ impl RemoteTimelineClient {
         }
 
         self.metric_end(&task.op);
+        for coalesced_op in &task.coalesced_ops {
+            self.metric_end(coalesced_op);
+        }
     }
 
     fn metric_impl(
