@@ -36,23 +36,24 @@ impl InterpretedWalRecord {
         };
 
         let mut shard_records: HashMap<ShardIdentity, InterpretedWalRecord> =
-            HashMap::from_iter(shards.iter().map(|shard| {
-                (
-                    *shard,
-                    InterpretedWalRecord {
-                        metadata_record: None,
-                        batch: SerializedValueBatch {
-                            raw: Vec::new(),
-                            metadata: Default::default(),
-                            max_lsn: Lsn(0),
-                            len: 0,
-                        },
-                        next_record_lsn,
-                        flush_uncommitted,
-                        xid,
+            HashMap::with_capacity(shards.len());
+        for shard in shards {
+            shard_records.insert(
+                *shard,
+                InterpretedWalRecord {
+                    metadata_record: None,
+                    batch: SerializedValueBatch {
+                        raw: Vec::new(),
+                        metadata: Default::default(),
+                        max_lsn: Lsn(0),
+                        len: 0,
                     },
-                )
-            }));
+                    next_record_lsn,
+                    flush_uncommitted,
+                    xid,
+                },
+            );
+        }
 
         MetadataRecord::from_decoded_filtered(
             &decoded,
