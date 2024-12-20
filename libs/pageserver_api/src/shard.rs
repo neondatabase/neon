@@ -31,6 +31,8 @@
 //! - In a tenant with 4 shards, each shard has ShardCount(N), ShardNumber(i) where i in 0..N-1 (inclusive),
 //!   and their slugs are 0004, 0104, 0204, and 0304.
 
+use std::hash::{Hash, Hasher};
+
 use crate::{key::Key, models::ShardParameters};
 use postgres_ffi::relfile_utils::INIT_FORKNUM;
 use serde::{Deserialize, Serialize};
@@ -40,7 +42,7 @@ pub use ::utils::shard::*;
 
 /// The ShardIdentity contains enough information to map a [`Key`] to a [`ShardNumber`],
 /// and to check whether that [`ShardNumber`] is the same as the current shard.
-#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub struct ShardIdentity {
     pub number: ShardNumber,
     pub count: ShardCount,
@@ -48,8 +50,18 @@ pub struct ShardIdentity {
     layout: ShardLayout,
 }
 
+/// Hash implementation
+///
+/// The stripe size cannot change dinamically, so it can be ignored for efficiency reasons.
+impl Hash for ShardIdentity {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.number.0.hash(state);
+        self.count.0.hash(state);
+    }
+}
+
 /// Stripe size in number of pages
-#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub struct ShardStripeSize(pub u32);
 
 impl Default for ShardStripeSize {
