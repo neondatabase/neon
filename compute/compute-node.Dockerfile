@@ -1583,4 +1583,5 @@ RUN set -ex; \
 
 ENV LANG=en_US.utf8
 USER postgres
+ENV LD_LIBRARY_PATH="/usr/local/lib/:$LD_LIBRARY_PATH"
 ENTRYPOINT ["/usr/local/bin/compute_ctl"]
