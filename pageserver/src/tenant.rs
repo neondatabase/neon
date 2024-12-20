@@ -4483,7 +4483,7 @@ impl Tenant {
             HashMap::with_capacity(timelines.len());
 
         // Ensures all timelines use the same start time when computing the time cutoff.
-        let now = SystemTime::now();
+        let now_ts_for_pitr_calc = SystemTime::now();
         for timeline in timelines.iter() {
             let cutoff = timeline
                 .get_last_record_lsn()
@@ -4491,7 +4491,7 @@ impl Tenant {
                 .unwrap_or(Lsn(0));
 
             let cutoffs = timeline
-                .find_gc_cutoffs(now, cutoff, pitr, cancel, ctx)
+                .find_gc_cutoffs(now_ts_for_pitr_calc, cutoff, pitr, cancel, ctx)
                 .await?;
             let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
             assert!(old.is_none());
