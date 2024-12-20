@@ -2163,7 +2163,7 @@ mod tests {
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
                 let interpreted = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
-                    &vec![*modification.tline.get_shard_identity()],
+                    &[*modification.tline.get_shard_identity()],
                     lsn,
                     modification.tline.pg_version,
                 )
