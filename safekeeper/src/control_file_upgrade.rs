@@ -257,7 +257,7 @@ impl PersistedPeerInfo {
     pub fn new() -> Self {
         Self {
             backup_lsn: Lsn::INVALID,
-            term: safekeeper_api::INVALID_TERM,
+            term: safekeeper_api::INITIAL_TERM,
             flush_lsn: Lsn(0),
             commit_lsn: Lsn(0),
         }
@@ -515,7 +515,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             peer_horizon_lsn: oldstate.peer_horizon_lsn,
             remote_consistent_lsn: oldstate.remote_consistent_lsn,
             partial_backup: oldstate.partial_backup,
-            eviction_state: EvictionState::Present,
+            eviction_state: oldstate.eviction_state,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
     }

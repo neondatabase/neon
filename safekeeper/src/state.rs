@@ -6,7 +6,7 @@ use std::{cmp::max, ops::Deref, time::SystemTime};
 use anyhow::{bail, Result};
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::{
-    membership::Configuration, models::TimelineTermBumpResponse, ServerInfo, Term,
+    membership::Configuration, models::TimelineTermBumpResponse, ServerInfo, Term, INITIAL_TERM,
 };
 use serde::{Deserialize, Serialize};
 use utils::{
@@ -16,7 +16,7 @@ use utils::{
 
 use crate::{
     control_file,
-    safekeeper::{AcceptorState, PgUuid, TermHistory, UNKNOWN_SERVER_VERSION},
+    safekeeper::{AcceptorState, PgUuid, TermHistory, TermLsn, UNKNOWN_SERVER_VERSION},
     timeline::TimelineError,
     wal_backup_partial::{self},
 };
@@ -84,12 +84,14 @@ pub enum EvictionState {
 }
 
 impl TimelinePersistentState {
+    /// commit_lsn is the same as start_lsn in the normal creaiton; see
+    /// `TimelineCreateRequest` comments.`
     pub fn new(
         ttid: &TenantTimelineId,
         mconf: Configuration,
         server_info: ServerInfo,
+        start_lsn: Lsn,
         commit_lsn: Lsn,
-        local_start_lsn: Lsn,
     ) -> anyhow::Result<TimelinePersistentState> {
         if server_info.wal_seg_size == 0 {
             bail!(TimelineError::UninitializedWalSegSize(*ttid));
@@ -99,29 +101,43 @@ impl TimelinePersistentState {
             bail!(TimelineError::UninitialinzedPgVersion(*ttid));
         }
 
-        if commit_lsn < local_start_lsn {
+        if commit_lsn < start_lsn {
             bail!(
-                "commit_lsn {} is smaller than local_start_lsn {}",
+                "commit_lsn {} is smaller than start_lsn {}",
                 commit_lsn,
-                local_start_lsn
+                start_lsn
             );
         }
+
+        // If we are given with init LSN, initialize term history with it. It
+        // ensures that walproposer always must be able to find a common point
+        // in histories; if it can't something is corrupted. Not having LSN here
+        // is so far left for legacy case where timeline is created by compute
+        // and LSN during creation is not known yet.
+        let term_history = if commit_lsn != Lsn::INVALID {
+            TermHistory(vec![TermLsn {
+                term: INITIAL_TERM,
+                lsn: start_lsn,
+            }])
+        } else {
+            TermHistory::empty()
+        };
 
         Ok(TimelinePersistentState {
             tenant_id: ttid.tenant_id,
             timeline_id: ttid.timeline_id,
             mconf,
             acceptor_state: AcceptorState {
-                term: 0,
-                term_history: TermHistory::empty(),
+                term: INITIAL_TERM,
+                term_history,
             },
             server: server_info,
             proposer_uuid: [0; 16],
-            timeline_start_lsn: Lsn(0),
-            local_start_lsn,
+            timeline_start_lsn: start_lsn,
+            local_start_lsn: start_lsn,
             commit_lsn,
-            backup_lsn: local_start_lsn,
-            peer_horizon_lsn: local_start_lsn,
+            backup_lsn: start_lsn,
+            peer_horizon_lsn: start_lsn,
             remote_consistent_lsn: Lsn(0),
             partial_backup: wal_backup_partial::State::default(),
             eviction_state: EvictionState::Present,

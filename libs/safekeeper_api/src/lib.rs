@@ -10,7 +10,9 @@ pub mod models;
 
 /// Consensus logical timestamp. Note: it is a part of sk control file.
 pub type Term = u64;
-pub const INVALID_TERM: Term = 0;
+/// With this term timeline is created initially. It
+/// is a normal term except wp is never elected with it.
+pub const INITIAL_TERM: Term = 0;
 
 /// Information about Postgres. Safekeeper gets it once and then verifies all
 /// further connections from computes match. Note: it is a part of sk control

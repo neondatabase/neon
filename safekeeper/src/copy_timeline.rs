@@ -150,8 +150,8 @@ pub async fn handle_request(
         &request.destination_ttid,
         Configuration::empty(),
         state.server.clone(),
-        request.until_lsn,
         start_lsn,
+        request.until_lsn,
     )?;
     new_state.timeline_start_lsn = start_lsn;
     new_state.peer_horizon_lsn = request.until_lsn;

@@ -7,7 +7,6 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_ffi::{TimeLineID, MAX_SEND_SIZE};
 use safekeeper_api::models::HotStandbyFeedback;
 use safekeeper_api::Term;
-use safekeeper_api::INVALID_TERM;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
@@ -980,7 +979,7 @@ where
 
     /// Update commit_lsn from peer safekeeper data.
     pub async fn record_safekeeper_info(&mut self, sk_info: &SafekeeperTimelineInfo) -> Result<()> {
-        if (Lsn(sk_info.commit_lsn) != Lsn::INVALID) && (sk_info.last_log_term != INVALID_TERM) {
+        if Lsn(sk_info.commit_lsn) != Lsn::INVALID {
             // Note: the check is too restrictive, generally we can update local
             // commit_lsn if our history matches (is part of) history of advanced
             // commit_lsn provider.
@@ -1291,7 +1290,6 @@ mod tests {
 
     #[test]
     fn test_sk_state_bincode_serde_roundtrip() {
-        use utils::Hex;
         let tenant_id = TenantId::from_str("cf0480929707ee75372337efaa5ecf96").unwrap();
         let timeline_id = TimelineId::from_str("112ded66422aa5e953e5440fa5427ac4").unwrap();
         let state = TimelinePersistentState {
