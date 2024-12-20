@@ -677,6 +677,7 @@ impl PageServerHandler {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn pagestream_read_message<IO>(
         pgb: &mut PostgresBackendReader<IO>,
         tenant_id: TenantId,
