@@ -22,6 +22,8 @@ use utils::lsn::Lsn;
 
 use pageserver_api::key::Key;
 
+use crate::models::InterpretedWalRecord;
+
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 
 /// Accompanying metadata for the batch
@@ -136,25 +138,15 @@ impl SerializedValueBatch {
     /// but absent from the raw buffer [`SerializedValueBatch::raw`]).
     pub(crate) fn from_decoded_filtered(
         decoded: DecodedWALRecord,
-        shards: &[ShardIdentity],
+        shard_records: &mut HashMap<ShardIdentity, InterpretedWalRecord>,
         next_record_lsn: Lsn,
         pg_version: u32,
-    ) -> anyhow::Result<HashMap<ShardIdentity, SerializedValueBatch>> {
+    ) -> anyhow::Result<()> {
         // First determine how big the buffers need to be and allocate it up-front.
         // This duplicates some of the work below, but it's empirically much faster.
-        let mut shard_batches = HashMap::with_capacity(shards.len());
-        for shard in shards {
-            let buf =
-                Vec::<u8>::with_capacity(Self::estimate_buffer_size(&decoded, shard, pg_version));
-            shard_batches.insert(
-                *shard,
-                SerializedValueBatch {
-                    raw: buf,
-                    metadata: Default::default(),
-                    max_lsn: Lsn(0),
-                    len: 0,
-                },
-            );
+        for (shard, record) in shard_records.iter_mut() {
+            let estimate = Self::estimate_buffer_size(&decoded, shard, pg_version);
+            record.batch.raw = Vec::with_capacity(estimate);
         }
 
         for blk in decoded.blocks.iter() {
@@ -175,14 +167,13 @@ impl SerializedValueBatch {
                 );
             }
 
-            for shard in shards {
-                let mut batch = shard_batches.get_mut(shard).expect("inserted in prologue");
+            for (shard, record) in shard_records.iter_mut() {
                 let SerializedValueBatch {
                     raw,
                     metadata,
                     max_lsn,
                     len,
-                } = &mut batch;
+                } = &mut record.batch;
 
                 let key_is_local = shard.is_key_local(&key);
 
@@ -262,21 +253,13 @@ impl SerializedValueBatch {
         }
 
         if cfg!(any(debug_assertions, test)) {
-            use std::collections::HashSet;
-
             // Validate that the batches are correct
-            for batch in shard_batches.values() {
-                batch.validate_lsn_order();
+            for record in shard_records.values() {
+                record.batch.validate_lsn_order();
             }
-
-            // Validate we produced batches for each requested shard
-            assert_eq!(
-                shard_batches.keys().collect::<HashSet<_>>(),
-                shards.iter().collect::<HashSet<_>>()
-            );
         }
 
-        Ok(shard_batches)
+        Ok(())
     }
 
     /// Look into the decoded PG WAL record and determine

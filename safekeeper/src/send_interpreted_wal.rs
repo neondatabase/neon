@@ -83,17 +83,15 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
 
 
                         // Deserialize and interpret WAL record
-                        let (shard_id, interpreted) = InterpretedWalRecord::from_bytes_filtered(
+                        let interpreted = InterpretedWalRecord::from_bytes_filtered(
                             recdata,
                             &shard,
                             next_record_lsn,
                             self.pg_version,
                         )
                         .with_context(|| "Failed to interpret WAL")?
-                        .pop()
+                        .remove(&self.shard)
                         .unwrap();
-
-                        assert_eq!(shard_id, self.shard);
 
                         if !interpreted.is_empty() {
                             records.push(interpreted);

@@ -314,16 +314,14 @@ async fn import_wal(
         let mut modification = tline.begin_modification(last_lsn);
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                let (got_shard, interpreted) = InterpretedWalRecord::from_bytes_filtered(
+                let interpreted = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
                     &shard,
                     lsn,
                     tline.pg_version,
                 )?
-                .pop()
+                .remove(tline.get_shard_identity())
                 .unwrap();
-
-                assert_eq!(got_shard, *tline.get_shard_identity());
 
                 walingest
                     .ingest_record(interpreted, &mut modification, ctx)
@@ -464,16 +462,14 @@ pub async fn import_wal_from_tar(
         let mut modification = tline.begin_modification(last_lsn);
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                let (got_shard, interpreted) = InterpretedWalRecord::from_bytes_filtered(
+                let interpreted = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
                     &shard,
                     lsn,
                     tline.pg_version,
                 )?
-                .pop()
+                .remove(tline.get_shard_identity())
                 .unwrap();
-
-                assert_eq!(got_shard, *tline.get_shard_identity());
 
                 walingest
                     .ingest_record(interpreted, &mut modification, ctx)

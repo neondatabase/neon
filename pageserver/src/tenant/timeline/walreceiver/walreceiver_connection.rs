@@ -496,16 +496,14 @@ pub(super) async fn handle_walreceiver_connection(
                         }
 
                         // Deserialize and interpret WAL record
-                        let (got_shard, interpreted) = InterpretedWalRecord::from_bytes_filtered(
+                        let interpreted = InterpretedWalRecord::from_bytes_filtered(
                             recdata,
                             &shard,
                             next_record_lsn,
                             modification.tline.pg_version,
                         )?
-                        .pop()
+                        .remove(timeline.get_shard_identity())
                         .unwrap();
-
-                        assert_eq!(got_shard, *modification.tline.get_shard_identity());
 
                         if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes)
                             && uncommitted_records > 0

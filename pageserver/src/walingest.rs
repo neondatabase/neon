@@ -2161,17 +2161,15 @@ mod tests {
         for chunk in bytes[xlogoff..].chunks(50) {
             decoder.feed_bytes(chunk);
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
-                let (got_shard, interpreted) = InterpretedWalRecord::from_bytes_filtered(
+                let interpreted = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
                     &vec![*modification.tline.get_shard_identity()],
                     lsn,
                     modification.tline.pg_version,
                 )
                 .unwrap()
-                .pop()
+                .remove(modification.tline.get_shard_identity())
                 .unwrap();
-
-                assert_eq!(got_shard, *modification.tline.get_shard_identity());
 
                 walingest
                     .ingest_record(interpreted, &mut modification, &ctx)
