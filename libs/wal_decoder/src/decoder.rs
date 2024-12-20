@@ -19,7 +19,7 @@ impl InterpretedWalRecord {
     /// the keys that are being written as that is enough for updating relation sizes.
     pub fn from_bytes_filtered(
         buf: Bytes,
-        shards: &Vec<ShardIdentity>,
+        shards: &[ShardIdentity],
         next_record_lsn: Lsn,
         pg_version: u32,
     ) -> anyhow::Result<Vec<(ShardIdentity, InterpretedWalRecord)>> {
@@ -66,7 +66,7 @@ impl MetadataRecord {
     /// records are broadcast to all shards for simplicity, but this should be improved.
     fn from_decoded_filtered(
         decoded: &DecodedWALRecord,
-        shards: &Vec<ShardIdentity>,
+        shards: &[ShardIdentity],
         next_record_lsn: Lsn,
         pg_version: u32,
     ) -> anyhow::Result<Vec<(ShardIdentity, Option<MetadataRecord>)>> {

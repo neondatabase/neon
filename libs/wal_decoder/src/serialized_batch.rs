@@ -136,7 +136,7 @@ impl SerializedValueBatch {
     /// but absent from the raw buffer [`SerializedValueBatch::raw`]).
     pub(crate) fn from_decoded_filtered(
         decoded: DecodedWALRecord,
-        shards: &Vec<ShardIdentity>,
+        shards: &[ShardIdentity],
         next_record_lsn: Lsn,
         pg_version: u32,
     ) -> anyhow::Result<HashMap<ShardIdentity, SerializedValueBatch>> {
