@@ -1801,7 +1801,7 @@ impl Timeline {
 
     /// Get a watermark for gc-compaction, that is the lowest LSN that we can use as the `gc_horizon` for
     /// the compaction algorithm. It is min(space_cutoff, time_cutoff, latest_gc_cutoff, standby_horizon).
-    /// Leases and retain_lsns are considered in the gc-compaction job itself so we don't need to compute it
+    /// Leases and retain_lsns are considered in the gc-compaction job itself so we don't need to account for them
     /// here.
     pub(crate) fn get_gc_compaction_watermark(self: &Arc<Self>) -> Lsn {
         let gc_cutoff_lsn = {
