@@ -249,7 +249,7 @@ impl IoConcurrency {
                 trace!(task_id, "spawning");
                 tokio::spawn(async move {
                     trace!("start");
-                    scopeguard::defer!({ trace!("end") });
+                    scopeguard::defer!{ trace!("end") };
                     type IosRx = tokio::sync::mpsc::UnboundedReceiver<IoFuture>;
                     type BarrierReqRx =
                         tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<()>>;
@@ -426,7 +426,7 @@ impl IoConcurrency {
         let io_num = IO_NUM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let fut = async move {
             trace!("start");
-            scopeguard::defer!({ trace!("end") });
+            scopeguard::defer!(trace!("end"));
             fut.await
         }
         .instrument(tracing::trace_span!("spawned_io", %io_num));

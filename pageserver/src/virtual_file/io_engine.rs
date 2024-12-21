@@ -15,7 +15,6 @@ pub(super) mod tokio_epoll_uring_ext;
 use tokio_epoll_uring::IoBuf;
 use tracing::Instrument;
 
-use crate::log_if_slow;
 
 pub(crate) use super::api::IoEngineKind;
 #[derive(Clone, Copy)]
@@ -112,7 +111,6 @@ pub(crate) fn get() -> IoEngine {
 use std::{
     os::unix::prelude::FileExt,
     sync::atomic::{AtomicU8, Ordering},
-    time::Duration,
 };
 
 use super::{
