@@ -3454,7 +3454,6 @@ impl Timeline {
                         )));
                     }
                 }
-
             }
         }
         trace!("futures completed");

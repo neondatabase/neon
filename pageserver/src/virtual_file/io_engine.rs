@@ -111,7 +111,8 @@ pub(crate) fn get() -> IoEngine {
 
 use std::{
     os::unix::prelude::FileExt,
-    sync::atomic::{AtomicU8, Ordering}, time::Duration,
+    sync::atomic::{AtomicU8, Ordering},
+    time::Duration,
 };
 
 use super::{

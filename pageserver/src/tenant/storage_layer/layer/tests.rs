@@ -9,7 +9,10 @@ use utils::{
 
 use super::failpoints::{Failpoint, FailpointKind};
 use super::*;
-use crate::{context::DownloadBehavior, tenant::storage_layer::{IoConcurrency, LayerVisibilityHint}};
+use crate::{
+    context::DownloadBehavior,
+    tenant::storage_layer::{IoConcurrency, LayerVisibilityHint},
+};
 use crate::{task_mgr::TaskKind, tenant::harness::TenantHarness};
 
 /// Used in tests to advance a future to wanted await point, and not futher.

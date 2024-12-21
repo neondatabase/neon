@@ -29,13 +29,17 @@ use std::{
     io,
     iter::Rev,
     ops::{Range, RangeInclusive},
-    result, time::Duration,
+    result,
+    time::Duration,
 };
 use thiserror::Error;
 use tracing::error;
 
 use crate::{
-    context::{DownloadBehavior, RequestContext}, log_if_slow, task_mgr::TaskKind, tenant::block_io::{BlockReader, BlockWriter}
+    context::{DownloadBehavior, RequestContext},
+    log_if_slow,
+    task_mgr::TaskKind,
+    tenant::block_io::{BlockReader, BlockWriter},
 };
 
 // The maximum size of a value stored in the B-tree. 5 bytes is enough currently.
