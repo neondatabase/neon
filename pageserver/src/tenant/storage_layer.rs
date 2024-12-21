@@ -172,7 +172,6 @@ pub(crate) struct ValuesReconstructState {
 /// we've built enough confidence.
 pub(crate) enum IoConcurrency {
     Serial,
-    Parallel,
     FuturesUnordered {
         ios_tx: tokio::sync::mpsc::UnboundedSender<IoFuture>,
         barriers_tx: tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
@@ -184,7 +183,6 @@ type IoFuture = Pin<Box<dyn Send + Future<Output = ()>>>;
 
 pub(crate) enum SelectedIoConcurrency {
     Serial,
-    Parallel,
     FuturesUnordered(GateGuard),
 }
 
@@ -192,7 +190,6 @@ impl std::fmt::Debug for IoConcurrency {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IoConcurrency::Serial => write!(f, "Serial"),
-            IoConcurrency::Parallel => write!(f, "Parallel"),
             IoConcurrency::FuturesUnordered { .. } => write!(f, "FuturesUnordered"),
         }
     }
@@ -202,7 +199,6 @@ impl std::fmt::Debug for SelectedIoConcurrency {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SelectedIoConcurrency::Serial => write!(f, "Serial"),
-            SelectedIoConcurrency::Parallel => write!(f, "Parallel"),
             SelectedIoConcurrency::FuturesUnordered(_) => write!(f, "FuturesUnordered"),
         }
     }
@@ -220,7 +216,6 @@ impl IoConcurrency {
                 .unwrap_or_else(|_| "serial".to_string())
         });
         let selected = match IO_CONCURRENCY.as_str() {
-            "parallel" => SelectedIoConcurrency::Parallel, // TODO: clonable gateguard, pass through Arc<Gate>? ?
             "serial" => SelectedIoConcurrency::Serial,
             "futures-unordered" => SelectedIoConcurrency::FuturesUnordered(gate_guard),
             x => panic!(
@@ -234,7 +229,6 @@ impl IoConcurrency {
     pub(crate) fn spawn(io_concurrency: SelectedIoConcurrency) -> Self {
         match io_concurrency {
             SelectedIoConcurrency::Serial => IoConcurrency::Serial,
-            SelectedIoConcurrency::Parallel => IoConcurrency::Parallel,
             SelectedIoConcurrency::FuturesUnordered(gate_guard) => {
                 let (barriers_tx, barrier_rx) = tokio::sync::mpsc::unbounded_channel();
                 let (ios_tx, ios_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -405,7 +399,6 @@ impl IoConcurrency {
     pub(crate) fn clone(&self) -> Self {
         match self {
             IoConcurrency::Serial => IoConcurrency::Serial,
-            IoConcurrency::Parallel => IoConcurrency::Parallel,
             IoConcurrency::FuturesUnordered {
                 ios_tx,
                 barriers_tx,
@@ -433,9 +426,6 @@ impl IoConcurrency {
         tracing::trace!(%io_num, "spawning IO");
         match self {
             IoConcurrency::Serial => fut.await,
-            IoConcurrency::Parallel => {
-                tokio::spawn(fut);
-            }
             IoConcurrency::FuturesUnordered { ios_tx, .. } => {
                 let mut fut = Box::pin(fut);
                 // opportunistic poll to give some boost (unproven if it helps, but sounds like a good idea)

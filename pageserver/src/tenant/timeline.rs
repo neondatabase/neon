@@ -3435,7 +3435,6 @@ impl Timeline {
         trace!("waiting for futures to complete");
         match &reconstruct_state.io_concurrency {
             super::storage_layer::IoConcurrency::Serial => (),
-            super::storage_layer::IoConcurrency::Parallel => (),
             super::storage_layer::IoConcurrency::FuturesUnordered { barriers_tx, .. } => {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 match barriers_tx.send(tx) {
@@ -5779,8 +5778,6 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<(Key, Bytes)>> {
-        use super::storage_layer::SelectedIoConcurrency;
-
         let mut all_data = Vec::new();
         let guard = self.layers.read().await;
         for layer in guard.layer_map()?.iter_historic_layers() {

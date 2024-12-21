@@ -6556,22 +6556,20 @@ mod tests {
         // Pick a big LSN such that we query over all the changes.
         let reads_lsn = Lsn(u64::MAX - 1);
 
-        let io_concurrency_levels = vec![
-            SelectedIoConcurrency::Serial,
-            SelectedIoConcurrency::Parallel,
+        let gate = Gate::default();
+        let io_concurrency_levels: Vec<Box<dyn Fn() -> SelectedIoConcurrency>> = vec![
+            Box::new(|| SelectedIoConcurrency::Serial),
+            Box::new(|| SelectedIoConcurrency::FuturesUnordered(gate.enter().unwrap())),
         ];
 
-        for io_concurrency_level in io_concurrency_levels {
+        for (io_concurrency_level_idx, io_concurrency_level) in
+            io_concurrency_levels.into_iter().enumerate()
+        {
             for read in reads.clone() {
-                // The type is not Copy() because FuturesUnordered variant is not Copy.
-                let io_concurrency_level = match io_concurrency_level {
-                    SelectedIoConcurrency::Serial => SelectedIoConcurrency::Serial,
-                    SelectedIoConcurrency::Parallel => SelectedIoConcurrency::Parallel,
-                    SelectedIoConcurrency::FuturesUnordered(_) => unreachable!("not used"),
-                };
+                let io_concurrency_level = io_concurrency_level();
+
                 info!(
-                    "Doing vectored read on {:?} with IO concurrency {:?}",
-                    read, io_concurrency_level
+                    "Doing vectored read on {read:?} with IO concurrency {io_concurrency_level_idx:?}",
                 );
 
                 let vectored_res = tline

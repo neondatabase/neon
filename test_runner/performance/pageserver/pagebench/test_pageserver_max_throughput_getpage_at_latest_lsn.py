@@ -67,7 +67,7 @@ def test_pageserver_characterize_throughput_with_n_tenants(
 # which by default uses 64 connections
 @pytest.mark.parametrize("n_clients", [1])
 @pytest.mark.parametrize("n_tenants", [1])
-@pytest.mark.parametrize("io_concurrency", ["serial", "parallel", "futures-unordered"])
+@pytest.mark.parametrize("io_concurrency", ["serial", "futures-unordered"])
 @pytest.mark.parametrize("ps_direct_io_mode", ["direct"])
 @pytest.mark.timeout(2400)
 @skip_on_ci(

@@ -15,7 +15,6 @@ pub(super) mod tokio_epoll_uring_ext;
 use tokio_epoll_uring::IoBuf;
 use tracing::Instrument;
 
-
 pub(crate) use super::api::IoEngineKind;
 #[derive(Clone, Copy)]
 #[repr(u8)]
