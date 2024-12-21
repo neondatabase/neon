@@ -39,7 +39,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::sync::gate::Gate;
+use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 use utils::{
     auth::{Claims, Scope, SwappableJwtAuth},
@@ -91,7 +91,7 @@ pub struct Listener {
 pub struct Connections {
     cancel: CancellationToken,
     tasks: tokio::task::JoinSet<ConnectionHandlerResult>,
-    gate: Arc<Gate>,
+    gate: Gate,
 }
 
 pub fn spawn(
@@ -101,7 +101,6 @@ pub fn spawn(
     tcp_listener: tokio::net::TcpListener,
 ) -> Listener {
     let cancel = CancellationToken::new();
-    let gate = Arc::new(Gate::default());
     let libpq_ctx = RequestContext::todo_child(
         TaskKind::LibpqEndpointListener,
         // listener task shouldn't need to download anything. (We will
@@ -120,7 +119,6 @@ pub fn spawn(
             conf.page_service_pipelining.clone(),
             libpq_ctx,
             cancel.clone(),
-            gate,
         )
         .map(anyhow::Ok),
     ));
@@ -175,12 +173,17 @@ pub async fn libpq_listener_main(
     pipelining_config: PageServicePipeliningConfig,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
-    gate: Arc<Gate>,
 ) -> Connections {
     let connections_cancel = CancellationToken::new();
+    let connections_gate = Gate::default();
     let mut connection_handler_tasks = tokio::task::JoinSet::default();
 
     loop {
+        let gate_guard = match connections_gate.enter() {
+            Ok(guard) => guard,
+            Err(_) => break,
+        };
+
         let accepted = tokio::select! {
             biased;
             _ = listener_cancel.cancelled() => break,
@@ -207,7 +210,7 @@ pub async fn libpq_listener_main(
                     pipelining_config.clone(),
                     connection_ctx,
                     connections_cancel.child_token(),
-                    Arc::clone(&gate),
+                    gate_guard,
                 ));
             }
             Err(err) => {
@@ -222,7 +225,7 @@ pub async fn libpq_listener_main(
     Connections {
         cancel: connections_cancel,
         tasks: connection_handler_tasks,
-        gate,
+        gate: connections_gate,
     }
 }
 
@@ -237,7 +240,7 @@ async fn page_service_conn_main(
     pipelining_config: PageServicePipeliningConfig,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
-    gate: Arc<Gate>,
+    gate_guard: GateGuard,
 ) -> ConnectionHandlerResult {
     let _guard = LIVE_CONNECTIONS
         .with_label_values(&["page_service"])
@@ -292,7 +295,7 @@ async fn page_service_conn_main(
         pipelining_config,
         connection_ctx,
         cancel.clone(),
-        gate,
+        gate_guard,
     );
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
@@ -340,7 +343,7 @@ struct PageServerHandler {
 
     pipelining_config: PageServicePipeliningConfig,
 
-    gate: Arc<Gate>,
+    gate_guard: GateGuard,
 }
 
 struct TimelineHandles {
@@ -633,7 +636,7 @@ impl PageServerHandler {
         pipelining_config: PageServicePipeliningConfig,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
-        gate: Arc<Gate>,
+        gate_guard: GateGuard,
     ) -> Self {
         PageServerHandler {
             auth,
@@ -642,7 +645,7 @@ impl PageServerHandler {
             timeline_handles: Some(TimelineHandles::new(tenant_manager)),
             cancel,
             pipelining_config,
-            gate,
+            gate_guard,
         }
     }
 
@@ -1161,7 +1164,7 @@ impl PageServerHandler {
             }
         }
 
-        let io_concurrency = IoConcurrency::spawn_from_env(match self.gate.enter() {
+        let io_concurrency = IoConcurrency::spawn_from_env(match self.gate_guard.try_clone() {
             Ok(guard) => guard,
             Err(_) => {
                 info!("shutdown request received in page handler");
