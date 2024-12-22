@@ -12,7 +12,7 @@ use uuid::Uuid;
 use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::cache::project_info::ProjectInfoCache;
 use crate::cancellation::{CancelMap, CancellationHandler};
-use crate::intern::{ProjectIdInt, RoleNameInt};
+use crate::intern::{AccountIdInt, ProjectIdInt, RoleNameInt};
 use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
 
 const CPLANE_CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
@@ -40,6 +40,27 @@ pub(crate) enum Notification {
         allowed_ips_update: AllowedIpsUpdate,
     },
     #[serde(
+        rename = "/allowed_vpc_endpoint_ids_updated_for_projects",
+        deserialize_with = "deserialize_json_string"
+    )]
+    AllowedVpcEndpointIdsUpdateForProjects {
+        allowed_vpc_endpoint_ids_update_for_projects: AllowedVpcEndpointIdsUpdateForProjects,
+    },
+    #[serde(
+        rename = "/allowed_vpc_endpoint_ids_updated_for_org",
+        deserialize_with = "deserialize_json_string"
+    )]
+    AllowedVpcEndpointIdsUpdateForAllProjectsInOrg {
+        allowed_vpc_endpoint_ids_update_for_org: AllowedVpcEndpointIdsUpdateForAllProjectsInOrg,
+    },
+    #[serde(
+        rename = "/block_public_or_vpc_access_updated",
+        deserialize_with = "deserialize_json_string"
+    )]
+    BlockPublicOrVpcAccessUpdate {
+        block_public_or_vpc_access_update: BlockPublicOrVpcAccessUpdate,
+    },
+    #[serde(
         rename = "/password_updated",
         deserialize_with = "deserialize_json_string"
     )]
@@ -51,6 +72,22 @@ pub(crate) enum Notification {
 pub(crate) struct AllowedIpsUpdate {
     project_id: ProjectIdInt,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub(crate) struct AllowedVpcEndpointIdsUpdateForProjects {
+    project_ids: Vec<ProjectIdInt>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub(crate) struct AllowedVpcEndpointIdsUpdateForAllProjectsInOrg {
+    account_id: AccountIdInt,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub(crate) struct BlockPublicOrVpcAccessUpdate {
+    project_id: ProjectIdInt,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub(crate) struct PasswordUpdate {
     project_id: ProjectIdInt,
@@ -164,7 +201,11 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                     }
                 }
             }
-            Notification::AllowedIpsUpdate { .. } | Notification::PasswordUpdate { .. } => {
+            Notification::AllowedIpsUpdate { .. }
+            | Notification::PasswordUpdate { .. }
+            | Notification::AllowedVpcEndpointIdsUpdateForProjects { .. }
+            | Notification::AllowedVpcEndpointIdsUpdateForAllProjectsInOrg { .. }
+            | Notification::BlockPublicOrVpcAccessUpdate { .. } => {
                 invalidate_cache(self.cache.clone(), msg.clone());
                 if matches!(msg, Notification::AllowedIpsUpdate { .. }) {
                     Metrics::get()
@@ -176,6 +217,27 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                         .proxy
                         .redis_events_count
                         .inc(RedisEventsCount::PasswordUpdate);
+                } else if matches!(
+                    msg,
+                    Notification::AllowedVpcEndpointIdsUpdateForProjects { .. }
+                ) {
+                    Metrics::get()
+                        .proxy
+                        .redis_events_count
+                        .inc(RedisEventsCount::AllowedVpcEndpointIdsUpdateForProjects);
+                } else if matches!(
+                    msg,
+                    Notification::AllowedVpcEndpointIdsUpdateForAllProjectsInOrg { .. }
+                ) {
+                    Metrics::get()
+                        .proxy
+                        .redis_events_count
+                        .inc(RedisEventsCount::AllowedVpcEndpointIdsUpdateForAllProjectsInOrg);
+                } else if matches!(msg, Notification::BlockPublicOrVpcAccessUpdate { .. }) {
+                    Metrics::get()
+                        .proxy
+                        .redis_events_count
+                        .inc(RedisEventsCount::BlockPublicOrVpcAccessUpdate);
                 }
                 // It might happen that the invalid entry is on the way to be cached.
                 // To make sure that the entry is invalidated, let's repeat the invalidation in INVALIDATION_LAG seconds.
@@ -197,6 +259,21 @@ fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
         Notification::AllowedIpsUpdate { allowed_ips_update } => {
             cache.invalidate_allowed_ips_for_project(allowed_ips_update.project_id);
         }
+        Notification::AllowedVpcEndpointIdsUpdateForProjects {
+            allowed_vpc_endpoint_ids_update_for_projects,
+        } => cache.invalidate_allowed_vpc_endpoint_ids_for_projects(
+            allowed_vpc_endpoint_ids_update_for_projects.project_ids,
+        ),
+        Notification::AllowedVpcEndpointIdsUpdateForAllProjectsInOrg {
+            allowed_vpc_endpoint_ids_update_for_org,
+        } => cache.invalidate_allowed_vpc_endpoint_ids_for_org(
+            allowed_vpc_endpoint_ids_update_for_org.account_id,
+        ),
+        Notification::BlockPublicOrVpcAccessUpdate {
+            block_public_or_vpc_access_update,
+        } => cache.invalidate_block_public_or_vpc_access_for_project(
+            block_public_or_vpc_access_update.project_id,
+        ),
         Notification::PasswordUpdate { password_update } => cache
             .invalidate_role_secret_for_project(
                 password_update.project_id,
