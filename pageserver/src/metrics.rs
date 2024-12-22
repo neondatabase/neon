@@ -3536,6 +3536,8 @@ pub mod tokio_epoll_uring {
 }
 
 pub(crate) mod tenant_throttling {
+    use std::num::NonZeroUsize;
+
     use metrics::{register_int_counter_vec, IntCounter};
     use once_cell::sync::Lazy;
     use utils::shard::TenantShardId;
@@ -3569,7 +3571,7 @@ pub(crate) mod tenant_throttling {
     static COUNT_ACCOUNTED_START: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
         register_int_counter_vec!(
             "pageserver_tenant_throttling_count_accounted_start_global",
-            "Count of tenant throttling starts, by kind of throttle.",
+            "Like pageserver_tenant_throttling_count_accounted_start, but aggregated to the instance.",
             &["kind"]
         )
         .unwrap()
@@ -3577,7 +3579,8 @@ pub(crate) mod tenant_throttling {
     static COUNT_ACCOUNTED_START_PER_TENANT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
         register_int_counter_vec!(
             "pageserver_tenant_throttling_count_accounted_start",
-            "Count of tenant throttling starts, by kind of throttle.",
+            "Counter incremented for each key that enters the throttling stage.
+             A batched request will increment this counter by the number of keys in the batch.",
             &["kind", "tenant_id", "shard_id"]
         )
         .unwrap()
@@ -3585,7 +3588,7 @@ pub(crate) mod tenant_throttling {
     static COUNT_ACCOUNTED_FINISH: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
         register_int_counter_vec!(
             "pageserver_tenant_throttling_count_accounted_finish_global",
-            "Count of tenant throttling finishes, by kind of throttle.",
+            "Like pageserver_tenant_throttling_count_accounted_finish, but aggregated to the instance.",
             &["kind"]
         )
         .unwrap()
@@ -3593,7 +3596,8 @@ pub(crate) mod tenant_throttling {
     static COUNT_ACCOUNTED_FINISH_PER_TENANT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
         register_int_counter_vec!(
             "pageserver_tenant_throttling_count_accounted_finish",
-            "Count of tenant throttling finishes, by kind of throttle.",
+            "Counter incremented for each key that exits the throttling stage.
+             A batched request will increment this counter by the number of keys in the batch.",
             &["kind", "tenant_id", "shard_id"]
         )
         .unwrap()
@@ -3601,7 +3605,7 @@ pub(crate) mod tenant_throttling {
     static WAIT_USECS: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
         register_int_counter_vec!(
             "pageserver_tenant_throttling_wait_usecs_sum_global",
-            "Sum of microseconds that spent waiting throttle by kind of throttle.",
+            "Like pageserver_tenant_throttling_wait_usecs_sum, but aggregated to the instance.",
             &["kind"]
         )
         .unwrap()
@@ -3609,7 +3613,8 @@ pub(crate) mod tenant_throttling {
     static WAIT_USECS_PER_TENANT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
         register_int_counter_vec!(
             "pageserver_tenant_throttling_wait_usecs_sum",
-            "Sum of microseconds that spent waiting throttle by kind of throttle.",
+            "Wall clock time spent waiting on the throttle.
+             A batched request counts as one ",
             &["kind", "tenant_id", "shard_id"]
         )
         .unwrap()
@@ -3701,21 +3706,24 @@ pub(crate) mod tenant_throttling {
 
     impl<const KIND: usize> tenant::throttle::Metric for Metrics<KIND> {
         #[inline(always)]
-        fn accounting_start(&self) {
-            self.count_accounted_start.inc();
+        fn accounting_start(&self, key_count: NonZeroUsize) {
+            self.count_accounted_start.inc_by(key_count.get());
         }
         #[inline(always)]
-        fn accounting_finish(&self) {
-            self.count_accounted_finish.inc();
+        fn accounting_finish(&self, key_count: NonZeroUsize) {
+            self.count_accounted_finish.inc_by(key_count.get());
         }
         #[inline(always)]
         fn observe_throttling(
             &self,
-            tenant::throttle::Observation { wait_time }: &tenant::throttle::Observation,
+            tenant::throttle::Observation {
+                key_conut,
+                wait_time,
+            }: &tenant::throttle::Observation,
         ) {
             let val = u64::try_from(wait_time.as_micros()).unwrap();
             self.wait_time.inc_by(val);
-            self.count_throttled.inc();
+            self.count_throttled.inc_by(key_count.get());
         }
     }
 }
