@@ -84,9 +84,6 @@ page_cache_size=10
     log.info("Checking layer access metrics ...")
 
     layer_access_metric_names = [
-        "pageserver_layers_visited_per_read_global_sum",
-        "pageserver_layers_visited_per_read_global_count",
-        "pageserver_layers_visited_per_read_global_bucket",
         "pageserver_layers_visited_per_vectored_read_global_sum",
         "pageserver_layers_visited_per_vectored_read_global_count",
         "pageserver_layers_visited_per_vectored_read_global_bucket",
@@ -97,12 +94,6 @@ page_cache_size=10
         layer_access_metrics = metrics.query_all(name)
         log.info(f"Got metrics: {layer_access_metrics}")
 
-    non_vectored_sum = metrics.query_one("pageserver_layers_visited_per_read_global_sum")
-    non_vectored_count = metrics.query_one("pageserver_layers_visited_per_read_global_count")
-    if non_vectored_count.value != 0:
-        non_vectored_average = non_vectored_sum.value / non_vectored_count.value
-    else:
-        non_vectored_average = 0
     vectored_sum = metrics.query_one("pageserver_layers_visited_per_vectored_read_global_sum")
     vectored_count = metrics.query_one("pageserver_layers_visited_per_vectored_read_global_count")
     if vectored_count.value > 0:
@@ -113,11 +104,10 @@ page_cache_size=10
         assert vectored_sum.value == 0
         vectored_average = 0
 
-    log.info(f"{non_vectored_average=} {vectored_average=}")
+    log.info(f"{vectored_average=}")
 
     # The upper bound for average number of layer visits below (8)
     # was chosen empirically for this workload.
-    assert non_vectored_average < 8
     assert vectored_average < 8
 
 
