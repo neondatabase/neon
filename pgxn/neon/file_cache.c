@@ -83,6 +83,43 @@
  * before extending the nominal size of the file.
  */
 
+/*-----------
+ * Prewarming
+ * ----------
+ *
+ * LFC prewarming happens with the use of one or more prewarm workers, which
+ * should never access the same LFC chunk at the same time.
+ *
+ * The prewarm worker works with these invariants:
+ *		1. There are no concurrent writes to the pages that the prewarm worker
+ *			is writing to the chunk.
+ *			This is guaranteed by these mechanisms: 
+ *			 - Before starting to write, a prewarm worker marks the chunk as
+ *			   "prewarm is writing to this", and then waits for all current
+ *			   accessors to finish their activities. Therefore, all users
+ *			   know that prewarm is active on the chunk.
+ *			 - Prewarm workers will only write to as-of-yet unwritten blocks
+ *			   in the chunk.
+ *			 - Writers to the chunk will wait for the prewarm worker to finish
+ *			   writing in the chunk before starting their own writes into
+ *			   as-of-yet unwritten blocks in the chunk.
+ *			 - Readers won't be blocked (but can decide to wait for prewarm
+ *			   in case they need to read pages not yet in LFC, and prewarm is
+ *			   active on the chunk)
+ *		2. Pages are never overwritten by LFC prewarm
+ *		3. Readers are never blocked
+ *		4. Only potentially conflicting writers are blocked, *but are not ignored*.
+ *
+ * The only consideration is that in hot-standby mode, we *can not* ignore
+ * writes to pages that are being prewarmed. Usually, that's not much of an
+ * issue, but here we don't have a buffer that ensures synchronization between
+ * the redo process and the contents of the page/buffer (which we'd otherwise
+ * have). So, in REDO mode we'd have to make sure that the recovery process
+ * DOES do redo for pages in chunks that are being prewarmed, even if that
+ * means doing PS reads, to make sure we don't drop changes for pages we're
+ * fetching through prewarm processes.
+ */
+
 /* Local file storage allocation chunk.
  * Should be power of two. Using larger than page chunks can
  * 1. Reduce hash-map memory footprint: 8TB database contains billion pages
@@ -105,12 +142,32 @@ typedef struct FileCacheEntry
 	BufferTag	key;
 	uint32		hash;
 	uint32		offset;
-	uint32		access_count : 30;
-	uint32      prewarm_requested : 1; /* entry should be filled by prewarm */
-	uint32      prewarm_started : 1;   /* chunk is written by lfc_prewarm */
+	uint32		access_count : 31; /* limited to (2^18 - 1) by MAX_BACKENDS */
+	bool		prewarm_active : 1;
 	uint32		bitmap[CHUNK_BITMAP_SIZE];
 	dlist_node	list_node;		/* LRU/holes list node */
 } FileCacheEntry;
+
+/*----------
+ * 		wait_count
+ * 			Number of chunk accesses the backend is waiting for to complete
+ *		wait_write
+ *			Signaled whenever the prewarm process is done with a chunk
+ *		backend_io
+ *			Prewarmer sleeps on this CV when it is waiting for concurrent
+ *			accesses to the chunk to finish their work.
+ */
+typedef struct FileCacheWorkerShared
+{
+	uint64				wait_time;		/* total time spent waiting for
+										 * concurrent writes on LFC chunks */
+	int					wait_count;		/* Number of other backends prewarm is
+										 * still waiting for */
+	ConditionVariable	prewarm_done;	/* Backends can wait on this for
+										 * prewarm to complete */
+	ConditionVariable	backend_writes;	/* Prewarm worker waits for signal on
+										 * this CV for concurrent writes */
+} FileCacheWorkerShared;
 
 typedef struct FileCacheControl
 {
@@ -125,13 +182,15 @@ typedef struct FileCacheControl
 	uint64		writes;			/* number of writes issued */
 	uint64		time_read;		/* time spent reading (us) */
 	uint64		time_write;		/* time spent writing (us) */
+	uint64		time_prewarm;	/* time spent waiting for prewarm (us) */
 	uint32		prewarm_total_chunks;
 	uint32		prewarm_curr_chunk;
 	uint32		prewarmed_pages;
 	uint32		skipped_pages;
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
-	dlist_head  holes;          /* double linked list of punched holes */
+	dlist_head  holes;			/* double linked list of punched holes */
+	FileCacheWorkerShared worker; /* future: support multiple parallel workers */
 	HyperLogLogState wss_estimation; /* estimation of working set size */
 } FileCacheControl;
 
@@ -526,6 +585,269 @@ lfc_get_state(size_t* n_entries)
 }
 
 /*
+ * Release the given entry, and handle any prewarm worker signaling
+ * that might be required.
+ *
+ * When called, the lfc_lock must be held exclusively. This function releases
+ * that lock.
+ */
+static inline void
+release_entry(FileCacheEntry *entry, bool prewarm_was_active)
+{
+	bool		signal = false;
+
+	Assert(entry->key.blockNum % BLOCKS_PER_CHUNK == 0);
+	CriticalAssert(entry->access_count > 0);
+
+	Assert(LWLockHeldByMeInMode(lfc_lock, LW_EXCLUSIVE));
+
+	dlist_push_head(&lfc_ctl->lru, &entry->list_node);
+	entry->access_count--;
+
+	if (unlikely(entry->prewarm_active) && !prewarm_was_active)
+	{
+		Assert(lfc_ctl->worker.wait_count >= 1);
+
+		lfc_ctl->worker.wait_count--;
+
+		if (lfc_ctl->worker.wait_count == 0)
+			signal = true;
+	}
+
+	LWLockRelease(lfc_lock);
+
+	if (signal)
+	{
+		ConditionVariableBroadcast(&lfc_ctl->worker.backend_writes);
+	}
+}
+
+/*
+ * Get an FileCacheEntry to write data into.
+ *
+ * It returns NULL if it can't find a matching entry, and can't allocate one.
+ * It also returns NULL if the generation changed while allocating the entry.
+ *
+ * It waits for the LFC prewarm worker to finish its job if it detects the
+ * prewarm operation might conflict with this backend's write operation.
+ *
+ * When it returns, the lfc_lock is held in exclusive mode.
+ */
+static inline FileCacheEntry *
+lfc_entry_for_write(BufferTag *key, bool no_replace, bool *prewarm_active,
+					const uint32 *bitmap)
+{
+	bool		found = false;
+	uint32		hash;
+
+	FileCacheEntry *entry;
+	Assert(!LWLockHeldByMe(lfc_lock));
+
+	Assert(key->blockNum % BLOCKS_PER_CHUNK == 0);
+
+	hash = get_hash_value(lfc_hash, key);
+
+	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
+
+	if (!LFC_ENABLED())
+	{
+		LWLockRelease(lfc_lock);
+		return NULL;
+	}
+
+	/*
+	 * We use find-or-insert if there's space and if we don't have any holes
+	 * in the LFC we can still fill.
+	 */
+	if (lfc_ctl->limit > lfc_ctl->size && dlist_is_empty(&lfc_ctl->holes))
+		entry = hash_search_with_hash_value(lfc_hash, key, hash,
+											HASH_ENTER_NULL, &found);
+	else
+		entry = hash_search_with_hash_value(lfc_hash, key, hash,
+											HASH_FIND, &found);
+
+	if (!found)
+	{
+		/* only when newly entered, only when size < limit */
+		if (entry != NULL)
+		{
+			Assert(dlist_is_empty(&lfc_ctl->holes));
+
+			lfc_ctl->used++;
+			entry->key = *key;
+			entry->hash = hash;
+			entry->offset = lfc_ctl->size++;
+			entry->access_count = 0;
+			entry->prewarm_active = false;
+			memset(entry->bitmap, 0, CHUNK_BITMAP_SIZE * sizeof(uint32));
+			memset(&entry->list_node, 0, sizeof(dlist_node));
+			neon_log(DEBUG2, "Allocated new space");
+		}
+		else
+		{
+			/*
+			 * lfc_hash is full, and we didn't want to add, or have space for,
+			 * a new entry. Instead, find a replacement from either the list
+			 * with holes (if our page usage is within the limit), or the LRU
+			 * (if the caller allowed us to do that).
+			 */
+			if (lfc_ctl->limit > lfc_ctl->used &&
+				!dlist_is_empty(&lfc_ctl->holes))
+			{
+				lfc_ctl->used++;
+				entry = dlist_container(FileCacheEntry, list_node,
+										dlist_pop_head_node(&lfc_ctl->holes));
+				neon_log(DEBUG2, "Fill hole");
+			}
+			else if (!no_replace && !dlist_is_empty(&lfc_ctl->lru))
+			{
+				entry = dlist_container(FileCacheEntry, list_node,
+										dlist_pop_head_node(&lfc_ctl->lru));
+				neon_log(DEBUG2, "Swap file cache page");
+			}
+
+			Assert(entry->access_count == 0);
+
+			if (entry != NULL)
+			{
+				lfc_ctl->used_pages -= pg_popcount((char *) entry->bitmap,
+												   CHUNK_BITMAP_SIZE * sizeof(uint32));
+				hash_search_with_hash_value(lfc_hash, &entry->key, entry->hash,
+											HASH_REMOVE, &found);
+				Assert(found);
+
+				hash_search_with_hash_value(lfc_hash, key, hash, HASH_ENTER,
+											&found);
+				Assert(found);
+
+				entry->key = *key;
+				entry->hash = hash;
+				/* offset is retained from the old version of the entry */
+				entry->access_count = 0;
+				entry->prewarm_active = false;
+				memset(entry->bitmap, 0, CHUNK_BITMAP_SIZE * sizeof(uint32));
+				memset(&entry->list_node, 0, sizeof(dlist_node));
+			}
+		}
+	}
+
+	/*-------
+	 * We've tried to get a page as much as we possibly can:
+	 *		- We tried adding a new chunk with HASH_ENTER_NULL;
+	 *		- There are no LFC chunks that are not already being accessed by
+	 *			another backend;
+	 *		- There are no LFC chunks that were in the 'holes' list;
+	 *
+	 * So, we've exhausted places to pull entries from, if we don't have one
+	 * yet, then we won't ever get one during this lock. So, return.
+	 */
+	if (entry == NULL)
+		return NULL;
+
+	/* increment access count, and unlink if needed */
+	if (entry->access_count++ == 0)
+		dlist_delete(&entry->list_node);
+
+	if (entry->prewarm_active)
+	{
+		bool		conflict = false;
+
+		/*
+		 * Prewarm is active on this chunk.
+		 * 
+		 * If it's active on pages we're about to write (i.e. those pages
+		 * haven't been written to yet), then we wait for prewarm to finish
+		 * processing this chunk. Otherwise (i.e. the pages have been written
+		 * to already) just continue on as usual.
+		 */
+
+		for (uint32 i = 0; i < CHUNK_BITMAP_SIZE; i++)
+		{
+			/* if we're about to write into an empty spot, we conflict */
+			if (~(entry->bitmap[i]) & bitmap[i])
+			{
+				conflict = true;
+				break;
+			}
+		}
+
+		if (conflict)
+		{
+			uint64		generation;
+			instr_time	start, end;
+			ConditionVariable *cv = &lfc_ctl->worker.prewarm_done;
+			generation = lfc_ctl->generation;
+			LWLockRelease(lfc_lock);
+			ConditionVariablePrepareToSleep(cv);
+
+			INSTR_TIME_SET_CURRENT(start);
+			while (entry->prewarm_active)
+			{
+				/* These IOs shouldn't take very long */
+				ConditionVariableTimedSleep(cv, 100,
+											WAIT_EVENT_NEON_LFC_PREWARM_IO);
+			}
+			ConditionVariableCancelSleep();
+			INSTR_TIME_SET_CURRENT(end);
+			INSTR_TIME_SUBTRACT(end, start);
+
+			LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
+
+			lfc_ctl->time_prewarm += INSTR_TIME_GET_MICROSEC(end);
+
+			/* LFC got disabled in the meantime */
+			if (!LFC_ENABLED())
+				return NULL;
+
+			/* LFC generation changed, can't do much about that */
+			if (unlikely(lfc_ctl->generation != generation))
+				return NULL;
+		}
+	}
+
+	*prewarm_active = entry->prewarm_active;
+
+	return entry;
+}
+
+typedef union PrewarmSlot {
+	Page		page;
+	BlockNumber	blkno;
+} PrewarmSlot;
+
+typedef struct LFCPrewarmChunk {
+	FileCacheEntry	   *cacheEntry;		/* LFC entry of work item */
+	FileCacheStateEntry *stateEntry;	/* prewarm request of work item */
+	int			npages;					/* bit count in .stateEntry */
+	int			prefetched;				/* num getpage requests already sent */
+	int			received;				/* pages already in .pages */
+	int			loaded;					/* pages loaded */
+	PGAlignedBlock	*pages;					/* pages read from disk; IO_ALIGNed */
+	void	   *alloc;					/* allocation containing *pages */
+	BlockNumber	blknos[FLEXIBLE_ARRAY_MEMBER];	/* block numbers */
+} LFCPrewarmChunk;
+
+#define PREWARM_CHUNK_SIZE(nmemb) ( \
+	offsetof(LFCPrewarmChunk, blknos) + (nmemb) * sizeof(BlockNumber) \
+)
+
+typedef struct LFCPrewarmWorkerState {
+	uint64		pages_prefetched;	/* neon_prefetch() called */
+	uint64		pages_read;			/* neon_read_at_lsn() called */
+	uint64		pages_loaded;		/* actually written to LFC */
+	int			max_io_depth;		/* max diff between prefetched and read */
+	LFCPrewarmChunk *chunk;			/* current chunk we're working on */
+} LFCPrewarmWorkerState;
+
+static void lfcp_cleanup(int, Datum);
+static LFCPrewarmChunk *lfcp_preprocess_chunk(FileCacheStateEntry *entry);
+static void lfcp_prefetch_for_chunk(LFCPrewarmWorkerState *state);
+static bool lfcp_read_chunk(LFCPrewarmWorkerState *state);
+static void lfcp_load_chunk(LFCPrewarmWorkerState *state);
+static void lfcp_release_chunk(LFCPrewarmChunk *chunk, uint64 generation);
+
+
+/*
  * Prewarm LFC cache to the specified state.
  *
  * Prewarming can interfere with accesses to the pages by other backends. Usually access to LFC is protected by shared buffers: when Postgres
@@ -547,195 +869,356 @@ lfc_get_state(size_t* n_entries)
  */
 
 static void
-lfc_prewarm(FileCacheStateEntry* fs, size_t n_entries)
+lfc_prewarm(FileCacheStateEntry* fs, size_t numrestore)
 {
-	ssize_t rc;
-	size_t snd_idx = 0, rcv_idx = 0;
-	size_t n_sent = 0, n_received = 0;
-	FileCacheEntry *entry;
-	uint64 generation;
-	uint32 entry_offset;
-	uint32 hash;
-	size_t i;
-	bool   found;
-	int    shard_no;
+	LFCPrewarmWorkerState state;
 
 	if (!lfc_ensure_opened())
 		return;
 
-	if (n_entries == 0 || fs == NULL)
+	if (numrestore == 0 || fs == NULL)
 	{
 		elog(LOG, "LFC: prewarm is disabled");
 		return;
 	}
+	state.max_io_depth = Max(1, maintenance_io_concurrency);
+	state.pages_prefetched = 0;
+	state.pages_read = 0;
+	state.pages_loaded = 0;
+
+	PG_ENSURE_ERROR_CLEANUP(lfcp_cleanup, PointerGetDatum(&state));
+	while (numrestore > 0)
+	{
+		CHECK_FOR_INTERRUPTS();
+		state.chunk = lfcp_preprocess_chunk(fs);
+
+		/* Pump prefetch state and read data into memory */
+		while (state.chunk != NULL)
+		{
+			/* prefetch_for and _read_ handle steps 5 and 6 of prewarming */
+			lfcp_prefetch_for_chunk(&state);
+
+			if (lfcp_read_chunk(&state))
+			{
+				/* Handles steps 7..10 of prewarming */
+				lfcp_load_chunk(&state);
+			}
+			CHECK_FOR_INTERRUPTS();
+		}
+
+		fs++;
+		numrestore--;
+	}
+	PG_END_ENSURE_ERROR_CLEANUP(lfcp_cleanup, PointerGetDatum(&state));
+}
+
+static void
+lfcp_cleanup(int code, Datum arg)
+{
+	LFCPrewarmWorkerState *state =
+		(LFCPrewarmWorkerState *) DatumGetPointer(arg);
+	LFCPrewarmChunk *chunk = state->chunk;
+
+	if (chunk)
+	{
+		FileCacheEntry *entry = chunk->cacheEntry;
+		if (entry)
+		{
+			bool	maybe_waiters = entry->prewarm_active;
+			LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
+			entry->prewarm_active = false;
+			release_entry(chunk->cacheEntry, false);
+
+			/* signal any waiters */
+			if (maybe_waiters)
+				ConditionVariableSignal(&lfc_ctl->worker.prewarm_done);
+		}
+	}
+}
+
+/* Takes care of steps 1 through 4 of the prewarm system */
+static LFCPrewarmChunk *
+lfcp_preprocess_chunk(FileCacheStateEntry *fcsentry)
+{
+	uint32		bitmap[CHUNK_BITMAP_SIZE];
+	bool		prewarm_conflict;
+	int			j = 0;
+	int			npages;
+	LFCPrewarmChunk *pwchunk;
+	FileCacheEntry *fcentry;
+
+	fcentry = lfc_entry_for_write(&fcsentry->key, true, &prewarm_conflict, fcsentry->bitmap);
+
+	/* No such chunk available, and we're already at capacity */
+	if (!fcentry)
+	{
+		LWLockRelease(lfc_lock);
+		return NULL;
+	}
+
+	for (int i = 0; i < CHUNK_BITMAP_SIZE; i++)
+	{
+		bitmap[i] = ~(fcentry->bitmap[i]) & fcsentry->bitmap[i];
+	}
+
+	npages = pg_popcount((const char *) bitmap,
+						 sizeof(uint32) * CHUNK_BITMAP_SIZE);
+
+	/*
+	 * Break out of the loop and release resources when we don't have any
+	 * pages left to prewarm.
+	 */
+	if (unlikely(npages == 0))
+	{
+		release_entry(fcentry, prewarm_conflict);
+		return NULL;
+	}
+
+	LWLockRelease(lfc_lock);
+
+	pwchunk = palloc0(PREWARM_CHUNK_SIZE(npages));
+	pwchunk->npages = npages;
+	pwchunk->stateEntry = fcsentry;
+	pwchunk->cacheEntry = fcentry;
+
+	for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
+	{
+		if (bitmap[i >> 5] & 1 << (i % 32))
+		{
+			pwchunk->blknos[j++] = fcsentry->key.blockNum + i;
+		}
+	}
+
+	Assert(j == pwchunk->npages);
+
+	return pwchunk;
+}
+
+static void
+lfcp_prefetch_for_chunk(LFCPrewarmWorkerState *state)
+{
+	LFCPrewarmChunk *chunk = state->chunk;
+	int			io_depth = state->pages_prefetched - state->pages_read;
+	int			ios_scheduled = chunk->npages - chunk->prefetched;
+
+	if (io_depth < state->max_io_depth && ios_scheduled > 0)
+	{
+		BufferTag	tag;
+		tag = chunk->stateEntry->key;
+
+		for (int i = chunk->prefetched;
+			 io_depth < state->max_io_depth && i < chunk->npages;
+			 i++, io_depth++, state->pages_prefetched++, chunk->prefetched++)
+		{
+			tag.blockNum = chunk->blknos[i];
+			prefetch_page(BufTagGetNRelFileInfo(tag), tag.forkNum,
+						  tag.blockNum);
+		}
+	}
+	Assert(chunk->npages >= chunk->prefetched);
+	Assert(chunk->prefetched >= chunk->received);
+	Assert(chunk->received >= 0);
+}
+
+/*
+ * Read the next block from PS.
+ * Returns true if this PrewarmChunk now has all requested pages.
+ */
+static bool
+lfcp_read_chunk(LFCPrewarmWorkerState *state)
+{
+	LFCPrewarmChunk *chunk = state->chunk;
+	int			io_depth = state->pages_prefetched - state->pages_read;
+	int			chunk_ios_active = chunk->npages - chunk->prefetched;
+
+	if (chunk_ios_active > 0)
+	{
+		BufferTag	tag;
+
+		Assert(io_depth >= chunk_ios_active);
+
+		tag = chunk->stateEntry->key;
+
+		if (chunk->received == 0)
+		{
+			Assert(chunk->alloc == NULL);
+#if PG_MAJORVERSION_NUM > 15
+			chunk->pages = chunk->alloc = 
+				MemoryContextAllocAligned(CurrentMemoryContext,
+										  chunk->npages * BLCKSZ,
+										  PG_IO_ALIGN_SIZE,
+										  0);
+#else
+			chunk->alloc = palloc((chunk->npages) * BLCKSZ);
+			chunk->pages = (PGAlignedBlock *)
+				TYPEALIGN((uintptr_t) chunk->alloc, PG_IO_ALIGN_SIZE);
+#endif
+		}
+
+		Assert(chunk->pages != NULL);
+		tag.blockNum = chunk->blknos[chunk->received];
+
+		read_page(BufTagGetNRelFileInfo(tag), tag.forkNum, tag.blockNum,
+				  chunk->pages[chunk->received].data);
+
+		state->pages_read++;
+		chunk->received++;
+	}
+
+	Assert(chunk_ios_active <= (state->pages_prefetched - state->pages_read));
+	Assert(chunk->npages >= chunk->prefetched);
+	Assert(chunk->prefetched >= chunk->received);
+	Assert(chunk->received >= 0);
+
+	/* Are all pages ready to load into the LFC now? */
+	return chunk->npages == chunk->received;
+}
+
+/*
+ * Load this chunk into LFC
+ */
+static void
+lfcp_load_chunk(LFCPrewarmWorkerState *state)
+{
+	LFCPrewarmChunk *chunk = state->chunk;
+	FileCacheEntry *fcentry = chunk->cacheEntry;
+	uint64		generation;
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
-	/* Do not prewarm more entries than LFC limit */
-	if (lfc_ctl->limit <= lfc_ctl->size)
+	if (!LFC_ENABLED())
 	{
 		LWLockRelease(lfc_lock);
+		lfcp_release_chunk(chunk, lfc_ctl->generation);
 		return;
 	}
-	if (n_entries > lfc_ctl->limit - lfc_ctl->size)
-	{
-		n_entries = lfc_ctl->limit - lfc_ctl->size;
-	}
 
-	/* Initialize fields used to track prewarming progress */
-	lfc_ctl->prewarm_total_chunks = n_entries;
-	lfc_ctl->prewarm_curr_chunk = 0;
 
-    /*
-	 * Load LFC state and add entries in hash table.
-	 * It is needed to track modification of prewarmed pages.
-	 * All such entries have `prewarm_requested` flag set. When entry is updated (some backed reads or writes
-	 * some pages from this chunk), then `prewarm_requested` flag is cleared, prohibiting prewarm of this chunk.
-	 * It prevents overwritting page updated or loaded by backend with older one, loaded by prewarm.
-	 */
-	for (i = 0; i < n_entries; i++)
-	{
-		hash = get_hash_value(lfc_hash, &fs[i].key);
-		entry = hash_search_with_hash_value(lfc_hash, &fs[i].key, hash, HASH_ENTER, &found);
-		/* Do not prewarm chunks which are already present in LFC */
-		if (!found)
-		{
-			entry->offset = lfc_ctl->size++;
-			entry->hash = hash;
-			entry->access_count = 0;
-			entry->prewarm_requested = true;
-			entry->prewarm_started = false;
-			memset(entry->bitmap, 0, sizeof entry->bitmap);
-			/* Most recently visted pages are stored first */
-			dlist_push_head(&lfc_ctl->lru, &entry->list_node);
-			lfc_ctl->used += 1;
-		}
-	}
+	/* 8.1 */
+	chunk->cacheEntry->prewarm_active = true;
+	/* 8.3 */
+	lfc_ctl->worker.wait_count = chunk->cacheEntry->access_count - 1;
+	generation = lfc_ctl->generation;
+
+	/* 8.4 */
 	LWLockRelease(lfc_lock);
 
-	elog(LOG, "LFC: start loading %ld chunks", (long)n_entries);
+	Assert(chunk->npages > 0);
 
-	while (true)
+	/* 10.1 */
+	if (lfc_ctl->worker.wait_count > 0)
 	{
-		size_t chunk_no = snd_idx / BLOCKS_PER_CHUNK;
-		size_t offs_in_chunk = snd_idx % BLOCKS_PER_CHUNK;
-		if (chunk_no < n_entries)
+		instr_time	start, end;
+		int		max_loops = lfc_ctl->worker.wait_count;
+
+		INSTR_TIME_SET_CURRENT(start);
+		ConditionVariablePrepareToSleep(&lfc_ctl->worker.backend_writes);
+
+		while (lfc_ctl->worker.wait_count > 0 && max_loops > 0)
 		{
-			if (fs[chunk_no].bitmap[offs_in_chunk >> 5] & (1 << (offs_in_chunk & 31)))
-			{
-				/*
-				 * In case of prewarming replica we should be careful not to load too new version
-				 * of the page - with LSN larger than current replay LSN.
-				 * At primary we are always loading latest version.
-				 */
-				XLogRecPtr req_lsn = RecoveryInProgress() ? GetXLogReplayRecPtr(NULL) : UINT64_MAX;
-
-				NeonGetPageRequest request = {
-					.req.tag = T_NeonGetPageRequest,
-					/* lsn and not_modified_since are filled in below */
-					.rinfo = BufTagGetNRelFileInfo(fs[chunk_no].key),
-					.forknum = fs[chunk_no].key.forkNum,
-					.blkno = fs[chunk_no].key.blockNum + offs_in_chunk,
-					.req.lsn = req_lsn,
-					.req.not_modified_since = 0
-				};
-				shard_no = get_shard_number(&fs[chunk_no].key);
-				while (!page_server->send(shard_no, (NeonRequest *) &request)
-					   || !page_server->flush(shard_no))
-				{
-					/* do nothing */
-				}
-				n_sent += 1;
-			}
-			snd_idx += 1;
+			max_loops--;
+			ConditionVariableTimedSleep(&lfc_ctl->worker.backend_writes,
+										10, WAIT_EVENT_NEON_LFC_PREWARM_IO);
 		}
-		if (n_sent >= n_received + lfc_prewarm_batch || chunk_no == n_entries)
-		{
-			NeonResponse * resp;
-			do
-			{
-				chunk_no = rcv_idx / BLOCKS_PER_CHUNK;
-				offs_in_chunk = rcv_idx % BLOCKS_PER_CHUNK;
-				rcv_idx += 1;
-			} while (!(fs[chunk_no].bitmap[offs_in_chunk >> 5] & (1 << (offs_in_chunk & 31))));
 
-			shard_no = get_shard_number(&fs[chunk_no].key);
-			resp = page_server->receive(shard_no);
-			lfc_ctl->prewarm_curr_chunk = chunk_no;
+		ConditionVariableCancelSleep();
+		INSTR_TIME_SET_CURRENT(end);
 
-			if (resp->tag != T_NeonGetPageResponse)
-			{
-				elog(LOG, "LFC: unexpected response type: %d", resp->tag);
-				return;
-			}
+		if (lfc_ctl->worker.wait_count > 0)
+			elog(ERROR, "Prewarm waiting for too long; %d readers remaining after %0.3f seconds",
+				 lfc_ctl->worker.wait_count, INSTR_TIME_GET_DOUBLE(end));
 
-			hash = get_hash_value(lfc_hash, &fs[chunk_no].key);
-
-			LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
-			entry = hash_search_with_hash_value(lfc_hash, &fs[chunk_no].key, hash, HASH_FIND, NULL);
-			if (entry != NULL && entry->prewarm_requested)
-			{
-				/* Unlink entry from LRU list to pin it for the duration of IO operation */
-				if (entry->access_count++ == 0)
-					dlist_delete(&entry->list_node);
-
-				generation = lfc_ctl->generation;
-				entry_offset = entry->offset;
-				Assert(!entry->prewarm_started);
-				entry->prewarm_started = true;
-
-				LWLockRelease(lfc_lock);
-
-				rc = pwrite(lfc_desc, ((NeonGetPageResponse*)resp)->page, BLCKSZ, ((off_t) entry_offset * BLOCKS_PER_CHUNK + offs_in_chunk) * BLCKSZ);
-				if (rc != BLCKSZ)
-				{
-					lfc_disable("write");
-					break;
-				}
-				else
-				{
-					LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
-
-					if (lfc_ctl->generation == generation)
-					{
-						CriticalAssert(LFC_ENABLED());
-						if (--entry->access_count == 0)
-							dlist_push_tail(&lfc_ctl->lru, &entry->list_node);
-						if (entry->prewarm_requested)
-						{
-							lfc_ctl->used_pages += 1 - ((entry->bitmap[offs_in_chunk >> 5] >> (offs_in_chunk & 31)) & 1);
-							entry->bitmap[offs_in_chunk >> 5] |= 1 << (offs_in_chunk & 31);
-							lfc_ctl->prewarmed_pages += 1;
-						}
-						else
-						{
-							lfc_ctl->skipped_pages += 1;
-						}
-						Assert(entry->prewarm_started);
-						entry->prewarm_started = false;
-					}
-
-					LWLockRelease(lfc_lock);
-				}
-			}
-			else
-			{
-				Assert(!entry || !entry->prewarm_started);
-				lfc_ctl->skipped_pages += 1;
-				LWLockRelease(lfc_lock);
-			}
-
-			if (++n_received == n_sent && snd_idx >= n_entries * BLOCKS_PER_CHUNK)
-			{
-				break;
-			}
-		}
+		INSTR_TIME_SUBTRACT(end, start);
+		lfc_ctl->worker.wait_time += INSTR_TIME_GET_MICROSEC(end);
 	}
-	Assert(n_sent == n_received);
-	lfc_ctl->prewarm_curr_chunk = n_entries;
-	elog(LOG, "LFC: complete prewarming: loaded %ld pages", (long)n_received);
+
+	/* 10.2 */
+	do {
+		int		i;
+		int		start = chunk->loaded;
+		int		writes_remaining = chunk->npages - chunk->loaded;
+		BlockNumber base = chunk->blknos[chunk->loaded];
+
+		for (i = 0; i < writes_remaining; i++)
+		{
+			if (chunk->blknos[start + i] != base + i)
+				break;
+			if (fcentry->bitmap[(start + i) / 32] & 1 << ((start + i) % 32))
+				break;
+		}
+
+		/*
+		 * If we didn't have any concurrent writes we may be able to combine
+		 * IOs, so write those pages in a single IO.
+		 */
+		if (i > 0)
+		{
+			size_t	len = i * BLCKSZ;
+			off_t	file_off =
+				((off_t) fcentry->offset) * BLOCKS_PER_CHUNK * BLCKSZ +
+				((off_t) start * BLCKSZ);
+			char   *dataptr = chunk->pages[start].data;
+
+			do {
+				int	len_written = pwrite(lfc_desc, dataptr, len, file_off);
+
+				if (len_written < 0)
+				{
+					elog(ERROR, "LFC Prewarm: Error writing data to LFC: %m");
+				}
+				file_off += len_written;
+				dataptr += len_written;
+				len -= len_written;
+			} while (len > 0);
+
+			chunk->loaded += i;
+		}
+		else
+		{
+			/*
+			 * Current page was written to after we started prewarming, but
+			 * before we received all pages for this chunk.
+			 */
+			Assert(fcentry->bitmap[start / 32] & 1 << (start % 32));
+			chunk->loaded += 1;
+		}
+	} while (chunk->loaded < chunk->npages);
+
+	/* handles signalling ready-marking of data */
+	lfcp_release_chunk(chunk, generation);
+	state->chunk = NULL;
 }
 
+/* Handles steps 10.4 through 10.7 */
+static void
+lfcp_release_chunk(LFCPrewarmChunk *chunk, uint64 generation)
+{
+	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
+	/* 10.5 */
+	chunk->cacheEntry->prewarm_active = false;
+
+	if (lfc_ctl->generation != generation)
+	{
+		release_entry(chunk->cacheEntry, false);
+		return;
+	}
+
+	/* 10.4 */
+	if (chunk->loaded == chunk->npages)
+	{
+		/* mark pages 'written' for this chunk */
+		for (int i = 0; i < CHUNK_BITMAP_SIZE; i++)
+		{
+			chunk->cacheEntry->bitmap[i] |= chunk->stateEntry->bitmap[i];
+		}
+	}
+	/* 10.6 */
+	ConditionVariableSignal(&lfc_ctl->worker.prewarm_done);
+	/* 10.7 */
+	release_entry(chunk->cacheEntry, false);
+	pfree(chunk->alloc);
+	pfree(chunk);
+}
 
 /*
  * Check if page is present in the cache.
@@ -905,7 +1388,6 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 
 	/* remove the page from the cache */
 	entry->bitmap[chunk_offs >> 5] &= ~(1 << (chunk_offs & (32 - 1)));
-	entry->prewarm_requested = false; /* prohibit prewarm of this LFC entry */
 
 	if (entry->access_count == 0)
 	{
@@ -999,6 +1481,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		int		blocks_in_chunk = Min(nblocks, BLOCKS_PER_CHUNK - (blkno % BLOCKS_PER_CHUNK));
 		int		iteration_hits = 0;
 		int		iteration_misses = 0;
+		bool	start_prewarm_active;
 		uint64	io_time_us = 0;
 		Assert(blocks_in_chunk > 0);
 
@@ -1050,9 +1533,16 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 		generation = lfc_ctl->generation;
 		entry_offset = entry->offset;
+		start_prewarm_active = entry->prewarm_active;
 
 		LWLockRelease(lfc_lock);
 
+		/*
+		 * Unlocked read is safe here, because all modifications on this data
+		 * will set more bits, never remove them, at least not while the chunk
+		 * hasn't been added back to the LRU (which won't happen while we
+		 * don't release it).
+		 */
 		for (int i = 0; i < blocks_in_chunk; i++)
 		{
 			/*
@@ -1084,35 +1574,30 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			}
 		}
 
-		/* Place entry to the head of LRU list */
+		/* Return entry to the LFC */
 		LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
-		if (lfc_ctl->generation == generation)
-		{
-			CriticalAssert(LFC_ENABLED());
-			lfc_ctl->hits += iteration_hits;
-			lfc_ctl->misses += iteration_misses;
-			pgBufferUsage.file_cache.hits += iteration_hits;
-			pgBufferUsage.file_cache.misses += iteration_misses;
-
-			if (iteration_hits)
-			{
-				lfc_ctl->time_read += io_time_us;
-				inc_page_cache_read_wait(io_time_us);
-			}
-
-			CriticalAssert(entry->access_count > 0);
-			if (--entry->access_count == 0)
-				dlist_push_tail(&lfc_ctl->lru, &entry->list_node);
-		}
-		else
+		if (unlikely(lfc_ctl->generation != generation))
 		{
 			/* generation mismatch, assume error condition */
 			LWLockRelease(lfc_lock);
 			return -1;
 		}
 
-		LWLockRelease(lfc_lock);
+		CriticalAssert(LFC_ENABLED());
+
+		lfc_ctl->hits += iteration_hits;
+		lfc_ctl->misses += iteration_misses;
+		pgBufferUsage.file_cache.hits += iteration_hits;
+		pgBufferUsage.file_cache.misses += iteration_misses;
+
+		if (iteration_hits)
+		{
+			lfc_ctl->time_read += io_time_us;
+			inc_page_cache_read_wait(io_time_us);
+		}
+
+		release_entry(entry, start_prewarm_active);
 
 		buf_offset += blocks_in_chunk;
 		nblocks -= blocks_in_chunk;
@@ -1134,8 +1619,6 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	BufferTag	tag;
 	FileCacheEntry *entry;
 	ssize_t		rc;
-	bool		found;
-	uint32		hash;
 	uint64		generation;
 	uint32		entry_offset;
 	int			buf_offset = 0;
@@ -1163,108 +1646,31 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	while (nblocks > 0)
 	{
 		struct iovec iov[PG_IOV_MAX];
-		int		chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
-		int		blocks_in_chunk = Min(nblocks, BLOCKS_PER_CHUNK - (blkno % BLOCKS_PER_CHUNK));
+		uint32		chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
+		uint32		blocks_in_chunk = Min(nblocks, BLOCKS_PER_CHUNK - (blkno % BLOCKS_PER_CHUNK));
+		uint32		bitmap[CHUNK_BITMAP_SIZE];
 		instr_time io_start, io_end;
+		bool	prewarm_active;
 		Assert(blocks_in_chunk > 0);
 
 		for (int i = 0; i < blocks_in_chunk; i++)
 		{
 			iov[i].iov_base = unconstify(void *, buffers[buf_offset + i]);
 			iov[i].iov_len = BLCKSZ;
+			bitmap[(buf_offset + i) >> 5] |= 1 << ((buf_offset + i) % 32);
 		}
 
 		tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
-		hash = get_hash_value(lfc_hash, &tag);
 
-		LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
+		entry = lfc_entry_for_write(&tag, false, &prewarm_active, bitmap);
 
-		if (!LFC_ENABLED())
+		if (!LFC_ENABLED() || !PointerIsValid(entry))
 		{
 			LWLockRelease(lfc_lock);
 			return;
 		}
 
-		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
-
-		if (found)
-		{
-			if (entry->prewarm_started)
-			{
-				/*
-				 * Some page of this chunk is currently written by `lfc_prewarm`.
-				 * We should give-up not to interfere with it.
-				 * But clearing `prewarm_requested` flag also will not allow `lfc_prewarm` to fix it result.
-				 */
-				entry->prewarm_requested = false;
-				LWLockRelease(lfc_lock);
-				return;
-			}
-			/*
-			 * Unlink entry from LRU list to pin it for the duration of IO
-			 * operation
-			 */
-			if (entry->access_count++ == 0)
-				dlist_delete(&entry->list_node);
-		}
-		else
-		{
-			/*
-			 * We have two choices if all cache pages are pinned (i.e. used in IO
-			 * operations):
-			 *
-			 * 1) Wait until some of this operation is completed and pages is
-			 * unpinned.
-			 *
-			 * 2) Allocate one more chunk, so that specified cache size is more
-			 * recommendation than hard limit.
-			 *
-			 * As far as probability of such event (that all pages are pinned) is
-			 * considered to be very very small: there are should be very large
-			 * number of concurrent IO operations and them are limited by
-			 * max_connections, we prefer not to complicate code and use second
-			 * approach.
-			 */
-			if (lfc_ctl->used >= lfc_ctl->limit && !dlist_is_empty(&lfc_ctl->lru))
-			{
-				/* Cache overflow: evict least recently used chunk */
-				FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->lru));
-
-				for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
-				{
-					lfc_ctl->used_pages -= (victim->bitmap[i >> 5] >> (i & 31)) & 1;
-				}
-				CriticalAssert(victim->access_count == 0);
-				entry->offset = victim->offset; /* grab victim's chunk */
-				hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
-				neon_log(DEBUG2, "Swap file cache page");
-			}
-			else if (!dlist_is_empty(&lfc_ctl->holes))
-			{
-				/* We can reuse a hole that was left behind when the LFC was shrunk previously */
-				FileCacheEntry *hole = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->holes));
-				uint32		offset = hole->offset;
-				bool		hole_found;
-
-				hash_search_with_hash_value(lfc_hash, &hole->key, hole->hash, HASH_REMOVE, &hole_found);
-				CriticalAssert(hole_found);
-
-				lfc_ctl->used += 1;
-				entry->offset = offset;	/* reuse the hole */
-			}
-			else
-			{
-				lfc_ctl->used += 1;
-				entry->offset = lfc_ctl->size++;	/* allocate new chunk at end
-													 * of file */
-			}
-			entry->access_count = 1;
-			entry->hash = hash;
-			entry->prewarm_started = false;
-			memset(entry->bitmap, 0, sizeof entry->bitmap);
-		}
-
-		entry->prewarm_requested = false; /* prohibit prewarm if LFC entry is updated by some backend */
+		Assert(entry);
 		generation = lfc_ctl->generation;
 		entry_offset = entry->offset;
 		LWLockRelease(lfc_lock);
@@ -1297,18 +1703,19 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				lfc_ctl->time_write += time_spent_us;
 				inc_page_cache_write_wait(time_spent_us);
 
-				if (--entry->access_count == 0)
-					dlist_push_tail(&lfc_ctl->lru, &entry->list_node);
-
 				for (int i = 0; i < blocks_in_chunk; i++)
 				{
 					lfc_ctl->used_pages += 1 - ((entry->bitmap[(chunk_offs + i) >> 5] >> ((chunk_offs + i) & 31)) & 1);
 					entry->bitmap[(chunk_offs + i) >> 5] |=
 						(1 << ((chunk_offs + i) & 31));
 				}
-			}
 
-			LWLockRelease(lfc_lock);
+				release_entry(entry, false);
+			}
+			else
+			{
+				LWLockRelease(lfc_lock);
+			}
 		}
 		blkno += blocks_in_chunk;
 		buf_offset += blocks_in_chunk;

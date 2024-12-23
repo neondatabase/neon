@@ -257,6 +257,9 @@ extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum,
 #endif
 extern int64 neon_dbsize(Oid dbNode);
 
+extern void prefetch_page(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno);
+extern void read_page(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, char *page);
+
 /* utils for neon relsize cache */
 extern void relsize_hash_init(void);
 extern bool get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size);

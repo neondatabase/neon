@@ -1105,6 +1105,26 @@ Retry:
 	return min_ring_index;
 }
 
+void
+prefetch_page(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno)
+{
+	bits8	mask = 1;
+	BufferTag tag;
+	InitBufferTag(&tag, &rinfo, forknum, blkno);
+
+	prefetch_register_bufferv(tag, NULL, 1, &mask, true);
+}
+
+void
+read_page(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
+		  char *page)
+{
+	neon_request_lsns lsns;
+	bits8			mask = 1;
+	neon_get_request_lsns(rinfo, forknum, blkno, &lsns, 1, &mask);
+	neon_read_at_lsn(rinfo, forknum, blkno, lsns, page);
+}
+
 static bool
 equal_requests(NeonRequest* a, NeonRequest* b)
 {
