@@ -35,8 +35,6 @@ impl<'m> MigrationRunner<'m> {
     /// used if you would like to fail the application of a series of migrations
     /// at some point.
     fn update_migration_id(&mut self, migration_id: i64) -> Result<()> {
-        let setval = format!("UPDATE neon_migration.migration_id SET id={}", migration_id);
-
         // We use this fail point in order to check that failing in the
         // middle of applying a series of migrations fails in an expected
         // manner
@@ -58,7 +56,10 @@ impl<'m> MigrationRunner<'m> {
         }
 
         self.client
-            .simple_query(&setval)
+            .query(
+                "UPDATE neon_migration.migration_id SET id = $1",
+                &[&migration_id],
+            )
             .context("run_migrations update id")?;
 
         Ok(())
@@ -66,20 +67,16 @@ impl<'m> MigrationRunner<'m> {
 
     /// Prepare the migrations the target database for handling migrations
     fn prepare_database(&mut self) -> Result<()> {
-        let query = "CREATE SCHEMA IF NOT EXISTS neon_migration";
-        self.client.simple_query(query)?;
-
-        let query = "CREATE TABLE IF NOT EXISTS neon_migration.migration_id (key INT NOT NULL PRIMARY KEY, id bigint NOT NULL DEFAULT 0)";
-        self.client.simple_query(query)?;
-
-        let query = "INSERT INTO neon_migration.migration_id VALUES (0, 0) ON CONFLICT DO NOTHING";
-        self.client.simple_query(query)?;
-
-        let query = "ALTER SCHEMA neon_migration OWNER TO cloud_admin";
-        self.client.simple_query(query)?;
-
-        let query = "REVOKE ALL ON SCHEMA neon_migration FROM PUBLIC";
-        self.client.simple_query(query)?;
+        self.client
+            .simple_query("CREATE SCHEMA IF NOT EXISTS neon_migration")?;
+        self.client.simple_query("CREATE TABLE IF NOT EXISTS neon_migration.migration_id (key INT NOT NULL PRIMARY KEY, id bigint NOT NULL DEFAULT 0)")?;
+        self.client.simple_query(
+            "INSERT INTO neon_migration.migration_id VALUES (0, 0) ON CONFLICT DO NOTHING",
+        )?;
+        self.client
+            .simple_query("ALTER SCHEMA neon_migration OWNER TO cloud_admin")?;
+        self.client
+            .simple_query("REVOKE ALL ON SCHEMA neon_migration FROM PUBLIC")?;
 
         Ok(())
     }
