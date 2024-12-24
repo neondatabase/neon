@@ -120,9 +120,6 @@ static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block
 
 static BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);
 
-static uint32 local_request_counter;
-#define GENERATE_REQUEST_ID() (((NeonRequestId)MyProcPid << 32) | ++local_request_counter)
-
 /*
  * Prefetch implementation:
  *
@@ -191,10 +188,14 @@ typedef struct PrefetchRequest
 	uint8		status;		/* see PrefetchStatus for valid values */
 	uint8		flags;		/* see PrefetchRequestFlags */
 	neon_request_lsns request_lsns;
-	NeonRequestId reqid;
 	NeonResponse *response;		/* may be null */
 	uint64		my_ring_index;
 } PrefetchRequest;
+
+StaticAssertDecl(sizeof(PrefetchRequest) == 64,
+				 "We prefer to have a power-of-2 size for this struct. Please"
+				 " try to find an alternative solution before reaching to"
+				 " increase the expected size here");
 
 /* prefetch buffer lookup hash table */
 
@@ -364,7 +365,6 @@ compact_prefetch_buffers(void)
 		target_slot->shard_no = source_slot->shard_no;
 		target_slot->status = source_slot->status;
 		target_slot->response = source_slot->response;
-		target_slot->reqid = source_slot->reqid;
 		target_slot->request_lsns = source_slot->request_lsns;
 		target_slot->my_ring_index = empty_ring_index;
 
@@ -797,7 +797,6 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 
 	NeonGetPageRequest request = {
 		.req.tag = T_NeonGetPageRequest,
-		.req.reqid = GENERATE_REQUEST_ID(),
 		/* lsn and not_modified_since are filled in below */
 		.rinfo = BufTagGetNRelFileInfo(slot->buftag),
 		.forknum = slot->buftag.forkNum,
@@ -805,8 +804,6 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 	};
 
 	Assert(mySlotNo == MyPState->ring_unused);
-
-	slot->reqid = request.req.reqid;
 
 	if (force_request_lsns)
 		slot->request_lsns = *force_request_lsns;
@@ -1180,10 +1177,6 @@ nm_pack_request(NeonRequest *msg)
 	initStringInfo(&s);
 
 	pq_sendbyte(&s, msg->tag);
-	if (neon_protocol_version >= 3)
-	{
-		pq_sendint64(&s, msg->reqid);
-	}
 	pq_sendint64(&s, msg->lsn);
 	pq_sendint64(&s, msg->not_modified_since);
 
@@ -1261,16 +1254,8 @@ NeonResponse *
 nm_unpack_response(StringInfo s)
 {
 	NeonMessageTag tag = pq_getmsgbyte(s);
-	NeonResponse resp_hdr = {0}; /* make valgrind happy */
 	NeonResponse *resp = NULL;
 
-	resp_hdr.tag = tag;
-	if (neon_protocol_version >= 3)
-	{
-		resp_hdr.reqid = pq_getmsgint64(s);
-		resp_hdr.lsn = pq_getmsgint64(s);
-		resp_hdr.not_modified_since = pq_getmsgint64(s);
-	}
 	switch (tag)
 	{
 			/* pagestore -> pagestore_client */
@@ -1278,14 +1263,7 @@ nm_unpack_response(StringInfo s)
 			{
 				NeonExistsResponse *msg_resp = palloc0(sizeof(NeonExistsResponse));
 
-				if (neon_protocol_version >= 3)
-				{
-					NInfoGetSpcOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					NInfoGetDbOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					NInfoGetRelNumber(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					msg_resp->forknum = pq_getmsgbyte(s);
-				}
-				msg_resp->resp = resp_hdr;
+				msg_resp->tag = tag;
 				msg_resp->exists = pq_getmsgbyte(s);
 				pq_getmsgend(s);
 
@@ -1297,14 +1275,7 @@ nm_unpack_response(StringInfo s)
 			{
 				NeonNblocksResponse *msg_resp = palloc0(sizeof(NeonNblocksResponse));
 
-				if (neon_protocol_version >= 3)
-				{
-					NInfoGetSpcOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					NInfoGetDbOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					NInfoGetRelNumber(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					msg_resp->forknum = pq_getmsgbyte(s);
-				}
-				msg_resp->resp = resp_hdr;
+				msg_resp->tag = tag;
 				msg_resp->n_blocks = pq_getmsgint(s, 4);
 				pq_getmsgend(s);
 
@@ -1317,20 +1288,12 @@ nm_unpack_response(StringInfo s)
 				NeonGetPageResponse *msg_resp;
 
 				msg_resp = MemoryContextAllocZero(MyPState->bufctx, PS_GETPAGERESPONSE_SIZE);
-				if (neon_protocol_version >= 3)
-				{
-					NInfoGetSpcOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					NInfoGetDbOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					NInfoGetRelNumber(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					msg_resp->forknum = pq_getmsgbyte(s);
-					msg_resp->blkno = pq_getmsgint(s, 4);
-				}
-				msg_resp->resp = resp_hdr;
+				msg_resp->tag = tag;
 				/* XXX:	should be varlena */
 				memcpy(msg_resp->page, pq_getmsgbytes(s, BLCKSZ), BLCKSZ);
 				pq_getmsgend(s);
 
-				Assert(msg_resp->resp.tag == T_NeonGetPageResponse);
+				Assert(msg_resp->tag == T_NeonGetPageResponse);
 
 				resp = (NeonResponse *) msg_resp;
 				break;
@@ -1340,11 +1303,7 @@ nm_unpack_response(StringInfo s)
 			{
 				NeonDbSizeResponse *msg_resp = palloc0(sizeof(NeonDbSizeResponse));
 
-				if (neon_protocol_version >= 3)
-				{
-					msg_resp->dbNode = pq_getmsgint(s, 4);
-				}
-				msg_resp->resp = resp_hdr;
+				msg_resp->tag = tag;
 				msg_resp->db_size = pq_getmsgint64(s);
 				pq_getmsgend(s);
 
@@ -1362,7 +1321,7 @@ nm_unpack_response(StringInfo s)
 				msglen = strlen(msgtext);
 
 				msg_resp = palloc0(sizeof(NeonErrorResponse) + msglen + 1);
-				msg_resp->resp = resp_hdr;
+				msg_resp->tag = tag;
 				memcpy(msg_resp->message, msgtext, msglen + 1);
 				pq_getmsgend(s);
 
@@ -1373,17 +1332,9 @@ nm_unpack_response(StringInfo s)
 		case T_NeonGetSlruSegmentResponse:
 		    {
 				NeonGetSlruSegmentResponse *msg_resp;
-				int n_blocks;
+				int n_blocks = pq_getmsgint(s, 4);
 				msg_resp = palloc(sizeof(NeonGetSlruSegmentResponse));
-
-				if (neon_protocol_version >= 3)
-				{
-					msg_resp->kind = pq_getmsgbyte(s);
-					msg_resp->segno = pq_getmsgint(s, 4);
-				}
-				msg_resp->resp = resp_hdr;
-
-				n_blocks = pq_getmsgint(s, 4);
+				msg_resp->tag = tag;
 				msg_resp->n_blocks = n_blocks;
 				memcpy(msg_resp->data, pq_getmsgbytes(s, n_blocks * BLCKSZ), n_blocks * BLCKSZ);
 				pq_getmsgend(s);
@@ -2355,7 +2306,6 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 	{
 		NeonExistsRequest request = {
 			.req.tag = T_NeonExistsRequest,
-			.req.reqid = GENERATE_REQUEST_ID(),
 			.req.lsn = request_lsns.request_lsn,
 			.req.not_modified_since = request_lsns.not_modified_since,
 			.rinfo = InfoFromSMgrRel(reln),
@@ -2363,59 +2313,31 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 		};
 
 		resp = page_server_request(&request);
-
-		switch (resp->tag)
-		{
-			case T_NeonExistsResponse:
-			{
-				NeonExistsResponse* exists_resp = (NeonExistsResponse *) resp;
-				if (neon_protocol_version >= 3)
-				{
-					if (resp->reqid != request.req.reqid ||
-						resp->lsn != request.req.lsn ||
-						resp->not_modified_since != request.req.not_modified_since ||
-						!RelFileInfoEquals(exists_resp->rinfo, request.rinfo) ||
-						exists_resp->forknum != forkNum)
-					{
-						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u} to exits request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u}",
-													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(exists_resp->rinfo), exists_resp->forknum,
-													request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since), RelFileInfoFmt(request.rinfo), forkNum);
-					}
-				}
-				exists = exists_resp->exists;
-				break;
-			}
-			case T_NeonErrorResponse:
-				if (neon_protocol_version >= 3)
-				{
-					if (resp->reqid != request.req.reqid ||
-						resp->lsn != request.req.lsn ||
-						resp->not_modified_since != request.req.not_modified_since)
-					{
-						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match exists request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
-							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
-							 request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since));
-					}
-				}
-				ereport(ERROR,
-						(errcode(ERRCODE_IO_ERROR),
-						 errmsg(NEON_TAG "[reqid %lx] could not read relation existence of rel %u/%u/%u.%u from page server at lsn %X/%08X",
-								resp->reqid,
-								RelFileInfoFmt(InfoFromSMgrRel(reln)),
-								forkNum,
-								LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
-						 errdetail("page server returned error: %s",
-								   ((NeonErrorResponse *) resp)->message)));
-				break;
-
-			default:
-				NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-											"Expected Exists (0x%02x) or Error (0x%02x) response to ExistsRequest, but got 0x%02x",
-											T_NeonExistsResponse, T_NeonErrorResponse, resp->tag);
-		}
-		pfree(resp);
 	}
+
+	switch (resp->tag)
+	{
+		case T_NeonExistsResponse:
+			exists = ((NeonExistsResponse *) resp)->exists;
+			break;
+
+		case T_NeonErrorResponse:
+			ereport(ERROR,
+					(errcode(ERRCODE_IO_ERROR),
+					 errmsg(NEON_TAG "could not read relation existence of rel %u/%u/%u.%u from page server at lsn %X/%08X",
+							RelFileInfoFmt(InfoFromSMgrRel(reln)),
+							forkNum,
+							LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
+					 errdetail("page server returned error: %s",
+							   ((NeonErrorResponse *) resp)->message)));
+			break;
+
+		default:
+			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+										"Expected Exists (0x%02x) or Error (0x%02x) response to ExistsRequest, but got 0x%02x",
+										T_NeonExistsResponse, T_NeonErrorResponse, resp->tag);
+	}
+	pfree(resp);
 	return exists;
 }
 
@@ -3023,43 +2945,15 @@ Retry:
 		switch (resp->tag)
 		{
 			case T_NeonGetPageResponse:
-			{
-				NeonGetPageResponse* getpage_resp = (NeonGetPageResponse *) resp;
-				if (neon_protocol_version >= 3)
-				{
-					if (resp->reqid != slot->reqid ||
-						resp->lsn != slot->request_lsns.request_lsn ||
-						resp->not_modified_since != slot->request_lsns.not_modified_since ||
-						!RelFileInfoEquals(getpage_resp->rinfo, rinfo) ||
-						getpage_resp->forknum != forkNum ||
-						getpage_resp->blkno != base_blockno + i)
-					{
-						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u, block=%u} to get page request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u, block=%u}",
-													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(getpage_resp->rinfo), getpage_resp->forknum, getpage_resp->blkno,
-													slot->reqid, LSN_FORMAT_ARGS(slot->request_lsns.request_lsn), LSN_FORMAT_ARGS(slot->request_lsns.not_modified_since), RelFileInfoFmt(rinfo), forkNum, base_blockno + i);
-					}
-				}
-				memcpy(buffer, getpage_resp->page, BLCKSZ);
+				memcpy(buffer, ((NeonGetPageResponse *) resp)->page, BLCKSZ);
 				lfc_write(rinfo, forkNum, blockno, buffer);
 				break;
-			}
+
 			case T_NeonErrorResponse:
-				if (neon_protocol_version >= 3)
-				{
-					if (resp->reqid != slot->reqid ||
-						resp->lsn != slot->request_lsns.request_lsn ||
-						resp->not_modified_since != slot->request_lsns.not_modified_since)
-					{
-						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get relsize request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
-							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
-							 slot->reqid, LSN_FORMAT_ARGS(slot->request_lsns.request_lsn), LSN_FORMAT_ARGS(slot->request_lsns.not_modified_since));
-					}
-				}
 				ereport(ERROR,
 						(errcode(ERRCODE_IO_ERROR),
-						 errmsg(NEON_TAG "[shard %d, reqid %lx] could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
-								slot->shard_no, resp->reqid, blockno, RelFileInfoFmt(rinfo),
+						 errmsg(NEON_TAG "[shard %d] could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
+								slot->shard_no, blockno, RelFileInfoFmt(rinfo),
 								forkNum, LSN_FORMAT_ARGS(reqlsns->effective_request_lsn)),
 						 errdetail("page server returned error: %s",
 								   ((NeonErrorResponse *) resp)->message)));
@@ -3543,7 +3437,6 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 	{
 		NeonNblocksRequest request = {
 			.req.tag = T_NeonNblocksRequest,
-			.req.reqid = GENERATE_REQUEST_ID(),
 			.req.lsn = request_lsns.request_lsn,
 			.req.not_modified_since = request_lsns.not_modified_since,
 			.rinfo = InfoFromSMgrRel(reln),
@@ -3551,67 +3444,39 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 		};
 
 		resp = page_server_request(&request);
-
-		switch (resp->tag)
-		{
-			case T_NeonNblocksResponse:
-			{
-				NeonNblocksResponse * relsize_resp = (NeonNblocksResponse *) resp;
-				if (neon_protocol_version >= 3)
-				{
-					if (resp->reqid != request.req.reqid ||
-						resp->lsn != request.req.lsn ||
-						resp->not_modified_since != request.req.not_modified_since ||
-						!RelFileInfoEquals(relsize_resp->rinfo, request.rinfo) ||
-						relsize_resp->forknum != forknum)
-					{
-						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u} to get relsize request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u}",
-													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(relsize_resp->rinfo), relsize_resp->forknum,
-													request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since), RelFileInfoFmt(request.rinfo), forknum);
-					}
-				}
-				n_blocks = relsize_resp->n_blocks;
-				break;
-			}
-			case T_NeonErrorResponse:
-				if (neon_protocol_version >= 3)
-				{
-					if (resp->reqid != request.req.reqid ||
-						resp->lsn != request.req.lsn ||
-						resp->not_modified_since != request.req.not_modified_since)
-					{
-						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get relsize request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
-							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
-							 request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since));
-					}
-				}
-				ereport(ERROR,
-						(errcode(ERRCODE_IO_ERROR),
-						 errmsg(NEON_TAG "[reqid %lx] could not read relation size of rel %u/%u/%u.%u from page server at lsn %X/%08X",
-								resp->reqid,
-								RelFileInfoFmt(InfoFromSMgrRel(reln)),
-								forknum,
-								LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
-						 errdetail("page server returned error: %s",
-								   ((NeonErrorResponse *) resp)->message)));
-				break;
-
-			default:
-				NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-											"Expected Nblocks (0x%02x) or Error (0x%02x) response to NblocksRequest, but got 0x%02x",
-											T_NeonNblocksResponse, T_NeonErrorResponse, resp->tag);
-		}
-		update_cached_relsize(InfoFromSMgrRel(reln), forknum, n_blocks);
-
-		neon_log(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
-				 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-				 forknum,
-				 LSN_FORMAT_ARGS(request_lsns.effective_request_lsn),
-				 n_blocks);
-
-		pfree(resp);
 	}
+
+	switch (resp->tag)
+	{
+		case T_NeonNblocksResponse:
+			n_blocks = ((NeonNblocksResponse *) resp)->n_blocks;
+			break;
+
+		case T_NeonErrorResponse:
+			ereport(ERROR,
+					(errcode(ERRCODE_IO_ERROR),
+					 errmsg(NEON_TAG "could not read relation size of rel %u/%u/%u.%u from page server at lsn %X/%08X",
+							RelFileInfoFmt(InfoFromSMgrRel(reln)),
+							forknum,
+							LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
+					 errdetail("page server returned error: %s",
+							   ((NeonErrorResponse *) resp)->message)));
+			break;
+
+		default:
+			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+										"Expected Nblocks (0x%02x) or Error (0x%02x) response to NblocksRequest, but got 0x%02x",
+										T_NeonNblocksResponse, T_NeonErrorResponse, resp->tag);
+	}
+	update_cached_relsize(InfoFromSMgrRel(reln), forknum, n_blocks);
+
+	neon_log(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
+			 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+			 forknum,
+			 LSN_FORMAT_ARGS(request_lsns.effective_request_lsn),
+			 n_blocks);
+
+	pfree(resp);
 	return n_blocks;
 }
 
@@ -3632,67 +3497,39 @@ neon_dbsize(Oid dbNode)
 	{
 		NeonDbSizeRequest request = {
 			.req.tag = T_NeonDbSizeRequest,
-			.req.reqid = GENERATE_REQUEST_ID(),
 			.req.lsn = request_lsns.request_lsn,
 			.req.not_modified_since = request_lsns.not_modified_since,
 			.dbNode = dbNode,
 		};
 
 		resp = page_server_request(&request);
-
-		switch (resp->tag)
-		{
-			case T_NeonDbSizeResponse:
-			{
-				NeonDbSizeResponse* dbsize_resp = (NeonDbSizeResponse *) resp;
-				if (neon_protocol_version >= 3)
-				{
-					if (resp->reqid != request.req.reqid ||
-						resp->lsn != request.req.lsn ||
-						resp->not_modified_since != request.req.not_modified_since ||
-						dbsize_resp->dbNode != dbNode)
-					{
-						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, dbNode=%u} to get DB size request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, dbNode=%u}",
-													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), dbsize_resp->dbNode,
-													request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since), dbNode);
-					}
-				}
-				db_size = dbsize_resp->db_size;
-				break;
-			}
-			case T_NeonErrorResponse:
-				if (neon_protocol_version >= 3)
-				{
-					if (resp->reqid != request.req.reqid ||
-						resp->lsn != request.req.lsn ||
-						resp->not_modified_since != request.req.not_modified_since)
-					{
-						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get DB size request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
-							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
-							 request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since));
-					}
-				}
-				ereport(ERROR,
-						(errcode(ERRCODE_IO_ERROR),
-						 errmsg(NEON_TAG "[reqid %lx] could not read db size of db %u from page server at lsn %X/%08X",
-								resp->reqid,
-								dbNode, LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
-						 errdetail("page server returned error: %s",
-								   ((NeonErrorResponse *) resp)->message)));
-				break;
-
-			default:
-				NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-											"Expected DbSize (0x%02x) or Error (0x%02x) response to DbSizeRequest, but got 0x%02x",
-											T_NeonDbSizeResponse, T_NeonErrorResponse, resp->tag);
-		}
-
-		neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
-				 dbNode, LSN_FORMAT_ARGS(request_lsns.effective_request_lsn), db_size);
-
-		pfree(resp);
 	}
+
+	switch (resp->tag)
+	{
+		case T_NeonDbSizeResponse:
+			db_size = ((NeonDbSizeResponse *) resp)->db_size;
+			break;
+
+		case T_NeonErrorResponse:
+			ereport(ERROR,
+					(errcode(ERRCODE_IO_ERROR),
+					 errmsg(NEON_TAG "could not read db size of db %u from page server at lsn %X/%08X",
+							dbNode, LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
+					 errdetail("page server returned error: %s",
+							   ((NeonErrorResponse *) resp)->message)));
+			break;
+
+		default:
+			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+										"Expected DbSize (0x%02x) or Error (0x%02x) response to DbSizeRequest, but got 0x%02x",
+										T_NeonDbSizeResponse, T_NeonErrorResponse, resp->tag);
+	}
+
+	neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
+			 dbNode, LSN_FORMAT_ARGS(request_lsns.effective_request_lsn), db_size);
+
+	pfree(resp);
 	return db_size;
 }
 
@@ -4025,7 +3862,6 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 
 	request = (NeonGetSlruSegmentRequest) {
 		.req.tag = T_NeonGetSlruSegmentRequest,
-		.req.reqid = GENERATE_REQUEST_ID(),
 		.req.lsn = request_lsn,
 		.req.not_modified_since = not_modified_since,
 		.kind = kind,
@@ -4044,42 +3880,14 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	switch (resp->tag)
 	{
 		case T_NeonGetSlruSegmentResponse:
-		{
-			NeonGetSlruSegmentResponse* slru_resp = (NeonGetSlruSegmentResponse *) resp;
-			if (neon_protocol_version >= 3)
-			{
-				if (resp->reqid != request.req.reqid ||
-					resp->lsn != request.req.lsn ||
-					resp->not_modified_since != request.req.not_modified_since ||
-					slru_resp->kind != kind ||
-					slru_resp->segno != segno)
-				{
-					NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-												"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, kind=%u, segno=%u} to get SLRU segment request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, kind=%u, segno=%u}",
-												resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), slru_resp->kind, slru_resp->segno,
-												request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since), kind, segno);
-				}
-			}
-			n_blocks = slru_resp->n_blocks;
-			memcpy(buffer, slru_resp->data, n_blocks*BLCKSZ);
+			n_blocks = ((NeonGetSlruSegmentResponse *) resp)->n_blocks;
+			memcpy(buffer, ((NeonGetSlruSegmentResponse *) resp)->data, n_blocks*BLCKSZ);
 			break;
-		}
+
 		case T_NeonErrorResponse:
-			if (neon_protocol_version >= 3)
-			{
-				if (resp->reqid != request.req.reqid ||
-					resp->lsn != request.req.lsn ||
-					resp->not_modified_since != request.req.not_modified_since)
-				{
-					elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get SLRU segment request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
-						 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
-						 request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since));
-				}
-			}
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
-					 errmsg(NEON_TAG "[reqid %lx] could not read SLRU %d segment %d at lsn %X/%08X",
-							resp->reqid,
+					 errmsg(NEON_TAG "could not read SLRU %d segment %d at lsn %X/%08X",
 							kind,
 							segno,
 							LSN_FORMAT_ARGS(request_lsn)),
@@ -4220,7 +4028,6 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		NeonNblocksRequest request = {
 			.req = (NeonRequest) {
 				.tag = T_NeonNblocksRequest,
-				.reqid = GENERATE_REQUEST_ID(),
 				.lsn = end_recptr,
 				.not_modified_since = end_recptr,
 			},
