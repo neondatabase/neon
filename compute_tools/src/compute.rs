@@ -41,14 +41,14 @@ use crate::local_proxy;
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::spec_apply::ApplySpecPhase::{
-    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateSuperUser,
-    DropInvalidDatabases, DropRoles, HandleNeonExtension, HandleOtherExtensions,
-    RenameAndDeleteDatabases, RenameRoles, RunInEachDatabase,
+    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateSchemaNeon,
+    CreateSuperUser, DropInvalidDatabases, DropRoles, FinalizeDropLogicalSubscriptions,
+    HandleNeonExtension, HandleOtherExtensions, RenameAndDeleteDatabases, RenameRoles,
+    RunInEachDatabase,
 };
 use crate::spec_apply::PerDatabasePhase;
 use crate::spec_apply::PerDatabasePhase::{
-    ChangeSchemaPerms, DeleteDBRoleReferences, DropSubscriptionsForDeletedDatabases,
-    HandleAnonExtension,
+    ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions, HandleAnonExtension,
 };
 use crate::spec_apply::{apply_operations, MutableApplyContext, DB};
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
@@ -338,6 +338,15 @@ impl ComputeNode {
 
     pub fn get_status(&self) -> ComputeStatus {
         self.state.lock().unwrap().status
+    }
+
+    pub fn get_timeline_id(&self) -> Option<TimelineId> {
+        self.state
+            .lock()
+            .unwrap()
+            .pspec
+            .as_ref()
+            .map(|s| s.timeline_id)
     }
 
     // Remove `pgdata` directory and create it again with right permissions.
@@ -929,6 +938,48 @@ impl ComputeNode {
                 .map(|role| (role.name.clone(), role))
                 .collect::<HashMap<String, Role>>();
 
+            // Check if we need to drop subscriptions before starting the endpoint.
+            //
+            // It is important to do this operation exactly once when endpoint starts on a new branch.
+            // Otherwise, we may drop not inherited, but newly created subscriptions.
+            //
+            // We cannot rely only on spec.drop_subscriptions_before_start flag,
+            // because if for some reason compute restarts inside VM,
+            // it will start again with the same spec and flag value.
+            //
+            // To handle this, we save the fact of the operation in the database
+            // in the neon.drop_subscriptions_done table.
+            // If the table does not exist, we assume that the operation was never performed, so we must do it.
+            // If table exists, we check if the operation was performed on the current timelilne.
+            //
+            let mut drop_subscriptions_done = false;
+
+            if spec.drop_subscriptions_before_start {
+                let timeline_id = self.get_timeline_id().context("timeline_id must be set")?;
+                let query = format!("select 1 from neon.drop_subscriptions_done where timeline_id = '{}'", timeline_id);
+
+                info!("Checking if drop subscription operation was already performed for timeline_id: {}", timeline_id);
+
+                drop_subscriptions_done =  match
+                    client.simple_query(&query).await {
+                    Ok(result) => {
+                        matches!(&result[0], postgres::SimpleQueryMessage::Row(_))
+                    },
+                    Err(e) =>
+                    {
+                        match e.code() {
+                            Some(&SqlState::UNDEFINED_TABLE) => false,
+                            _ => {
+                                // We don't expect any other error here, except for the schema/table not existing
+                                error!("Error checking if drop subscription operation was already performed: {}", e);
+                                return Err(e.into());
+                            }
+                        }
+                    }
+                }
+            };
+
+
             let jwks_roles = Arc::new(
                 spec.as_ref()
                     .local_proxy_config
@@ -996,7 +1047,7 @@ impl ComputeNode {
                         jwks_roles.clone(),
                         concurrency_token.clone(),
                         db,
-                        [DropSubscriptionsForDeletedDatabases].to_vec(),
+                        [DropLogicalSubscriptions].to_vec(),
                     );
 
                     Ok(spawn(fut))
@@ -1024,6 +1075,7 @@ impl ComputeNode {
                 CreateAndAlterRoles,
                 RenameAndDeleteDatabases,
                 CreateAndAlterDatabases,
+                CreateSchemaNeon,
             ] {
                 info!("Applying phase {:?}", &phase);
                 apply_operations(
@@ -1064,6 +1116,17 @@ impl ComputeNode {
                     }
 
                     let conf = Arc::new(conf);
+                    let mut phases = vec![
+                        DeleteDBRoleReferences,
+                        ChangeSchemaPerms,
+                        HandleAnonExtension,
+                    ];
+
+                    if spec.drop_subscriptions_before_start && !drop_subscriptions_done {
+                        info!("Adding DropLogicalSubscriptions phase because drop_subscriptions_before_start is set");
+                        phases.push(DropLogicalSubscriptions);
+                    }
+
                     let fut = Self::apply_spec_sql_db(
                         spec.clone(),
                         conf,
@@ -1071,12 +1134,7 @@ impl ComputeNode {
                         jwks_roles.clone(),
                         concurrency_token.clone(),
                         db,
-                        [
-                            DeleteDBRoleReferences,
-                            ChangeSchemaPerms,
-                            HandleAnonExtension,
-                        ]
-                        .to_vec(),
+                        phases,
                     );
 
                     Ok(spawn(fut))
@@ -1088,12 +1146,20 @@ impl ComputeNode {
                 handle.await??;
             }
 
-            for phase in vec![
+            let mut phases = vec![
                 HandleOtherExtensions,
-                HandleNeonExtension,
+                HandleNeonExtension, // This step depends on CreateSchemaNeon
                 CreateAvailabilityCheck,
                 DropRoles,
-            ] {
+            ];
+
+            // This step depends on CreateSchemaNeon
+            if spec.drop_subscriptions_before_start && !drop_subscriptions_done {
+                info!("Adding FinalizeDropLogicalSubscriptions phase because drop_subscriptions_before_start is set");
+                phases.push(FinalizeDropLogicalSubscriptions);
+            }
+
+            for phase in phases {
                 debug!("Applying phase {:?}", &phase);
                 apply_operations(
                     spec.clone(),
@@ -1463,6 +1529,14 @@ impl ComputeNode {
                         Ok(())
                     },
                 )?;
+
+                let postgresql_conf_path = pgdata_path.join("postgresql.conf");
+                if config::line_in_file(
+                    &postgresql_conf_path,
+                    "neon.disable_logical_replication_subscribers=false",
+                )? {
+                    info!("updated postgresql.conf to set neon.disable_logical_replication_subscribers=false");
+                }
                 self.pg_reload_conf()?;
             }
             self.post_apply_config()?;
