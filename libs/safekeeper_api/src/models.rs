@@ -175,6 +175,7 @@ pub enum WalReceiverStatus {
 pub struct TimelineStatus {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
+    pub mconf: Configuration,
     pub acceptor_state: AcceptorStateStatus,
     pub pg_info: ServerInfo,
     pub flush_lsn: Lsn,
@@ -187,6 +188,20 @@ pub struct TimelineStatus {
     pub peers: Vec<PeerInfo>,
     pub walsenders: Vec<WalSenderState>,
     pub walreceivers: Vec<WalReceiverState>,
+}
+
+/// Request to switch membership configuration.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TimelineMembershipSwitchRequest {
+    pub mconf: Configuration,
+}
+
+/// In response both previous and current configuration are sent.
+#[derive(Serialize, Deserialize)]
+pub struct TimelineMembershipSwitchResponse {
+    pub previous_conf: Configuration,
+    pub current_conf: Configuration,
 }
 
 fn lsn_invalid() -> Lsn {
