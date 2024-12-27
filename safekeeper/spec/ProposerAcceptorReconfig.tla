@@ -22,6 +22,9 @@
       quorum one never does. So the FinishChange
       condition which collects max of the quorum may get
       only more strict over time.
+
+    The invariants expectedly break if any of FinishChange
+    required conditions are removed.
 *)
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
@@ -324,7 +327,6 @@ LogSafety == PAS!LogSafety
 CommittedNotTruncated == PAS!CommittedNotTruncated
 
 MaxTerm == PAS!MaxTerm
-\* MaxTerm == \A p \in proposers: prop_state[p].term <= 1
 
 MaxStoreConf == conf_store.generation <= 1
 
