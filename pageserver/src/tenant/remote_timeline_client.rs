@@ -1946,21 +1946,21 @@ impl RemoteTimelineClient {
             // Assert that we don't modify a layer that's referenced by the current index.
             if cfg!(debug_assertions) {
                 let modified = match &task.op {
-                    UploadOp::UploadLayer(layer, ..) => vec![layer.layer_desc().layer_name()],
-                    UploadOp::Delete(delete) => {
-                        delete.layers.iter().map(|(name, _)| name.clone()).collect()
+                    UploadOp::UploadLayer(layer, layer_metadata, _) => {
+                        vec![(layer.layer_desc().layer_name(), layer_metadata.clone())]
                     }
+                    UploadOp::Delete(delete) => delete.layers.clone(),
                     // These don't modify layers.
                     UploadOp::UploadMetadata { .. } => Vec::new(),
                     UploadOp::Barrier(_) => Vec::new(),
                     UploadOp::Shutdown => Vec::new(),
                 };
                 if let Ok(queue) = self.upload_queue.lock().unwrap().initialized_mut() {
-                    for layer_name in modified {
+                    for (name, metadata) in modified {
                         debug_assert!(
-                            !queue.clean.0.layer_metadata.contains_key(&layer_name),
-                            "layer {layer_name} modified while referenced by index"
-                        )
+                            !queue.clean.0.contains_layer(&name, &metadata),
+                            "layer {name} modified while referenced by index",
+                        );
                     }
                 }
             }
