@@ -2,6 +2,26 @@
 
 (*
     Spec for https://github.com/neondatabase/neon/blob/538e2312a617c65d489d391892c70b2e4d7407b5/docs/rfcs/035-safekeeper-dynamic-membership-change.md
+
+    Simplifications:
+    - The ones inherited from ProposerAcceptorStatic.
+    - We don't model transient state of the configuration change driver process
+      (storage controller in the implementation). Its actions StartChange and FinishChange
+      are taken based on the persistent state of safekeepers and conf store. The
+      justification for that is the following: once new configuration n is
+      created (e.g with StartChange or FinishChange), any old configuration
+      change driver working on older conf < n will never be able to commit
+      it to the conf store because it is protected by CAS. The
+      propagation of these older confs is still possible though, and
+      spec allows to do it through acceptors.
+      Plus the model is already pretty huge.
+    - Previous point also means that the FinishChange action is
+      based only on the current state of safekeepers, not from
+      the past. That's ok because while individual
+      acceptor <last_log_term, flush_lsn> may go down,
+      quorum one never does. So the FinishChange
+      condition which collects max of the quorum may get
+      only more strict over time.
 *)
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
@@ -65,7 +85,7 @@ Init ==
            /\ prop_conf = [p \in proposers |-> init_conf]
            /\ acc_conf = [a \in acceptors |-> init_conf]
            /\ conf_store = init_conf
-           \* We could start with anything, but to reduce space state start with
+           \* We could start with anything, but to reduce state space state with
            \* the most reasonable total acceptors - 1 conf size, which e.g.
            \* makes basic {a1} -> {a2} change in {a1, a2} acceptors and {a1, a2,
            \* a3} -> {a2, a3, a4} in {a1, a2, a3, a4} acceptors models even in
@@ -165,21 +185,22 @@ CommitEntries(p) ==
                               /\ PAS!DoCommitEntries(p, PAS!Min(q1_commit_lsn, q2_commit_lsn))
     /\ UNCHANGED <<prop_conf, acc_conf, conf_store>>
 
-\* Proposer p adopts higher conf from acceptor a.
-ProposerSwitchConf(p, a) ==
-    \* p's conf is lower than a's.
-    /\ (acc_conf[a].generation > prop_conf[p].generation)
-    \* We allow to seamlessly bump conf only when proposer is already elected.
-    \* If it isn't, some of the votes already collected could have been from
-    \* non-members of updated conf. It is easier (both here and in the impl) to
-    \* restart instead of figuring and removing these out.
-    \*
-    \* So if proposer is in 'campaign' in the impl we would restart preserving
-    \* conf and increasing term. In the spec this transition is already covered
-    \* by more a generic RestartProposer, so we don't specify it here.
-    /\ prop_state[p].state = "leader"
-    /\ prop_conf' = [prop_conf EXCEPT ![p] = acc_conf[a]]
-    /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, acc_conf, conf_store>>
+\* Proposer p adopts higher conf c from conf store or from some acceptor.
+ProposerSwitchConf(p) ==
+    /\ \E c \in ({conf_store} \union {acc_conf[a]: a \in acceptors}):
+        \* p's conf is lower than c.
+        /\ (c.generation > prop_conf[p].generation)
+        \* We allow to seamlessly bump conf only when proposer is already elected.
+        \* If it isn't, some of the votes already collected could have been from
+        \* non-members of updated conf. It is easier (both here and in the impl) to
+        \* restart instead of figuring and removing these out.
+        \*
+        \* So if proposer is in 'campaign' in the impl we would restart preserving
+        \* conf and increasing term. In the spec this transition is already covered
+        \* by more a generic RestartProposer, so we don't specify it here.
+        /\ prop_state[p].state = "leader"
+        /\ prop_conf' = [prop_conf EXCEPT ![p] = c]
+        /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, acc_conf, conf_store>>
 
 \* Do CAS on the conf store, starting change into the new_members conf.
 StartChange(new_members) ==
@@ -201,8 +222,16 @@ FinishChange ==
     \* The conditions for finishing the change are:
     /\ \E qo \in PAS!AllMinQuorums(conf_store.members):
            \* 1) Old majority must be aware of the joint conf.
+           \* Note: generally the driver can't know current acceptor
+           \* generation, it can only know that it once had been the
+           \* expected one, but it might have advanced since then.
+           \* But as explained at the top of the file if acceptor gen
+           \* advanced, FinishChange will never be able to complete
+           \* due to CAS anyway. We use strict equality here because
+           \* that's what makes sense conceptually (old driver should
+           \* abandon its attempt if it observes that conf has advanced).
            /\ \A a \in qo: conf_store.generation = acc_conf[a].generation
-           \* 2) New member set must have log synced, i.e. some majority needs
+           \* 2) New member set must have log synced, i.e. some its majority needs
            \*    to have <last_log_term, lsn> at least as high as max of some
            \*    old majority.
            \* 3) Term must be synced, i.e. some majority of the new set must
@@ -221,6 +250,7 @@ FinishChange ==
                       \A a \in qn:
                           /\ PAS!TermLsnGE([term |-> AccLastLogTerm(a), lsn |-> PAS!FlushLsn(a)], sync_pos)
                           /\ acc_state[a].term >= sync_term
+                          \* The same note as above about strict equality applies here.
                           /\ conf_store.generation = acc_conf[a].generation
     /\ conf_store' = [generation |-> conf_store.generation + 1, members |-> conf_store.newMembers, newMembers |-> NULL]
     /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, prop_conf, acc_conf>>
@@ -232,12 +262,13 @@ AbortChange ==
     /\ conf_store' = [generation |-> conf_store.generation + 1, members |-> conf_store.members, newMembers |-> NULL]
     /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, prop_conf, acc_conf>>
 
-\* Acceptor a switches to higher configuration (we model it as taken from the
-\* store, but it can be from proposer/peers as well).
+\* Acceptor a switches to higher configuration from the conf store
+\* or from some proposer.
 AccSwitchConf(a) ==
-    /\ acc_conf[a].generation < conf_store.generation
-    /\ acc_conf' = [acc_conf EXCEPT ![a] = conf_store]
-    /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, prop_conf, conf_store>>
+    /\ \E c \in ({conf_store} \union {prop_conf[p]: p \in proposers}):
+        /\ acc_conf[a].generation < c.generation
+        /\ acc_conf' = [acc_conf EXCEPT ![a] = c]
+        /\ UNCHANGED <<prop_state, acc_state, committed, elected_history, prop_conf, conf_store>>
 
 \* Nuke all acceptor state if it is not a member of its current conf. Models
 \* cleanup after migration/abort.
@@ -251,7 +282,6 @@ AccReset(a) ==
     \* terminate all existing connections.
     /\ prop_state' = [p \in proposers |-> [prop_state[p] EXCEPT !.nextSendLsn[a] = NULL]]
     /\ UNCHANGED <<committed, elected_history, prop_conf, acc_conf, conf_store>>
-
 
 \*******************************************************************************
 \* Final spec
@@ -269,7 +299,7 @@ Next ==
   \/ \E new_members \in SUBSET acceptors: StartChange(new_members)
   \/ FinishChange
   \/ AbortChange
-  \/ \E p \in proposers: \E a \in acceptors: ProposerSwitchConf(p, a)
+  \/ \E p \in proposers: ProposerSwitchConf(p)
   \/ \E a \in acceptors: AccSwitchConf(a)
   \/ \E a \in acceptors: AccReset(a)
 
