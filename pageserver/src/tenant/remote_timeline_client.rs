@@ -1958,7 +1958,7 @@ impl RemoteTimelineClient {
                 if let Ok(queue) = self.upload_queue.lock().unwrap().initialized_mut() {
                     for (name, metadata) in modified {
                         debug_assert!(
-                            !queue.clean.0.contains_layer(&name, &metadata),
+                            !queue.clean.0.references(&name, &metadata),
                             "layer {name} modified while referenced by index",
                         );
                     }

@@ -144,8 +144,11 @@ impl IndexPart {
         Self::empty(TimelineMetadata::example())
     }
 
-    /// Returns true if the index contains a reference to the given layer.
-    pub fn contains_layer(&self, name: &LayerName, metadata: &LayerFileMetadata) -> bool {
+    /// Returns true if the index contains a reference to the given layer (i.e. file path).
+    ///
+    /// TODO: either LayerName or PersistentLayerKey should probably contain information about the
+    /// shard and generation, instead of passing in LayerFileMetadata too.
+    pub fn references(&self, name: &LayerName, metadata: &LayerFileMetadata) -> bool {
         let Some(index_metadata) = self.layer_metadata.get(name) else {
             return false;
         };
