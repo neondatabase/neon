@@ -312,6 +312,15 @@ Spec == Init /\ [][Next]_<<prop_state, acc_state, committed, elected_history, pr
 \* Invariants
 \********************************************************************************
 
+AllConfs ==
+    {conf_store} \union {prop_conf[p]: p \in proposers} \union {acc_conf[a]: a \in acceptors}
+
+\* Fairly trivial (given the conf store) invariant that different configurations
+\* with the same generation are never issued.
+ConfigSafety ==
+    \A c1, c2 \in AllConfs:
+        (c1.generation = c2.generation) => (c1 = c2)
+
 ElectionSafety == PAS!ElectionSafety
 
 ElectionSafetyFull == PAS!ElectionSafetyFull
@@ -324,16 +333,16 @@ LogSafety == PAS!LogSafety
 \* Invariants which don't need to hold, but useful for playing/debugging.
 \********************************************************************************
 
+\* Check that we ever switch into non joint conf.
+MaxAccConf == ~ \E a \in acceptors:
+    /\ acc_conf[a].generation = 3
+    /\ acc_conf[a].newMembers /= NULL
+
 CommittedNotTruncated == PAS!CommittedNotTruncated
 
 MaxTerm == PAS!MaxTerm
 
 MaxStoreConf == conf_store.generation <= 1
-
-\* Check that we ever switch into non joint conf.
-MaxAccConf == ~ \E a \in acceptors:
-    /\ acc_conf[a].generation = 3
-    /\ acc_conf[a].newMembers /= NULL
 
 MaxAccWalLen == PAS!MaxAccWalLen
 
