@@ -183,6 +183,7 @@ impl GlobalTimelines {
                                     &conf,
                                     broker_active_set.clone(),
                                     partial_backup_rate_limiter.clone(),
+                                    wal_backup.clone(),
                                 );
                             }
                             // If we can't load a timeline, it's most likely because of a corrupted
@@ -304,7 +305,13 @@ impl GlobalTimelines {
         };
 
         // Do the actual move and reflect the result in the map.
-        match GlobalTimelines::install_temp_timeline(ttid, tmp_path, conf.clone(), wal_backup).await
+        match GlobalTimelines::install_temp_timeline(
+            ttid,
+            tmp_path,
+            conf.clone(),
+            wal_backup.clone(),
+        )
+        .await
         {
             Ok(timeline) => {
                 let mut timeline_shared_state = timeline.write_shared_state().await;
@@ -323,6 +330,7 @@ impl GlobalTimelines {
                     &conf,
                     broker_active_set,
                     partial_backup_rate_limiter,
+                    wal_backup,
                 );
                 drop(timeline_shared_state);
                 Ok(timeline)

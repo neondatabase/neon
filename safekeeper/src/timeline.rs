@@ -28,7 +28,6 @@ use utils::{
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 
-use crate::control_file;
 use crate::rate_limit::RateLimiter;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, TermLsn};
@@ -39,6 +38,7 @@ use crate::timeline_manager::{AtomicStatus, ManagerCtl};
 use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::{remote_timeline_path, WalBackup};
 use crate::wal_backup_partial::PartialRemoteSegment;
+use crate::{control_file, wal_backup};
 
 use crate::metrics::{FullTimelineInfo, WalStorageMetrics, MISC_OPERATION_SECONDS};
 use crate::wal_storage::{Storage as wal_storage_iface, WalReader};
@@ -534,6 +534,7 @@ impl Timeline {
         conf: &SafeKeeperConf,
         broker_active_set: Arc<TimelinesSet>,
         partial_backup_rate_limiter: RateLimiter,
+        wal_backup: Arc<WalBackup>,
     ) {
         let (tx, rx) = self.manager_ctl.bootstrap_manager();
 
@@ -556,6 +557,7 @@ impl Timeline {
                     tx,
                     rx,
                     partial_backup_rate_limiter,
+                    wal_backup,
                 )
                 .await
             }
@@ -592,12 +594,16 @@ impl Timeline {
         // it is cancelled, so WAL storage won't be opened again.
         shared_state.sk.close_wal_store();
 
-        if !only_local && self.conf.is_wal_backup_enabled() {
-            // Note: we concurrently delete remote storage data from multiple
-            // safekeepers. That's ok, s3 replies 200 if object doesn't exist and we
-            // do some retries anyway.
-            self.wal_backup.delete_timeline(&self.ttid).await?;
+        match (self.wal_backup.get_storage(), only_local) {
+            (Some(storage), false) => {
+                // Note: we concurrently delete remote storage data from multiple
+                // safekeepers. That's ok, s3 replies 200 if object doesn't exist and we
+                // do some retries anyway.
+                wal_backup::delete_timeline(&storage, &self.ttid).await?;
+            }
+            _ => {}
         }
+
         let dir_existed = delete_dir(&self.timeline_dir).await?;
         Ok(dir_existed)
     }
@@ -938,14 +944,12 @@ impl WalResidentTimeline {
 
     pub async fn get_walreader(&self, start_lsn: Lsn) -> Result<WalReader> {
         let (_, persisted_state) = self.get_state().await;
-        let enable_remote_read = self.conf.is_wal_backup_enabled();
 
         WalReader::new(
             &self.ttid,
             self.timeline_dir.clone(),
             &persisted_state,
             start_lsn,
-            enable_remote_read,
             self.wal_backup.clone(),
         )
     }

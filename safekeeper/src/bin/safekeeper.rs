@@ -429,9 +429,9 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
         e
     })?;
 
-    let wal_backup = Arc::new(WalBackup::new().init(&conf).await?);
+    let wal_backup = Arc::new(WalBackup::new(&conf).await?);
 
-    let global_timelines = Arc::new(GlobalTimelines::new(conf.clone(), wal_backup));
+    let global_timelines = Arc::new(GlobalTimelines::new(conf.clone(), wal_backup.clone()));
 
     // Register metrics collector for active timelines. It's important to do this
     // after daemonizing, otherwise process collector will be upset.
@@ -506,6 +506,7 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
             conf.clone(),
             http_listener,
             global_timelines.clone(),
+            wal_backup,
         ))
         .map(|res| ("HTTP service main".to_owned(), res));
     tasks_handles.push(Box::pin(http_handle));

@@ -90,7 +90,7 @@ impl Env {
         let safekeeper = self.make_safekeeper(node_id, ttid).await?;
         let shared_state = SharedState::new(StateSK::Loaded(safekeeper));
 
-        let wal_backup = Arc::new(WalBackup::default());
+        let wal_backup = Arc::new(WalBackup::new(&conf).await?);
 
         let timeline = Timeline::new(
             ttid,
@@ -98,13 +98,14 @@ impl Env {
             &remote_path,
             shared_state,
             conf.clone(),
-            wal_backup,
+            wal_backup.clone(),
         );
         timeline.bootstrap(
             &mut timeline.write_shared_state().await,
             &conf,
             Arc::new(TimelinesSet::default()), // ignored for now
             RateLimiter::new(0, 0),
+            wal_backup,
         );
         Ok(timeline)
     }

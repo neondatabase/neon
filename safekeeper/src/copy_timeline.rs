@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use camino::Utf8PathBuf;
 use postgres_ffi::{MAX_SEND_SIZE, WAL_SEGMENT_SIZE};
+use remote_storage::GenericRemoteStorage;
 use std::sync::Arc;
 use tokio::{
     fs::OpenOptions,
@@ -14,6 +15,7 @@ use crate::{
     state::TimelinePersistentState,
     timeline::{TimelineError, WalResidentTimeline},
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
+    wal_backup::copy_s3_segments,
     wal_storage::{wal_file_paths, WalReader},
     GlobalTimelines,
 };
@@ -30,6 +32,7 @@ pub struct Request {
 pub async fn handle_request(
     request: Request,
     global_timelines: Arc<GlobalTimelines>,
+    storage: Arc<GenericRemoteStorage>,
 ) -> Result<()> {
     // TODO: request.until_lsn MUST be a valid LSN, and we cannot check it :(
     //   if LSN will point to the middle of a WAL record, timeline will be in "broken" state
@@ -126,16 +129,15 @@ pub async fn handle_request(
     assert!(first_ondisk_segment <= last_segment);
     assert!(first_ondisk_segment >= first_segment);
 
-    source_tli
-        .wal_backup
-        .copy_s3_segments(
-            wal_seg_size,
-            &request.source_ttid,
-            &request.destination_ttid,
-            first_segment,
-            first_ondisk_segment,
-        )
-        .await?;
+    copy_s3_segments(
+        &storage,
+        wal_seg_size,
+        &request.source_ttid,
+        &request.destination_ttid,
+        first_segment,
+        first_ondisk_segment,
+    )
+    .await?;
 
     copy_disk_segments(
         &source_tli,
