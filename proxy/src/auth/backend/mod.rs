@@ -678,6 +678,9 @@ mod tests {
         .await
         .unwrap();
 
+        // flush the final server message
+        stream.flush().await.unwrap();
+
         handle.await.unwrap();
     }
 

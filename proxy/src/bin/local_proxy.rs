@@ -271,7 +271,6 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
     Ok(Box::leak(Box::new(ProxyConfig {
         tls_config: None,
         metric_collection: None,
-        allow_self_signed_compute: false,
         http_config,
         authentication_config: AuthenticationConfig {
             jwks_cache: JwkCache::default(),

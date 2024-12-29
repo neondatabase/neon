@@ -3122,6 +3122,23 @@ impl Tenant {
         }
     }
 
+    pub(crate) fn get_scheduled_compaction_tasks(
+        &self,
+        timeline_id: TimelineId,
+    ) -> Vec<CompactOptions> {
+        use itertools::Itertools;
+        let guard = self.scheduled_compaction_tasks.lock().unwrap();
+        guard
+            .get(&timeline_id)
+            .map(|tline_pending_tasks| {
+                tline_pending_tasks
+                    .iter()
+                    .map(|x| x.options.clone())
+                    .collect_vec()
+            })
+            .unwrap_or_default()
+    }
+
     /// Schedule a compaction task for a timeline.
     pub(crate) async fn schedule_compaction(
         &self,
@@ -5760,11 +5777,11 @@ mod tests {
     use utils::id::TenantId;
 
     #[cfg(feature = "testing")]
+    use models::CompactLsnRange;
+    #[cfg(feature = "testing")]
     use pageserver_api::record::NeonWalRecord;
     #[cfg(feature = "testing")]
     use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
-    #[cfg(feature = "testing")]
-    use timeline::CompactLsnRange;
     #[cfg(feature = "testing")]
     use timeline::GcInfo;
 
@@ -9634,7 +9651,7 @@ mod tests {
     #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_on_branch() -> anyhow::Result<()> {
-        use timeline::CompactLsnRange;
+        use models::CompactLsnRange;
 
         let harness = TenantHarness::create("test_simple_bottom_most_compaction_on_branch").await?;
         let (tenant, ctx) = harness.load().await;

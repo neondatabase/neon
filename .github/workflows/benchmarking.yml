@@ -308,6 +308,7 @@ jobs:
           "image": [ "'"$image_default"'" ],
           "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb" ,"runner": '"$runner_default"', "image": "'"$image_default"'" },
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new-many-tables","db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
                       { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb" ,"runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned-bookworm" },
                       { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned-bookworm" },
@@ -410,7 +411,7 @@ jobs:
         aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Create Neon Project
-      if: contains(fromJson('["neonvm-captest-new", "neonvm-captest-freetier", "neonvm-azure-captest-freetier", "neonvm-azure-captest-new"]'), matrix.platform)
+      if: contains(fromJson('["neonvm-captest-new", "neonvm-captest-new-many-tables", "neonvm-captest-freetier", "neonvm-azure-captest-freetier", "neonvm-azure-captest-new"]'), matrix.platform)
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
@@ -429,7 +430,7 @@ jobs:
           neonvm-captest-sharding-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_SHARDING_CONNSTR }}
             ;;
-          neonvm-captest-new | neonvm-captest-freetier | neonvm-azure-captest-new | neonvm-azure-captest-freetier)
+          neonvm-captest-new | neonvm-captest-new-many-tables | neonvm-captest-freetier | neonvm-azure-captest-new | neonvm-azure-captest-freetier)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
             ;;
           rds-aurora)
@@ -445,6 +446,26 @@ jobs:
         esac
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+
+    # we want to compare Neon project OLTP throughput and latency at scale factor 10 GB 
+    # without (neonvm-captest-new)
+    # and with (neonvm-captest-new-many-tables) many relations in the database
+    - name: Create many relations before the run
+      if: contains(fromJson('["neonvm-captest-new-many-tables"]'), matrix.platform)
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_perf_many_relations
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+        TEST_NUM_RELATIONS: 10000
 
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set

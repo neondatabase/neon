@@ -1187,6 +1187,25 @@ RUN case "${PG_VERSION}" in \
 
 #########################################################################################
 #
+# Layer "pg_repack"
+# compile pg_repack extension
+#
+#########################################################################################
+
+FROM build-deps AS pg-repack-build
+ARG PG_VERSION
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
+
+RUN wget https://github.com/reorg/pg_repack/archive/refs/tags/ver_1.5.2.tar.gz -O pg_repack.tar.gz && \
+    echo '4516cad42251ed3ad53ff619733004db47d5755acac83f75924cd94d1c4fb681 pg_repack.tar.gz' | sha256sum --check && \
+    mkdir pg_repack-src && cd pg_repack-src && tar xzf ../pg_repack.tar.gz --strip-components=1 -C . && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install
+
+#########################################################################################
+#
 # Layer "neon-pg-ext-build"
 # compile neon extensions
 #
@@ -1230,6 +1249,7 @@ COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-repack-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
@@ -1536,28 +1556,30 @@ RUN apt update && \
         locales \
         procps \
         ca-certificates \
+        curl \
+        unzip \
         $VERSION_INSTALLS && \
     apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 
-# s5cmd 2.2.2 from https://github.com/peak/s5cmd/releases/tag/v2.2.2
-# used by fast_import
+# aws cli is used by fast_import (curl and unzip above are at this time only used for this installation step)
 ARG TARGETARCH
-ADD https://github.com/peak/s5cmd/releases/download/v2.2.2/s5cmd_2.2.2_linux_$TARGETARCH.deb /tmp/s5cmd.deb
 RUN set -ex; \
-    \
-    # Determine the expected checksum based on TARGETARCH
     if [ "${TARGETARCH}" = "amd64" ]; then \
-        CHECKSUM="392c385320cd5ffa435759a95af77c215553d967e4b1c0fffe52e4f14c29cf85"; \
+        TARGETARCH_ALT="x86_64"; \
+        CHECKSUM="c9a9df3770a3ff9259cb469b6179e02829687a464e0824d5c32d378820b53a00"; \
     elif [ "${TARGETARCH}" = "arm64" ]; then \
-        CHECKSUM="939bee3cf4b5604ddb00e67f8c157b91d7c7a5b553d1fbb6890fad32894b7b46"; \
+        TARGETARCH_ALT="aarch64"; \
+        CHECKSUM="8181730be7891582b38b028112e81b4899ca817e8c616aad807c9e9d1289223a"; \
     else \
         echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
     fi; \
-    \
-    # Compute and validate the checksum
-    echo "${CHECKSUM}  /tmp/s5cmd.deb" | sha256sum -c -
-RUN dpkg -i /tmp/s5cmd.deb && rm /tmp/s5cmd.deb
+    curl -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
+    echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
+    unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
+    /tmp/awscliv2/aws/install; \
+    rm -rf /tmp/awscliv2.zip /tmp/awscliv2; \
+    true
 
 ENV LANG=en_US.utf8
 USER postgres

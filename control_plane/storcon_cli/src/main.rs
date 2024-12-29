@@ -5,7 +5,8 @@ use clap::{Parser, Subcommand};
 use pageserver_api::{
     controller_api::{
         AvailabilityZone, NodeAvailabilityWrapper, NodeDescribeResponse, NodeShardResponse,
-        ShardSchedulingPolicy, TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
+        SafekeeperDescribeResponse, ShardSchedulingPolicy, TenantCreateRequest,
+        TenantDescribeResponse, TenantPolicyRequest,
     },
     models::{
         EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
@@ -211,6 +212,8 @@ enum Command {
         #[arg(long)]
         timeout: humantime::Duration,
     },
+    /// List safekeepers known to the storage controller
+    Safekeepers {},
 }
 
 #[derive(Parser)]
@@ -1019,6 +1022,31 @@ async fn main() -> anyhow::Result<()> {
             println!(
                 "Fill was cancelled for node {node_id}. Schedulling policy is now {final_policy:?}"
             );
+        }
+        Command::Safekeepers {} => {
+            let mut resp = storcon_client
+                .dispatch::<(), Vec<SafekeeperDescribeResponse>>(
+                    Method::GET,
+                    "control/v1/safekeeper".to_string(),
+                    None,
+                )
+                .await?;
+
+            resp.sort_by(|a, b| a.id.cmp(&b.id));
+
+            let mut table = comfy_table::Table::new();
+            table.set_header(["Id", "Version", "Host", "Port", "Http Port", "AZ Id"]);
+            for sk in resp {
+                table.add_row([
+                    format!("{}", sk.id),
+                    format!("{}", sk.version),
+                    sk.host,
+                    format!("{}", sk.port),
+                    format!("{}", sk.http_port),
+                    sk.availability_zone_id.to_string(),
+                ]);
+            }
+            println!("{table}");
         }
     }
 
