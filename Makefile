@@ -111,7 +111,7 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 	EXTRA_VERSION=$$(cd $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION && git rev-parse HEAD); \
 	(cd $(POSTGRES_INSTALL_DIR)/build/$$VERSION && \
 	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION/configure \
-		CFLAGS='$(PG_CFLAGS)' \
+		CFLAGS='$(PG_CFLAGS)' CPPFLAGS='-DTCP_NODELAY' \
 		$(PG_CONFIGURE_OPTS) --with-extra-version=" ($$EXTRA_VERSION)" \
 		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/$$VERSION > configure.log)
 
