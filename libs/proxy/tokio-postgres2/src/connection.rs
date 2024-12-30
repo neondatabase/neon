@@ -91,6 +91,8 @@ where
             .map(|o| o.map(|r| r.map_err(Error::io)))
     }
 
+    /// Read and process messages from the connection to postgres.
+    /// client <- postgres
     fn poll_read(&mut self, cx: &mut Context<'_>) -> Result<Option<AsyncMessage>, Error> {
         if self.state != State::Active {
             trace!("poll_read: done");
@@ -168,6 +170,7 @@ where
         }
     }
 
+    /// Fetch the next client request and enqueue the response sender.
     fn poll_request(&mut self, cx: &mut Context<'_>) -> Poll<Option<RequestMessages>> {
         if self.receiver.is_closed() {
             return Poll::Ready(None);
@@ -186,6 +189,8 @@ where
         }
     }
 
+    /// Process client requests and write them to the postgres connection, flushing if necessary.
+    /// client -> postgres
     fn poll_write(&mut self, cx: &mut Context<'_>) -> Result<(), Error> {
         loop {
             if self.state == State::Closing {
