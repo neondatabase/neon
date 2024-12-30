@@ -18,7 +18,7 @@ mod private {
     use tokio_rustls::client::TlsStream;
     use tokio_rustls::TlsConnector;
 
-    use crate::config::TlsServerEndPoint;
+    use crate::tls::TlsServerEndPoint;
 
     pub struct TlsConnectFuture<S> {
         inner: tokio_rustls::Connect<S>,

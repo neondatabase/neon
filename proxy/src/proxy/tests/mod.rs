@@ -22,7 +22,7 @@ use super::*;
 use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned,
 };
-use crate::config::{CertResolver, ComputeConfig, RetryConfig};
+use crate::config::{ComputeConfig, RetryConfig};
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{
@@ -30,6 +30,7 @@ use crate::control_plane::{
 };
 use crate::error::ErrorKind;
 use crate::tls::postgres_rustls::MakeRustlsConnect;
+use crate::tls::server_config::CertResolver;
 use crate::types::{BranchId, EndpointId, ProjectId};
 use crate::{sasl, scram};
 
