@@ -186,11 +186,11 @@ where
         }
     }
 
-    fn poll_write(&mut self, cx: &mut Context<'_>) -> Result<bool, Error> {
+    fn poll_write(&mut self, cx: &mut Context<'_>) -> Result<(), Error> {
         loop {
             if self.state == State::Closing {
                 trace!("poll_write: done");
-                return Ok(false);
+                return Ok(());
             }
 
             if Pin::new(&mut self.stream)
@@ -199,7 +199,9 @@ where
                 .is_pending()
             {
                 trace!("poll_write: waiting on socket");
-                return Ok(false);
+
+                // poll_ready is self-flushing.
+                return Ok(());
             }
 
             let request = match self.poll_request(cx) {
@@ -216,11 +218,13 @@ where
                         "poll_write: at eof, pending responses {}",
                         self.responses.len()
                     );
-                    return Ok(true);
+                    self.poll_flush(cx)?;
+                    return Ok(());
                 }
                 Poll::Pending => {
                     trace!("poll_write: waiting on request");
-                    return Ok(true);
+                    self.poll_flush(cx)?;
+                    return Ok(());
                 }
             };
 
@@ -283,10 +287,7 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<AsyncMessage, Error>>> {
         let message = self.poll_read(cx)?;
-        let want_flush = self.poll_write(cx)?;
-        if want_flush {
-            self.poll_flush(cx)?;
-        }
+        self.poll_write(cx)?;
         match message {
             Some(message) => Poll::Ready(Some(Ok(message))),
             None => match self.poll_shutdown(cx) {
