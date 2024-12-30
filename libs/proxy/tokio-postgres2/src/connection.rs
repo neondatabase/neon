@@ -216,7 +216,21 @@ where
                     self.state = State::Terminating;
                     let mut request = BytesMut::new();
                     frontend::terminate(&mut request);
-                    RequestMessages::Single(FrontendMessage::Raw(request.freeze()))
+                    let request = RequestMessages::Single(FrontendMessage::Raw(request.freeze()));
+
+                    match request {
+                        RequestMessages::Single(request) => {
+                            Pin::new(&mut self.stream)
+                                .start_send(request)
+                                .map_err(Error::io)?;
+                            if self.state == State::Terminating {
+                                trace!("poll_write: sent eof, closing");
+                                self.state = State::Closing;
+                            }
+                        }
+                    }
+
+                    continue;
                 }
                 Poll::Ready(None) => {
                     trace!(
