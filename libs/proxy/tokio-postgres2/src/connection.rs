@@ -208,8 +208,12 @@ where
                 return Ok(());
             }
 
-            let request = match self.poll_request(cx) {
-                Poll::Ready(Some(request)) => request,
+            match self.poll_request(cx) {
+                Poll::Ready(Some(RequestMessages::Single(request))) => {
+                    Pin::new(&mut self.stream)
+                        .start_send(request)
+                        .map_err(Error::io)?;
+                }
                 Poll::Ready(None) if self.responses.is_empty() && self.state == State::Active => {
                     trace!("poll_write: at eof, terminating");
                     let mut request = BytesMut::new();
@@ -223,7 +227,8 @@ where
                     trace!("poll_write: sent eof, closing");
                     self.state = State::Closing;
 
-                    continue;
+                    trace!("poll_write: done");
+                    return Ok(());
                 }
                 Poll::Ready(None) => {
                     trace!(
@@ -237,14 +242,6 @@ where
                     trace!("poll_write: waiting on request");
                     self.poll_flush(cx)?;
                     return Ok(());
-                }
-            };
-
-            match request {
-                RequestMessages::Single(request) => {
-                    Pin::new(&mut self.stream)
-                        .start_send(request)
-                        .map_err(Error::io)?;
                 }
             }
         }
