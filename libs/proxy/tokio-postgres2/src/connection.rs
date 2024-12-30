@@ -93,7 +93,7 @@ where
     /// Read and process messages from the connection to postgres.
     /// client <- postgres
     fn poll_read(&mut self, cx: &mut Context<'_>) -> Result<Option<AsyncMessage>, Error> {
-        if self.state != State::Active {
+        if self.state == State::Closing {
             trace!("poll_read: done");
             return Ok(None);
         }
@@ -259,10 +259,6 @@ where
     }
 
     fn poll_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        if self.state != State::Closing {
-            return Poll::Pending;
-        }
-
         match Pin::new(&mut self.stream)
             .poll_close(cx)
             .map_err(Error::io)?
@@ -293,8 +289,27 @@ where
     ) -> Poll<Option<Result<AsyncMessage, Error>>> {
         let message = self.poll_read(cx)?;
         self.poll_write(cx)?;
+
         match message {
             Some(message) => Poll::Ready(Some(Ok(message))),
+            // if state is not closing, and there's no message from postgres, then:
+            //
+            // poll_read():
+            // 1. There were no pending responses and we're waiting for postgres to send a response.
+            // 2. There are pending responses but the Client cannot yet receive it.
+            //
+            // poll_write():
+            // 3. The buffer to postgres is too full, so flushing.
+            // 4. There's no more client requests, but still pending responses, and there is data to flush.
+            // 5. There's no more client requests, but still pending responses, but there is no data to flush.
+            // 6. We're still waiting for client requests.
+            //
+            // In both cases 1 and 2, the cx.waker() is registered.
+            // In cases 3, 4, and 6 the cx.waker() is regestered.
+            //
+            // In case 5 no waker is registered, but the only process can be made by waiting for data from postgres, but we only
+            // from cases 1 or 2 that a waker is registered for reading.
+            None if self.state != State::Closing => Poll::Pending,
             None => match self.poll_shutdown(cx) {
                 Poll::Ready(Ok(())) => Poll::Ready(None),
                 Poll::Ready(Err(e)) => Poll::Ready(Some(Err(e))),
