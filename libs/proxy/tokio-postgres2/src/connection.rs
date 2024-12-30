@@ -189,12 +189,13 @@ where
     }
 
     /// Process client requests and write them to the postgres connection, flushing if necessary.
+    /// Returns true if the connection is now closing
     /// client -> postgres
-    fn poll_write(&mut self, cx: &mut Context<'_>) -> Result<(), Error> {
+    fn poll_write(&mut self, cx: &mut Context<'_>) -> Result<bool, Error> {
         loop {
             if self.state == State::Closing {
                 trace!("poll_write: done");
-                return Ok(());
+                return Ok(false);
             }
 
             if Pin::new(&mut self.stream)
@@ -205,15 +206,18 @@ where
                 trace!("poll_write: waiting on socket");
 
                 // poll_ready is self-flushing.
-                return Ok(());
+                return Ok(false);
             }
 
             match self.poll_request(cx) {
+                // send the message to postgres
                 Poll::Ready(Some(RequestMessages::Single(request))) => {
                     Pin::new(&mut self.stream)
                         .start_send(request)
                         .map_err(Error::io)?;
                 }
+                // No more messages from the client, and no more responses to wait for.
+                // Send a terminate message to postgres
                 Poll::Ready(None) if self.responses.is_empty() => {
                     trace!("poll_write: at eof, terminating");
                     let mut request = BytesMut::new();
@@ -225,23 +229,23 @@ where
                         .map_err(Error::io)?;
 
                     trace!("poll_write: sent eof, closing");
-                    self.state = State::Closing;
-
                     trace!("poll_write: done");
-                    return Ok(());
+                    return Ok(true);
                 }
+                // No more messages from the client, but there are still some responses to wait for.
                 Poll::Ready(None) => {
                     trace!(
                         "poll_write: at eof, pending responses {}",
                         self.responses.len()
                     );
                     self.poll_flush(cx)?;
-                    return Ok(());
+                    return Ok(false);
                 }
+                // Still waiting for a message from the client.
                 Poll::Pending => {
                     trace!("poll_write: waiting on request");
                     self.poll_flush(cx)?;
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
@@ -288,7 +292,10 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<AsyncMessage, Error>>> {
         let message = self.poll_read(cx)?;
-        self.poll_write(cx)?;
+        let closing = self.poll_write(cx)?;
+        if closing {
+            self.state = State::Closing;
+        }
 
         match message {
             Some(message) => Poll::Ready(Some(Ok(message))),
