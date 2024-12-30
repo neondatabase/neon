@@ -33,7 +33,6 @@ pub struct Response {
 #[derive(PartialEq, Debug)]
 enum State {
     Active,
-    Terminating,
     Closing,
 }
 
@@ -213,7 +212,6 @@ where
                 Poll::Ready(Some(request)) => request,
                 Poll::Ready(None) if self.responses.is_empty() && self.state == State::Active => {
                     trace!("poll_write: at eof, terminating");
-                    self.state = State::Terminating;
                     let mut request = BytesMut::new();
                     frontend::terminate(&mut request);
                     let request = FrontendMessage::Raw(request.freeze());
@@ -247,10 +245,6 @@ where
                     Pin::new(&mut self.stream)
                         .start_send(request)
                         .map_err(Error::io)?;
-                    if self.state == State::Terminating {
-                        trace!("poll_write: sent eof, closing");
-                        self.state = State::Closing;
-                    }
                 }
             }
         }
