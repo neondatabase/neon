@@ -92,21 +92,21 @@ where
 
     /// Read and process messages from the connection to postgres.
     /// client <- postgres
-    fn poll_read(&mut self, cx: &mut Context<'_>) -> Result<Option<AsyncMessage>, Error> {
+    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Result<AsyncMessage, Error>> {
         loop {
             let message = match self.poll_response(cx)? {
                 Poll::Ready(Some(message)) => message,
-                Poll::Ready(None) => return Err(Error::closed()),
+                Poll::Ready(None) => return Poll::Ready(Err(Error::closed())),
                 Poll::Pending => {
                     trace!("poll_read: waiting on response");
-                    return Ok(None);
+                    return Poll::Pending;
                 }
             };
 
             let (mut messages, request_complete) = match message {
                 BackendMessage::Async(Message::NoticeResponse(body)) => {
                     let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
-                    return Ok(Some(AsyncMessage::Notice(error)));
+                    return Poll::Ready(Ok(AsyncMessage::Notice(error)));
                 }
                 BackendMessage::Async(Message::NotificationResponse(body)) => {
                     let notification = Notification {
@@ -114,7 +114,7 @@ where
                         channel: body.channel().map_err(Error::parse)?.to_string(),
                         payload: body.message().map_err(Error::parse)?.to_string(),
                     };
-                    return Ok(Some(AsyncMessage::Notification(notification)));
+                    return Poll::Ready(Ok(AsyncMessage::Notification(notification)));
                 }
                 BackendMessage::Async(Message::ParameterStatus(body)) => {
                     self.parameters.insert(
@@ -133,8 +133,8 @@ where
             let mut response = match self.responses.pop_front() {
                 Some(response) => response,
                 None => match messages.next().map_err(Error::parse)? {
-                    Some(Message::ErrorResponse(error)) => return Err(Error::db(error)),
-                    _ => return Err(Error::unexpected_message()),
+                    Some(Message::ErrorResponse(error)) => return Poll::Ready(Err(Error::db(error))),
+                    _ => return Poll::Ready(Err(Error::unexpected_message())),
                 },
             };
 
@@ -158,7 +158,7 @@ where
                         request_complete,
                     });
                     trace!("poll_read: waiting on sender");
-                    return Ok(None);
+                    return Poll::Pending;
                 }
             }
         }
@@ -289,7 +289,7 @@ where
                 self.state = State::Closing;
             }
 
-            if let Some(message) = message {
+            if let Poll::Ready(message) = message {
                 return Poll::Ready(Some(Ok(message)));
             }
 
