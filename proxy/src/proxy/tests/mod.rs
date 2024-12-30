@@ -29,7 +29,7 @@ use crate::control_plane::{
     self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo, NodeInfoCache,
 };
 use crate::error::ErrorKind;
-use crate::postgres_rustls::MakeRustlsConnect;
+use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::types::{BranchId, EndpointId, ProjectId};
 use crate::{sasl, scram};
 

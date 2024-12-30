@@ -17,11 +17,11 @@ use crate::config::ComputeConfig;
 use crate::error::ReportableError;
 use crate::ext::LockExt;
 use crate::metrics::{CancellationRequest, CancellationSource, Metrics};
-use crate::postgres_rustls::MakeRustlsConnect;
 use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::cancellation_publisher::{
     CancellationPublisher, CancellationPublisherMut, RedisPublisherClient,
 };
+use crate::tls::postgres_rustls::MakeRustlsConnect;
 
 pub type CancelMap = Arc<DashMap<CancelKeyData, Option<CancelClosure>>>;
 pub type CancellationHandlerMain = CancellationHandler<Option<Arc<Mutex<RedisPublisherClient>>>>;
@@ -271,7 +271,8 @@ impl CancelClosure {
     ) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
 
-        let mut mk_tls = crate::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
+        let mut mk_tls =
+            crate::tls::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
         let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
             &mut mk_tls,
             &self.hostname,

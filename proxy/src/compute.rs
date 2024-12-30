@@ -22,8 +22,8 @@ use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
-use crate::postgres_rustls::MakeRustlsConnect;
 use crate::proxy::neon_option;
+use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::types::Host;
 
 pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
@@ -251,7 +251,7 @@ impl ConnCfg {
         let (socket_addr, stream, host) = self.connect_raw(config.timeout).await?;
         drop(pause);
 
-        let mut mk_tls = crate::postgres_rustls::MakeRustlsConnect::new(config.tls.clone());
+        let mut mk_tls = crate::tls::postgres_rustls::MakeRustlsConnect::new(config.tls.clone());
         let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
             &mut mk_tls,
             host,
