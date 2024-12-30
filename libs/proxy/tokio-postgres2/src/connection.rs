@@ -93,11 +93,6 @@ where
     /// Read and process messages from the connection to postgres.
     /// client <- postgres
     fn poll_read(&mut self, cx: &mut Context<'_>) -> Result<Option<AsyncMessage>, Error> {
-        if self.state == State::Closing {
-            trace!("poll_read: done");
-            return Ok(None);
-        }
-
         loop {
             let message = match self.poll_response(cx)? {
                 Poll::Ready(Some(message)) => message,
@@ -193,11 +188,6 @@ where
     /// client -> postgres
     fn poll_write(&mut self, cx: &mut Context<'_>) -> Result<bool, Error> {
         loop {
-            if self.state == State::Closing {
-                trace!("poll_write: done");
-                return Ok(false);
-            }
-
             if Pin::new(&mut self.stream)
                 .poll_ready(cx)
                 .map_err(Error::io)?
@@ -291,15 +281,19 @@ where
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<AsyncMessage, Error>>> {
-        let message = self.poll_read(cx)?;
-        let closing = self.poll_write(cx)?;
-        if closing {
-            self.state = State::Closing;
-        }
+        if self.state != State::Closing {
+            // if the state is still active, try read from and write to postgres.
+            let message = self.poll_read(cx)?;
+            let closing = self.poll_write(cx)?;
+            if closing {
+                self.state = State::Closing;
+            }
 
-        match message {
-            Some(message) => Poll::Ready(Some(Ok(message))),
-            // if state is not closing, and there's no message from postgres, then:
+            if let Some(message) = message {
+                return Poll::Ready(Some(Ok(message)));
+            }
+
+            // if state is still not closing, and there's no message from postgres, then:
             //
             // poll_read():
             // 1. There were no pending responses and we're waiting for postgres to send a response.
@@ -316,12 +310,15 @@ where
             //
             // In case 5 no waker is registered, but the only process can be made by waiting for data from postgres, but we only
             // from cases 1 or 2 that a waker is registered for reading.
-            None if self.state != State::Closing => Poll::Pending,
-            None => match self.poll_shutdown(cx) {
-                Poll::Ready(Ok(())) => Poll::Ready(None),
-                Poll::Ready(Err(e)) => Poll::Ready(Some(Err(e))),
-                Poll::Pending => Poll::Pending,
-            },
+            if self.state != State::Closing {
+                return Poll::Pending;
+            }
+        }
+
+        match self.poll_shutdown(cx) {
+            Poll::Ready(Ok(())) => Poll::Ready(None),
+            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(e))),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
