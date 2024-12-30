@@ -193,10 +193,9 @@ ProposerSwitchConf(p) ==
     /\ \E c \in ({conf_store} \union {acc_conf[a]: a \in acceptors}):
         \* p's conf is lower than c.
         /\ (c.generation > prop_conf[p].generation)
-        \* We allow to seamlessly bump conf only when proposer is already elected.
-        \* If it isn't, some of the votes already collected could have been from
-        \* non-members of updated conf. It is easier (both here and in the impl) to
-        \* restart instead of figuring and removing these out.
+        \* We allow to bump conf without restart only when wp is already elected.
+        \* If it isn't, the votes it has already collected are from the previous
+        \* configuration and can't be used.
         \*
         \* So if proposer is in 'campaign' in the impl we would restart preserving
         \* conf and increasing term. In the spec this transition is already covered
