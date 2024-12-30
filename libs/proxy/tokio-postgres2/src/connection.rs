@@ -36,6 +36,11 @@ enum State {
     Closing,
 }
 
+enum WriteReady {
+    Terminating,
+    WaitingOnRead,
+}
+
 /// A connection to a PostgreSQL database.
 ///
 /// This is one half of what is returned when a new connection is established. It performs the actual IO with the
@@ -133,7 +138,9 @@ where
             let mut response = match self.responses.pop_front() {
                 Some(response) => response,
                 None => match messages.next().map_err(Error::parse)? {
-                    Some(Message::ErrorResponse(error)) => return Poll::Ready(Err(Error::db(error))),
+                    Some(Message::ErrorResponse(error)) => {
+                        return Poll::Ready(Err(Error::db(error)))
+                    }
                     _ => return Poll::Ready(Err(Error::unexpected_message())),
                 },
             };
@@ -184,9 +191,8 @@ where
     }
 
     /// Process client requests and write them to the postgres connection, flushing if necessary.
-    /// Returns true if the connection is now closing
     /// client -> postgres
-    fn poll_write(&mut self, cx: &mut Context<'_>) -> Result<bool, Error> {
+    fn poll_write(&mut self, cx: &mut Context<'_>) -> Poll<Result<WriteReady, Error>> {
         loop {
             if Pin::new(&mut self.stream)
                 .poll_ready(cx)
@@ -196,7 +202,7 @@ where
                 trace!("poll_write: waiting on socket");
 
                 // poll_ready is self-flushing.
-                return Ok(false);
+                return Poll::Pending;
             }
 
             match self.poll_request(cx) {
@@ -220,7 +226,7 @@ where
 
                     trace!("poll_write: sent eof, closing");
                     trace!("poll_write: done");
-                    return Ok(true);
+                    return Poll::Ready(Ok(WriteReady::Terminating));
                 }
                 // No more messages from the client, but there are still some responses to wait for.
                 Poll::Ready(None) => {
@@ -228,28 +234,33 @@ where
                         "poll_write: at eof, pending responses {}",
                         self.responses.len()
                     );
-                    self.poll_flush(cx)?;
-                    return Ok(false);
+                    ready!(self.poll_flush(cx))?;
+                    return Poll::Ready(Ok(WriteReady::WaitingOnRead));
                 }
                 // Still waiting for a message from the client.
                 Poll::Pending => {
                     trace!("poll_write: waiting on request");
-                    self.poll_flush(cx)?;
-                    return Ok(false);
+                    ready!(self.poll_flush(cx))?;
+                    return Poll::Pending;
                 }
             }
         }
     }
 
-    fn poll_flush(&mut self, cx: &mut Context<'_>) -> Result<(), Error> {
+    fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         match Pin::new(&mut self.stream)
             .poll_flush(cx)
             .map_err(Error::io)?
         {
-            Poll::Ready(()) => trace!("poll_flush: flushed"),
-            Poll::Pending => trace!("poll_flush: waiting on socket"),
+            Poll::Ready(()) => {
+                trace!("poll_flush: flushed");
+                Poll::Ready(Ok(()))
+            }
+            Poll::Pending => {
+                trace!("poll_flush: waiting on socket");
+                Poll::Pending
+            }
         }
-        Ok(())
     }
 
     fn poll_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
@@ -285,7 +296,7 @@ where
             // if the state is still active, try read from and write to postgres.
             let message = self.poll_read(cx)?;
             let closing = self.poll_write(cx)?;
-            if closing {
+            if let Poll::Ready(WriteReady::Terminating) = closing {
                 self.state = State::Closing;
             }
 
@@ -293,23 +304,9 @@ where
                 return Poll::Ready(Some(Ok(message)));
             }
 
-            // if state is still not closing, and there's no message from postgres, then:
-            //
-            // poll_read():
-            // 1. There were no pending responses and we're waiting for postgres to send a response.
-            // 2. There are pending responses but the Client cannot yet receive it.
-            //
-            // poll_write():
-            // 3. The buffer to postgres is too full, so flushing.
-            // 4. There's no more client requests, but still pending responses, and there is data to flush.
-            // 5. There's no more client requests, but still pending responses, but there is no data to flush.
-            // 6. We're still waiting for client requests.
-            //
-            // In both cases 1 and 2, the cx.waker() is registered.
-            // In cases 3, 4, and 6 the cx.waker() is regestered.
-            //
-            // In case 5 no waker is registered, but the only process can be made by waiting for data from postgres, but we only
-            // from cases 1 or 2 that a waker is registered for reading.
+            // poll_read returned Pending.
+            // poll_write returned Pending or Ready(WriteReady::WaitingOnRead).
+            // if poll_write returned Ready(WriteReady::WaitingOnRead), then we are waiting to read more data from postgres.
             if self.state != State::Closing {
                 return Poll::Pending;
             }
