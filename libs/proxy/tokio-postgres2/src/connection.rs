@@ -51,7 +51,6 @@ pub struct Connection<S, T> {
     /// HACK: we need this in the Neon Proxy to forward params.
     pub parameters: HashMap<String, String>,
     receiver: mpsc::UnboundedReceiver<Request>,
-    pending_request: Option<RequestMessages>,
     pending_responses: VecDeque<BackendMessage>,
     responses: VecDeque<Response>,
     state: State,
@@ -72,7 +71,6 @@ where
             stream,
             parameters,
             receiver,
-            pending_request: None,
             pending_responses,
             responses: VecDeque::new(),
             state: State::Active,
@@ -171,11 +169,6 @@ where
     }
 
     fn poll_request(&mut self, cx: &mut Context<'_>) -> Poll<Option<RequestMessages>> {
-        if let Some(messages) = self.pending_request.take() {
-            trace!("retrying pending request");
-            return Poll::Ready(Some(messages));
-        }
-
         if self.receiver.is_closed() {
             return Poll::Ready(None);
         }
