@@ -13,7 +13,7 @@ use postgres_client::tls::{MakeTlsConnect, NoTls};
 use retry::{retry_after, ShouldRetryWakeCompute};
 use rstest::rstest;
 use rustls::crypto::ring;
-use rustls::{pki_types, RootCertStore};
+use rustls::pki_types;
 use tokio::io::DuplexStream;
 
 use super::connect_compute::ConnectMechanism;
@@ -29,6 +29,7 @@ use crate::control_plane::{
     self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo, NodeInfoCache,
 };
 use crate::error::ErrorKind;
+use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::tls::server_config::CertResolver;
 use crate::types::{BranchId, EndpointId, ProjectId};
@@ -111,17 +112,7 @@ fn generate_tls_config<'a>(
     };
 
     let client_config = {
-        let config =
-            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .context("ring should support the default protocol versions")?
-                .with_root_certificates({
-                    let mut store = rustls::RootCertStore::empty();
-                    store.add(ca)?;
-                    store
-                })
-                .with_no_client_auth();
-        let config = Arc::new(config);
+        let config = Arc::new(compute_client_config_with_certs([ca]));
 
         ClientConfig { config, hostname }
     };
@@ -585,18 +576,9 @@ fn config() -> ComputeConfig {
         backoff_factor: 2.0,
     };
 
-    let root_store = RootCertStore::empty();
-
-    let client_config =
-        rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("ring should support the default protocol versions")
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-
     ComputeConfig {
         retry,
-        tls: Arc::new(client_config),
+        tls: Arc::new(compute_client_config_with_certs(std::iter::empty())),
         timeout: Duration::from_secs(2),
     }
 }

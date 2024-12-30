@@ -3,7 +3,7 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::bail;
 use futures::future::Either;
 use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
@@ -24,9 +24,9 @@ use proxy::redis::{elasticache, notifications};
 use proxy::scram::threadpool::ThreadPool;
 use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::GlobalConnPoolOptions;
+use proxy::tls::client_config::compute_client_config_with_root_certs;
 use proxy::{auth, control_plane, http, serverless, usage_metrics};
 use remote_storage::RemoteStorageConfig;
-use rustls::crypto::ring;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -637,20 +637,9 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         console_redirect_confirmation_timeout: args.webauth_confirmation_timeout,
     };
 
-    let root_store = load_certs()
-        .context("loading native tls certificates")?
-        .clone();
-
-    let client_config =
-        rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("ring should support the default protocol versions")
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-
     let compute_config = ComputeConfig {
         retry: config::RetryConfig::parse(&args.connect_to_compute_retry)?,
-        tls: Arc::new(client_config),
+        tls: Arc::new(compute_client_config_with_root_certs()?),
         timeout: Duration::from_secs(2),
     };
 
@@ -672,18 +661,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     tokio::spawn(config.connect_compute_locks.garbage_collect_worker());
 
     Ok(config)
-}
-
-pub(crate) fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {
-    let der_certs = rustls_native_certs::load_native_certs();
-
-    if !der_certs.errors.is_empty() {
-        bail!("could not parse certificates: {:?}", der_certs.errors);
-    }
-
-    let mut store = rustls::RootCertStore::empty();
-    store.add_parsable_certificates(der_certs.certs);
-    Ok(Arc::new(store))
 }
 
 /// auth::Backend is created at proxy startup, and lives forever.

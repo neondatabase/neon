@@ -326,11 +326,9 @@ impl<P> Drop for Session<P> {
 mod tests {
     use std::time::Duration;
 
-    use rustls::crypto::ring;
-    use rustls::RootCertStore;
-
     use super::*;
     use crate::config::RetryConfig;
+    use crate::tls::client_config::compute_client_config_with_certs;
 
     fn config() -> ComputeConfig {
         let retry = RetryConfig {
@@ -339,18 +337,9 @@ mod tests {
             backoff_factor: 2.0,
         };
 
-        let root_store = RootCertStore::empty();
-
-        let client_config =
-            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .expect("ring should support the default protocol versions")
-                .with_root_certificates(root_store)
-                .with_no_client_auth();
-
         ComputeConfig {
             retry,
-            tls: Arc::new(client_config),
+            tls: Arc::new(compute_client_config_with_certs(std::iter::empty())),
             timeout: Duration::from_secs(2),
         }
     }

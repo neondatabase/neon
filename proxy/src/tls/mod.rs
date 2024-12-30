@@ -1,3 +1,4 @@
+pub mod client_config;
 pub mod postgres_rustls;
 pub mod server_config;
 

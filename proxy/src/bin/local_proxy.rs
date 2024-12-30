@@ -27,6 +27,7 @@ use proxy::rate_limiter::{
 use proxy::scram::threadpool::ThreadPool;
 use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::{self, GlobalConnPoolOptions};
+use proxy::tls::client_config::compute_client_config_with_root_certs;
 use proxy::types::RoleName;
 use proxy::url::ApiUrl;
 
@@ -34,8 +35,6 @@ project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
 use clap::Parser;
-use rustls::crypto::ring;
-use rustls::RootCertStore;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
@@ -273,19 +272,9 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         max_response_size_bytes: args.sql_over_http.sql_over_http_max_response_size_bytes,
     };
 
-    // local_proxy won't use TLS to talk to postgres.
-    let root_store = RootCertStore::empty();
-
-    let client_config =
-        rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("ring should support the default protocol versions")
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-
     let compute_config = ComputeConfig {
         retry: RetryConfig::parse(RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES)?,
-        tls: Arc::new(client_config),
+        tls: Arc::new(compute_client_config_with_root_certs()?),
         timeout: Duration::from_secs(2),
     };
 
