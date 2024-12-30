@@ -214,7 +214,7 @@ where
                         .start_send(request)
                         .map_err(Error::io)?;
                 }
-                Poll::Ready(None) if self.responses.is_empty() && self.state == State::Active => {
+                Poll::Ready(None) if self.responses.is_empty() => {
                     trace!("poll_write: at eof, terminating");
                     let mut request = BytesMut::new();
                     frontend::terminate(&mut request);
