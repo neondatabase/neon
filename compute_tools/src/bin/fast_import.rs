@@ -217,15 +217,36 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         )
         .instrument(info_span!("postgres")),
     );
+
+    // Create neondb database in the running postgres
     let restore_pg_connstring =
         format!("host=localhost port=5432 user={superuser} dbname=postgres");
     loop {
-        let res = tokio_postgres::connect(&restore_pg_connstring, tokio_postgres::NoTls).await;
-        if res.is_ok() {
-            info!("postgres is ready, could connect to it");
-            break;
+        match tokio_postgres::connect(&restore_pg_connstring, tokio_postgres::NoTls).await {
+            Ok((client, connection)) => {
+                // Spawn the connection handling task to maintain the connection
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        eprintln!("connection error: {}", e);
+                    }
+                });
+
+                match client.simple_query("CREATE DATABASE neondb;").await {
+                    Ok(_) => {
+                        info!("created neondb database");
+                        break;
+                    }
+                    Err(e) => {
+                        info!("failed to create database: {}", e);
+                        break;
+                    }
+                }
+            }
+            Err(_) => continue
         }
     }
+
+    let restore_pg_connstring = restore_pg_connstring.replace("dbname=postgres", "dbname=neondb");
 
     let dumpdir = working_directory.join("dumpdir");
 
