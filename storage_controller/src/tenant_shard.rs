@@ -172,7 +172,11 @@ impl IntentState {
         preferred_az_id: Option<AvailabilityZone>,
     ) -> Self {
         if let Some(node_id) = node_id {
-            scheduler.update_node_ref_counts(node_id, RefCountUpdate::Attach);
+            scheduler.update_node_ref_counts(
+                node_id,
+                preferred_az_id.as_ref(),
+                RefCountUpdate::Attach,
+            );
         }
         Self {
             attached: node_id,
@@ -184,10 +188,18 @@ impl IntentState {
     pub(crate) fn set_attached(&mut self, scheduler: &mut Scheduler, new_attached: Option<NodeId>) {
         if self.attached != new_attached {
             if let Some(old_attached) = self.attached.take() {
-                scheduler.update_node_ref_counts(old_attached, RefCountUpdate::Detach);
+                scheduler.update_node_ref_counts(
+                    old_attached,
+                    self.preferred_az_id.as_ref(),
+                    RefCountUpdate::Detach,
+                );
             }
             if let Some(new_attached) = &new_attached {
-                scheduler.update_node_ref_counts(*new_attached, RefCountUpdate::Attach);
+                scheduler.update_node_ref_counts(
+                    *new_attached,
+                    self.preferred_az_id.as_ref(),
+                    RefCountUpdate::Attach,
+                );
             }
             self.attached = new_attached;
         }
@@ -213,16 +225,28 @@ impl IntentState {
         let demoted = self.attached;
         self.attached = Some(promote_secondary);
 
-        scheduler.update_node_ref_counts(promote_secondary, RefCountUpdate::PromoteSecondary);
+        scheduler.update_node_ref_counts(
+            promote_secondary,
+            self.preferred_az_id.as_ref(),
+            RefCountUpdate::PromoteSecondary,
+        );
         if let Some(demoted) = demoted {
-            scheduler.update_node_ref_counts(demoted, RefCountUpdate::DemoteAttached);
+            scheduler.update_node_ref_counts(
+                demoted,
+                self.preferred_az_id.as_ref(),
+                RefCountUpdate::DemoteAttached,
+            );
         }
     }
 
     pub(crate) fn push_secondary(&mut self, scheduler: &mut Scheduler, new_secondary: NodeId) {
         assert!(!self.secondary.contains(&new_secondary));
         assert!(self.attached != Some(new_secondary));
-        scheduler.update_node_ref_counts(new_secondary, RefCountUpdate::AddSecondary);
+        scheduler.update_node_ref_counts(
+            new_secondary,
+            self.preferred_az_id.as_ref(),
+            RefCountUpdate::AddSecondary,
+        );
         self.secondary.push(new_secondary);
     }
 
@@ -230,27 +254,43 @@ impl IntentState {
     pub(crate) fn remove_secondary(&mut self, scheduler: &mut Scheduler, node_id: NodeId) {
         let index = self.secondary.iter().position(|n| *n == node_id);
         if let Some(index) = index {
-            scheduler.update_node_ref_counts(node_id, RefCountUpdate::RemoveSecondary);
+            scheduler.update_node_ref_counts(
+                node_id,
+                self.preferred_az_id.as_ref(),
+                RefCountUpdate::RemoveSecondary,
+            );
             self.secondary.remove(index);
         }
     }
 
     pub(crate) fn clear_secondary(&mut self, scheduler: &mut Scheduler) {
         for secondary in self.secondary.drain(..) {
-            scheduler.update_node_ref_counts(secondary, RefCountUpdate::RemoveSecondary);
+            scheduler.update_node_ref_counts(
+                secondary,
+                self.preferred_az_id.as_ref(),
+                RefCountUpdate::RemoveSecondary,
+            );
         }
     }
 
     /// Remove the last secondary node from the list of secondaries
     pub(crate) fn pop_secondary(&mut self, scheduler: &mut Scheduler) {
         if let Some(node_id) = self.secondary.pop() {
-            scheduler.update_node_ref_counts(node_id, RefCountUpdate::RemoveSecondary);
+            scheduler.update_node_ref_counts(
+                node_id,
+                self.preferred_az_id.as_ref(),
+                RefCountUpdate::RemoveSecondary,
+            );
         }
     }
 
     pub(crate) fn clear(&mut self, scheduler: &mut Scheduler) {
         if let Some(old_attached) = self.attached.take() {
-            scheduler.update_node_ref_counts(old_attached, RefCountUpdate::Detach);
+            scheduler.update_node_ref_counts(
+                old_attached,
+                self.preferred_az_id.as_ref(),
+                RefCountUpdate::Detach,
+            );
         }
 
         self.clear_secondary(scheduler);
@@ -285,7 +325,11 @@ impl IntentState {
         if self.attached == Some(node_id) {
             self.attached = None;
             self.secondary.push(node_id);
-            scheduler.update_node_ref_counts(node_id, RefCountUpdate::DemoteAttached);
+            scheduler.update_node_ref_counts(
+                node_id,
+                self.preferred_az_id.as_ref(),
+                RefCountUpdate::DemoteAttached,
+            );
             true
         } else {
             false

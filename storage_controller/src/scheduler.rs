@@ -32,6 +32,9 @@ pub(crate) struct SchedulerNode {
     shard_count: usize,
     /// How many shards are currently attached on this node, via their [`crate::tenant_shard::IntentState`].
     attached_shard_count: usize,
+    /// How many shards have a location on this node (via [`crate::tenant_shard::IntentState`]) _and_ this node
+    /// is in their preferred AZ (i.e. this is their 'home' location)
+    home_shard_count: usize,
     /// Availability zone id in which the node resides
     az: AvailabilityZone,
 
@@ -417,6 +420,7 @@ impl Scheduler {
                 SchedulerNode {
                     shard_count: 0,
                     attached_shard_count: 0,
+                    home_shard_count: 0,
                     may_schedule: node.may_schedule(),
                     az: node.get_availability_zone_id().clone(),
                 },
@@ -444,6 +448,7 @@ impl Scheduler {
                 SchedulerNode {
                     shard_count: 0,
                     attached_shard_count: 0,
+                    home_shard_count: 0,
                     may_schedule: node.may_schedule(),
                     az: node.get_availability_zone_id().clone(),
                 },
@@ -456,6 +461,9 @@ impl Scheduler {
                     Some(node) => {
                         node.shard_count += 1;
                         node.attached_shard_count += 1;
+                        if Some(&node.az) == shard.preferred_az() {
+                            node.home_shard_count += 1;
+                        }
                     }
                     None => anyhow::bail!(
                         "Tenant {} references nonexistent node {}",
@@ -467,7 +475,12 @@ impl Scheduler {
 
             for node_id in shard.intent.get_secondary() {
                 match expect_nodes.get_mut(node_id) {
-                    Some(node) => node.shard_count += 1,
+                    Some(node) => {
+                        node.shard_count += 1;
+                        if Some(&node.az) == shard.preferred_az() {
+                            node.home_shard_count += 1;
+                        }
+                    }
                     None => anyhow::bail!(
                         "Tenant {} references nonexistent node {}",
                         shard.tenant_shard_id,
@@ -511,12 +524,19 @@ impl Scheduler {
     ///
     /// It is an error to call this for a node that is not known to the scheduler (i.e. passed into
     /// [`Self::new`] or [`Self::node_upsert`])
-    pub(crate) fn update_node_ref_counts(&mut self, node_id: NodeId, update: RefCountUpdate) {
+    pub(crate) fn update_node_ref_counts(
+        &mut self,
+        node_id: NodeId,
+        preferred_az: Option<&AvailabilityZone>,
+        update: RefCountUpdate,
+    ) {
         let Some(node) = self.nodes.get_mut(&node_id) else {
             debug_assert!(false);
             tracing::error!("Scheduler missing node {node_id}");
             return;
         };
+
+        let is_home_az = Some(&node.az) == preferred_az;
 
         match update {
             RefCountUpdate::PromoteSecondary => {
@@ -525,19 +545,31 @@ impl Scheduler {
             RefCountUpdate::Attach => {
                 node.shard_count += 1;
                 node.attached_shard_count += 1;
+                if is_home_az {
+                    node.home_shard_count += 1;
+                }
             }
             RefCountUpdate::Detach => {
                 node.shard_count -= 1;
                 node.attached_shard_count -= 1;
+                if is_home_az {
+                    node.home_shard_count -= 1;
+                }
             }
             RefCountUpdate::DemoteAttached => {
                 node.attached_shard_count -= 1;
             }
             RefCountUpdate::AddSecondary => {
                 node.shard_count += 1;
+                if is_home_az {
+                    node.home_shard_count += 1;
+                }
             }
             RefCountUpdate::RemoveSecondary => {
                 node.shard_count -= 1;
+                if is_home_az {
+                    node.home_shard_count -= 1;
+                }
             }
         }
 
@@ -623,6 +655,7 @@ impl Scheduler {
                 entry.insert(SchedulerNode {
                     shard_count: 0,
                     attached_shard_count: 0,
+                    home_shard_count: 0,
                     may_schedule: node.may_schedule(),
                     az: node.get_availability_zone_id().clone(),
                 });
