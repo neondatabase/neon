@@ -902,8 +902,8 @@ mod tests {
         let nodes = test_utils::make_test_nodes(2, &[]);
 
         let mut scheduler = Scheduler::new(nodes.values());
-        let mut t1_intent = IntentState::new();
-        let mut t2_intent = IntentState::new();
+        let mut t1_intent = IntentState::new(None);
+        let mut t2_intent = IntentState::new(None);
 
         let context = ScheduleContext::default();
 
@@ -979,7 +979,7 @@ mod tests {
             let scheduled = scheduler
                 .schedule_shard::<AttachedShardTag>(&[], &None, context)
                 .unwrap();
-            let mut intent = IntentState::new();
+            let mut intent = IntentState::new(None);
             intent.set_attached(scheduler, Some(scheduled));
             scheduled_intents.push(intent);
             assert_eq!(scheduled, expect_node);
@@ -1112,7 +1112,7 @@ mod tests {
             let scheduled = scheduler
                 .schedule_shard::<Tag>(&[], &preferred_az, context)
                 .unwrap();
-            let mut intent = IntentState::new();
+            let mut intent = IntentState::new(preferred_az.clone());
             intent.set_attached(scheduler, Some(scheduled));
             scheduled_intents.push(intent);
             assert_eq!(scheduled, expect_node);
