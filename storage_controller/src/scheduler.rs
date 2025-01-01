@@ -225,9 +225,9 @@ pub(crate) struct NodeSecondarySchedulingScore {
     affinity_score: AffinityScore,
     /// Utilisation score that combines shard count and disk utilisation
     utilization_score: u64,
-    /// Total number of shards attached to this node. When nodes have identical utilisation, this
-    /// acts as an anti-affinity between attached shards.
-    total_attached_shard_count: usize,
+    /// Anti-affinity with other non-home locations: this gives the behavior that secondaries
+    /// will spread out across the nodes in an AZ.
+    total_non_home_shard_count: usize,
     /// Convenience to make selection deterministic in tests and empty systems
     node_id: NodeId,
 }
@@ -254,7 +254,7 @@ impl NodeSchedulingScore for NodeSecondarySchedulingScore {
                 .copied()
                 .unwrap_or(AffinityScore::FREE),
             utilization_score: utilization.cached_score(),
-            total_attached_shard_count: node.attached_shard_count,
+            total_non_home_shard_count: (node.shard_count - node.home_shard_count),
             node_id: *node_id,
         })
     }
@@ -262,7 +262,7 @@ impl NodeSchedulingScore for NodeSecondarySchedulingScore {
     fn for_optimization(&self) -> Self {
         Self {
             utilization_score: 0,
-            total_attached_shard_count: 0,
+            total_non_home_shard_count: 0,
             node_id: NodeId(0),
             ..*self
         }
@@ -809,30 +809,29 @@ impl Scheduler {
             return None;
         }
 
-        let mut scores_by_az = HashMap::new();
-        for (node_id, node) in &self.nodes {
-            let az_scores = scores_by_az.entry(&node.az).or_insert_with(Vec::new);
-            let score = match &node.may_schedule {
-                MaySchedule::Yes(utilization) => utilization.score(),
-                MaySchedule::No => PageserverUtilization::full().score(),
-            };
-            az_scores.push((node_id, node, score));
+        #[derive(Default)]
+        struct AzScore {
+            home_shard_count: usize,
+            scheduleable: bool,
         }
 
-        // Sort by utilization.  Also include the node ID to break ties.
-        for scores in scores_by_az.values_mut() {
-            scores.sort_by_key(|i| (i.2, i.0));
+        let mut azs: HashMap<&AvailabilityZone, AzScore> = HashMap::new();
+        for node in self.nodes.values() {
+            let az = azs.entry(&node.az).or_default();
+            az.home_shard_count += node.home_shard_count;
+            az.scheduleable |= matches!(node.may_schedule, MaySchedule::Yes(_));
         }
 
-        let mut median_by_az = scores_by_az
-            .iter()
-            .map(|(az, nodes)| (*az, nodes.get(nodes.len() / 2).unwrap().2))
-            .collect::<Vec<_>>();
-        // Sort by utilization.  Also include the AZ to break ties.
-        median_by_az.sort_by_key(|i| (i.1, i.0));
+        // If any AZs are schedulable, then filter out the non-schedulable ones (i.e. AZs where
+        // all nodes are overloaded or otherwise unschedulable).
+        if azs.values().any(|i| i.scheduleable) {
+            azs.retain(|_, i| i.scheduleable);
+        }
 
-        // Return the AZ with the lowest median utilization
-        Some(median_by_az.first().unwrap().0.clone())
+        // Find the AZ with the lowest number of shards currently allocated
+        let mut azs = azs.into_iter().collect::<Vec<_>>();
+        azs.sort_by_key(|i| (i.1.home_shard_count, i.0));
+        Some(azs.first().unwrap().0.clone())
     }
 
     pub(crate) fn get_node_az(&self, node_id: &NodeId) -> Option<AvailabilityZone> {
@@ -1214,36 +1213,108 @@ mod tests {
 
         /// Force the utilization of a node in Scheduler's state to a particular
         /// number of bytes used.
-        fn set_utilization(scheduler: &mut Scheduler, node_id: NodeId, shard_count: u32) {
-            let mut node = Node::new(
-                node_id,
-                "".to_string(),
-                0,
-                "".to_string(),
-                0,
-                scheduler.nodes.get(&node_id).unwrap().az.clone(),
-            );
-            node.set_availability(NodeAvailability::Active(test_utilization::simple(
-                shard_count,
-                0,
-            )));
-            scheduler.node_upsert(&node);
+        fn set_shard_count(scheduler: &mut Scheduler, node_id: NodeId, shard_count: usize) {
+            let node = scheduler.nodes.get_mut(&node_id).unwrap();
+            node.home_shard_count = shard_count;
         }
 
         // Initial empty state.  Scores are tied, scheduler prefers lower AZ ID.
         assert_eq!(scheduler.get_az_for_new_tenant(), Some(az_a_tag.clone()));
 
-        // Put some utilization on one node in AZ A: this should change nothing, as the median hasn't changed
-        set_utilization(&mut scheduler, NodeId(1), 1000000);
-        assert_eq!(scheduler.get_az_for_new_tenant(), Some(az_a_tag.clone()));
-
-        // Put some utilization on a second node in AZ A: now the median has changed, so the scheduler
-        // should prefer the other AZ.
-        set_utilization(&mut scheduler, NodeId(2), 1000000);
+        // Home shard count is higher in AZ A, so AZ B will be preferred
+        set_shard_count(&mut scheduler, NodeId(1), 10);
         assert_eq!(scheduler.get_az_for_new_tenant(), Some(az_b_tag.clone()));
+
+        // Total home shard count is higher in AZ B, so we revert to preferring AZ A
+        set_shard_count(&mut scheduler, NodeId(4), 6);
+        set_shard_count(&mut scheduler, NodeId(5), 6);
+        assert_eq!(scheduler.get_az_for_new_tenant(), Some(az_a_tag.clone()));
     }
 
     use test_log::test;
+
+    /// Test that when selecting AZs for many new tenants, we get the expected balance across nodes
+    #[test]
+    fn az_selection_many() {
+        let az_a_tag = AvailabilityZone("az-a".to_string());
+        let az_b_tag = AvailabilityZone("az-b".to_string());
+        let az_c_tag = AvailabilityZone("az-c".to_string());
+        let nodes = test_utils::make_test_nodes(
+            6,
+            &[
+                az_a_tag.clone(),
+                az_b_tag.clone(),
+                az_c_tag.clone(),
+                az_a_tag.clone(),
+                az_b_tag.clone(),
+                az_c_tag.clone(),
+            ],
+        );
+
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        // We should get 1/6th of these on each node, give or take a few...
+        let total_tenants = 300;
+
+        // ...where the 'few' is the number of AZs, because the scheduling will sometimes overshoot
+        // on one AZ before correcting itself.  This is because we select the 'home' AZ based on
+        // an AZ-wide metric, but we select the location for secondaries on a purely node-based
+        // metric (while excluding the home AZ).
+        let grace = 3;
+
+        let mut scheduled_shards = Vec::new();
+        for _i in 0..total_tenants {
+            let preferred_az = scheduler.get_az_for_new_tenant().unwrap();
+
+            let mut node_home_counts = scheduler
+                .nodes
+                .iter()
+                .map(|(node_id, node)| (node_id, node.home_shard_count))
+                .collect::<Vec<_>>();
+            node_home_counts.sort_by_key(|i| i.0);
+            eprintln!("Selected {}, vs nodes {:?}", preferred_az, node_home_counts);
+
+            let tenant_shard_id = TenantShardId {
+                tenant_id: TenantId::generate(),
+                shard_number: ShardNumber(0),
+                shard_count: ShardCount(1),
+            };
+
+            let shard_identity = ShardIdentity::new(
+                tenant_shard_id.shard_number,
+                tenant_shard_id.shard_count,
+                pageserver_api::shard::ShardStripeSize(1),
+            )
+            .unwrap();
+            let mut shard = TenantShard::new(
+                tenant_shard_id,
+                shard_identity,
+                pageserver_api::controller_api::PlacementPolicy::Attached(1),
+                Some(preferred_az),
+            );
+
+            let mut context = ScheduleContext::default();
+            shard.schedule(&mut scheduler, &mut context).unwrap();
+            eprintln!("Scheduled shard at {:?}", shard.intent);
+
+            scheduled_shards.push(shard);
+        }
+
+        for (node_id, node) in &scheduler.nodes {
+            eprintln!(
+                "Node {}: {} {} {}",
+                node_id, node.shard_count, node.attached_shard_count, node.home_shard_count
+            );
+        }
+
+        for node in scheduler.nodes.values() {
+            assert!((node.home_shard_count as i64 - total_tenants as i64 / 6).abs() < grace);
+        }
+
+        for mut shard in scheduled_shards {
+            shard.intent.clear(&mut scheduler);
+        }
+    }
 
     #[test]
     /// Make sure that when we have an odd number of nodes and an even number of shards, we still
