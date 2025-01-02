@@ -45,10 +45,8 @@ pub struct IndexPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub import_pgdata: Option<import_pgdata::index_part_format::Root>,
 
-    /// Per layer file name metadata, which can be present for a present or missing layer file.
-    ///
-    /// Older versions of `IndexPart` will not have this property or have only a part of metadata
-    /// that latest version stores.
+    /// Layer filenames and metadata. For an index persisted in remote storage, all layers must
+    /// exist in remote storage.
     pub layer_metadata: HashMap<LayerName, LayerFileMetadata>,
 
     /// Because of the trouble of eyeballing the legacy "metadata" field, we copied the
