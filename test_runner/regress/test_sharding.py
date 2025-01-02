@@ -1379,13 +1379,7 @@ def test_sharding_split_failures(
                 else:
                     attached_count += 1
 
-        if exclude_ps_id is not None:
-            # For a node failure case, we expect there to be a secondary location
-            # scheduled on the offline node, so expect one fewer secondary in total
-            assert secondary_count == initial_shard_count - 1
-        else:
-            assert secondary_count == initial_shard_count
-
+        assert secondary_count == initial_shard_count
         assert attached_count == initial_shard_count
 
     def assert_split_done(exclude_ps_id: int | None = None) -> None:

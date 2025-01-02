@@ -4086,6 +4086,22 @@ impl Service {
                 }
 
                 tracing::info!("Restoring parent shard {tenant_shard_id}");
+
+                // Drop any intents that refer to unavailable nodes, to enable this abort to proceed even
+                // if the original attachment location is offline.
+                if let Some(node_id) = shard.intent.get_attached() {
+                    if !nodes.get(node_id).unwrap().is_available() {
+                        tracing::info!("Demoting attached intent for {tenant_shard_id} on unavailable node {node_id}");
+                        shard.intent.demote_attached(scheduler, *node_id);
+                    }
+                }
+                for node_id in shard.intent.get_secondary().clone() {
+                    if !nodes.get(&node_id).unwrap().is_available() {
+                        tracing::info!("Dropping secondary intent for {tenant_shard_id} on unavailable node {node_id}");
+                        shard.intent.remove_secondary(scheduler, node_id);
+                    }
+                }
+
                 shard.splitting = SplitState::Idle;
                 if let Err(e) = shard.schedule(scheduler, &mut ScheduleContext::default()) {
                     // If this shard can't be scheduled now (perhaps due to offline nodes or
