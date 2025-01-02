@@ -541,6 +541,7 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		}
 		else
 		{
+			LWLockRelease(lfc_lock);
 			return found;
 		}
 
