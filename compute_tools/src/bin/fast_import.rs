@@ -55,6 +55,8 @@ struct Args {
     pg_bin_dir: Utf8PathBuf,
     #[clap(long)]
     pg_lib_dir: Utf8PathBuf,
+    #[clap(long)]
+    pg_port: Option<u16>, // port to run postgres on, 5432 is default
 }
 
 #[serde_with::serde_as]
@@ -91,6 +93,12 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     let working_directory = args.working_directory;
     let pg_bin_dir = args.pg_bin_dir;
     let pg_lib_dir = args.pg_lib_dir;
+    let pg_port = if args.pg_port.is_some() {
+        args.pg_port.unwrap()
+    } else {
+        info!("pg_port not specified, using default 5432");
+        5432
+    };
 
     // Initialize AWS clients only if s3_prefix is specified
     let (aws_config, kms_client) = if args.s3_prefix.is_some() {
@@ -191,6 +199,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     let mut postgres_proc = tokio::process::Command::new(pgbin)
         .arg("-D")
         .arg(&pgdata_dir)
+        .args(["-p", &format!("{pg_port}")])
         .args(["-c", "wal_level=minimal"])
         .args(["-c", "shared_buffers=10GB"])
         .args(["-c", "max_wal_senders=0"])
@@ -226,7 +235,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
 
     // Create neondb database in the running postgres
     let restore_pg_connstring =
-        format!("host=localhost port=5432 user={superuser} dbname=postgres");
+        format!("host=localhost port={pg_port} user={superuser} dbname=postgres");
     loop {
         match tokio_postgres::connect(&restore_pg_connstring, tokio_postgres::NoTls).await {
             Ok((client, connection)) => {
