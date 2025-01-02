@@ -37,7 +37,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ComputeMetrics"
 
-  /metrics
+  /metrics:
     get:
       tags:
       - Info
