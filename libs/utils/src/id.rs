@@ -188,6 +188,10 @@ macro_rules! id_newtype {
             pub const fn from_array(b: [u8; 16]) -> Self {
                 $t(Id(b))
             }
+
+            pub const fn empty() -> Self {
+                Self::from_array([0; 16])
+            }
         }
 
         impl FromStr for $t {

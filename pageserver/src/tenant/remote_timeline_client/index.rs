@@ -8,14 +8,14 @@ use std::collections::HashMap;
 use chrono::NaiveDateTime;
 use pageserver_api::models::AuxFilePolicy;
 use serde::{Deserialize, Serialize};
-use utils::id::TimelineId;
 
+use super::is_same_remote_layer_path;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::import_pgdata;
 use crate::tenant::Generation;
 use pageserver_api::shard::ShardIndex;
-
+use utils::id::TimelineId;
 use utils::lsn::Lsn;
 
 /// In-memory representation of an `index_part.json` file
@@ -146,13 +146,13 @@ impl IndexPart {
 
     /// Returns true if the index contains a reference to the given layer (i.e. file path).
     ///
-    /// TODO: either LayerName or PersistentLayerKey should probably contain information about the
-    /// shard and generation, instead of passing in LayerFileMetadata too.
+    /// TODO: there should be a variant of LayerName for the physical remote path that contains
+    /// information about the shard and generation, to avoid passing in metadata.
     pub fn references(&self, name: &LayerName, metadata: &LayerFileMetadata) -> bool {
         let Some(index_metadata) = self.layer_metadata.get(name) else {
             return false;
         };
-        metadata.shard == index_metadata.shard && metadata.generation == index_metadata.generation
+        is_same_remote_layer_path(name, metadata, name, index_metadata)
     }
 }
 

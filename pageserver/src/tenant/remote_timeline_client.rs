@@ -2531,6 +2531,34 @@ pub fn remote_layer_path(
     RemotePath::from_string(&path).expect("Failed to construct path")
 }
 
+/// Returns true if a and b have the same layer path within a tenant/timeline. This is essentially
+/// remote_layer_path(a) == remote_layer_path(b) without the string allocations.
+///
+/// TODO: there should be a variant of LayerName for the physical path that contains information
+/// about the shard and generation, such that this could be replaced by a simple comparison.
+pub fn is_same_remote_layer_path(
+    aname: &LayerName,
+    ameta: &LayerFileMetadata,
+    bname: &LayerName,
+    bmeta: &LayerFileMetadata,
+) -> bool {
+    let is_same =
+        aname == bname && ameta.shard == bmeta.shard && ameta.generation == bmeta.generation;
+    // Assert that this matches remote_layer_path().
+    if cfg!(debug_assertions) {
+        const TENANT: TenantId = TenantId::empty();
+        const TIMELINE: TimelineId = TimelineId::empty();
+        let apath = remote_layer_path(&TENANT, &TIMELINE, ameta.shard, aname, ameta.generation);
+        let bpath = remote_layer_path(&TENANT, &TIMELINE, bmeta.shard, bname, bmeta.generation);
+        if is_same {
+            assert_eq!(apath, bpath, "is_same_layer_path={is_same}");
+        } else {
+            assert_ne!(apath, bpath, "is_same_layer_path={is_same}");
+        }
+    };
+    is_same
+}
+
 pub fn remote_initdb_archive_path(tenant_id: &TenantId, timeline_id: &TimelineId) -> RemotePath {
     RemotePath::from_string(&format!(
         "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{INITDB_PATH}"
