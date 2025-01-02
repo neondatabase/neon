@@ -2542,21 +2542,8 @@ pub fn is_same_remote_layer_path(
     bname: &LayerName,
     bmeta: &LayerFileMetadata,
 ) -> bool {
-    let is_same =
-        aname == bname && ameta.shard == bmeta.shard && ameta.generation == bmeta.generation;
-    // Assert that this matches remote_layer_path().
-    if cfg!(debug_assertions) {
-        const TENANT: TenantId = TenantId::empty();
-        const TIMELINE: TimelineId = TimelineId::empty();
-        let apath = remote_layer_path(&TENANT, &TIMELINE, ameta.shard, aname, ameta.generation);
-        let bpath = remote_layer_path(&TENANT, &TIMELINE, bmeta.shard, bname, bmeta.generation);
-        if is_same {
-            assert_eq!(apath, bpath, "is_same_layer_path={is_same}");
-        } else {
-            assert_ne!(apath, bpath, "is_same_layer_path={is_same}");
-        }
-    };
-    is_same
+    // NB: don't assert remote_layer_path(a) == remote_layer_path(b); too expensive even for debug.
+    aname == bname && ameta.shard == bmeta.shard && ameta.generation == bmeta.generation
 }
 
 pub fn remote_initdb_archive_path(tenant_id: &TenantId, timeline_id: &TimelineId) -> RemotePath {
