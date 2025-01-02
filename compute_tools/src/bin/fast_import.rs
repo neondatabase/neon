@@ -202,7 +202,13 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         .args(["-c", &format!("max_parallel_workers={nproc}")])
         .args(["-c", &format!("max_parallel_workers_per_gather={nproc}")])
         .args(["-c", &format!("max_worker_processes={nproc}")])
-        .args(["-c", &format!("effective_io_concurrency={}", if cfg!(target_os = "macos") { 0 } else { 100 })])
+        .args([
+            "-c",
+            &format!(
+                "effective_io_concurrency={}",
+                if cfg!(target_os = "macos") { 0 } else { 100 }
+            ),
+        ])
         .env_clear()
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -242,7 +248,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-            Err(_) => continue
+            Err(_) => continue,
         }
     }
 
