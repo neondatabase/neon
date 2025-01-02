@@ -398,6 +398,7 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
 
     # Offloading is off by default at time of writing: remove this line when it's on by default
     neon_env_builder.pageserver_config_override = "timeline_offloading = true"
+    neon_env_builder.storage_controller_config = {"heartbeat_interval": "100msec"}
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
 
     # We will exercise migrations, so need multiple pageservers
