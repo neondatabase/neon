@@ -196,6 +196,8 @@ impl ConnCfg {
             connect_with_timeout(host, port).and_then(|stream| async {
                 let socket_addr = stream.peer_addr()?;
                 let socket = socket2::SockRef::from(&stream);
+                // Disable Nagle's algorithm to not introduce latency between
+                // client and compute.
                 socket.set_nodelay(true)?;
                 // This prevents load balancer from severing the connection.
                 socket.set_keepalive(true)?;
