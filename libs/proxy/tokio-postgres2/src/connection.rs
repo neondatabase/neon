@@ -66,7 +66,6 @@ where
 {
     pub(crate) fn new(
         stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
-        pending_responses: VecDeque<BackendMessage>,
         parameters: HashMap<String, String>,
         receiver: mpsc::UnboundedReceiver<Request>,
     ) -> Connection<S, T> {
@@ -74,7 +73,7 @@ where
             stream,
             parameters,
             receiver,
-            pending_responses,
+            pending_responses: VecDeque::new(),
             responses: VecDeque::new(),
             state: State::Active,
         }
