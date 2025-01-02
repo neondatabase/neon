@@ -424,9 +424,13 @@ fn start_postgres(
         "running compute with features: {:?}",
         state.pspec.as_ref().unwrap().spec.features
     );
-    // before we release the mutex, fetch the swap size (if any) for later.
-    let swap_size_bytes = state.pspec.as_ref().unwrap().spec.swap_size_bytes;
-    let disk_quota_bytes = state.pspec.as_ref().unwrap().spec.disk_quota_bytes;
+    // before we release the mutex, fetch some parameters for later.
+    let &ComputeSpec {
+        swap_size_bytes,
+        disk_quota_bytes,
+        disable_lfc_resizing,
+        ..
+    } = &state.pspec.as_ref().unwrap().spec;
     drop(state);
 
     // Launch remaining service threads
@@ -531,11 +535,18 @@ fn start_postgres(
             // This token is used internally by the monitor to clean up all threads
             let token = CancellationToken::new();
 
+            // don't pass postgres connection string to vm-monitor if we don't want it to resize LFC
+            let pgconnstr = if disable_lfc_resizing.unwrap_or(false) {
+                None
+            } else {
+                file_cache_connstr.cloned()
+            };
+
             let vm_monitor = rt.as_ref().map(|rt| {
                 rt.spawn(vm_monitor::start(
                     Box::leak(Box::new(vm_monitor::Args {
                         cgroup: cgroup.cloned(),
-                        pgconnstr: file_cache_connstr.cloned(),
+                        pgconnstr,
                         addr: vm_monitor_addr.clone(),
                     })),
                     token.clone(),
