@@ -1,11 +1,10 @@
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
-use crate::error::DbError;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::{AsyncMessage, Error, Notification};
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use futures_util::{ready, Sink, Stream};
-use log::{info, trace};
+use log::trace;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
 use std::collections::{HashMap, VecDeque};
@@ -109,9 +108,8 @@ where
             };
 
             let (mut messages, request_complete) = match message {
-                BackendMessage::Async(Message::NoticeResponse(body)) => {
-                    let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
-                    return Poll::Ready(Ok(AsyncMessage::Notice(error)));
+                BackendMessage::Async(Message::NoticeResponse(_)) => {
+                    continue;
                 }
                 BackendMessage::Async(Message::NotificationResponse(body)) => {
                     let notification = Notification {
@@ -328,11 +326,7 @@ where
     type Output = Result<(), Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        while let Some(message) = ready!(self.poll_message(cx)?) {
-            if let AsyncMessage::Notice(notice) = message {
-                info!("{}: {}", notice.severity(), notice.message());
-            }
-        }
+        while ready!(self.poll_message(cx)?).is_some() {}
         Poll::Ready(Ok(()))
     }
 }

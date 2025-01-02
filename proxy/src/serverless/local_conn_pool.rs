@@ -227,7 +227,6 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                 let message = ready!(connection.poll_message(cx));
 
                 match message {
-                    Some(Ok(AsyncMessage::Notice(_))) => {}
                     Some(Ok(AsyncMessage::Notification(notif))) => {
                         warn!(%session_id, pid = notif.process_id(), channel = notif.channel(), "notification received");
                     }
