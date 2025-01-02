@@ -193,11 +193,15 @@ impl ConnCfg {
 
         let connect_once = |host, port| {
             debug!("trying to connect to compute node at {host}:{port}");
-            connect_with_timeout(host, port).and_then(|socket| async {
-                let socket_addr = socket.peer_addr()?;
+            connect_with_timeout(host, port).and_then(|stream| async {
+                let socket_addr = stream.peer_addr()?;
+                let socket = socket2::SockRef::from(&stream);
+                // Disable Nagle's algorithm to not introduce latency between
+                // client and compute.
+                socket.set_nodelay(true)?;
                 // This prevents load balancer from severing the connection.
-                socket2::SockRef::from(&socket).set_keepalive(true)?;
-                Ok((socket_addr, socket))
+                socket.set_keepalive(true)?;
+                Ok((socket_addr, stream))
             })
         };
 
