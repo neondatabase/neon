@@ -415,8 +415,8 @@ pub struct Service {
     /// Queue of tenants who are waiting for concurrency limits to permit them to reconcile
     /// Send into this queue to promptly attempt to reconcile this shard next time units are available.
     ///
-    /// Note that this state logically lives inside ServiceInner, but carrying Sender here makes the code simpler
-    /// by avoiding needing a &mut ref to something inside the ServiceInner.  This could be optimized to
+    /// Note that this state logically lives inside ServiceState, but carrying Sender here makes the code simpler
+    /// by avoiding needing a &mut ref to something inside the ServiceState.  This could be optimized to
     /// use a VecDeque instead of a channel to reduce synchronization overhead, at the cost of some code complexity.
     delayed_reconcile_tx: tokio::sync::mpsc::Sender<TenantShardId>,
 
@@ -1160,6 +1160,11 @@ impl Service {
                     deltas.filter(|delta| matches!(delta, ObservedStateDelta::Upsert(_)));
                 tenant.apply_observed_deltas(upsert_deltas);
             }
+        }
+
+        // If we just finished detaching all shards for a tenant, it might be time to drop it from memory.
+        if tenant.policy == PlacementPolicy::Detached {
+            self.maybe_drop_tenant(tenant.tenant_shard_id.tenant_id, &mut locked);
         }
 
         // Maybe some other work can proceed now that this job finished.
@@ -2436,6 +2441,88 @@ impl Service {
         }
     }
 
+    /// For APIs that might act on tenants with [`PlacementPolicy::Detached`], first check if
+    /// the tenant is present in memory. If not, load it from the database.  If it is found
+    /// in neither location, return a NotFound error.
+    async fn maybe_load_tenant(&self, tenant_id: TenantId) -> Result<(), ApiError> {
+        let present_in_memory = {
+            let locked = self.inner.read().unwrap();
+            locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .next()
+                .is_some()
+        };
+
+        if present_in_memory {
+            return Ok(());
+        }
+
+        let tenant_shards = self.persistence.load_tenant(tenant_id).await?;
+        if tenant_shards.is_empty() {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Tenant {} not found", tenant_id).into(),
+            ));
+        }
+
+        // TODO: choose a fresh AZ to use for this tenant when un-detaching: there definitely isn't a running
+        // compute, so no benefit to making AZ sticky across detaches.
+
+        let mut locked = self.inner.write().unwrap();
+        tracing::info!(
+            "Loaded {} shards for tenant {}",
+            tenant_shards.len(),
+            tenant_id
+        );
+
+        locked.tenants.extend(tenant_shards.into_iter().map(|p| {
+            let intent = IntentState::new();
+            let shard =
+                TenantShard::from_persistent(p, intent).expect("Corrupt shard row in database");
+
+            // Sanity check: when loading on-demand, we should always be loaded something Detached
+            debug_assert!(shard.policy == PlacementPolicy::Detached);
+            if shard.policy != PlacementPolicy::Detached {
+                tracing::error!(
+                    "Tenant shard {} loaded on-demand, but has non-Detached policy {:?}",
+                    shard.tenant_shard_id,
+                    shard.policy
+                );
+            }
+
+            (shard.tenant_shard_id, shard)
+        }));
+
+        Ok(())
+    }
+
+    /// If all shards for a tenant are detached, and in a fully quiescent state (no observed locations on pageservers),
+    /// and have no reconciler running, then we can drop the tenant from memory.  It will be reloaded on-demand
+    /// if we are asked to attach it again (see [`Self::maybe_load_tenant`]).
+    fn maybe_drop_tenant(
+        &self,
+        tenant_id: TenantId,
+        locked: &mut std::sync::RwLockWriteGuard<ServiceState>,
+    ) {
+        let mut tenant_shards = locked.tenants.range(TenantShardId::tenant_range(tenant_id));
+        if tenant_shards.all(|(_id, shard)| {
+            shard.policy == PlacementPolicy::Detached
+                && shard.reconciler.is_none()
+                && shard.observed.is_empty()
+        }) {
+            let keys = locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .map(|(id, _)| id)
+                .copied()
+                .collect::<Vec<_>>();
+            for key in keys {
+                tracing::info!("Dropping detached tenant shard {} from memory", key);
+                locked.tenants.remove(&key);
+            }
+        }
+    }
+
     /// This API is used by the cloud control plane to migrate unsharded tenants that it created
     /// directly with pageservers into this service.
     ///
@@ -2462,14 +2549,26 @@ impl Service {
         )
         .await;
 
-        if !tenant_shard_id.is_unsharded() {
+        let tenant_id = if !tenant_shard_id.is_unsharded() {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
                 "This API is for importing single-sharded or unsharded tenants"
             )));
-        }
+        } else {
+            tenant_shard_id.tenant_id
+        };
+
+        // In case we are waking up a Detached tenant
+        match self.maybe_load_tenant(tenant_id).await {
+            Ok(()) | Err(ApiError::NotFound(_)) => {
+                // This is a creation or an update
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        };
 
         // First check if this is a creation or an update
-        let create_or_update = self.tenant_location_config_prepare(tenant_shard_id.tenant_id, req);
+        let create_or_update = self.tenant_location_config_prepare(tenant_id, req);
 
         let mut result = TenantLocationConfigResponse {
             shards: Vec::new(),
@@ -2596,6 +2695,8 @@ impl Service {
         let tenant_id = req.tenant_id;
         let patch = req.config;
 
+        self.maybe_load_tenant(tenant_id).await?;
+
         let base = {
             let locked = self.inner.read().unwrap();
             let shards = locked
@@ -2640,19 +2741,7 @@ impl Service {
         )
         .await;
 
-        let tenant_exists = {
-            let locked = self.inner.read().unwrap();
-            let mut r = locked
-                .tenants
-                .range(TenantShardId::tenant_range(req.tenant_id));
-            r.next().is_some()
-        };
-
-        if !tenant_exists {
-            return Err(ApiError::NotFound(
-                anyhow::anyhow!("Tenant {} not found", req.tenant_id).into(),
-            ));
-        }
+        self.maybe_load_tenant(req.tenant_id).await?;
 
         self.set_tenant_config_and_reconcile(req.tenant_id, req.config)
             .await
@@ -2945,6 +3034,8 @@ impl Service {
         let _tenant_lock =
             trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
 
+        self.maybe_load_tenant(tenant_id).await?;
+
         // Detach all shards. This also deletes local pageserver shard data.
         let (detach_waiters, node) = {
             let mut detach_waiters = Vec::new();
@@ -3063,6 +3154,8 @@ impl Service {
             TenantOperations::UpdatePolicy,
         )
         .await;
+
+        self.maybe_load_tenant(tenant_id).await?;
 
         failpoint_support::sleep_millis_async!("tenant-update-policy-exclusive-lock");
 
@@ -5146,11 +5239,18 @@ impl Service {
             )));
         }
 
-        let mut shards = self.persistence.list_tenant_shards().await?;
-        shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
+        let mut persistent_shards = self.persistence.list_tenant_shards().await?;
+        persistent_shards
+            .sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
+
+        // Filter out detached shards, as we do not expect these to be present in memory
+        persistent_shards.retain(|tsp| {
+            tsp.placement_policy != serde_json::to_string(&PlacementPolicy::Detached).unwrap()
+        });
+
         expect_shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
 
-        if shards != expect_shards {
+        if persistent_shards != expect_shards {
             tracing::error!("Consistency check failed on shards.");
             tracing::error!(
                 "Shards in memory: {}",
@@ -5159,7 +5259,7 @@ impl Service {
             );
             tracing::error!(
                 "Shards in database: {}",
-                serde_json::to_string(&shards)
+                serde_json::to_string(&persistent_shards)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
