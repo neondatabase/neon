@@ -5245,11 +5245,18 @@ impl Service {
             )));
         }
 
-        let mut shards = self.persistence.list_tenant_shards().await?;
-        shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
+        let mut persistent_shards = self.persistence.list_tenant_shards().await?;
+        persistent_shards
+            .sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
+
+        // Filter out detached shards, as we do not expect these to be present in memory
+        persistent_shards.retain(|tsp| {
+            tsp.placement_policy != serde_json::to_string(&PlacementPolicy::Detached).unwrap()
+        });
+
         expect_shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
 
-        if shards != expect_shards {
+        if persistent_shards != expect_shards {
             tracing::error!("Consistency check failed on shards.");
             tracing::error!(
                 "Shards in memory: {}",
@@ -5258,7 +5265,7 @@ impl Service {
             );
             tracing::error!(
                 "Shards in database: {}",
-                serde_json::to_string(&shards)
+                serde_json::to_string(&persistent_shards)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
