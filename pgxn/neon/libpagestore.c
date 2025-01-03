@@ -723,7 +723,7 @@ retry:
 		INSTR_TIME_SET_CURRENT(now);
 		since_last_log = now;
 		INSTR_TIME_SUBTRACT(since_last_log, last_log_ts);
-		if (INSTR_TIME_GET_MICROSEC(since_last_log) >= LOG_INTERVAL_US)
+		if (INSTR_TIME_GET_MILLISEC(since_last_log) >= LOG_INTERVAL_MS)
 		{
 			since_start = now;
 			INSTR_TIME_SUBTRACT(since_start, start_ts);
