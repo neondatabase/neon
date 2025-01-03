@@ -81,53 +81,48 @@ impl<'m> MigrationRunner<'m> {
         Ok(())
     }
 
+    /// Run an individual migration
+    fn run_migration(&mut self, migration_id: i64, migration: &str) -> Result<()> {
+        if migration.starts_with("-- SKIP") {
+            info!("Skipping migration id={}", migration_id);
+
+            // Even though we are skipping the migration, updating the
+            // migration ID should help keep logic easy to understand when
+            // trying to understand the state of a cluster.
+            self.update_migration_id(migration_id)?;
+        } else {
+            info!("Running migration id={}:\n{}\n", migration_id, migration);
+
+            self.client
+                .simple_query("BEGIN")
+                .context("begin migration")?;
+
+            self.client
+                .simple_query(migration)
+                .with_context(|| format!("run_migrations migration id={migration_id}"))?;
+
+            self.update_migration_id(migration_id)?;
+
+            self.client
+                .simple_query("COMMIT")
+                .context("commit migration")?;
+
+            info!("Finished migration id={}", migration_id);
+        }
+
+        Ok(())
+    }
+
     /// Run the configrured set of migrations
     pub fn run_migrations(mut self) -> Result<()> {
         self.prepare_database()?;
 
         let mut current_migration = self.get_migration_id()? as usize;
         while current_migration < self.migrations.len() {
-            macro_rules! migration_id {
-                ($cm:expr) => {
-                    ($cm + 1) as i64
-                };
-            }
-
-            let migration = self.migrations[current_migration];
-
-            if migration.starts_with("-- SKIP") {
-                info!("Skipping migration id={}", migration_id!(current_migration));
-
-                // Even though we are skipping the migration, updating the
-                // migration ID should help keep logic easy to understand when
-                // trying to understand the state of a cluster.
-                self.update_migration_id(migration_id!(current_migration))?;
-            } else {
-                info!(
-                    "Running migration id={}:\n{}\n",
-                    migration_id!(current_migration),
-                    migration
-                );
-
-                self.client
-                    .simple_query("BEGIN")
-                    .context("begin migration")?;
-
-                self.client.simple_query(migration).with_context(|| {
-                    format!(
-                        "run_migrations migration id={}",
-                        migration_id!(current_migration)
-                    )
-                })?;
-
-                self.update_migration_id(migration_id!(current_migration))?;
-
-                self.client
-                    .simple_query("COMMIT")
-                    .context("commit migration")?;
-
-                info!("Finished migration id={}", migration_id!(current_migration));
-            }
+            self.run_migration(
+                (current_migration + 1) as i64,
+                self.migrations[current_migration],
+            )?;
 
             current_migration += 1;
         }
