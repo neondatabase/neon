@@ -694,7 +694,7 @@ retry:
 		WaitEvent	event;
 		long		timeout;
 
-		timeout = Min(0, LOG_INTERVAL_US - INSTR_TIME_GET_MICROSEC(since_last_log));
+		timeout = Max(0, LOG_INTERVAL_US - INSTR_TIME_GET_MICROSEC(since_last_log));
 
 		/* Sleep until there's something to do */
 		(void) WaitEventSetWait(shard->wes_read, timeout, &event, 1,
