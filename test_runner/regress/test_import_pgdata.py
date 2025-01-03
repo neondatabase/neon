@@ -9,7 +9,7 @@ import pytest
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.fast_import import FastImport
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, VanillaPostgres, PgProtocol, PgBin
+from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, PgProtocol, VanillaPostgres
 from fixtures.pageserver.http import (
     ImportPgdataIdemptencyKey,
     PageserverApiException,
