@@ -18,9 +18,6 @@ cd $(dirname $0)
 COMPUTE_CONTAINER_NAME=docker-compose-compute-1
 TEST_CONTAINER_NAME=docker-compose-neon-test-extensions-1
 PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
-: ${http_proxy:=}
-: ${https_proxy:=}
-export http_proxy https_proxy
 
 cleanup() {
     echo "show container information"
