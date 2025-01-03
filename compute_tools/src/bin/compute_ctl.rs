@@ -67,12 +67,15 @@ use compute_tools::params::*;
 use compute_tools::spec::*;
 use compute_tools::swap::resize_swap;
 use rlimit::{setrlimit, Resource};
+use utils::failpoint_support;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
 const BUILD_TAG_DEFAULT: &str = "latest";
 
 fn main() -> Result<()> {
+    let scenario = failpoint_support::init();
+
     let (build_tag, clap_args) = init()?;
 
     // enable core dumping for all child processes
@@ -99,6 +102,8 @@ fn main() -> Result<()> {
     let delay_exit = cleanup_after_postgres_exit(start_pg_result)?;
 
     maybe_delay_exit(delay_exit);
+
+    scenario.teardown();
 
     deinit_and_exit(wait_pg_result);
 }
@@ -419,9 +424,13 @@ fn start_postgres(
         "running compute with features: {:?}",
         state.pspec.as_ref().unwrap().spec.features
     );
-    // before we release the mutex, fetch the swap size (if any) for later.
-    let swap_size_bytes = state.pspec.as_ref().unwrap().spec.swap_size_bytes;
-    let disk_quota_bytes = state.pspec.as_ref().unwrap().spec.disk_quota_bytes;
+    // before we release the mutex, fetch some parameters for later.
+    let &ComputeSpec {
+        swap_size_bytes,
+        disk_quota_bytes,
+        disable_lfc_resizing,
+        ..
+    } = &state.pspec.as_ref().unwrap().spec;
     drop(state);
 
     // Launch remaining service threads
@@ -526,11 +535,18 @@ fn start_postgres(
             // This token is used internally by the monitor to clean up all threads
             let token = CancellationToken::new();
 
+            // don't pass postgres connection string to vm-monitor if we don't want it to resize LFC
+            let pgconnstr = if disable_lfc_resizing.unwrap_or(false) {
+                None
+            } else {
+                file_cache_connstr.cloned()
+            };
+
             let vm_monitor = rt.as_ref().map(|rt| {
                 rt.spawn(vm_monitor::start(
                     Box::leak(Box::new(vm_monitor::Args {
                         cgroup: cgroup.cloned(),
-                        pgconnstr: file_cache_connstr.cloned(),
+                        pgconnstr,
                         addr: vm_monitor_addr.clone(),
                     })),
                     token.clone(),
