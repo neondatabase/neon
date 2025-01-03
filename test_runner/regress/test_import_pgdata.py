@@ -344,3 +344,10 @@ def test_fast_import_binary(
     log.info(f"Result: {res}")
     assert res[0][0] == 10
     new_pgdata_vanilla_pg.stop()
+
+# TODO: Maybe test with pageserver?
+# 1. run whole neon env
+# 2. create timeline with some s3 path???
+# 3. run fast_import with s3 prefix
+# 4. ??? mock http where pageserver will report progress
+# 5. run compute on this timeline and check if data is there
