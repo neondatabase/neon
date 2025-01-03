@@ -2604,9 +2604,15 @@ impl Tenant {
                 WaitCompletionError::NotInitialized(
                     e, // If the queue is already stopped, it's a shutdown error.
                 ) if e.is_stopping() => CreateTimelineError::ShuttingDown,
-                e => CreateTimelineError::Other(e.into()),
-            })
-            .context("wait for timeline initial uploads to complete")?;
+                WaitCompletionError::NotInitialized(_) => {
+                    // This is a bug: we should never try to wait for uploads before initializing the timeline
+                    debug_assert!(false);
+                    CreateTimelineError::Other(anyhow::anyhow!("timeline not initialized"))
+                }
+                WaitCompletionError::UploadQueueShutDownOrStopped => {
+                    CreateTimelineError::ShuttingDown
+                }
+            })?;
 
         // The creating task is responsible for activating the timeline.
         // We do this after `wait_completion()` so that we don't spin up tasks that start
