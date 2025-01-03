@@ -97,6 +97,7 @@ pub(crate) enum DatabaseOperation {
     TenantGenerations,
     ShardGenerations,
     ListTenantShards,
+    LoadTenant,
     InsertTenantShards,
     UpdateTenantShard,
     DeleteTenant,
@@ -341,6 +342,24 @@ impl Persistence {
                 let query = tenant_shards.filter(
                     placement_policy.ne(serde_json::to_string(&PlacementPolicy::Detached).unwrap()),
                 );
+                let result = query.load::<TenantShardPersistence>(conn)?;
+
+                Ok(result)
+            },
+        )
+        .await
+    }
+
+    /// When restoring a previously detached tenant into memory, load it from the database
+    pub(crate) async fn load_tenant(
+        &self,
+        filter_tenant_id: TenantId,
+    ) -> DatabaseResult<Vec<TenantShardPersistence>> {
+        use crate::schema::tenant_shards::dsl::*;
+        self.with_measured_conn(
+            DatabaseOperation::LoadTenant,
+            move |conn| -> DatabaseResult<_> {
+                let query = tenant_shards.filter(tenant_id.eq(filter_tenant_id.to_string()));
                 let result = query.load::<TenantShardPersistence>(conn)?;
 
                 Ok(result)

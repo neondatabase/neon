@@ -1176,6 +1176,9 @@ impl Service {
                 }
             }
         }
+
+        // If the shard we just finished with is configured to be detached and is fully idle, then
+        // we may drop it from memory.
     }
 
     async fn process_results(
@@ -2436,6 +2439,49 @@ impl Service {
         }
     }
 
+    /// For APIs that might act on tenants with [`PlacementPolicy::Detached`], first check if
+    /// the tenant is present in memory. If not, load it from the database.  If it is found
+    /// in neither location, return a NotFound error.
+    async fn maybe_load_tenant(&self, tenant_id: TenantId) -> Result<(), ApiError> {
+        let present_in_memory = {
+            let locked = self.inner.read().unwrap();
+            locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .next()
+                .is_some()
+        };
+
+        if present_in_memory {
+            return Ok(());
+        }
+
+        let tenant_shards = self.persistence.load_tenant(tenant_id).await?;
+        if tenant_shards.is_empty() {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Tenant {} not found", tenant_id).into(),
+            ));
+        }
+
+        // TODO: choose a fresh AZ to use for this tenant when un-detaching: there definitely isn't a running
+        // compute, so no benefit to making AZ sticky across detaches.
+
+        let mut locked = self.inner.write().unwrap();
+        tracing::info!(
+            "Loaded {} shards for tenant {}",
+            tenant_shards.len(),
+            tenant_id
+        );
+        locked.tenants.extend(tenant_shards.into_iter().map(|p| {
+            let intent = IntentState::new();
+            let shard =
+                TenantShard::from_persistent(p, intent).expect("Corrupt shard row in database");
+            (shard.tenant_shard_id, shard)
+        }));
+
+        Ok(())
+    }
+
     /// This API is used by the cloud control plane to migrate unsharded tenants that it created
     /// directly with pageservers into this service.
     ///
@@ -2462,14 +2508,26 @@ impl Service {
         )
         .await;
 
-        if !tenant_shard_id.is_unsharded() {
+        let tenant_id = if !tenant_shard_id.is_unsharded() {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
                 "This API is for importing single-sharded or unsharded tenants"
             )));
-        }
+        } else {
+            tenant_shard_id.tenant_id
+        };
+
+        // In case we are waking up a Detached tenant
+        match self.maybe_load_tenant(tenant_id).await {
+            Ok(()) | Err(ApiError::NotFound(_)) => {
+                // This is a creation or an update
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        };
 
         // First check if this is a creation or an update
-        let create_or_update = self.tenant_location_config_prepare(tenant_shard_id.tenant_id, req);
+        let create_or_update = self.tenant_location_config_prepare(tenant_id, req);
 
         let mut result = TenantLocationConfigResponse {
             shards: Vec::new(),
