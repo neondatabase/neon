@@ -73,6 +73,13 @@ enum EncryptionSecret {
     KMS { key_id: String },
 }
 
+// copied from pageserver_api::config::defaults::DEFAULT_LOCALE to avoid dependency just for a constant
+const DEFAULT_LOCALE: &str = if cfg!(target_os = "macos") {
+    "C"
+} else {
+    "C.UTF-8"
+};
+
 #[tokio::main]
 pub(crate) async fn main() -> anyhow::Result<()> {
     utils::logging::init(
@@ -182,7 +189,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     let superuser = "cloud_admin"; // XXX: this shouldn't be hard-coded
     postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
         superuser,
-        locale: "en_US.UTF-8", // XXX: this shouldn't be hard-coded,
+        locale: DEFAULT_LOCALE, // XXX: this shouldn't be hard-coded,
         pg_version,
         initdb_bin: pg_bin_dir.join("initdb").as_ref(),
         library_search_path: &pg_lib_dir, // TODO: is this right? Prob works in compute image, not sure about neon_local.
