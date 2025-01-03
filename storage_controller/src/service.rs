@@ -415,8 +415,8 @@ pub struct Service {
     /// Queue of tenants who are waiting for concurrency limits to permit them to reconcile
     /// Send into this queue to promptly attempt to reconcile this shard next time units are available.
     ///
-    /// Note that this state logically lives inside ServiceInner, but carrying Sender here makes the code simpler
-    /// by avoiding needing a &mut ref to something inside the ServiceInner.  This could be optimized to
+    /// Note that this state logically lives inside ServiceState, but carrying Sender here makes the code simpler
+    /// by avoiding needing a &mut ref to something inside the ServiceState.  This could be optimized to
     /// use a VecDeque instead of a channel to reduce synchronization overhead, at the cost of some code complexity.
     delayed_reconcile_tx: tokio::sync::mpsc::Sender<TenantShardId>,
 
@@ -1162,6 +1162,11 @@ impl Service {
             }
         }
 
+        // If we just finished detaching all shards for a tenant, it might be time to drop it from memory.
+        if tenant.policy == PlacementPolicy::Detached {
+            self.maybe_drop_tenant(tenant.tenant_shard_id.tenant_id, &mut locked);
+        }
+
         // Maybe some other work can proceed now that this job finished.
         if self.reconciler_concurrency.available_permits() > 0 {
             while let Ok(tenant_shard_id) = locked.delayed_reconcile_rx.try_recv() {
@@ -1176,9 +1181,6 @@ impl Service {
                 }
             }
         }
-
-        // If the shard we just finished with is configured to be detached and is fully idle, then
-        // we may drop it from memory.
     }
 
     async fn process_results(
@@ -2472,14 +2474,53 @@ impl Service {
             tenant_shards.len(),
             tenant_id
         );
+
         locked.tenants.extend(tenant_shards.into_iter().map(|p| {
             let intent = IntentState::new();
             let shard =
                 TenantShard::from_persistent(p, intent).expect("Corrupt shard row in database");
+
+            // Sanity check: when loading on-demand, we should always be loaded something Detached
+            debug_assert!(shard.policy == PlacementPolicy::Detached);
+            if shard.policy != PlacementPolicy::Detached {
+                tracing::error!(
+                    "Tenant shard {} loaded on-demand, but has non-Detached policy {:?}",
+                    shard.tenant_shard_id,
+                    shard.policy
+                );
+            }
+
             (shard.tenant_shard_id, shard)
         }));
 
         Ok(())
+    }
+
+    /// If all shards for a tenant are detached, and in a fully quiescent state (no observed locations on pageservers),
+    /// and have no reconciler running, then we can drop the tenant from memory.  It will be reloaded on-demand
+    /// if we are asked to attach it again (see [`Self::maybe_load_tenant`]).
+    fn maybe_drop_tenant(
+        &self,
+        tenant_id: TenantId,
+        locked: &mut std::sync::RwLockWriteGuard<ServiceState>,
+    ) {
+        let mut tenant_shards = locked.tenants.range(TenantShardId::tenant_range(tenant_id));
+        if tenant_shards.all(|(_id, shard)| {
+            shard.policy == PlacementPolicy::Detached
+                && shard.reconciler.is_none()
+                && shard.observed.is_empty()
+        }) {
+            let keys = locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .map(|(id, _)| id)
+                .copied()
+                .collect::<Vec<_>>();
+            for key in keys {
+                tracing::info!("Dropping detached tenant shard {} from memory", key);
+                locked.tenants.remove(&key);
+            }
+        }
     }
 
     /// This API is used by the cloud control plane to migrate unsharded tenants that it created
