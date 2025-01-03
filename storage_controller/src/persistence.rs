@@ -1227,6 +1227,7 @@ pub(crate) struct SafekeeperPersistence {
     pub(crate) active: bool,
     pub(crate) http_port: i32,
     pub(crate) availability_zone_id: String,
+    pub(crate) scheduling_policy: Option<String>,
 }
 
 impl SafekeeperPersistence {
@@ -1252,6 +1253,7 @@ impl SafekeeperPersistence {
             port: self.port,
             http_port: self.http_port,
             availability_zone_id: self.availability_zone_id.clone(),
+            scheduling_policy: self.scheduling_policy.clone(),
         }
     }
 }
