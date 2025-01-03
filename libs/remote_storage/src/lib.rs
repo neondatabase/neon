@@ -12,6 +12,7 @@
 mod azure_blob;
 mod config;
 mod error;
+mod gcs;
 mod local_fs;
 mod metrics;
 mod s3_bucket;
@@ -688,6 +689,12 @@ impl GenericRemoteStorage {
 /// Immutable, cannot be changed once the file is created.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageMetadata(HashMap<String, String>);
+
+impl StorageMetadata {
+    pub fn new(map: HashMap<String, String>) -> Self {
+        Self(map)
+    }
+}
 
 impl<const N: usize> From<[(&str, &str); N]> for StorageMetadata {
     fn from(arr: [(&str, &str); N]) -> Self {
