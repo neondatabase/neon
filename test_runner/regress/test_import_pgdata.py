@@ -322,10 +322,10 @@ def test_pgdata_import_smoke(
     "newer control file catalog version and struct format isn't supported",
 )
 def test_fast_import_binary(
-        test_output_dir,
-        vanilla_pg: VanillaPostgres,
-        port_distributor: PortDistributor,
-        fast_import: FastImport,
+    test_output_dir,
+    vanilla_pg: VanillaPostgres,
+    port_distributor: PortDistributor,
+    fast_import: FastImport,
 ):
     vanilla_pg.start()
     vanilla_pg.safe_psql("CREATE TABLE foo (a int); INSERT INTO foo SELECT generate_series(1, 10);")
@@ -344,6 +344,7 @@ def test_fast_import_binary(
     log.info(f"Result: {res}")
     assert res[0][0] == 10
     new_pgdata_vanilla_pg.stop()
+
 
 # TODO: Maybe test with pageserver?
 # 1. run whole neon env

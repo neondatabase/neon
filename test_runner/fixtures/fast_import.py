@@ -16,12 +16,12 @@ class FastImport(AbstractNeonCli):
     cmd: subprocess.CompletedProcess[str] | None = None
 
     def __init__(
-            self,
-            extra_env: dict[str, str] | None,
-            binpath: Path,
-            pg_distrib_dir: Path,
-            pg_version: PgVersion,
-            workdir: Path
+        self,
+        extra_env: dict[str, str] | None,
+        binpath: Path,
+        pg_distrib_dir: Path,
+        pg_version: PgVersion,
+        workdir: Path,
     ):
         if extra_env is None:
             env_vars = {}
@@ -44,12 +44,13 @@ class FastImport(AbstractNeonCli):
             raise Exception(f"Working directory '{workdir}' does not exist")
         self.workdir = workdir
 
-    def run(self,
-            pg_port: int,
-            source_connection_string: str | None = None,
-            s3prefix: str | None = None,
-            interactive: bool = False,
-            ) -> subprocess.CompletedProcess[str]:
+    def run(
+        self,
+        pg_port: int,
+        source_connection_string: str | None = None,
+        s3prefix: str | None = None,
+        interactive: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
         if self.cmd is not None:
             raise Exception("Command already executed")
         args = [
@@ -78,10 +79,10 @@ class FastImport(AbstractNeonCli):
 
 @pytest.fixture(scope="function")
 def fast_import(
-        pg_version: PgVersion,
-        test_output_dir: Path,
-        neon_binpath: Path,
-        pg_distrib_dir: Path,
+    pg_version: PgVersion,
+    test_output_dir: Path,
+    neon_binpath: Path,
+    pg_distrib_dir: Path,
 ) -> Iterator[FastImport]:
     workdir = Path(tempfile.mkdtemp())
     with FastImport(None, neon_binpath, pg_distrib_dir, pg_version, workdir) as fi:
@@ -96,4 +97,4 @@ def fast_import(
         with open(test_output_dir / "fast_import.stderr", "w") as f:
             f.write(fi.cmd.stderr)
 
-        log.info('Written logs to %s', test_output_dir)
+        log.info("Written logs to %s", test_output_dir)
