@@ -1,15 +1,22 @@
 use crate::auth::{AuthError, Claims, SwappableJwtAuth};
 use crate::http::error::{api_error_handler, route_error_handler, ApiError};
 use crate::http::request::{get_query_param, parse_query_param};
+use crate::pprof;
+use ::pprof::protos::Message as _;
+use ::pprof::ProfilerGuardBuilder;
 use anyhow::{anyhow, Context};
+use bytes::{Bytes, BytesMut};
 use hyper::header::{HeaderName, AUTHORIZATION, CONTENT_DISPOSITION};
 use hyper::http::HeaderValue;
 use hyper::Method;
 use hyper::{header::CONTENT_TYPE, Body, Request, Response};
 use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use once_cell::sync::Lazy;
+use regex::Regex;
 use routerify::ext::RequestExt;
 use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
+use tokio::sync::{mpsc, Mutex};
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, info_span, warn, Instrument};
 
@@ -17,11 +24,6 @@ use std::future::Future;
 use std::io::Write as _;
 use std::str::FromStr;
 use std::time::Duration;
-
-use bytes::{Bytes, BytesMut};
-use pprof::protos::Message as _;
-use tokio::sync::{mpsc, Mutex};
-use tokio_stream::wrappers::ReceiverStream;
 
 static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -365,7 +367,7 @@ pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, A
 
     // Take the profile.
     let report = tokio::task::spawn_blocking(move || {
-        let guard = pprof::ProfilerGuardBuilder::default()
+        let guard = ProfilerGuardBuilder::default()
             .frequency(frequency_hz)
             .blocklist(&["libc", "libgcc", "pthread", "vdso"])
             .build()?;
@@ -457,10 +459,34 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
         }
 
         Format::Pprof => {
-            let data = tokio::task::spawn_blocking(move || prof_ctl.dump_pprof())
-                .await
-                .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
-                .map_err(ApiError::InternalServerError)?;
+            let data = tokio::task::spawn_blocking(move || {
+                let bytes = prof_ctl.dump_pprof()?;
+                // Symbolize the profile.
+                // TODO: consider moving this upstream to jemalloc_pprof and avoiding the
+                // serialization roundtrip.
+                static STRIP_FUNCTIONS: Lazy<Vec<(Regex, bool)>> = Lazy::new(|| {
+                    // Functions to strip from profiles. If true, also remove child frames.
+                    vec![
+                        (Regex::new("^__rust").unwrap(), false),
+                        (Regex::new("^_start$").unwrap(), false),
+                        (Regex::new("^irallocx_prof").unwrap(), true),
+                        (Regex::new("^prof_alloc_prep").unwrap(), true),
+                        (Regex::new("^std::rt::lang_start").unwrap(), false),
+                        (Regex::new("^std::sys::backtrace::__rust").unwrap(), false),
+                    ]
+                });
+                let profile = pprof::decode(&bytes)?;
+                let profile = pprof::symbolize(profile)?;
+                let profile = pprof::strip_locations(
+                    profile,
+                    &["libc", "libgcc", "pthread", "vdso"],
+                    &STRIP_FUNCTIONS,
+                );
+                pprof::encode(&profile)
+            })
+            .await
+            .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
+            .map_err(ApiError::InternalServerError)?;
             Response::builder()
                 .status(200)
                 .header(CONTENT_TYPE, "application/octet-stream")

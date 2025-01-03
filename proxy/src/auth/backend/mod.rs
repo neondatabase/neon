@@ -463,6 +463,8 @@ impl ComputeConnectBackend for Backend<'_, ComputeCredentials> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unimplemented, clippy::unwrap_used)]
+
     use std::net::IpAddr;
     use std::sync::Arc;
     use std::time::Duration;
@@ -675,6 +677,9 @@ mod tests {
         )
         .await
         .unwrap();
+
+        // flush the final server message
+        stream.flush().await.unwrap();
 
         handle.await.unwrap();
     }

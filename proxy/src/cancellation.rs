@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use postgres_client::{CancelToken, NoTls};
+use postgres_client::tls::MakeTlsConnect;
+use postgres_client::CancelToken;
 use pq_proto::CancelKeyData;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -12,12 +13,15 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::auth::{check_peer_addr_is_in_list, IpPattern};
+use crate::config::ComputeConfig;
 use crate::error::ReportableError;
+use crate::ext::LockExt;
 use crate::metrics::{CancellationRequest, CancellationSource, Metrics};
 use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::cancellation_publisher::{
     CancellationPublisher, CancellationPublisherMut, RedisPublisherClient,
 };
+use crate::tls::postgres_rustls::MakeRustlsConnect;
 
 pub type CancelMap = Arc<DashMap<CancelKeyData, Option<CancelClosure>>>;
 pub type CancellationHandlerMain = CancellationHandler<Option<Arc<Mutex<RedisPublisherClient>>>>;
@@ -29,6 +33,7 @@ type IpSubnetKey = IpNet;
 ///
 /// If `CancellationPublisher` is available, cancel request will be used to publish the cancellation key to other proxy instances.
 pub struct CancellationHandler<P> {
+    compute_config: &'static ComputeConfig,
     map: CancelMap,
     client: P,
     /// This field used for the monitoring purposes.
@@ -114,7 +119,7 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
                 IpAddr::V4(ip) => IpNet::V4(Ipv4Net::new_assert(ip, 24).trunc()), // use defaut mask here
                 IpAddr::V6(ip) => IpNet::V6(Ipv6Net::new_assert(ip, 64).trunc()),
             };
-            if !self.limiter.lock().unwrap().check(subnet_key, 1) {
+            if !self.limiter.lock_propagate_poison().check(subnet_key, 1) {
                 // log only the subnet part of the IP address to know which subnet is rate limited
                 tracing::warn!("Rate limit exceeded. Skipping cancellation message, {subnet_key}");
                 Metrics::get()
@@ -173,8 +178,11 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
                 source: self.from,
                 kind: crate::metrics::CancellationOutcome::Found,
             });
-        info!("cancelling query per user's request using key {key}");
-        cancel_closure.try_cancel_query().await
+        info!(
+            "cancelling query per user's request using key {key}, hostname {}, address: {}",
+            cancel_closure.hostname, cancel_closure.socket_addr
+        );
+        cancel_closure.try_cancel_query(self.compute_config).await
     }
 
     #[cfg(test)]
@@ -189,8 +197,13 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
 }
 
 impl CancellationHandler<()> {
-    pub fn new(map: CancelMap, from: CancellationSource) -> Self {
+    pub fn new(
+        compute_config: &'static ComputeConfig,
+        map: CancelMap,
+        from: CancellationSource,
+    ) -> Self {
         Self {
+            compute_config,
             map,
             client: (),
             from,
@@ -205,8 +218,14 @@ impl CancellationHandler<()> {
 }
 
 impl<P: CancellationPublisherMut> CancellationHandler<Option<Arc<Mutex<P>>>> {
-    pub fn new(map: CancelMap, client: Option<Arc<Mutex<P>>>, from: CancellationSource) -> Self {
+    pub fn new(
+        compute_config: &'static ComputeConfig,
+        map: CancelMap,
+        client: Option<Arc<Mutex<P>>>,
+        from: CancellationSource,
+    ) -> Self {
         Self {
+            compute_config,
             map,
             client,
             from,
@@ -228,6 +247,7 @@ pub struct CancelClosure {
     socket_addr: SocketAddr,
     cancel_token: CancelToken,
     ip_allowlist: Vec<IpPattern>,
+    hostname: String, // for pg_sni router
 }
 
 impl CancelClosure {
@@ -235,17 +255,36 @@ impl CancelClosure {
         socket_addr: SocketAddr,
         cancel_token: CancelToken,
         ip_allowlist: Vec<IpPattern>,
+        hostname: String,
     ) -> Self {
         Self {
             socket_addr,
             cancel_token,
             ip_allowlist,
+            hostname,
         }
     }
     /// Cancels the query running on user's compute node.
-    pub(crate) async fn try_cancel_query(self) -> Result<(), CancelError> {
+    pub(crate) async fn try_cancel_query(
+        self,
+        compute_config: &ComputeConfig,
+    ) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
-        self.cancel_token.cancel_query_raw(socket, NoTls).await?;
+
+        let mut mk_tls =
+            crate::tls::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
+        let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
+            &mut mk_tls,
+            &self.hostname,
+        )
+        .map_err(|e| {
+            CancelError::IO(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
+
+        self.cancel_token.cancel_query_raw(socket, tls).await?;
         debug!("query was cancelled");
         Ok(())
     }
@@ -283,12 +322,32 @@ impl<P> Drop for Session<P> {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::config::RetryConfig;
+    use crate::tls::client_config::compute_client_config_with_certs;
+
+    fn config() -> ComputeConfig {
+        let retry = RetryConfig {
+            base_delay: Duration::from_secs(1),
+            max_retries: 5,
+            backoff_factor: 2.0,
+        };
+
+        ComputeConfig {
+            retry,
+            tls: Arc::new(compute_client_config_with_certs(std::iter::empty())),
+            timeout: Duration::from_secs(2),
+        }
+    }
 
     #[tokio::test]
     async fn check_session_drop() -> anyhow::Result<()> {
         let cancellation_handler = Arc::new(CancellationHandler::<()>::new(
+            Box::leak(Box::new(config())),
             CancelMap::default(),
             CancellationSource::FromRedis,
         ));
@@ -304,8 +363,11 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_session_noop_regression() {
-        let handler =
-            CancellationHandler::<()>::new(CancelMap::default(), CancellationSource::Local);
+        let handler = CancellationHandler::<()>::new(
+            Box::leak(Box::new(config())),
+            CancelMap::default(),
+            CancellationSource::Local,
+        );
         handler
             .cancel_session(
                 CancelKeyData {

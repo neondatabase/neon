@@ -827,7 +827,6 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 	{
 		while (!pageserver_connect(shard_no, shard->n_reconnect_attempts < max_reconnect_attempts ? LOG : ERROR))
 		{
-			HandleMainLoopInterrupts();
 			shard->n_reconnect_attempts += 1;
 		}
 		shard->n_reconnect_attempts = 0;

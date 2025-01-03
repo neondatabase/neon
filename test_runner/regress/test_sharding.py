@@ -11,6 +11,7 @@ from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineArchival
 from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    DEFAULT_AZ_ID,
     NeonEnv,
     NeonEnvBuilder,
     StorageControllerApiException,
@@ -793,6 +794,7 @@ def test_sharding_split_stripe_size(
         "tenant_id": str(env.initial_tenant),
         "stripe_size": None,
         "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
+        "preferred_az": DEFAULT_AZ_ID,
     }
     assert notifications[0] == expect
 
@@ -812,6 +814,7 @@ def test_sharding_split_stripe_size(
             {"node_id": int(env.pageservers[0].id), "shard_number": 0},
             {"node_id": int(env.pageservers[0].id), "shard_number": 1},
         ],
+        "preferred_az": DEFAULT_AZ_ID,
     }
     log.info(f"Got notification: {notifications[1]}")
     assert notifications[1] == expect_after

@@ -4,11 +4,10 @@
 use crate::handler::SafekeeperPostgresHandler;
 use crate::metrics::RECEIVED_PS_FEEDBACKS;
 use crate::receive_wal::WalReceivers;
-use crate::safekeeper::{Term, TermLsn};
+use crate::safekeeper::TermLsn;
 use crate::send_interpreted_wal::InterpretedWalSender;
 use crate::timeline::WalResidentTimeline;
 use crate::wal_reader_stream::WalReaderStreamBuilder;
-use crate::wal_service::ConnectionId;
 use crate::wal_storage::WalReader;
 use anyhow::{bail, Context as AnyhowContext};
 use bytes::Bytes;
@@ -19,7 +18,11 @@ use postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
 use postgres_ffi::get_current_timestamp;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
-use serde::{Deserialize, Serialize};
+use safekeeper_api::models::{
+    ConnectionId, HotStandbyFeedback, ReplicationFeedback, StandbyFeedback, StandbyReply,
+    WalSenderState, INVALID_FULL_TRANSACTION_ID,
+};
+use safekeeper_api::Term;
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::failpoint_support;
 use utils::id::TenantTimelineId;
@@ -28,7 +31,6 @@ use utils::postgres_client::PostgresClientProtocol;
 
 use std::cmp::{max, min};
 use std::net::SocketAddr;
-use std::str;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch::Receiver;
@@ -41,65 +43,6 @@ const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';
 const STANDBY_STATUS_UPDATE_TAG_BYTE: u8 = b'r';
 // neon extension of replication protocol
 const NEON_STATUS_UPDATE_TAG_BYTE: u8 = b'z';
-
-type FullTransactionId = u64;
-
-/// Hot standby feedback received from replica
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct HotStandbyFeedback {
-    pub ts: TimestampTz,
-    pub xmin: FullTransactionId,
-    pub catalog_xmin: FullTransactionId,
-}
-
-const INVALID_FULL_TRANSACTION_ID: FullTransactionId = 0;
-
-impl HotStandbyFeedback {
-    pub fn empty() -> HotStandbyFeedback {
-        HotStandbyFeedback {
-            ts: 0,
-            xmin: 0,
-            catalog_xmin: 0,
-        }
-    }
-}
-
-/// Standby status update
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct StandbyReply {
-    pub write_lsn: Lsn, // The location of the last WAL byte + 1 received and written to disk in the standby.
-    pub flush_lsn: Lsn, // The location of the last WAL byte + 1 flushed to disk in the standby.
-    pub apply_lsn: Lsn, // The location of the last WAL byte + 1 applied in the standby.
-    pub reply_ts: TimestampTz, // The client's system clock at the time of transmission, as microseconds since midnight on 2000-01-01.
-    pub reply_requested: bool,
-}
-
-impl StandbyReply {
-    fn empty() -> Self {
-        StandbyReply {
-            write_lsn: Lsn::INVALID,
-            flush_lsn: Lsn::INVALID,
-            apply_lsn: Lsn::INVALID,
-            reply_ts: 0,
-            reply_requested: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct StandbyFeedback {
-    pub reply: StandbyReply,
-    pub hs_feedback: HotStandbyFeedback,
-}
-
-impl StandbyFeedback {
-    pub fn empty() -> Self {
-        StandbyFeedback {
-            reply: StandbyReply::empty(),
-            hs_feedback: HotStandbyFeedback::empty(),
-        }
-    }
-}
 
 /// WalSenders registry. Timeline holds it (wrapped in Arc).
 pub struct WalSenders {
@@ -339,25 +282,6 @@ impl WalSendersShared {
             hs_feedback: agg,
         };
     }
-}
-
-// Serialized is used only for pretty printing in json.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalSenderState {
-    ttid: TenantTimelineId,
-    addr: SocketAddr,
-    conn_id: ConnectionId,
-    // postgres application_name
-    appname: Option<String>,
-    feedback: ReplicationFeedback,
-}
-
-// Receiver is either pageserver or regular standby, which have different
-// feedbacks.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-enum ReplicationFeedback {
-    Pageserver(PageserverFeedback),
-    Standby(StandbyFeedback),
 }
 
 // id of the occupied slot in WalSenders to access it (and save in the
@@ -888,6 +812,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
 
 #[cfg(test)]
 mod tests {
+    use safekeeper_api::models::FullTransactionId;
     use utils::id::{TenantId, TimelineId};
 
     use super::*;

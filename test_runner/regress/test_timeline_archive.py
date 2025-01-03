@@ -398,6 +398,7 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
 
     # Offloading is off by default at time of writing: remove this line when it's on by default
     neon_env_builder.pageserver_config_override = "timeline_offloading = true"
+    neon_env_builder.storage_controller_config = {"heartbeat_interval": "100msec"}
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
 
     # We will exercise migrations, so need multiple pageservers
@@ -426,6 +427,7 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
             [
                 ".*removing local file.*because it has unexpected length.*",
                 ".*__temp.*",
+                ".*method=POST path=\\S+/timeline .*: Not activating a Stopping timeline.*",
                 # FIXME: there are still anyhow::Error paths in timeline creation/deletion which
                 # generate 500 results when called during shutdown (https://github.com/neondatabase/neon/issues/9768)
                 ".*InternalServerError.*",
@@ -434,6 +436,14 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
                 ".*delete_timeline.*Error",
             ]
         )
+
+    env.storage_scrubber.allowed_errors.extend(
+        [
+            # Unclcean shutdowns of pageserver can legitimately result in orphan layers
+            # (https://github.com/neondatabase/neon/issues/9988#issuecomment-2520558211)
+            f".*Orphan layer detected: tenants/{tenant_id}/.*"
+        ]
+    )
 
     class TimelineState:
         def __init__(self):

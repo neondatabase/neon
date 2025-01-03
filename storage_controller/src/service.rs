@@ -18,7 +18,7 @@ use crate::{
     background_node_operations::{
         Drain, Fill, Operation, OperationError, OperationHandler, MAX_RECONCILES_PER_OPERATION,
     },
-    compute_hook::NotifyError,
+    compute_hook::{self, NotifyError},
     drain_utils::{self, TenantShardDrain, TenantShardIterator},
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
     leadership::Leadership,
@@ -46,10 +46,11 @@ use pageserver_api::{
     controller_api::{
         AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
         NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
-        ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
-        TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard,
-        TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse,
-        TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
+        SafekeeperDescribeResponse, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
+        ShardsPreferredAzsResponse, TenantCreateRequest, TenantCreateResponse,
+        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
+        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
+        TenantShardMigrateResponse,
     },
     models::{
         SecondaryProgress, TenantConfigPatchRequest, TenantConfigRequest,
@@ -656,11 +657,14 @@ impl Service {
                     // emit a compute notification for this. In the case where our observed state does not
                     // yet match our intent, we will eventually reconcile, and that will emit a compute notification.
                     if let Some(attached_at) = tenant_shard.stably_attached() {
-                        compute_notifications.push((
-                            *tenant_shard_id,
-                            attached_at,
-                            tenant_shard.shard.stripe_size,
-                        ));
+                        compute_notifications.push(compute_hook::ShardUpdate {
+                            tenant_shard_id: *tenant_shard_id,
+                            node_id: attached_at,
+                            stripe_size: tenant_shard.shard.stripe_size,
+                            preferred_az: tenant_shard
+                                .preferred_az()
+                                .map(|az| Cow::Owned(az.clone())),
+                        });
                     }
                 }
             }
@@ -4786,7 +4790,15 @@ impl Service {
         for (child_id, child_ps, stripe_size) in child_locations {
             if let Err(e) = self
                 .compute_hook
-                .notify(child_id, child_ps, stripe_size, &self.cancel)
+                .notify(
+                    compute_hook::ShardUpdate {
+                        tenant_shard_id: child_id,
+                        node_id: child_ps,
+                        stripe_size,
+                        preferred_az: preferred_az_id.as_ref().map(Cow::Borrowed),
+                    },
+                    &self.cancel,
+                )
                 .await
             {
                 tracing::warn!("Failed to update compute of {}->{} during split, proceeding anyway to complete split ({e})",
@@ -6873,10 +6885,7 @@ impl Service {
         let mut plan = Vec::new();
 
         for (node_id, attached) in nodes_by_load {
-            let available = locked
-                .nodes
-                .get(&node_id)
-                .map_or(false, |n| n.is_available());
+            let available = locked.nodes.get(&node_id).is_some_and(|n| n.is_available());
             if !available {
                 continue;
             }
@@ -7161,15 +7170,24 @@ impl Service {
 
     pub(crate) async fn safekeepers_list(
         &self,
-    ) -> Result<Vec<crate::persistence::SafekeeperPersistence>, DatabaseError> {
-        self.persistence.list_safekeepers().await
+    ) -> Result<Vec<SafekeeperDescribeResponse>, DatabaseError> {
+        Ok(self
+            .persistence
+            .list_safekeepers()
+            .await?
+            .into_iter()
+            .map(|v| v.as_describe_response())
+            .collect::<Vec<_>>())
     }
 
     pub(crate) async fn get_safekeeper(
         &self,
         id: i64,
-    ) -> Result<crate::persistence::SafekeeperPersistence, DatabaseError> {
-        self.persistence.safekeeper_get(id).await
+    ) -> Result<SafekeeperDescribeResponse, DatabaseError> {
+        self.persistence
+            .safekeeper_get(id)
+            .await
+            .map(|v| v.as_describe_response())
     }
 
     pub(crate) async fn upsert_safekeeper(

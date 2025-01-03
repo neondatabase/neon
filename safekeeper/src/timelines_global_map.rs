@@ -4,7 +4,6 @@
 
 use crate::defaults::DEFAULT_EVICTION_CONCURRENCY;
 use crate::rate_limit::RateLimiter;
-use crate::safekeeper::ServerInfo;
 use crate::state::TimelinePersistentState;
 use crate::timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError};
 use crate::timelines_set::TimelinesSet;
@@ -13,6 +12,7 @@ use crate::{control_file, wal_storage, SafeKeeperConf};
 use anyhow::{bail, Context, Result};
 use camino::Utf8PathBuf;
 use camino_tempfile::Utf8TempDir;
+use safekeeper_api::ServerInfo;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::str::FromStr;

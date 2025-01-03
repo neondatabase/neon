@@ -1181,8 +1181,19 @@ impl ComputeNode {
             let mut conf = postgres::config::Config::from(conf);
             conf.application_name("compute_ctl:migrations");
 
-            let mut client = conf.connect(NoTls)?;
-            handle_migrations(&mut client).context("apply_config handle_migrations")
+            match conf.connect(NoTls) {
+                Ok(mut client) => {
+                    if let Err(e) = handle_migrations(&mut client) {
+                        error!("Failed to run migrations: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to connect to the compute for running migrations: {}",
+                        e
+                    );
+                }
+            };
         });
 
         Ok::<(), anyhow::Error>(())

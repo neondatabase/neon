@@ -31,9 +31,9 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
-        CompactionAlgorithm, CompactionAlgorithmSettings, DownloadRemoteLayersTaskInfo,
-        DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
-        LsnLease, TimelineState,
+        CompactKeyRange, CompactLsnRange, CompactionAlgorithm, CompactionAlgorithmSettings,
+        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
+        InMemoryLayerInfo, LayerMapInfo, LsnLease, TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
@@ -790,63 +790,6 @@ pub(crate) struct CompactRequest {
     pub sub_compaction: bool,
     /// Max job size for each subcompaction job.
     pub sub_compaction_max_job_size_mb: Option<u64>,
-}
-
-#[serde_with::serde_as]
-#[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct CompactLsnRange {
-    pub start: Lsn,
-    pub end: Lsn,
-}
-
-#[serde_with::serde_as]
-#[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct CompactKeyRange {
-    #[serde_as(as = "serde_with::DisplayFromStr")]
-    pub start: Key,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
-    pub end: Key,
-}
-
-impl From<Range<Lsn>> for CompactLsnRange {
-    fn from(range: Range<Lsn>) -> Self {
-        Self {
-            start: range.start,
-            end: range.end,
-        }
-    }
-}
-
-impl From<Range<Key>> for CompactKeyRange {
-    fn from(range: Range<Key>) -> Self {
-        Self {
-            start: range.start,
-            end: range.end,
-        }
-    }
-}
-
-impl From<CompactLsnRange> for Range<Lsn> {
-    fn from(range: CompactLsnRange) -> Self {
-        range.start..range.end
-    }
-}
-
-impl From<CompactKeyRange> for Range<Key> {
-    fn from(range: CompactKeyRange) -> Self {
-        range.start..range.end
-    }
-}
-
-impl CompactLsnRange {
-    #[cfg(test)]
-    #[cfg(feature = "testing")]
-    pub fn above(lsn: Lsn) -> Self {
-        Self {
-            start: lsn,
-            end: Lsn::MAX,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4064,8 +4007,11 @@ impl Timeline {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
+            // Note that there are a third "caller" that will take the `partitioning` lock. It is `gc_compaction_split_jobs` for
+            // gc-compaction where it uses the repartition data to determine the split jobs. In the future, it might use its own
+            // heuristics, but for now, we should allow concurrent access to it and let the caller retry compaction.
             return Err(CompactionError::Other(anyhow!(
-                "repartition() called concurrently, this should not happen"
+                "repartition() called concurrently, this is rare and a retry should be fine"
             )));
         };
         let ((dense_partition, sparse_partition), partition_lsn) = &*partitioning_guard;
@@ -5861,7 +5807,7 @@ enum OpenLayerAction {
     None,
 }
 
-impl<'a> TimelineWriter<'a> {
+impl TimelineWriter<'_> {
     async fn handle_open_layer_action(
         &mut self,
         at: Lsn,
