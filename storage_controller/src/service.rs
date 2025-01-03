@@ -2695,6 +2695,8 @@ impl Service {
         let tenant_id = req.tenant_id;
         let patch = req.config;
 
+        self.maybe_load_tenant(tenant_id).await?;
+
         let base = {
             let locked = self.inner.read().unwrap();
             let shards = locked
@@ -2739,19 +2741,7 @@ impl Service {
         )
         .await;
 
-        let tenant_exists = {
-            let locked = self.inner.read().unwrap();
-            let mut r = locked
-                .tenants
-                .range(TenantShardId::tenant_range(req.tenant_id));
-            r.next().is_some()
-        };
-
-        if !tenant_exists {
-            return Err(ApiError::NotFound(
-                anyhow::anyhow!("Tenant {} not found", req.tenant_id).into(),
-            ));
-        }
+        self.maybe_load_tenant(req.tenant_id).await?;
 
         self.set_tenant_config_and_reconcile(req.tenant_id, req.config)
             .await
@@ -3044,6 +3034,8 @@ impl Service {
         let _tenant_lock =
             trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
 
+        self.maybe_load_tenant(tenant_id).await?;
+
         // Detach all shards. This also deletes local pageserver shard data.
         let (detach_waiters, node) = {
             let mut detach_waiters = Vec::new();
@@ -3162,6 +3154,8 @@ impl Service {
             TenantOperations::UpdatePolicy,
         )
         .await;
+
+        self.maybe_load_tenant(tenant_id).await?;
 
         failpoint_support::sleep_millis_async!("tenant-update-policy-exclusive-lock");
 
