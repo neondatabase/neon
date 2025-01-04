@@ -1,16 +1,13 @@
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
-use once_cell::sync::OnceCell;
 use postgres_client::tls::MakeTlsConnect;
 use postgres_client::{CancelToken, RawConnection};
 use postgres_protocol::message::backend::NoticeResponseBody;
 use pq_proto::StartupMessageParams;
-use rustls::crypto::ring;
 use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -18,14 +15,15 @@ use tracing::{debug, error, info, warn};
 
 use crate::auth::parse_endpoint_param;
 use crate::cancellation::CancelClosure;
+use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
-use crate::postgres_rustls::MakeRustlsConnect;
 use crate::proxy::neon_option;
+use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::types::Host;
 
 pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
@@ -39,9 +37,6 @@ pub(crate) enum ConnectionError {
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     CouldNotConnect(#[from] io::Error),
-
-    #[error("Couldn't load native TLS certificates: {0:?}")]
-    TlsCertificateError(Vec<rustls_native_certs::Error>),
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     TlsError(#[from] InvalidDnsNameError),
@@ -89,7 +84,6 @@ impl ReportableError for ConnectionError {
             }
             ConnectionError::Postgres(_) => crate::error::ErrorKind::Compute,
             ConnectionError::CouldNotConnect(_) => crate::error::ErrorKind::Compute,
-            ConnectionError::TlsCertificateError(_) => crate::error::ErrorKind::Service,
             ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
             ConnectionError::WakeComputeError(e) => e.get_error_kind(),
             ConnectionError::TooManyConnectionAttempts(e) => e.get_error_kind(),
@@ -199,11 +193,15 @@ impl ConnCfg {
 
         let connect_once = |host, port| {
             debug!("trying to connect to compute node at {host}:{port}");
-            connect_with_timeout(host, port).and_then(|socket| async {
-                let socket_addr = socket.peer_addr()?;
+            connect_with_timeout(host, port).and_then(|stream| async {
+                let socket_addr = stream.peer_addr()?;
+                let socket = socket2::SockRef::from(&stream);
+                // Disable Nagle's algorithm to not introduce latency between
+                // client and compute.
+                socket.set_nodelay(true)?;
                 // This prevents load balancer from severing the connection.
-                socket2::SockRef::from(&socket).set_keepalive(true)?;
-                Ok((socket_addr, socket))
+                socket.set_keepalive(true)?;
+                Ok((socket_addr, stream))
             })
         };
 
@@ -251,25 +249,13 @@ impl ConnCfg {
         &self,
         ctx: &RequestContext,
         aux: MetricsAuxInfo,
-        timeout: Duration,
+        config: &ComputeConfig,
     ) -> Result<PostgresConnection, ConnectionError> {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (socket_addr, stream, host) = self.connect_raw(timeout).await?;
+        let (socket_addr, stream, host) = self.connect_raw(config.timeout).await?;
         drop(pause);
 
-        let root_store = TLS_ROOTS
-            .get_or_try_init(load_certs)
-            .map_err(ConnectionError::TlsCertificateError)?
-            .clone();
-
-        let client_config =
-            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .expect("ring should support the default protocol versions")
-                .with_root_certificates(root_store)
-                .with_no_client_auth();
-
-        let mut mk_tls = crate::postgres_rustls::MakeRustlsConnect::new(client_config);
+        let mut mk_tls = crate::tls::postgres_rustls::MakeRustlsConnect::new(config.tls.clone());
         let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
             &mut mk_tls,
             host,
@@ -340,19 +326,6 @@ fn filtered_options(options: &str) -> Option<String> {
 
     Some(options)
 }
-
-pub(crate) fn load_certs() -> Result<Arc<rustls::RootCertStore>, Vec<rustls_native_certs::Error>> {
-    let der_certs = rustls_native_certs::load_native_certs();
-
-    if !der_certs.errors.is_empty() {
-        return Err(der_certs.errors);
-    }
-
-    let mut store = rustls::RootCertStore::empty();
-    store.add_parsable_certificates(der_certs.certs);
-    Ok(Arc::new(store))
-}
-static TLS_ROOTS: OnceCell<Arc<rustls::RootCertStore>> = OnceCell::new();
 
 #[cfg(test)]
 mod tests {

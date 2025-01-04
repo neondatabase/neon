@@ -1285,7 +1285,7 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
 
 #########################################################################################
 #
-# Compile and run the Neon-specific `compute_ctl` and `fast_import` binaries
+# Compile the Neon-specific `compute_ctl`, `fast_import`, and `local_proxy` binaries
 #
 #########################################################################################
 FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools
@@ -1295,7 +1295,7 @@ ENV BUILD_TAG=$BUILD_TAG
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
-RUN cd compute_tools && mold -run cargo build --locked --profile release-line-debug-size-lto
+RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy
 
 #########################################################################################
 #
@@ -1337,20 +1337,6 @@ RUN set -e \
     && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
     && make -j $(nproc) dist_man_MANS= \
     && make install dist_man_MANS=
-
-#########################################################################################
-#
-# Compile the Neon-specific `local_proxy` binary
-#
-#########################################################################################
-FROM $REPOSITORY/$IMAGE:$TAG AS local_proxy
-ARG BUILD_TAG
-ENV BUILD_TAG=$BUILD_TAG
-
-USER nonroot
-# Copy entire project to get Cargo.* files with proper dependencies for the whole project
-COPY --chown=nonroot . .
-RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin local_proxy
 
 #########################################################################################
 #
@@ -1491,7 +1477,7 @@ COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/
 COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
 
 # local_proxy and its config
-COPY --from=local_proxy --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local_proxy
+COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local_proxy
 RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 
 # Metrics exporter binaries and  configuration files
