@@ -1241,6 +1241,7 @@ impl SafekeeperPersistence {
             active: self.active,
             http_port: self.http_port,
             availability_zone_id: &self.availability_zone_id,
+            scheduling_policy: None,
         }
     }
     pub(crate) fn as_describe_response(&self) -> SafekeeperDescribeResponse {
@@ -1260,6 +1261,7 @@ impl SafekeeperPersistence {
 
 #[derive(Insertable, AsChangeset)]
 #[diesel(table_name = crate::schema::safekeepers)]
+#[diesel(treat_none_as_null = true)]
 struct InsertUpdateSafekeeper<'a> {
     id: i64,
     region_id: &'a str,
@@ -1269,4 +1271,5 @@ struct InsertUpdateSafekeeper<'a> {
     active: bool,
     http_port: i32,
     availability_zone_id: &'a str,
+    scheduling_policy: Option<&'a str>,
 }
