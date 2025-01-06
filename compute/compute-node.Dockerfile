@@ -1462,6 +1462,7 @@ ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
 ENV PGPORT=55433
 ENV PGUSER=cloud_admin
+ENV PGPASSWORD=cloud_admin
 ENV PGDATABASE=postgres
 #########################################################################################
 #
