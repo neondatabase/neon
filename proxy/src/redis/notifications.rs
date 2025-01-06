@@ -37,6 +37,7 @@ struct NotificationHeader<'a> {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "topic", content = "data")]
+// Message to contributors: Make sure to align these topic names with the list below.
 pub(crate) enum Notification {
     #[serde(
         rename = "/allowed_ips_updated",
@@ -73,6 +74,21 @@ pub(crate) enum Notification {
     PasswordUpdate { password_update: PasswordUpdate },
     #[serde(rename = "/cancel_session")]
     Cancel(CancelSession),
+}
+
+/// Returns true if the topic name given is a known topic that we can deserialize and action on.
+/// Returns false otherwise.
+fn known_topic(s: &str) -> bool {
+    // Message to contributors: Make sure to align these topic names with the enum above.
+    matches!(
+        s,
+        "/allowed_ips_updated"
+            | "/block_public_or_vpc_access_updated"
+            | "/allowed_vpc_endpoints_updated_for_org"
+            | "/allowed_vpc_endpoints_updated_for_projects"
+            | "/password_updated"
+            | "/cancel_session"
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -175,18 +191,10 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
             }
         };
 
-        match header.topic {
-            "/allowed_ips_updated"
-            | "/block_public_or_vpc_access_updated"
-            | "/allowed_vpc_endpoints_updated_for_org"
-            | "/allowed_vpc_endpoints_updated_for_projects"
-            | "/password_updated"
-            | "/cancel_session" => {}
-            topic => {
-                // don't update the metric for redis errors if it's just a topic we don't know about.
-                tracing::warn!(topic, "unknown topic");
-                return Ok(());
-            }
+        if !known_topic(header.topic) {
+            // don't update the metric for redis errors if it's just a topic we don't know about.
+            tracing::warn!(topic = header.topic, "unknown topic");
+            return Ok(());
         }
 
         let msg: Notification = match serde_json::from_str(&payload) {
