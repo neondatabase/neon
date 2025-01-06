@@ -8,6 +8,11 @@ on:
         type: string
         default: '[]'
         required: false
+      rebuild_rust_code:
+        description: "Rebuild Rust code"
+        type: boolean
+        default: false
+        required: false
       rebuild_everything:
         description: "If true, rebuild for all versions"
         type: boolean
@@ -147,7 +152,7 @@ jobs:
 
   cargo-build:
     if: |
-      (inputs.pg_versions != '[]' || inputs.rebuild_everything) && (
+      (inputs.pg_versions != '[]' || inputs.rust_code || inputs.rebuild_everything) && (
         contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
         contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
         github.ref_name == 'main'
