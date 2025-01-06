@@ -154,6 +154,7 @@ enum TenantOperations {
     TimelineArchivalConfig,
     TimelineDetachAncestor,
     TimelineGcBlockUnblock,
+    DropDetached,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -1164,7 +1165,16 @@ impl Service {
 
         // If we just finished detaching all shards for a tenant, it might be time to drop it from memory.
         if tenant.policy == PlacementPolicy::Detached {
-            self.maybe_drop_tenant(tenant.tenant_shard_id.tenant_id, &mut locked);
+            // We may only drop a tenant from memory while holding the exclusive lock on the tenant ID: this protects us
+            // from concurrent execution wrt a request handler that might expect the tenant to remain in memory for the
+            // duration of the request.
+            let guard = self.tenant_op_locks.try_exclusive(
+                tenant.tenant_shard_id.tenant_id,
+                TenantOperations::DropDetached,
+            );
+            if let Some(guard) = guard {
+                self.maybe_drop_tenant(tenant.tenant_shard_id.tenant_id, &mut locked, &guard);
+            }
         }
 
         // Maybe some other work can proceed now that this job finished.
@@ -2444,7 +2454,14 @@ impl Service {
     /// For APIs that might act on tenants with [`PlacementPolicy::Detached`], first check if
     /// the tenant is present in memory. If not, load it from the database.  If it is found
     /// in neither location, return a NotFound error.
-    async fn maybe_load_tenant(&self, tenant_id: TenantId) -> Result<(), ApiError> {
+    ///
+    /// Caller must demonstrate they hold a lock guard, as otherwise two callers might try and load
+    /// it at the same time, or we might race with [`Self::maybe_drop_tenant`]
+    async fn maybe_load_tenant(
+        &self,
+        tenant_id: TenantId,
+        _guard: &TracingExclusiveGuard<TenantOperations>,
+    ) -> Result<(), ApiError> {
         let present_in_memory = {
             let locked = self.inner.read().unwrap();
             locked
@@ -2499,10 +2516,14 @@ impl Service {
     /// If all shards for a tenant are detached, and in a fully quiescent state (no observed locations on pageservers),
     /// and have no reconciler running, then we can drop the tenant from memory.  It will be reloaded on-demand
     /// if we are asked to attach it again (see [`Self::maybe_load_tenant`]).
+    ///
+    /// Caller must demonstrate they hold a lock guard, as otherwise it is unsafe to drop a tenant from
+    /// memory while some other function might assume it continues to exist while not holding the lock on Self::inner.
     fn maybe_drop_tenant(
         &self,
         tenant_id: TenantId,
         locked: &mut std::sync::RwLockWriteGuard<ServiceState>,
+        _guard: &TracingExclusiveGuard<TenantOperations>,
     ) {
         let mut tenant_shards = locked.tenants.range(TenantShardId::tenant_range(tenant_id));
         if tenant_shards.all(|(_id, shard)| {
@@ -2558,7 +2579,7 @@ impl Service {
         };
 
         // In case we are waking up a Detached tenant
-        match self.maybe_load_tenant(tenant_id).await {
+        match self.maybe_load_tenant(tenant_id, &_tenant_lock).await {
             Ok(()) | Err(ApiError::NotFound(_)) => {
                 // This is a creation or an update
             }
@@ -2695,7 +2716,7 @@ impl Service {
         let tenant_id = req.tenant_id;
         let patch = req.config;
 
-        self.maybe_load_tenant(tenant_id).await?;
+        self.maybe_load_tenant(tenant_id, &_tenant_lock).await?;
 
         let base = {
             let locked = self.inner.read().unwrap();
@@ -2741,7 +2762,7 @@ impl Service {
         )
         .await;
 
-        self.maybe_load_tenant(req.tenant_id).await?;
+        self.maybe_load_tenant(req.tenant_id, &_tenant_lock).await?;
 
         self.set_tenant_config_and_reconcile(req.tenant_id, req.config)
             .await
@@ -3034,7 +3055,7 @@ impl Service {
         let _tenant_lock =
             trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
 
-        self.maybe_load_tenant(tenant_id).await?;
+        self.maybe_load_tenant(tenant_id, &_tenant_lock).await?;
 
         // Detach all shards. This also deletes local pageserver shard data.
         let (detach_waiters, node) = {
@@ -3155,7 +3176,7 @@ impl Service {
         )
         .await;
 
-        self.maybe_load_tenant(tenant_id).await?;
+        self.maybe_load_tenant(tenant_id, &_tenant_lock).await?;
 
         failpoint_support::sleep_millis_async!("tenant-update-policy-exclusive-lock");
 

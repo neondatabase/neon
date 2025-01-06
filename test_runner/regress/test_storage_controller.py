@@ -3289,7 +3289,7 @@ def test_storage_controller_detached_stopped(
             "generation": None,
         },
     )
-
+    env.storage_controller.reconcile_until_idle()
     env.storage_controller.consistency_check()
 
     # Confirm the detach happened
