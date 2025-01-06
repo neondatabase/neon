@@ -5243,11 +5243,6 @@ impl Service {
         persistent_shards
             .sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
 
-        // Filter out detached shards, as we do not expect these to be present in memory
-        persistent_shards.retain(|tsp| {
-            tsp.placement_policy != serde_json::to_string(&PlacementPolicy::Detached).unwrap()
-        });
-
         expect_shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
 
         if persistent_shards != expect_shards {
