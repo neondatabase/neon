@@ -680,7 +680,7 @@ call_PQgetCopyData(shardno_t shard_no, char **buffer)
 	 * but in the cases that take exceptionally long, it's useful to log the
 	 * exact timestamps.
 	 */
-#define LOG_INTERVAL_MS		UINT64CONST(10 * 1000)
+#define LOG_INTERVAL_MS		INT64CONST(10 * 1000)
 
 	INSTR_TIME_SET_CURRENT(now);
 	start_ts = last_log_ts = now;
