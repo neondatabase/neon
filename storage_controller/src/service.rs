@@ -6231,6 +6231,10 @@ impl Service {
         let mut pending_reconciles = 0;
         let mut az_violations = 0;
 
+        // If we find any tenants to drop from memory, stash them to offload after
+        // we're done traversing t map of tenants.
+        let mut drop_detached_tenants = Vec::new();
+
         let mut reconciles_spawned = 0;
         for shard in tenants.values_mut() {
             // Accumulate scheduling statistics
@@ -6264,6 +6268,25 @@ impl Service {
                 // Shard wanted to reconcile but for some reason couldn't.
                 pending_reconciles += 1;
             }
+
+            // If this tenant is detached, try dropping it from memory. This is usually done
+            // proactively in [`Self::process_results`], but we do it here to handle the edge
+            // case where a reconcile completes while someone else is holding an op lock for the tenant.
+            if shard.tenant_shard_id.shard_number == ShardNumber(0)
+                && shard.policy == PlacementPolicy::Detached
+            {
+                if let Some(guard) = self.tenant_op_locks.try_exclusive(
+                    shard.tenant_shard_id.tenant_id,
+                    TenantOperations::DropDetached,
+                ) {
+                    drop_detached_tenants.push((shard.tenant_shard_id.tenant_id, guard));
+                }
+            }
+        }
+
+        // Process any deferred tenant drops
+        for (tenant_id, guard) in drop_detached_tenants {
+            self.maybe_drop_tenant(tenant_id, &mut locked, &guard);
         }
 
         metrics::METRICS_REGISTRY
