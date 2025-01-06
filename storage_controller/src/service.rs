@@ -1296,7 +1296,7 @@ impl Service {
             .set(nodes.len() as i64);
 
         tracing::info!("Loading shards from database...");
-        let mut tenant_shard_persistence = persistence.list_tenant_shards().await?;
+        let mut tenant_shard_persistence = persistence.load_active_tenant_shards().await?;
         tracing::info!(
             "Loaded {} shards from database.",
             tenant_shard_persistence.len()
@@ -5239,7 +5239,7 @@ impl Service {
             )));
         }
 
-        let mut persistent_shards = self.persistence.list_tenant_shards().await?;
+        let mut persistent_shards = self.persistence.load_active_tenant_shards().await?;
         persistent_shards
             .sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
 

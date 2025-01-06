@@ -334,7 +334,9 @@ impl Persistence {
     ///
     /// We exclude shards configured to be detached.  During startup, if we see any attached locations
     /// for such shards, they will automatically be detached as 'orphans'.
-    pub(crate) async fn list_tenant_shards(&self) -> DatabaseResult<Vec<TenantShardPersistence>> {
+    pub(crate) async fn load_active_tenant_shards(
+        &self,
+    ) -> DatabaseResult<Vec<TenantShardPersistence>> {
         use crate::schema::tenant_shards::dsl::*;
         self.with_measured_conn(
             DatabaseOperation::ListTenantShards,
