@@ -168,13 +168,6 @@ impl SerializedValueBatch {
             }
 
             for (shard, record) in shard_records.iter_mut() {
-                let SerializedValueBatch {
-                    raw,
-                    metadata,
-                    max_lsn,
-                    len,
-                } = &mut record.batch;
-
                 let key_is_local = shard.is_key_local(&key);
 
                 tracing::debug!(
@@ -188,10 +181,13 @@ impl SerializedValueBatch {
                     if shard.is_shard_zero() {
                         // Shard 0 tracks relation sizes.  Although we will not store this block, we will observe
                         // its blkno in case it implicitly extends a relation.
-                        metadata.push(ValueMeta::Observed(ObservedValueMeta {
-                            key: key.to_compact(),
-                            lsn: next_record_lsn,
-                        }))
+                        record
+                            .batch
+                            .metadata
+                            .push(ValueMeta::Observed(ObservedValueMeta {
+                                key: key.to_compact(),
+                                lsn: next_record_lsn,
+                            }))
                     }
 
                     continue;
@@ -233,22 +229,25 @@ impl SerializedValueBatch {
                     })
                 };
 
-                let relative_off = raw.len() as u64;
+                let relative_off = record.batch.raw.len() as u64;
 
-                val.ser_into(raw)
+                val.ser_into(&mut record.batch.raw)
                     .expect("Writing into in-memory buffer is infallible");
 
-                let val_ser_size = raw.len() - relative_off as usize;
+                let val_ser_size = record.batch.raw.len() - relative_off as usize;
 
-                metadata.push(ValueMeta::Serialized(SerializedValueMeta {
-                    key: key.to_compact(),
-                    lsn: next_record_lsn,
-                    batch_offset: relative_off,
-                    len: val_ser_size,
-                    will_init: val.will_init(),
-                }));
-                *max_lsn = std::cmp::max(*max_lsn, next_record_lsn);
-                *len += 1;
+                record
+                    .batch
+                    .metadata
+                    .push(ValueMeta::Serialized(SerializedValueMeta {
+                        key: key.to_compact(),
+                        lsn: next_record_lsn,
+                        batch_offset: relative_off,
+                        len: val_ser_size,
+                        will_init: val.will_init(),
+                    }));
+                record.batch.max_lsn = std::cmp::max(record.batch.max_lsn, next_record_lsn);
+                record.batch.len += 1;
             }
         }
 
