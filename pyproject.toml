@@ -48,7 +48,8 @@ types-jwcrypto = "^1.5.0.20240925"
 pyyaml = "^6.0.2"
 types-pyyaml = "^6.0.12.20240917"
 testcontainers = "^4.9.0"
-jsonnet = "^0.20.0"
+# Jsonnet doesn't support Python 3.13 yet
+jsonnet = { version = "^0.20.0", markers = "python_version < '3.13'" }
 
 [tool.poetry.group.dev.dependencies]
 mypy = "==1.13.0"
