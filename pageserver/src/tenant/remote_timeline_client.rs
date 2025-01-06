@@ -1943,6 +1943,30 @@ impl RemoteTimelineClient {
                 return;
             }
 
+            // Assert that we don't modify a layer that's referenced by the current index.
+            if cfg!(debug_assertions) {
+                let modified = match &task.op {
+                    UploadOp::UploadLayer(layer, layer_metadata, _) => {
+                        vec![(layer.layer_desc().layer_name(), layer_metadata)]
+                    }
+                    UploadOp::Delete(delete) => {
+                        delete.layers.iter().map(|(n, m)| (n.clone(), m)).collect()
+                    }
+                    // These don't modify layers.
+                    UploadOp::UploadMetadata { .. } => Vec::new(),
+                    UploadOp::Barrier(_) => Vec::new(),
+                    UploadOp::Shutdown => Vec::new(),
+                };
+                if let Ok(queue) = self.upload_queue.lock().unwrap().initialized_mut() {
+                    for (ref name, metadata) in modified {
+                        debug_assert!(
+                            !queue.clean.0.references(name, metadata),
+                            "layer {name} modified while referenced by index",
+                        );
+                    }
+                }
+            }
+
             let upload_result: anyhow::Result<()> = match &task.op {
                 UploadOp::UploadLayer(ref layer, ref layer_metadata, mode) => {
                     if let Some(OpType::FlushDeletion) = mode {
@@ -2507,6 +2531,21 @@ pub fn remote_layer_path(
     );
 
     RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
+/// Returns true if a and b have the same layer path within a tenant/timeline. This is essentially
+/// remote_layer_path(a) == remote_layer_path(b) without the string allocations.
+///
+/// TODO: there should be a variant of LayerName for the physical path that contains information
+/// about the shard and generation, such that this could be replaced by a simple comparison.
+pub fn is_same_remote_layer_path(
+    aname: &LayerName,
+    ameta: &LayerFileMetadata,
+    bname: &LayerName,
+    bmeta: &LayerFileMetadata,
+) -> bool {
+    // NB: don't assert remote_layer_path(a) == remote_layer_path(b); too expensive even for debug.
+    aname == bname && ameta.shard == bmeta.shard && ameta.generation == bmeta.generation
 }
 
 pub fn remote_initdb_archive_path(tenant_id: &TenantId, timeline_id: &TimelineId) -> RemotePath {

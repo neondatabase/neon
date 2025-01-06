@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::bail;
 use futures::future::Either;
@@ -8,7 +9,7 @@ use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
 use proxy::cancellation::{CancelMap, CancellationHandler};
 use proxy::config::{
-    self, remote_storage_from_toml, AuthenticationConfig, CacheOptions, HttpConfig,
+    self, remote_storage_from_toml, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig,
     ProjectInfoCacheOptions, ProxyConfig, ProxyProtocolV2,
 };
 use proxy::context::parquet::ParquetUploadArgs;
@@ -23,6 +24,7 @@ use proxy::redis::{elasticache, notifications};
 use proxy::scram::threadpool::ThreadPool;
 use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::GlobalConnPoolOptions;
+use proxy::tls::client_config::compute_client_config_with_root_certs;
 use proxy::{auth, control_plane, http, serverless, usage_metrics};
 use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
@@ -397,6 +399,7 @@ async fn main() -> anyhow::Result<()> {
     let cancellation_handler = Arc::new(CancellationHandler::<
         Option<Arc<Mutex<RedisPublisherClient>>>,
     >::new(
+        &config.connect_to_compute,
         cancel_map.clone(),
         redis_publisher,
         proxy::metrics::CancellationSource::FromClient,
@@ -492,6 +495,7 @@ async fn main() -> anyhow::Result<()> {
                     let cache = api.caches.project_info.clone();
                     if let Some(client) = client1 {
                         maintenance_tasks.spawn(notifications::task_main(
+                            config,
                             client,
                             cache.clone(),
                             cancel_map.clone(),
@@ -500,6 +504,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     if let Some(client) = client2 {
                         maintenance_tasks.spawn(notifications::task_main(
+                            config,
                             client,
                             cache.clone(),
                             cancel_map.clone(),
@@ -632,6 +637,12 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         console_redirect_confirmation_timeout: args.webauth_confirmation_timeout,
     };
 
+    let compute_config = ComputeConfig {
+        retry: config::RetryConfig::parse(&args.connect_to_compute_retry)?,
+        tls: Arc::new(compute_client_config_with_root_certs()?),
+        timeout: Duration::from_secs(2),
+    };
+
     let config = ProxyConfig {
         tls_config,
         metric_collection,
@@ -642,9 +653,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         region: args.region.clone(),
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
-        connect_to_compute_retry_config: config::RetryConfig::parse(
-            &args.connect_to_compute_retry,
-        )?,
+        connect_to_compute: compute_config,
     };
 
     let config = Box::leak(Box::new(config));
