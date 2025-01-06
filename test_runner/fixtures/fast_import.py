@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import tempfile
@@ -39,7 +40,10 @@ class FastImport(AbstractNeonCli):
         if not (self.pg_bin / "postgres").exists():
             raise Exception(f"postgres binary was not found at '{self.pg_bin}'")
         self.pg_lib = pg_dir / "lib"
-
+        if env_vars.get("LD_LIBRARY_PATH") is not None:
+            self.pg_lib = Path(env_vars["LD_LIBRARY_PATH"])
+        elif os.getenv("LD_LIBRARY_PATH") is not None:
+            self.pg_lib = Path(str(os.getenv("LD_LIBRARY_PATH")))
         if not workdir.exists():
             raise Exception(f"Working directory '{workdir}' does not exist")
         self.workdir = workdir
