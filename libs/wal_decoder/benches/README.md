@@ -3,12 +3,14 @@
 Note that these benchmarks pull WAL from a public bucket in S3
 as a preparation step. Hence, you need a way to auth with AWS.
 You can achieve this by copying the `~/.aws/config` file from
-the AWS SSO notion page and exportin `AWS_PROFILE=dev` when invoking
+the AWS SSO notion page and exporting `AWS_PROFILE=dev` when invoking
 the benchmarks.
 
 To run benchmarks:
 
 ```sh
+aws sso login --profile dev
+
 # All benchmarks.
 AWS_PROFILE=dev cargo bench --package wal_decoder
 
