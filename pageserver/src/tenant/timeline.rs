@@ -4859,6 +4859,7 @@ impl Timeline {
 
     async fn find_gc_time_cutoff(
         &self,
+        now: SystemTime,
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
@@ -4866,7 +4867,6 @@ impl Timeline {
         debug_assert_current_span_has_tenant_and_timeline_id();
         if self.shard_identity.is_shard_zero() {
             // Shard Zero has SLRU data and can calculate the PITR time -> LSN mapping itself
-            let now = SystemTime::now();
             let time_range = if pitr == Duration::ZERO {
                 humantime::parse_duration(DEFAULT_PITR_INTERVAL).expect("constant is invalid")
             } else {
@@ -4952,6 +4952,7 @@ impl Timeline {
     #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
     pub(super) async fn find_gc_cutoffs(
         &self,
+        now: SystemTime,
         space_cutoff: Lsn,
         pitr: Duration,
         cancel: &CancellationToken,
@@ -4979,7 +4980,7 @@ impl Timeline {
         // - if PITR interval is set, then this is our cutoff.
         // - if PITR interval is not set, then we do a lookup
         //   based on DEFAULT_PITR_INTERVAL, so that size-based retention does not result in keeping history around permanently on idle databases.
-        let time_cutoff = self.find_gc_time_cutoff(pitr, cancel, ctx).await?;
+        let time_cutoff = self.find_gc_time_cutoff(now, pitr, cancel, ctx).await?;
 
         Ok(match (pitr, time_cutoff) {
             (Duration::ZERO, Some(time_cutoff)) => {
