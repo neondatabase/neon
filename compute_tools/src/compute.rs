@@ -945,8 +945,11 @@ impl ComputeNode {
                 dbs: databases,
             }));
 
-            // Apply the per-db pre drop database phase
-            info!("Applying RunInEachDatabase1 (pre-dropdb) phase");
+            // Apply special pre drop database phase.
+            // NOTE: we use the code of RunInEachDatabase phase for parallelism
+            // and connection management, but we don't really run it in *each* database,
+            // only in databases, we're about to drop.
+            info!("Applying PerDatabase (pre-dropdb) phase");
             let concurrency_token = Arc::new(tokio::sync::Semaphore::new(concurrency));
 
             // Run the phase for each database that we're about to drop.
