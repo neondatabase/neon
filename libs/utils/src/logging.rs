@@ -119,6 +119,24 @@ impl From<FlushGuardInner> for FlushGuard {
     }
 }
 
+/// Initialize the global tracing subscriber.
+///
+/// # Tracing-Based Debugging
+///
+/// If feature `tracing-based-debugging` is enabled, this function will add support
+/// for runtime enablement of various tracing-based debugging tools.
+///
+/// The feature is disabled by default to avoid compile time bloat.
+///
+/// For example, to use the `tracing-chrome` crate to debug pageserver:
+///
+/// 1. Enable the feature by adding `tracing-based-debugging` to the `features` list in
+///   the pageserver crate's `Cargo.toml`.
+/// 2. Build pageserver.
+/// 3. Launch pageserver with env var `NEON_UTILS_LOGGING_ENABLE_TRACING_CHROME=1`.
+/// 4. Cleanly shut down pageserver.
+/// 5. Follow instructions of the `tracing-chrome` crate to post-process and visualize
+///    the trace files.
 pub fn init(
     log_format: LogFormat,
     tracing_error_layer_enablement: TracingErrorLayerEnablement,
