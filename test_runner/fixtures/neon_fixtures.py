@@ -4359,6 +4359,7 @@ class Safekeeper(LogUtils):
                 "1s",
                 "--eviction-min-resident",
                 "10s",
+                "--wal-reader-fanout",
             ]
 
         self.extra_opts = extra_opts
