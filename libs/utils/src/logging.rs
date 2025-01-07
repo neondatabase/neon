@@ -1,9 +1,11 @@
+#[cfg(feature = "tracing-based-debugging")]
 use std::{
     io::BufWriter,
     num::NonZeroUsize,
-    str::FromStr,
     sync::{Arc, Mutex},
 };
+
+use std::str::FromStr;
 
 use anyhow::Context;
 use metrics::{IntCounter, IntCounterVec};
@@ -106,18 +108,17 @@ pub enum Output {
 /// Keep alive and drop it before the program terminates.
 #[allow(dead_code)] // We need to store the `Arc<>` for drop semantics.
 #[must_use]
+#[cfg(feature = "tracing-based-debugging")]
 pub struct FlushGuard(Arc<Mutex<FlushGuardInner>>);
 
+#[cfg(feature = "tracing-based-debugging")]
 struct FlushGuardInner {
     _tracing_chrome_layer: Option<tracing_chrome::FlushGuard>,
     _tracing_flame_layer: Option<tracing_flame::FlushGuard<BufWriter<std::fs::File>>>,
 }
 
-impl From<FlushGuardInner> for FlushGuard {
-    fn from(value: FlushGuardInner) -> Self {
-        Self(Arc::new(Mutex::new(value)))
-    }
-}
+#[cfg(not(feature = "tracing-based-debugging"))]
+pub struct FlushGuard;
 
 /// Initialize the global tracing subscriber.
 ///
@@ -177,67 +178,6 @@ pub fn init(
         TracingEventCountLayer(&TRACING_EVENT_COUNT_METRIC).with_filter(rust_log_env_filter()),
     );
 
-    let tracing_chrome_layer_flush_guard;
-    let r = r.with(
-        if crate::env::var("NEON_UTILS_LOGGING_ENABLE_TRACING_CHROME").unwrap_or(false) {
-            let (layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
-                .trace_style(tracing_chrome::TraceStyle::Async)
-                .build();
-            tracing_chrome_layer_flush_guard = Some(guard);
-            Some(layer.with_filter(rust_log_env_filter()))
-        } else {
-            tracing_chrome_layer_flush_guard = None;
-            None
-        },
-    );
-
-    let tracing_flame_flush_guard;
-    let r = r.with(
-        if crate::env::var("NEON_UTILS_LOGGING_ENABLE_TRACING_FLAME").unwrap_or(false) {
-            let (layer, guard) = tracing_flame::FlameLayer::with_file("./tracing.folded").unwrap();
-            let layer = layer
-                .with_empty_samples(false)
-                .with_module_path(false)
-                .with_file_and_line(false)
-                .with_threads_collapsed(true);
-            tracing_flame_flush_guard = Some(guard);
-            Some(layer.with_filter(rust_log_env_filter()))
-        } else {
-            tracing_flame_flush_guard = None;
-            None
-        },
-    );
-
-    let r = {
-        let varname = "NEON_UTILS_LOGGING_ENABLE_TOKIO_CONSOLE";
-        let console_subscriber_config: Option<NonZeroUsize> = crate::env::var(varname);
-        #[cfg(tokio_unstable)]
-        {
-            r.with(match console_subscriber_config {
-                Some(n) => {
-                    use console_subscriber::ConsoleLayer;
-                    Some(
-                        console_subscriber::Builder::default()
-                            .event_buffer_capacity(
-                                n.get() * ConsoleLayer::DEFAULT_EVENT_BUFFER_CAPACITY,
-                            )
-                            .client_buffer_capacity(
-                                n.get() * ConsoleLayer::DEFAULT_CLIENT_BUFFER_CAPACITY,
-                            )
-                            .spawn(),
-                    )
-                }
-                None => None,
-            })
-        }
-        #[cfg(not(tokio_unstable))]
-        if console_subscriber_config.is_some() {
-            panic!("recompile with --cfg tokio_unstable to enable {varname}");
-        } else {
-            r
-        }
-    };
-
     let r = r.with(match tracing_error_layer_enablement {
         TracingErrorLayerEnablement::EnableWithRustLogFilter => {
             Some(tracing_error::ErrorLayer::default().with_filter(rust_log_env_filter()))
@@ -245,13 +185,83 @@ pub fn init(
         TracingErrorLayerEnablement::Disabled => None,
     });
 
+    #[cfg(feature = "tracing-based-debugging")]
+    let (r, guard) = {
+        let tracing_chrome_layer_flush_guard;
+        let r = r.with(
+            if crate::env::var("NEON_UTILS_LOGGING_ENABLE_TRACING_CHROME").unwrap_or(false) {
+                let (layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
+                    .trace_style(tracing_chrome::TraceStyle::Async)
+                    .build();
+                tracing_chrome_layer_flush_guard = Some(guard);
+                Some(layer.with_filter(rust_log_env_filter()))
+            } else {
+                tracing_chrome_layer_flush_guard = None;
+                None
+            },
+        );
+
+        let tracing_flame_flush_guard;
+        let r = r.with(
+            if crate::env::var("NEON_UTILS_LOGGING_ENABLE_TRACING_FLAME").unwrap_or(false) {
+                let (layer, guard) =
+                    tracing_flame::FlameLayer::with_file("./tracing.folded").unwrap();
+                let layer = layer
+                    .with_empty_samples(false)
+                    .with_module_path(false)
+                    .with_file_and_line(false)
+                    .with_threads_collapsed(true);
+                tracing_flame_flush_guard = Some(guard);
+                Some(layer.with_filter(rust_log_env_filter()))
+            } else {
+                tracing_flame_flush_guard = None;
+                None
+            },
+        );
+
+        let r = {
+            let varname = "NEON_UTILS_LOGGING_ENABLE_TOKIO_CONSOLE";
+            let console_subscriber_config: Option<NonZeroUsize> = crate::env::var(varname);
+            #[cfg(tokio_unstable)]
+            {
+                r.with(match console_subscriber_config {
+                    Some(n) => {
+                        use console_subscriber::ConsoleLayer;
+                        Some(
+                            console_subscriber::Builder::default()
+                                .event_buffer_capacity(
+                                    n.get() * ConsoleLayer::DEFAULT_EVENT_BUFFER_CAPACITY,
+                                )
+                                .client_buffer_capacity(
+                                    n.get() * ConsoleLayer::DEFAULT_CLIENT_BUFFER_CAPACITY,
+                                )
+                                .spawn(),
+                        )
+                    }
+                    None => None,
+                })
+            }
+            #[cfg(not(tokio_unstable))]
+            if console_subscriber_config.is_some() {
+                panic!("recompile with --cfg tokio_unstable to enable {varname}");
+            } else {
+                r
+            }
+        };
+        (
+            r,
+            FlushGuard(Arc::new(Mutex::new(FlushGuardInner {
+                _tracing_chrome_layer: tracing_chrome_layer_flush_guard,
+                _tracing_flame_layer: tracing_flame_flush_guard,
+            }))),
+        )
+    };
+    #[cfg(not(feature = "tracing-based-debugging"))]
+    let (r, guard) = (r, FlushGuard);
+
     r.init();
 
-    Ok(FlushGuardInner {
-        _tracing_chrome_layer: tracing_chrome_layer_flush_guard,
-        _tracing_flame_layer: tracing_flame_flush_guard,
-    }
-    .into())
+    Ok(guard)
 }
 
 /// Disable the default rust panic hook by using `set_hook`.
