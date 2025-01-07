@@ -563,8 +563,8 @@ def test_sharding_split_smoke(
     # Note which pageservers initially hold a shard after tenant creation
     pre_split_pageserver_ids = dict()
     for loc in env.storage_controller.locate(tenant_id):
-        shard_number = TenantShardId.parse(loc["shard_id"]).shard_number
-        pre_split_pageserver_ids[loc["node_id"]] = shard_number
+        shard_no = TenantShardId.parse(loc["shard_id"]).shard_number
+        pre_split_pageserver_ids[loc["node_id"]] = shard_no
     log.info(f"Pre-split pageservers: {pre_split_pageserver_ids}")
 
     # For pageservers holding a shard, validate their ingest statistics
@@ -588,7 +588,7 @@ def test_sharding_split_smoke(
         received = metrics["pageserver_wal_ingest_records_received_total"]
         observed = metrics["pageserver_wal_ingest_records_observed_total"]
 
-        shard_number = pre_split_pageserver_ids.get(pageserver.id, None)
+        shard_number: int | None = pre_split_pageserver_ids.get(pageserver.id, None)
         if shard_number is None:
             assert received == 0
             assert observed == 0
@@ -597,12 +597,12 @@ def test_sharding_split_smoke(
             # for relation size tracking.
             assert observed > 0
             assert received > 0
-            observed_on_shard_zero = observed
+            observed_on_shard_zero = int(observed)
         else:
             # Non zero shards do not observe any records, but only receive their own.
             assert observed == 0
             assert received > 0
-            received_on_non_zero_shard += received
+            received_on_non_zero_shard += int(received)
 
     # Some records are sent to multiple shards and some shard 0 records include both value observations
     # and other metadata. Hence, we do a sanity check below that shard 0 observes the majority of records
