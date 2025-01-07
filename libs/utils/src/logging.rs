@@ -132,7 +132,7 @@ pub struct FlushGuard;
 /// For example, to use the `tracing-chrome` crate to debug pageserver:
 ///
 /// 1. Enable the feature by adding `tracing-based-debugging` to the `features` list in
-///   the pageserver crate's `Cargo.toml`.
+///    the pageserver crate's `Cargo.toml`.
 /// 2. Build pageserver.
 /// 3. Launch pageserver with env var `NEON_UTILS_LOGGING_ENABLE_TRACING_CHROME=1`.
 /// 4. Cleanly shut down pageserver.
