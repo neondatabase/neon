@@ -1169,8 +1169,8 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # The topmost commit in the `neon_staging` branch at the time of writing this
 # https://github.com/Mooncake-Labs/pg_mooncake/commits/neon_staging/
-# https://github.com/Mooncake-Labs/pg_mooncake/commit/a94f70dea60786eed2d51a13b022a4bd2a7e3b61
-ENV PG_MOONCAKE_VERSION=a94f70dea60786eed2d51a13b022a4bd2a7e3b61
+# https://github.com/Mooncake-Labs/pg_mooncake/commit/6ebb0e3a1298182f104b6b3ab85333fcd5dd91f9
+ENV PG_MOONCAKE_VERSION=6ebb0e3a1298182f104b6b3ab85333fcd5dd91f9
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 
 RUN git clone --depth 1 --branch neon_staging https://github.com/Mooncake-Labs/pg_mooncake.git pg_mooncake-src && \
