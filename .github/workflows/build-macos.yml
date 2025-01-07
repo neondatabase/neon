@@ -225,7 +225,6 @@ jobs:
           path: pg_install/build/walproposer-lib
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-walproposer_lib-v17-${{ steps.pg_rev_v17.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
-
       - name: Install build dependencies
         run: |
           brew install flex bison openssl protobuf icu4c
