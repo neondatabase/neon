@@ -211,9 +211,8 @@ impl Reconciler {
         lazy: bool,
     ) -> Result<(), ReconcileError> {
         if !node.is_available() && config.mode == LocationConfigMode::Detached {
-            // [`crate::service::Service::node_activate_reconcile`] will update the observed state
-            // when the node comes back online. At that point, the intent and observed states will
-            // be mismatched and a background reconciliation will detach.
+            // Skip if we cannot detach right now due to the node being unavailable. It will be
+            // handled by the background reconciliation loop.
             tracing::info!(
                 "Node {node} is unavailable during detach: proceeding anyway, it will be detached via background reconciliation"
             );
