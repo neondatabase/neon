@@ -2406,7 +2406,14 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.tenant_create(tid)
 
     env.storage_controller.reconcile_until_idle()
-    env.storage_controller.configure_failpoints(("sleep-on-reconcile-epilogue", "return(10000)"))
+    env.storage_controller.configure_failpoints(("reconciler-epilogue", "pause"))
+
+    def unpause_failpoint():
+        time.sleep(2)
+        env.storage_controller.configure_failpoints(("reconciler-epilogue", "off"))
+
+    thread = threading.Thread(target=unpause_failpoint)
+    thread.start()
 
     # Make a change to the tenant config to trigger a slow reconcile
     virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
@@ -2420,6 +2427,8 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
 
     observed_state = env.storage_controller.step_down()
     log.info(f"Storage controller stepped down with {observed_state=}")
+
+    thread.join()
 
     # Validate that we waited for the slow reconcile to complete
     # and updated the observed state in the storcon before stepping down.

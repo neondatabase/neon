@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use utils::backoff::exponential_backoff;
-use utils::failpoint_support;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
@@ -824,7 +823,7 @@ impl Reconciler {
                 .handle_detach(self.tenant_shard_id, self.shard.stripe_size);
         }
 
-        failpoint_support::sleep_millis_async!("sleep-on-reconcile-epilogue");
+        pausable_failpoint!("reconciler-epilogue");
 
         Ok(())
     }
