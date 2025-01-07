@@ -23,11 +23,12 @@ use fail::fail_point;
 use handle::ShardTimelineId;
 use offload::OffloadError;
 use once_cell::sync::Lazy;
+use pageserver_api::models::PageTraceEvent;
 use pageserver_api::{
     config::tenant_conf_defaults::DEFAULT_COMPACTION_THRESHOLD,
     key::{
-        CompactKey, KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX,
-        NON_INHERITED_RANGE, NON_INHERITED_SPARSE_RANGE,
+        KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
+        NON_INHERITED_SPARSE_RANGE,
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
@@ -436,13 +437,6 @@ pub struct Timeline {
     pub(crate) create_idempotency: crate::tenant::CreateTimelineIdempotency,
 
     pub(crate) page_trace: ArcSwap<Option<PageTrace>>,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct PageTraceEvent {
-    pub(crate) key: CompactKey,
-    pub(crate) effective_lsn: Lsn,
-    pub(crate) time: SystemTime,
 }
 
 /// When one of these is instantiated for a tenant, it will be used to record fine-grained
