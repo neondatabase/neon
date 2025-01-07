@@ -74,7 +74,7 @@ pub(crate) enum Notification {
     #[serde(rename = "/cancel_session")]
     Cancel(CancelSession),
 
-    #[serde(other)]
+    #[serde(other, skip_serializing)]
     UnknownTopic,
 }
 
