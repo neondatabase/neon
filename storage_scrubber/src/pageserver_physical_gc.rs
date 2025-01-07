@@ -450,6 +450,8 @@ async fn gc_ancestor(
                 index_part: _,
                 index_part_generation: _,
                 s3_layers,
+                index_part_last_modified_time: _,
+                index_part_snapshot_time: _,
             } => s3_layers,
             BlobDataParseResult::Relic => {
                 // Post-deletion tenant location: don't try and GC it.
@@ -586,7 +588,9 @@ async fn gc_timeline(
         BlobDataParseResult::Parsed {
             index_part,
             index_part_generation,
-            s3_layers: _s3_layers,
+            s3_layers: _,
+            index_part_last_modified_time: _,
+            index_part_snapshot_time: _,
         } => (index_part, *index_part_generation, data.unused_index_keys),
         BlobDataParseResult::Relic => {
             // Post-deletion tenant location: don't try and GC it.
