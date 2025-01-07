@@ -186,7 +186,7 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                 });
                 match serde_json::from_str::<NotificationHeader>(&payload) {
                     Ok(header) => tracing::error!(topic = header.topic, "broken message: {e}"),
-                    Err(e) => tracing::error!("broken message: {e}"),
+                    Err(_) => tracing::error!("broken message: {e}"),
                 };
                 return Ok(());
             }
