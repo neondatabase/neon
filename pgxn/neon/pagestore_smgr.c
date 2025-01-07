@@ -423,7 +423,11 @@ readahead_buffer_resize(int newsize, void *extra)
 	 * ensuring we have received all but the last n requests (n = newsize).
 	 */
 	if (MyPState->n_requests_inflight > newsize)
-		prefetch_wait_for(MyPState->ring_unused - newsize);
+	{
+		Assert(MyPState->ring_unused >= MyPState->n_requests_inflight - newsize);
+		prefetch_wait_for(MyPState->ring_unused - (MyPState->n_requests_inflight - newsize));
+		Assert(MyPState->n_requests_inflight <= newsize);
+	}
 
 	/* construct the new PrefetchState, and copy over the memory contexts */
 	newPState = MemoryContextAllocZero(TopMemoryContext, newprfs_size);
@@ -438,7 +442,6 @@ readahead_buffer_resize(int newsize, void *extra)
 	newPState->ring_last = newsize;
 	newPState->ring_unused = newsize;
 	newPState->ring_receive = newsize;
-	newPState->ring_flush = newsize;
 	newPState->max_shard_no = MyPState->max_shard_no;
 	memcpy(newPState->shard_bitmap, MyPState->shard_bitmap, sizeof(MyPState->shard_bitmap));
 
@@ -489,6 +492,7 @@ readahead_buffer_resize(int newsize, void *extra)
 		}
 		newPState->n_unused -= 1;
 	}
+	newPState->ring_flush = newPState->ring_receive;
 
 	MyNeonCounters->getpage_prefetches_buffered =
 		MyPState->n_responses_buffered;
@@ -498,6 +502,7 @@ readahead_buffer_resize(int newsize, void *extra)
 	for (; end >= MyPState->ring_last && end != UINT64_MAX; end -= 1)
 	{
 		PrefetchRequest *slot = GetPrfSlot(end);
+		Assert(slot->status != PRFS_REQUESTED);
 		if (slot->status == PRFS_RECEIVED)
 		{
 			pfree(slot->response);
@@ -711,6 +716,8 @@ prefetch_on_ps_disconnect(void)
 		MyPState->ring_receive += 1;
 
 		prefetch_set_unused(ring_index);
+		pgBufferUsage.prefetch.expired += 1;
+		MyNeonCounters->getpage_prefetch_discards_total += 1;
 	}
 
 	/*
@@ -930,7 +937,8 @@ Retry:
 					prefetch_set_unused(ring_index);
 					entry = NULL;
 					slot = NULL;
-					MyNeonCounters->getpage_prefetch_discards_total++;
+					pgBufferUsage.prefetch.expired += 1;
+					MyNeonCounters->getpage_prefetch_discards_total += 1;
 				}
 			}
 
@@ -1021,10 +1029,14 @@ Retry:
 						if (!prefetch_wait_for(cleanup_index))
 							goto Retry;
 						prefetch_set_unused(cleanup_index);
+						pgBufferUsage.prefetch.expired += 1;
+						MyNeonCounters->getpage_prefetch_discards_total += 1;
 						break;
 					case PRFS_RECEIVED:
 					case PRFS_TAG_REMAINS:
 						prefetch_set_unused(cleanup_index);
+						pgBufferUsage.prefetch.expired += 1;
+						MyNeonCounters->getpage_prefetch_discards_total += 1;
 						break;
 					default:
 						pg_unreachable();

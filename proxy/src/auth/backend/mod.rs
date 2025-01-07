@@ -74,10 +74,6 @@ impl std::fmt::Display for Backend<'_, ()> {
                     .debug_tuple("ControlPlane::ProxyV1")
                     .field(&endpoint.url())
                     .finish(),
-                ControlPlaneClient::Neon(endpoint) => fmt
-                    .debug_tuple("ControlPlane::Neon")
-                    .field(&endpoint.url())
-                    .finish(),
                 #[cfg(any(test, feature = "testing"))]
                 ControlPlaneClient::PostgresMock(endpoint) => fmt
                     .debug_tuple("ControlPlane::PostgresMock")
@@ -467,6 +463,8 @@ impl ComputeConnectBackend for Backend<'_, ComputeCredentials> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unimplemented, clippy::unwrap_used)]
+
     use std::net::IpAddr;
     use std::sync::Arc;
     use std::time::Duration;
@@ -679,6 +677,9 @@ mod tests {
         )
         .await
         .unwrap();
+
+        // flush the final server message
+        stream.flush().await.unwrap();
 
         handle.await.unwrap();
     }

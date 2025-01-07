@@ -1060,7 +1060,7 @@ pub struct ImageLayerIterator<'a> {
     is_end: bool,
 }
 
-impl<'a> ImageLayerIterator<'a> {
+impl ImageLayerIterator<'_> {
     pub(crate) fn layer_dbg_info(&self) -> String {
         self.image_layer.layer_dbg_info()
     }

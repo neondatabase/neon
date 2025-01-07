@@ -75,7 +75,7 @@ pub struct TenantPolicyRequest {
     pub scheduling: Option<ShardSchedulingPolicy>,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct AvailabilityZone(pub String);
 
 impl Display for AvailabilityZone {
@@ -370,6 +370,23 @@ pub struct MetadataHealthListOutdatedRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MetadataHealthListOutdatedResponse {
     pub health_records: Vec<MetadataHealthRecord>,
+}
+
+/// Publicly exposed safekeeper description
+///
+/// The `active` flag which we have in the DB is not included on purpose: it is deprecated.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeeperDescribeResponse {
+    pub id: NodeId,
+    pub region_id: String,
+    /// 1 is special, it means just created (not currently posted to storcon).
+    /// Zero or negative is not really expected.
+    /// Otherwise the number from `release-$(number_of_commits_on_branch)` tag.
+    pub version: i64,
+    pub host: String,
+    pub port: i32,
+    pub http_port: i32,
+    pub availability_zone_id: String,
 }
 
 #[cfg(test)]

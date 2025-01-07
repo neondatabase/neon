@@ -91,7 +91,7 @@ pub(crate) enum BlockReaderRef<'a> {
     VirtualFile(&'a VirtualFile),
 }
 
-impl<'a> BlockReaderRef<'a> {
+impl BlockReaderRef<'_> {
     #[inline(always)]
     async fn read_blk(
         &self,

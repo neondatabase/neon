@@ -11,6 +11,7 @@ members = [
     "pageserver/pagebench",
     "proxy",
     "safekeeper",
+    "safekeeper/client",
     "storage_broker",
     "storage_controller",
     "storage_controller/client",
@@ -51,6 +52,7 @@ anyhow = { version = "1.0", features = ["backtrace"] }
 arc-swap = "1.6"
 async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
 atomic-take = "1.1.0"
+backtrace = "0.3.74"
 flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
@@ -133,7 +135,7 @@ parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
-pprof = { version = "0.14", features = ["criterion", "flamegraph", "protobuf", "protobuf-codec"] }
+pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointer", "protobuf", "protobuf-codec"] }
 procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.13"
@@ -233,6 +235,7 @@ postgres_initdb = { path = "./libs/postgres_initdb" }
 pq_proto = { version = "0.1", path = "./libs/pq_proto/" }
 remote_storage = { version = "0.1", path = "./libs/remote_storage/" }
 safekeeper_api = { version = "0.1", path = "./libs/safekeeper_api" }
+safekeeper_client = { path = "./safekeeper/client" }
 desim = { version = "0.1", path = "./libs/desim" }
 storage_broker = { version = "0.1", path = "./storage_broker/" } # Note: main broker code is inside the binary crate, so linking with the library shouldn't be heavy.
 storage_controller_client = { path = "./storage_controller/client" }
@@ -263,6 +266,8 @@ tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", br
 [profile.release]
 # This is useful for profiling and, to some extent, debug.
 # Besides, debug info should not affect the performance.
+#
+# NB: we also enable frame pointers for improved profiling, see .cargo/config.toml.
 debug = true
 
 # disable debug symbols for all packages except this one to decrease binaries size

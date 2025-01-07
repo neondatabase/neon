@@ -24,7 +24,7 @@ pub struct Key {
 
 /// When working with large numbers of Keys in-memory, it is more efficient to handle them as i128 than as
 /// a struct of fields.
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize, Debug)]
 pub struct CompactKey(i128);
 
 /// The storage key size.
@@ -564,6 +564,10 @@ impl Key {
             && self.field3 == 0x01
             && self.field5 == 0
             && self.field6 == u32::MAX
+    }
+
+    pub fn is_slru_dir_key(&self) -> bool {
+        slru_dir_kind(self).is_some()
     }
 }
 
