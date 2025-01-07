@@ -56,7 +56,7 @@ use utils::{
 };
 use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use std::{
@@ -1148,7 +1148,6 @@ impl Timeline {
         vectored_res
     }
 
-    #[instrument(level = "trace", skip_all, fields(request_num = tracing::field::Empty))]
     pub(super) async fn get_vectored_impl(
         &self,
         keyspace: KeySpace,
@@ -1162,11 +1161,6 @@ impl Timeline {
             GetKind::Vectored
         };
 
-        static REQUEST_NUM: AtomicUsize = AtomicUsize::new(0);
-        let request_num = REQUEST_NUM.fetch_add(1, AtomicOrdering::Relaxed);
-        tracing::Span::current().record("request_num", &request_num);
-
-        trace!("getting reconstruct data");
         let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
             .for_get_kind(get_kind)
             .start_timer();
@@ -1179,7 +1173,6 @@ impl Timeline {
             .start_timer();
         let layers_visited = reconstruct_state.get_layers_visited();
 
-        trace!("waiting for reconstruct data and reconstructing values");
         let futs = FuturesUnordered::new();
         for (key, state) in std::mem::take(&mut reconstruct_state.keys) {
             futs.push({
@@ -1187,7 +1180,6 @@ impl Timeline {
                 async move {
                     assert_eq!(state.situation, ValueReconstructSituation::Complete);
 
-                    trace!("collecting pending IOs");
                     let converted = match state.collect_pending_ios().await {
                         Ok(ok) => ok,
                         Err(err) => {
@@ -1195,13 +1187,11 @@ impl Timeline {
                         }
                     };
 
-                    trace!("reconstructing value");
                     (
                         key,
                         walredo_self.reconstruct_value(key, lsn, converted).await,
                     )
                 }
-                .instrument(tracing::trace_span!("key_loop", key = %key, lsn = lsn.0))
             });
         }
 
@@ -3419,7 +3409,7 @@ impl Timeline {
             }
         }
 
-        // TODO: internalize
+        // TODO: move this to a function
         trace!("waiting for futures to complete");
         match &reconstruct_state.io_concurrency {
             super::storage_layer::IoConcurrency::Serial => (),

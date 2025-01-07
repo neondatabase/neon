@@ -30,14 +30,12 @@ use std::{
     iter::Rev,
     ops::{Range, RangeInclusive},
     result,
-    time::Duration,
 };
 use thiserror::Error;
 use tracing::error;
 
 use crate::{
     context::{DownloadBehavior, RequestContext},
-    log_if_slow,
     task_mgr::TaskKind,
     tenant::block_io::{BlockReader, BlockWriter},
 };
@@ -304,8 +302,8 @@ where
                 // We could keep the page cache read guard alive, but, at the time of writing,
                 // we run quite small PS PageCache s => can't risk running out of
                 // PageCache space because this stream isn't consumed fast enough.
-                let page_read_guard = log_if_slow("read_blk", Duration::from_secs(1), block_cursor
-                    .read_blk(self.start_blk + node_blknum, ctx))
+                let page_read_guard = block_cursor
+                    .read_blk(self.start_blk + node_blknum, ctx)
                     .await?;
                 node_buf.copy_from_slice(page_read_guard.as_ref());
                 drop(page_read_guard); // drop page cache read guard early

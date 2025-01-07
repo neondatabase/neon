@@ -375,29 +375,6 @@ async fn timed_after_cancellation<Fut: std::future::Future>(
     }
 }
 
-async fn log_if_slow<Fut: std::future::Future>(
-    name: &str,
-    warn_at: std::time::Duration,
-    fut: Fut,
-) -> <Fut as std::future::Future>::Output {
-    let started = std::time::Instant::now();
-
-    let mut fut = std::pin::pin!(fut);
-
-    match tokio::time::timeout(warn_at, &mut fut).await {
-        Ok(ret) => ret,
-        Err(_) => {
-            tracing::trace!(
-                what = name,
-                elapsed_ms = started.elapsed().as_millis(),
-                "slow"
-            );
-
-            fut.await
-        }
-    }
-}
-
 #[cfg(test)]
 mod timed_tests {
     use super::timed;

@@ -10011,7 +10011,7 @@ mod tests {
 
         let keyspace = KeySpace::single(get_key(0)..get_key(10));
         let results = tline
-            .get_vectored(keyspace, delta_layer_end_lsn, &ctx)
+            .get_vectored(keyspace, delta_layer_end_lsn, IoConcurrency::todo(), &ctx)
             .await
             .expect("No vectored errors");
         for (key, res) in results {

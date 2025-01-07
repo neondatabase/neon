@@ -20,7 +20,6 @@ bincode.workspace = true
 bytes.workspace = true
 camino.workspace = true
 chrono.workspace = true
-console-subscriber = "*"
 diatomic-waker.workspace = true
 flate2.workspace = true
 git-version.workspace = true
@@ -43,7 +42,7 @@ serde_with.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
 thiserror.workspace = true
-tokio = {workspace = true, features = ["tracing"] }
+tokio.workspace = true
 tokio-tar.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = ["serde"] }

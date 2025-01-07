@@ -415,15 +415,6 @@ impl IoConcurrency {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        static IO_NUM: AtomicUsize = AtomicUsize::new(0);
-        let io_num = IO_NUM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let fut = async move {
-            trace!("start");
-            scopeguard::defer!(trace!("end"));
-            fut.await
-        }
-        .instrument(tracing::trace_span!("spawned_io", %io_num));
-        tracing::trace!(%io_num, "spawning IO");
         match self {
             IoConcurrency::Serial => fut.await,
             IoConcurrency::FuturesUnordered { ios_tx, .. } => {

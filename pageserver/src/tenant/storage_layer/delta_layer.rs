@@ -885,7 +885,6 @@ impl DeltaLayerInner {
         Ok(())
     }
 
-    #[instrument(level = "trace", skip_all)]
     async fn plan_reads<Reader>(
         keyspace: &KeySpace,
         lsn_range: Range<Lsn>,
@@ -897,30 +896,18 @@ impl DeltaLayerInner {
     where
         Reader: BlockReader + Clone,
     {
-        trace!("enter");
-        scopeguard::defer!({
-            trace!("exit");
-        });
-
         let ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
             .build();
 
-        let nranges = keyspace.ranges.len();
-        trace!("Planning reads for {nranges} ranges");
-        for (i, range) in keyspace.ranges.iter().enumerate() {
-            trace!("range {i}/{nranges}");
+        for range in keyspace.ranges.iter() {
             let mut range_end_handled = false;
 
             let start_key = DeltaKey::from_key_lsn(&range.start, lsn_range.start);
             let index_stream = index_reader.clone().into_stream(&start_key.0, &ctx);
             let mut index_stream = std::pin::pin!(index_stream);
 
-            let mut n = 0;
             while let Some(index_entry) = index_stream.next().await {
-                trace!("index entry {n}");
-                n += 1;
-
                 let (raw_key, value) = index_entry?;
                 let key = Key::from_slice(&raw_key[..KEY_SIZE]);
                 let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
@@ -999,18 +986,12 @@ impl DeltaLayerInner {
         largest_read_size
     }
 
-    #[instrument(level = "trace", skip_all)]
     async fn do_reads_and_update_state(
         &self,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) {
-        trace!("enter");
-        scopeguard::defer!({
-            trace!("exit");
-        });
-
         let max_vectored_read_bytes = self
             .max_vectored_read_bytes
             .expect("Layer is loaded with max vectored bytes config")
@@ -1023,10 +1004,7 @@ impl DeltaLayerInner {
         // Note that reads are processed in reverse order (from highest key+lsn).
         // This is the order that `ReconstructState` requires such that it can
         // track when a key is done.
-        let reads_len = reads.len();
-        trace!("Processing {reads_len} reads");
-        for (i, read) in reads.into_iter().rev().enumerate() {
-            trace!("read {i}/{reads_len}");
+        for read in reads.into_iter().rev() {
             let mut senders: HashMap<
                 (Key, Lsn),
                 sync::oneshot::Sender<Result<OnDiskValue, std::io::Error>>,
