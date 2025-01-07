@@ -15,6 +15,9 @@ pub(super) mod tokio_epoll_uring_ext;
 use tokio_epoll_uring::IoBuf;
 use tracing::Instrument;
 
+#[cfg(target_os = "linux")]
+use {crate::log_if_slow, std::time::Duration};
+
 pub(crate) use super::api::IoEngineKind;
 #[derive(Clone, Copy)]
 #[repr(u8)]
