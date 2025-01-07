@@ -979,6 +979,16 @@ jobs:
       VERSIONS: v14 v15 v16 v17
 
     steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
