@@ -24,7 +24,7 @@ bincode.workspace = true
 bytes.workspace = true
 camino.workspace = true
 chrono.workspace = true
-console-subscriber = {workspace = true, optional = true}
+console-subscriber = { version = "0.4.1", optional = true }
 diatomic-waker.workspace = true
 flate2.workspace = true
 git-version.workspace = true
@@ -52,9 +52,9 @@ tokio-tar.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = ["serde"] }
 tracing.workspace = true
-tracing-chrome = { workspace = true, optional = true }
+tracing-chrome = { version = "0.7.2", optional = true }
 tracing-error.workspace = true
-tracing-flame = { workspace = true, optional = true }
+tracing-flame = { version = "0.2.0", optional = true }
 tracing-subscriber = { workspace = true, features = ["json", "registry"] }
 rand.workspace = true
 scopeguard.workspace = true

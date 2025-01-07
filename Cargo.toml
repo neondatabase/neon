@@ -78,7 +78,6 @@ cfg-if = "1.0.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.0", features = ["derive", "env"] }
 comfy-table = "7.1"
-console-subscriber = "0.4.1"
 const_format = "0.2"
 crc32c = "0.6"
 dashmap = { version = "5.5.0", features = ["raw-api"] }
@@ -190,9 +189,7 @@ toml_edit = "0.22"
 tonic = {version = "0.12.3", features = ["tls", "tls-roots"]}
 tower-service = "0.3.2"
 tracing = "0.1"
-tracing-chrome = "0.7.2"
 tracing-error = "0.2"
-tracing-flame = "0.2.0"
 tracing-opentelemetry = "0.27"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
 try-lock = "0.2.5"
