@@ -83,6 +83,7 @@ use utils::{
     generation::Generation,
     http::error::ApiError,
     id::{NodeId, TenantId, TimelineId},
+    pausable_failpoint,
     sync::gate::Gate,
 };
 
@@ -1023,6 +1024,8 @@ impl Service {
                         NodeOperations::Configure,
                     )
                     .await;
+
+                    pausable_failpoint!("heartbeat-pre-node-state-configure");
 
                     // This is the code path for geniune availability transitions (i.e node
                     // goes unavailable and/or comes back online).
@@ -2492,6 +2495,7 @@ impl Service {
                 // Persist updates
                 // Ordering: write to the database before applying changes in-memory, so that
                 // we will not appear time-travel backwards on a restart.
+
                 let mut schedule_context = ScheduleContext::default();
                 for ShardUpdate {
                     tenant_shard_id,

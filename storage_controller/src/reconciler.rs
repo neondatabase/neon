@@ -748,6 +748,8 @@ impl Reconciler {
                     };
 
                     if increment_generation {
+                        pausable_failpoint!("reconciler-pre-increment-generation");
+
                         let generation = self
                             .persistence
                             .increment_generation(self.tenant_shard_id, node.get_id())
