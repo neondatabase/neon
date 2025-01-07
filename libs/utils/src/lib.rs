@@ -31,7 +31,6 @@ pub mod id;
 pub mod shard;
 
 mod hex;
-
 pub use hex::Hex;
 
 // http endpoint utils
