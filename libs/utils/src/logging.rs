@@ -134,27 +134,9 @@ pub fn init(
     // See https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering
     use tracing_subscriber::prelude::*;
 
-    // https://users.rust-lang.org/t/how-can-i-init-tracing-registry-dynamically-with-multiple-outputs/94307/6
-    #[derive(Default)]
-    struct LayerStack {
-        layers:
-            Option<Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Sync + Send>>,
-    }
-    impl LayerStack {
-        fn add_layer<L>(&mut self, new_layer: L)
-        where
-            L: tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync,
-        {
-            let new = match self.layers.take() {
-                Some(layers) => Some(layers.and_then(new_layer).boxed()),
-                None => Some(new_layer.boxed()),
-            };
-            self.layers = new;
-        }
-    }
-    let mut layers = LayerStack::default();
+    let r = tracing_subscriber::registry();
 
-    layers.add_layer({
+    let r = r.with({
         let log_layer = tracing_subscriber::fmt::layer()
             .with_target(false)
             .with_ansi(false)
@@ -172,22 +154,26 @@ pub fn init(
         log_layer.with_filter(rust_log_env_filter())
     });
 
-    layers.add_layer(
+    let r = r.with(
         TracingEventCountLayer(&TRACING_EVENT_COUNT_METRIC).with_filter(rust_log_env_filter()),
     );
 
-    let tracing_chrome_layer_flush_guard =
+    let tracing_chrome_layer_flush_guard;
+    let r = r.with(
         if crate::env::var("NEON_UTILS_LOGGING_ENABLE_TRACING_CHROME").unwrap_or(false) {
             let (layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
                 .trace_style(tracing_chrome::TraceStyle::Async)
                 .build();
-            layers.add_layer(layer.with_filter(rust_log_env_filter()));
-            Some(guard)
+            tracing_chrome_layer_flush_guard = Some(guard);
+            Some(layer.with_filter(rust_log_env_filter()))
         } else {
+            tracing_chrome_layer_flush_guard = None;
             None
-        };
+        },
+    );
 
-    let tracing_flame_flush_guard =
+    let tracing_flame_flush_guard;
+    let r = r.with(
         if crate::env::var("NEON_UTILS_LOGGING_ENABLE_TRACING_FLAME").unwrap_or(false) {
             let (layer, guard) = tracing_flame::FlameLayer::with_file("./tracing.folded").unwrap();
             let layer = layer
@@ -195,21 +181,22 @@ pub fn init(
                 .with_module_path(false)
                 .with_file_and_line(false)
                 .with_threads_collapsed(true);
-            layers.add_layer(layer.with_filter(rust_log_env_filter()));
-            Some(guard)
+            tracing_flame_flush_guard = Some(guard);
+            Some(layer.with_filter(rust_log_env_filter()))
         } else {
+            tracing_flame_flush_guard = None;
             None
-        };
+        },
+    );
 
-    match tracing_error_layer_enablement {
-        TracingErrorLayerEnablement::EnableWithRustLogFilter => layers
-            .add_layer(tracing_error::ErrorLayer::default().with_filter(rust_log_env_filter())),
-        TracingErrorLayerEnablement::Disabled => (),
-    }
+    let r = r.with(match tracing_error_layer_enablement {
+        TracingErrorLayerEnablement::EnableWithRustLogFilter => {
+            Some(tracing_error::ErrorLayer::default().with_filter(rust_log_env_filter()))
+        }
+        TracingErrorLayerEnablement::Disabled => None,
+    });
 
-    let r = tracing_subscriber::registry();
-    r.with(layers.layers.expect("we add at least one layer"))
-        .init();
+    r.init();
 
     Ok(FlushGuardInner {
         _tracing_chrome_layer: tracing_chrome_layer_flush_guard,
