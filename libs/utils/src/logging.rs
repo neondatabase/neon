@@ -1,5 +1,6 @@
 use std::{
     io::BufWriter,
+    num::NonZeroUsize,
     str::FromStr,
     sync::{Arc, Mutex},
 };
@@ -188,6 +189,36 @@ pub fn init(
             None
         },
     );
+
+    let r = {
+        let varname = "NEON_UTILS_LOGGING_ENABLE_TOKIO_CONSOLE";
+        let console_subscriber_config: Option<NonZeroUsize> = crate::env::var(varname);
+        #[cfg(tokio_unstable)]
+        {
+            r.with(match console_subscriber_config {
+                Some(n) => {
+                    use console_subscriber::ConsoleLayer;
+                    Some(
+                        console_subscriber::Builder::default()
+                            .event_buffer_capacity(
+                                n.get() * ConsoleLayer::DEFAULT_EVENT_BUFFER_CAPACITY,
+                            )
+                            .client_buffer_capacity(
+                                n.get() * ConsoleLayer::DEFAULT_CLIENT_BUFFER_CAPACITY,
+                            )
+                            .spawn(),
+                    )
+                }
+                None => None,
+            })
+        }
+        #[cfg(not(tokio_unstable))]
+        if console_subscriber_config.is_some() {
+            panic!("recompile with --cfg tokio_unstable to enable {varname}");
+        } else {
+            r
+        }
+    };
 
     let r = r.with(match tracing_error_layer_enablement {
         TracingErrorLayerEnablement::EnableWithRustLogFilter => {
