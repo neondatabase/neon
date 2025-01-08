@@ -680,7 +680,7 @@ call_PQgetCopyData(shardno_t shard_no, char **buffer)
 	 * but in the cases that take exceptionally long, it's useful to log the
 	 * exact timestamps.
 	 */
-#define LOG_INTERVAL_US		UINT64CONST(10 * 1000000)
+#define LOG_INTERVAL_MS		INT64CONST(10 * 1000)
 
 	INSTR_TIME_SET_CURRENT(now);
 	start_ts = last_log_ts = now;
@@ -694,7 +694,7 @@ retry:
 		WaitEvent	event;
 		long		timeout;
 
-		timeout = Min(0, LOG_INTERVAL_US - INSTR_TIME_GET_MICROSEC(since_last_log));
+		timeout = Max(0, LOG_INTERVAL_MS - INSTR_TIME_GET_MILLISEC(since_last_log));
 
 		/* Sleep until there's something to do */
 		(void) WaitEventSetWait(shard->wes_read, timeout, &event, 1,
@@ -723,7 +723,7 @@ retry:
 		INSTR_TIME_SET_CURRENT(now);
 		since_last_log = now;
 		INSTR_TIME_SUBTRACT(since_last_log, last_log_ts);
-		if (INSTR_TIME_GET_MICROSEC(since_last_log) >= LOG_INTERVAL_US)
+		if (INSTR_TIME_GET_MILLISEC(since_last_log) >= LOG_INTERVAL_MS)
 		{
 			since_start = now;
 			INSTR_TIME_SUBTRACT(since_start, start_ts);

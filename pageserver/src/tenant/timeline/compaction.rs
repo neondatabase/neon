@@ -1799,6 +1799,24 @@ impl Timeline {
         Ok(())
     }
 
+    /// Get a watermark for gc-compaction, that is the lowest LSN that we can use as the `gc_horizon` for
+    /// the compaction algorithm. It is min(space_cutoff, time_cutoff, latest_gc_cutoff, standby_horizon).
+    /// Leases and retain_lsns are considered in the gc-compaction job itself so we don't need to account for them
+    /// here.
+    pub(crate) fn get_gc_compaction_watermark(self: &Arc<Self>) -> Lsn {
+        let gc_cutoff_lsn = {
+            let gc_info = self.gc_info.read().unwrap();
+            gc_info.min_cutoff()
+        };
+
+        // TODO: standby horizon should use leases so we don't really need to consider it here.
+        // let watermark = watermark.min(self.standby_horizon.load());
+
+        // TODO: ensure the child branches will not use anything below the watermark, or consider
+        // them when computing the watermark.
+        gc_cutoff_lsn.min(*self.get_latest_gc_cutoff_lsn())
+    }
+
     /// Split a gc-compaction job into multiple compaction jobs. The split is based on the key range and the estimated size of the compaction job.
     /// The function returns a list of compaction jobs that can be executed separately. If the upper bound of the compact LSN
     /// range is not specified, we will use the latest gc_cutoff as the upper bound, so that all jobs in the jobset acts
@@ -1811,7 +1829,7 @@ impl Timeline {
         let compact_below_lsn = if job.compact_lsn_range.end != Lsn::MAX {
             job.compact_lsn_range.end
         } else {
-            *self.get_latest_gc_cutoff_lsn() // use the real gc cutoff
+            self.get_gc_compaction_watermark()
         };
 
         // Split compaction job to about 4GB each
@@ -2006,7 +2024,7 @@ impl Timeline {
                 // Therefore, it can only clean up data that cannot be cleaned up with legacy gc, instead of
                 // cleaning everything that theoritically it could. In the future, it should use `self.gc_info`
                 // to get the truth data.
-                let real_gc_cutoff = *self.get_latest_gc_cutoff_lsn();
+                let real_gc_cutoff = self.get_gc_compaction_watermark();
                 // The compaction algorithm will keep all keys above the gc_cutoff while keeping only necessary keys below the gc_cutoff for
                 // each of the retain_lsn. Therefore, if the user-provided `compact_lsn_range.end` is larger than the real gc cutoff, we will use
                 // the real cutoff.

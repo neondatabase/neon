@@ -2521,6 +2521,7 @@ class NeonPageserver(PgProtocol, LogUtils):
         self,
         extra_env_vars: dict[str, str] | None = None,
         timeout_in_seconds: int | None = None,
+        await_active: bool = True,
     ) -> Self:
         """
         Start the page server.
@@ -2547,8 +2548,10 @@ class NeonPageserver(PgProtocol, LogUtils):
         )
         self.running = True
 
-        if self.env.storage_controller.running and self.env.storage_controller.node_registered(
-            self.id
+        if (
+            await_active
+            and self.env.storage_controller.running
+            and self.env.storage_controller.node_registered(self.id)
         ):
             self.env.storage_controller.poll_node_status(
                 self.id, PageserverAvailability.ACTIVE, None, max_attempts=200, backoff=0.1
@@ -4606,7 +4609,8 @@ class StorageScrubber:
         ]
         args = base_args + args
 
-        log.info(f"Invoking scrubber command {args} with env: {env}")
+        log.info(f"Invoking scrubber command {args}")
+
         (output_path, stdout, status_code) = subprocess_capture(
             self.log_dir,
             args,
