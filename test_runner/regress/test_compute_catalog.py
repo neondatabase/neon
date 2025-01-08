@@ -290,9 +290,10 @@ def test_compute_drop_role(neon_simple_env: NeonEnv):
     endpoint.reconfigure()
 
     with endpoint.cursor(dbname=TEST_DB_NAME) as cursor:
-        # Create table as `cloud_admin`. This is the case when, for example,
+        # Create table and view as `cloud_admin`. This is the case when, for example,
         # PostGIS extensions creates tables in `public` schema.
         cursor.execute("create table test_table (id int)")
+        cursor.execute("create view test_view as select * from test_table")
 
     with endpoint.cursor(dbname=TEST_DB_NAME, user="neon") as cursor:
         cursor.execute("create role readonly")
@@ -314,9 +315,10 @@ def test_compute_drop_role(neon_simple_env: NeonEnv):
         cursor.execute(
             "select grantor from information_schema.role_table_grants where grantee = 'readonly'"
         )
-        res = cursor.fetchone()
-        assert res is not None
-        assert res[0] == "neon_superuser"
+        res = cursor.fetchall()
+        assert len(res) == 2, f"Expected 2 table grants, got {len(res)}"
+        for row in res:
+            assert row[0] == "neon_superuser"
 
     # Drop role via compute_ctl
     endpoint.respec_deep(
