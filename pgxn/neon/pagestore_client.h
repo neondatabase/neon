@@ -49,10 +49,10 @@ typedef uint64 NeonRequestId;
 /* base struct for c-style inheritance */
 typedef struct
 {
-	NeonMessageTag	tag;
-	NeonRequestId	reqid;
-	XLogRecPtr		lsn;
-	XLogRecPtr		not_modified_since;
+	NeonMessageTag tag;
+	NeonRequestId reqid;
+	XLogRecPtr	lsn;
+	XLogRecPtr	not_modified_since;
 } NeonMessage;
 
 #define messageTag(m) (((const NeonMessage *)(m))->tag)
@@ -98,37 +98,37 @@ typedef NeonMessage NeonRequest;
 
 typedef struct
 {
-	NeonRequest 	req;
-	NRelFileInfo 	rinfo;
-	ForkNumber		forknum;
+	NeonRequest req;
+	NRelFileInfo rinfo;
+	ForkNumber	forknum;
 } NeonExistsRequest;
 
 typedef struct
 {
-	NeonRequest 	req;
-	NRelFileInfo 	rinfo;
-	ForkNumber		forknum;
+	NeonRequest req;
+	NRelFileInfo rinfo;
+	ForkNumber	forknum;
 } NeonNblocksRequest;
 
 typedef struct
 {
-	NeonRequest 	req;
-	Oid				dbNode;
+	NeonRequest req;
+	Oid			dbNode;
 } NeonDbSizeRequest;
 
 typedef struct
 {
-	NeonRequest		req;
-	NRelFileInfo 	rinfo;
-	ForkNumber		forknum;
-	BlockNumber 	blkno;
+	NeonRequest req;
+	NRelFileInfo rinfo;
+	ForkNumber	forknum;
+	BlockNumber blkno;
 } NeonGetPageRequest;
 
 typedef struct
 {
-	NeonRequest 	req;
-	SlruKind 		kind;
-	int      		segno;
+	NeonRequest req;
+	SlruKind	kind;
+	int			segno;
 } NeonGetSlruSegmentRequest;
 
 /* supertype of all the Neon*Response structs below */
@@ -136,52 +136,52 @@ typedef NeonMessage NeonResponse;
 
 typedef struct
 {
-	NeonResponse	resp;
-	NRelFileInfo	rinfo;
-	ForkNumber		forknum;
-	bool			exists;
+	NeonResponse resp;
+	NRelFileInfo rinfo;
+	ForkNumber	forknum;
+	bool		exists;
 } NeonExistsResponse;
 
 typedef struct
 {
-	NeonResponse	resp;
-	NRelFileInfo	rinfo;
-	ForkNumber		forknum;
-	uint32			n_blocks;
+	NeonResponse resp;
+	NRelFileInfo rinfo;
+	ForkNumber	forknum;
+	uint32		n_blocks;
 } NeonNblocksResponse;
 
 typedef struct
 {
-	NeonResponse	resp;
-	NRelFileInfo	rinfo;
-	ForkNumber		forknum;
-	BlockNumber 	blkno;
-	char			page[FLEXIBLE_ARRAY_MEMBER];
+	NeonResponse resp;
+	NRelFileInfo rinfo;
+	ForkNumber	forknum;
+	BlockNumber blkno;
+	char		page[FLEXIBLE_ARRAY_MEMBER];
 } NeonGetPageResponse;
 
 #define PS_GETPAGERESPONSE_SIZE (MAXALIGN(offsetof(NeonGetPageResponse, page) + BLCKSZ))
 
 typedef struct
 {
-	NeonResponse	resp;
-	Oid             dbNode;
-	int64			db_size;
+	NeonResponse resp;
+	Oid			dbNode;
+	int64		db_size;
 } NeonDbSizeResponse;
 
 typedef struct
 {
-	NeonResponse	resp;
-	char			message[FLEXIBLE_ARRAY_MEMBER]; /* null-terminated error
-													 * message */
+	NeonResponse resp;
+	char		message[FLEXIBLE_ARRAY_MEMBER]; /* null-terminated error
+												 * message */
 } NeonErrorResponse;
 
 typedef struct
 {
-	NeonResponse	resp;
-	SlruKind 		kind;
-	int      		segno;
-	int         	n_blocks;
-	char			data[BLCKSZ * SLRU_PAGES_PER_SEGMENT];
+	NeonResponse resp;
+	SlruKind	kind;
+	int			segno;
+	int			n_blocks;
+	char		data[BLCKSZ * SLRU_PAGES_PER_SEGMENT];
 } NeonGetSlruSegmentResponse;
 
 
