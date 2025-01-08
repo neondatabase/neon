@@ -4,7 +4,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#include "miscadmin.h"
 #include "port/pg_bitutils.h"
+#include "portability/instr_time.h"
 #include "storage/ipc.h"
 
 #include "file_cache_internal.h"
