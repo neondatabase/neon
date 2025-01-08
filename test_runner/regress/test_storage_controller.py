@@ -3299,11 +3299,114 @@ def test_storage_controller_detached_stopped(
             "generation": None,
         },
     )
-
+    env.storage_controller.reconcile_until_idle()
     env.storage_controller.consistency_check()
 
     # Confirm the detach happened
     assert env.pageserver.http_client().tenant_list_locations()["tenant_shards"] == []
+
+
+@run_only_on_default_postgres("Postgres version makes no difference here")
+def test_storage_controller_detach_lifecycle(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Test that detached tenants are handled properly through their lifecycle: getting dropped
+    from memory when detached, then getting loaded back on-demand.
+    """
+
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+
+    neon_env_builder.num_pageservers = 1
+
+    env = neon_env_builder.init_configs()
+    env.start()
+    virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.storage_controller.tenant_create(
+        tenant_id,
+        shard_count=1,
+    )
+    virtual_ps_http.timeline_create(PgVersion.NOT_SET, tenant_id, timeline_id)
+
+    remote_prefix = "/".join(
+        (
+            "tenants",
+            str(tenant_id),
+        )
+    )
+    # We will later check data is gone after deletion, so as a control check that it is present to begin with
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix=remote_prefix,
+    )
+
+    assert len(env.pageserver.http_client().tenant_list_locations()["tenant_shards"]) == 1
+    assert len(env.storage_controller.tenant_list()) == 1
+
+    # Detach the tenant
+    virtual_ps_http.tenant_location_conf(
+        tenant_id,
+        {
+            "mode": "Detached",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": None,
+        },
+    )
+    # Ensure reconciles are done (the one we do inline in location_conf is advisory and if it takes too long that API just succeeds anyway)
+    env.storage_controller.reconcile_until_idle()
+    env.storage_controller.consistency_check()
+
+    # Confirm the detach happened on pageserver
+    assert env.pageserver.http_client().tenant_list_locations()["tenant_shards"] == []
+    # Confirm the tenant is not in memory on the controller
+    assert env.storage_controller.tenant_list() == []
+
+    # The detached tenant does not get loaded into memory across a controller restart
+    env.storage_controller.stop()
+    env.storage_controller.start()
+    assert env.storage_controller.tenant_list() == []
+    env.storage_controller.consistency_check()
+
+    # The detached tenant can be re-attached
+    virtual_ps_http.tenant_location_conf(
+        tenant_id,
+        {
+            "mode": "AttachedSingle",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": None,
+        },
+    )
+    assert len(env.pageserver.http_client().tenant_list_locations()["tenant_shards"]) == 1
+    assert len(env.storage_controller.tenant_list()) == 1
+    env.storage_controller.consistency_check()
+
+    # Detach it again before doing deletion
+    virtual_ps_http.tenant_location_conf(
+        tenant_id,
+        {
+            "mode": "Detached",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": None,
+        },
+    )
+    env.storage_controller.reconcile_until_idle()
+    env.storage_controller.consistency_check()
+
+    # A detached tenant can be deleted
+    virtual_ps_http.tenant_delete(tenant_id)
+
+    # Such deletions really work (empty remote storage)
+    assert_prefix_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix=remote_prefix,
+    )
 
 
 @run_only_on_default_postgres("Postgres version makes no difference here")
