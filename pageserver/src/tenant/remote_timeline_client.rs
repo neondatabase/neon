@@ -848,12 +848,12 @@ impl RemoteTimelineClient {
                 // The expected case: the timeline is archived and we don't want to unarchive
                 (false, false) => {}
                 (true, false) => {
-                    tracing::info!("Can't shut down timeline: timeline slated for unarchival");
+                    tracing::info!("can't shut down timeline: timeline slated for unarchival");
                     return Err(ShutdownIfArchivedError::NotArchived);
                 }
                 (_, true) => {
                     tracing::info!(
-                        "Can't shut down timeline: timeline not archived in remote storage"
+                        "can't shut down timeline: timeline not archived in remote storage"
                     );
                     return Err(ShutdownIfArchivedError::NotArchived);
                 }
