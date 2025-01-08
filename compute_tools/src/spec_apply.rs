@@ -510,7 +510,7 @@ async fn get_operations<'a>(
                                     // TODO: this is obviously not 100% true because of the above case,
                                     // there could be still some privileges that are not revoked. Maybe this
                                     // only drops privileges that were granted *by this* role, not *to this* role,
-                                    // but this is has to be checked.
+                                    // but this has to be checked.
                                     Operation {
                                         query: format!("DROP OWNED BY {}", quoted),
                                         comment: None,

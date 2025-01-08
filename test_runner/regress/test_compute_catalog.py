@@ -256,7 +256,7 @@ def test_compute_drop_role(neon_simple_env: NeonEnv):
     """
     Test that compute_ctl can drop a role even if it has some depending objects
     like permissions in one of the databases.
-    Repro test for https://github.com/neondatabase/cloud/issues/13582
+    Reproduction test for https://github.com/neondatabase/cloud/issues/13582
     """
     env = neon_simple_env
     TEST_DB_NAME = "db_with_permissions"
@@ -273,7 +273,7 @@ def test_compute_drop_role(neon_simple_env: NeonEnv):
                         # additional grants equivalent to our real environment, so we can repro some
                         # issues.
                         "name": "neon",
-                        # XXX: this is a hash suggested by LLM, no specific meaning.
+                        # Some autocomplete-suggested hash, no specific meaning.
                         "encrypted_password": "SCRAM-SHA-256$4096:hBT22QjqpydQWqEulorfXA==$miBogcoj68JWYdsNB5PW1X6PjSLBEcNuctuhtGkb4PY=:hxk2gxkwxGo6P7GCtfpMlhA9zwHvPMsCz+NQf2HfvWk=",
                         "options": [],
                     },
@@ -297,7 +297,7 @@ def test_compute_drop_role(neon_simple_env: NeonEnv):
     with endpoint.cursor(dbname=TEST_DB_NAME, user="neon") as cursor:
         cursor.execute("create role readonly")
         # We (`compute_ctl`) make 'neon' the owner of schema 'public' in the owned database.
-        # Postgres has all sorts of permissions and grant that we may not handle well,
+        # Postgres has all sorts of permissions and grants that we may not handle well,
         # but this is the shortest repro grant for the issue
         # https://github.com/neondatabase/cloud/issues/13582
         cursor.execute("grant select on all tables in schema public to readonly")
