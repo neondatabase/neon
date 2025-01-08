@@ -1032,19 +1032,9 @@ def test_timeline_offload_race_unarchive(neon_env_builder: NeonEnvBuilder, end_w
     def leaf_offloaded():
         assert timeline_offloaded_api(leaf_timeline_id)
 
-    # Offloading should happen after the failpoint is turned off
+    # Ensure that we've hit the failed offload attempt
     ps_http.configure_failpoints((failpoint, "off"))
-
-    ps_http.timeline_archival_config(
-        tenant_id,
-        leaf_timeline_id,
-        state=TimelineArchivalState.UNARCHIVED,
-    )
-    parent_detail = ps_http.timeline_detail(
-        tenant_id,
-        leaf_timeline_id,
-    )
-    assert parent_detail["is_archived"] is False
+    wait_until(lambda: env.pageserver.assert_log_contains(f".*compaction_loop.*offload_timeline.*{leaf_timeline_id}.*can't shut down timeline.*"))
 
     with env.endpoints.create_start(
         "test_ancestor_branch_archive", tenant_id=tenant_id
