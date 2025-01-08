@@ -17,6 +17,7 @@ from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_AZ_ID,
+    LogCursor,
     NeonEnv,
     NeonEnvBuilder,
     NeonPageserver,
@@ -2406,7 +2407,14 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.tenant_create(tid)
 
     env.storage_controller.reconcile_until_idle()
-    env.storage_controller.configure_failpoints(("sleep-on-reconcile-epilogue", "return(10000)"))
+    env.storage_controller.configure_failpoints(("reconciler-epilogue", "pause"))
+
+    def unpause_failpoint():
+        time.sleep(2)
+        env.storage_controller.configure_failpoints(("reconciler-epilogue", "off"))
+
+    thread = threading.Thread(target=unpause_failpoint)
+    thread.start()
 
     # Make a change to the tenant config to trigger a slow reconcile
     virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
@@ -2420,6 +2428,8 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
 
     observed_state = env.storage_controller.step_down()
     log.info(f"Storage controller stepped down with {observed_state=}")
+
+    thread.join()
 
     # Validate that we waited for the slow reconcile to complete
     # and updated the observed state in the storcon before stepping down.
@@ -3294,3 +3304,113 @@ def test_storage_controller_detached_stopped(
 
     # Confirm the detach happened
     assert env.pageserver.http_client().tenant_list_locations()["tenant_shards"] == []
+
+
+@run_only_on_default_postgres("Postgres version makes no difference here")
+def test_storage_controller_node_flap_detach_race(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Reproducer for https://github.com/neondatabase/neon/issues/10253.
+
+    When a node's availability flaps, the reconciliations spawned by the node
+    going offline may race with the reconciliation done when then node comes
+    back online.
+    """
+    neon_env_builder.num_pageservers = 4
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    env.storage_controller.tenant_create(
+        tenant_id,
+        shard_count=2,
+    )
+    env.storage_controller.reconcile_until_idle()
+
+    stopped_nodes = [s["node_id"] for s in env.storage_controller.locate(tenant_id)]
+
+    def has_hit_failpoint(failpoint: str, offset: LogCursor | None = None) -> LogCursor:
+        res = env.storage_controller.log_contains(f"at failpoint {failpoint}", offset=offset)
+        assert res
+        return res[1]
+
+    # Stop the nodes which host attached shards.
+    # This will trigger reconciliations which pause before incrmenenting the generation,
+    # and, more importantly, updating the `generation_pageserver` of the shards.
+    env.storage_controller.configure_failpoints(("reconciler-pre-increment-generation", "pause"))
+    for node_id in stopped_nodes:
+        env.get_pageserver(node_id).stop(immediate=True)
+
+    def failure_handled() -> LogCursor:
+        stop_offset = None
+
+        for node_id in stopped_nodes:
+            res = env.storage_controller.log_contains(f"node {node_id} going offline")
+            assert res
+            stop_offset = res[1]
+
+        assert stop_offset
+        return stop_offset
+
+    offset = wait_until(failure_handled)
+
+    # Now restart the nodes and make them pause before marking themselves as available
+    # or running the activation reconciliation.
+    env.storage_controller.configure_failpoints(("heartbeat-pre-node-state-configure", "pause"))
+
+    for node_id in stopped_nodes:
+        env.get_pageserver(node_id).start(await_active=False)
+
+    offset = wait_until(
+        lambda: has_hit_failpoint("heartbeat-pre-node-state-configure", offset=offset)
+    )
+
+    # The nodes have restarted and are waiting to perform activaction reconciliation.
+    # Unpause the initial reconciliation triggered by the nodes going offline.
+    # It will attempt to detach from the old location, but notice that the old location
+    # is not yet available, and then stop before processing the results of the reconciliation.
+    env.storage_controller.configure_failpoints(("reconciler-epilogue", "pause"))
+    env.storage_controller.configure_failpoints(("reconciler-pre-increment-generation", "off"))
+
+    offset = wait_until(lambda: has_hit_failpoint("reconciler-epilogue", offset=offset))
+
+    # Let the nodes perform activation reconciliation while still holding up processing the result
+    # from the initial reconcile triggered by going offline.
+    env.storage_controller.configure_failpoints(("heartbeat-pre-node-state-configure", "off"))
+
+    def activate_reconciliation_done():
+        for node_id in stopped_nodes:
+            assert env.storage_controller.log_contains(
+                f"Node {node_id} transition to active", offset=offset
+            )
+
+    wait_until(activate_reconciliation_done)
+
+    # Finally, allow the initial reconcile to finish up.
+    env.storage_controller.configure_failpoints(("reconciler-epilogue", "off"))
+
+    # Give things a chance to settle and validate that no stale locations exist
+    env.storage_controller.reconcile_until_idle()
+
+    def validate_locations():
+        shard_locations = defaultdict(list)
+        for ps in env.pageservers:
+            locations = ps.http_client().tenant_list_locations()["tenant_shards"]
+            for loc in locations:
+                shard_locations[loc[0]].append(
+                    {"generation": loc[1]["generation"], "mode": loc[1]["mode"], "node": ps.id}
+                )
+
+        log.info(f"Shard locations: {shard_locations}")
+
+        attached_locations = {
+            k: list(filter(lambda loc: loc["mode"] == "AttachedSingle", v))
+            for k, v in shard_locations.items()
+        }
+
+        for shard, locs in attached_locations.items():
+            assert len(locs) == 1, f"{shard} has {len(locs)} attached locations"
+
+    wait_until(validate_locations, timeout=10)

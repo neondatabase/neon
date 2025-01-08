@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use utils::backoff::exponential_backoff;
-use utils::failpoint_support;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
@@ -212,11 +211,12 @@ impl Reconciler {
         lazy: bool,
     ) -> Result<(), ReconcileError> {
         if !node.is_available() && config.mode == LocationConfigMode::Detached {
-            // Attempts to detach from offline nodes may be imitated without doing I/O: a node which is offline
-            // will get fully reconciled wrt the shard's intent state when it is reactivated, irrespective of
-            // what we put into `observed`, in [`crate::service::Service::node_activate_reconcile`]
-            tracing::info!("Node {node} is unavailable during detach: proceeding anyway, it will be detached on next activation");
-            self.observed.locations.remove(&node.get_id());
+            // [`crate::service::Service::node_activate_reconcile`] will update the observed state
+            // when the node comes back online. At that point, the intent and observed states will
+            // be mismatched and a background reconciliation will detach.
+            tracing::info!(
+                "Node {node} is unavailable during detach: proceeding anyway, it will be detached via background reconciliation"
+            );
             return Ok(());
         }
 
@@ -749,6 +749,8 @@ impl Reconciler {
                     };
 
                     if increment_generation {
+                        pausable_failpoint!("reconciler-pre-increment-generation");
+
                         let generation = self
                             .persistence
                             .increment_generation(self.tenant_shard_id, node.get_id())
@@ -824,7 +826,7 @@ impl Reconciler {
                 .handle_detach(self.tenant_shard_id, self.shard.stripe_size);
         }
 
-        failpoint_support::sleep_millis_async!("sleep-on-reconcile-epilogue");
+        pausable_failpoint!("reconciler-epilogue");
 
         Ok(())
     }

@@ -135,7 +135,7 @@ parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
-pprof = { version = "0.14", features = ["criterion", "flamegraph", "protobuf", "protobuf-codec"] }
+pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointer", "protobuf", "protobuf-codec"] }
 procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.13"
@@ -266,6 +266,8 @@ tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", br
 [profile.release]
 # This is useful for profiling and, to some extent, debug.
 # Besides, debug info should not affect the performance.
+#
+# NB: we also enable frame pointers for improved profiling, see .cargo/config.toml.
 debug = true
 
 # disable debug symbols for all packages except this one to decrease binaries size
