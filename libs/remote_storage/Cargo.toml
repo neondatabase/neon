@@ -31,6 +31,7 @@ metrics.workspace = true
 utils.workspace = true
 pin-project-lite.workspace = true
 
+opendal = { workspace = true, features = ["services-gcs"] }
 azure_core.workspace = true
 azure_identity.workspace = true
 azure_storage.workspace = true
