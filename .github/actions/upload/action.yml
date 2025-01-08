@@ -14,7 +14,7 @@ inputs:
   prefix:
     description: "S3 prefix. Default is '${GITHUB_SHA}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}'"
     required: false
-  aws_oicd_role_arn:
+  aws-oicd-role-arn:
     description: "the OIDC role arn for aws auth"
     required: false
     default: ""
@@ -61,7 +61,7 @@ runs:
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-region: eu-central-1
-        role-to-assume: ${{ inputs.aws_oicd_role_arn }}
+        role-to-assume: ${{ inputs.aws-oicd-role-arn }}
         role-duration-seconds: 3600
 
     - name: Upload artifact

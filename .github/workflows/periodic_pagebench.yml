@@ -21,15 +21,17 @@ defaults:
   run:
     shell: bash -euo pipefail {0}
 
-permissions:
-  id-token: write # aws-actions/configure-aws-credentials
-
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
   trigger_bench_on_ec2_machine_in_eu_central_1:
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
+      pull-requests: write
     runs-on: [ self-hosted, small ]
     container:
       image: neondatabase/build-tools:pinned-bookworm
@@ -135,7 +137,7 @@ jobs:
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
       with:
-        aws_oicd_role_arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}

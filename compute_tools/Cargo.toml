@@ -7,7 +7,7 @@ license.workspace = true
 [features]
 default = []
 # Enables test specific features.
-testing = []
+testing = ["fail/failpoints"]
 
 [dependencies]
 base64.workspace = true
@@ -19,6 +19,7 @@ camino.workspace = true
 chrono.workspace = true
 cfg-if.workspace = true
 clap.workspace = true
+fail.workspace = true
 flate2.workspace = true
 futures.workspace = true
 hyper0 = { workspace = true, features = ["full"] }

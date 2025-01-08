@@ -97,8 +97,8 @@ use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::DEFAULT_PG_VERSION;
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
-    StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
-    TimelineInfo,
+    CompactInfoResponse, StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest,
+    TimelineGcRequest, TimelineInfo,
 };
 use utils::{
     auth::SwappableJwtAuth,
@@ -2039,6 +2039,34 @@ async fn timeline_cancel_compact_handler(
     .await
 }
 
+// Get compact info of a timeline
+async fn timeline_compact_info_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
+    async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+        let res = tenant.get_scheduled_compaction_tasks(timeline_id);
+        let mut resp = Vec::new();
+        for item in res {
+            resp.push(CompactInfoResponse {
+                compact_key_range: item.compact_key_range,
+                compact_lsn_range: item.compact_lsn_range,
+                sub_compaction: item.sub_compaction,
+            });
+        }
+        json_response(StatusCode::OK, resp)
+    }
+    .instrument(info_span!("timeline_compact_info", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .await
+}
+
 // Run compaction immediately on given timeline.
 async fn timeline_compact_handler(
     mut request: Request<Body>,
@@ -3399,6 +3427,10 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/do_gc",
             |r| api_handler(r, timeline_gc_handler),
+        )
+        .get(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",
+            |r| api_handler(r, timeline_compact_info_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",

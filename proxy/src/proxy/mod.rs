@@ -152,7 +152,7 @@ pub async fn task_main(
                 Ok(Some(p)) => {
                     ctx.set_success();
                     let _disconnect = ctx.log_connect();
-                    match p.proxy_pass().await {
+                    match p.proxy_pass(&config.connect_to_compute).await {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
                             warn!(?session_id, "per-client task finished with an IO error from the client: {e:#}");
@@ -188,13 +188,6 @@ impl ClientMode {
         match self {
             ClientMode::Tcp => false,
             ClientMode::Websockets { .. } => true,
-        }
-    }
-
-    pub(crate) fn allow_self_signed_compute(&self, config: &ProxyConfig) -> bool {
-        match self {
-            ClientMode::Tcp => config.allow_self_signed_compute,
-            ClientMode::Websockets { .. } => false,
         }
     }
 
@@ -357,9 +350,8 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             locks: &config.connect_compute_locks,
         },
         &user_info,
-        mode.allow_self_signed_compute(config),
         config.wake_compute_retry_config,
-        config.connect_to_compute_retry_config,
+        &config.connect_to_compute,
     )
     .or_else(|e| stream.throw_error(e))
     .await?;
@@ -494,7 +486,7 @@ impl NeonOptions {
 
 pub(crate) fn neon_option(bytes: &str) -> Option<(&str, &str)> {
     static RE: OnceCell<Regex> = OnceCell::new();
-    let re = RE.get_or_init(|| Regex::new(r"^neon_(\w+):(.+)").unwrap());
+    let re = RE.get_or_init(|| Regex::new(r"^neon_(\w+):(.+)").expect("regex should be correct"));
 
     let cap = re.captures(bytes)?;
     let (_, [k, v]) = cap.extract();

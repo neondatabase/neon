@@ -11,6 +11,7 @@ use diesel::Connection;
 use itertools::Itertools;
 use pageserver_api::controller_api::AvailabilityZone;
 use pageserver_api::controller_api::MetadataHealthRecord;
+use pageserver_api::controller_api::SafekeeperDescribeResponse;
 use pageserver_api::controller_api::ShardSchedulingPolicy;
 use pageserver_api::controller_api::{NodeSchedulingPolicy, PlacementPolicy};
 use pageserver_api::models::TenantConfig;
@@ -1239,6 +1240,18 @@ impl SafekeeperPersistence {
             active: self.active,
             http_port: self.http_port,
             availability_zone_id: &self.availability_zone_id,
+        }
+    }
+    pub(crate) fn as_describe_response(&self) -> SafekeeperDescribeResponse {
+        // omit the `active` flag on purpose: it is deprecated.
+        SafekeeperDescribeResponse {
+            id: NodeId(self.id as u64),
+            region_id: self.region_id.clone(),
+            version: self.version,
+            host: self.host.clone(),
+            port: self.port,
+            http_port: self.http_port,
+            availability_zone_id: self.availability_zone_id.clone(),
         }
     }
 }

@@ -2604,9 +2604,15 @@ impl Tenant {
                 WaitCompletionError::NotInitialized(
                     e, // If the queue is already stopped, it's a shutdown error.
                 ) if e.is_stopping() => CreateTimelineError::ShuttingDown,
-                e => CreateTimelineError::Other(e.into()),
-            })
-            .context("wait for timeline initial uploads to complete")?;
+                WaitCompletionError::NotInitialized(_) => {
+                    // This is a bug: we should never try to wait for uploads before initializing the timeline
+                    debug_assert!(false);
+                    CreateTimelineError::Other(anyhow::anyhow!("timeline not initialized"))
+                }
+                WaitCompletionError::UploadQueueShutDownOrStopped => {
+                    CreateTimelineError::ShuttingDown
+                }
+            })?;
 
         // The creating task is responsible for activating the timeline.
         // We do this after `wait_completion()` so that we don't spin up tasks that start
@@ -3120,6 +3126,23 @@ impl Tenant {
         } else {
             Vec::new()
         }
+    }
+
+    pub(crate) fn get_scheduled_compaction_tasks(
+        &self,
+        timeline_id: TimelineId,
+    ) -> Vec<CompactOptions> {
+        use itertools::Itertools;
+        let guard = self.scheduled_compaction_tasks.lock().unwrap();
+        guard
+            .get(&timeline_id)
+            .map(|tline_pending_tasks| {
+                tline_pending_tasks
+                    .iter()
+                    .map(|x| x.options.clone())
+                    .collect_vec()
+            })
+            .unwrap_or_default()
     }
 
     /// Schedule a compaction task for a timeline.
@@ -4465,13 +4488,17 @@ impl Tenant {
         let mut gc_cutoffs: HashMap<TimelineId, GcCutoffs> =
             HashMap::with_capacity(timelines.len());
 
+        // Ensures all timelines use the same start time when computing the time cutoff.
+        let now_ts_for_pitr_calc = SystemTime::now();
         for timeline in timelines.iter() {
             let cutoff = timeline
                 .get_last_record_lsn()
                 .checked_sub(horizon)
                 .unwrap_or(Lsn(0));
 
-            let cutoffs = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await?;
+            let cutoffs = timeline
+                .find_gc_cutoffs(now_ts_for_pitr_calc, cutoff, pitr, cancel, ctx)
+                .await?;
             let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
             assert!(old.is_none());
         }
@@ -5760,11 +5787,11 @@ mod tests {
     use utils::id::TenantId;
 
     #[cfg(feature = "testing")]
+    use models::CompactLsnRange;
+    #[cfg(feature = "testing")]
     use pageserver_api::record::NeonWalRecord;
     #[cfg(feature = "testing")]
     use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
-    #[cfg(feature = "testing")]
-    use timeline::CompactLsnRange;
     #[cfg(feature = "testing")]
     use timeline::GcInfo;
 
@@ -9634,7 +9661,7 @@ mod tests {
     #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_on_branch() -> anyhow::Result<()> {
-        use timeline::CompactLsnRange;
+        use models::CompactLsnRange;
 
         let harness = TenantHarness::create("test_simple_bottom_most_compaction_on_branch").await?;
         let (tenant, ctx) = harness.load().await;
