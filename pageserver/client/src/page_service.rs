@@ -118,7 +118,7 @@ impl PagestreamClient {
             cancel_on_client_drop: cancel_conn_task,
             conn_task,
         } = { self };
-        // The `copy_both` contains internal channel sender, the receiver of which is polled by `conn_task`.
+        // The `copy_both` split into `sink` and `stream` contains internal channel sender, the receiver of which is polled by `conn_task`.
         // When `conn_task` observes the sender has been dropped, it sends a `FeMessage::CopyFail` into the connection.
         // (see https://github.com/neondatabase/rust-postgres/blob/2005bf79573b8add5cf205b52a2b208e356cc8b0/tokio-postgres/src/copy_both.rs#L56).
         //
@@ -138,7 +138,9 @@ impl PagestreamClient {
         let _ = cancel_conn_task.unwrap();
         conn_task.await.unwrap();
 
-        // TODO: figure out what to do about sink & stream
+        // Now drop the split copy_both.
+        drop(sink);
+        drop(stream);
     }
 
     pub async fn getpage(
