@@ -601,6 +601,9 @@ impl BatchedFeMessage {
         };
         let throttled = tokio::select! {
             throttled = shard.pagestream_throttle.throttle(tokens) => { throttled }
+            _ = shard.cancel.cancelled() => {
+                return Err(QueryError::Shutdown);
+            }
             _ = cancel.cancelled() => {
                 return Err(QueryError::Shutdown);
             }
