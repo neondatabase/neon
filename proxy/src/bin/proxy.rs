@@ -744,9 +744,59 @@ fn build_auth_backend(
         }
 
         AuthBackendType::ConsoleRedirect => {
-            let url = args.uri.parse()?;
-            let backend = ConsoleRedirectBackend::new(url);
+            let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
+            let project_info_cache_config: ProjectInfoCacheOptions =
+                args.project_info_cache.parse()?;
+            let endpoint_cache_config: config::EndpointCacheConfig =
+                args.endpoint_cache_config.parse()?;
 
+            info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
+            info!(
+                "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
+            );
+            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
+            let caches = Box::leak(Box::new(control_plane::caches::ApiCaches::new(
+                wake_compute_cache_config,
+                project_info_cache_config,
+                endpoint_cache_config,
+            )));
+
+            let config::ConcurrencyLockOptions {
+                shards,
+                limiter,
+                epoch,
+                timeout,
+            } = args.wake_compute_lock.parse()?;
+            info!(?limiter, shards, ?epoch, "Using NodeLocks (wake_compute)");
+            let locks = Box::leak(Box::new(control_plane::locks::ApiLocks::new(
+                "wake_compute_lock",
+                limiter,
+                shards,
+                timeout,
+                epoch,
+                &Metrics::get().wake_compute_lock,
+            )?));
+
+            let url = args.uri.clone().parse()?;
+            let ep_url: proxy::url::ApiUrl = args.auth_endpoint.parse()?;
+            let endpoint = http::Endpoint::new(ep_url, http::new_client());
+            let mut wake_compute_rps_limit = args.wake_compute_limit.clone();
+            RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
+            let wake_compute_endpoint_rate_limiter =
+                Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
+
+            // Since we use only get_allowed_ips_and_secret() wake_compute_endpoint_rate_limiter
+            // and locks are not used in ConsoleRedirectBackend,
+            // but they are required by the NeonControlPlaneClient
+            let api = control_plane::client::cplane_proxy_v1::NeonControlPlaneClient::new(
+                endpoint,
+                args.control_plane_token.clone(),
+                caches,
+                locks,
+                wake_compute_endpoint_rate_limiter,
+            );
+
+            let backend = ConsoleRedirectBackend::new(url, api);
             let config = Box::leak(Box::new(backend));
 
             Ok(Either::Right(config))
