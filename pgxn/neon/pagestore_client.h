@@ -93,6 +93,11 @@ typedef enum {
  *
  * These structs describe the V2 of these requests. (The old now-defunct V1
  * protocol contained just one LSN and a boolean 'latest' flag.)
+ *
+ * V3 version of protocol adds request ID to all requests. This request ID is also included in response
+ * as well as other fields from requests, which allows to verify that we receive response for our request.
+ * We copy fields from request to response to make checking more reliable: request ID is formed from process ID
+ * and local counter, so in principle there can be duplicated requests IDs if process PID is reused.
  */
 typedef NeonMessage NeonRequest;
 

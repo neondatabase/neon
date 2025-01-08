@@ -1460,6 +1460,11 @@ impl TryFrom<u8> for PagestreamBeMessageTag {
 // interface allows sending both LSNs, and let the pageserver do the right thing. There was no
 // difference in the responses between V1 and V2.
 //
+// V3 version of protocol adds request ID to all requests. This request ID is also included in response
+// as well as other fields from requests, which allows to verify that we receive response for our request.
+// We copy fields from request to response to make checking more reliable: request ID is formed from process ID
+// and local counter, so in principle there can be duplicated requests IDs if process PID is reused.
+//
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PagestreamProtocolVersion {
     V2,
@@ -1512,56 +1517,86 @@ pub struct PagestreamGetSlruSegmentRequest {
 
 #[derive(Debug)]
 pub struct PagestreamExistsResponse {
+    // Fields copied from the request, to aid debugging and to enable assertions in the
+    // compute to ensure that it doesn't mix up responses belonging to different
+    // requests.
     pub reqid: RequestId,
     pub request_lsn: Lsn,
     pub not_modified_since: Lsn,
     pub rel: RelTag,
+
+    // Actual response
     pub exists: bool,
 }
 
 #[derive(Debug)]
 pub struct PagestreamNblocksResponse {
+    // Fields copied from the request, to aid debugging and to enable assertions in the
+    // compute to ensure that it doesn't mix up responses belonging to different
+    // requests.
     pub reqid: RequestId,
     pub request_lsn: Lsn,
     pub not_modified_since: Lsn,
     pub rel: RelTag,
+
+    // Actual response
     pub n_blocks: u32,
 }
 
 #[derive(Debug)]
 pub struct PagestreamGetPageResponse {
+    // Fields copied from the request, to aid debugging and to enable assertions in the
+    // compute to ensure that it doesn't mix up responses belonging to different
+    // requests.
     pub reqid: RequestId,
     pub request_lsn: Lsn,
     pub not_modified_since: Lsn,
     pub rel: RelTag,
+
+    // Actual response
     pub blkno: u32,
     pub page: Bytes,
 }
 
 #[derive(Debug)]
 pub struct PagestreamGetSlruSegmentResponse {
+    // Fields copied from the request, to aid debugging and to enable assertions in the
+    // compute to ensure that it doesn't mix up responses belonging to different
+    // requests.
     pub reqid: RequestId,
     pub request_lsn: Lsn,
     pub not_modified_since: Lsn,
     pub kind: u8,
     pub segno: u32,
+
+    // Actual response
     pub segment: Bytes,
 }
 
 #[derive(Debug)]
 pub struct PagestreamErrorResponse {
+    // Fields copied from the request, to aid debugging and to enable assertions in the
+    // compute to ensure that it doesn't mix up responses belonging to different
+    // requests.
     pub reqid: RequestId,
     pub request_lsn: Lsn,
     pub not_modified_since: Lsn,
+
+    // Actual response
     pub message: String,
 }
 
 #[derive(Debug)]
 pub struct PagestreamDbSizeResponse {
+    // Fields copied from the request, to aid debugging and to enable assertions in the
+    // compute to ensure that it doesn't mix up responses belonging to different
+    // requests.
     pub reqid: RequestId,
     pub request_lsn: Lsn,
     pub not_modified_since: Lsn,
     pub db_node: u32,
+
+    // Actual response
     pub db_size: i64,
 }
 
