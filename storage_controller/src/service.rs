@@ -6238,7 +6238,7 @@ impl Service {
         let mut az_violations = 0;
 
         // If we find any tenants to drop from memory, stash them to offload after
-        // we're done traversing t map of tenants.
+        // we're done traversing the map of tenants.
         let mut drop_detached_tenants = Vec::new();
 
         let mut reconciles_spawned = 0;
