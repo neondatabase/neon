@@ -796,8 +796,8 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 	uint64		mySlotNo PG_USED_FOR_ASSERTS_ONLY = slot->my_ring_index;
 
 	NeonGetPageRequest request = {
-		.req.tag = T_NeonGetPageRequest,
-		.req.reqid = GENERATE_REQUEST_ID(),
+		.hdr.tag = T_NeonGetPageRequest,
+		.hdr.reqid = GENERATE_REQUEST_ID(),
 		/* lsn and not_modified_since are filled in below */
 		.rinfo = BufTagGetNRelFileInfo(slot->buftag),
 		.forknum = slot->buftag.forkNum,
@@ -806,7 +806,7 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 
 	Assert(mySlotNo == MyPState->ring_unused);
 
-	slot->reqid = request.req.reqid;
+	slot->reqid = request.hdr.reqid;
 
 	if (force_request_lsns)
 		slot->request_lsns = *force_request_lsns;
@@ -814,8 +814,8 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 		neon_get_request_lsns(BufTagGetNRelFileInfo(slot->buftag),
 							  slot->buftag.forkNum, slot->buftag.blockNum,
 							  &slot->request_lsns, 1, NULL);
-	request.req.lsn = slot->request_lsns.request_lsn;
-	request.req.not_modified_since = slot->request_lsns.not_modified_since;
+	request.hdr.lsn = slot->request_lsns.request_lsn;
+	request.hdr.not_modified_since = slot->request_lsns.not_modified_since;
 
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_unused);
@@ -1280,12 +1280,12 @@ nm_unpack_response(StringInfo s)
 
 				if (neon_protocol_version >= 3)
 				{
-					NInfoGetSpcOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					NInfoGetDbOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					NInfoGetRelNumber(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					msg_resp->forknum = pq_getmsgbyte(s);
+					NInfoGetSpcOid(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					NInfoGetDbOid(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					NInfoGetRelNumber(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					msg_resp->req.forknum = pq_getmsgbyte(s);
 				}
-				msg_resp->resp = resp_hdr;
+				msg_resp->req.hdr = resp_hdr;
 				msg_resp->exists = pq_getmsgbyte(s);
 				pq_getmsgend(s);
 
@@ -1299,12 +1299,12 @@ nm_unpack_response(StringInfo s)
 
 				if (neon_protocol_version >= 3)
 				{
-					NInfoGetSpcOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					NInfoGetDbOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					NInfoGetRelNumber(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					msg_resp->forknum = pq_getmsgbyte(s);
+					NInfoGetSpcOid(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					NInfoGetDbOid(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					NInfoGetRelNumber(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					msg_resp->req.forknum = pq_getmsgbyte(s);
 				}
-				msg_resp->resp = resp_hdr;
+				msg_resp->req.hdr = resp_hdr;
 				msg_resp->n_blocks = pq_getmsgint(s, 4);
 				pq_getmsgend(s);
 
@@ -1319,18 +1319,18 @@ nm_unpack_response(StringInfo s)
 				msg_resp = MemoryContextAllocZero(MyPState->bufctx, PS_GETPAGERESPONSE_SIZE);
 				if (neon_protocol_version >= 3)
 				{
-					NInfoGetSpcOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					NInfoGetDbOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					NInfoGetRelNumber(msg_resp->rinfo) = pq_getmsgint(s, 4);
-					msg_resp->forknum = pq_getmsgbyte(s);
-					msg_resp->blkno = pq_getmsgint(s, 4);
+					NInfoGetSpcOid(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					NInfoGetDbOid(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					NInfoGetRelNumber(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					msg_resp->req.forknum = pq_getmsgbyte(s);
+					msg_resp->req.blkno = pq_getmsgint(s, 4);
 				}
-				msg_resp->resp = resp_hdr;
+				msg_resp->req.hdr = resp_hdr;
 				/* XXX:	should be varlena */
 				memcpy(msg_resp->page, pq_getmsgbytes(s, BLCKSZ), BLCKSZ);
 				pq_getmsgend(s);
 
-				Assert(msg_resp->resp.tag == T_NeonGetPageResponse);
+				Assert(msg_resp->req.hdr.tag == T_NeonGetPageResponse);
 
 				resp = (NeonResponse *) msg_resp;
 				break;
@@ -1342,9 +1342,9 @@ nm_unpack_response(StringInfo s)
 
 				if (neon_protocol_version >= 3)
 				{
-					msg_resp->dbNode = pq_getmsgint(s, 4);
+					msg_resp->req.dbNode = pq_getmsgint(s, 4);
 				}
-				msg_resp->resp = resp_hdr;
+				msg_resp->req.hdr = resp_hdr;
 				msg_resp->db_size = pq_getmsgint64(s);
 				pq_getmsgend(s);
 
@@ -1362,7 +1362,7 @@ nm_unpack_response(StringInfo s)
 				msglen = strlen(msgtext);
 
 				msg_resp = palloc0(sizeof(NeonErrorResponse) + msglen + 1);
-				msg_resp->resp = resp_hdr;
+				msg_resp->req = resp_hdr;
 				memcpy(msg_resp->message, msgtext, msglen + 1);
 				pq_getmsgend(s);
 
@@ -1374,14 +1374,14 @@ nm_unpack_response(StringInfo s)
 		    {
 				NeonGetSlruSegmentResponse *msg_resp;
 				int n_blocks;
-				msg_resp = palloc(sizeof(NeonGetSlruSegmentResponse));
+				msg_resp = palloc0(sizeof(NeonGetSlruSegmentResponse));
 
 				if (neon_protocol_version >= 3)
 				{
-					msg_resp->kind = pq_getmsgbyte(s);
-					msg_resp->segno = pq_getmsgint(s, 4);
+					msg_resp->req.kind = pq_getmsgbyte(s);
+					msg_resp->req.segno = pq_getmsgint(s, 4);
 				}
-				msg_resp->resp = resp_hdr;
+				msg_resp->req.hdr = resp_hdr;
 
 				n_blocks = pq_getmsgint(s, 4);
 				msg_resp->n_blocks = n_blocks;
@@ -1428,8 +1428,8 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfoString(&s, "{\"type\": \"NeonExistsRequest\"");
 				appendStringInfo(&s, ", \"rinfo\": \"%u/%u/%u\"", RelFileInfoFmt(msg_req->rinfo));
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
-				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.not_modified_since));
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.lsn));
+				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.not_modified_since));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1441,8 +1441,8 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfoString(&s, "{\"type\": \"NeonNblocksRequest\"");
 				appendStringInfo(&s, ", \"rinfo\": \"%u/%u/%u\"", RelFileInfoFmt(msg_req->rinfo));
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
-				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.not_modified_since));
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.lsn));
+				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.not_modified_since));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1455,8 +1455,8 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfo(&s, ", \"rinfo\": \"%u/%u/%u\"", RelFileInfoFmt(msg_req->rinfo));
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
 				appendStringInfo(&s, ", \"blkno\": %u", msg_req->blkno);
-				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.not_modified_since));
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.lsn));
+				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.not_modified_since));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1466,8 +1466,8 @@ nm_to_string(NeonMessage *msg)
 
 				appendStringInfoString(&s, "{\"type\": \"NeonDbSizeRequest\"");
 				appendStringInfo(&s, ", \"dbnode\": \"%u\"", msg_req->dbNode);
-				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.not_modified_since));
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.lsn));
+				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.not_modified_since));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1478,8 +1478,8 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfoString(&s, "{\"type\": \"NeonGetSlruSegmentRequest\"");
 				appendStringInfo(&s, ", \"kind\": %u", msg_req->kind);
 				appendStringInfo(&s, ", \"segno\": %u", msg_req->segno);
-				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.not_modified_since));
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.lsn));
+				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.not_modified_since));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -2354,10 +2354,10 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1, NULL);
 	{
 		NeonExistsRequest request = {
-			.req.tag = T_NeonExistsRequest,
-			.req.reqid = GENERATE_REQUEST_ID(),
-			.req.lsn = request_lsns.request_lsn,
-			.req.not_modified_since = request_lsns.not_modified_since,
+			.hdr.tag = T_NeonExistsRequest,
+			.hdr.reqid = GENERATE_REQUEST_ID(),
+			.hdr.lsn = request_lsns.request_lsn,
+			.hdr.not_modified_since = request_lsns.not_modified_since,
 			.rinfo = InfoFromSMgrRel(reln),
 			.forknum = forkNum
 		};
@@ -2371,16 +2371,16 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 				NeonExistsResponse* exists_resp = (NeonExistsResponse *) resp;
 				if (neon_protocol_version >= 3)
 				{
-					if (resp->reqid != request.req.reqid ||
-						resp->lsn != request.req.lsn ||
-						resp->not_modified_since != request.req.not_modified_since ||
-						!RelFileInfoEquals(exists_resp->rinfo, request.rinfo) ||
-						exists_resp->forknum != forkNum)
+					if (resp->reqid != request.hdr.reqid ||
+						resp->lsn != request.hdr.lsn ||
+						resp->not_modified_since != request.hdr.not_modified_since ||
+						!RelFileInfoEquals(exists_resp->req.rinfo, request.rinfo) ||
+						exists_resp->req.forknum != request.forknum)
 					{
 						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
 													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u} to exits request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u}",
-													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(exists_resp->rinfo), exists_resp->forknum,
-													request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since), RelFileInfoFmt(request.rinfo), forkNum);
+													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(exists_resp->req.rinfo), exists_resp->req.forknum,
+													request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since), RelFileInfoFmt(request.rinfo), request.forknum);
 					}
 				}
 				exists = exists_resp->exists;
@@ -2389,13 +2389,13 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 			case T_NeonErrorResponse:
 				if (neon_protocol_version >= 3)
 				{
-					if (resp->reqid != request.req.reqid ||
-						resp->lsn != request.req.lsn ||
-						resp->not_modified_since != request.req.not_modified_since)
+					if (resp->reqid != request.hdr.reqid ||
+						resp->lsn != request.hdr.lsn ||
+						resp->not_modified_since != request.hdr.not_modified_since)
 					{
 						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match exists request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
 							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
-							 request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since));
+							 request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since));
 					}
 				}
 				ereport(ERROR,
@@ -3030,13 +3030,13 @@ Retry:
 					if (resp->reqid != slot->reqid ||
 						resp->lsn != slot->request_lsns.request_lsn ||
 						resp->not_modified_since != slot->request_lsns.not_modified_since ||
-						!RelFileInfoEquals(getpage_resp->rinfo, rinfo) ||
-						getpage_resp->forknum != forkNum ||
-						getpage_resp->blkno != base_blockno + i)
+						!RelFileInfoEquals(getpage_resp->req.rinfo, rinfo) ||
+						getpage_resp->req.forknum != forkNum ||
+						getpage_resp->req.blkno != base_blockno + i)
 					{
 						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
 													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u, block=%u} to get page request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u, block=%u}",
-													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(getpage_resp->rinfo), getpage_resp->forknum, getpage_resp->blkno,
+													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(getpage_resp->req.rinfo), getpage_resp->req.forknum, getpage_resp->req.blkno,
 													slot->reqid, LSN_FORMAT_ARGS(slot->request_lsns.request_lsn), LSN_FORMAT_ARGS(slot->request_lsns.not_modified_since), RelFileInfoFmt(rinfo), forkNum, base_blockno + i);
 					}
 				}
@@ -3542,10 +3542,10 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 
 	{
 		NeonNblocksRequest request = {
-			.req.tag = T_NeonNblocksRequest,
-			.req.reqid = GENERATE_REQUEST_ID(),
-			.req.lsn = request_lsns.request_lsn,
-			.req.not_modified_since = request_lsns.not_modified_since,
+			.hdr.tag = T_NeonNblocksRequest,
+			.hdr.reqid = GENERATE_REQUEST_ID(),
+			.hdr.lsn = request_lsns.request_lsn,
+			.hdr.not_modified_since = request_lsns.not_modified_since,
 			.rinfo = InfoFromSMgrRel(reln),
 			.forknum = forknum,
 		};
@@ -3559,16 +3559,16 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 				NeonNblocksResponse * relsize_resp = (NeonNblocksResponse *) resp;
 				if (neon_protocol_version >= 3)
 				{
-					if (resp->reqid != request.req.reqid ||
-						resp->lsn != request.req.lsn ||
-						resp->not_modified_since != request.req.not_modified_since ||
-						!RelFileInfoEquals(relsize_resp->rinfo, request.rinfo) ||
-						relsize_resp->forknum != forknum)
+					if (resp->reqid != request.hdr.reqid ||
+						resp->lsn != request.hdr.lsn ||
+						resp->not_modified_since != request.hdr.not_modified_since ||
+						!RelFileInfoEquals(relsize_resp->req.rinfo, request.rinfo) ||
+						relsize_resp->req.forknum != forknum)
 					{
 						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
 													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u} to get relsize request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u}",
-													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(relsize_resp->rinfo), relsize_resp->forknum,
-													request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since), RelFileInfoFmt(request.rinfo), forknum);
+													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(relsize_resp->req.rinfo), relsize_resp->req.forknum,
+													request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since), RelFileInfoFmt(request.rinfo), forknum);
 					}
 				}
 				n_blocks = relsize_resp->n_blocks;
@@ -3577,13 +3577,13 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			case T_NeonErrorResponse:
 				if (neon_protocol_version >= 3)
 				{
-					if (resp->reqid != request.req.reqid ||
-						resp->lsn != request.req.lsn ||
-						resp->not_modified_since != request.req.not_modified_since)
+					if (resp->reqid != request.hdr.reqid ||
+						resp->lsn != request.hdr.lsn ||
+						resp->not_modified_since != request.hdr.not_modified_since)
 					{
 						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get relsize request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
 							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
-							 request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since));
+							 request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since));
 					}
 				}
 				ereport(ERROR,
@@ -3631,10 +3631,10 @@ neon_dbsize(Oid dbNode)
 
 	{
 		NeonDbSizeRequest request = {
-			.req.tag = T_NeonDbSizeRequest,
-			.req.reqid = GENERATE_REQUEST_ID(),
-			.req.lsn = request_lsns.request_lsn,
-			.req.not_modified_since = request_lsns.not_modified_since,
+			.hdr.tag = T_NeonDbSizeRequest,
+			.hdr.reqid = GENERATE_REQUEST_ID(),
+			.hdr.lsn = request_lsns.request_lsn,
+			.hdr.not_modified_since = request_lsns.not_modified_since,
 			.dbNode = dbNode,
 		};
 
@@ -3647,15 +3647,15 @@ neon_dbsize(Oid dbNode)
 				NeonDbSizeResponse* dbsize_resp = (NeonDbSizeResponse *) resp;
 				if (neon_protocol_version >= 3)
 				{
-					if (resp->reqid != request.req.reqid ||
-						resp->lsn != request.req.lsn ||
-						resp->not_modified_since != request.req.not_modified_since ||
-						dbsize_resp->dbNode != dbNode)
+					if (resp->reqid != request.hdr.reqid ||
+						resp->lsn != request.hdr.lsn ||
+						resp->not_modified_since != request.hdr.not_modified_since ||
+						dbsize_resp->req.dbNode != dbNode)
 					{
 						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
 													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, dbNode=%u} to get DB size request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, dbNode=%u}",
-													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), dbsize_resp->dbNode,
-													request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since), dbNode);
+													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), dbsize_resp->req.dbNode,
+													request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since), dbNode);
 					}
 				}
 				db_size = dbsize_resp->db_size;
@@ -3664,13 +3664,13 @@ neon_dbsize(Oid dbNode)
 			case T_NeonErrorResponse:
 				if (neon_protocol_version >= 3)
 				{
-					if (resp->reqid != request.req.reqid ||
-						resp->lsn != request.req.lsn ||
-						resp->not_modified_since != request.req.not_modified_since)
+					if (resp->reqid != request.hdr.reqid ||
+						resp->lsn != request.hdr.lsn ||
+						resp->not_modified_since != request.hdr.not_modified_since)
 					{
 						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get DB size request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
 							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
-							 request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since));
+							 request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since));
 					}
 				}
 				ereport(ERROR,
@@ -4024,17 +4024,17 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 		return -1;
 
 	request = (NeonGetSlruSegmentRequest) {
-		.req.tag = T_NeonGetSlruSegmentRequest,
-		.req.reqid = GENERATE_REQUEST_ID(),
-		.req.lsn = request_lsn,
-		.req.not_modified_since = not_modified_since,
+		.hdr.tag = T_NeonGetSlruSegmentRequest,
+		.hdr.reqid = GENERATE_REQUEST_ID(),
+		.hdr.lsn = request_lsn,
+		.hdr.not_modified_since = not_modified_since,
 		.kind = kind,
 		.segno = segno
 	};
 
 	do
 	{
-		while (!page_server->send(shard_no, &request.req) || !page_server->flush(shard_no));
+		while (!page_server->send(shard_no, &request.hdr) || !page_server->flush(shard_no));
 
 		consume_prefetch_responses();
 
@@ -4048,16 +4048,16 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 			NeonGetSlruSegmentResponse* slru_resp = (NeonGetSlruSegmentResponse *) resp;
 			if (neon_protocol_version >= 3)
 			{
-				if (resp->reqid != request.req.reqid ||
-					resp->lsn != request.req.lsn ||
-					resp->not_modified_since != request.req.not_modified_since ||
-					slru_resp->kind != kind ||
-					slru_resp->segno != segno)
+				if (resp->reqid != request.hdr.reqid ||
+					resp->lsn != request.hdr.lsn ||
+					resp->not_modified_since != request.hdr.not_modified_since ||
+					slru_resp->req.kind != kind ||
+					slru_resp->req.segno != segno)
 				{
 					NEON_PANIC_CONNECTION_STATE(-1, PANIC,
 												"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, kind=%u, segno=%u} to get SLRU segment request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, kind=%u, segno=%u}",
-												resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), slru_resp->kind, slru_resp->segno,
-												request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since), kind, segno);
+												resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), slru_resp->req.kind, slru_resp->req.segno,
+												request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since), kind, segno);
 				}
 			}
 			n_blocks = slru_resp->n_blocks;
@@ -4067,13 +4067,13 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 		case T_NeonErrorResponse:
 			if (neon_protocol_version >= 3)
 			{
-				if (resp->reqid != request.req.reqid ||
-					resp->lsn != request.req.lsn ||
-					resp->not_modified_since != request.req.not_modified_since)
+				if (resp->reqid != request.hdr.reqid ||
+					resp->lsn != request.hdr.lsn ||
+					resp->not_modified_since != request.hdr.not_modified_since)
 				{
 					elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get SLRU segment request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
 						 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
-						 request.req.reqid, LSN_FORMAT_ARGS(request.req.lsn), LSN_FORMAT_ARGS(request.req.not_modified_since));
+						 request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since));
 				}
 			}
 			ereport(ERROR,
@@ -4218,7 +4218,7 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		NeonResponse *response;
 		NeonNblocksResponse *nbresponse;
 		NeonNblocksRequest request = {
-			.req = (NeonRequest) {
+			.hdr = (NeonRequest) {
 				.tag = T_NeonNblocksRequest,
 				.reqid = GENERATE_REQUEST_ID(),
 				.lsn = end_recptr,

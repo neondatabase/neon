@@ -17,7 +17,7 @@ use pageserver_api::models::{
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetSlruSegmentRequest,
     PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest, PagestreamNblocksResponse,
-    PagestreamProtocolVersion, RequestId,
+    PagestreamProtocolVersion, PagestreamRequest,
 };
 use pageserver_api::shard::TenantShardId;
 use postgres_backend::{
@@ -67,7 +67,7 @@ use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::{basebackup, timed_after_cancellation};
 use pageserver_api::key::rel_block_to_key;
-use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
+use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
@@ -539,10 +539,8 @@ impl From<WaitLsnError> for QueryError {
 
 #[derive(thiserror::Error, Debug)]
 struct BatchedPageStreamError {
+    req: PagestreamRequest,
     err: PageStreamError,
-    reqid: RequestId,
-    request_lsn: Lsn,
-    not_modified_since: Lsn,
 }
 
 impl std::fmt::Display for BatchedPageStreamError {
@@ -552,11 +550,7 @@ impl std::fmt::Display for BatchedPageStreamError {
 }
 
 struct BatchedGetPageRequest {
-    rel: RelTag,
-    blkno: BlockNumber,
-    reqid: RequestId,
-    request_lsn: Lsn,
-    not_modified_since: Lsn,
+    req: PagestreamGetPageRequest,
     timer: SmgrOpTimer,
 }
 
@@ -725,7 +719,7 @@ impl PageServerHandler {
 
         let batched_msg = match neon_fe_msg {
             PagestreamFeMessage::Exists(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
+                let span = tracing::info_span!(parent: parent_span, "handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
@@ -741,7 +735,7 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::Nblocks(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn);
+                let span = tracing::info_span!(parent: parent_span, "handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
@@ -757,7 +751,7 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::DbSize(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn);
+                let span = tracing::info_span!(parent: parent_span, "handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
@@ -773,7 +767,7 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::GetSlruSegment(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn);
+                let span = tracing::info_span!(parent: parent_span, "handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
@@ -788,31 +782,23 @@ impl PageServerHandler {
                     req,
                 }
             }
-            PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
-                reqid,
-                request_lsn,
-                not_modified_since,
-                rel,
-                blkno,
-            }) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_page_at_lsn_request_batched", req_lsn = %request_lsn);
+            PagestreamFeMessage::GetPage(req) => {
+                let span = tracing::info_span!(parent: parent_span, "handle_get_page_at_lsn_request_batched", req_lsn = %req.hdr.request_lsn);
 
                 macro_rules! respond_error {
                     ($error:expr) => {{
                         let error = BatchedFeMessage::RespondError {
                             span,
                             error: BatchedPageStreamError {
+                                req: req.hdr,
                                 err: $error,
-                                reqid,
-                                request_lsn,
-                                not_modified_since,
                             },
                         };
                         Ok(Some(error))
                     }};
                 }
 
-                let key = rel_block_to_key(rel, blkno);
+                let key = rel_block_to_key(req.rel, req.blkno);
                 let shard = match timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Page(key))
                     .instrument(span.clone()) // sets `shard_id` field
@@ -846,8 +832,8 @@ impl PageServerHandler {
 
                 let effective_request_lsn = match Self::wait_or_get_last_lsn(
                     &shard,
-                    request_lsn,
-                    not_modified_since,
+                    req.hdr.request_lsn,
+                    req.hdr.not_modified_since,
                     &shard.get_latest_gc_cutoff_lsn(),
                     ctx,
                 )
@@ -863,14 +849,7 @@ impl PageServerHandler {
                     span,
                     shard,
                     effective_request_lsn,
-                    pages: smallvec::smallvec![BatchedGetPageRequest {
-                        rel,
-                        blkno,
-                        reqid,
-                        request_lsn,
-                        not_modified_since,
-                        timer
-                    }],
+                    pages: smallvec::smallvec![BatchedGetPageRequest { req, timer }],
                 }
             }
         };
@@ -973,12 +952,7 @@ impl PageServerHandler {
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError {
-                            err,
-                            reqid: req.reqid,
-                            request_lsn: req.request_lsn,
-                            not_modified_since: req.not_modified_since,
-                        })],
+                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
                     span,
                 )
             }
@@ -995,12 +969,7 @@ impl PageServerHandler {
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError {
-                            err,
-                            reqid: req.reqid,
-                            request_lsn: req.request_lsn,
-                            not_modified_since: req.not_modified_since,
-                        })],
+                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
                     span,
                 )
             }
@@ -1043,12 +1012,7 @@ impl PageServerHandler {
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError {
-                            err,
-                            reqid: req.reqid,
-                            request_lsn: req.request_lsn,
-                            not_modified_since: req.not_modified_since,
-                        })],
+                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
                     span,
                 )
             }
@@ -1065,12 +1029,7 @@ impl PageServerHandler {
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError {
-                            err,
-                            reqid: req.reqid,
-                            request_lsn: req.request_lsn,
-                            not_modified_since: req.not_modified_since,
-                        })],
+                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
                     span,
                 )
             }
@@ -1111,9 +1070,7 @@ impl PageServerHandler {
                         });
                         (
                             PagestreamBeMessage::Error(PagestreamErrorResponse {
-                                reqid: e.reqid,
-                                request_lsn: e.request_lsn,
-                                not_modified_since: e.not_modified_since,
+                                req: e.req,
                                 message: e.err.to_string(),
                             }),
                             None, // TODO: measure errors
@@ -1659,8 +1616,8 @@ impl PageServerHandler {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
-            req.request_lsn,
-            req.not_modified_since,
+            req.hdr.request_lsn,
+            req.hdr.not_modified_since,
             &latest_gc_cutoff_lsn,
             ctx,
         )
@@ -1671,10 +1628,7 @@ impl PageServerHandler {
             .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
-            reqid: req.reqid,
-            request_lsn: req.request_lsn,
-            not_modified_since: req.not_modified_since,
-            rel: req.rel,
+            req: *req,
             exists,
         }))
     }
@@ -1689,8 +1643,8 @@ impl PageServerHandler {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
-            req.request_lsn,
-            req.not_modified_since,
+            req.hdr.request_lsn,
+            req.hdr.not_modified_since,
             &latest_gc_cutoff_lsn,
             ctx,
         )
@@ -1701,10 +1655,7 @@ impl PageServerHandler {
             .await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
-            reqid: req.reqid,
-            request_lsn: req.request_lsn,
-            not_modified_since: req.not_modified_since,
-            rel: req.rel,
+            req: *req,
             n_blocks,
         }))
     }
@@ -1719,8 +1670,8 @@ impl PageServerHandler {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
-            req.request_lsn,
-            req.not_modified_since,
+            req.hdr.request_lsn,
+            req.hdr.not_modified_since,
             &latest_gc_cutoff_lsn,
             ctx,
         )
@@ -1732,10 +1683,7 @@ impl PageServerHandler {
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
         Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
-            reqid: req.reqid,
-            request_lsn: req.request_lsn,
-            not_modified_since: req.not_modified_since,
-            db_node: req.dbnode,
+            req: *req,
             db_size,
         }))
     }
@@ -1756,7 +1704,7 @@ impl PageServerHandler {
 
         let results = timeline
             .get_rel_page_at_lsn_batched(
-                requests.iter().map(|p| (&p.rel, &p.blkno)),
+                requests.iter().map(|p| (&p.req.rel, &p.req.blkno)),
                 effective_lsn,
                 ctx,
             )
@@ -1772,11 +1720,7 @@ impl PageServerHandler {
                     res.map(|page| {
                         (
                             PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse {
-                                reqid: req.reqid,
-                                request_lsn: req.request_lsn,
-                                not_modified_since: req.not_modified_since,
-                                rel: req.rel,
-                                blkno: req.blkno,
+                                req: req.req,
                                 page,
                             }),
                             req.timer,
@@ -1784,9 +1728,7 @@ impl PageServerHandler {
                     })
                     .map_err(|e| BatchedPageStreamError {
                         err: PageStreamError::from(e),
-                        reqid: req.reqid,
-                        request_lsn: req.request_lsn,
-                        not_modified_since: req.not_modified_since,
+                        req: req.req.hdr,
                     })
                 }),
         )
@@ -1802,8 +1744,8 @@ impl PageServerHandler {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
-            req.request_lsn,
-            req.not_modified_since,
+            req.hdr.request_lsn,
+            req.hdr.not_modified_since,
             &latest_gc_cutoff_lsn,
             ctx,
         )
@@ -1814,14 +1756,7 @@ impl PageServerHandler {
         let segment = timeline.get_slru_segment(kind, req.segno, lsn, ctx).await?;
 
         Ok(PagestreamBeMessage::GetSlruSegment(
-            PagestreamGetSlruSegmentResponse {
-                reqid: req.reqid,
-                request_lsn: req.request_lsn,
-                not_modified_since: req.not_modified_since,
-                kind: req.kind,
-                segno: req.segno,
-                segment,
-            },
+            PagestreamGetSlruSegmentResponse { req: *req, segment },
         ))
     }
 

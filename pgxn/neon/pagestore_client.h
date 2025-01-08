@@ -103,27 +103,27 @@ typedef NeonMessage NeonRequest;
 
 typedef struct
 {
-	NeonRequest req;
+	NeonRequest hdr;
 	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 } NeonExistsRequest;
 
 typedef struct
 {
-	NeonRequest req;
+	NeonRequest hdr;
 	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 } NeonNblocksRequest;
 
 typedef struct
 {
-	NeonRequest req;
+	NeonRequest hdr;
 	Oid			dbNode;
 } NeonDbSizeRequest;
 
 typedef struct
 {
-	NeonRequest req;
+	NeonRequest hdr;
 	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 	BlockNumber blkno;
@@ -131,7 +131,7 @@ typedef struct
 
 typedef struct
 {
-	NeonRequest req;
+	NeonRequest hdr;
 	SlruKind	kind;
 	int			segno;
 } NeonGetSlruSegmentRequest;
@@ -141,26 +141,19 @@ typedef NeonMessage NeonResponse;
 
 typedef struct
 {
-	NeonResponse resp;
-	NRelFileInfo rinfo;
-	ForkNumber	forknum;
+	NeonExistsRequest req;
 	bool		exists;
 } NeonExistsResponse;
 
 typedef struct
 {
-	NeonResponse resp;
-	NRelFileInfo rinfo;
-	ForkNumber	forknum;
+	NeonNblocksRequest req;
 	uint32		n_blocks;
 } NeonNblocksResponse;
 
 typedef struct
 {
-	NeonResponse resp;
-	NRelFileInfo rinfo;
-	ForkNumber	forknum;
-	BlockNumber blkno;
+	NeonGetPageRequest req;
 	char		page[FLEXIBLE_ARRAY_MEMBER];
 } NeonGetPageResponse;
 
@@ -168,23 +161,20 @@ typedef struct
 
 typedef struct
 {
-	NeonResponse resp;
-	Oid			dbNode;
+	NeonDbSizeRequest req;
 	int64		db_size;
 } NeonDbSizeResponse;
 
 typedef struct
 {
-	NeonResponse resp;
+	NeonResponse req;
 	char		message[FLEXIBLE_ARRAY_MEMBER]; /* null-terminated error
 												 * message */
 } NeonErrorResponse;
 
 typedef struct
 {
-	NeonResponse resp;
-	SlruKind	kind;
-	int			segno;
+	NeonGetSlruSegmentRequest req;
 	int			n_blocks;
 	char		data[BLCKSZ * SLRU_PAGES_PER_SEGMENT];
 } NeonGetSlruSegmentResponse;

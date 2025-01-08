@@ -1473,130 +1473,78 @@ pub enum PagestreamProtocolVersion {
 
 pub type RequestId = u64;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct PagestreamRequest {
+    pub reqid: RequestId,
+    pub request_lsn: Lsn,
+    pub not_modified_since: Lsn,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct PagestreamExistsRequest {
-    pub reqid: RequestId,
-    pub request_lsn: Lsn,
-    pub not_modified_since: Lsn,
+    pub hdr: PagestreamRequest,
     pub rel: RelTag,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct PagestreamNblocksRequest {
-    pub reqid: RequestId,
-    pub request_lsn: Lsn,
-    pub not_modified_since: Lsn,
+    pub hdr: PagestreamRequest,
     pub rel: RelTag,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct PagestreamGetPageRequest {
-    pub reqid: RequestId,
-    pub request_lsn: Lsn,
-    pub not_modified_since: Lsn,
+    pub hdr: PagestreamRequest,
     pub rel: RelTag,
     pub blkno: u32,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct PagestreamDbSizeRequest {
-    pub reqid: RequestId,
-    pub request_lsn: Lsn,
-    pub not_modified_since: Lsn,
+    pub hdr: PagestreamRequest,
     pub dbnode: u32,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct PagestreamGetSlruSegmentRequest {
-    pub reqid: RequestId,
-    pub request_lsn: Lsn,
-    pub not_modified_since: Lsn,
+    pub hdr: PagestreamRequest,
     pub kind: u8,
     pub segno: u32,
 }
 
 #[derive(Debug)]
 pub struct PagestreamExistsResponse {
-    // Fields copied from the request, to aid debugging and to enable assertions in the
-    // compute to ensure that it doesn't mix up responses belonging to different
-    // requests.
-    pub reqid: RequestId,
-    pub request_lsn: Lsn,
-    pub not_modified_since: Lsn,
-    pub rel: RelTag,
-
-    // Actual response
+    pub req: PagestreamExistsRequest,
     pub exists: bool,
 }
 
 #[derive(Debug)]
 pub struct PagestreamNblocksResponse {
-    // Fields copied from the request, to aid debugging and to enable assertions in the
-    // compute to ensure that it doesn't mix up responses belonging to different
-    // requests.
-    pub reqid: RequestId,
-    pub request_lsn: Lsn,
-    pub not_modified_since: Lsn,
-    pub rel: RelTag,
-
-    // Actual response
+    pub req: PagestreamNblocksRequest,
     pub n_blocks: u32,
 }
 
 #[derive(Debug)]
 pub struct PagestreamGetPageResponse {
-    // Fields copied from the request, to aid debugging and to enable assertions in the
-    // compute to ensure that it doesn't mix up responses belonging to different
-    // requests.
-    pub reqid: RequestId,
-    pub request_lsn: Lsn,
-    pub not_modified_since: Lsn,
-    pub rel: RelTag,
-
-    // Actual response
-    pub blkno: u32,
+    pub req: PagestreamGetPageRequest,
     pub page: Bytes,
 }
 
 #[derive(Debug)]
 pub struct PagestreamGetSlruSegmentResponse {
-    // Fields copied from the request, to aid debugging and to enable assertions in the
-    // compute to ensure that it doesn't mix up responses belonging to different
-    // requests.
-    pub reqid: RequestId,
-    pub request_lsn: Lsn,
-    pub not_modified_since: Lsn,
-    pub kind: u8,
-    pub segno: u32,
-
-    // Actual response
+    pub req: PagestreamGetSlruSegmentRequest,
     pub segment: Bytes,
 }
 
 #[derive(Debug)]
 pub struct PagestreamErrorResponse {
-    // Fields copied from the request, to aid debugging and to enable assertions in the
-    // compute to ensure that it doesn't mix up responses belonging to different
-    // requests.
-    pub reqid: RequestId,
-    pub request_lsn: Lsn,
-    pub not_modified_since: Lsn,
-
-    // Actual response
+    pub req: PagestreamRequest,
     pub message: String,
 }
 
 #[derive(Debug)]
 pub struct PagestreamDbSizeResponse {
-    // Fields copied from the request, to aid debugging and to enable assertions in the
-    // compute to ensure that it doesn't mix up responses belonging to different
-    // requests.
-    pub reqid: RequestId,
-    pub request_lsn: Lsn,
-    pub not_modified_since: Lsn,
-    pub db_node: u32,
-
-    // Actual response
+    pub req: PagestreamDbSizeRequest,
     pub db_size: i64,
 }
 
@@ -1620,9 +1568,9 @@ impl PagestreamFeMessage {
         match self {
             Self::Exists(req) => {
                 bytes.put_u8(0);
-                bytes.put_u64(req.reqid);
-                bytes.put_u64(req.request_lsn.0);
-                bytes.put_u64(req.not_modified_since.0);
+                bytes.put_u64(req.hdr.reqid);
+                bytes.put_u64(req.hdr.request_lsn.0);
+                bytes.put_u64(req.hdr.not_modified_since.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
                 bytes.put_u32(req.rel.relnode);
@@ -1631,9 +1579,9 @@ impl PagestreamFeMessage {
 
             Self::Nblocks(req) => {
                 bytes.put_u8(1);
-                bytes.put_u64(req.reqid);
-                bytes.put_u64(req.request_lsn.0);
-                bytes.put_u64(req.not_modified_since.0);
+                bytes.put_u64(req.hdr.reqid);
+                bytes.put_u64(req.hdr.request_lsn.0);
+                bytes.put_u64(req.hdr.not_modified_since.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
                 bytes.put_u32(req.rel.relnode);
@@ -1642,9 +1590,9 @@ impl PagestreamFeMessage {
 
             Self::GetPage(req) => {
                 bytes.put_u8(2);
-                bytes.put_u64(req.reqid);
-                bytes.put_u64(req.request_lsn.0);
-                bytes.put_u64(req.not_modified_since.0);
+                bytes.put_u64(req.hdr.reqid);
+                bytes.put_u64(req.hdr.request_lsn.0);
+                bytes.put_u64(req.hdr.not_modified_since.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
                 bytes.put_u32(req.rel.relnode);
@@ -1654,17 +1602,17 @@ impl PagestreamFeMessage {
 
             Self::DbSize(req) => {
                 bytes.put_u8(3);
-                bytes.put_u64(req.reqid);
-                bytes.put_u64(req.request_lsn.0);
-                bytes.put_u64(req.not_modified_since.0);
+                bytes.put_u64(req.hdr.reqid);
+                bytes.put_u64(req.hdr.request_lsn.0);
+                bytes.put_u64(req.hdr.not_modified_since.0);
                 bytes.put_u32(req.dbnode);
             }
 
             Self::GetSlruSegment(req) => {
                 bytes.put_u8(4);
-                bytes.put_u64(req.reqid);
-                bytes.put_u64(req.request_lsn.0);
-                bytes.put_u64(req.not_modified_since.0);
+                bytes.put_u64(req.hdr.reqid);
+                bytes.put_u64(req.hdr.request_lsn.0);
+                bytes.put_u64(req.hdr.not_modified_since.0);
                 bytes.put_u8(req.kind);
                 bytes.put_u32(req.segno);
             }
@@ -1697,9 +1645,11 @@ impl PagestreamFeMessage {
 
         match msg_tag {
             0 => Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
-                reqid,
-                request_lsn,
-                not_modified_since,
+                hdr: PagestreamRequest {
+                    reqid,
+                    request_lsn,
+                    not_modified_since,
+                },
                 rel: RelTag {
                     spcnode: body.read_u32::<BigEndian>()?,
                     dbnode: body.read_u32::<BigEndian>()?,
@@ -1708,9 +1658,11 @@ impl PagestreamFeMessage {
                 },
             })),
             1 => Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
-                reqid,
-                request_lsn,
-                not_modified_since,
+                hdr: PagestreamRequest {
+                    reqid,
+                    request_lsn,
+                    not_modified_since,
+                },
                 rel: RelTag {
                     spcnode: body.read_u32::<BigEndian>()?,
                     dbnode: body.read_u32::<BigEndian>()?,
@@ -1719,9 +1671,11 @@ impl PagestreamFeMessage {
                 },
             })),
             2 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
-                reqid,
-                request_lsn,
-                not_modified_since,
+                hdr: PagestreamRequest {
+                    reqid,
+                    request_lsn,
+                    not_modified_since,
+                },
                 rel: RelTag {
                     spcnode: body.read_u32::<BigEndian>()?,
                     dbnode: body.read_u32::<BigEndian>()?,
@@ -1731,16 +1685,20 @@ impl PagestreamFeMessage {
                 blkno: body.read_u32::<BigEndian>()?,
             })),
             3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
-                reqid,
-                request_lsn,
-                not_modified_since,
+                hdr: PagestreamRequest {
+                    reqid,
+                    request_lsn,
+                    not_modified_since,
+                },
                 dbnode: body.read_u32::<BigEndian>()?,
             })),
             4 => Ok(PagestreamFeMessage::GetSlruSegment(
                 PagestreamGetSlruSegmentRequest {
-                    reqid,
-                    request_lsn,
-                    not_modified_since,
+                    hdr: PagestreamRequest {
+                        reqid,
+                        request_lsn,
+                        not_modified_since,
+                    },
                     kind: body.read_u8()?,
                     segno: body.read_u32::<BigEndian>()?,
                 },
@@ -1794,65 +1752,65 @@ impl PagestreamBeMessage {
                 match self {
                     Self::Exists(resp) => {
                         bytes.put_u8(Tag::Exists as u8);
-                        bytes.put_u64(resp.reqid);
-                        bytes.put_u64(resp.request_lsn.0);
-                        bytes.put_u64(resp.not_modified_since.0);
-                        bytes.put_u32(resp.rel.spcnode);
-                        bytes.put_u32(resp.rel.dbnode);
-                        bytes.put_u32(resp.rel.relnode);
-                        bytes.put_u8(resp.rel.forknum);
+                        bytes.put_u64(resp.req.hdr.reqid);
+                        bytes.put_u64(resp.req.hdr.request_lsn.0);
+                        bytes.put_u64(resp.req.hdr.not_modified_since.0);
+                        bytes.put_u32(resp.req.rel.spcnode);
+                        bytes.put_u32(resp.req.rel.dbnode);
+                        bytes.put_u32(resp.req.rel.relnode);
+                        bytes.put_u8(resp.req.rel.forknum);
                         bytes.put_u8(resp.exists as u8);
                     }
 
                     Self::Nblocks(resp) => {
                         bytes.put_u8(Tag::Nblocks as u8);
-                        bytes.put_u64(resp.reqid);
-                        bytes.put_u64(resp.request_lsn.0);
-                        bytes.put_u64(resp.not_modified_since.0);
-                        bytes.put_u32(resp.rel.spcnode);
-                        bytes.put_u32(resp.rel.dbnode);
-                        bytes.put_u32(resp.rel.relnode);
-                        bytes.put_u8(resp.rel.forknum);
+                        bytes.put_u64(resp.req.hdr.reqid);
+                        bytes.put_u64(resp.req.hdr.request_lsn.0);
+                        bytes.put_u64(resp.req.hdr.not_modified_since.0);
+                        bytes.put_u32(resp.req.rel.spcnode);
+                        bytes.put_u32(resp.req.rel.dbnode);
+                        bytes.put_u32(resp.req.rel.relnode);
+                        bytes.put_u8(resp.req.rel.forknum);
                         bytes.put_u32(resp.n_blocks);
                     }
 
                     Self::GetPage(resp) => {
                         bytes.put_u8(Tag::GetPage as u8);
-                        bytes.put_u64(resp.reqid);
-                        bytes.put_u64(resp.request_lsn.0);
-                        bytes.put_u64(resp.not_modified_since.0);
-                        bytes.put_u32(resp.rel.spcnode);
-                        bytes.put_u32(resp.rel.dbnode);
-                        bytes.put_u32(resp.rel.relnode);
-                        bytes.put_u8(resp.rel.forknum);
-                        bytes.put_u32(resp.blkno);
+                        bytes.put_u64(resp.req.hdr.reqid);
+                        bytes.put_u64(resp.req.hdr.request_lsn.0);
+                        bytes.put_u64(resp.req.hdr.not_modified_since.0);
+                        bytes.put_u32(resp.req.rel.spcnode);
+                        bytes.put_u32(resp.req.rel.dbnode);
+                        bytes.put_u32(resp.req.rel.relnode);
+                        bytes.put_u8(resp.req.rel.forknum);
+                        bytes.put_u32(resp.req.blkno);
                         bytes.put(&resp.page[..])
                     }
 
                     Self::Error(resp) => {
                         bytes.put_u8(Tag::Error as u8);
-                        bytes.put_u64(resp.reqid);
-                        bytes.put_u64(resp.request_lsn.0);
-                        bytes.put_u64(resp.not_modified_since.0);
+                        bytes.put_u64(resp.req.reqid);
+                        bytes.put_u64(resp.req.request_lsn.0);
+                        bytes.put_u64(resp.req.not_modified_since.0);
                         bytes.put(resp.message.as_bytes());
                         bytes.put_u8(0); // null terminator
                     }
                     Self::DbSize(resp) => {
                         bytes.put_u8(Tag::DbSize as u8);
-                        bytes.put_u64(resp.reqid);
-                        bytes.put_u64(resp.request_lsn.0);
-                        bytes.put_u64(resp.not_modified_since.0);
-                        bytes.put_u32(resp.db_node);
+                        bytes.put_u64(resp.req.hdr.reqid);
+                        bytes.put_u64(resp.req.hdr.request_lsn.0);
+                        bytes.put_u64(resp.req.hdr.not_modified_since.0);
+                        bytes.put_u32(resp.req.dbnode);
                         bytes.put_i64(resp.db_size);
                     }
 
                     Self::GetSlruSegment(resp) => {
                         bytes.put_u8(Tag::GetSlruSegment as u8);
-                        bytes.put_u64(resp.reqid);
-                        bytes.put_u64(resp.request_lsn.0);
-                        bytes.put_u64(resp.not_modified_since.0);
-                        bytes.put_u8(resp.kind);
-                        bytes.put_u32(resp.segno);
+                        bytes.put_u64(resp.req.hdr.reqid);
+                        bytes.put_u64(resp.req.hdr.request_lsn.0);
+                        bytes.put_u64(resp.req.hdr.not_modified_since.0);
+                        bytes.put_u8(resp.req.kind);
+                        bytes.put_u32(resp.req.segno);
                         bytes.put_u32((resp.segment.len() / BLCKSZ as usize) as u32);
                         bytes.put(&resp.segment[..]);
                     }
@@ -1881,10 +1839,14 @@ impl PagestreamBeMessage {
                     };
                     let exists = buf.read_u8()? != 0;
                     Self::Exists(PagestreamExistsResponse {
-                        reqid,
-                        request_lsn,
-                        not_modified_since,
-                        rel,
+                        req: PagestreamExistsRequest {
+                            hdr: PagestreamRequest {
+                                reqid,
+                                request_lsn,
+                                not_modified_since,
+                            },
+                            rel,
+                        },
                         exists,
                     })
                 }
@@ -1900,10 +1862,14 @@ impl PagestreamBeMessage {
                     };
                     let n_blocks = buf.read_u32::<BigEndian>()?;
                     Self::Nblocks(PagestreamNblocksResponse {
-                        reqid,
-                        request_lsn,
-                        not_modified_since,
-                        rel,
+                        req: PagestreamNblocksRequest {
+                            hdr: PagestreamRequest {
+                                reqid,
+                                request_lsn,
+                                not_modified_since,
+                            },
+                            rel,
+                        },
                         n_blocks,
                     })
                 }
@@ -1921,11 +1887,15 @@ impl PagestreamBeMessage {
                     let mut page = vec![0; 8192]; // TODO: use MaybeUninit
                     buf.read_exact(&mut page)?;
                     Self::GetPage(PagestreamGetPageResponse {
-                        reqid,
-                        request_lsn,
-                        not_modified_since,
-                        rel,
-                        blkno,
+                        req: PagestreamGetPageRequest {
+                            hdr: PagestreamRequest {
+                                reqid,
+                                request_lsn,
+                                not_modified_since,
+                            },
+                            rel,
+                            blkno,
+                        },
                         page: page.into(),
                     })
                 }
@@ -1938,9 +1908,11 @@ impl PagestreamBeMessage {
                     let cstring = std::ffi::CString::from_vec_with_nul(msg)?;
                     let rust_str = cstring.to_str()?;
                     Self::Error(PagestreamErrorResponse {
-                        reqid,
-                        request_lsn,
-                        not_modified_since,
+                        req: PagestreamRequest {
+                            reqid,
+                            request_lsn,
+                            not_modified_since,
+                        },
                         message: rust_str.to_owned(),
                     })
                 }
@@ -1948,13 +1920,17 @@ impl PagestreamBeMessage {
                     let reqid = buf.read_u64::<BigEndian>()?;
                     let request_lsn = Lsn(buf.read_u64::<BigEndian>()?);
                     let not_modified_since = Lsn(buf.read_u64::<BigEndian>()?);
-                    let db_node = buf.read_u32::<BigEndian>()?;
+                    let dbnode = buf.read_u32::<BigEndian>()?;
                     let db_size = buf.read_i64::<BigEndian>()?;
                     Self::DbSize(PagestreamDbSizeResponse {
-                        reqid,
-                        request_lsn,
-                        not_modified_since,
-                        db_node,
+                        req: PagestreamDbSizeRequest {
+                            hdr: PagestreamRequest {
+                                reqid,
+                                request_lsn,
+                                not_modified_since,
+                            },
+                            dbnode,
+                        },
                         db_size,
                     })
                 }
@@ -1968,11 +1944,15 @@ impl PagestreamBeMessage {
                     let mut segment = vec![0; n_blocks as usize * BLCKSZ as usize];
                     buf.read_exact(&mut segment)?;
                     Self::GetSlruSegment(PagestreamGetSlruSegmentResponse {
-                        reqid,
-                        request_lsn,
-                        not_modified_since,
-                        kind,
-                        segno,
+                        req: PagestreamGetSlruSegmentRequest {
+                            hdr: PagestreamRequest {
+                                reqid,
+                                request_lsn,
+                                not_modified_since,
+                            },
+                            kind,
+                            segno,
+                        },
                         segment: segment.into(),
                     })
                 }
@@ -2011,9 +1991,11 @@ mod tests {
         // Test serialization/deserialization of PagestreamFeMessage
         let messages = vec![
             PagestreamFeMessage::Exists(PagestreamExistsRequest {
-                reqid: 0,
-                request_lsn: Lsn(4),
-                not_modified_since: Lsn(3),
+                hdr: PagestreamRequest {
+                    reqid: 0,
+                    request_lsn: Lsn(4),
+                    not_modified_since: Lsn(3),
+                },
                 rel: RelTag {
                     forknum: 1,
                     spcnode: 2,
@@ -2022,9 +2004,11 @@ mod tests {
                 },
             }),
             PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
-                reqid: 0,
-                request_lsn: Lsn(4),
-                not_modified_since: Lsn(4),
+                hdr: PagestreamRequest {
+                    reqid: 0,
+                    request_lsn: Lsn(4),
+                    not_modified_since: Lsn(4),
+                },
                 rel: RelTag {
                     forknum: 1,
                     spcnode: 2,
@@ -2033,9 +2017,11 @@ mod tests {
                 },
             }),
             PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
-                reqid: 0,
-                request_lsn: Lsn(4),
-                not_modified_since: Lsn(3),
+                hdr: PagestreamRequest {
+                    reqid: 0,
+                    request_lsn: Lsn(4),
+                    not_modified_since: Lsn(3),
+                },
                 rel: RelTag {
                     forknum: 1,
                     spcnode: 2,
@@ -2045,9 +2031,11 @@ mod tests {
                 blkno: 7,
             }),
             PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
-                reqid: 0,
-                request_lsn: Lsn(4),
-                not_modified_since: Lsn(3),
+                hdr: PagestreamRequest {
+                    reqid: 0,
+                    request_lsn: Lsn(4),
+                    not_modified_since: Lsn(3),
+                },
                 dbnode: 7,
             }),
         ];
