@@ -272,7 +272,8 @@ def test_compute_drop_role(neon_simple_env: NeonEnv):
                         # We need to create role via compute_ctl, because in this case it will receive
                         # additional grants equivalent to our real environment, so we can repro some
                         # issues.
-                        "name": "readonly",
+                        "name": "neon",
+                        # XXX: this is a hash suggested by LLM, no specific meaning.
                         "encrypted_password": "SCRAM-SHA-256$4096:hBT22QjqpydQWqEulorfXA==$miBogcoj68JWYdsNB5PW1X6PjSLBEcNuctuhtGkb4PY=:hxk2gxkwxGo6P7GCtfpMlhA9zwHvPMsCz+NQf2HfvWk=",
                         "options": [],
                     },
@@ -280,7 +281,7 @@ def test_compute_drop_role(neon_simple_env: NeonEnv):
                 "databases": [
                     {
                         "name": TEST_DB_NAME,
-                        "owner": "readonly",
+                        "owner": "neon",
                     },
                 ],
             },
@@ -289,7 +290,13 @@ def test_compute_drop_role(neon_simple_env: NeonEnv):
     endpoint.reconfigure()
 
     with endpoint.cursor(dbname=TEST_DB_NAME) as cursor:
+        # Create table as `cloud_admin`. This is the case when, for example,
+        # PostGIS extensions creates tables in `public` schema.
         cursor.execute("create table test_table (id int)")
+
+    with endpoint.cursor(dbname=TEST_DB_NAME, user="neon") as cursor:
+        cursor.execute("create role readonly")
+        # We (`compute_ctl`) make 'neon' the owner of schema 'public' in the owned database.
         # Postgres has all sorts of permissions and grant that we may not handle well,
         # but this is the shortest repro grant for the issue
         # https://github.com/neondatabase/cloud/issues/13582
@@ -300,6 +307,16 @@ def test_compute_drop_role(neon_simple_env: NeonEnv):
         cursor.execute("SELECT rolname FROM pg_roles WHERE rolname = 'readonly'")
         role = cursor.fetchone()
         assert role is not None
+
+    # Confirm that we actually have some permissions for 'readonly' role
+    # that may block our ability to drop the role.
+    with endpoint.cursor(dbname=TEST_DB_NAME) as cursor:
+        cursor.execute(
+            "select grantor from information_schema.role_table_grants where grantee = 'readonly'"
+        )
+        res = cursor.fetchone()
+        assert res is not None
+        assert res[0] == "neon_superuser"
 
     # Drop role via compute_ctl
     endpoint.respec_deep(
@@ -318,5 +335,31 @@ def test_compute_drop_role(neon_simple_env: NeonEnv):
     # Check that role is dropped
     with endpoint.cursor() as cursor:
         cursor.execute("SELECT rolname FROM pg_roles WHERE rolname = 'readonly'")
+        role = cursor.fetchone()
+        assert role is None
+
+    #
+    # Drop schema 'public' and check that we can still drop the role
+    #
+    with endpoint.cursor(dbname=TEST_DB_NAME) as cursor:
+        cursor.execute("create role readonly2")
+        cursor.execute("grant select on all tables in schema public to readonly2")
+        cursor.execute("drop schema public cascade")
+
+    endpoint.respec_deep(
+        **{
+            "skip_pg_catalog_updates": False,
+            "delta_operations": [
+                {
+                    "action": "delete_role",
+                    "name": "readonly2",
+                },
+            ],
+        }
+    )
+    endpoint.reconfigure()
+
+    with endpoint.cursor() as cursor:
+        cursor.execute("SELECT rolname FROM pg_roles WHERE rolname = 'readonly2'")
         role = cursor.fetchone()
         assert role is None

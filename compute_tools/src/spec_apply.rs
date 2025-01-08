@@ -75,7 +75,7 @@ pub struct MutableApplyContext {
     pub dbs: HashMap<String, Database>,
 }
 
-/// Appply the operations that belong to the given spec apply phase.
+/// Apply the operations that belong to the given spec apply phase.
 ///
 /// Commands within a single phase are executed in order of Iterator yield.
 /// Commands of ApplySpecPhase::RunInEachDatabase will execute in the database
@@ -498,7 +498,19 @@ async fn get_operations<'a>(
                                         ),
                                         comment: None,
                                     },
+                                    // Revoke some potentially blocking privileges (Neon-specific currently)
+                                    Operation {
+                                        query: format!(
+                                            include_str!("sql/pre_drop_role_revoke_privileges.sql"),
+                                            role_name = quoted,
+                                        ),
+                                        comment: None,
+                                    },
                                     // This now will only drop privileges of the role
+                                    // TODO: this is obviously not 100% true because of the above case,
+                                    // there could be still some privileges that are not revoked. Maybe this
+                                    // only drops privileges that were granted *by this* role, not *to this* role,
+                                    // but this is has to be checked.
                                     Operation {
                                         query: format!("DROP OWNED BY {}", quoted),
                                         comment: None,
