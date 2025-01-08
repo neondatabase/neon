@@ -5684,6 +5684,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "smallvec",
  "storage_broker",
  "strum",
  "strum_macros",
