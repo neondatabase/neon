@@ -962,7 +962,9 @@ def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
 
 
 @pytest.mark.parametrize("end_with_offloaded", [False, True])
-def test_timeline_offload_race_unarchive(neon_env_builder: NeonEnvBuilder, end_with_offloaded: bool):
+def test_timeline_offload_race_unarchive(
+    neon_env_builder: NeonEnvBuilder, end_with_offloaded: bool
+):
     """
     Ensure that unarchive and timeline offload don't race each other
     """
@@ -1034,7 +1036,11 @@ def test_timeline_offload_race_unarchive(neon_env_builder: NeonEnvBuilder, end_w
 
     # Ensure that we've hit the failed offload attempt
     ps_http.configure_failpoints((failpoint, "off"))
-    wait_until(lambda: env.pageserver.assert_log_contains(f".*compaction_loop.*offload_timeline.*{leaf_timeline_id}.*can't shut down timeline.*"))
+    wait_until(
+        lambda: env.pageserver.assert_log_contains(
+            f".*compaction_loop.*offload_timeline.*{leaf_timeline_id}.*can't shut down timeline.*"
+        )
+    )
 
     with env.endpoints.create_start(
         "test_ancestor_branch_archive", tenant_id=tenant_id
