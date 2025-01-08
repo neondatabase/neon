@@ -1558,8 +1558,14 @@ impl Service {
         // the pageserver API (not via this service), we will auto-create any missing tenant
         // shards with default state.
         let insert = {
-            let locked = self.inner.write().unwrap();
-            !locked.tenants.contains_key(&attach_req.tenant_shard_id)
+            match self
+                .maybe_load_tenant(attach_req.tenant_shard_id.tenant_id, &_tenant_lock)
+                .await
+            {
+                Ok(_) => false,
+                Err(ApiError::NotFound(_)) => true,
+                Err(e) => return Err(e.into()),
+            }
         };
 
         if insert {
