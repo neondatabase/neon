@@ -1044,7 +1044,7 @@ async fn main() -> anyhow::Result<()> {
                     format!("{}", sk.port),
                     format!("{}", sk.http_port),
                     sk.availability_zone_id.to_string(),
-                    format!("{}", sk.scheduling_policy.unwrap_or_default()),
+                    format!("{}", sk.scheduling_policy),
                 ]);
             }
             println!("{table}");

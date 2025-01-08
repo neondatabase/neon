@@ -1227,7 +1227,7 @@ pub(crate) struct SafekeeperPersistence {
     pub(crate) active: bool,
     pub(crate) http_port: i32,
     pub(crate) availability_zone_id: String,
-    pub(crate) scheduling_policy: Option<String>,
+    pub(crate) scheduling_policy: String,
 }
 
 impl SafekeeperPersistence {
@@ -1241,7 +1241,7 @@ impl SafekeeperPersistence {
             active: self.active,
             http_port: self.http_port,
             availability_zone_id: &self.availability_zone_id,
-            scheduling_policy: None,
+            scheduling_policy: &self.scheduling_policy,
         }
     }
     pub(crate) fn as_describe_response(&self) -> SafekeeperDescribeResponse {
@@ -1271,5 +1271,5 @@ struct InsertUpdateSafekeeper<'a> {
     active: bool,
     http_port: i32,
     availability_zone_id: &'a str,
-    scheduling_policy: Option<&'a str>,
+    scheduling_policy: &'a str,
 }
