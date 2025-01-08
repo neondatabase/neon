@@ -6,6 +6,7 @@ OBJS = \
 	$(WIN32RES) \
 	extension_server.o \
 	file_cache.o \
+	file_cache_prewarm.o \
 	hll.o \
 	libpagestore.o \
 	logical_replication_monitor.o \

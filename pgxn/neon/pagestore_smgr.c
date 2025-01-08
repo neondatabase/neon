@@ -4379,13 +4379,20 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	}
 
 	/*
-	 * we don't have the buffer in memory, update lwLsn past this record, also
-	 * evict page from file cache
+	 * If a buffer is present in LFC, we should probably replay from there
+	 * (rather than evict it).
+	 */
+	if (no_redo_needed)
+	{
+		no_redo_needed = !lfc_cache_contains_prewarm(rinfo, forknum, blkno);
+	}
+
+	/*
+	 * we don't have the buffer in memory, so update lwLsn past this record
 	 */
 	if (no_redo_needed)
 	{
 		SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
-		lfc_evict(rinfo, forknum, blkno);
 	}
 
 	LWLockRelease(partitionLock);

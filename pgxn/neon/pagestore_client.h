@@ -278,6 +278,12 @@ extern int lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum,
 
 extern bool lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum,
 							   BlockNumber blkno);
+/*
+ * Same as above, but also returns true if prewarm is currently active on this
+ * chunk 
+ */
+extern bool lfc_cache_contains_prewarm(NRelFileInfo rinfo, ForkNumber forkNum,
+									   BlockNumber blkno);
 extern int lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum,
 							   BlockNumber blkno, int nblocks, bits8 *bitmap);
 extern void lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno);
