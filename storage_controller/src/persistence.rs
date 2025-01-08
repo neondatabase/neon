@@ -1045,7 +1045,7 @@ impl Persistence {
 
     pub(crate) async fn safekeeper_upsert(
         &self,
-        record: SafekeeperPersistence,
+        record: SafekeeperUpsert,
     ) -> Result<(), DatabaseError> {
         use crate::schema::safekeepers::dsl::*;
 
@@ -1213,6 +1213,7 @@ pub(crate) struct ControllerPersistence {
     pub(crate) started_at: chrono::DateTime<chrono::Utc>,
 }
 
+// What we store in the database
 #[derive(Serialize, Deserialize, Queryable, Selectable, Eq, PartialEq, Debug, Clone)]
 #[diesel(table_name = crate::schema::safekeepers)]
 pub(crate) struct SafekeeperPersistence {
@@ -1231,19 +1232,6 @@ pub(crate) struct SafekeeperPersistence {
 }
 
 impl SafekeeperPersistence {
-    fn as_insert_or_update(&self) -> InsertUpdateSafekeeper<'_> {
-        InsertUpdateSafekeeper {
-            id: self.id,
-            region_id: &self.region_id,
-            version: self.version,
-            host: &self.host,
-            port: self.port,
-            active: self.active,
-            http_port: self.http_port,
-            availability_zone_id: &self.availability_zone_id,
-            scheduling_policy: &self.scheduling_policy,
-        }
-    }
     pub(crate) fn as_describe_response(&self) -> SafekeeperDescribeResponse {
         // omit the `active` flag on purpose: it is deprecated.
         SafekeeperDescribeResponse {
@@ -1259,9 +1247,40 @@ impl SafekeeperPersistence {
     }
 }
 
+/// What we expect from the upsert http api
+#[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone)]
+pub(crate) struct SafekeeperUpsert {
+    pub(crate) id: i64,
+    pub(crate) region_id: String,
+    /// 1 is special, it means just created (not currently posted to storcon).
+    /// Zero or negative is not really expected.
+    /// Otherwise the number from `release-$(number_of_commits_on_branch)` tag.
+    pub(crate) version: i64,
+    pub(crate) host: String,
+    pub(crate) port: i32,
+    pub(crate) active: bool,
+    pub(crate) http_port: i32,
+    pub(crate) availability_zone_id: String,
+}
+
+impl SafekeeperUpsert {
+    fn as_insert_or_update(&self) -> InsertUpdateSafekeeper<'_> {
+        InsertUpdateSafekeeper {
+            id: self.id,
+            region_id: &self.region_id,
+            version: self.version,
+            host: &self.host,
+            port: self.port,
+            active: self.active,
+            http_port: self.http_port,
+            availability_zone_id: &self.availability_zone_id,
+            scheduling_policy: None,
+        }
+    }
+}
+
 #[derive(Insertable, AsChangeset)]
 #[diesel(table_name = crate::schema::safekeepers)]
-#[diesel(treat_none_as_null = true)]
 struct InsertUpdateSafekeeper<'a> {
     id: i64,
     region_id: &'a str,
@@ -1271,5 +1290,5 @@ struct InsertUpdateSafekeeper<'a> {
     active: bool,
     http_port: i32,
     availability_zone_id: &'a str,
-    scheduling_policy: &'a str,
+    scheduling_policy: Option<&'a str>,
 }

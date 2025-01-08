@@ -7192,7 +7192,7 @@ impl Service {
 
     pub(crate) async fn upsert_safekeeper(
         &self,
-        record: crate::persistence::SafekeeperPersistence,
+        record: crate::persistence::SafekeeperUpsert,
     ) -> Result<(), DatabaseError> {
         self.persistence.safekeeper_upsert(record).await
     }
