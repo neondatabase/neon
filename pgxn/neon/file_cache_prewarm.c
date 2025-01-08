@@ -207,7 +207,7 @@ lfcp_preprocess_chunk(FileCacheStateEntry *fcsentry)
 static bool
 lfcp_pump_prefetch(LFCPrewarmWorkerState *state)
 {
-	LFCPrewarmChunk *chunk;
+	LFCPrewarmChunk *chunk = NULL;
 	int			inflight_ios = (int) (state->lpws_pages_prefetched - state->lpws_pages_read);
 	int			chunk_ios_remaining = 0;
 
@@ -230,7 +230,10 @@ lfcp_pump_prefetch(LFCPrewarmWorkerState *state)
 			if (!PointerIsValid(chunk))
 			{
 				if (state->lpws_numrestore == 0)
-					break;
+				{
+					/* no new chunks to send prefetch requests for */
+					return true;
+				};
 				continue;
 			}
 			dlist_push_head(&state->lpws_work, &chunk->node);
@@ -272,7 +275,8 @@ static bool
 lfcp_pump_read(LFCPrewarmWorkerState *state)
 {
 	LFCPrewarmChunk *chunk;
-	int			io_depth = state->lpws_pages_prefetched - state->lpws_pages_read;
+	int			io_depth PG_USED_FOR_ASSERTS_ONLY =
+		state->lpws_pages_prefetched - state->lpws_pages_read;
 	int			chunk_ios_active;
 
 	if (dlist_is_empty(&state->lpws_work))
