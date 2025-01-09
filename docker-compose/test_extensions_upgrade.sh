@@ -76,12 +76,14 @@ else
     )
     result=$(curl "${PARAMS[@]}")
     echo $result | jq .
-    echo "${tenant_id}" > "${TENANT_ID_FILE}"
-    echo "${new_timeline_id}" > "${TIMELINE_ID_FILE}"
-    TAG=${OLDTAG} docker compose down compute compute_is_ready
-    COMPUTE_TAG=${NEWTAG} TAG=${OLDTAG} docker compose up -d --build compute compute_is_ready
+    TENANT_ID=${tenant_id} TIMELINE_ID=${new_timeline_id} TAG=${OLDTAG} docker compose down compute compute_is_ready
+    COMPUTE_TAG=${NEWTAG} TAG=${OLDTAG} TENANT_ID=${tenant_id} TIMELINE_ID=${new_timeline_id} docker compose up -d --build compute compute_is_ready
     wait_for_ready
-    psql -c "SHOW neon.timeline_id"
+    TID=$(psql -Aqt -c "SHOW neon.timeline_id")
+    if [ ${TID} != ${new_timeline_id} ]; then
+      echo Timeline mismatch
+      exit 1
+    fi
     if [ ${ext} == "pg_hintplan" ]; then
         TMPDIR=$(mktemp -d)
         # The following block does the same for the pg_hintplan test

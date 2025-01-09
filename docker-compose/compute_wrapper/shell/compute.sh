@@ -13,8 +13,6 @@ PG_VERSION=${PG_VERSION:-14}
 
 SPEC_FILE_ORG=/var/db/postgres/specs/spec.json
 SPEC_FILE=/tmp/spec.json
-TENANT_ID_FILE=/var/db/postgres/specs/tenant_id
-TIMELINE_ID_FILE=/var/db/postgres/specs/timeline_id
 
 echo "Waiting pageserver become ready."
 while ! nc -z pageserver 6400; do
@@ -22,9 +20,9 @@ while ! nc -z pageserver 6400; do
 done
 echo "Page server is ready."
 
- if [ -f "${TENANT_ID_FILE}" ] && [ -f "${TIMELINE_ID_FILE}" ]; then
-   tenant_id=$(cat "${TENANT_ID_FILE}")
-   timeline_id=$(cat "${TIMELINE_ID_FILE}")
+ if [ -n "${TENANT_ID:-}" ] && [ -n "${TIMELINE_ID:-}" ]; then
+   tenant_id=${TENANT_ID}
+   timeline_id=${TIMELINE_ID}
 else
   echo "Check if a tenant present"
   PARAMS=(

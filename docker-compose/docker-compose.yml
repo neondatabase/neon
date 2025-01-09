@@ -154,6 +154,8 @@ services:
         - https_proxy=${https_proxy:-}
     environment:
       - PG_VERSION=${PG_VERSION:-16}
+      - TENANT_ID=${TENANT_ID:-}
+      - TIMELINE_ID=${TIMELINE_ID:-}
       #- RUST_BACKTRACE=1
     # Mount the test files directly, for faster editing cycle.
     volumes:
