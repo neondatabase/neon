@@ -97,6 +97,7 @@ pub(crate) enum DatabaseOperation {
     TenantGenerations,
     ShardGenerations,
     ListTenantShards,
+    LoadTenant,
     InsertTenantShards,
     UpdateTenantShard,
     DeleteTenant,
@@ -330,11 +331,40 @@ impl Persistence {
 
     /// At startup, load the high level state for shards, such as their config + policy.  This will
     /// be enriched at runtime with state discovered on pageservers.
-    pub(crate) async fn list_tenant_shards(&self) -> DatabaseResult<Vec<TenantShardPersistence>> {
+    ///
+    /// We exclude shards configured to be detached.  During startup, if we see any attached locations
+    /// for such shards, they will automatically be detached as 'orphans'.
+    pub(crate) async fn load_active_tenant_shards(
+        &self,
+    ) -> DatabaseResult<Vec<TenantShardPersistence>> {
+        use crate::schema::tenant_shards::dsl::*;
         self.with_measured_conn(
             DatabaseOperation::ListTenantShards,
             move |conn| -> DatabaseResult<_> {
-                Ok(crate::schema::tenant_shards::table.load::<TenantShardPersistence>(conn)?)
+                let query = tenant_shards.filter(
+                    placement_policy.ne(serde_json::to_string(&PlacementPolicy::Detached).unwrap()),
+                );
+                let result = query.load::<TenantShardPersistence>(conn)?;
+
+                Ok(result)
+            },
+        )
+        .await
+    }
+
+    /// When restoring a previously detached tenant into memory, load it from the database
+    pub(crate) async fn load_tenant(
+        &self,
+        filter_tenant_id: TenantId,
+    ) -> DatabaseResult<Vec<TenantShardPersistence>> {
+        use crate::schema::tenant_shards::dsl::*;
+        self.with_measured_conn(
+            DatabaseOperation::LoadTenant,
+            move |conn| -> DatabaseResult<_> {
+                let query = tenant_shards.filter(tenant_id.eq(filter_tenant_id.to_string()));
+                let result = query.load::<TenantShardPersistence>(conn)?;
+
+                Ok(result)
             },
         )
         .await

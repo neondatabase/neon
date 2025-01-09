@@ -524,6 +524,10 @@ impl ObservedState {
             locations: HashMap::new(),
         }
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.locations.is_empty()
+    }
 }
 
 impl TenantShard {
