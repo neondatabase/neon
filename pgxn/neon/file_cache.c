@@ -486,7 +486,7 @@ release_entry(FileCacheEntry *entry, bool prewarm_was_active)
 	entry->access_count--;
 
 	if (entry->access_count == 0)
-		dlist_push_head(&lfc_ctl->lru, &entry->list_node);
+		dlist_push_tail(&lfc_ctl->lru, &entry->list_node);
 
 	if (unlikely(entry->prewarm_active) && !prewarm_was_active)
 	{
