@@ -69,6 +69,12 @@ const COMPACTION_DELTA_THRESHOLD: usize = 5;
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct GcCompactionJobId(pub usize);
 
+impl std::fmt::Display for GcCompactionJobId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum GcCompactionQueueItem {
     Manual(CompactOptions),
@@ -164,6 +170,7 @@ impl GcCompactionQueue {
         if let Some(notify) = notify {
             guard.notify.insert(id, notify);
         }
+        info!("scheduled compaction job id={}", id);
         id
     }
 
@@ -173,6 +180,7 @@ impl GcCompactionQueue {
 
     /// Notify the caller the job has finished and unblock GC.
     fn notify_and_unblock(&self, id: GcCompactionJobId) {
+        info!("compaction job id={} finished", id);
         let mut guard = self.inner.lock().unwrap();
         if let Some(blocking) = guard.gc_guards.remove(&id) {
             drop(blocking)
