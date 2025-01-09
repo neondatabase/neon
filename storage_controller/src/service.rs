@@ -2475,18 +2475,29 @@ impl Service {
         tenant_id: TenantId,
         _guard: &TracingExclusiveGuard<TenantOperations>,
     ) -> Result<(), ApiError> {
-        let present_in_memory = {
+        // Check if the tenant is present in memory, and select an AZ to use when loading
+        // if we will load it.
+        let load_in_az = {
             let locked = self.inner.read().unwrap();
-            locked
+            let existing = locked
                 .tenants
                 .range(TenantShardId::tenant_range(tenant_id))
-                .next()
-                .is_some()
-        };
+                .next();
 
-        if present_in_memory {
-            return Ok(());
-        }
+            // If the tenant is not present in memory, we expect to load it from database,
+            // so let's figure out what AZ to load it into while we have self.inner locked.
+            if existing.is_none() {
+                locked
+                    .scheduler
+                    .get_az_for_new_tenant()
+                    .ok_or(ApiError::BadRequest(anyhow::anyhow!(
+                        "No AZ with nodes found to load tenant"
+                    )))?
+            } else {
+                // We already have this tenant in memory
+                return Ok(());
+            }
+        };
 
         let tenant_shards = self.persistence.load_tenant(tenant_id).await?;
         if tenant_shards.is_empty() {
@@ -2495,8 +2506,20 @@ impl Service {
             ));
         }
 
-        // TODO: choose a fresh AZ to use for this tenant when un-detaching: there definitely isn't a running
-        // compute, so no benefit to making AZ sticky across detaches.
+        // Update the persistent shards with the AZ that we are about to apply to in-memory state
+        self.persistence
+            .set_tenant_shard_preferred_azs(
+                tenant_shards
+                    .iter()
+                    .map(|t| {
+                        (
+                            t.get_tenant_shard_id().expect("Corrupt shard in database"),
+                            load_in_az.clone(),
+                        )
+                    })
+                    .collect(),
+            )
+            .await?;
 
         let mut locked = self.inner.write().unwrap();
         tracing::info!(
@@ -2506,7 +2529,7 @@ impl Service {
         );
 
         locked.tenants.extend(tenant_shards.into_iter().map(|p| {
-            let intent = IntentState::new();
+            let intent = IntentState::new(Some(load_in_az.clone()));
             let shard =
                 TenantShard::from_persistent(p, intent).expect("Corrupt shard row in database");
 
