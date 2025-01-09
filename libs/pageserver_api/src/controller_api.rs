@@ -320,6 +320,38 @@ impl From<NodeSchedulingPolicy> for String {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
+pub enum SkSchedulingPolicy {
+    Active,
+    Disabled,
+    Decomissioned,
+}
+
+impl FromStr for SkSchedulingPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "active" => Self::Active,
+            "disabled" => Self::Disabled,
+            "decomissioned" => Self::Decomissioned,
+            _ => return Err(anyhow::anyhow!("Unknown scheduling state '{s}'")),
+        })
+    }
+}
+
+impl From<SkSchedulingPolicy> for String {
+    fn from(value: SkSchedulingPolicy) -> String {
+        use SkSchedulingPolicy::*;
+        match value {
+            Active => "active",
+            Disabled => "disabled",
+            Decomissioned => "decomissioned",
+        }
+        .to_string()
+    }
+}
+
 /// Controls how tenant shards are mapped to locations on pageservers, e.g. whether
 /// to create secondary locations.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -387,6 +419,7 @@ pub struct SafekeeperDescribeResponse {
     pub port: i32,
     pub http_port: i32,
     pub availability_zone_id: String,
+    pub scheduling_policy: SkSchedulingPolicy,
 }
 
 #[cfg(test)]

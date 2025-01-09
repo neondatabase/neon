@@ -538,7 +538,7 @@ jobs:
 
   trigger-e2e-tests:
     if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute' }}
-    needs: [ check-permissions, promote-images, tag ]
+    needs: [ check-permissions, promote-images-dev, tag ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
     secrets: inherit
 
@@ -930,8 +930,8 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml logs || 0
           docker compose -f ./docker-compose/docker-compose.yml down
 
-  promote-images:
-    needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
+  promote-images-dev:
+    needs: [ check-permissions, tag, vm-compute-node-image ]
     runs-on: ubuntu-22.04
 
     permissions:
@@ -964,6 +964,35 @@ jobs:
             docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }} \
                                                neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
           done
+
+  promote-images-prod:
+    needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
+    runs-on: ubuntu-22.04
+    if: github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
+
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
+
+    env:
+      VERSIONS: v14 v15 v16 v17
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
       - name: Add latest tag to images
         if: github.ref_name == 'main'
@@ -1010,7 +1039,7 @@ jobs:
 
   push-to-acr-dev:
     if: github.ref_name == 'main'
-    needs: [ tag, promote-images ]
+    needs: [ tag, promote-images-dev ]
     uses: ./.github/workflows/_push-to-acr.yml
     with:
       client_id: ${{ vars.AZURE_DEV_CLIENT_ID }}
@@ -1022,7 +1051,7 @@ jobs:
 
   push-to-acr-prod:
     if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
-    needs: [ tag, promote-images ]
+    needs: [ tag, promote-images-prod ]
     uses: ./.github/workflows/_push-to-acr.yml
     with:
       client_id: ${{ vars.AZURE_PROD_CLIENT_ID }}
@@ -1112,7 +1141,7 @@ jobs:
           exit 1
 
   deploy:
-    needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
+    needs: [ check-permissions, promote-images-prod, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
     # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
     if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute') && !failure() && !cancelled()
     permissions:
@@ -1333,7 +1362,7 @@ jobs:
           done
 
   pin-build-tools-image:
-    needs: [ build-build-tools-image, promote-images, build-and-test-locally ]
+    needs: [ build-build-tools-image, promote-images-prod, build-and-test-locally ]
     if: github.ref_name == 'main'
     uses: ./.github/workflows/pin-build-tools-image.yml
     with:
@@ -1356,7 +1385,7 @@ jobs:
       - build-and-test-locally
       - check-codestyle-python
       - check-codestyle-rust
-      - promote-images
+      - promote-images-dev
       - test-images
       - trigger-custom-extensions-build-and-wait
     runs-on: ubuntu-22.04

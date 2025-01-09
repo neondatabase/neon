@@ -428,6 +428,7 @@ fn start_postgres(
     let &ComputeSpec {
         swap_size_bytes,
         disk_quota_bytes,
+        #[cfg(target_os = "linux")]
         disable_lfc_resizing,
         ..
     } = &state.pspec.as_ref().unwrap().spec;
