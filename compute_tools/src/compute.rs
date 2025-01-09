@@ -1070,7 +1070,7 @@ impl ComputeNode {
                     ];
 
                     if spec.drop_subscriptions_before_start {
-                        info!("Adding DropLogicalSubscriptions phase because drop_subscriptions_before_start is set");
+                        info!("adding DropLogicalSubscriptions phase because drop_subscriptions_before_start is set");
                         phases.push(DropLogicalSubscriptions);
                     }
 
