@@ -60,7 +60,7 @@ use compute_tools::compute::{
 };
 use compute_tools::configurator::launch_configurator;
 use compute_tools::extension_server::get_pg_version_string;
-use compute_tools::http::api::launch_http_server;
+use compute_tools::http::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
@@ -493,7 +493,10 @@ fn start_postgres(
     let mut pg = None;
     if !prestartup_failed {
         pg = match compute.start_compute() {
-            Ok(pg) => Some(pg),
+            Ok(pg) => {
+                info!(postmaster_pid = %pg.0.id(), "Postgres was started");
+                Some(pg)
+            }
             Err(err) => {
                 error!("could not start the compute node: {:#}", err);
                 compute.set_failed_status(err);
@@ -591,6 +594,8 @@ fn wait_postgres(pg: Option<PostgresHandle>) -> Result<WaitPostgresResult> {
     // propagate to Postgres and it will be shut down as well.
     let mut exit_code = None;
     if let Some((mut pg, logs_handle)) = pg {
+        info!(postmaster_pid = %pg.id(), "Waiting for Postgres to exit");
+
         let ecode = pg
             .wait()
             .expect("failed to start waiting on Postgres process");
