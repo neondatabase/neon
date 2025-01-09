@@ -1561,7 +1561,7 @@ pub struct TenantHistorySize {
 
 impl PagestreamFeMessage {
     /// Serialize a compute -> pageserver message. This is currently only used in testing
-    /// tools. Always uses protocol version 2.
+    /// tools. Always uses protocol version 3.
     pub fn serialize(&self) -> Bytes {
         let mut bytes = BytesMut::new();
 
@@ -1748,7 +1748,7 @@ impl PagestreamBeMessage {
                     }
                 }
             }
-            _ => {
+            PagestreamProtocolVersion::V3 => {
                 match self {
                     Self::Exists(resp) => {
                         bytes.put_u8(Tag::Exists as u8);
