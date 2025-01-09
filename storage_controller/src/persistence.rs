@@ -1051,7 +1051,9 @@ impl Persistence {
         use crate::schema::safekeepers::dsl::*;
 
         self.with_conn(move |conn| -> DatabaseResult<()> {
-            let bind = record.as_insert_or_update();
+            let bind = record
+                .as_insert_or_update()
+                .map_err(|e| DatabaseError::Logical(format!("{e}")))?;
 
             let inserted_updated = diesel::insert_into(safekeepers)
                 .values(&bind)
@@ -1269,8 +1271,11 @@ pub(crate) struct SafekeeperUpsert {
 }
 
 impl SafekeeperUpsert {
-    fn as_insert_or_update(&self) -> InsertUpdateSafekeeper<'_> {
-        InsertUpdateSafekeeper {
+    fn as_insert_or_update(&self) -> anyhow::Result<InsertUpdateSafekeeper<'_>> {
+        if self.version < 0 {
+            anyhow::bail!("negative version: {}", self.version);
+        }
+        Ok(InsertUpdateSafekeeper {
             id: self.id,
             region_id: &self.region_id,
             version: self.version,
@@ -1279,8 +1284,9 @@ impl SafekeeperUpsert {
             active: self.active,
             http_port: self.http_port,
             availability_zone_id: &self.availability_zone_id,
+            // None means a wish to not update this column. We expose abilities to update it via other means.
             scheduling_policy: None,
-        }
+        })
     }
 }
 
