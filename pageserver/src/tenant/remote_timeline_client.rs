@@ -851,14 +851,16 @@ impl RemoteTimelineClient {
                     tracing::info!("can't shut down timeline: timeline slated for unarchival");
                     return Err(ShutdownIfArchivedError::NotArchived);
                 }
-                (_, true) => {
-                    tracing::info!(
-                        "can't shut down timeline: timeline not archived in remote storage"
-                    );
+                (dirty_archived, true) => {
+                    tracing::info!(%dirty_archived, "can't shut down timeline: timeline not archived in remote storage");
                     return Err(ShutdownIfArchivedError::NotArchived);
                 }
             }
 
+            // Set the shutting_down flag while the guard from the archival check is held.
+            // This prevents a race with unarchival, as initialized_mut will not return
+            // an upload queue from this point.
+            // Also launch the queued tasks like shutdown() does.
             if !upload_queue.shutting_down {
                 upload_queue.shutting_down = true;
                 upload_queue.queued_operations.push_back(UploadOp::Shutdown);
