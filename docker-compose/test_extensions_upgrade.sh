@@ -38,7 +38,8 @@ EXTENSIONS='[
 {"extname": "ip4r", "extdir": "ip4r-src"},
 {"extname": "prefix", "extdir": "prefix-src"},
 {"extname": "hll", "extdir": "hll-src"},
-{"extname": "pg_cron", "extdir": "pg_cron-src"}
+{"extname": "pg_cron", "extdir": "pg_cron-src"},
+{"extname": "pg_uuidv7", "extdir": "pg_uuidv7-src"}
 ]'
 EXTNAMES=$(echo ${EXTENSIONS} | jq -r '.[].extname' | paste -sd ' ' -)
 TAG=${NEWTAG} docker compose up --build -d
@@ -98,4 +99,3 @@ else
   done
 fi
 docker compose --profile test-extensions down
-rm -f "${TENANT_ID_FILE}" "${TIMELINE_ID_FILE}"
