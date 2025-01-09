@@ -9,7 +9,10 @@ use utils::{
 
 use super::failpoints::{Failpoint, FailpointKind};
 use super::*;
-use crate::{context::DownloadBehavior, tenant::storage_layer::LayerVisibilityHint};
+use crate::{
+    context::DownloadBehavior,
+    tenant::storage_layer::{IoConcurrency, LayerVisibilityHint},
+};
 use crate::{task_mgr::TaskKind, tenant::harness::TenantHarness};
 
 /// Used in tests to advance a future to wanted await point, and not futher.
@@ -55,7 +58,7 @@ async fn smoke_test() {
     };
 
     let img_before = {
-        let mut data = ValuesReconstructState::default();
+        let mut data = ValuesReconstructState::new(IoConcurrency::todo());
         layer
             .get_values_reconstruct_data(
                 controlfile_keyspace.clone(),
@@ -65,10 +68,13 @@ async fn smoke_test() {
             )
             .await
             .unwrap();
+
         data.keys
             .remove(&CONTROLFILE_KEY)
             .expect("must be present")
-            .expect("should not error")
+            .collect_pending_ios()
+            .await
+            .expect("must not error")
             .img
             .take()
             .expect("tenant harness writes the control file")
@@ -87,7 +93,7 @@ async fn smoke_test() {
 
     // on accesses when the layer is evicted, it will automatically be downloaded.
     let img_after = {
-        let mut data = ValuesReconstructState::default();
+        let mut data = ValuesReconstructState::new(IoConcurrency::todo());
         layer
             .get_values_reconstruct_data(
                 controlfile_keyspace.clone(),
@@ -101,7 +107,9 @@ async fn smoke_test() {
         data.keys
             .remove(&CONTROLFILE_KEY)
             .expect("must be present")
-            .expect("should not error")
+            .collect_pending_ios()
+            .await
+            .expect("must not error")
             .img
             .take()
             .expect("tenant harness writes the control file")

@@ -17,6 +17,7 @@ use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
 };
+use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::GetVectoredError;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
@@ -208,6 +209,7 @@ impl Timeline {
                     .get_rel_page_at_lsn_batched(
                         pages.iter().map(|(tag, blknum)| (tag, blknum)),
                         effective_lsn,
+                        IoConcurrency::todo(),
                         ctx,
                     )
                     .await;
@@ -246,6 +248,7 @@ impl Timeline {
         &self,
         pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber)>,
         effective_lsn: Lsn,
+        io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> Vec<Result<Bytes, PageReconstructError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
@@ -309,7 +312,10 @@ impl Timeline {
             acc.to_keyspace()
         };
 
-        match self.get_vectored(keyspace, effective_lsn, ctx).await {
+        match self
+            .get_vectored(keyspace, effective_lsn, io_concurrency, ctx)
+            .await
+        {
             Ok(results) => {
                 for (key, res) in results {
                     let mut key_slots = keys_slots.remove(&key).unwrap().into_iter();

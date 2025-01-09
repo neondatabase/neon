@@ -5780,7 +5780,7 @@ mod tests {
     use pageserver_api::value::Value;
     use pageserver_compaction::helpers::overlaps_with;
     use rand::{thread_rng, Rng};
-    use storage_layer::PersistentLayerKey;
+    use storage_layer::{IoConcurrency, PersistentLayerKey, SelectedIoConcurrency};
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
     use timeline::{CompactOptions, DeltaLayerTestDesc};
@@ -6618,48 +6618,65 @@ mod tests {
         // Pick a big LSN such that we query over all the changes.
         let reads_lsn = Lsn(u64::MAX - 1);
 
-        for read in reads {
-            info!("Doing vectored read on {:?}", read);
+        let gate = Gate::default();
+        let io_concurrency_levels: Vec<Box<dyn Fn() -> SelectedIoConcurrency>> = vec![
+            Box::new(|| SelectedIoConcurrency::Serial),
+            Box::new(|| SelectedIoConcurrency::FuturesUnordered(gate.enter().unwrap())),
+        ];
 
-            let vectored_res = tline
-                .get_vectored_impl(
-                    read.clone(),
-                    reads_lsn,
-                    &mut ValuesReconstructState::new(),
-                    &ctx,
-                )
-                .await;
+        for (io_concurrency_level_idx, io_concurrency_level) in
+            io_concurrency_levels.into_iter().enumerate()
+        {
+            for read in reads.clone() {
+                let io_concurrency_level = io_concurrency_level();
 
-            let mut expected_lsns: HashMap<Key, Lsn> = Default::default();
-            let mut expect_missing = false;
-            let mut key = read.start().unwrap();
-            while key != read.end().unwrap() {
-                if let Some(lsns) = inserted.get(&key) {
-                    let expected_lsn = lsns.iter().rfind(|lsn| **lsn <= reads_lsn);
-                    match expected_lsn {
-                        Some(lsn) => {
-                            expected_lsns.insert(key, *lsn);
+                info!(
+                    "Doing vectored read on {read:?} with IO concurrency {io_concurrency_level_idx:?}",
+                );
+
+                let vectored_res = tline
+                    .get_vectored_impl(
+                        read.clone(),
+                        reads_lsn,
+                        &mut ValuesReconstructState::new(IoConcurrency::spawn(
+                            io_concurrency_level,
+                        )),
+                        &ctx,
+                    )
+                    .await;
+
+                let mut expected_lsns: HashMap<Key, Lsn> = Default::default();
+                let mut expect_missing = false;
+                let mut key = read.start().unwrap();
+                while key != read.end().unwrap() {
+                    if let Some(lsns) = inserted.get(&key) {
+                        let expected_lsn = lsns.iter().rfind(|lsn| **lsn <= reads_lsn);
+                        match expected_lsn {
+                            Some(lsn) => {
+                                expected_lsns.insert(key, *lsn);
+                            }
+                            None => {
+                                expect_missing = true;
+                                break;
+                            }
                         }
-                        None => {
-                            expect_missing = true;
-                            break;
-                        }
+                    } else {
+                        expect_missing = true;
+                        break;
                     }
-                } else {
-                    expect_missing = true;
-                    break;
+
+                    key = key.next();
                 }
 
-                key = key.next();
-            }
-
-            if expect_missing {
-                assert!(matches!(vectored_res, Err(GetVectoredError::MissingKey(_))));
-            } else {
-                for (key, image) in vectored_res? {
-                    let expected_lsn = expected_lsns.get(&key).expect("determined above");
-                    let expected_image = test_img(&format!("{} at {}", key.field6, expected_lsn));
-                    assert_eq!(image?, expected_image);
+                if expect_missing {
+                    assert!(matches!(vectored_res, Err(GetVectoredError::MissingKey(_))));
+                } else {
+                    for (key, image) in vectored_res? {
+                        let expected_lsn = expected_lsns.get(&key).expect("determined above");
+                        let expected_image =
+                            test_img(&format!("{} at {}", key.field6, expected_lsn));
+                        assert_eq!(image?, expected_image);
+                    }
                 }
             }
         }
@@ -6706,7 +6723,7 @@ mod tests {
             .get_vectored_impl(
                 aux_keyspace.clone(),
                 read_lsn,
-                &mut ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(IoConcurrency::todo()),
                 &ctx,
             )
             .await;
@@ -6854,7 +6871,7 @@ mod tests {
             .get_vectored_impl(
                 read.clone(),
                 current_lsn,
-                &mut ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(IoConcurrency::todo()),
                 &ctx,
             )
             .await?;
@@ -6989,7 +7006,7 @@ mod tests {
                         ranges: vec![child_gap_at_key..child_gap_at_key.next()],
                     },
                     query_lsn,
-                    &mut ValuesReconstructState::new(),
+                    &mut ValuesReconstructState::new(IoConcurrency::todo()),
                     &ctx,
                 )
                 .await;
@@ -7488,7 +7505,7 @@ mod tests {
                 .get_vectored_impl(
                     keyspace.clone(),
                     lsn,
-                    &mut ValuesReconstructState::default(),
+                    &mut ValuesReconstructState::new(IoConcurrency::todo()),
                     &ctx,
                 )
                 .await?
@@ -7678,7 +7695,7 @@ mod tests {
             lsn: Lsn,
             ctx: &RequestContext,
         ) -> anyhow::Result<(BTreeMap<Key, Result<Bytes, PageReconstructError>>, usize)> {
-            let mut reconstruct_state = ValuesReconstructState::default();
+            let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::todo());
             let res = tline
                 .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
                 .await?;
@@ -7902,7 +7919,7 @@ mod tests {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Option<Bytes>, GetVectoredError> {
-        let mut reconstruct_state = ValuesReconstructState::new();
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::todo());
         let mut res = tline
             .get_vectored_impl(
                 KeySpace::single(key..key.next()),
@@ -9994,7 +10011,7 @@ mod tests {
 
         let keyspace = KeySpace::single(get_key(0)..get_key(10));
         let results = tline
-            .get_vectored(keyspace, delta_layer_end_lsn, &ctx)
+            .get_vectored(keyspace, delta_layer_end_lsn, IoConcurrency::todo(), &ctx)
             .await
             .expect("No vectored errors");
         for (key, res) in results {

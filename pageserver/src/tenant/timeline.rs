@@ -20,6 +20,7 @@ use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
+use futures::{stream::FuturesUnordered, StreamExt};
 use handle::ShardTimelineId;
 use offload::OffloadError;
 use once_cell::sync::Lazy;
@@ -76,7 +77,10 @@ use crate::{
         config::AttachmentMode,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
-        storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
+        storage_layer::{
+            inmemory_layer::IndexEntry, IoConcurrency, PersistentLayerDesc,
+            ValueReconstructSituation,
+        },
     },
     walingest::WalLagCooldown,
     walredo,
@@ -998,9 +1002,7 @@ impl Timeline {
             ranges: vec![key..key.next()],
         };
 
-        // Initialise the reconstruct state for the key with the cache
-        // entry returned above.
-        let mut reconstruct_state = ValuesReconstructState::new();
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::todo());
 
         let vectored_res = self
             .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
@@ -1043,6 +1045,7 @@ impl Timeline {
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
+        io_concurrency: super::storage_layer::IoConcurrency,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         if !lsn.is_valid() {
@@ -1077,7 +1080,7 @@ impl Timeline {
             .get_vectored_impl(
                 keyspace.clone(),
                 lsn,
-                &mut ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(io_concurrency),
                 ctx,
             )
             .await;
@@ -1133,7 +1136,7 @@ impl Timeline {
             .get_vectored_impl(
                 keyspace.clone(),
                 lsn,
-                &mut ValuesReconstructState::default(),
+                &mut ValuesReconstructState::new(IoConcurrency::todo()),
                 ctx,
             )
             .await;
@@ -1168,22 +1171,34 @@ impl Timeline {
         let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
             .for_get_kind(get_kind)
             .start_timer();
-        let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
         let layers_visited = reconstruct_state.get_layers_visited();
 
-        for (key, res) in std::mem::take(&mut reconstruct_state.keys) {
-            match res {
-                Err(err) => {
-                    results.insert(key, Err(err));
-                }
-                Ok(state) => {
-                    let state = ValueReconstructState::from(state);
+        let futs = FuturesUnordered::new();
+        for (key, state) in std::mem::take(&mut reconstruct_state.keys) {
+            futs.push({
+                let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
+                async move {
+                    assert_eq!(state.situation, ValueReconstructSituation::Complete);
 
-                    let reconstruct_res = self.reconstruct_value(key, lsn, state).await;
-                    results.insert(key, reconstruct_res);
+                    let converted = match state.collect_pending_ios().await {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            return (key, Err(err));
+                        }
+                    };
+
+                    (
+                        key,
+                        walredo_self.reconstruct_value(key, lsn, converted).await,
+                    )
                 }
-            }
+            });
         }
+
+        let results = futs
+            .collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>()
+            .await;
+
         reconstruct_timer.stop_and_record();
 
         // For aux file keys (v1 or v2) the vectored read path does not return an error
@@ -3394,6 +3409,32 @@ impl Timeline {
             }
         }
 
+        // TODO: move this to a function
+        trace!("waiting for futures to complete");
+        match &reconstruct_state.io_concurrency {
+            super::storage_layer::IoConcurrency::Serial => (),
+            super::storage_layer::IoConcurrency::FuturesUnordered { barriers_tx, .. } => {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                match barriers_tx.send(tx) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        return Err(GetVectoredError::Other(anyhow::anyhow!(
+                            "concurrent io task dropped its barriers_rx, likely it panicked"
+                        )));
+                    }
+                }
+                match rx.await {
+                    Ok(()) => {}
+                    Err(_) => {
+                        return Err(GetVectoredError::Other(anyhow::anyhow!(
+                            "concurrent io task dropped the barrier_done, likely it panicked"
+                        )));
+                    }
+                }
+            }
+        }
+        trace!("futures completed");
+
         Ok(TimelineVisitOutcome {
             completed_keyspace,
             image_covered_keyspace: image_covered_keyspace.consume_keyspace(),
@@ -4138,7 +4179,12 @@ impl Timeline {
                     || (last_key_in_range && key_request_accum.raw_size() > 0)
                 {
                     let results = self
-                        .get_vectored(key_request_accum.consume_keyspace(), lsn, ctx)
+                        .get_vectored(
+                            key_request_accum.consume_keyspace(),
+                            lsn,
+                            IoConcurrency::todo(),
+                            ctx,
+                        )
                         .await?;
 
                     if self.cancel.is_cancelled() {
@@ -4219,7 +4265,7 @@ impl Timeline {
         start: Key,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         // Metadata keys image layer creation.
-        let mut reconstruct_state = ValuesReconstructState::default();
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::todo());
         let begin = Instant::now();
         let data = self
             .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
@@ -5719,7 +5765,7 @@ impl Timeline {
         for layer in guard.layer_map()?.iter_historic_layers() {
             if !layer.is_delta() && layer.image_layer_lsn() == lsn {
                 let layer = guard.get_from_desc(&layer);
-                let mut reconstruct_data = ValuesReconstructState::default();
+                let mut reconstruct_data = ValuesReconstructState::new(IoConcurrency::todo());
                 layer
                     .get_values_reconstruct_data(
                         KeySpace::single(Key::MIN..Key::MAX),
@@ -5729,7 +5775,8 @@ impl Timeline {
                     )
                     .await?;
                 for (k, v) in reconstruct_data.keys {
-                    all_data.push((k, v?.img.unwrap().1));
+                    let v = v.collect_pending_ios().await?;
+                    all_data.push((k, v.img.unwrap().1));
                 }
             }
         }
