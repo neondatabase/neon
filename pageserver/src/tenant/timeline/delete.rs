@@ -193,13 +193,10 @@ impl DeleteTimelineFlow {
     ) -> Result<(), DeleteTimelineError> {
         super::debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let allow_offloaded_children = false;
-        let set_stopping = true;
         let (timeline, mut guard) = make_timeline_delete_guard(
             tenant,
             timeline_id,
-            allow_offloaded_children,
-            set_stopping,
+            TimelineDeleteGuardKind::Delete,
         )?;
 
         guard.mark_in_progress()?;
@@ -417,11 +414,16 @@ impl DeleteTimelineFlow {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(super) enum TimelineDeleteGuardKind {
+    Offload,
+    Delete,
+}
+
 pub(super) fn make_timeline_delete_guard(
     tenant: &Tenant,
     timeline_id: TimelineId,
-    allow_offloaded_children: bool,
-    set_stopping: bool,
+    guard_kind: TimelineDeleteGuardKind,
 ) -> Result<(TimelineOrOffloaded, DeletionGuard), DeleteTimelineError> {
     // Note the interaction between this guard and deletion guard.
     // Here we attempt to lock deletion guard when we're holding a lock on timelines.
@@ -447,7 +449,7 @@ pub(super) fn make_timeline_delete_guard(
     // Ensure that there are no child timelines, because we are about to remove files,
     // which will break child branches
     let mut children = Vec::new();
-    if !allow_offloaded_children {
+    if guard_kind == TimelineDeleteGuardKind::Delete {
         children.extend(timelines_offloaded.iter().filter_map(|(id, entry)| {
             (entry.ancestor_timeline_id == Some(timeline_id)).then_some(*id)
         }));
@@ -477,7 +479,7 @@ pub(super) fn make_timeline_delete_guard(
         }
     };
 
-    if set_stopping {
+    if guard_kind == TimelineDeleteGuardKind::Delete {
         if let TimelineOrOffloaded::Timeline(timeline) = &timeline {
             timeline.set_state(TimelineState::Stopping);
         }
