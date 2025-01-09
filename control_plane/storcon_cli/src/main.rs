@@ -1043,8 +1043,8 @@ async fn main() -> anyhow::Result<()> {
                     sk.host,
                     format!("{}", sk.port),
                     format!("{}", sk.http_port),
-                    sk.availability_zone_id.to_string(),
-                    format!("{}", sk.scheduling_policy),
+                    sk.availability_zone_id.clone(),
+                    sk.scheduling_policy.clone(),
                 ]);
             }
             println!("{table}");
