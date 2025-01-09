@@ -716,6 +716,8 @@ prefetch_on_ps_disconnect(void)
 		MyPState->ring_receive += 1;
 
 		prefetch_set_unused(ring_index);
+		pgBufferUsage.prefetch.expired += 1;
+		MyNeonCounters->getpage_prefetch_discards_total += 1;
 	}
 
 	/*
@@ -935,7 +937,8 @@ Retry:
 					prefetch_set_unused(ring_index);
 					entry = NULL;
 					slot = NULL;
-					MyNeonCounters->getpage_prefetch_discards_total++;
+					pgBufferUsage.prefetch.expired += 1;
+					MyNeonCounters->getpage_prefetch_discards_total += 1;
 				}
 			}
 
@@ -1026,10 +1029,14 @@ Retry:
 						if (!prefetch_wait_for(cleanup_index))
 							goto Retry;
 						prefetch_set_unused(cleanup_index);
+						pgBufferUsage.prefetch.expired += 1;
+						MyNeonCounters->getpage_prefetch_discards_total += 1;
 						break;
 					case PRFS_RECEIVED:
 					case PRFS_TAG_REMAINS:
 						prefetch_set_unused(cleanup_index);
+						pgBufferUsage.prefetch.expired += 1;
+						MyNeonCounters->getpage_prefetch_discards_total += 1;
 						break;
 					default:
 						pg_unreachable();

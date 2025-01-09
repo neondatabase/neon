@@ -31,9 +31,9 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
-        CompactionAlgorithm, CompactionAlgorithmSettings, DownloadRemoteLayersTaskInfo,
-        DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
-        LsnLease, TimelineState,
+        CompactKeyRange, CompactLsnRange, CompactionAlgorithm, CompactionAlgorithmSettings,
+        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
+        InMemoryLayerInfo, LayerMapInfo, LsnLease, TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
@@ -144,15 +144,19 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
-use super::remote_timeline_client::index::IndexPart;
-use super::remote_timeline_client::RemoteTimelineClient;
-use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
-use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
-use super::upload_queue::NotInitialized;
-use super::GcError;
 use super::{
-    debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf, MaybeOffloaded,
+    config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
+    MaybeOffloaded,
+};
+use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
+use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
+use super::{
+    remote_timeline_client::RemoteTimelineClient, remote_timeline_client::WaitCompletionError,
+    storage_layer::ReadableLayer,
+};
+use super::{
+    secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
+    GcError,
 };
 
 #[cfg(test)]
@@ -786,63 +790,6 @@ pub(crate) struct CompactRequest {
     pub sub_compaction: bool,
     /// Max job size for each subcompaction job.
     pub sub_compaction_max_job_size_mb: Option<u64>,
-}
-
-#[serde_with::serde_as]
-#[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct CompactLsnRange {
-    pub start: Lsn,
-    pub end: Lsn,
-}
-
-#[serde_with::serde_as]
-#[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct CompactKeyRange {
-    #[serde_as(as = "serde_with::DisplayFromStr")]
-    pub start: Key,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
-    pub end: Key,
-}
-
-impl From<Range<Lsn>> for CompactLsnRange {
-    fn from(range: Range<Lsn>) -> Self {
-        Self {
-            start: range.start,
-            end: range.end,
-        }
-    }
-}
-
-impl From<Range<Key>> for CompactKeyRange {
-    fn from(range: Range<Key>) -> Self {
-        Self {
-            start: range.start,
-            end: range.end,
-        }
-    }
-}
-
-impl From<CompactLsnRange> for Range<Lsn> {
-    fn from(range: CompactLsnRange) -> Self {
-        range.start..range.end
-    }
-}
-
-impl From<CompactKeyRange> for Range<Key> {
-    fn from(range: CompactKeyRange) -> Self {
-        range.start..range.end
-    }
-}
-
-impl CompactLsnRange {
-    #[cfg(test)]
-    #[cfg(feature = "testing")]
-    pub fn above(lsn: Lsn) -> Self {
-        Self {
-            start: lsn,
-            end: Lsn::MAX,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3893,6 +3840,24 @@ impl Timeline {
             // release lock on 'layers'
         };
 
+        // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
+        // This makes us refuse ingest until the new layers have been persisted to the remote
+        let start = Instant::now();
+        self.remote_client
+            .wait_completion()
+            .await
+            .map_err(|e| match e {
+                WaitCompletionError::UploadQueueShutDownOrStopped
+                | WaitCompletionError::NotInitialized(
+                    NotInitialized::ShuttingDown | NotInitialized::Stopped,
+                ) => FlushLayerError::Cancelled,
+                WaitCompletionError::NotInitialized(NotInitialized::Uninitialized) => {
+                    FlushLayerError::Other(anyhow!(e).into())
+                }
+            })?;
+        let duration = start.elapsed().as_secs_f64();
+        self.metrics.flush_wait_upload_time_gauge_add(duration);
+
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
         // We still schedule the upload, resulting in an error, but ideally we'd somehow avoid this
@@ -4894,6 +4859,7 @@ impl Timeline {
 
     async fn find_gc_time_cutoff(
         &self,
+        now: SystemTime,
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
@@ -4901,7 +4867,6 @@ impl Timeline {
         debug_assert_current_span_has_tenant_and_timeline_id();
         if self.shard_identity.is_shard_zero() {
             // Shard Zero has SLRU data and can calculate the PITR time -> LSN mapping itself
-            let now = SystemTime::now();
             let time_range = if pitr == Duration::ZERO {
                 humantime::parse_duration(DEFAULT_PITR_INTERVAL).expect("constant is invalid")
             } else {
@@ -4987,6 +4952,7 @@ impl Timeline {
     #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
     pub(super) async fn find_gc_cutoffs(
         &self,
+        now: SystemTime,
         space_cutoff: Lsn,
         pitr: Duration,
         cancel: &CancellationToken,
@@ -5014,7 +4980,7 @@ impl Timeline {
         // - if PITR interval is set, then this is our cutoff.
         // - if PITR interval is not set, then we do a lookup
         //   based on DEFAULT_PITR_INTERVAL, so that size-based retention does not result in keeping history around permanently on idle databases.
-        let time_cutoff = self.find_gc_time_cutoff(pitr, cancel, ctx).await?;
+        let time_cutoff = self.find_gc_time_cutoff(now, pitr, cancel, ctx).await?;
 
         Ok(match (pitr, time_cutoff) {
             (Duration::ZERO, Some(time_cutoff)) => {
