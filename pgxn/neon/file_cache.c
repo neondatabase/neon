@@ -483,8 +483,10 @@ release_entry(FileCacheEntry *entry, bool prewarm_was_active)
 
 	Assert(LWLockHeldByMeInMode(lfc_lock, LW_EXCLUSIVE));
 
-	dlist_push_head(&lfc_ctl->lru, &entry->list_node);
 	entry->access_count--;
+
+	if (entry->access_count == 0)
+		dlist_push_head(&lfc_ctl->lru, &entry->list_node);
 
 	if (unlikely(entry->prewarm_active) && !prewarm_was_active)
 	{
@@ -559,7 +561,9 @@ lfc_entry_for_write(BufferTag *key, bool no_replace, bool *prewarm_active,
 			entry->key = *key;
 			entry->hash = hash;
 			entry->offset = lfc_ctl->size++;
-			entry->access_count = 0;
+
+			/* newly allocated, thus definitely not in LRU */
+			entry->access_count = 1;
 			entry->prewarm_active = false;
 			memset(entry->bitmap, 0, CHUNK_BITMAP_SIZE * sizeof(uint32));
 			memset(&entry->list_node, 0, sizeof(dlist_node));
@@ -588,7 +592,7 @@ lfc_entry_for_write(BufferTag *key, bool no_replace, bool *prewarm_active,
 				neon_log(DEBUG2, "Swap file cache page");
 			}
 
-			Assert(entry->access_count == 0);
+			Assert(entry == NULL || entry->access_count == 0);
 
 			if (entry != NULL)
 			{
@@ -596,21 +600,35 @@ lfc_entry_for_write(BufferTag *key, bool no_replace, bool *prewarm_active,
 												   CHUNK_BITMAP_SIZE * sizeof(uint32));
 				hash_search_with_hash_value(lfc_hash, &entry->key, entry->hash,
 											HASH_REMOVE, &found);
+				/*
+				 * We removed the to-be-evicted entry; that must have been
+				 * in the hash (else, we've been touching undefined memory).
+				 */
 				Assert(found);
 
-				hash_search_with_hash_value(lfc_hash, key, hash, HASH_ENTER,
-											&found);
-				Assert(found);
+				entry = hash_search_with_hash_value(lfc_hash, key, hash,
+													HASH_ENTER, &found);
+
+				Assert(!found);
 
 				entry->key = *key;
 				entry->hash = hash;
 				/* offset is retained from the old version of the entry */
-				entry->access_count = 0;
+				entry->access_count = 1;
 				entry->prewarm_active = false;
 				memset(entry->bitmap, 0, CHUNK_BITMAP_SIZE * sizeof(uint32));
 				memset(&entry->list_node, 0, sizeof(dlist_node));
 			}
 		}
+	}
+	else /* found */
+	{
+		Assert(PointerIsValid(entry));
+
+		/* increment access count, and unlink if needed */
+		if (entry->access_count == 0)
+			dlist_delete(&entry->list_node);
+		entry->access_count += 1;
 	}
 
 	/*-------
@@ -625,10 +643,6 @@ lfc_entry_for_write(BufferTag *key, bool no_replace, bool *prewarm_active,
 	 */
 	if (entry == NULL)
 		return NULL;
-
-	/* increment access count, and unlink if needed */
-	if (entry->access_count++ == 0)
-		dlist_delete(&entry->list_node);
 
 	if (entry->prewarm_active)
 	{
