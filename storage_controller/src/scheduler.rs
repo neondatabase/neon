@@ -792,18 +792,16 @@ impl Scheduler {
     }
 
     /// For choosing which AZ to schedule a new shard into, use this.  It will return the
-    /// AZ with the lowest median utilization.
+    /// AZ with the the lowest number of shards currently scheduled in this AZ as their home
+    /// location.
     ///
     /// We use an AZ-wide measure rather than simply selecting the AZ of the least-loaded
     /// node, because while tenants start out single sharded, when they grow and undergo
-    /// shard-split, they will occupy space on many nodes within an AZ.
+    /// shard-split, they will occupy space on many nodes within an AZ.  It is important
+    /// that we pick the AZ in a way that balances this _future_ load.
     ///
-    /// We use median rather than total free space or mean utilization, because
-    /// we wish to avoid preferring AZs that have low-load nodes resulting from
-    /// recent replacements.
-    ///
-    /// The practical result is that we will pick an AZ based on its median node, and
-    /// then actually _schedule_ the new shard onto the lowest-loaded node in that AZ.
+    /// Once we've picked an AZ, subsequent scheduling within that AZ will be driven by
+    /// nodes' utilization scores.
     pub(crate) fn get_az_for_new_tenant(&self) -> Option<AvailabilityZone> {
         if self.nodes.is_empty() {
             return None;
