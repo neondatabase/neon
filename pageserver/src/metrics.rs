@@ -1854,6 +1854,7 @@ pub(crate) static LIVE_CONNECTIONS: Lazy<IntCounterPairVec> = Lazy::new(|| {
 
 #[derive(Clone, Copy, enum_map::Enum, IntoStaticStr)]
 pub(crate) enum ComputeCommandKind {
+    PageStreamV3,
     PageStreamV2,
     Basebackup,
     Fullbackup,
