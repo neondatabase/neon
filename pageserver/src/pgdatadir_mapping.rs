@@ -627,7 +627,7 @@ impl Timeline {
             // cannot overflow, high and low are both smaller than u64::MAX / 2
             let mid = (high + low) / 2;
 
-            let cmp = self
+            let cmp = match self
                 .is_latest_commit_timestamp_ge_than(
                     search_timestamp,
                     Lsn(mid * 8),
@@ -635,7 +635,16 @@ impl Timeline {
                     &mut found_larger,
                     ctx,
                 )
-                .await?;
+                .await
+            {
+                Ok(res) => res,
+                Err(PageReconstructError::MissingKey(e)) => {
+                    warn!("Missing key while find_lsn_for_timestamp. Either we might have already garbage-collected that data or the key is really missing. Last error: {:#}", e);
+                    // Return that we didn't find any requests smaller than the LSN, and logging the error.
+                    return Ok(LsnForTimestamp::Past(min_lsn));
+                }
+                Err(e) => return Err(e),
+            };
 
             if cmp {
                 high = mid;
@@ -643,6 +652,7 @@ impl Timeline {
                 low = mid + 1;
             }
         }
+
         // If `found_smaller == true`, `low = t + 1` where `t` is the target LSN,
         // so the LSN of the last commit record before or at `search_timestamp`.
         // Remove one from `low` to get `t`.
