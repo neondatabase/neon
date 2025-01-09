@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#include "neon_pgversioncompat.h"
+
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
 #include "portability/instr_time.h"
@@ -11,7 +13,6 @@
 
 #include "file_cache_internal.h"
 #include "neon.h"
-#include "neon_pgversioncompat.h"
 #include "pagestore_client.h"
 
 static void lfcp_cleanup(int, Datum);
@@ -47,6 +48,7 @@ void
 lfc_prewarm(FileCacheStateEntry* fs, size_t numrestore)
 {
 	LFCPrewarmWorkerState state;
+	lfc_ctl->prewarm_total_chunks += numrestore;
 
 	if (!lfc_ensure_opened())
 		return;
@@ -85,9 +87,13 @@ lfc_prewarm(FileCacheStateEntry* fs, size_t numrestore)
 				lfcp_pump_load(&state);
 			}
 		}
-		CHECK_FOR_INTERRUPTS();
 	}
 	PG_END_ENSURE_ERROR_CLEANUP(lfcp_cleanup, PointerGetDatum(&state));
+	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
+	lfc_ctl->prewarmed_pages += state.lpws_pages_loaded;
+	lfc_ctl->prewarm_curr_chunk += numrestore;
+	lfc_ctl->skipped_pages += state.lpws_pages_discarded;
+	LWLockRelease(lfc_lock);
 }
 
 static void
@@ -209,51 +215,76 @@ lfcp_pump_prefetch(LFCPrewarmWorkerState *state)
 {
 	LFCPrewarmChunk *chunk = NULL;
 	int			inflight_ios = (int) (state->lpws_pages_prefetched - state->lpws_pages_read);
-	int			chunk_ios_remaining = 0;
+	int			chunk_prefetches_remaining = 0;
+
+	if (inflight_ios >= state->lpws_max_io_depth)
+		return true;
 
 	if (!dlist_is_empty(&state->lpws_work))
 	{
 		chunk = dlist_head_element(LFCPrewarmChunk, node, &state->lpws_work);
-		chunk_ios_remaining = chunk->npages - chunk->prefetched;
+		chunk_prefetches_remaining = chunk->npages - chunk->prefetched;
+		Assert(chunk_prefetches_remaining >= 0);
 	}
 
 	while (inflight_ios < state->lpws_max_io_depth &&
-		   (chunk_ios_remaining > 0 || state->lpws_numrestore > 0))
+		   (chunk_prefetches_remaining > 0 || state->lpws_numrestore > 0))
 	{
 		BufferTag	tag;
+		int			new_ios;
 
-		while (chunk_ios_remaining == 0)
+		while (chunk_prefetches_remaining == 0)
 		{
-			chunk = lfcp_preprocess_chunk(state->lpws_fcses);
-			state->lpws_fcses++;
-			state->lpws_numrestore--;
+			FileCacheStateEntry *fcentry = state->lpws_fcses;
+			chunk = lfcp_preprocess_chunk(fcentry);
+			state->lpws_fcses += 1;
+			state->lpws_numrestore -= 1;
 			if (!PointerIsValid(chunk))
 			{
 				if (state->lpws_numrestore == 0)
 				{
 					/* no new chunks to send prefetch requests for */
 					return true;
-				};
+				}
 				continue;
 			}
+
+			ereport(DEBUG1,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("[LFCP] prewarm starting on %u/%u/%u.%d page %u; %ld remaining",
+							RelFileInfoFmt(BufTagGetNRelFileInfo(fcentry->key)),
+							fcentry->key.forkNum,
+							fcentry->key.blockNum,
+							state->lpws_numrestore),
+					 errhidecontext(true),
+					 errhidestmt(true)));
+
 			dlist_push_head(&state->lpws_work, &chunk->node);
-			chunk_ios_remaining = chunk->npages - chunk->prefetched;
+			chunk_prefetches_remaining = chunk->npages - chunk->prefetched;
 		}
 
+		Assert(chunk_prefetches_remaining >= 0);
 		Assert(PointerIsValid(chunk));
 		tag = chunk->stateEntry->key;
 
 		/* TODO: vectorize IOs */
-		for (int i = chunk->prefetched;
-			 inflight_ios < state->lpws_max_io_depth && i < chunk->npages;
-			 i++, inflight_ios++, state->lpws_pages_prefetched++, chunk->prefetched++)
+		for (new_ios = 0
+			 ; inflight_ios + new_ios < state->lpws_max_io_depth &&
+			   new_ios < chunk_prefetches_remaining
+			 ; new_ios++)
 		{
-			tag.blockNum = chunk->blknos[i];
+			tag.blockNum = chunk->blknos[chunk->prefetched + new_ios];
 			prefetch_page(BufTagGetNRelFileInfo(tag), tag.forkNum,
 						  tag.blockNum);
 		}
 
-		chunk_ios_remaining = chunk->npages - chunk->prefetched;
+		Assert(new_ios > 0);
+		chunk->prefetched += new_ios;
+		state->lpws_pages_prefetched += new_ios;
+		inflight_ios += new_ios;
+
+		chunk_prefetches_remaining -= new_ios;
+		Assert(chunk_prefetches_remaining == chunk->npages - chunk->prefetched);
 	}
 
 	if (chunk)
@@ -262,9 +293,13 @@ lfcp_pump_prefetch(LFCPrewarmWorkerState *state)
 		Assert(chunk->prefetched >= chunk->received);
 		Assert(chunk->received >= 0);
 	}
+	else
+	{
+		Assert(chunk_prefetches_remaining == 0);
+	}
 
 	return inflight_ios == state->lpws_max_io_depth ||
-		   (chunk_ios_remaining == 0 && state->lpws_numrestore == 0);
+		   (chunk_prefetches_remaining == 0 && state->lpws_numrestore == 0);
 }
 
 /*
@@ -283,7 +318,10 @@ lfcp_pump_read(LFCPrewarmWorkerState *state)
 		return false;
 
 	chunk = dlist_tail_element(LFCPrewarmChunk, node, &state->lpws_work);
-	chunk_ios_active = chunk->npages - chunk->prefetched;
+	chunk_ios_active = chunk->prefetched - chunk->received;
+
+	if (chunk_ios_active == 0)
+		elog(WARNING, "No io active");
 
 	if (chunk_ios_active > 0)
 	{
@@ -300,6 +338,16 @@ lfcp_pump_read(LFCPrewarmWorkerState *state)
 		if (chunk->received == 0)
 		{
 			Assert(chunk->alloc == NULL);
+
+			ereport(DEBUG1,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("[LFCP] reads starting on %u/%u/%u..%d start page %u",
+							RelFileInfoFmt(BufTagGetNRelFileInfo(chunk->stateEntry->key)),
+							chunk->stateEntry->key.forkNum,
+							chunk->stateEntry->key.blockNum),
+					 errhidecontext(true),
+					 errhidestmt(true)));
+
 #if PG_MAJORVERSION_NUM > 15
 			chunk->pages = chunk->alloc = 
 				MemoryContextAllocAligned(CurrentMemoryContext,
@@ -321,6 +369,7 @@ lfcp_pump_read(LFCPrewarmWorkerState *state)
 
 		state->lpws_pages_read++;
 		chunk->received++;
+		chunk_ios_active--;
 	}
 
 	Assert(chunk_ios_active <= (state->lpws_pages_prefetched - state->lpws_pages_read));
@@ -344,6 +393,15 @@ lfcp_pump_load(LFCPrewarmWorkerState *state)
 	FileCacheEntry *fcentry = chunk->cacheEntry;
 	uint64		generation;
 
+	ereport(DEBUG1,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("[LFCP] write starting on %u/%u/%u.%d start page %u",
+					RelFileInfoFmt(BufTagGetNRelFileInfo(chunk->stateEntry->key)),
+					chunk->stateEntry->key.forkNum,
+					chunk->stateEntry->key.blockNum),
+			 errhidecontext(true),
+			 errhidestmt(true)));
+
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
 	/* handle error condition */
@@ -355,9 +413,9 @@ lfcp_pump_load(LFCPrewarmWorkerState *state)
 	}
 
 	/* Prewarming 6.1 */
-	chunk->cacheEntry->prewarm_active = true;
+	fcentry->prewarm_active = true;
 	/* Prewarming 6.3 */
-	lfc_ctl->worker.wait_count = chunk->cacheEntry->access_count - 1;
+	lfc_ctl->worker.wait_count = fcentry->access_count - 1;
 	generation = lfc_ctl->generation;
 
 	/* Prewarming exit 6 */
@@ -429,7 +487,7 @@ lfcp_pump_load(LFCPrewarmWorkerState *state)
 			do {
 				/* no 'pwritev' necessary, nor possible */
 				int	len_written = (int) pwrite(lfc_desc, dataptr, len,
-												  file_off);
+											   file_off);
 
 				if (len_written < 0)
 				{
@@ -498,6 +556,15 @@ lfcp_release_chunk(LFCPrewarmChunk *chunk, uint64 generation)
 
 	/* Prewarming 11 */
 	ConditionVariableSignal(&lfc_ctl->worker.prewarm_done);
+
+	ereport(DEBUG1,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("[LFCP] finished work on %u/%u/%u.%d start page %u",
+					RelFileInfoFmt(BufTagGetNRelFileInfo(chunk->stateEntry->key)),
+					chunk->stateEntry->key.forkNum,
+					chunk->stateEntry->key.blockNum),
+			 errhidecontext(true),
+			 errhidestmt(true)));
 
 	/* Cleanup, return */
 cleanup_and_return:

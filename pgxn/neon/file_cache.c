@@ -230,6 +230,8 @@ lfc_shmem_startup(void)
 		memset(lfc_ctl, 0, sizeof *lfc_ctl);
 		dlist_init(&lfc_ctl->lru);
 		dlist_init(&lfc_ctl->holes);
+		ConditionVariableInit(&lfc_ctl->worker.prewarm_done);
+		ConditionVariableInit(&lfc_ctl->worker.chunk_release);
 
 		/* Initialize hyper-log-log structure for estimating working set size */
 		initSHLL(&lfc_ctl->wss_estimation);
@@ -305,7 +307,8 @@ lfc_change_limit_hook(int newval, void *extra)
 		 * Shrink cache by throwing away least recently accessed chunks and
 		 * returning their space to file system
 		 */
-		FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->lru));
+		FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node,
+												 dlist_pop_head_node(&lfc_ctl->lru));
 		FileCacheEntry *hole;
 		uint32		offset = victim->offset;
 		uint32		hash;
@@ -626,9 +629,8 @@ lfc_entry_for_write(BufferTag *key, bool no_replace, bool *prewarm_active,
 		Assert(PointerIsValid(entry));
 
 		/* increment access count, and unlink if needed */
-		if (entry->access_count == 0)
+		if (entry->access_count++ == 0)
 			dlist_delete(&entry->list_node);
-		entry->access_count += 1;
 	}
 
 	/*-------
