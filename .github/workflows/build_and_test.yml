@@ -728,30 +728,6 @@ jobs:
           tags: |
             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
-      - name: Build compute-tools image
-        # compute-tools are Postgres independent, so build it only once
-        # We pick 16, because that builds on debian 11 with older glibc (and is
-        # thus compatible with newer glibc), rather than 17 on Debian 12, as
-        # that isn't guaranteed to be compatible with Debian 11
-        if: matrix.version.pg == 'v16'
-        uses: docker/build-push-action@v6
-        with:
-          target: compute-tools-image
-          context: .
-          build-args: |
-            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
-            DEBIAN_VERSION=${{ matrix.version.debian }}
-          provenance: false
-          push: true
-          pull: true
-          file: compute/compute-node.Dockerfile
-          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-tools-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
-          tags: |
-            neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
-
   compute-node-image:
     needs: [ compute-node-image-arch, tag ]
     permissions:
@@ -794,14 +770,6 @@ jobs:
                                              neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
                                              neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
-      - name: Create multi-arch compute-tools image
-        if: matrix.version.pg == 'v16'
-        run: |
-          docker buildx imagetools create -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }} \
-                                          -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }} \
-                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
-                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -816,12 +784,6 @@ jobs:
         run: |
           docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
                                                                                 neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
-
-      - name: Push multi-arch compute-tools image to ECR
-        if: matrix.version.pg == 'v16'
-        run: |
-          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{ needs.tag.outputs.build-tag }} \
-                                                                                neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}
 
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
@@ -1001,9 +963,6 @@ jobs:
             docker buildx imagetools create -t $repo/neon:latest \
                                                $repo/neon:${{ needs.tag.outputs.build-tag }}
 
-            docker buildx imagetools create -t $repo/compute-tools:latest \
-                                               $repo/compute-tools:${{ needs.tag.outputs.build-tag }}
-
             for version in ${VERSIONS}; do
               docker buildx imagetools create -t $repo/compute-node-${version}:latest \
                                                  $repo/compute-node-${version}:${{ needs.tag.outputs.build-tag }}
@@ -1032,7 +991,7 @@ jobs:
       - name: Copy all images to prod ECR
         if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
         run: |
-          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16,v17}; do
+          for image in neon {vm-,}compute-node-{v14,v15,v16,v17}; do
             docker buildx imagetools create -t 093970136003.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }} \
                                                369495373322.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }}
           done
@@ -1044,7 +1003,7 @@ jobs:
     with:
       client_id: ${{ vars.AZURE_DEV_CLIENT_ID }}
       image_tag: ${{ needs.tag.outputs.build-tag }}
-      images: neon compute-tools vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
+      images: neon vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
       registry_name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
       subscription_id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       tenant_id: ${{ vars.AZURE_TENANT_ID }}
@@ -1056,7 +1015,7 @@ jobs:
     with:
       client_id: ${{ vars.AZURE_PROD_CLIENT_ID }}
       image_tag: ${{ needs.tag.outputs.build-tag }}
-      images: neon compute-tools vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
+      images: neon vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
       registry_name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
       subscription_id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       tenant_id: ${{ vars.AZURE_TENANT_ID }}
