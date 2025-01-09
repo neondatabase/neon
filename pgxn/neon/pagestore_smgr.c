@@ -1098,6 +1098,12 @@ Retry:
 	return min_ring_index;
 }
 
+static bool
+equal_requests(NeonRequest* a, NeonRequest* b)
+{
+	return a->reqid == b->reqid && a->lsn == b->lsn && a->not_modified_since == b->not_modified_since;
+}
+
 
 /*
  * Note: this function can get canceled and use a long jump to the next catch
@@ -2371,9 +2377,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 				NeonExistsResponse* exists_resp = (NeonExistsResponse *) resp;
 				if (neon_protocol_version >= 3)
 				{
-					if (resp->reqid != request.hdr.reqid ||
-						resp->lsn != request.hdr.lsn ||
-						resp->not_modified_since != request.hdr.not_modified_since ||
+					if (!equal_requests(resp, &request.hdr) ||
 						!RelFileInfoEquals(exists_resp->req.rinfo, request.rinfo) ||
 						exists_resp->req.forknum != request.forknum)
 					{
@@ -2389,9 +2393,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 			case T_NeonErrorResponse:
 				if (neon_protocol_version >= 3)
 				{
-					if (resp->reqid != request.hdr.reqid ||
-						resp->lsn != request.hdr.lsn ||
-						resp->not_modified_since != request.hdr.not_modified_since)
+					if (!equal_requests(resp, &request.hdr))
 					{
 						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match exists request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
 							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
@@ -3559,9 +3561,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 				NeonNblocksResponse * relsize_resp = (NeonNblocksResponse *) resp;
 				if (neon_protocol_version >= 3)
 				{
-					if (resp->reqid != request.hdr.reqid ||
-						resp->lsn != request.hdr.lsn ||
-						resp->not_modified_since != request.hdr.not_modified_since ||
+					if (!equal_requests(resp, &request.hdr) ||
 						!RelFileInfoEquals(relsize_resp->req.rinfo, request.rinfo) ||
 						relsize_resp->req.forknum != forknum)
 					{
@@ -3577,9 +3577,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			case T_NeonErrorResponse:
 				if (neon_protocol_version >= 3)
 				{
-					if (resp->reqid != request.hdr.reqid ||
-						resp->lsn != request.hdr.lsn ||
-						resp->not_modified_since != request.hdr.not_modified_since)
+					if (!equal_requests(resp, &request.hdr))
 					{
 						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get relsize request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
 							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
@@ -3647,9 +3645,7 @@ neon_dbsize(Oid dbNode)
 				NeonDbSizeResponse* dbsize_resp = (NeonDbSizeResponse *) resp;
 				if (neon_protocol_version >= 3)
 				{
-					if (resp->reqid != request.hdr.reqid ||
-						resp->lsn != request.hdr.lsn ||
-						resp->not_modified_since != request.hdr.not_modified_since ||
+					if (!equal_requests(resp, &request.hdr) ||
 						dbsize_resp->req.dbNode != dbNode)
 					{
 						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
@@ -3664,9 +3660,7 @@ neon_dbsize(Oid dbNode)
 			case T_NeonErrorResponse:
 				if (neon_protocol_version >= 3)
 				{
-					if (resp->reqid != request.hdr.reqid ||
-						resp->lsn != request.hdr.lsn ||
-						resp->not_modified_since != request.hdr.not_modified_since)
+					if (!equal_requests(resp, &request.hdr))
 					{
 						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get DB size request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
 							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
@@ -4048,9 +4042,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 			NeonGetSlruSegmentResponse* slru_resp = (NeonGetSlruSegmentResponse *) resp;
 			if (neon_protocol_version >= 3)
 			{
-				if (resp->reqid != request.hdr.reqid ||
-					resp->lsn != request.hdr.lsn ||
-					resp->not_modified_since != request.hdr.not_modified_since ||
+				if (!equal_requests(resp, &request.hdr) ||
 					slru_resp->req.kind != kind ||
 					slru_resp->req.segno != segno)
 				{
@@ -4067,9 +4059,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 		case T_NeonErrorResponse:
 			if (neon_protocol_version >= 3)
 			{
-				if (resp->reqid != request.hdr.reqid ||
-					resp->lsn != request.hdr.lsn ||
-					resp->not_modified_since != request.hdr.not_modified_since)
+				if (!equal_requests(resp, &request.hdr))
 				{
 					elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get SLRU segment request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
 						 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
