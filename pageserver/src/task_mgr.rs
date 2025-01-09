@@ -149,7 +149,7 @@ impl FromStr for TokioRuntimeMode {
 static TOKIO_THREAD_STACK_SIZE: Lazy<NonZeroUsize> = Lazy::new(|| {
     env::var("NEON_PAGESERVER_TOKIO_THREAD_STACK_SIZE")
         // the default 2MiB are insufficent, especially in debug mode
-        .unwrap_or_else(|| NonZeroUsize::new(4 * 1024 * 1024).unwrap())
+        .unwrap_or_else(|| NonZeroUsize::new(8 * 1024 * 1024).unwrap())
 });
 
 static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
