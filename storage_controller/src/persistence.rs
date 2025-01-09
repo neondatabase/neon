@@ -13,6 +13,7 @@ use pageserver_api::controller_api::AvailabilityZone;
 use pageserver_api::controller_api::MetadataHealthRecord;
 use pageserver_api::controller_api::SafekeeperDescribeResponse;
 use pageserver_api::controller_api::ShardSchedulingPolicy;
+use pageserver_api::controller_api::SkSchedulingPolicy;
 use pageserver_api::controller_api::{NodeSchedulingPolicy, PlacementPolicy};
 use pageserver_api::models::TenantConfig;
 use pageserver_api::shard::ShardConfigError;
@@ -1232,9 +1233,13 @@ pub(crate) struct SafekeeperPersistence {
 }
 
 impl SafekeeperPersistence {
-    pub(crate) fn as_describe_response(&self) -> SafekeeperDescribeResponse {
+    pub(crate) fn as_describe_response(&self) -> Result<SafekeeperDescribeResponse, DatabaseError> {
+        let scheduling_policy =
+            SkSchedulingPolicy::from_str(&self.scheduling_policy).map_err(|e| {
+                DatabaseError::Logical(format!("can't construct SkSchedulingPolicy: {e:?}"))
+            })?;
         // omit the `active` flag on purpose: it is deprecated.
-        SafekeeperDescribeResponse {
+        Ok(SafekeeperDescribeResponse {
             id: NodeId(self.id as u64),
             region_id: self.region_id.clone(),
             version: self.version,
@@ -1242,8 +1247,8 @@ impl SafekeeperPersistence {
             port: self.port,
             http_port: self.http_port,
             availability_zone_id: self.availability_zone_id.clone(),
-            scheduling_policy: self.scheduling_policy.clone(),
-        }
+            scheduling_policy,
+        })
     }
 }
 

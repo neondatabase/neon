@@ -7171,13 +7171,13 @@ impl Service {
     pub(crate) async fn safekeepers_list(
         &self,
     ) -> Result<Vec<SafekeeperDescribeResponse>, DatabaseError> {
-        Ok(self
+        self
             .persistence
             .list_safekeepers()
             .await?
             .into_iter()
             .map(|v| v.as_describe_response())
-            .collect::<Vec<_>>())
+            .collect::<Result<Vec<_>, _>>()
     }
 
     pub(crate) async fn get_safekeeper(
@@ -7187,7 +7187,7 @@ impl Service {
         self.persistence
             .safekeeper_get(id)
             .await
-            .map(|v| v.as_describe_response())
+            .and_then(|v| v.as_describe_response())
     }
 
     pub(crate) async fn upsert_safekeeper(
