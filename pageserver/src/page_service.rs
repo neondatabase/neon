@@ -932,6 +932,7 @@ impl PageServerHandler {
                     vec![self
                         .handle_get_rel_exists_request(&shard, &req, ctx)
                         .instrument(span.clone())
+                        .log_if_slow("handle_get_rel_exists_request", Duration::from_secs(10))
                         .await
                         .map(|msg| (msg, timer))],
                     span,
@@ -948,6 +949,7 @@ impl PageServerHandler {
                     vec![self
                         .handle_get_nblocks_request(&shard, &req, ctx)
                         .instrument(span.clone())
+                        .log_if_slow("handle_get_nblocks_request", Duration::from_secs(10))
                         .await
                         .map(|msg| (msg, timer))],
                     span,
@@ -972,6 +974,10 @@ impl PageServerHandler {
                                 ctx,
                             )
                             .instrument(span.clone())
+                            .log_if_slow(
+                                "handle_get_page_at_lsn_request_batched",
+                                Duration::from_secs(10),
+                            )
                             .await;
                         assert_eq!(res.len(), npages);
                         res
@@ -990,6 +996,7 @@ impl PageServerHandler {
                     vec![self
                         .handle_db_size_request(&shard, &req, ctx)
                         .instrument(span.clone())
+                        .log_if_slow("handle_db_size_request", Duration::from_secs(10))
                         .await
                         .map(|msg| (msg, timer))],
                     span,
@@ -1006,6 +1013,7 @@ impl PageServerHandler {
                     vec![self
                         .handle_get_slru_segment_request(&shard, &req, ctx)
                         .instrument(span.clone())
+                        .log_if_slow("handle_get_slru_segment_request", Duration::from_secs(10))
                         .await
                         .map(|msg| (msg, timer))],
                     span,
@@ -1104,6 +1112,7 @@ impl PageServerHandler {
             }
             // and log the info! line inside the request span
             .instrument(span.clone())
+            .log_if_slow("flush_fut", Duration::from_secs(10))
             .await?;
         }
         Ok(())
