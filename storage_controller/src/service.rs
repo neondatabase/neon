@@ -7171,8 +7171,7 @@ impl Service {
     pub(crate) async fn safekeepers_list(
         &self,
     ) -> Result<Vec<SafekeeperDescribeResponse>, DatabaseError> {
-        self
-            .persistence
+        self.persistence
             .list_safekeepers()
             .await?
             .into_iter()
