@@ -39,7 +39,10 @@ EXTENSIONS='[
 {"extname": "prefix", "extdir": "prefix-src"},
 {"extname": "hll", "extdir": "hll-src"},
 {"extname": "pg_cron", "extdir": "pg_cron-src"},
-{"extname": "pg_uuidv7", "extdir": "pg_uuidv7-src"}
+{"extname": "pg_uuidv7", "extdir": "pg_uuidv7-src"},
+{"extname": "roaringbitmap", "extdir": "pg_roaringbitmap-src"},
+{"extname": "semver", "extdir": "pg_semver-src"},
+{"extname": "pg_ivm", "extdir": "pg_ivm-src"}
 ]'
 EXTNAMES=$(echo ${EXTENSIONS} | jq -r '.[].extname' | paste -sd ' ' -)
 TAG=${NEWTAG} docker compose up --build -d
