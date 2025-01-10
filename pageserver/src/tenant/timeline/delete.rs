@@ -193,11 +193,8 @@ impl DeleteTimelineFlow {
     ) -> Result<(), DeleteTimelineError> {
         super::debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let (timeline, mut guard) = make_timeline_delete_guard(
-            tenant,
-            timeline_id,
-            TimelineDeleteGuardKind::Delete,
-        )?;
+        let (timeline, mut guard) =
+            make_timeline_delete_guard(tenant, timeline_id, TimelineDeleteGuardKind::Delete)?;
 
         guard.mark_in_progress()?;
 
