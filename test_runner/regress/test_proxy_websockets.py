@@ -8,7 +8,8 @@ import pytest
 import websocket_tunnel
 import websockets
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonProxy, PortDistributor
+from fixtures.neon_fixtures import NeonProxy
+from fixtures.port_distributor import PortDistributor
 
 
 @pytest.mark.asyncio
