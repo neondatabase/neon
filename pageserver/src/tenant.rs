@@ -48,6 +48,7 @@ use timeline::compaction::GcCompactJob;
 use timeline::compaction::ScheduledCompactionTask;
 use timeline::import_pgdata;
 use timeline::offload::offload_timeline;
+use timeline::offload::OffloadError;
 use timeline::CompactFlags;
 use timeline::CompactOptions;
 use timeline::CompactionError;
@@ -2039,7 +2040,7 @@ impl Tenant {
     ) -> Result<Arc<Timeline>, TimelineArchivalError> {
         info!("unoffloading timeline");
 
-        // We activate the timeline below manually, so this must be called on an active timeline.
+        // We activate the timeline below manually, so this must be called on an active tenant.
         // We expect callers of this function to ensure this.
         match self.current_state() {
             TenantState::Activating { .. }
@@ -2604,9 +2605,15 @@ impl Tenant {
                 WaitCompletionError::NotInitialized(
                     e, // If the queue is already stopped, it's a shutdown error.
                 ) if e.is_stopping() => CreateTimelineError::ShuttingDown,
-                e => CreateTimelineError::Other(e.into()),
-            })
-            .context("wait for timeline initial uploads to complete")?;
+                WaitCompletionError::NotInitialized(_) => {
+                    // This is a bug: we should never try to wait for uploads before initializing the timeline
+                    debug_assert!(false);
+                    CreateTimelineError::Other(anyhow::anyhow!("timeline not initialized"))
+                }
+                WaitCompletionError::UploadQueueShutDownOrStopped => {
+                    CreateTimelineError::ShuttingDown
+                }
+            })?;
 
         // The creating task is responsible for activating the timeline.
         // We do this after `wait_completion()` so that we don't spin up tasks that start
@@ -3094,9 +3101,17 @@ impl Tenant {
             };
             has_pending_task |= pending_task_left.unwrap_or(false);
             if pending_task_left == Some(false) && *can_offload {
-                offload_timeline(self, timeline)
+                pausable_failpoint!("before-timeline-auto-offload");
+                match offload_timeline(self, timeline)
                     .instrument(info_span!("offload_timeline", %timeline_id))
-                    .await?;
+                    .await
+                {
+                    Err(OffloadError::NotArchived) => {
+                        // Ignore this, we likely raced with unarchival
+                        Ok(())
+                    }
+                    other => other,
+                }?;
             }
         }
 
@@ -4482,13 +4497,17 @@ impl Tenant {
         let mut gc_cutoffs: HashMap<TimelineId, GcCutoffs> =
             HashMap::with_capacity(timelines.len());
 
+        // Ensures all timelines use the same start time when computing the time cutoff.
+        let now_ts_for_pitr_calc = SystemTime::now();
         for timeline in timelines.iter() {
             let cutoff = timeline
                 .get_last_record_lsn()
                 .checked_sub(horizon)
                 .unwrap_or(Lsn(0));
 
-            let cutoffs = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await?;
+            let cutoffs = timeline
+                .find_gc_cutoffs(now_ts_for_pitr_calc, cutoff, pitr, cancel, ctx)
+                .await?;
             let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
             assert!(old.is_none());
         }

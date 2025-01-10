@@ -159,6 +159,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let request_gauge = metrics.connection_requests.guard(proto);
 
     let tls = config.tls_config.as_ref();
+
     let record_handshake_error = !ctx.has_private_peer_addr();
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
     let do_handshake = handshake(ctx, stream, tls, record_handshake_error);
@@ -171,23 +172,20 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             // spawn a task to cancel the session, but don't wait for it
             cancellations.spawn({
                 let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-                let session_id = ctx.session_id();
-                let peer_ip = ctx.peer_addr();
-                let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?session_id);
+                let ctx = ctx.clone();
+                let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?ctx.session_id());
                 cancel_span.follows_from(tracing::Span::current());
                 async move {
-                    drop(
-                        cancellation_handler_clone
-                            .cancel_session(
-                                cancel_key_data,
-                                session_id,
-                                peer_ip,
-                                config.authentication_config.ip_allowlist_check_enabled,
-                            )
-                            .instrument(cancel_span)
-                            .await,
-                    );
-                }
+                    cancellation_handler_clone
+                        .cancel_session_auth(
+                            cancel_key_data,
+                            ctx,
+                            config.authentication_config.ip_allowlist_check_enabled,
+                            backend,
+                        )
+                        .await
+                        .inspect_err(|e | debug!(error = ?e, "cancel_session failed")).ok();
+                }.instrument(cancel_span)
             });
 
             return Ok(None);

@@ -65,7 +65,7 @@ aws-smithy-types = "1.2"
 aws-credential-types = "1.2.0"
 aws-sigv4 = { version = "1.2", features = ["sign-http"] }
 aws-types = "1.3"
-axum = { version = "0.7.5", features = ["ws"] }
+axum = { version = "0.7.9", features = ["ws"] }
 base64 = "0.13.0"
 bincode = "1.3"
 bindgen = "0.70"
@@ -135,7 +135,7 @@ parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
-pprof = { version = "0.14", features = ["criterion", "flamegraph", "protobuf", "protobuf-codec"] }
+pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointer", "protobuf", "protobuf-codec"] }
 procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.13"
@@ -187,7 +187,9 @@ tokio-util = { version = "0.7.10", features = ["io", "rt"] }
 toml = "0.8"
 toml_edit = "0.22"
 tonic = {version = "0.12.3", features = ["tls", "tls-roots"]}
-tower-service = "0.3.2"
+tower = { version = "0.5.2", default-features = false }
+tower-http = { version = "0.6.2", features = ["request-id", "trace"] }
+tower-service = "0.3.3"
 tracing = "0.1"
 tracing-error = "0.2"
 tracing-opentelemetry = "0.27"
@@ -266,6 +268,8 @@ tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", br
 [profile.release]
 # This is useful for profiling and, to some extent, debug.
 # Besides, debug info should not affect the performance.
+#
+# NB: we also enable frame pointers for improved profiling, see .cargo/config.toml.
 debug = true
 
 # disable debug symbols for all packages except this one to decrease binaries size

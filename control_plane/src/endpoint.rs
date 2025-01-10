@@ -62,7 +62,7 @@ use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
 use crate::storage_controller::StorageController;
 
-use compute_api::responses::{ComputeState, ComputeStatus};
+use compute_api::responses::{ComputeStatus, ComputeStatusResponse};
 use compute_api::spec::{Cluster, ComputeFeature, ComputeMode, ComputeSpec};
 
 // contents of a endpoint.json file
@@ -739,7 +739,7 @@ impl Endpoint {
     }
 
     // Call the /status HTTP API
-    pub async fn get_status(&self) -> Result<ComputeState> {
+    pub async fn get_status(&self) -> Result<ComputeStatusResponse> {
         let client = reqwest::Client::new();
 
         let response = client
