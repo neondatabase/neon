@@ -574,44 +574,6 @@ enum BatchedFeMessage {
     },
 }
 
-impl BatchedFeMessage {
-    async fn throttle_and_record_start_processing(
-        &mut self,
-        cancel: &CancellationToken,
-    ) -> Result<(), QueryError> {
-        let (shard, tokens, timers) = match self {
-            BatchedFeMessage::Exists { shard, timer, .. }
-            | BatchedFeMessage::Nblocks { shard, timer, .. }
-            | BatchedFeMessage::DbSize { shard, timer, .. }
-            | BatchedFeMessage::GetSlruSegment { shard, timer, .. } => {
-                (
-                    shard,
-                    // 1 token is probably under-estimating because these
-                    // request handlers typically do several Timeline::get calls.
-                    1,
-                    itertools::Either::Left(std::iter::once(timer)),
-                )
-            }
-            BatchedFeMessage::GetPage { shard, pages, .. } => (
-                shard,
-                pages.len(),
-                itertools::Either::Right(pages.iter_mut().map(|(_, _, timer)| timer)),
-            ),
-            BatchedFeMessage::RespondError { .. } => return Ok(()),
-        };
-        let throttled = tokio::select! {
-            throttled = shard.pagestream_throttle.throttle(tokens) => { throttled }
-            _ = cancel.cancelled() => {
-                return Err(QueryError::Shutdown);
-            }
-        };
-        for timer in timers {
-            timer.observe_throttle_done_execution_starting(&throttled);
-        }
-        Ok(())
-    }
-}
-
 impl PageServerHandler {
     pub fn new(
         tenant_manager: Arc<TenantManager>,
@@ -697,6 +659,18 @@ impl PageServerHandler {
         // parse request
         let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
+        // TODO: turn in to async closure once available to avoid repeating received_at
+        async fn record_op_start_and_throttle(
+            shard: &timeline::handle::Handle<TenantManagerTypes>,
+            op: metrics::SmgrQueryType,
+            received_at: Instant,
+        ) -> SmgrOpTimer {
+            let mut timer = shard.query_metrics.start_smgr_op(op, received_at);
+            let throttled = shard.pagestream_throttle.throttle(1).await;
+            timer.observe_throttle_done_execution_starting(&throttled);
+            timer
+        }
+
         let batched_msg = match neon_fe_msg {
             PagestreamFeMessage::Exists(req) => {
                 let span = tracing::info_span!(parent: parent_span, "handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
@@ -704,9 +678,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
-                let timer = shard
-                    .query_metrics
-                    .start_smgr_op(metrics::SmgrQueryType::GetRelExists, received_at);
+                let timer = record_op_start_and_throttle(
+                    &shard,
+                    metrics::SmgrQueryType::GetRelExists,
+                    received_at,
+                )
+                .await;
                 BatchedFeMessage::Exists {
                     span,
                     timer,
@@ -720,9 +697,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
-                let timer = shard
-                    .query_metrics
-                    .start_smgr_op(metrics::SmgrQueryType::GetRelSize, received_at);
+                let timer = record_op_start_and_throttle(
+                    &shard,
+                    metrics::SmgrQueryType::GetRelSize,
+                    received_at,
+                )
+                .await;
                 BatchedFeMessage::Nblocks {
                     span,
                     timer,
@@ -736,9 +716,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
-                let timer = shard
-                    .query_metrics
-                    .start_smgr_op(metrics::SmgrQueryType::GetDbSize, received_at);
+                let timer = record_op_start_and_throttle(
+                    &shard,
+                    metrics::SmgrQueryType::GetDbSize,
+                    received_at,
+                )
+                .await;
                 BatchedFeMessage::DbSize {
                     span,
                     timer,
@@ -752,9 +735,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
-                let timer = shard
-                    .query_metrics
-                    .start_smgr_op(metrics::SmgrQueryType::GetSlruSegment, received_at);
+                let timer = record_op_start_and_throttle(
+                    &shard,
+                    metrics::SmgrQueryType::GetSlruSegment,
+                    received_at,
+                )
+                .await;
                 BatchedFeMessage::GetSlruSegment {
                     span,
                     timer,
@@ -805,12 +791,17 @@ impl PageServerHandler {
                     }
                 };
 
-                // It's important to start the timer before waiting for the LSN
+                // It's important to start the smgr op metric recorder as early as possible
                 // so that the _started counters are incremented before we do
-                // any serious waiting, e.g., for LSNs.
-                let timer = shard
-                    .query_metrics
-                    .start_smgr_op(metrics::SmgrQueryType::GetPageAtLsn, received_at);
+                // any serious waiting, e.g., for throttle or LSNs.
+                // We feed wait times to the metric recorder so it can deduct them / count
+                // them seperately.
+                let timer = record_op_start_and_throttle(
+                    &shard,
+                    metrics::SmgrQueryType::GetPageAtLsn,
+                    received_at,
+                )
+                .await;
 
                 let effective_request_lsn = match Self::wait_or_get_last_lsn(
                     &shard,
@@ -1225,17 +1216,13 @@ impl PageServerHandler {
                 Ok(msg) => msg,
                 Err(e) => break e,
             };
-            let mut msg = match msg {
+            let msg = match msg {
                 Some(msg) => msg,
                 None => {
                     debug!("pagestream subprotocol end observed");
                     return ((pgb_reader, timeline_handles), Ok(()));
                 }
             };
-
-            if let Err(cancelled) = msg.throttle_and_record_start_processing(&self.cancel).await {
-                break cancelled;
-            }
 
             let err = self
                 .pagesteam_handle_batched_message(pgb_writer, msg, &cancel, ctx)
@@ -1394,15 +1381,13 @@ impl PageServerHandler {
                             return Ok(());
                         }
                     };
-                    let mut batch = match batch {
+                    let batch = match batch {
                         Ok(batch) => batch,
                         Err(e) => {
                             return Err(e);
                         }
                     };
-                    batch
-                        .throttle_and_record_start_processing(&self.cancel)
-                        .await?;
+
                     self.pagesteam_handle_batched_message(pgb_writer, batch, &cancel, &ctx)
                         .await?;
                 }
