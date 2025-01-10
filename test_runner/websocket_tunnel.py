@@ -42,9 +42,9 @@ def enable_verbose_logging():
     logger.addHandler(logging.StreamHandler())
 
 
-async def start_server(tcp_listen_host, tcp_listen_port, ws_url, ws_host, ws_port):
+async def start_server(tcp_listen_host, tcp_listen_port, ws_url, ctx):
     server = await asyncio.start_server(
-        lambda r, w: handle_client(r, w, ws_url, ws_host, ws_port), tcp_listen_host, tcp_listen_port
+        lambda r, w: handle_client(r, w, ws_url, ctx), tcp_listen_host, tcp_listen_port
     )
     return server
 
@@ -57,7 +57,7 @@ async def handle_tcp_to_websocket(tcp_reader, ws):
             await ws.send(data)
     except websockets.exceptions.ConnectionClosedError as e:
         log.debug(f"connection closed: {e}")
-    except websockets.exceptions.ConnectionClosedOk:
+    except websockets.exceptions.ConnectionClosedOK:
         log.debug("connection closed")
     except Exception as e:
         log.error(e)
@@ -70,21 +70,17 @@ async def handle_websocket_to_tcp(ws, tcp_writer):
             await tcp_writer.drain()
     except websockets.exceptions.ConnectionClosedError as e:
         log.debug(f"connection closed: {e}")
-    except websockets.exceptions.ConnectionClosedOk:
+    except websockets.exceptions.ConnectionClosedOK:
         log.debug("connection closed")
     except Exception as e:
         log.error(e)
 
 
-async def handle_client(tcp_reader, tcp_writer, ws_url: str, ws_host: str, ws_port: int):
+async def handle_client(tcp_reader, tcp_writer, ws_url: str, ctx: ssl.SSLContext):
     try:
         log.info("Received TCP connection. Connecting to websockets proxy.")
 
-        ctx = ssl.create_default_context(Purpose.SERVER_AUTH)
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
-        async with websockets.connect(ws_url, ssl=ctx, host=ws_host, port=ws_port) as ws:
+        async with websockets.connect(ws_url, ssl=ctx) as ws:
             try:
                 log.info("Connected to websockets proxy")
 
@@ -143,9 +139,11 @@ async def main():
     if args.verbose:
         enable_verbose_logging()
 
-    server = await start_server(
-        args.tcp_listen_addr, args.tcp_listen_port, args.ws_url, args.ws_host, args.ws_port
-    )
+    ctx = ssl.create_default_context(Purpose.SERVER_AUTH)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    server = await start_server(args.tcp_listen_addr, args.tcp_listen_port, args.ws_url, ctx)
     print(
         f"Listening for connections at {args.tcp_listen_addr}:{args.tcp_listen_port}, forwarding them to {args.ws_host}:{args.ws_port}"
     )
