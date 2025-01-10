@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import ssl
 
-import asyncio
 import asyncpg
 import pytest
-import websockets
 import websocket_tunnel
+import websockets
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonProxy, PortDistributor
 
