@@ -726,9 +726,10 @@ impl Key {
         self.field1 >= METADATA_KEY_BEGIN_PREFIX && self.field1 < METADATA_KEY_END_PREFIX
     }
 
-    #[inline(always)]
-    pub fn is_inherited_sparse_key(self) -> bool {
-        self.is_sparse() && self.field1 == RELATION_SIZE_PREFIX
+    /// Check if the key belongs to the inherited keyspace.
+    fn is_inherited_sparse_key(self) -> bool {
+        debug_assert!(self.is_sparse());
+        self.field1 == RELATION_SIZE_PREFIX
     }
 
     pub fn sparse_non_inherited_keyspace() -> Range<Key> {
