@@ -11,7 +11,7 @@ Currently we build two main images:
 
 We build all images after a successful `release` tests run and push automatically to Docker Hub with two parallel CI jobs
 
-1. `neondatabase/compute-node-v16` (and -v15 and -v14)
+1. `neondatabase/compute-node-v17` (and -16, -v15, -v14)
 
 2. `neondatabase/neon`
 
