@@ -52,6 +52,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeTravelError;
+use scopeguard::defer;
 use tenant_size_model::{svg::SvgBranchKind, SizeResult, StorageModel};
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
@@ -1543,8 +1544,18 @@ async fn timeline_page_trace_handler(
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
 
+    // Install a page trace, unless one is already in progress.
     let (page_trace, mut trace_rx) = PageTrace::new(event_limit);
-    timeline.page_trace.store(Arc::new(Some(page_trace)));
+    let cur = timeline.page_trace.load();
+    let installed = cur.is_none()
+        && timeline
+            .page_trace
+            .compare_and_swap(cur, Some(Arc::new(page_trace)))
+            .is_none();
+    if !installed {
+        return Err(ApiError::Conflict("page trace already active".to_string()));
+    }
+    defer!(timeline.page_trace.store(None)); // uninstall on return
 
     let mut buffer = Vec::with_capacity(size_limit as usize);
 
@@ -1570,9 +1581,6 @@ async fn timeline_page_trace_handler(
             }
         }
     }
-
-    // Above code is infallible, so we guarantee to switch the trace off when done
-    timeline.page_trace.store(Arc::new(None));
 
     Ok(Response::builder()
         .status(StatusCode::OK)

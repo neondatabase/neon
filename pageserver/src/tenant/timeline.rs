@@ -14,7 +14,7 @@ pub mod uninit;
 mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
@@ -436,7 +436,8 @@ pub struct Timeline {
     /// Cf. [`crate::tenant::CreateTimelineIdempotency`].
     pub(crate) create_idempotency: crate::tenant::CreateTimelineIdempotency,
 
-    pub(crate) page_trace: ArcSwap<Option<PageTrace>>,
+    /// If Some, collects GetPage metadata for an ongoing PageTrace.
+    pub(crate) page_trace: ArcSwapOption<PageTrace>,
 }
 
 /// When one of these is instantiated for a tenant, it will be used to record fine-grained
