@@ -5,9 +5,6 @@ generate_id() {
     local -n resvar=$1
     printf -v resvar '%08x%08x%08x%08x' $SRANDOM $SRANDOM $SRANDOM $SRANDOM
 }
-TENANT_ID_FILE="$(dirname ${0})/compute_wrapper/var/db/postgres/specs/tenant_id"
-TIMELINE_ID_FILE="$(dirname ${0})/compute_wrapper/var/db/postgres/specs/timeline_id"
-rm -f "${TENANT_ID_FILE}" "${TIMELINE_ID_FILE}"
 if [ -z ${OLDTAG+x} ] || [ -z ${NEWTAG+x} ] || [ -z "${OLDTAG}" ] || [ -z "${NEWTAG}" ]; then
   echo OLDTAG and NEWTAG must be defined
   exit 1
@@ -18,11 +15,16 @@ export PGPASSWORD=cloud_admin
 export PGHOST=127.0.0.1
 export PGPORT=55433
 export PGDATABASE=postgres
-docker volume prune -f
 function wait_for_ready {
-  while ! docker compose logs compute_is_ready | grep -q "accepting connections"; do
+  TIME=0
+  while ! docker compose logs compute_is_ready | grep -q "accepting connections" && [ ${TIME} -le 300 ] ; do
+    ((TIME += 1 ))
     sleep 1
   done
+  if [ ${TIME} -gt 300 ]; then
+    echo Time is out.
+    exit 2
+  fi
 }
 function create_extensions() {
   for ext in ${1}; do
@@ -50,7 +52,6 @@ wait_for_ready
 create_extensions "${EXTNAMES}"
 query="select json_object_agg(extname,extversion) from pg_extension where extname in ('${EXTNAMES// /\',\'}')"
 new_vers=$(psql -Aqt -c "$query" )
-echo $new_vers
 docker compose down
 TAG=${OLDTAG} docker compose --profile test-extensions up --build -d --force-recreate
 wait_for_ready
@@ -66,8 +67,7 @@ if [ -z "${exts}" ]; then
 else
   tenant_id=$(psql -Aqt -c "SHOW neon.tenant_id")
   timeline_id=$(psql -Aqt -c "SHOW neon.timeline_id")
-  #XXX for ext in ${exts}; do
-  for ext in ${EXTNAMES}; do
+  for ext in ${exts}; do
     echo Testing ${ext}...
     EXTDIR=$(echo ${EXTENSIONS} | jq -r '.[] | select(.extname=="'${ext}'") | .extdir')
     generate_id new_timeline_id
@@ -87,13 +87,6 @@ else
     if [ ${TID} != ${new_timeline_id} ]; then
       echo Timeline mismatch
       exit 1
-    fi
-    if [ ${ext} == "pg_hintplan" ]; then
-        TMPDIR=$(mktemp -d)
-        # The following block does the same for the pg_hintplan test
-        docker compose cp neon-test-extensions:/ext-src/pg_hint_plan-src/data $TMPDIR/data
-        docker compose cp $TMPDIR/data compute:/ext-src/pg_hint_plan-src/
-        rm -rf $TMPDIR
     fi
     psql -d contrib_regression -c "\dx ${ext}"
     docker compose exec -e PGPASSWORD=cloud_admin neon-test-extensions sh -c /ext-src/${EXTDIR}/test-upgrade.sh
