@@ -20,6 +20,12 @@ while ! nc -z pageserver 6400; do
 done
 echo "Page server is ready."
 
+if [ ${PG_VERSION} == 16 ]; then
+  jq '.cluster.settings += [{"name": "session_preload_libraries","value": "anon","vartype": "string"}]' ${SPEC_FILE_ORG} > ${SPEC_FILE}
+else
+  cp ${SPEC_FILE_ORG} ${SPEC_FILE}
+fi
+
  if [ -n "${TENANT_ID:-}" ] && [ -n "${TIMELINE_ID:-}" ]; then
    tenant_id=${TENANT_ID}
    timeline_id=${TIMELINE_ID}
@@ -66,7 +72,7 @@ else
 fi
 
 echo "Overwrite tenant id and timeline id in spec file"
-sed "s/TENANT_ID/${tenant_id}/" ${SPEC_FILE_ORG} > ${SPEC_FILE}
+sed -i "s/TENANT_ID/${tenant_id}/" ${SPEC_FILE}
 sed -i "s/TIMELINE_ID/${timeline_id}/" ${SPEC_FILE}
 
 cat ${SPEC_FILE}
