@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::SystemTime;
 
 use itertools::Itertools;
 use pageserver::tenant::checks::check_valid_layermap;
@@ -88,9 +89,14 @@ pub(crate) async fn branch_cleanup_and_check_errors(
             match s3_data.blob_data {
                 BlobDataParseResult::Parsed {
                     index_part,
-                    index_part_generation: _index_part_generation,
-                    s3_layers: _s3_layers,
+                    index_part_generation: _,
+                    s3_layers: _,
+                    index_part_last_modified_time,
+                    index_part_snapshot_time,
                 } => {
+                    // Ignore missing file error if index_part downloaded is different from the one when listing the layer files.
+                    let ignore_error = index_part_snapshot_time < index_part_last_modified_time
+                        && !cfg!(debug_assertions);
                     if !IndexPart::KNOWN_VERSIONS.contains(&index_part.version()) {
                         result
                             .errors
@@ -171,7 +177,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                                     is_l0,
                                 );
 
-                                if is_l0 {
+                                if is_l0 || ignore_error {
                                     result.warnings.push(msg);
                                 } else {
                                     result.errors.push(msg);
@@ -308,9 +314,11 @@ pub(crate) enum BlobDataParseResult {
     Parsed {
         index_part: Box<IndexPart>,
         index_part_generation: Generation,
+        index_part_last_modified_time: SystemTime,
+        index_part_snapshot_time: SystemTime,
         s3_layers: HashSet<(LayerName, Generation)>,
     },
-    /// The remains of a deleted Timeline (i.e. an initdb archive only)
+    /// The remains of an uncleanly deleted Timeline or aborted timeline creation(e.g. an initdb archive only, or some layer without an index)
     Relic,
     Incorrect {
         errors: Vec<String>,
@@ -346,7 +354,7 @@ pub(crate) async fn list_timeline_blobs(
     match res {
         ListTimelineBlobsResult::Ready(data) => Ok(data),
         ListTimelineBlobsResult::MissingIndexPart(_) => {
-            // Retry if index is missing.
+            // Retry if listing raced with removal of an index
             let data = list_timeline_blobs_impl(remote_client, id, root_target)
                 .await?
                 .into_data();
@@ -358,7 +366,7 @@ pub(crate) async fn list_timeline_blobs(
 enum ListTimelineBlobsResult {
     /// Blob data is ready to be intepreted.
     Ready(RemoteTimelineBlobData),
-    /// List timeline blobs has layer files but is missing [`IndexPart`].
+    /// The listing contained an index but when we tried to fetch it, we couldn't
     MissingIndexPart(RemoteTimelineBlobData),
 }
 
@@ -467,26 +475,26 @@ async fn list_timeline_blobs_impl(
     match index_part_object.as_ref() {
         Some(selected) => index_part_keys.retain(|k| k != selected),
         None => {
-            // It is possible that the branch gets deleted after we got some layer files listed
-            // and we no longer have the index file in the listing.
-            errors.push(
+            // This case does not indicate corruption, but it should be very unusual.  It can
+            // happen if:
+            // - timeline creation is in progress (first layer is written before index is written)
+            // - timeline deletion happened while a stale pageserver was still attached, it might upload
+            //   a layer after the deletion is done.
+            tracing::info!(
                 "S3 list response got no index_part.json file but still has layer files"
-                    .to_string(),
             );
-            return Ok(ListTimelineBlobsResult::MissingIndexPart(
-                RemoteTimelineBlobData {
-                    blob_data: BlobDataParseResult::Incorrect { errors, s3_layers },
-                    unused_index_keys: index_part_keys,
-                    unknown_keys,
-                },
-            ));
+            return Ok(ListTimelineBlobsResult::Ready(RemoteTimelineBlobData {
+                blob_data: BlobDataParseResult::Relic,
+                unused_index_keys: index_part_keys,
+                unknown_keys,
+            }));
         }
     }
 
     if let Some(index_part_object_key) = index_part_object.as_ref() {
-        let index_part_bytes =
+        let (index_part_bytes, index_part_last_modified_time) =
             match download_object_with_retries(remote_client, &index_part_object_key.key).await {
-                Ok(index_part_bytes) => index_part_bytes,
+                Ok(data) => data,
                 Err(e) => {
                     // It is possible that the branch gets deleted in-between we list the objects
                     // and we download the index part file.
@@ -500,7 +508,7 @@ async fn list_timeline_blobs_impl(
                     ));
                 }
             };
-
+        let index_part_snapshot_time = index_part_object_key.last_modified;
         match serde_json::from_slice(&index_part_bytes) {
             Ok(index_part) => {
                 return Ok(ListTimelineBlobsResult::Ready(RemoteTimelineBlobData {
@@ -508,6 +516,8 @@ async fn list_timeline_blobs_impl(
                         index_part: Box::new(index_part),
                         index_part_generation,
                         s3_layers,
+                        index_part_last_modified_time,
+                        index_part_snapshot_time,
                     },
                     unused_index_keys: index_part_keys,
                     unknown_keys,
@@ -625,7 +635,7 @@ pub(crate) async fn list_tenant_manifests(
 
     let manifest_bytes =
         match download_object_with_retries(remote_client, &latest_listing_object.key).await {
-            Ok(bytes) => bytes,
+            Ok((bytes, _)) => bytes,
             Err(e) => {
                 // It is possible that the tenant gets deleted in-between we list the objects
                 // and we download the manifest file.

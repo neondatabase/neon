@@ -39,6 +39,7 @@ diesel::table! {
         active -> Bool,
         http_port -> Int4,
         availability_zone_id -> Text,
+        scheduling_policy -> Varchar,
     }
 }
 

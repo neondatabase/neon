@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::bail;
 use futures::future::Either;
@@ -8,7 +9,7 @@ use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
 use proxy::cancellation::{CancelMap, CancellationHandler};
 use proxy::config::{
-    self, remote_storage_from_toml, AuthenticationConfig, CacheOptions, HttpConfig,
+    self, remote_storage_from_toml, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig,
     ProjectInfoCacheOptions, ProxyConfig, ProxyProtocolV2,
 };
 use proxy::context::parquet::ParquetUploadArgs;
@@ -23,6 +24,7 @@ use proxy::redis::{elasticache, notifications};
 use proxy::scram::threadpool::ThreadPool;
 use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::GlobalConnPoolOptions;
+use proxy::tls::client_config::compute_client_config_with_root_certs;
 use proxy::{auth, control_plane, http, serverless, usage_metrics};
 use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
@@ -105,6 +107,9 @@ struct ProxyCliArgs {
     /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
     #[clap(short = 'c', long, alias = "ssl-cert")]
     tls_cert: Option<String>,
+    /// Allow writing TLS session keys to the given file pointed to by the environment variable `SSLKEYLOGFILE`.
+    #[clap(long, alias = "allow-ssl-keylogfile")]
+    allow_tls_keylogfile: bool,
     /// path to directory with TLS certificates for client postgres connections
     #[clap(long)]
     certs_dir: Option<String>,
@@ -126,9 +131,6 @@ struct ProxyCliArgs {
     /// lock for `connect_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
     #[clap(long, default_value = config::ConcurrencyLockOptions::DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK)]
     connect_compute_lock: String,
-    /// Allow self-signed certificates for compute nodes (for testing)
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    allow_self_signed_compute: bool,
     #[clap(flatten)]
     sql_over_http: SqlOverHttpArgs,
     /// timeout for scram authentication protocol
@@ -397,6 +399,7 @@ async fn main() -> anyhow::Result<()> {
     let cancellation_handler = Arc::new(CancellationHandler::<
         Option<Arc<Mutex<RedisPublisherClient>>>,
     >::new(
+        &config.connect_to_compute,
         cancel_map.clone(),
         redis_publisher,
         proxy::metrics::CancellationSource::FromClient,
@@ -492,6 +495,7 @@ async fn main() -> anyhow::Result<()> {
                     let cache = api.caches.project_info.clone();
                     if let Some(client) = client1 {
                         maintenance_tasks.spawn(notifications::task_main(
+                            config,
                             client,
                             cache.clone(),
                             cancel_map.clone(),
@@ -500,6 +504,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     if let Some(client) = client2 {
                         maintenance_tasks.spawn(notifications::task_main(
+                            config,
                             client,
                             cache.clone(),
                             cancel_map.clone(),
@@ -555,14 +560,12 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             key_path,
             cert_path,
             args.certs_dir.as_ref(),
+            args.allow_tls_keylogfile,
         )?),
         (None, None) => None,
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
 
-    if args.allow_self_signed_compute {
-        warn!("allowing self-signed compute certificates");
-    }
     let backup_metric_collection_config = config::MetricBackupCollectionConfig {
         interval: args.metric_backup_collection_interval,
         remote_storage_config: args.metric_backup_collection_remote_storage.clone(),
@@ -634,10 +637,15 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         console_redirect_confirmation_timeout: args.webauth_confirmation_timeout,
     };
 
+    let compute_config = ComputeConfig {
+        retry: config::RetryConfig::parse(&args.connect_to_compute_retry)?,
+        tls: Arc::new(compute_client_config_with_root_certs()?),
+        timeout: Duration::from_secs(2),
+    };
+
     let config = ProxyConfig {
         tls_config,
         metric_collection,
-        allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
         authentication_config,
         proxy_protocol_v2: args.proxy_protocol_v2,
@@ -645,9 +653,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         region: args.region.clone(),
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
-        connect_to_compute_retry_config: config::RetryConfig::parse(
-            &args.connect_to_compute_retry,
-        )?,
+        connect_to_compute: compute_config,
     };
 
     let config = Box::leak(Box::new(config));
@@ -738,9 +744,59 @@ fn build_auth_backend(
         }
 
         AuthBackendType::ConsoleRedirect => {
-            let url = args.uri.parse()?;
-            let backend = ConsoleRedirectBackend::new(url);
+            let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
+            let project_info_cache_config: ProjectInfoCacheOptions =
+                args.project_info_cache.parse()?;
+            let endpoint_cache_config: config::EndpointCacheConfig =
+                args.endpoint_cache_config.parse()?;
 
+            info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
+            info!(
+                "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
+            );
+            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
+            let caches = Box::leak(Box::new(control_plane::caches::ApiCaches::new(
+                wake_compute_cache_config,
+                project_info_cache_config,
+                endpoint_cache_config,
+            )));
+
+            let config::ConcurrencyLockOptions {
+                shards,
+                limiter,
+                epoch,
+                timeout,
+            } = args.wake_compute_lock.parse()?;
+            info!(?limiter, shards, ?epoch, "Using NodeLocks (wake_compute)");
+            let locks = Box::leak(Box::new(control_plane::locks::ApiLocks::new(
+                "wake_compute_lock",
+                limiter,
+                shards,
+                timeout,
+                epoch,
+                &Metrics::get().wake_compute_lock,
+            )?));
+
+            let url = args.uri.clone().parse()?;
+            let ep_url: proxy::url::ApiUrl = args.auth_endpoint.parse()?;
+            let endpoint = http::Endpoint::new(ep_url, http::new_client());
+            let mut wake_compute_rps_limit = args.wake_compute_limit.clone();
+            RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
+            let wake_compute_endpoint_rate_limiter =
+                Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
+
+            // Since we use only get_allowed_ips_and_secret() wake_compute_endpoint_rate_limiter
+            // and locks are not used in ConsoleRedirectBackend,
+            // but they are required by the NeonControlPlaneClient
+            let api = control_plane::client::cplane_proxy_v1::NeonControlPlaneClient::new(
+                endpoint,
+                args.control_plane_token.clone(),
+                caches,
+                locks,
+                wake_compute_endpoint_rate_limiter,
+            );
+
+            let backend = ConsoleRedirectBackend::new(url, api);
             let config = Box::leak(Box::new(backend));
 
             Ok(Either::Right(config))
