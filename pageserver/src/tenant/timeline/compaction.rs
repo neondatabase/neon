@@ -242,9 +242,14 @@ impl GcCompactionQueue {
             {
                 let mut guard = self.inner.lock().unwrap();
                 guard.gc_guards.insert(id, gc_guard);
+                let mut tasks = Vec::new();
                 for task in pending_tasks {
                     let id = guard.next_id();
-                    guard.queued.push_back((id, task));
+                    tasks.push((id, task));
+                }
+                tasks.reverse();
+                for item in tasks {
+                    guard.queued.push_front(item);
                 }
             }
             info!("scheduled enhanced gc bottom-most compaction with sub-compaction, split into {} jobs", jobs_len);
