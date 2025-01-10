@@ -1047,6 +1047,9 @@ impl Service {
                             // on a snapshot of the nodes.
                             tracing::info!("Node {} was not found after heartbeat round", node_id);
                         }
+                        Err(ApiError::ShuttingDown) => {
+                            // No-op: we're shutting down, no need to try and update any nodes' statuses
+                        }
                         Err(err) => {
                             // Transition to active involves reconciling: if a node responds to a heartbeat then
                             // becomes unavailable again, we may get an error here.
@@ -7347,13 +7350,12 @@ impl Service {
     pub(crate) async fn safekeepers_list(
         &self,
     ) -> Result<Vec<SafekeeperDescribeResponse>, DatabaseError> {
-        Ok(self
-            .persistence
+        self.persistence
             .list_safekeepers()
             .await?
             .into_iter()
             .map(|v| v.as_describe_response())
-            .collect::<Vec<_>>())
+            .collect::<Result<Vec<_>, _>>()
     }
 
     pub(crate) async fn get_safekeeper(
@@ -7363,12 +7365,12 @@ impl Service {
         self.persistence
             .safekeeper_get(id)
             .await
-            .map(|v| v.as_describe_response())
+            .and_then(|v| v.as_describe_response())
     }
 
     pub(crate) async fn upsert_safekeeper(
         &self,
-        record: crate::persistence::SafekeeperPersistence,
+        record: crate::persistence::SafekeeperUpsert,
     ) -> Result<(), DatabaseError> {
         self.persistence.safekeeper_upsert(record).await
     }

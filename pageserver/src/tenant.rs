@@ -48,6 +48,7 @@ use timeline::compaction::GcCompactJob;
 use timeline::compaction::ScheduledCompactionTask;
 use timeline::import_pgdata;
 use timeline::offload::offload_timeline;
+use timeline::offload::OffloadError;
 use timeline::CompactFlags;
 use timeline::CompactOptions;
 use timeline::CompactionError;
@@ -2041,7 +2042,7 @@ impl Tenant {
     ) -> Result<Arc<Timeline>, TimelineArchivalError> {
         info!("unoffloading timeline");
 
-        // We activate the timeline below manually, so this must be called on an active timeline.
+        // We activate the timeline below manually, so this must be called on an active tenant.
         // We expect callers of this function to ensure this.
         match self.current_state() {
             TenantState::Activating { .. }
@@ -3102,9 +3103,17 @@ impl Tenant {
             };
             has_pending_task |= pending_task_left.unwrap_or(false);
             if pending_task_left == Some(false) && *can_offload {
-                offload_timeline(self, timeline)
+                pausable_failpoint!("before-timeline-auto-offload");
+                match offload_timeline(self, timeline)
                     .instrument(info_span!("offload_timeline", %timeline_id))
-                    .await?;
+                    .await
+                {
+                    Err(OffloadError::NotArchived) => {
+                        // Ignore this, we likely raced with unarchival
+                        Ok(())
+                    }
+                    other => other,
+                }?;
             }
         }
 

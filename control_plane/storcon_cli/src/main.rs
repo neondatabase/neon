@@ -1035,7 +1035,15 @@ async fn main() -> anyhow::Result<()> {
             resp.sort_by(|a, b| a.id.cmp(&b.id));
 
             let mut table = comfy_table::Table::new();
-            table.set_header(["Id", "Version", "Host", "Port", "Http Port", "AZ Id"]);
+            table.set_header([
+                "Id",
+                "Version",
+                "Host",
+                "Port",
+                "Http Port",
+                "AZ Id",
+                "Scheduling",
+            ]);
             for sk in resp {
                 table.add_row([
                     format!("{}", sk.id),
@@ -1043,7 +1051,8 @@ async fn main() -> anyhow::Result<()> {
                     sk.host,
                     format!("{}", sk.port),
                     format!("{}", sk.http_port),
-                    sk.availability_zone_id.to_string(),
+                    sk.availability_zone_id.clone(),
+                    String::from(sk.scheduling_policy),
                 ]);
             }
             println!("{table}");
