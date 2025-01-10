@@ -574,6 +574,25 @@ enum BatchedFeMessage {
     },
 }
 
+impl BatchedFeMessage {
+    fn observe_execution_start(&mut self, at: Instant) {
+        match self {
+            BatchedFeMessage::Exists { timer, .. }
+            | BatchedFeMessage::Nblocks { timer, .. }
+            | BatchedFeMessage::DbSize { timer, .. }
+            | BatchedFeMessage::GetSlruSegment { timer, .. } => {
+                timer.observe_execution_start(at);
+            }
+            BatchedFeMessage::GetPage { pages, .. } => {
+                for (_, _, timer) in pages {
+                    timer.observe_execution_start(at);
+                }
+            }
+            BatchedFeMessage::RespondError { .. } => {}
+        }
+    }
+}
+
 impl PageServerHandler {
     pub fn new(
         tenant_manager: Arc<TenantManager>,
@@ -673,7 +692,7 @@ impl PageServerHandler {
                 res = shard.pagestream_throttle.throttle(1) => res,
                 _ = shard.cancel.cancelled() => return Err(QueryError::Shutdown),
             };
-            timer.observe_throttle_done_execution_starting(&throttled);
+            timer.observe_throttle_done(&throttled);
             Ok(timer)
         }
 
@@ -912,6 +931,13 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
+        let started_at = Instant::now();
+        let batch = {
+            let mut batch = batch;
+            batch.observe_execution_start(started_at);
+            batch
+        };
+
         // invoke handler function
         let (handler_results, span): (
             Vec<Result<(PagestreamBeMessage, SmgrOpTimer), PageStreamError>>,
@@ -1071,8 +1097,7 @@ impl PageServerHandler {
             // The timer's underlying metric is used for a storage-internal latency SLO and
             // we don't want to include latency in it that we can't control.
             // And as pointed out above, in this case, we don't control the time that flush will take.
-            let flushing_timer =
-                timer.map(|timer| timer.observe_smgr_op_completion_and_start_flushing());
+            let flushing_timer = timer.map(|timer| timer.observe_execution_end_flush_start());
 
             // what we want to do
             let flush_fut = pgb_writer.flush();
@@ -1393,7 +1418,6 @@ impl PageServerHandler {
                             return Err(e);
                         }
                     };
-
                     self.pagesteam_handle_batched_message(pgb_writer, batch, &cancel, &ctx)
                         .await?;
                 }
