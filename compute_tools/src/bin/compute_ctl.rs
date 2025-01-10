@@ -68,6 +68,7 @@ use compute_tools::spec::*;
 use compute_tools::swap::resize_swap;
 use rlimit::{setrlimit, Resource};
 use utils::failpoint_support;
+use utils::id::{TenantId, TimelineId};
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
@@ -87,9 +88,9 @@ fn main() -> Result<()> {
 
         let cli_args = process_cli(&clap_args)?;
 
-        let cli_spec = try_spec_from_cli(&clap_args, &cli_args)?;
+        // let cli_spec = try_spec_from_cli(&clap_args, &cli_args)?;
 
-        let wait_spec_result = wait_spec(build_tag, cli_args, cli_spec)?;
+        let wait_spec_result = wait_spec(build_tag, cli_args)?;
 
         start_postgres(&clap_args, wait_spec_result)?
 
@@ -313,13 +314,40 @@ fn wait_spec(
         http_port,
         ..
     }: ProcessCliResult,
-    CliSpecParams {
-        spec,
-        live_config_allowed,
-    }: CliSpecParams,
 ) -> Result<WaitSpecResult> {
     let mut new_state = ComputeState::new();
     let spec_set;
+
+    let live_config_allowed = true;
+
+    let spec = Some(ComputeSpec {
+        // format_version: todo!(),
+        // operation_uuid: todo!(),
+        // features: todo!(),
+        // swap_size_bytes: todo!(),
+        // disk_quota_bytes: todo!(),
+        // disable_lfc_resizing: todo!(),
+        // cluster: todo!(),
+        // delta_operations: todo!(),
+        // skip_pg_catalog_updates: todo!(),
+        // tenant_id: todo!(),
+        // timeline_id: todo!(),
+        // pageserver_connstring: todo!(),
+        // safekeeper_connstrings: todo!(),
+        // mode: todo!(),
+        // storage_auth_token: todo!(),
+        // remote_extensions: todo!(),
+        // pgbouncer_settings: todo!(),
+        // shard_stripe_size: todo!(),
+        // local_proxy_config: todo!(),
+        // reconfigure_concurrency: todo!(),
+        pageserver_connstring: Some("pageserver-1.example.com:5432".to_string()),
+        safekeeper_connstrings: vec!["safekeeper-1.example.com:5432".to_string()],
+        tenant_id: Some(TenantId::generate()),
+        timeline_id: Some(TimelineId::generate()),
+
+        ..Default::default()
+    });
 
     if let Some(spec) = spec {
         let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
@@ -355,9 +383,7 @@ fn wait_spec(
     // available for binding. Prewarming helps Postgres start quicker later,
     // because QEMU will already have its memory allocated from the host, and
     // the necessary binaries will already be cached.
-    if !spec_set {
-        compute.prewarm_postgres()?;
-    }
+    compute.prewarm_postgres()?;
 
     // Launch http service first, so that we can serve control-plane requests
     // while configuration is still in progress.

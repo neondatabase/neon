@@ -1,0 +1,99 @@
+apiVersion: vm.neon.tech/v1
+kind: VirtualMachine
+metadata:
+  annotations:
+    autoscaling.neon.tech/bounds: '{"min":{"cpu":"250m","mem":"1Gi"},"max":{"cpu":"2","mem":"8Gi"}}'
+    autoscaling.neon.tech/config: '{"enableLFCMetrics":true}'
+  creationTimestamp: "2025-01-04T18:37:29Z"
+  finalizers:
+  - vm.neon.tech/finalizer
+  generation: 1
+  labels:
+    autoscaling.neon.tech/enabled: "true"
+    neon/component: compute-node
+    neon/compute-id: compute-purple-art-unreal
+    neon/endpoint-id: ep-unreal
+  name: compute-purple-art-unreal
+  namespace: default
+spec:
+  cpuScalingMode: QmpScaling
+  disks:
+  - emptyDisk:
+      discard: true
+      size: 36096Mi
+    mountPath: /neonvm/cache
+    name: cache
+    readOnly: false
+  - emptyDisk:
+      discard: true
+      enableQuotas: true
+      size: 150Gi
+    mountPath: /var/db/postgres/compute
+    name: pgdata
+    readOnly: false
+  enableAcceleration: true
+  enableNetworkMonitoring: false
+  enableSSH: true
+  guest:
+    args:
+    - -c
+    - /usr/local/bin/compute_ctl -D /var/db/postgres/compute/pgdata -b /usr/local/bin/postgres
+      -C postgresql://cloud_admin@127.0.0.1/postgres?options=-c%20default_transaction_read_only%3Dfalse
+      --compute-id compute-purple-art-unreal --control-plane-uri http://dontexist.local:9096
+      --resize-swap-on-bind --set-disk-quota-for-fs /var/db/postgres/compute 2>&1
+    command:
+    - /bin/sh
+    cpus:
+      max: 10
+      min: 250m
+      use: 500m
+    env:
+    - name: RUST_LOG
+      value: info
+    - name: OTEL_SDK_DISABLED
+      value: "true"
+    - name: AUTOSCALING
+      value: "true"
+    memorySlotSize: 1Gi
+    memorySlots:
+      max: 40
+      min: 1
+      use: 2
+    ports:
+    - name: postgres
+      port: 5432
+      protocol: TCP
+    - name: control
+      port: 3080
+      protocol: TCP
+    - name: pooler
+      port: 6432
+      protocol: TCP
+    - name: host-metrics
+      port: 9100
+      protocol: TCP
+    - name: metrics
+      port: 9187
+      protocol: TCP
+    - name: sql-exporter
+      port: 9399
+      protocol: TCP
+    - name: sql-exporter-2
+      port: 9499
+      protocol: TCP
+    - name: vm-monitor
+      port: 10301
+      protocol: TCP
+    - name: local-proxy
+      port: 10432
+      protocol: TCP
+    rootDisk:
+      image: vm-neon-local-v16
+      imagePullPolicy: IfNotPresent
+      size: 20Gi
+    settings:
+      swap: 40Gi
+      sysctl:
+      - vm.overcommit_memory=2
+  restartPolicy: Always
+  schedulerName: autoscale-scheduler

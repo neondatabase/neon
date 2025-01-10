@@ -358,64 +358,22 @@ impl ComputeNode {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
         let start_time = Instant::now();
 
-        let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
-        let mut config = postgres::Config::from_str(shard0_connstr)?;
-
-        // Use the storage auth token from the config file, if given.
-        // Note: this overrides any password set in the connection string.
-        if let Some(storage_auth_token) = &spec.storage_auth_token {
-            info!("Got storage auth token from spec file");
-            config.password(storage_auth_token);
-        } else {
-            info!("Storage auth token not set");
-        }
-
-        // Connect to pageserver
-        let mut client = config.connect(NoTls)?;
-        let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
-
-        let basebackup_cmd = match lsn {
-            Lsn(0) => {
-                if spec.spec.mode != ComputeMode::Primary {
-                    format!(
-                        "basebackup {} {} --gzip --replica",
-                        spec.tenant_id, spec.timeline_id
-                    )
-                } else {
-                    format!("basebackup {} {} --gzip", spec.tenant_id, spec.timeline_id)
-                }
-            }
-            _ => {
-                if spec.spec.mode != ComputeMode::Primary {
-                    format!(
-                        "basebackup {} {} {} --gzip --replica",
-                        spec.tenant_id, spec.timeline_id, lsn
-                    )
-                } else {
-                    format!(
-                        "basebackup {} {} {} --gzip",
-                        spec.tenant_id, spec.timeline_id, lsn
-                    )
-                }
-            }
-        };
-
-        let copyreader = client.copy_out(basebackup_cmd.as_str())?;
-        let mut measured_reader = MeasuredReader::new(copyreader);
+        // Open backup file directly
+        let backup_file = std::fs::File::open("/var/db/backups/backup.tar.gz")?;
+        let mut measured_reader = MeasuredReader::new(backup_file);
         let mut bufreader = std::io::BufReader::new(&mut measured_reader);
 
-        // Read the archive directly from the `CopyOutReader`
+        // Read the archive directly from the file
         //
         // Set `ignore_zeros` so that unpack() reads all the Copy data and
-        // doesn't stop at the end-of-archive marker. Otherwise, if the server
-        // sends an Error after finishing the tarball, we will not notice it.
+        // doesn't stop at the end-of-archive marker.
         let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut bufreader));
         ar.set_ignore_zeros(true);
         ar.unpack(&self.pgdata)?;
 
         // Report metrics
         let mut state = self.state.lock().unwrap();
-        state.metrics.pageserver_connect_micros = pageserver_connect_micros;
+        state.metrics.pageserver_connect_micros = 0;
         state.metrics.basebackup_bytes = measured_reader.get_byte_count() as u64;
         state.metrics.basebackup_ms = start_time.elapsed().as_millis() as u64;
         Ok(())
@@ -628,32 +586,7 @@ impl ComputeNode {
             self.http_port,
         )?;
 
-        // Syncing safekeepers is only safe with primary nodes: if a primary
-        // is already connected it will be kicked out, so a secondary (standby)
-        // cannot sync safekeepers.
-        let lsn = match spec.mode {
-            ComputeMode::Primary => {
-                info!("checking if safekeepers are synced");
-                let lsn = if let Ok(Some(lsn)) = self.check_safekeepers_synced(compute_state) {
-                    lsn
-                } else {
-                    info!("starting safekeepers syncing");
-                    self.sync_safekeepers(pspec.storage_auth_token.clone())
-                        .with_context(|| "failed to sync safekeepers")?
-                };
-                info!("safekeepers synced at LSN {}", lsn);
-                lsn
-            }
-            ComputeMode::Static(lsn) => {
-                info!("Starting read-only node at static LSN {}", lsn);
-                lsn
-            }
-            ComputeMode::Replica => {
-                info!("Initializing standby from latest Pageserver LSN");
-                Lsn(0)
-            }
-        };
-
+        let lsn = Lsn(0);
         info!(
             "getting basebackup@{} from pageserver {}",
             lsn, &pspec.pageserver_connstr
