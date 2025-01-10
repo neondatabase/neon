@@ -98,8 +98,4 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         fi
     fi
     cleanup
-    # Restore the original spec.json
-    if [ "$pg_version" -ne 17 ]; then
-      mv "$SPEC_PATH/spec.bak" "$SPEC_PATH/spec.json"
-    fi
 done
