@@ -23,6 +23,8 @@ pub const INITIAL_GENERATION: Generation = 1;
 pub struct SafekeeperId {
     pub id: NodeId,
     pub host: String,
+    /// We include here only port for computes -- that is, pg protocol tenant
+    /// only port, or wide pg protocol port if the former is not configured.
     pub pg_port: u16,
 }
 
