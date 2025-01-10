@@ -132,7 +132,7 @@ pub struct GcCompactionQueue {
     /// All items in the queue, and the currently-running job.
     inner: std::sync::Mutex<GcCompactionQueueInner>,
     /// Ensure only one thread is consuming the queue.
-    queue_lock: tokio::sync::Mutex<()>,
+    consumer_lock: tokio::sync::Mutex<()>,
 }
 
 impl GcCompactionQueue {
@@ -145,7 +145,7 @@ impl GcCompactionQueue {
                 gc_guards: HashMap::new(),
                 last_id: GcCompactionJobId(0),
             }),
-            queue_lock: tokio::sync::Mutex::new(()),
+            consumer_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -190,6 +190,68 @@ impl GcCompactionQueue {
         }
     }
 
+    async fn handle_sub_compaction(
+        &self,
+        id: GcCompactionJobId,
+        options: CompactOptions,
+        timeline: &Arc<Timeline>,
+        gc_block: &GcBlock,
+    ) -> Result<(), CompactionError> {
+        info!("running scheduled enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs");
+        let jobs: Vec<GcCompactJob> = timeline
+            .gc_compaction_split_jobs(
+                GcCompactJob::from_compact_options(options.clone()),
+                options.sub_compaction_max_job_size_mb,
+            )
+            .await
+            .map_err(CompactionError::Other)?;
+        if jobs.is_empty() {
+            info!("no jobs to run, skipping scheduled compaction task");
+            self.notify_and_unblock(id);
+        } else {
+            let gc_guard = match gc_block.start().await {
+                Ok(guard) => guard,
+                Err(e) => {
+                    return Err(CompactionError::Other(anyhow!(
+                        "cannot run gc-compaction because gc is blocked: {}",
+                        e
+                    )));
+                }
+            };
+
+            let jobs_len = jobs.len();
+            let mut pending_tasks = Vec::new();
+            for job in jobs {
+                // Unfortunately we need to convert the `GcCompactJob` back to `CompactionOptions`
+                // until we do further refactors to allow directly call `compact_with_gc`.
+                let mut flags: EnumSet<CompactFlags> = EnumSet::default();
+                flags |= CompactFlags::EnhancedGcBottomMostCompaction;
+                if job.dry_run {
+                    flags |= CompactFlags::DryRun;
+                }
+                let options = CompactOptions {
+                    flags,
+                    sub_compaction: false,
+                    compact_key_range: Some(job.compact_key_range.into()),
+                    compact_lsn_range: Some(job.compact_lsn_range.into()),
+                    sub_compaction_max_job_size_mb: None,
+                };
+                pending_tasks.push(GcCompactionQueueItem::SubCompactionJob(options));
+            }
+            pending_tasks.push(GcCompactionQueueItem::Notify(id));
+            {
+                let mut guard = self.inner.lock().unwrap();
+                guard.gc_guards.insert(id, gc_guard);
+                for task in pending_tasks {
+                    let id = guard.next_id();
+                    guard.queued.push_back((id, task));
+                }
+            }
+            info!("scheduled enhanced gc bottom-most compaction with sub-compaction, split into {} jobs", jobs_len);
+        }
+        Ok(())
+    }
+
     /// Take a job from the queue and process it. Returns if there are still pending tasks.
     pub async fn iteration(
         &self,
@@ -198,7 +260,7 @@ impl GcCompactionQueue {
         gc_block: &GcBlock,
         timeline: &Arc<Timeline>,
     ) -> Result<bool, CompactionError> {
-        let _one_op_at_a_time_guard = self.queue_lock.lock().await;
+        let _one_op_at_a_time_guard = self.consumer_lock.lock().await;
         let has_pending_tasks;
         let (id, item) = {
             let mut guard = self.inner.lock().unwrap();
@@ -218,58 +280,8 @@ impl GcCompactionQueue {
                 {
                     warn!("ignoring scheduled compaction task: scheduled task must be gc compaction: {:?}", options);
                 } else if options.sub_compaction {
-                    info!("running scheduled enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs");
-                    let jobs: Vec<GcCompactJob> = timeline
-                        .gc_compaction_split_jobs(
-                            GcCompactJob::from_compact_options(options.clone()),
-                            options.sub_compaction_max_job_size_mb,
-                        )
-                        .await
-                        .map_err(CompactionError::Other)?;
-                    if jobs.is_empty() {
-                        info!("no jobs to run, skipping scheduled compaction task");
-                        self.notify_and_unblock(id);
-                    } else {
-                        let gc_guard = match gc_block.start().await {
-                            Ok(guard) => guard,
-                            Err(e) => {
-                                return Err(CompactionError::Other(anyhow!(
-                                    "cannot run gc-compaction because gc is blocked: {}",
-                                    e
-                                )));
-                            }
-                        };
-
-                        let jobs_len = jobs.len();
-                        let mut pending_tasks = Vec::new();
-                        for job in jobs {
-                            // Unfortunately we need to convert the `GcCompactJob` back to `CompactionOptions`
-                            // until we do further refactors to allow directly call `compact_with_gc`.
-                            let mut flags: EnumSet<CompactFlags> = EnumSet::default();
-                            flags |= CompactFlags::EnhancedGcBottomMostCompaction;
-                            if job.dry_run {
-                                flags |= CompactFlags::DryRun;
-                            }
-                            let options = CompactOptions {
-                                flags,
-                                sub_compaction: false,
-                                compact_key_range: Some(job.compact_key_range.into()),
-                                compact_lsn_range: Some(job.compact_lsn_range.into()),
-                                sub_compaction_max_job_size_mb: None,
-                            };
-                            pending_tasks.push(GcCompactionQueueItem::SubCompactionJob(options));
-                        }
-                        pending_tasks.push(GcCompactionQueueItem::Notify(id));
-                        {
-                            let mut guard = self.inner.lock().unwrap();
-                            guard.gc_guards.insert(id, gc_guard);
-                            for task in pending_tasks {
-                                let id = guard.next_id();
-                                guard.queued.push_back((id, task));
-                            }
-                        }
-                        info!("scheduled enhanced gc bottom-most compaction with sub-compaction, split into {} jobs", jobs_len);
-                    }
+                    self.handle_sub_compaction(id, options, timeline, gc_block)
+                        .await?;
                 } else {
                     let gc_guard = match gc_block.start().await {
                         Ok(guard) => guard,
