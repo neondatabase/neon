@@ -816,11 +816,6 @@ impl PageServerHandler {
                     }
                 };
 
-                // It's important to start the smgr op metric recorder as early as possible
-                // so that the _started counters are incremented before we do
-                // any serious waiting, e.g., for throttle or LSNs.
-                // We feed wait times to the metric recorder so it can deduct them / count
-                // them seperately.
                 let timer = record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetPageAtLsn,
