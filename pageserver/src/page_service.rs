@@ -664,11 +664,17 @@ impl PageServerHandler {
             shard: &timeline::handle::Handle<TenantManagerTypes>,
             op: metrics::SmgrQueryType,
             received_at: Instant,
-        ) -> SmgrOpTimer {
+        ) -> Result<SmgrOpTimer, QueryError> {
+            // It's important to start the smgr op metric recorder as early as possible
+            // so that the _started counters are incremented before we do
+            // any serious waiting, e.g., for throttle, batching, or actual request handling.
             let mut timer = shard.query_metrics.start_smgr_op(op, received_at);
-            let throttled = shard.pagestream_throttle.throttle(1).await;
+            let throttled = tokio::select! {
+                res = shard.pagestream_throttle.throttle(1) => res,
+                _ = shard.cancel.cancelled() => return Err(QueryError::Shutdown),
+            };
             timer.observe_throttle_done_execution_starting(&throttled);
-            timer
+            Ok(timer)
         }
 
         let batched_msg = match neon_fe_msg {
@@ -683,7 +689,7 @@ impl PageServerHandler {
                     metrics::SmgrQueryType::GetRelExists,
                     received_at,
                 )
-                .await;
+                .await?;
                 BatchedFeMessage::Exists {
                     span,
                     timer,
@@ -702,7 +708,7 @@ impl PageServerHandler {
                     metrics::SmgrQueryType::GetRelSize,
                     received_at,
                 )
-                .await;
+                .await?;
                 BatchedFeMessage::Nblocks {
                     span,
                     timer,
@@ -721,7 +727,7 @@ impl PageServerHandler {
                     metrics::SmgrQueryType::GetDbSize,
                     received_at,
                 )
-                .await;
+                .await?;
                 BatchedFeMessage::DbSize {
                     span,
                     timer,
@@ -740,7 +746,7 @@ impl PageServerHandler {
                     metrics::SmgrQueryType::GetSlruSegment,
                     received_at,
                 )
-                .await;
+                .await?;
                 BatchedFeMessage::GetSlruSegment {
                     span,
                     timer,
@@ -801,7 +807,7 @@ impl PageServerHandler {
                     metrics::SmgrQueryType::GetPageAtLsn,
                     received_at,
                 )
-                .await;
+                .await?;
 
                 let effective_request_lsn = match Self::wait_or_get_last_lsn(
                     &shard,
