@@ -6939,12 +6939,9 @@ version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877c5b330756d856ffcc4553ab34a5684481ade925ecc54bcd1bf02b1d0d4d52"
 dependencies = [
- "async-stream",
  "async-trait",
- "axum",
  "base64 0.22.1",
  "bytes",
- "h2 0.4.4",
  "http 1.1.0",
  "http-body 1.0.0",
  "http-body-util",
@@ -6956,7 +6953,6 @@ dependencies = [
  "prost",
  "rustls-native-certs 0.8.0",
  "rustls-pemfile 2.1.1",
- "socket2",
  "tokio",
  "tokio-rustls 0.26.0",
  "tokio-stream",
@@ -7508,7 +7504,6 @@ dependencies = [
  "serde",
  "thiserror",
  "tokio",
- "tonic",
  "tonic-build",
  "tracing",
  "utils",
@@ -7917,8 +7912,6 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "anyhow",
- "axum",
- "axum-core",
  "base64 0.13.1",
  "base64 0.21.1",
  "base64ct",
@@ -7999,7 +7992,6 @@ dependencies = [
  "toml_edit",
  "tonic",
  "tower 0.4.13",
- "tower 0.5.2",
  "tracing",
  "tracing-core",
  "url",
