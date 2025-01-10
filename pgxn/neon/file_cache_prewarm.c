@@ -355,7 +355,7 @@ lfcp_pump_read(LFCPrewarmWorkerState *state)
 										  PG_IO_ALIGN_SIZE,
 										  0);
 #else
-			chunk->alloc = palloc((chunk->npages) * BLCKSZ);
+			chunk->alloc = palloc((chunk->npages) * BLCKSZ + PG_IO_ALIGN_SIZE);
 			chunk->pages = (PGAlignedBlock *)
 				TYPEALIGN(PG_IO_ALIGN_SIZE, (Size) chunk->alloc);
 #endif
