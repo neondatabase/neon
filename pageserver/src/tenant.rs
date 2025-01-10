@@ -369,8 +369,9 @@ pub struct Tenant {
 
     /// Throttle applied at the top of [`Timeline::get`].
     /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
-    pub(crate) pagestream_throttle:
-        Arc<throttle::Throttle<crate::metrics::tenant_throttling::Pagestream>>,
+    pub(crate) pagestream_throttle: Arc<throttle::Throttle>,
+
+    pub(crate) pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
 
     /// An ongoing timeline detach concurrency limiter.
     ///
@@ -1691,6 +1692,7 @@ impl Tenant {
                     TimelineResources {
                         remote_client,
                         pagestream_throttle: self.pagestream_throttle.clone(),
+                        pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
                         l0_flush_global_state: self.l0_flush_global_state.clone(),
                     },
                     LoadTimelineCause::Attach,
@@ -4084,6 +4086,9 @@ impl Tenant {
         Ok(timeline)
     }
 
+    /// [`Tenant::shutdown`] must be called before dropping the returned [`Tenant`] object
+    /// to ensure proper cleanup of background tasks and metrics.
+    //
     // Allow too_many_arguments because a constructor's argument list naturally grows with the
     // number of attributes in the struct: breaking these out into a builder wouldn't be helpful.
     #[allow(clippy::too_many_arguments)]
@@ -4192,8 +4197,10 @@ impl Tenant {
             gate: Gate::default(),
             pagestream_throttle: Arc::new(throttle::Throttle::new(
                 Tenant::get_pagestream_throttle_config(conf, &attached_conf.tenant_conf),
-                crate::metrics::tenant_throttling::Metrics::new(&tenant_shard_id),
             )),
+            pagestream_throttle_metrics: Arc::new(
+                crate::metrics::tenant_throttling::Pagestream::new(&tenant_shard_id),
+            ),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
@@ -5100,6 +5107,7 @@ impl Tenant {
         TimelineResources {
             remote_client: self.build_timeline_remote_client(timeline_id),
             pagestream_throttle: self.pagestream_throttle.clone(),
+            pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
         }
     }

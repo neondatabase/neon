@@ -688,11 +688,13 @@ impl PageServerHandler {
             // so that the _started counters are incremented before we do
             // any serious waiting, e.g., for throttle, batching, or actual request handling.
             let mut timer = shard.query_metrics.start_smgr_op(op, received_at);
+            let now = Instant::now();
+            timer.observe_throttle_start(now);
             let throttled = tokio::select! {
-                res = shard.pagestream_throttle.throttle(1) => res,
+                res = shard.pagestream_throttle.throttle(1, now) => res,
                 _ = shard.cancel.cancelled() => return Err(QueryError::Shutdown),
             };
-            timer.observe_throttle_done(&throttled);
+            timer.observe_throttle_done(throttled);
             Ok(timer)
         }
 
@@ -1092,7 +1094,11 @@ impl PageServerHandler {
             // The timer's underlying metric is used for a storage-internal latency SLO and
             // we don't want to include latency in it that we can't control.
             // And as pointed out above, in this case, we don't control the time that flush will take.
-            let flushing_timer = timer.map(|timer| timer.observe_execution_end_flush_start());
+            let flushing_timer = timer.map(|mut timer| {
+                timer
+                    .observe_execution_end_flush_start(Instant::now())
+                    .expect("we are the first caller")
+            });
 
             // what we want to do
             let flush_fut = pgb_writer.flush();
