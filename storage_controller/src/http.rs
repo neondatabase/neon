@@ -3,7 +3,7 @@ use crate::metrics::{
     HttpRequestLatencyLabelGroup, HttpRequestStatusLabelGroup, PageserverRequestLabelGroup,
     METRICS_REGISTRY,
 };
-use crate::persistence::SafekeeperPersistence;
+use crate::persistence::SafekeeperUpsert;
 use crate::reconciler::ReconcileError;
 use crate::service::{LeadershipStatus, Service, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT};
 use anyhow::Context;
@@ -1249,7 +1249,7 @@ async fn handle_get_safekeeper(req: Request<Body>) -> Result<Response<Body>, Api
 async fn handle_upsert_safekeeper(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Infra)?;
 
-    let body = json_request::<SafekeeperPersistence>(&mut req).await?;
+    let body = json_request::<SafekeeperUpsert>(&mut req).await?;
     let id = parse_request_param::<i64>(&req, "id")?;
 
     if id != body.id {
