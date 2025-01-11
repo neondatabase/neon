@@ -1290,17 +1290,6 @@ RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin c
 
 #########################################################################################
 #
-# Final compute-tools image
-#
-#########################################################################################
-
-FROM debian:$DEBIAN_FLAVOR AS compute-tools-image
-
-COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
-COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
-
-#########################################################################################
-#
 # Layer "pgbouncer"
 #
 #########################################################################################
