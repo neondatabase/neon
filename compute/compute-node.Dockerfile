@@ -976,22 +976,9 @@ RUN apt update && apt install --no-install-recommends --no-install-suggests -y p
 
 FROM rust-extensions-build-pgrx12 AS pg-jsonschema-pg-build
 ARG PG_VERSION
-# version 0.3.3 supports v17
 # last release v0.3.3 - Oct 16, 2024
-#
-# there were no breaking changes
-# so we can use the same version for all postgres versions
-RUN case "${PG_VERSION}" in \
-    "v14" | "v15" | "v16" | "v17") \
-        export PG_JSONSCHEMA_VERSION=0.3.3 \
-        export PG_JSONSCHEMA_CHECKSUM=40c2cffab4187e0233cb8c3bde013be92218c282f95f4469c5282f6b30d64eac \
-    ;; \
-    *) \
-        echo "unexpected PostgreSQL version" && exit 1 \
-    ;; \
-    esac && \
-    wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v${PG_JSONSCHEMA_VERSION}.tar.gz -O pg_jsonschema.tar.gz && \
-    echo "${PG_JSONSCHEMA_CHECKSUM} pg_jsonschema.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v0.3.3.tar.gz -O pg_jsonschema.tar.gz && \
+    echo "40c2cffab4187e0233cb8c3bde013be92218c282f95f4469c5282f6b30d64eac pg_jsonschema.tar.gz" | sha256sum --check && \
     mkdir pg_jsonschema-src && cd pg_jsonschema-src && tar xzf ../pg_jsonschema.tar.gz --strip-components=1 -C . && \
     # see commit 252b3685a27a0f4c31a0f91e983c6314838e89e8
     # `unsafe-postgres` feature allows to build pgx extensions
@@ -1012,22 +999,9 @@ RUN case "${PG_VERSION}" in \
 FROM rust-extensions-build-pgrx12 AS pg-graphql-pg-build
 ARG PG_VERSION
 
-# version 1.5.9 supports v17
 # last release v1.5.9 - Oct 16, 2024
-#
-# there were no breaking changes
-# so we can use the same version for all postgres versions
-RUN case "${PG_VERSION}" in \
-    "v14" | "v15" | "v16" | "v17") \
-        export PG_GRAPHQL_VERSION=1.5.9 \
-        export PG_GRAPHQL_CHECKSUM=cf768385a41278be1333472204fc0328118644ae443182cf52f7b9b23277e497 \
-    ;; \
-    *) \
-        echo "unexpected PostgreSQL version" && exit 1 \
-    ;; \
-    esac && \
-    wget https://github.com/supabase/pg_graphql/archive/refs/tags/v${PG_GRAPHQL_VERSION}.tar.gz -O pg_graphql.tar.gz && \
-    echo "${PG_GRAPHQL_CHECKSUM} pg_graphql.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/supabase/pg_graphql/archive/refs/tags/v1.5.9.tar.gz -O pg_graphql.tar.gz && \
+    echo "cf768385a41278be1333472204fc0328118644ae443182cf52f7b9b23277e497 pg_graphql.tar.gz" | sha256sum --check && \
     mkdir pg_graphql-src && cd pg_graphql-src && tar xzf ../pg_graphql.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "=0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
