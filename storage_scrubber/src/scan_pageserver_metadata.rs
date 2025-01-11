@@ -47,6 +47,8 @@ impl MetadataSummary {
             index_part,
             index_part_generation: _,
             s3_layers: _,
+            index_part_last_modified_time: _,
+            index_part_snapshot_time: _,
         } = &data.blob_data
         {
             *self
@@ -195,7 +197,9 @@ pub async fn scan_pageserver_metadata(
                     if let BlobDataParseResult::Parsed {
                         index_part,
                         index_part_generation,
-                        s3_layers: _s3_layers,
+                        s3_layers: _,
+                        index_part_last_modified_time: _,
+                        index_part_snapshot_time: _,
                     } = &data.blob_data
                     {
                         if index_part.deleted_at.is_some() {
@@ -318,9 +322,11 @@ pub async fn scan_pageserver_metadata(
 
         match &data.blob_data {
             BlobDataParseResult::Parsed {
-                index_part: _index_part,
+                index_part: _,
                 index_part_generation: _index_part_generation,
                 s3_layers,
+                index_part_last_modified_time: _,
+                index_part_snapshot_time: _,
             } => {
                 tenant_objects.push(ttid, s3_layers.clone());
             }

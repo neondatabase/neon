@@ -103,11 +103,6 @@ RUN mkdir -p /data/.neon/ && \
   > /data/.neon/pageserver.toml && \
   chown -R neon:neon /data/.neon
 
-# When running a binary that links with libpq, default to using our most recent postgres version.  Binaries
-# that want a particular postgres version will select it explicitly: this is just a default.
-ENV LD_LIBRARY_PATH=/usr/local/v${DEFAULT_PG_VERSION}/lib
-
-
 VOLUME ["/data"]
 USER neon
 EXPOSE 6400
