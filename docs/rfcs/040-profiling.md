@@ -100,6 +100,7 @@ Parameters:
 * `format`: profile output format (`pprof` or `svg`; default `pprof`).
 * `seconds`: duration to collect profile over, in seconds (default `5`).
 * `frequency`: how often to sample thread stacks, in Hz (default `99`).
+* `force`: if `true`, cancel a running profile and start a new one (default `false`).
 
 Works on Linux and macOS.
 
@@ -214,9 +215,9 @@ much larger than the actual runtime.
 Note that Go does not support a frequency parameter, so we must set a fixed frequency for all
 profiles via `SetCPUProfileRate()` (default 100 Hz).
 
-Typically, only 1 CPU profile can be taken at a time. This means that we can't take ad hoc CPU
-profiles while a continuous profile is running. If necessary, we either have to stop Alloy, or
-[add an override parameter](https://github.com/neondatabase/neon/issues/10072).
+Only one CPU profile can be taken at a time. With continuous profiling, one will always be running.
+To allow also taking an ad hoc CPU profile, the Rust endpoint support a `force` query parameter to
+cancel the running profile and start a new one.
 
 TODO: decide on an optimal sample frequency. Ideally below 1% CPU usage.
 
