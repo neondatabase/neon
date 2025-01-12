@@ -81,7 +81,7 @@ Requirements:
 * Returns profile in pprof format, with symbols.
 * `seconds` query parameter specifying the profile duration.
 * Default sample frequency should not impact service (at most 5% CPU).
-* Unauthenticated. Do not expose user data or risk denial-of-service. TODO: reconsider.
+* Unauthenticated. Do not expose user data or risk denial-of-service.
 * Linux-compatibile.
 
 Optional:
@@ -244,10 +244,6 @@ allocation size. A 1 MB allocation takes about 15 µs in benchmarks, and a stack
 so we can estimate that a 2 MB sampling frequency has about 3% allocation overhead -- this is 
 consistent with benchmarks. This is significantly larger than CPU profiles, but mitigated by the
 fact that performance-sensitive code will avoid allocations as far as possible.
-
-### Unresolved Questions
-
-* Should we use authentication for profile endpoints?
 
 ## Alternatives Considered
 
