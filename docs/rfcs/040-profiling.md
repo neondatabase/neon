@@ -166,7 +166,7 @@ from `lib/utils/src/http/endpoint.rs`. Expose it unauthenticated at `/profile/he
 
 Parameters:
 
-* `format`: profile output format (`pprof` or `jemalloc`; default `pprof`).
+* `format`: profile output format (`pprof`, `svg`, or `jemalloc`; default `pprof`).
 
 Works on Linux only.
 
