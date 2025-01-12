@@ -9,8 +9,9 @@ See also [internal user guide](https://www.notion.so/neondatabase/Storage-CPU-Me
 This document proposes a standard cross-team pattern for CPU and memory profiling across
 applications and languages, using the [pprof](https://github.com/google/pprof) profile format.
 
-It enables both ad hoc profiles via HTTP endpoints, and continuous profiling via [Grafana Cloud
-Profiles](https://grafana.com/docs/grafana-cloud/monitor-applications/profiles/) across the fleet.
+It enables both ad hoc profiles via HTTP endpoints, and continuous profiling across the fleet via
+[Grafana Cloud Profiles](https://grafana.com/docs/grafana-cloud/monitor-applications/profiles/).
+Continuous profiling incurs an overhead of about 0.1% CPU usage and 3% slower heap allocations.
 
 ## Motivation
 
@@ -114,9 +115,9 @@ Parameters:
 * `debug`: profile output format (`0` is pprof, `1` or above is plaintext; default `0`).
 * `seconds`: duration to collect profile over, in seconds (default `30`).
 
-Does not support a frequency parameter (see [#57488](https://github.com/golang/go/issues/57488));
-uses 100 Hz by default. TODO: consider hardcoding a lower frequency if needed, via 
-`SetCPUProfileRate()`.
+Does not support a frequency parameter (see [#57488](https://github.com/golang/go/issues/57488)),
+and defaults to 100 Hz. A lower frequency can be hardcoded via `SetCPUProfileRate`, but the default
+is likely ok (estimated 1% overhead).
 
 Works on Linux and macOS.
 
@@ -150,7 +151,7 @@ Optional:
 ### Rust Memory Profiling
 
 Use the jemalloc allocator via [tikv-jemallocator](https://github.com/tikv/jemallocator),
-and enable profiling with samples every 1 MB allocated:
+and enable profiling with samples every 2 MB allocated:
 
 ```rust
 #[global_allocator]
@@ -158,7 +159,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[allow(non_upper_case_globals)]
 #[export_name = "malloc_conf"]
-pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:20\0";
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 ```
 
 Use [`profile_heap_handler`](https://github.com/neondatabase/neon/blob/dcb24ce170573a2ae6ed29467669d03c73b589e6/libs/utils/src/http/endpoint.rs#L414)
@@ -200,32 +201,53 @@ with CPU profiles for Safekeeper and Pageserver.
 
 TODO: decide on retention period.
 
-### Scrape Frequency
+### Scraping
+
+* CPU profiling: 19 seconds at 19 Hz every 20 seconds.
+* Heap profiling: heap snapshot with 2 MB frequency every 20 seconds.
 
 There are two main approaches that can be taken for CPU profiles:
 
-* Continuous low-frequency profiles (e.g. 11 Hz for 20 seconds every 20 seconds).
+* Continuous low-frequency profiles (e.g. 19 Hz for 20 seconds every 20 seconds).
 * Occasional high-frequency profiles (e.g. 99 Hz for 5 seconds every 60 seconds).
 
-We prefer continuous low-frequency profiles where possible. This has a fixed low overhead, instead
+We choose continuous low-frequency profiles where possible. This has a fixed low overhead, instead
 of a spiky high overhead. It likely also gives a more representative view of resource usage.
-However, a 11 Hz rate will consider all samples to take a minimum of 90.9 ms CPU time, which may be
-much larger than the actual runtime.
-
-Note that Go does not support a frequency parameter, so we must set a fixed frequency for all
-profiles via `SetCPUProfileRate()` (default 100 Hz).
+However, a 19 Hz rate gives a minimum resolution of 52.6 ms per sample, which may be larger than the
+actual runtime of small functions. Note that Go does not support a frequency parameter, so we must
+use a fixed frequency for all profiles via `SetCPUProfileRate()` (default 100 Hz).
 
 Only one CPU profile can be taken at a time. With continuous profiling, one will always be running.
-To allow also taking an ad hoc CPU profile, the Rust endpoint support a `force` query parameter to
-cancel the running profile and start a new one.
+To allow also taking an ad hoc CPU profile, the Rust endpoint supports a `force` query parameter to
+cancel a running profile and start a new one.
 
-TODO: decide on an optimal sample frequency. Ideally below 1% CPU usage.
+### Resource Cost
+
+With Rust:
+
+* CPU profiles at 19 Hz frequency: 0.1% overhead.
+* Heap profiles at 2 MB frequency: 3% overhead.
+
+Benchmarks with pprof-rs showed that the CPU time for taking a stack trace of a 40-frame stack was
+11 µs using the `frame-pointer` feature, and 1.4 µs using `libunwind` with DWARF (which saw frequent
+seg faults).
+
+CPU profiles work by installing an `ITIMER_PROF` for the process, which triggers a `SIGPROF` signal
+after a given amount of cumulative CPU time across all CPUs. The signal handler will run for one
+of the currently executing threads and take a stack trace. Thus, a 19 Hz profile will take 1 stack
+trace every 52.6 ms CPU time -- assuming 11 µs for a stack trace, this is 0.02% overhead, but
+likely 0.1% in practice (given e.g. context switches).
+
+Heap profiles work by probabilistically taking a stack trace on allocations, adjusted for the
+allocation size. A 1 MB allocation takes about 15 µs in benchmarks, and a stack trace about 1 µs,
+so we can estimate that a 2 MB sampling frequency has about 3% allocation overhead -- this is 
+consistent with benchmarks. This is significantly larger than CPU profiles, but mitigated by the
+fact that performance-sensitive code will avoid allocations as far as possible.
 
 ### Unresolved Questions
 
 * Should we standardize on pprof?
 * Should we use Grafana Cloud Profiles?
-* Which sample frequency should we use for continuous profiles?
 * How long should we retain continuous profiles for?
 * Should we use authentication for profile endpoints?
 
@@ -238,6 +260,7 @@ TODO: decide on an optimal sample frequency. Ideally below 1% CPU usage.
   * Supported by Grafana.
   * Less information about stack frames and spans.
   * Limited tooling for local analysis.
+  * Does not support heap profiles.
   * Does not work on macOS.
 
 * [Polar Signals](https://www.polarsignals.com) instead of Grafana.
