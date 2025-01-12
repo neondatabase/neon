@@ -1,6 +1,6 @@
 # CPU and Memory Profiling
 
-Created 2024-12-11 by Erik Grinaker.
+Created 2025-01-12 by Erik Grinaker.
 
 See also [internal user guide](https://www.notion.so/neondatabase/Storage-CPU-Memory-Profiling-14bf189e004780228ec7d04442742324?pvs=4).
 
