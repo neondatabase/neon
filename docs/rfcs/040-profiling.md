@@ -204,6 +204,7 @@ With Rust:
 
 * CPU profiles at 19 Hz frequency: 0.1% overhead.
 * Heap profiles at 2 MB frequency: 3% overhead.
+* Profile symbolization caches: 125 MB memory (for Pageserver).
 
 Benchmarks with pprof-rs showed that the CPU time for taking a stack trace of a 40-frame stack was
 11 µs using the `frame-pointer` feature, and 1.4 µs using `libunwind` with DWARF (which saw frequent
@@ -220,6 +221,9 @@ allocation size. A 1 MB allocation takes about 15 µs in benchmarks, and a stack
 so we can estimate that a 2 MB sampling frequency has about 3% allocation overhead -- this is 
 consistent with benchmarks. This is significantly larger than CPU profiles, but mitigated by the
 fact that performance-sensitive code will avoid allocations as far as possible.
+
+Profile symbolization uses in-memory caches for symbol lookups. These take about 125 MB for
+Pageserver.
 
 ## Alternatives Considered
 
