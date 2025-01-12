@@ -192,14 +192,15 @@ However, PostgreSQL profiling is not a priority at the moment (see C CPU profili
 
 ## Grafana Continuous Profiling
 
-[Grafana Alloy](https://grafana.com/docs/alloy/latest/) will continually scrape CPU and memory
-profiles across the fleet, and archive them as time series. This can be used to analyze resource
-usage over time, either in aggregate or zoomed in to specific events and nodes.
+[Grafana Alloy](https://grafana.com/docs/alloy/latest/) continually scrapes CPU and memory profiles
+across the fleet, and archive them as time series. This can be used to analyze resource usage over
+time, either in aggregate or zoomed in to specific events and nodes.
 
-It is currently enabled in [staging](https://neonstaging.grafana.net/a/grafana-pyroscope-app/profiles-explorer),
-with CPU profiles for Safekeeper and Pageserver.
+Profiles are retained for 30 days. TODO: determine ingestion costs (50-100 GB included per month,
+then $0.50/GB).
 
-TODO: decide on retention period.
+It is currently enabled in [staging](https://neonstaging.grafana.net/a/grafana-pyroscope-app/profiles-explorer)
+for Pageserver and Safekeeper.
 
 ### Scraping
 
@@ -246,9 +247,6 @@ fact that performance-sensitive code will avoid allocations as far as possible.
 
 ### Unresolved Questions
 
-* Should we standardize on pprof?
-* Should we use Grafana Cloud Profiles?
-* How long should we retain continuous profiles for?
 * Should we use authentication for profile endpoints?
 
 ## Alternatives Considered
