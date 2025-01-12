@@ -4,6 +4,7 @@
 //!
 use anyhow::{Context, Result};
 use postgres_backend::QueryError;
+use safekeeper_api::models::ConnectionId;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -114,8 +115,6 @@ async fn handle_socket(
         .await
 }
 
-/// Unique WAL service connection ids are logged in spans for observability.
-pub type ConnectionId = u32;
 pub type ConnectionCount = u32;
 
 pub fn issue_connection_id(count: &mut ConnectionCount) -> ConnectionId {

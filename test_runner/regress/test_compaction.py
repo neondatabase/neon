@@ -84,9 +84,6 @@ page_cache_size=10
     log.info("Checking layer access metrics ...")
 
     layer_access_metric_names = [
-        "pageserver_layers_visited_per_read_global_sum",
-        "pageserver_layers_visited_per_read_global_count",
-        "pageserver_layers_visited_per_read_global_bucket",
         "pageserver_layers_visited_per_vectored_read_global_sum",
         "pageserver_layers_visited_per_vectored_read_global_count",
         "pageserver_layers_visited_per_vectored_read_global_bucket",
@@ -97,12 +94,6 @@ page_cache_size=10
         layer_access_metrics = metrics.query_all(name)
         log.info(f"Got metrics: {layer_access_metrics}")
 
-    non_vectored_sum = metrics.query_one("pageserver_layers_visited_per_read_global_sum")
-    non_vectored_count = metrics.query_one("pageserver_layers_visited_per_read_global_count")
-    if non_vectored_count.value != 0:
-        non_vectored_average = non_vectored_sum.value / non_vectored_count.value
-    else:
-        non_vectored_average = 0
     vectored_sum = metrics.query_one("pageserver_layers_visited_per_vectored_read_global_sum")
     vectored_count = metrics.query_one("pageserver_layers_visited_per_vectored_read_global_count")
     if vectored_count.value > 0:
@@ -113,11 +104,10 @@ page_cache_size=10
         assert vectored_sum.value == 0
         vectored_average = 0
 
-    log.info(f"{non_vectored_average=} {vectored_average=}")
+    log.info(f"{vectored_average=}")
 
     # The upper bound for average number of layer visits below (8)
     # was chosen empirically for this workload.
-    assert non_vectored_average < 8
     assert vectored_average < 8
 
 
@@ -134,6 +124,10 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     }
 
     env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
+    env.pageserver.allowed_errors.append(
+        r".*failed to acquire partition lock during gc-compaction.*"
+    )
+    env.pageserver.allowed_errors.append(r".*repartition() called concurrently.*")
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
@@ -153,6 +147,7 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
         if i % 10 == 0:
             log.info(f"Running churn round {i}/{churn_rounds} ...")
 
+        if (i - 1) % 10 == 0:
             # Run gc-compaction every 10 rounds to ensure the test doesn't take too long time.
             ps_http.timeline_compact(
                 tenant_id,
@@ -161,14 +156,21 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
                 body={
                     "scheduled": True,
                     "sub_compaction": True,
-                    "compact_range": {
+                    "compact_key_range": {
                         "start": "000000000000000000000000000000000000",
                         "end": "030000000000000000000000000000000000",
                     },
+                    "sub_compaction_max_job_size_mb": 16,
                 },
             )
 
         workload.churn_rows(row_count, env.pageserver.id)
+
+    def compaction_finished():
+        queue_depth = len(ps_http.timeline_compact_info(tenant_id, timeline_id))
+        assert queue_depth == 0
+
+    wait_until(compaction_finished, timeout=60)
 
     # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
     env.pageserver.assert_log_contains(

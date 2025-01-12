@@ -131,7 +131,6 @@ PAGESERVER_GLOBAL_METRICS: tuple[str, ...] = (
     "pageserver_getpage_reconstruct_seconds_sum",
     *[f"pageserver_basebackup_query_seconds_{x}" for x in ["bucket", "count", "sum"]],
     *histogram("pageserver_smgr_query_seconds_global"),
-    *histogram("pageserver_layers_visited_per_read_global"),
     *histogram("pageserver_getpage_get_reconstruct_data_seconds"),
     *histogram("pageserver_wait_lsn_seconds"),
     *histogram("pageserver_remote_operation_seconds"),
@@ -178,6 +177,7 @@ PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
     counter("pageserver_timeline_wal_records_received"),
     counter("pageserver_page_service_pagestream_flush_in_progress_micros"),
     *histogram("pageserver_page_service_batch_size"),
+    *histogram("pageserver_page_service_pagestream_batch_wait_time_seconds"),
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
     # "pageserver_directory_entries_count", -- only used if above a certain threshold
     # "pageserver_broken_tenants_count" -- used only for broken
