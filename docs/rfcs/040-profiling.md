@@ -27,21 +27,19 @@ Go has [first-class support](https://pkg.go.dev/net/http/pprof) for profiling in
 standard library, using the [pprof](https://github.com/google/pprof) profile format and associated
 tooling.
 
-This is not the case for Rust and C, where obtaining profiles is currently rather cumbersome. It
-requires installing and running additional tools like `perf` as root on production nodes, with
-analysis tools that can be hard to use and often don't give good results. This is not only annoying,
-but can also significantly affect the resolution time of production incidents.
+This is not the case for Rust and C, where obtaining profiles can be rather cumbersome. It requires
+installing and running additional tools like `perf` as root on production nodes, with analysis tools
+that can be hard to use and often don't give good results. This is not only annoying, but can also
+significantly affect the resolution time of production incidents.
 
-This proposal aims to:
+This proposal will:
 
 * Provide CPU and heap profiles in pprof format via HTTP API.
 * Record continuous profiles in Grafana for aggregate historical analysis.
 * Make it easy for anyone to see a flamegraph in less than one minute.
 * Be reasonably consistent across teams and services (Rust, Go, C).
 
-## Non Goals
-
-These are out of scope here, but may be considered later.
+## Non Goals (For Now)
 
 * [Additional profile types](https://grafana.com/docs/pyroscope/next/configure-client/profile-types/)
   like mutexes, locks, goroutines, etc.
@@ -50,10 +48,10 @@ These are out of scope here, but may be considered later.
 
 ## Using Profiles
 
-Ready-to-use profiles will be obtainable using e.g. `curl`:
+Ready-to-use profiles can be obtained using e.g. `curl`. For Rust services:
 
 ```
-$ curl localhost:7676/profile/cpu >profile.pb
+$ curl localhost:9898/profile/cpu >profile.pb.gz
 ```
 
 pprof profiles can be explored using the [`pprof`](https://github.com/google/pprof) web UI, which
@@ -63,38 +61,39 @@ provides flamegraphs, call graphs, plain text listings, and more:
 $ pprof -http :6060 <profile>
 ```
 
-Some endpoints (e.g. Rust-based ones) may also be able to generate e.g. flamegraph SVGs directly:
+Some endpoints (e.g. Rust-based ones) can also generate flamegraph SVGs directly:
 
 ```
-$ curl localhost:7676/profile/cpu?format=svg >profile.svg
+$ curl localhost:9898/profile/cpu?format=svg >profile.svg
 $ open profile.svg
 ```
 
-Continuous profiles will be available in Grafana under Explore → Profiles → Explore Profiles
+Continuous profiles are available in Grafana under Explore → Profiles → Explore Profiles
 (currently only in [staging](https://neonstaging.grafana.net/a/grafana-pyroscope-app/profiles-explorer)).
 
-## CPU Profiling
+## API Requirements
 
-Requirements:
+* HTTP endpoints that return a profile in pprof format (with symbols).
+  * CPU: records a profile over the request time interval (`seconds` query parameter).
+  * Memory: returns the current in-use heap allocations.
+* Unauthenticated, as it should not expose user data or pose a denial-of-service risk.
+* Default sample frequency should not impact service (maximum 5% CPU overhead).
+* Linux-compatibility.
 
-* HTTP endpoint that takes a CPU profile over the request time interval.
-* Returns profile in pprof format, with symbols.
-* `seconds` query parameter specifying the profile duration.
-* Default sample frequency should not impact service (at most 5% CPU).
-* Unauthenticated. Do not expose user data or risk denial-of-service.
-* Linux-compatibile.
+Nice to have:
 
-Optional:
+* Return flamegraph SVG directly from the HTTP endpoint if requested.
+* Configurable sample frequency for CPU profiles.
+* Historical heap allocations, by count and bytes.
+* macOS-compatiblity.
 
-* `frequency` query parameter specifying the sample frequency in Hertz.
-* Emit human-readable profile formats (e.g. SVG flamegraph or plain text).
-* macOS-compatibile.
+## Rust Profiling
 
-### Rust CPU Profiling
+### CPU
 
-Use [pprof-rs](https://github.com/tikv/pprof-rs) via
-[`profile_cpu_handler`](https://github.com/neondatabase/neon/blob/dcb24ce170573a2ae6ed29467669d03c73b589e6/libs/utils/src/http/endpoint.rs#L336)
-from `lib/utils/src/http/endpoint.rs`. Expose it unauthenticated at `/profile/cpu`.
+CPU profiles are provided by [pprof-rs](https://github.com/tikv/pprof-rs) via
+[`profile_cpu_handler`](https://github.com/neondatabase/neon/blob/dcb24ce170573a2ae6ed29467669d03c73b589e6/libs/utils/src/http/endpoint.rs#L336).
+Expose it unauthenticated at `/profile/cpu`.
 
 Parameters:
 
@@ -105,52 +104,9 @@ Parameters:
 
 Works on Linux and macOS.
 
-### Go CPU Profiling
+### Memory
 
-Use [net/http/pprof](https://pkg.go.dev/net/http/pprof). Expose it unauthenticated at
-`/debug/pprof/profile`.
-
-Parameters:
-
-* `debug`: profile output format (`0` is pprof, `1` or above is plaintext; default `0`).
-* `seconds`: duration to collect profile over, in seconds (default `30`).
-
-Does not support a frequency parameter (see [#57488](https://github.com/golang/go/issues/57488)),
-and defaults to 100 Hz. A lower frequency can be hardcoded via `SetCPUProfileRate`, but the default
-is likely ok (estimated 1% overhead).
-
-Works on Linux and macOS.
-
-### C CPU Profiling
-
-[gperftools](https://github.com/gperftools/gperftools) provides in-process CPU profiling with
-pprof output.
-
-However, continuous profiling of PostgreSQL is expensive (many computes), and has limited value
-since we don't own the internals anyway.
-
-Ad hoc profiling might still be useful, but the compute team considers existing tooling sufficient,
-so this is not a priority at the moment.
-
-## Memory Profiling
-
-Requirements:
-
-* HTTP endpoint that returns a profile of the current heap allocations by size.
-* Returns profile in pprof format, with symbols.
-* Sample frequency should not impact service (at most 5% CPU).
-* Unauthenticated. Do not expose user data or risk denial-of-service.
-* Linux compatibility.
-
-Optional:
-
-* Return a profile with historical allocations by count and size.
-* Emit human-readable profile formats (e.g. SVG flamegraph or plain text).
-* macOS compatibility.
-
-### Rust Memory Profiling
-
-Use the jemalloc allocator via [tikv-jemallocator](https://github.com/tikv/jemallocator),
+Use the jemalloc allocator via [`tikv-jemallocator`](https://github.com/tikv/jemallocator),
 and enable profiling with samples every 2 MB allocated:
 
 ```rust
@@ -162,38 +118,58 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 ```
 
-Use [`profile_heap_handler`](https://github.com/neondatabase/neon/blob/dcb24ce170573a2ae6ed29467669d03c73b589e6/libs/utils/src/http/endpoint.rs#L414)
-from `lib/utils/src/http/endpoint.rs`. Expose it unauthenticated at `/profile/heap`.
+pprof profiles are generated by
+[`jemalloc-pprof`](https://github.com/polarsignals/rust-jemalloc-pprof) via
+[`profile_heap_handler`](https://github.com/neondatabase/neon/blob/dcb24ce170573a2ae6ed29467669d03c73b589e6/libs/utils/src/http/endpoint.rs#L414).
+Expose it unauthenticated at `/profile/heap`.
 
 Parameters:
 
 * `format`: profile output format (`pprof`, `svg`, or `jemalloc`; default `pprof`).
 
-Works on Linux only.
+Works on Linux only, due to jemalloc limitations.
 
-### Go Memory Profiling
+## Go Profiling
 
-Use [net/http/pprof](https://pkg.go.dev/net/http/pprof). Expose it unauthenticated at
-`/debug/pprof/heap`.
-
-Parameters:
-
-* `seconds`: create delta profile over duration, in seconds (default `0`).
-* `gc`: if `1`, garbage collect before taking profile.
+The Go standard library includes pprof profiling via HTTP API in
+[`net/http/pprof`](https://pkg.go.dev/net/http/pprof). Expose it unauthenticated at
+`/debug/pprof`.
 
 Works on Linux and macOS.
 
-### C Memory Profiling
+### CPU 
 
-[gperftools](https://github.com/gperftools/gperftools) provides in-process CPU profiling with
-pprof output.
+Via `/debug/pprof/profile`. Parameters:
 
-However, PostgreSQL profiling is not a priority at the moment (see C CPU profiling section).
+* `debug`: profile output format (`0` is pprof, `1` or above is plaintext; default `0`).
+* `seconds`: duration to collect profile over, in seconds (default `30`).
+
+Does not support a frequency parameter (see [#57488](https://github.com/golang/go/issues/57488)),
+and defaults to 100 Hz. A lower frequency can be hardcoded via `SetCPUProfileRate`, but the default
+is likely ok (estimated 1% overhead).
+
+### Memory
+
+Via `/debug/pprof/heap`. Parameters:
+
+* `seconds`: take a delta profile over the given duration, in seconds (default `0`).
+* `gc`: if `1`, garbage collect before taking profile.
+
+## C Profiling
+
+[gperftools](https://github.com/gperftools/gperftools) provides in-process CPU and heap profiling
+with pprof output.
+
+However, continuous profiling of PostgreSQL is expensive (many computes), and has limited value
+since we don't own the internals anyway.
+
+Ad hoc profiling might still be useful, but the compute team considers existing tooling sufficient,
+so this is not a priority at the moment.
 
 ## Grafana Continuous Profiling
 
 [Grafana Alloy](https://grafana.com/docs/alloy/latest/) continually scrapes CPU and memory profiles
-across the fleet, and archive them as time series. This can be used to analyze resource usage over
+across the fleet, and archives them as time series. This can be used to analyze resource usage over
 time, either in aggregate or zoomed in to specific events and nodes.
 
 Profiles are retained for 30 days. TODO: determine ingestion costs (50-100 GB included per month,
@@ -222,7 +198,7 @@ Only one CPU profile can be taken at a time. With continuous profiling, one will
 To allow also taking an ad hoc CPU profile, the Rust endpoint supports a `force` query parameter to
 cancel a running profile and start a new one.
 
-### Resource Cost
+### Overhead
 
 With Rust:
 
@@ -247,7 +223,7 @@ fact that performance-sensitive code will avoid allocations as far as possible.
 
 ## Alternatives Considered
 
-* eBPF profiles instead of pprof.
+* eBPF profiles.
   * Don't require instrumenting the binary.
   * Use less resources.
   * Can profile in kernel space too.
