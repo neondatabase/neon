@@ -146,6 +146,8 @@ impl SerializedValueBatch {
         // First determine how big the buffers need to be and allocate it up-front.
         // This duplicates some of the work below, but it's empirically much faster.
         for (shard, record) in shard_records.iter_mut() {
+            assert!(record.batch.is_empty());
+
             let estimate = Self::estimate_buffer_size(&decoded, shard, pg_version);
             record.batch.raw = Vec::with_capacity(estimate);
         }
