@@ -1706,15 +1706,17 @@ impl PageServerHandler {
             .query_metrics
             .observe_getpage_batch_start(requests.len());
 
+        // If a page trace is running, submit an event for this request.
         if let Some(page_trace) = timeline.page_trace.load().as_ref() {
             let time = SystemTime::now();
             for (rel_tag, blknum, _timer) in &requests {
                 let key = rel_block_to_key(*rel_tag, *blknum).to_compact();
-                page_trace.send(PageTraceEvent {
+                // Ignore error (trace buffer may be full or tracer may have disconnected).
+                _ = page_trace.try_send(PageTraceEvent {
                     key,
                     effective_lsn,
                     time,
-                })
+                });
             }
         }
 

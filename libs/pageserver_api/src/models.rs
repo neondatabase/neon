@@ -1981,11 +1981,21 @@ impl PagestreamBeMessage {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PageTraceEvent {
     pub key: CompactKey,
     pub effective_lsn: Lsn,
     pub time: SystemTime,
+}
+
+impl Default for PageTraceEvent {
+    fn default() -> Self {
+        Self {
+            key: Default::default(),
+            effective_lsn: Default::default(),
+            time: std::time::UNIX_EPOCH,
+        }
+    }
 }
 
 #[cfg(test)]

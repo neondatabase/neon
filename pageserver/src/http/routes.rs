@@ -27,6 +27,7 @@ use pageserver_api::models::LocationConfigMode;
 use pageserver_api::models::LsnLease;
 use pageserver_api::models::LsnLeaseRequest;
 use pageserver_api::models::OffloadedTimelineInfo;
+use pageserver_api::models::PageTraceEvent;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantConfigPatchRequest;
 use pageserver_api::models::TenantDetails;
@@ -92,7 +93,6 @@ use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::CompactOptions;
 use crate::tenant::timeline::CompactRequest;
 use crate::tenant::timeline::CompactionError;
-use crate::tenant::timeline::PageTrace;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
 use crate::tenant::OffloadedTimeline;
@@ -1533,48 +1533,49 @@ async fn timeline_page_trace_handler(
     let state = get_state(&request);
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    let size_limit =
-        parse_query_param::<_, u64>(&request, "size_limit_bytes")?.unwrap_or(1024 * 1024);
-    let time_limit_secs = parse_query_param::<_, u64>(&request, "time_limit_secs")?.unwrap_or(5);
+    let size_limit: usize = parse_query_param(&request, "size_limit_bytes")?.unwrap_or(1024 * 1024);
+    let time_limit_secs: u64 = parse_query_param(&request, "time_limit_secs")?.unwrap_or(5);
 
-    // Convert size limit to event limit based on known serialized size of an event
-    let event_limit = size_limit / 32;
+    // Convert size limit to event limit based on the serialized size of an event. The event size is
+    // fixed, as the default bincode serializer uses fixed-width integer encoding.
+    let event_size = bincode::serialize(&PageTraceEvent::default())
+        .map_err(|err| ApiError::InternalServerError(err.into()))?
+        .len();
+    let event_limit = size_limit / event_size;
 
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
 
-    // Install a page trace, unless one is already in progress.
-    let (page_trace, mut trace_rx) = PageTrace::new(event_limit);
+    // Install a page trace, unless one is already in progress. We just use a buffered channel,
+    // which may 2x the memory usage in the worst case, but it's still bounded.
+    let (trace_tx, mut trace_rx) = tokio::sync::mpsc::channel(event_limit);
     let cur = timeline.page_trace.load();
     let installed = cur.is_none()
         && timeline
             .page_trace
-            .compare_and_swap(cur, Some(Arc::new(page_trace)))
+            .compare_and_swap(cur, Some(Arc::new(trace_tx)))
             .is_none();
     if !installed {
         return Err(ApiError::Conflict("page trace already active".to_string()));
     }
     defer!(timeline.page_trace.store(None)); // uninstall on return
 
-    let mut buffer = Vec::with_capacity(size_limit as usize);
-
+    // Collect the trace and return it to the client. We could stream the response, but this is
+    // simple and fine.
+    let mut body = Vec::with_capacity(size_limit);
     let deadline = Instant::now() + Duration::from_secs(time_limit_secs);
 
-    loop {
+    while body.len() < size_limit {
         tokio::select! {
             event = trace_rx.recv() => {
                 let Some(event) = event else {
-                    break; // should never happen, sender doesn't close
+                    break; // shouldn't happen (sender doesn't close, unless timeline dropped)
                 };
-                buffer.extend(bincode::serialize(&event).unwrap());
-
-                if buffer.len() >= size_limit as usize {
-                    // Size threshold reached
-                    break;
-                }
+                bincode::serialize_into(&mut body, &event)
+                    .map_err(|err| ApiError::InternalServerError(err.into()))?;
             }
-            _ = tokio::time::sleep_until(deadline) => break,
+            _ = tokio::time::sleep_until(deadline) => break, // time limit reached
             _ = cancel.cancelled() => return Err(ApiError::Cancelled),
         }
     }
@@ -1582,7 +1583,7 @@ async fn timeline_page_trace_handler(
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
-        .body(hyper::Body::from(buffer))
+        .body(hyper::Body::from(body))
         .unwrap())
 }
 
