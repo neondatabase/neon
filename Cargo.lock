@@ -7382,7 +7382,6 @@ dependencies = [
  "remote_storage",
  "serde",
  "serde_json",
- "smallvec",
  "thiserror",
  "tikv-jemallocator",
  "tokio",
