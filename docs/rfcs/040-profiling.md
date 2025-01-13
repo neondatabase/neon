@@ -207,12 +207,14 @@ cancel a running profile and start a new one.
 With Rust:
 
 * CPU profiles at 19 Hz frequency: 0.1% overhead.
-* Heap profiles at 2 MB frequency: 3% overhead.
-* Profile symbolization caches: 125 MB memory (for Pageserver).
+* Heap profiles at 2 MB frequency: 3% allocation overhead.
+* Profile call/encoding/symbolization: 20 ms every 20 seconds, or 0.1% of 1 CPU (for Pageserver).
+* Profile symbolization caches: 125 MB memory, or 0.4% of 32 GB (for Pageserver).
 
 Benchmarks with pprof-rs showed that the CPU time for taking a stack trace of a 40-frame stack was
-11 µs using the `frame-pointer` feature, and 1.4 µs using `libunwind` with DWARF (which saw frequent
-seg faults).
+11 µs using the `frame-pointer` feature, and 1.4 µs using `libunwind` with DWARF. `libunwind` saw
+frequent seg faults, so we use `frame-pointer` and build binaries with frame pointers (negligible
+overhead).
 
 CPU profiles work by installing an `ITIMER_PROF` for the process, which triggers a `SIGPROF` signal
 after a given amount of cumulative CPU time across all CPUs. The signal handler will run for one
