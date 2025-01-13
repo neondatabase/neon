@@ -68,7 +68,8 @@ impl InterpretedWalRecord {
 }
 
 impl MetadataRecord {
-    /// Builds metadata records for this WAL record for the specified shards if any, if any.
+    /// Populates the given `shard_records` with metadata records from this WAL record, if any,
+    /// discarding those belonging to other shards.
     ///
     /// Only metadata records relevant for the given shards is emitted. Currently, most metadata
     /// records are broadcast to all shards for simplicity, but this should be improved.

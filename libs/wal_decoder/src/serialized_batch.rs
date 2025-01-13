@@ -130,7 +130,8 @@ impl Default for SerializedValueBatch {
 }
 
 impl SerializedValueBatch {
-    /// Build a batch of serialized values from a decoded PG WAL record
+    /// Populates the given `shard_records` with value batches from this WAL record, if any,
+    /// discarding those belonging to other shards.
     ///
     /// The batch will only contain values for keys targeting the specifiec
     /// shard. Shard 0 is a special case, where any keys that don't belong to
