@@ -1213,8 +1213,8 @@ mod tests {
 
         let mut scheduler = Scheduler::new(nodes.values());
 
-        /// Force the utilization of a node in Scheduler's state to a particular
-        /// number of bytes used.
+        /// Force the `home_shard_count` of a node directly: this is the metric used
+        /// by the scheduler when picking AZs.
         fn set_shard_count(scheduler: &mut Scheduler, node_id: NodeId, shard_count: usize) {
             let node = scheduler.nodes.get_mut(&node_id).unwrap();
             node.home_shard_count = shard_count;

@@ -6530,8 +6530,6 @@ impl Service {
                     continue;
                 }
 
-                // TODO: optimization calculations are relatively expensive: create some fast-path for
-                // the common idle case (avoiding the search on tenants that we have recently checked)
                 if let Some(optimization) =
                     // If idle, maybe optimize attachments: if a shard has a secondary location that is preferable to
                     // its primary location based on soft constraints, cut it over.
@@ -6547,7 +6545,7 @@ impl Service {
                     // in the same tenant with secondary locations on the node where they originally split.
                     shard.optimize_secondary(scheduler, &schedule_context)
                 {
-                    tracing::info!(tenant_shard_id=%shard.tenant_shard_id, "Identified optimization for asecondary: {optimization:?}");
+                    tracing::info!(tenant_shard_id=%shard.tenant_shard_id, "Identified optimization for secondary: {optimization:?}");
                     work.push((shard.tenant_shard_id, optimization));
                     break;
                 }
