@@ -1,6 +1,7 @@
 {
   "v17": [
     "17.2",
+<<<<<<< HEAD
     "b370789d9825e9666618cf7132d24494f86a5a0a"
   ],
   "v16": [
@@ -10,6 +11,17 @@
   "v15": [
     "15.10",
     "acb78a38656cba8a204163425a11b8d24b4dd881"
+=======
+    "b7f1d43e1ab857903413dd8384e1153a3cdda2db"
+  ],
+  "v16": [
+    "16.6",
+    "da15fec86484538aa23c72fd087734437ebe12ed"
+  ],
+  "v15": [
+    "15.10",
+    "d9f40a6398acad70e2f39ff043492dac64f5dbee"
+>>>>>>> aec654b99 (Do not exclude AUX_FILES_KEY from test for oversized vecrtored read)
   ],
   "v14": [
     "14.15",
