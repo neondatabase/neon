@@ -52,7 +52,7 @@ pub struct ShardIdentity {
 
 /// Hash implementation
 ///
-/// The stripe size cannot change dinamically, so it can be ignored for efficiency reasons.
+/// The stripe size cannot change dynamically, so it can be ignored for efficiency reasons.
 impl Hash for ShardIdentity {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let ShardIdentity {
