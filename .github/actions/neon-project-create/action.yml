@@ -105,3 +105,4 @@ runs:
         SHARD_COUNT: ${{ inputs.shard-count }}
         STRIPE_SIZE: ${{ inputs.stripe-size }}
         PSQL: /tmp/neon/pg_install/v16/bin/psql
+        LD_LIBRARY_PATH: /tmp/neon/pg_install/v16/lib
