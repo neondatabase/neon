@@ -107,12 +107,13 @@
 
 use std::collections::hash_map;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
 
+use futures::lock::OwnedMutexGuard;
 use pageserver_api::shard::ShardIdentity;
 use tracing::instrument;
 use tracing::trace;
@@ -170,12 +171,17 @@ pub(crate) struct ShardTimelineId {
 }
 
 /// See module-level comment.
-pub(crate) struct Handle<T: Types>(Arc<HandleInner<T>>);
-struct HandleInner<T: Types> {
-    shut_down: AtomicBool,
-    timeline: T::Timeline,
-    // The timeline's gate held open.
-    _gate_guard: utils::sync::gate::GateGuard,
+pub(crate) struct Handle<T: Types>(
+    // We need sth with interior mutability + Send-ness.
+    // tokio sync Mutex gives that, and adds OwnedMutexGuard, which is handy.
+    Arc<tokio::sync::Mutex<HandleInner<T>>>,
+);
+enum HandleInner<T: Types> {
+    KeepingTimelineGateOpen {
+        timeline: T::Timeline,
+        gate_guard: utils::sync::gate::GateGuard,
+    },
+    ShutDown,
 }
 
 /// Embedded in each [`Types::Timeline`] as the anchor for the only long-lived strong ref to `HandleInner`.
@@ -248,7 +254,7 @@ impl<T: Types> Cache<T> {
             let handle = self
                 .get_impl(timeline_id, shard_selector, tenant_manager)
                 .await?;
-            if handle.0.shut_down.load(Ordering::Relaxed) {
+            if handle.0.check_shut_down().is_none() {
                 let removed = self
                     .map
                     .remove(&handle.0.timeline.shard_timeline_id())
@@ -367,10 +373,9 @@ impl<T: Types> Cache<T> {
                 let handle = Arc::new(
                     // TODO: global metric that keeps track of the number of live HandlerTimeline instances
                     // so we can identify reference cycle bugs.
-                    HandleInner {
-                        shut_down: AtomicBool::new(false),
-                        _gate_guard: gate_guard,
+                    HandleInner::KeepingTimelineGateOpen {
                         timeline: timeline.clone(),
+                        gate_guard,
                     },
                 );
                 let handle = {
@@ -409,6 +414,21 @@ impl<T: Types> Cache<T> {
     }
 }
 
+impl<T: Types> Handle<T> {
+    pub(crate) async fn upgrade(&mut self) -> Option<impl Deref<Target = T::Timeline>> {
+        // This could probably simplified with a
+        let guard = self.0.lock_owned().await;
+        let map_res = OwnedMutexGuard::try_map(guard, |f: &mut HandleInner<T>| match f {
+            HandleInner::KeepingTimelineGateOpen { timeline, .. } => Some(&mut timeline),
+            HandleInner::ShutDown => None,
+        });
+        let Ok(timeline) = map_res else {
+            return None;
+        };
+        Some(timeline)
+    }
+}
+
 impl<T: Types> PerTimelineState<T> {
     /// After this method returns, [`Cache::get`] will never again return a [`Handle`]
     /// to the [`Types::Timeline`] that embeds this per-timeline state.
@@ -435,13 +455,6 @@ impl<T: Types> PerTimelineState<T> {
             handle.shut_down.store(true, Ordering::Relaxed);
         }
         drop(handles);
-    }
-}
-
-impl<T: Types> std::ops::Deref for Handle<T> {
-    type Target = T::Timeline;
-    fn deref(&self) -> &Self::Target {
-        &self.0.timeline
     }
 }
 
