@@ -525,7 +525,7 @@ impl Timeline {
             // scan directory listing
             let key_range = rel_tag_sparse_key_range(spcnode, dbnode);
             let results = self
-                .get_vectored(KeySpace::single(key_range), version.get_lsn(), ctx)
+                .scan(KeySpace::single(key_range), version.get_lsn(), ctx)
                 .await?;
             let mut rels = HashSet::new();
             for (key, val) in results {
