@@ -1444,7 +1444,7 @@ RUN case "${PG_VERSION}" in "v17") \
     echo "postgresql_anonymizer does not yet support PG17" && exit 0;; \
     esac && patch -p1 </ext-src/pg_anon.patch
 RUN patch -p1 </ext-src/pg_cron.patch
-COPY ./docker-compose/ext-src /ext-src
+#COPY ./docker-compose/ext-src /ext-src
 ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
 ENV PGPORT=55433
