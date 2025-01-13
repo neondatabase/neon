@@ -417,15 +417,15 @@ impl<T: Types> Cache<T> {
 impl<T: Types> Handle<T> {
     pub(crate) async fn upgrade(&mut self) -> Option<impl Deref<Target = T::Timeline>> {
         // This could probably simplified with a
-        let guard = self.0.lock_owned().await;
-        let map_res = OwnedMutexGuard::try_map(guard, |f: &mut HandleInner<T>| match f {
+        let lock_guard = self.0.lock_owned().await;
+        let res = OwnedMutexGuard::try_map(lock_guard, |f: &mut HandleInner<T>| match f {
             HandleInner::KeepingTimelineGateOpen { timeline, .. } => Some(&mut timeline),
             HandleInner::ShutDown => None,
         });
-        let Ok(timeline) = map_res else {
+        let Ok(mapped_lock_guard) = res else {
             return None;
         };
-        Some(timeline)
+        Some(mapped_lock_guard)
     }
 }
 
