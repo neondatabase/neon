@@ -1526,7 +1526,7 @@ async fn timeline_gc_unblocking_handler(
 
 async fn timeline_page_trace_handler(
     request: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -1579,6 +1579,7 @@ async fn timeline_page_trace_handler(
                 // Time threshold reached
                 break;
             }
+            _ = cancel.cancelled() => return Err(ApiError::Cancelled),
         }
     }
 
