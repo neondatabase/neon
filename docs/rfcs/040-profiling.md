@@ -131,7 +131,7 @@ Parameters:
 
 * `format`: profile output format (`pprof`, `svg`, or `jemalloc`; default `pprof`).
 
-Works on Linux only, due to jemalloc limitations.
+Works on Linux only, due to [jemalloc limitations](https://github.com/jemalloc/jemalloc/issues/26).
 
 ## Go Profiling
 
