@@ -3791,6 +3791,9 @@ impl Timeline {
                     1,
                     "currently sparse keyspace should only contain a single metadata keyspace"
                 );
+                // Safety: create_image_layers treat sparse keyspaces differently that it does not scan
+                // every single key within the keyspace, and therefore, it's safe to force converting it
+                // into a dense keyspace before calling this function.
                 partitions
                     .parts
                     .extend(metadata_partition.into_dense().parts);
