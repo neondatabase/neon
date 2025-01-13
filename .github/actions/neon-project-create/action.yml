@@ -78,6 +78,9 @@ runs:
         echo "Project ${project_id} has been created"
 
         if [ "${SHARD_SPLIT_PROJECT}" = "true" ]; then
+          # sleep a while
+          sleep 20
+          
           # determine tenant ID
           TENANT_ID=`${PSQL} ${dsn} -t -A -c "SHOW neon.tenant_id"`
           
@@ -89,7 +92,7 @@ runs:
             "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/storage/proxy/control/v1/tenant/${TENANT_ID}/shard_split" \
             -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${API_KEY}" \
             -d "{\"new_shard_count\": $SHARD_COUNT, \"new_stripe_size\": $STRIPE_SIZE}"
-            
+
         fi
 
       env:
