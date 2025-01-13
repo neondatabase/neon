@@ -1,4 +1,5 @@
 #!/bin/sh
 set -ex
 cd "$(dirname ${0})"
-/usr/local/pgsql/lib/pgxs/src/makefiles/../../src/test/regress/pg_regress --use-existing --inputdir=./ --bindir='/usr/local/pgsql/bin'    --dbname=contrib_regression prefix falcon explain queries
+PG_REGRESS=$(dirname "$(pg_config --pgxs)")/../test/regress/pg_regress
+${PG_REGRESS} --use-existing --inputdir=./ --bindir='/usr/local/pgsql/bin'    --dbname=contrib_regression prefix falcon explain queries
