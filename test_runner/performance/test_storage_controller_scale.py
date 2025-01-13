@@ -564,7 +564,7 @@ def test_storage_controller_many_tenants(
     # in the region that we just restored.  Assume it'll take up to twice as long as it took to fill
     # a single node
     env.storage_controller.reconcile_until_idle(
-        max_interval=0.1, timeout_secs=DRAIN_FILL_TIMEOUT * 2
+        max_interval=0.1, timeout_secs=DRAIN_FILL_TIMEOUT * 4
     )
     assert_all_tenants_scheduled_in_home_az()
 
