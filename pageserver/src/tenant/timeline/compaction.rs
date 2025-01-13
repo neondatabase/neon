@@ -1776,7 +1776,10 @@ impl Timeline {
         base_img_from_ancestor: Option<(Key, Lsn, Bytes)>,
     ) -> anyhow::Result<KeyHistoryRetention> {
         // Pre-checks for the invariants
-        if cfg!(debug_assertions) {
+
+        let debug_mode = cfg!(debug_assertions) || cfg!(feature = "testing");
+
+        if debug_mode {
             for (log_key, _, _) in full_history {
                 assert_eq!(log_key, &key, "mismatched key");
             }
@@ -1972,7 +1975,6 @@ impl Timeline {
             // Whether to reconstruct the image. In debug mode, we will generate an image
             // at every retain_lsn to ensure data is not corrupted, but we won't put the
             // image into the final layer.
-            let debug_mode = cfg!(debug_assertions) || cfg!(feature = "testing");
             let generate_image = produce_image || debug_mode;
             if produce_image {
                 records_since_last_image = 0;
@@ -2306,6 +2308,8 @@ impl Timeline {
         let compact_key_range = job.compact_key_range;
         let compact_lsn_range = job.compact_lsn_range;
 
+        let debug_mode = cfg!(debug_assertions) || cfg!(feature = "testing");
+
         info!("running enhanced gc bottom-most compaction, dry_run={dry_run}, compact_key_range={}..{}, compact_lsn_range={}..{}", compact_key_range.start, compact_key_range.end, compact_lsn_range.start, compact_lsn_range.end);
 
         scopeguard::defer! {
@@ -2431,7 +2435,7 @@ impl Timeline {
                 .first()
                 .copied()
                 .unwrap_or(job_desc.gc_cutoff);
-            if cfg!(debug_assertions) || cfg!(feature = "testing") {
+            if debug_mode {
                 assert_eq!(
                     res,
                     job_desc
