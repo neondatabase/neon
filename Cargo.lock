@@ -3931,6 +3931,7 @@ dependencies = [
  "camino",
  "clap",
  "humantime",
+ "itertools 0.10.5",
  "pageserver",
  "pageserver_api",
  "postgres_ffi",

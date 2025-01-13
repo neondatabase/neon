@@ -1,50 +1,39 @@
 use std::collections::HashMap;
-use std::io::{Cursor, ErrorKind, Read};
-use std::time::SystemTime;
+use std::io::BufReader;
 
 use camino::Utf8PathBuf;
 use clap::Parser;
-use pageserver_api::key::Key;
+use itertools::Itertools as _;
+use pageserver_api::key::{CompactKey, Key};
 use pageserver_api::models::PageTraceEvent;
 use pageserver_api::reltag::RelTag;
-use utils::lsn::Lsn;
 
+/// Parses a page trace (as emitted by the `page_trace` timeline API), and outputs stats.
 #[derive(Parser)]
 pub(crate) struct PageTraceCmd {
-    /// Trace input data path
+    /// Trace input file.
     path: Utf8PathBuf,
 }
 
-pub(crate) async fn main(cmd: &PageTraceCmd) -> anyhow::Result<()> {
-    let data = tokio::fs::read(&cmd.path).await?;
-
-    let mut reader = Cursor::new(&data);
-
-    let mut events = Vec::new();
-
-    let event_size = bincode::serialized_size(&PageTraceEvent {
-        key: 0.into(),
-        effective_lsn: Lsn(0),
-        time: SystemTime::now(),
-    })?;
-
+pub(crate) fn main(cmd: &PageTraceCmd) -> anyhow::Result<()> {
+    let mut file = BufReader::new(std::fs::OpenOptions::new().read(true).open(&cmd.path)?);
+    let mut events: Vec<PageTraceEvent> = Vec::new();
     loop {
-        let mut event_bytes = vec![0; event_size as usize];
-        if let Err(e) = reader.read_exact(&mut event_bytes) {
-            if e.kind() == ErrorKind::UnexpectedEof {
-                eprintln!("End of input, read {} keys", events.len());
-                break;
-            } else {
-                return Err(e.into());
+        match bincode::deserialize_from(&mut file) {
+            Ok(event) => events.push(event),
+            Err(err) => {
+                if let bincode::ErrorKind::Io(ref err) = *err {
+                    if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                        break;
+                    }
+                }
+                return Err(err.into());
             }
         }
-        let event = bincode::deserialize::<PageTraceEvent>(&event_bytes)?;
-
-        events.push(event);
     }
 
-    let mut reads_by_relation = HashMap::new();
-    let mut reads_by_key = HashMap::new();
+    let mut reads_by_relation: HashMap<RelTag, i64> = HashMap::new();
+    let mut reads_by_key: HashMap<CompactKey, i64> = HashMap::new();
 
     for event in events {
         let key = Key::from_compact(event.key);
@@ -55,29 +44,29 @@ pub(crate) async fn main(cmd: &PageTraceCmd) -> anyhow::Result<()> {
             forknum: key.field5,
         };
 
-        *(reads_by_relation.entry(reltag).or_insert(0)) += 1;
-        *(reads_by_key.entry(event.key).or_insert(0)) += 1;
+        *reads_by_relation.entry(reltag).or_default() += 1;
+        *reads_by_key.entry(event.key).or_default() += 1;
     }
 
-    let mut multi_read_keys = Vec::new();
-    for (key, count) in reads_by_key {
-        if count > 1 {
-            multi_read_keys.push((key, count));
-        }
-    }
+    let multi_read_keys = reads_by_key
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .sorted_by_key(|(key, count)| (-*count, *key))
+        .collect_vec();
 
-    multi_read_keys.sort_by_key(|i| (i.1, i.0));
-
-    eprintln!("Multi-read keys: {}", multi_read_keys.len());
+    println!("Multi-read keys: {}", multi_read_keys.len());
     for (key, count) in multi_read_keys {
-        eprintln!("  {}: {}", key, count);
+        println!("  {key}: {count}");
     }
 
-    eprintln!("Reads by relation:");
-    let mut reads_by_relation = reads_by_relation.into_iter().collect::<Vec<_>>();
-    reads_by_relation.sort_by_key(|i| (i.1, i.0));
+    let reads_by_relation = reads_by_relation
+        .into_iter()
+        .sorted_by_key(|(rel, count)| (-*count, *rel))
+        .collect_vec();
+
+    println!("Reads by relation:");
     for (reltag, count) in reads_by_relation {
-        eprintln!("  {}: {}", reltag, count);
+        println!("  {reltag}: {count}");
     }
 
     Ok(())

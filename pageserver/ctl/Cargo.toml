@@ -12,6 +12,7 @@ bincode.workspace = true
 camino.workspace = true
 clap = { workspace = true, features = ["string"] }
 humantime.workspace = true
+itertools.workspace = true
 pageserver = { path = ".." }
 pageserver_api.workspace = true
 remote_storage = { path = "../../libs/remote_storage" }

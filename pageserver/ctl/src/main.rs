@@ -186,9 +186,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
         Commands::Key(dkc) => dkc.execute(),
-        Commands::PageTrace(cmd) => {
-            page_trace::main(&cmd).await?;
-        }
+        Commands::PageTrace(cmd) => page_trace::main(&cmd)?,
     };
     Ok(())
 }
