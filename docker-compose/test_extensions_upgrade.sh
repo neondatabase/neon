@@ -1,5 +1,6 @@
 #!/bin/bash
 set -eux -o pipefail
+cd "$(dirname "${0}")"
 # Takes a variable name as argument. The result is stored in that variable.
 generate_id() {
     local -n resvar=$1
