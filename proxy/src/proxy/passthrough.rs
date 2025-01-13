@@ -56,18 +56,18 @@ pub(crate) async fn proxy_pass(
     Ok(())
 }
 
-pub(crate) struct ProxyPassthrough<P, S> {
+pub(crate) struct ProxyPassthrough<S> {
     pub(crate) client: Stream<S>,
     pub(crate) compute: PostgresConnection,
     pub(crate) aux: MetricsAuxInfo,
     pub(crate) session_id: uuid::Uuid,
+    pub(crate) cancel: cancellation::Session,
 
     pub(crate) _req: NumConnectionRequestsGuard<'static>,
     pub(crate) _conn: NumClientConnectionsGuard<'static>,
-    pub(crate) _cancel: cancellation::Session<P>,
 }
 
-impl<P, S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<P, S> {
+impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
     pub(crate) async fn proxy_pass(
         self,
         compute_config: &ComputeConfig,
@@ -81,6 +81,11 @@ impl<P, S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<P, S> {
         {
             tracing::warn!(session_id = ?self.session_id, ?err, "could not cancel the query in the database");
         }
+
+        if let Err(e) = self.cancel.remove_cancel_key() {
+            tracing::warn!(session_id = ?self.session_id, ?e, "could not remove the cancel key");
+        }
+
         res
     }
 }

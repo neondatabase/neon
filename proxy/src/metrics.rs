@@ -341,13 +341,6 @@ pub struct RedisErrors<'a> {
 }
 
 #[derive(FixedCardinalityLabel, Copy, Clone)]
-pub enum CancellationSource {
-    FromClient,
-    FromRedis,
-    Local,
-}
-
-#[derive(FixedCardinalityLabel, Copy, Clone)]
 pub enum CancellationOutcome {
     NotFound,
     Found,
@@ -357,7 +350,6 @@ pub enum CancellationOutcome {
 #[derive(LabelGroup)]
 #[label(set = CancellationRequestSet)]
 pub struct CancellationRequest {
-    pub source: CancellationSource,
     pub kind: CancellationOutcome,
 }
 

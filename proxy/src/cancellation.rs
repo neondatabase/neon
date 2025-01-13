@@ -1,48 +1,38 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use postgres_client::tls::MakeTlsConnect;
 use postgres_client::CancelToken;
 use pq_proto::CancelKeyData;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 use tracing::{debug, info};
-use uuid::Uuid;
 
 use crate::auth::backend::{BackendIpAllowlist, ComputeUserInfo};
-use crate::auth::{check_peer_addr_is_in_list, AuthError, IpPattern};
+use crate::auth::{check_peer_addr_is_in_list, AuthError};
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::ext::LockExt;
-use crate::metrics::{CancellationRequest, CancellationSource, Metrics};
+use crate::metrics::{CancellationRequest, Metrics};
 use crate::rate_limiter::LeakyBucketRateLimiter;
-use crate::redis::cancellation_publisher::{
-    CancellationPublisher, CancellationPublisherMut, RedisPublisherClient,
-};
+use crate::redis::keys::KeyPrefix;
+use crate::redis::kv_ops::RedisOp;
 use crate::tls::postgres_rustls::MakeRustlsConnect;
-
-pub type CancelMap = Arc<DashMap<CancelKeyData, Option<CancelClosure>>>;
-pub type CancellationHandlerMain = CancellationHandler<Option<Arc<Mutex<RedisPublisherClient>>>>;
-pub(crate) type CancellationHandlerMainInternal = Option<Arc<Mutex<RedisPublisherClient>>>;
 
 type IpSubnetKey = IpNet;
 
 /// Enables serving `CancelRequest`s.
 ///
 /// If `CancellationPublisher` is available, cancel request will be used to publish the cancellation key to other proxy instances.
-pub struct CancellationHandler<P> {
+pub struct CancellationHandler {
     compute_config: &'static ComputeConfig,
-    map: CancelMap,
-    client: P,
-    /// This field used for the monitoring purposes.
-    /// Represents the source of the cancellation request.
-    from: CancellationSource,
     // rate limiter of cancellation requests
     limiter: Arc<std::sync::Mutex<LeakyBucketRateLimiter<IpSubnetKey>>>,
+    tx: Option<mpsc::Sender<RedisOp>>, // send messages to the redis KV client task
 }
 
 #[derive(Debug, Error)]
@@ -61,6 +51,12 @@ pub(crate) enum CancelError {
 
     #[error("Authentication backend error")]
     AuthError(#[from] AuthError),
+
+    #[error("key not found")]
+    NotFound,
+
+    #[error("proxy service error")]
+    InternalError,
 }
 
 impl ReportableError for CancelError {
@@ -73,120 +69,50 @@ impl ReportableError for CancelError {
             CancelError::Postgres(_) => crate::error::ErrorKind::Compute,
             CancelError::RateLimit => crate::error::ErrorKind::RateLimit,
             CancelError::IpNotAllowed => crate::error::ErrorKind::User,
+            CancelError::NotFound => crate::error::ErrorKind::User,
             CancelError::AuthError(_) => crate::error::ErrorKind::ControlPlane,
+            CancelError::InternalError => crate::error::ErrorKind::Service,
         }
     }
 }
 
-impl<P: CancellationPublisher> CancellationHandler<P> {
-    /// Run async action within an ephemeral session identified by [`CancelKeyData`].
-    pub(crate) fn get_session(self: Arc<Self>) -> Session<P> {
+impl CancellationHandler {
+    pub fn new(compute_config: &'static ComputeConfig, tx: Option<mpsc::Sender<RedisOp>>) -> Self {
+        Self {
+            compute_config,
+            tx,
+            limiter: Arc::new(std::sync::Mutex::new(
+                LeakyBucketRateLimiter::<IpSubnetKey>::new_with_shards(
+                    LeakyBucketRateLimiter::<IpSubnetKey>::DEFAULT,
+                    64,
+                ),
+            )),
+        }
+    }
+
+    pub(crate) fn get_key(self: &Arc<Self>) -> Result<Session, CancelError> {
         // we intentionally generate a random "backend pid" and "secret key" here.
         // we use the corresponding u64 as an identifier for the
         // actual endpoint+pid+secret for postgres/pgbouncer.
         //
         // if we forwarded the backend_pid from postgres to the client, there would be a lot
         // of overlap between our computes as most pids are small (~100).
-        let key = loop {
-            let key = rand::random();
+        // let node_id_bits: u64 = (node_id as u64) << 32;
 
-            // Random key collisions are unlikely to happen here, but they're still possible,
-            // which is why we have to take care not to rewrite an existing key.
-            match self.map.entry(key) {
-                dashmap::mapref::entry::Entry::Occupied(_) => continue,
-                dashmap::mapref::entry::Entry::Vacant(e) => {
-                    e.insert(None);
-                }
-            }
-            break key;
-        };
+        let key: CancelKeyData = rand::random();
+
+        let prefix_key: KeyPrefix = KeyPrefix::Cancel(key);
+        let redis_key = prefix_key.build_redis_key().map_err(|e| {
+            tracing::warn!("failed to build redis key: {e}");
+            CancelError::InternalError
+        })?;
 
         debug!("registered new query cancellation key {key}");
-        Session {
+        Ok(Session {
             key,
-            cancellation_handler: self,
-        }
-    }
-
-    /// Cancelling only in notification, will be removed
-    pub(crate) async fn cancel_session(
-        &self,
-        key: CancelKeyData,
-        session_id: Uuid,
-        peer_addr: IpAddr,
-        check_allowed: bool,
-    ) -> Result<(), CancelError> {
-        // TODO: check for unspecified address is only for backward compatibility, should be removed
-        if !peer_addr.is_unspecified() {
-            let subnet_key = match peer_addr {
-                IpAddr::V4(ip) => IpNet::V4(Ipv4Net::new_assert(ip, 24).trunc()), // use defaut mask here
-                IpAddr::V6(ip) => IpNet::V6(Ipv6Net::new_assert(ip, 64).trunc()),
-            };
-            if !self.limiter.lock_propagate_poison().check(subnet_key, 1) {
-                // log only the subnet part of the IP address to know which subnet is rate limited
-                tracing::warn!("Rate limit exceeded. Skipping cancellation message, {subnet_key}");
-                Metrics::get()
-                    .proxy
-                    .cancellation_requests_total
-                    .inc(CancellationRequest {
-                        source: self.from,
-                        kind: crate::metrics::CancellationOutcome::RateLimitExceeded,
-                    });
-                return Err(CancelError::RateLimit);
-            }
-        }
-
-        // NB: we should immediately release the lock after cloning the token.
-        let cancel_state = self.map.get(&key).and_then(|x| x.clone());
-        let Some(cancel_closure) = cancel_state else {
-            tracing::warn!("query cancellation key not found: {key}");
-            Metrics::get()
-                .proxy
-                .cancellation_requests_total
-                .inc(CancellationRequest {
-                    source: self.from,
-                    kind: crate::metrics::CancellationOutcome::NotFound,
-                });
-
-            if session_id == Uuid::nil() {
-                // was already published, do not publish it again
-                return Ok(());
-            }
-
-            match self.client.try_publish(key, session_id, peer_addr).await {
-                Ok(()) => {} // do nothing
-                Err(e) => {
-                    // log it here since cancel_session could be spawned in a task
-                    tracing::error!("failed to publish cancellation key: {key}, error: {e}");
-                    return Err(CancelError::IO(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    )));
-                }
-            }
-            return Ok(());
-        };
-
-        if check_allowed
-            && !check_peer_addr_is_in_list(&peer_addr, cancel_closure.ip_allowlist.as_slice())
-        {
-            // log it here since cancel_session could be spawned in a task
-            tracing::warn!("IP is not allowed to cancel the query: {key}");
-            return Err(CancelError::IpNotAllowed);
-        }
-
-        Metrics::get()
-            .proxy
-            .cancellation_requests_total
-            .inc(CancellationRequest {
-                source: self.from,
-                kind: crate::metrics::CancellationOutcome::Found,
-            });
-        info!(
-            "cancelling query per user's request using key {key}, hostname {}, address: {}",
-            cancel_closure.hostname, cancel_closure.socket_addr
-        );
-        cancel_closure.try_cancel_query(self.compute_config).await
+            redis_key,
+            cancellation_handler: Arc::clone(self),
+        })
     }
 
     /// Try to cancel a running query for the corresponding connection.
@@ -195,152 +121,128 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
     /// Will fetch IP allowlist internally.
     ///
     /// return Result primarily for tests
-    pub(crate) async fn cancel_session_auth<T: BackendIpAllowlist>(
+    pub(crate) async fn cancel_session<T: BackendIpAllowlist>(
         &self,
         key: CancelKeyData,
         ctx: RequestContext,
         check_allowed: bool,
         auth_backend: &T,
     ) -> Result<(), CancelError> {
-        // TODO: check for unspecified address is only for backward compatibility, should be removed
-        if !ctx.peer_addr().is_unspecified() {
-            let subnet_key = match ctx.peer_addr() {
-                IpAddr::V4(ip) => IpNet::V4(Ipv4Net::new_assert(ip, 24).trunc()), // use defaut mask here
-                IpAddr::V6(ip) => IpNet::V6(Ipv6Net::new_assert(ip, 64).trunc()),
-            };
-            if !self.limiter.lock_propagate_poison().check(subnet_key, 1) {
-                // log only the subnet part of the IP address to know which subnet is rate limited
-                tracing::warn!("Rate limit exceeded. Skipping cancellation message, {subnet_key}");
-                Metrics::get()
-                    .proxy
-                    .cancellation_requests_total
-                    .inc(CancellationRequest {
-                        source: self.from,
-                        kind: crate::metrics::CancellationOutcome::RateLimitExceeded,
-                    });
-                return Err(CancelError::RateLimit);
-            }
+        let subnet_key = match ctx.peer_addr() {
+            IpAddr::V4(ip) => IpNet::V4(Ipv4Net::new_assert(ip, 24).trunc()), // use defaut mask here
+            IpAddr::V6(ip) => IpNet::V6(Ipv6Net::new_assert(ip, 64).trunc()),
+        };
+        if !self.limiter.lock_propagate_poison().check(subnet_key, 1) {
+            // log only the subnet part of the IP address to know which subnet is rate limited
+            tracing::warn!("Rate limit exceeded. Skipping cancellation message, {subnet_key}");
+            Metrics::get()
+                .proxy
+                .cancellation_requests_total
+                .inc(CancellationRequest {
+                    kind: crate::metrics::CancellationOutcome::RateLimitExceeded,
+                });
+            return Err(CancelError::RateLimit);
         }
 
-        // NB: we should immediately release the lock after cloning the token.
-        let cancel_state = self.map.get(&key).and_then(|x| x.clone());
+        let prefix_key: KeyPrefix = KeyPrefix::Cancel(key);
+
+        let redis_key = prefix_key.build_redis_key().map_err(|e| {
+            tracing::warn!("failed to build redis key: {e}");
+            CancelError::InternalError
+        })?;
+
+        let Some(tx) = &self.tx else {
+            tracing::warn!("cancellation handler is not available");
+            return Err(CancelError::InternalError);
+        };
+
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let op = RedisOp::HGetAll {
+            key: redis_key,
+            resp_tx,
+        };
+
+        tx.send(op).await.map_err(|e| {
+            tracing::warn!("failed to send RedisOp: {e}");
+            CancelError::InternalError
+        })?;
+
+        let result = resp_rx.await.map_err(|e| {
+            tracing::warn!("failed to receive RedisOp response: {e}");
+            CancelError::InternalError
+        })?;
+
+        let cancel_state_str: Option<String> = match result {
+            Ok(mut state) => {
+                if state.len() == 1 {
+                    Some(state.remove(0).1)
+                } else {
+                    tracing::warn!("unexpected number of entries in cancel state: {state:?}");
+                    return Err(CancelError::InternalError);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to receive cancel state from redis: {e}");
+                return Err(CancelError::InternalError);
+            }
+        };
+
+        let cancel_state: Option<CancelClosure> = match cancel_state_str {
+            Some(state) => {
+                let cancel_closure: CancelClosure = serde_json::from_str(&state).map_err(|e| {
+                    tracing::warn!("failed to deserialize cancel state: {e}");
+                    CancelError::InternalError
+                })?;
+                Some(cancel_closure)
+            }
+            None => None,
+        };
+
         let Some(cancel_closure) = cancel_state else {
             tracing::warn!("query cancellation key not found: {key}");
             Metrics::get()
                 .proxy
                 .cancellation_requests_total
                 .inc(CancellationRequest {
-                    source: self.from,
                     kind: crate::metrics::CancellationOutcome::NotFound,
                 });
-
-            if ctx.session_id() == Uuid::nil() {
-                // was already published, do not publish it again
-                return Ok(());
-            }
-
-            match self
-                .client
-                .try_publish(key, ctx.session_id(), ctx.peer_addr())
-                .await
-            {
-                Ok(()) => {} // do nothing
-                Err(e) => {
-                    // log it here since cancel_session could be spawned in a task
-                    tracing::error!("failed to publish cancellation key: {key}, error: {e}");
-                    return Err(CancelError::IO(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    )));
-                }
-            }
-            return Ok(());
+            return Err(CancelError::NotFound);
         };
 
-        let ip_allowlist = auth_backend
-            .get_allowed_ips(&ctx, &cancel_closure.user_info)
-            .await
-            .map_err(CancelError::AuthError)?;
+        if check_allowed {
+            let ip_allowlist = auth_backend
+                .get_allowed_ips(&ctx, &cancel_closure.user_info)
+                .await
+                .map_err(CancelError::AuthError)?;
 
-        if check_allowed && !check_peer_addr_is_in_list(&ctx.peer_addr(), &ip_allowlist) {
-            // log it here since cancel_session could be spawned in a task
-            tracing::warn!("IP is not allowed to cancel the query: {key}");
-            return Err(CancelError::IpNotAllowed);
+            if !check_peer_addr_is_in_list(&ctx.peer_addr(), &ip_allowlist) {
+                // log it here since cancel_session could be spawned in a task
+                tracing::warn!(
+                    "IP is not allowed to cancel the query: {key}, address: {}",
+                    ctx.peer_addr()
+                );
+                return Err(CancelError::IpNotAllowed);
+            }
         }
 
         Metrics::get()
             .proxy
             .cancellation_requests_total
             .inc(CancellationRequest {
-                source: self.from,
                 kind: crate::metrics::CancellationOutcome::Found,
             });
         info!("cancelling query per user's request using key {key}");
         cancel_closure.try_cancel_query(self.compute_config).await
-    }
-
-    #[cfg(test)]
-    fn contains(&self, session: &Session<P>) -> bool {
-        self.map.contains_key(&session.key)
-    }
-
-    #[cfg(test)]
-    fn is_empty(&self) -> bool {
-        self.map.is_empty()
-    }
-}
-
-impl CancellationHandler<()> {
-    pub fn new(
-        compute_config: &'static ComputeConfig,
-        map: CancelMap,
-        from: CancellationSource,
-    ) -> Self {
-        Self {
-            compute_config,
-            map,
-            client: (),
-            from,
-            limiter: Arc::new(std::sync::Mutex::new(
-                LeakyBucketRateLimiter::<IpSubnetKey>::new_with_shards(
-                    LeakyBucketRateLimiter::<IpSubnetKey>::DEFAULT,
-                    64,
-                ),
-            )),
-        }
-    }
-}
-
-impl<P: CancellationPublisherMut> CancellationHandler<Option<Arc<Mutex<P>>>> {
-    pub fn new(
-        compute_config: &'static ComputeConfig,
-        map: CancelMap,
-        client: Option<Arc<Mutex<P>>>,
-        from: CancellationSource,
-    ) -> Self {
-        Self {
-            compute_config,
-            map,
-            client,
-            from,
-            limiter: Arc::new(std::sync::Mutex::new(
-                LeakyBucketRateLimiter::<IpSubnetKey>::new_with_shards(
-                    LeakyBucketRateLimiter::<IpSubnetKey>::DEFAULT,
-                    64,
-                ),
-            )),
-        }
     }
 }
 
 /// This should've been a [`std::future::Future`], but
 /// it's impossible to name a type of an unboxed future
 /// (we'd need something like `#![feature(type_alias_impl_trait)]`).
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CancelClosure {
     socket_addr: SocketAddr,
     cancel_token: CancelToken,
-    ip_allowlist: Vec<IpPattern>,
     hostname: String, // for pg_sni router
     user_info: ComputeUserInfo,
 }
@@ -349,14 +251,12 @@ impl CancelClosure {
     pub(crate) fn new(
         socket_addr: SocketAddr,
         cancel_token: CancelToken,
-        ip_allowlist: Vec<IpPattern>,
         hostname: String,
         user_info: ComputeUserInfo,
     ) -> Self {
         Self {
             socket_addr,
             cancel_token,
-            ip_allowlist,
             hostname,
             user_info,
         }
@@ -385,99 +285,68 @@ impl CancelClosure {
         debug!("query was cancelled");
         Ok(())
     }
-
-    /// Obsolete (will be removed after moving CancelMap to Redis), only for notifications
-    pub(crate) fn set_ip_allowlist(&mut self, ip_allowlist: Vec<IpPattern>) {
-        self.ip_allowlist = ip_allowlist;
-    }
 }
 
 /// Helper for registering query cancellation tokens.
-pub(crate) struct Session<P> {
+pub(crate) struct Session {
     /// The user-facing key identifying this session.
     key: CancelKeyData,
-    /// The [`CancelMap`] this session belongs to.
-    cancellation_handler: Arc<CancellationHandler<P>>,
+    redis_key: String,
+    cancellation_handler: Arc<CancellationHandler>,
 }
 
-impl<P> Session<P> {
-    /// Store the cancel token for the given session.
-    /// This enables query cancellation in `crate::proxy::prepare_client_connection`.
-    pub(crate) fn enable_query_cancellation(&self, cancel_closure: CancelClosure) -> CancelKeyData {
-        debug!("enabling query cancellation for this session");
-        self.cancellation_handler
-            .map
-            .insert(self.key, Some(cancel_closure));
-
-        self.key
+impl Session {
+    pub(crate) fn key(&self) -> &CancelKeyData {
+        &self.key
     }
-}
 
-impl<P> Drop for Session<P> {
-    fn drop(&mut self) {
-        self.cancellation_handler.map.remove(&self.key);
-        debug!("dropped query cancellation key {}", &self.key);
-    }
-}
-
-#[cfg(test)]
-#[expect(clippy::unwrap_used)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-    use crate::config::RetryConfig;
-    use crate::tls::client_config::compute_client_config_with_certs;
-
-    fn config() -> ComputeConfig {
-        let retry = RetryConfig {
-            base_delay: Duration::from_secs(1),
-            max_retries: 5,
-            backoff_factor: 2.0,
+    // Add the redis event to the redis task queue
+    pub(crate) fn write_cancel_key(
+        &self,
+        cancel_closure: CancelClosure,
+    ) -> Result<(), CancelError> {
+        let Some(tx) = &self.cancellation_handler.tx else {
+            tracing::warn!("cancellation handler is not available");
+            return Err(CancelError::InternalError);
         };
 
-        ComputeConfig {
-            retry,
-            tls: Arc::new(compute_client_config_with_certs(std::iter::empty())),
-            timeout: Duration::from_secs(2),
-        }
-    }
+        let closure_json = serde_json::to_string(&cancel_closure).map_err(|e| {
+            tracing::warn!("failed to serialize cancel closure: {e}");
+            CancelError::InternalError
+        })?;
 
-    #[tokio::test]
-    async fn check_session_drop() -> anyhow::Result<()> {
-        let cancellation_handler = Arc::new(CancellationHandler::<()>::new(
-            Box::leak(Box::new(config())),
-            CancelMap::default(),
-            CancellationSource::FromRedis,
-        ));
+        let op = RedisOp::HSet {
+            key: self.redis_key.clone(),
+            field: "data".to_string(),
+            value: closure_json,
+            resp_tx: None, // error handling is done in the worker task,
+        };
 
-        let session = cancellation_handler.clone().get_session();
-        assert!(cancellation_handler.contains(&session));
-        drop(session);
-        // Check that the session has been dropped.
-        assert!(cancellation_handler.is_empty());
+        tx.try_send(op).map_err(|e| {
+            tracing::warn!("failed to send RedisOp: {e}");
+            CancelError::InternalError
+        })?;
 
         Ok(())
     }
 
-    #[tokio::test]
-    async fn cancel_session_noop_regression() {
-        let handler = CancellationHandler::<()>::new(
-            Box::leak(Box::new(config())),
-            CancelMap::default(),
-            CancellationSource::Local,
-        );
-        handler
-            .cancel_session(
-                CancelKeyData {
-                    backend_pid: 0,
-                    cancel_key: 0,
-                },
-                Uuid::new_v4(),
-                "127.0.0.1".parse().unwrap(),
-                true,
-            )
-            .await
-            .unwrap();
+    pub(crate) fn remove_cancel_key(&self) -> Result<(), CancelError> {
+        let Some(tx) = &self.cancellation_handler.tx else {
+            tracing::warn!("cancellation handler is not available");
+            return Err(CancelError::InternalError);
+        };
+
+        let op = RedisOp::HDel {
+            key: self.redis_key.clone(),
+            field: "data".to_string(),
+            resp_tx: None,
+        };
+
+        tx.try_send(op).map_err(|e| {
+            tracing::warn!("failed to send RedisOp: {e}");
+            CancelError::InternalError
+        })?;
+
+        Ok(())
     }
 }
