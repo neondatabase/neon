@@ -75,6 +75,9 @@ jobs:
         postgres_version: 16
         compute_units: '[7, 7]' # we want to test large compute here to avoid compute-side bottleneck
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+        shard-split-project: true
+        shard-count: 8
+        stripe-size: 512
 
     - name: Initialize Neon project
       if: ${{ matrix.target_project == 'new_empty_project' }}

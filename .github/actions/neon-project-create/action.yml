@@ -17,6 +17,19 @@ inputs:
   compute_units:
     description: '[Min, Max] compute units'
     default: '[1, 1]'
+  shard-split-project:
+    description: 'by default new projects are not shard-split, specify true to shard-split'
+    required: false
+    default: 'false'
+  shard-count:
+    description: 'Number of shards to split the project into, only applies if shard-split-project is true'
+    required: false
+    default: '8'
+  stripe-size:
+    description: 'Stripe size, optional, in 8kiB pages.  e.g. set 2048 for 16MB stripes. Default is 128 MiB, only applies if shard-split-project is true'
+    required: false
+    default: '32768'
+  
 
 outputs:
   dsn:
@@ -63,6 +76,24 @@ runs:
         echo "project_id=${project_id}" >> $GITHUB_OUTPUT
 
         echo "Project ${project_id} has been created"
+
+        if [ "${SHARD_SPLIT_PROJECT}" = "true" ]; then
+          # determine tenant ID
+          TENANT_ID=`${PSQL} ${dsn} -t -A -c "SHOW neon.tenant_id"`
+          
+          echo "Splitting project ${project_id} with tenant_id ${TENANT_ID} into $((SHARD_COUNT)) shards with stripe size $((STRIPE_SIZE))"
+         
+          curl -X PUT \
+            "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/storage/proxy/control/v1/tenant/${TENANT_ID}/shard_split" \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/json" \
+            --header "Authorization: Bearer ${API_KEY}" \
+            --data "{
+              \"new_shard_count\": $((SHARD_COUNT)),
+              \"new_stripe_size\": $((STRIPE_SIZE))
+            }"
+        fi
+
       env:
         API_HOST: ${{ inputs.api_host }}
         API_KEY: ${{ inputs.api_key }}
@@ -70,3 +101,7 @@ runs:
         POSTGRES_VERSION: ${{ inputs.postgres_version }}
         MIN_CU: ${{ fromJSON(inputs.compute_units)[0] }}
         MAX_CU: ${{ fromJSON(inputs.compute_units)[1] }}
+        SHARD_SPLIT_PROJECT: ${{ inputs.shard-split-project }}
+        SHARD_COUNT: ${{ inputs.shard-count }}
+        STRIPE_SIZE: ${{ inputs.stripe-size }}
+        PSQL: /tmp/neon/pg_install/v16/bin/psql
