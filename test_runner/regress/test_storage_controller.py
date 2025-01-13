@@ -822,6 +822,7 @@ def test_storage_controller_stuck_compute_hook(
     env.storage_controller.consistency_check()
 
 
+@run_only_on_default_postgres("postgres behavior is not relevant")
 def test_storage_controller_compute_hook_retry(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
