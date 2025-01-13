@@ -3791,7 +3791,9 @@ impl Timeline {
                     1,
                     "currently sparse keyspace should only contain a single metadata keyspace"
                 );
-                partitions.parts.extend(metadata_partition.into_dense().parts);
+                partitions
+                    .parts
+                    .extend(metadata_partition.into_dense().parts);
             }
 
             let mut layers_to_upload = Vec::new();
