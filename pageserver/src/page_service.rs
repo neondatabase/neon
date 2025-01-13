@@ -558,31 +558,31 @@ enum BatchedFeMessage {
     Exists {
         span: Span,
         timer: SmgrOpTimer,
-        shard: timeline::handle::Handle<TenantManagerTypes>,
+        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         req: models::PagestreamExistsRequest,
     },
     Nblocks {
         span: Span,
         timer: SmgrOpTimer,
-        shard: timeline::handle::Handle<TenantManagerTypes>,
+        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         req: models::PagestreamNblocksRequest,
     },
     GetPage {
         span: Span,
-        shard: timeline::handle::Handle<TenantManagerTypes>,
+        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         effective_request_lsn: Lsn,
         pages: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
     },
     DbSize {
         span: Span,
         timer: SmgrOpTimer,
-        shard: timeline::handle::Handle<TenantManagerTypes>,
+        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         req: models::PagestreamDbSizeRequest,
     },
     GetSlruSegment {
         span: Span,
         timer: SmgrOpTimer,
-        shard: timeline::handle::Handle<TenantManagerTypes>,
+        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         req: models::PagestreamGetSlruSegmentRequest,
     },
     RespondError {
@@ -734,7 +734,7 @@ impl PageServerHandler {
                 BatchedFeMessage::Exists {
                     span,
                     timer,
-                    shard,
+                    shard: shard.downgrade(),
                     req,
                 }
             }
@@ -753,7 +753,7 @@ impl PageServerHandler {
                 BatchedFeMessage::Nblocks {
                     span,
                     timer,
-                    shard,
+                    shard: shard.downgrade(),
                     req,
                 }
             }
@@ -772,7 +772,7 @@ impl PageServerHandler {
                 BatchedFeMessage::DbSize {
                     span,
                     timer,
-                    shard,
+                    shard: shard.downgrade(),
                     req,
                 }
             }
@@ -791,7 +791,7 @@ impl PageServerHandler {
                 BatchedFeMessage::GetSlruSegment {
                     span,
                     timer,
-                    shard,
+                    shard: shard.downgrade(),
                     req,
                 }
             }
@@ -843,6 +843,7 @@ impl PageServerHandler {
                 )
                 .await?;
 
+                // We're holding the Handle
                 let effective_request_lsn = match Self::wait_or_get_last_lsn(
                     &shard,
                     req.hdr.request_lsn,
@@ -860,7 +861,7 @@ impl PageServerHandler {
                 };
                 BatchedFeMessage::GetPage {
                     span,
-                    shard,
+                    shard: shard.downgrade(),
                     effective_request_lsn,
                     pages: smallvec::smallvec![BatchedGetPageRequest { req, timer }],
                 }
@@ -968,7 +969,14 @@ impl PageServerHandler {
                 fail::fail_point!("ps::handle-pagerequest-message::exists");
                 (
                     vec![self
-                        .handle_get_rel_exists_request(&shard, &req, ctx)
+                        .handle_get_rel_exists_request(
+                            &*shard
+                                .upgrade()
+                                // TODO: need sensitive to cancel()
+                                .await?,
+                            &req,
+                            ctx,
+                        )
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -985,7 +993,7 @@ impl PageServerHandler {
                 fail::fail_point!("ps::handle-pagerequest-message::nblocks");
                 (
                     vec![self
-                        .handle_get_nblocks_request(&shard, &req, ctx)
+                        .handle_get_nblocks_request(&*shard.upgrade().await?, &req, ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -1006,7 +1014,7 @@ impl PageServerHandler {
                         trace!(npages, "handling getpage request");
                         let res = self
                             .handle_get_page_at_lsn_request_batched(
-                                &shard,
+                                &*shard.upgrade().await?,
                                 effective_request_lsn,
                                 pages,
                                 ctx,
@@ -1028,7 +1036,7 @@ impl PageServerHandler {
                 fail::fail_point!("ps::handle-pagerequest-message::dbsize");
                 (
                     vec![self
-                        .handle_db_size_request(&shard, &req, ctx)
+                        .handle_db_size_request(&*shard.upgrade().await?, &req, ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -1045,7 +1053,7 @@ impl PageServerHandler {
                 fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
                 (
                     vec![self
-                        .handle_get_slru_segment_request(&shard, &req, ctx)
+                        .handle_get_slru_segment_request(&*shard.upgrade().await?, &req, ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -2387,6 +2395,14 @@ impl From<GetActiveTimelineError> for QueryError {
             GetActiveTimelineError::Tenant(GetActiveTenantError::Cancelled) => QueryError::Shutdown,
             GetActiveTimelineError::Tenant(e) => e.into(),
             GetActiveTimelineError::Timeline(e) => QueryError::NotFound(format!("{e}").into()),
+        }
+    }
+}
+
+impl From<crate::tenant::timeline::handle::HandleUpgradeError> for QueryError {
+    fn from(e: crate::tenant::timeline::handle::HandleUpgradeError) -> Self {
+        match e {
+            crate::tenant::timeline::handle::HandleUpgradeError::ShutDown => QueryError::Shutdown,
         }
     }
 }

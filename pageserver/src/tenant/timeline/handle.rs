@@ -121,6 +121,7 @@ use utils::id::TimelineId;
 use utils::shard::ShardIndex;
 use utils::shard::ShardNumber;
 
+use crate::page_service::GetActiveTimelineError;
 use crate::tenant::mgr::ShardSelector;
 
 /// The requirement for Debug is so that #[derive(Debug)] works in some places.
@@ -153,7 +154,7 @@ pub(crate) struct Cache<T: Types> {
     map: Map<T>,
 }
 
-type Map<T> = HashMap<ShardTimelineId, Weak<HandleInner<T>>>;
+type Map<T> = HashMap<ShardTimelineId, WeakHandle<T>>;
 
 impl<T: Types> Default for Cache<T> {
     fn default() -> Self {
@@ -171,11 +172,8 @@ pub(crate) struct ShardTimelineId {
 }
 
 /// See module-level comment.
-pub(crate) struct Handle<T: Types>(
-    // We need sth with interior mutability + Send-ness.
-    // tokio sync Mutex gives that, and adds OwnedMutexGuard, which is handy.
-    Arc<tokio::sync::Mutex<HandleInner<T>>>,
-);
+pub(crate) struct Handle<T: Types>(tokio::sync::OwnedMutexGuard<HandleInner<T>>);
+pub(crate) struct WeakHandle<T: Types>(Arc<tokio::sync::Mutex<HandleInner<T>>>);
 enum HandleInner<T: Types> {
     KeepingTimelineGateOpen {
         timeline: T::Timeline,
@@ -414,18 +412,37 @@ impl<T: Types> Cache<T> {
     }
 }
 
-impl<T: Types> Handle<T> {
-    pub(crate) async fn upgrade(&mut self) -> Option<impl Deref<Target = T::Timeline>> {
-        // This could probably simplified with a
+pub(crate) enum HandleUpgradeError {
+    ShutDown,
+}
+
+impl<T: Types> WeakHandle<T> {
+    pub(crate) async fn upgrade(&self) -> Result<Handle<T>, HandleUpgradeError> {
         let lock_guard = self.0.lock_owned().await;
-        let res = OwnedMutexGuard::try_map(lock_guard, |f: &mut HandleInner<T>| match f {
-            HandleInner::KeepingTimelineGateOpen { timeline, .. } => Some(&mut timeline),
-            HandleInner::ShutDown => None,
-        });
-        let Ok(mapped_lock_guard) = res else {
-            return None;
-        };
-        Some(mapped_lock_guard)
+        match &*lock_guard {
+            HandleInner::KeepingTimelineGateOpen {
+                timeline,
+                gate_guard,
+            } => Ok(Handle(lock_guard)),
+            HandleInner::ShutDown => Err(HandleUpgradeError::ShutDown),
+        }
+    }
+}
+
+impl<T: Types> Deref for Handle<T> {
+    type Target = T::Timeline;
+
+    fn deref(&self) -> &Self::Target {
+        match &*self.0 {
+            HandleInner::KeepingTimelineGateOpen { timeline, .. } => timeline,
+            HandleInner::ShutDown => unreachable!(),
+        }
+    }
+}
+
+impl<T: Types> Handle<T> {
+    pub(crate) fn downgrade(&self) -> WeakHandle<T> {
+        WeakHandle(Arc::clone(&self.0.mutex()))
     }
 }
 
