@@ -387,6 +387,10 @@ impl InterpretedWalReader {
                             shard_senders.remove(idx);
                             tracing::info!("Removed shard sender {}", to_remove);
                         }
+
+                        if shard_senders.is_empty() {
+                            self.shard_senders.remove(&to_remove.shard());
+                        }
                     }
                 },
                 // Listen for new shards that want to attach to this reader.
