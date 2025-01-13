@@ -5256,7 +5256,8 @@ impl Service {
         expect_nodes.sort_by_key(|n| n.node_id);
         nodes.sort_by_key(|n| n.node_id);
 
-        if nodes != expect_nodes {
+        // Errors relating to nodes are deferred so that we don't skip the shard checks below if we have a node error
+        let node_result = if nodes != expect_nodes {
             tracing::error!("Consistency check failed on nodes.");
             tracing::error!(
                 "Nodes in memory: {}",
@@ -5268,10 +5269,12 @@ impl Service {
                 serde_json::to_string(&nodes)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
-            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            Err(ApiError::InternalServerError(anyhow::anyhow!(
                 "Node consistency failure"
-            )));
-        }
+            )))
+        } else {
+            Ok(())
+        };
 
         let mut persistent_shards = self.persistence.load_active_tenant_shards().await?;
         persistent_shards
@@ -5342,7 +5345,7 @@ impl Service {
             )));
         }
 
-        Ok(())
+        node_result
     }
 
     /// For debug/support: a JSON dump of the [`Scheduler`].  Returns a response so that
