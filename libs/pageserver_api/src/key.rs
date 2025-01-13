@@ -5,6 +5,7 @@ use postgres_ffi::Oid;
 use postgres_ffi::RepOriginId;
 use serde::{Deserialize, Serialize};
 use std::{fmt, ops::Range};
+use utils::const_assert;
 
 use crate::reltag::{BlockNumber, RelTag, SlruKind};
 
@@ -786,9 +787,9 @@ impl Key {
         self.field1 == RELATION_SIZE_PREFIX
     }
 
-    pub fn sparse_non_inherited_keyspace() -> Range<Key> {
+    pub const fn sparse_non_inherited_keyspace() -> Range<Key> {
         // The two keys are adjacent; if we will have non-adjancent keys in the future, we should return a keyspace
-        debug_assert_eq!(AUX_KEY_PREFIX + 1, REPL_ORIGIN_KEY_PREFIX);
+        const_assert!(AUX_KEY_PREFIX + 1 == REPL_ORIGIN_KEY_PREFIX);
         Key {
             field1: AUX_KEY_PREFIX,
             field2: 0,
