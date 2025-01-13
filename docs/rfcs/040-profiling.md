@@ -177,7 +177,7 @@ across the fleet, and archives them as time series. This can be used to analyze 
 time, either in aggregate or zoomed in to specific events and nodes.
 
 Profiles are retained for 30 days. Profile ingestion volume for CPU+heap at 20 second intervals
-is aboout 1.7 GB/node/day, or about $1/node/day ($0.50/GB).
+is aboout 0.9 GB/node/day, or about $0.50/node/day ($0.50/GB).
 
 It is currently enabled in [staging](https://neonstaging.grafana.net/a/grafana-pyroscope-app/profiles-explorer)
 for Pageserver and Safekeeper.
