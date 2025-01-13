@@ -90,7 +90,8 @@ pub(crate) struct InterpretedWalReaderHandle {
     join_handle: JoinHandle<Result<(), InterpretedWalReaderError>>,
     state: Arc<std::sync::RwLock<InterpretedWalReaderState>>,
     shard_notification_tx: tokio::sync::mpsc::UnboundedSender<AttachShardNotification>,
-    // TODO: remove or keep
+    // Currently, the task is aborted on [`Self`] drop. Cancellation token is here
+    // in case we want to refine the approach later.
     #[allow(unused)]
     cancel: CancellationToken,
 }
