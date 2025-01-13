@@ -4158,17 +4158,42 @@ impl Service {
         .ok_or_else(|| ApiError::NotFound(anyhow::anyhow!("Tenant {tenant_id} not found").into()))
     }
 
-    pub(crate) fn tenant_list(&self) -> Vec<TenantDescribeResponse> {
+    /// limit & offset are pagination parameters. Since we are walking an in-memory HashMap, `offset` does not
+    /// avoid traversing data, it just avoid returning it. This is suitable for our purposes, since our in memory
+    /// maps are small enough to traverse fast, our pagination is just to avoid serializing huge JSON responses
+    /// in our external API.
+    pub(crate) fn tenant_list(
+        &self,
+        limit: Option<usize>,
+        start_after: Option<TenantId>,
+    ) -> Vec<TenantDescribeResponse> {
         let locked = self.inner.read().unwrap();
 
+        // Apply start_from parameter
+        let shard_range = match start_after {
+            None => locked.tenants.range(..),
+            Some(tenant_id) => locked.tenants.range(
+                TenantShardId {
+                    tenant_id,
+                    shard_number: ShardNumber(u8::MAX),
+                    shard_count: ShardCount(u8::MAX),
+                }..,
+            ),
+        };
+
         let mut result = Vec::new();
-        for (_tenant_id, tenant_shards) in
-            &locked.tenants.iter().group_by(|(id, _shard)| id.tenant_id)
-        {
+        for (_tenant_id, tenant_shards) in &shard_range.group_by(|(id, _shard)| id.tenant_id) {
             result.push(
                 self.tenant_describe_impl(tenant_shards.map(|(_k, v)| v))
                     .expect("Groups are always non-empty"),
             );
+
+            // Enforce `limit` parameter
+            if let Some(limit) = limit {
+                if result.len() >= limit {
+                    break;
+                }
+            }
         }
 
         result

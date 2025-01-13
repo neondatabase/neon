@@ -653,6 +653,10 @@ async fn handle_tenant_list(
 ) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let limit: Option<usize> = parse_query_param(&req, "limit")?;
+    let start_after: Option<TenantId> = parse_query_param(&req, "start_after")?;
+    tracing::info!("start_after: {:?}", start_after);
+
     match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
             return res;
@@ -660,7 +664,7 @@ async fn handle_tenant_list(
         ForwardOutcome::NotForwarded(_req) => {}
     };
 
-    json_response(StatusCode::OK, service.tenant_list())
+    json_response(StatusCode::OK, service.tenant_list(limit, start_after))
 }
 
 async fn handle_node_register(req: Request<Body>) -> Result<Response<Body>, ApiError> {
