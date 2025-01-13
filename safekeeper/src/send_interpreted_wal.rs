@@ -383,17 +383,7 @@ impl InterpretedWalReader {
                     // for the steady state).
                     for to_remove in shard_senders_to_remove {
                         let shard_senders = self.shard_senders.get_mut(&to_remove.shard()).expect("saw it above");
-
-                        let mut remove_at = None;
-                        for (idx, shard_sender) in shard_senders.iter().enumerate() {
-                            let crnt_shard_sender_id = ShardSenderId::new(to_remove.shard(), shard_sender.sender_id);
-                            if crnt_shard_sender_id == to_remove {
-                                remove_at = Some(idx);
-                                break;
-                            }
-                        }
-
-                        if let Some(idx) = remove_at {
+                        if let Some(idx) = shard_senders.iter().position(|s| s.sender_id == to_remove.sender_id) {
                             shard_senders.remove(idx);
                             tracing::info!("Removed shard sender {}", to_remove);
                         }
