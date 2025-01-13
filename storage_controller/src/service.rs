@@ -1047,6 +1047,9 @@ impl Service {
                             // on a snapshot of the nodes.
                             tracing::info!("Node {} was not found after heartbeat round", node_id);
                         }
+                        Err(ApiError::ShuttingDown) => {
+                            // No-op: we're shutting down, no need to try and update any nodes' statuses
+                        }
                         Err(err) => {
                             // Transition to active involves reconciling: if a node responds to a heartbeat then
                             // becomes unavailable again, we may get an error here.
@@ -5294,7 +5297,8 @@ impl Service {
         expect_nodes.sort_by_key(|n| n.node_id);
         nodes.sort_by_key(|n| n.node_id);
 
-        if nodes != expect_nodes {
+        // Errors relating to nodes are deferred so that we don't skip the shard checks below if we have a node error
+        let node_result = if nodes != expect_nodes {
             tracing::error!("Consistency check failed on nodes.");
             tracing::error!(
                 "Nodes in memory: {}",
@@ -5306,10 +5310,12 @@ impl Service {
                 serde_json::to_string(&nodes)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
-            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            Err(ApiError::InternalServerError(anyhow::anyhow!(
                 "Node consistency failure"
-            )));
-        }
+            )))
+        } else {
+            Ok(())
+        };
 
         let mut persistent_shards = self.persistence.load_active_tenant_shards().await?;
         persistent_shards
@@ -5319,6 +5325,7 @@ impl Service {
 
         if persistent_shards != expect_shards {
             tracing::error!("Consistency check failed on shards.");
+
             tracing::error!(
                 "Shards in memory: {}",
                 serde_json::to_string(&expect_shards)
@@ -5329,12 +5336,57 @@ impl Service {
                 serde_json::to_string(&persistent_shards)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
+
+            // The total dump log lines above are useful in testing but in the field grafana will
+            // usually just drop them because they're so large. So we also do some explicit logging
+            // of just the diffs.
+            let persistent_shards = persistent_shards
+                .into_iter()
+                .map(|tsp| (tsp.get_tenant_shard_id().unwrap(), tsp))
+                .collect::<HashMap<_, _>>();
+            let expect_shards = expect_shards
+                .into_iter()
+                .map(|tsp| (tsp.get_tenant_shard_id().unwrap(), tsp))
+                .collect::<HashMap<_, _>>();
+            for (tenant_shard_id, persistent_tsp) in &persistent_shards {
+                match expect_shards.get(tenant_shard_id) {
+                    None => {
+                        tracing::error!(
+                            "Shard {} found in database but not in memory",
+                            tenant_shard_id
+                        );
+                    }
+                    Some(expect_tsp) => {
+                        if expect_tsp != persistent_tsp {
+                            tracing::error!(
+                                "Shard {} is inconsistent.  In memory: {}, database has: {}",
+                                tenant_shard_id,
+                                serde_json::to_string(expect_tsp).unwrap(),
+                                serde_json::to_string(&persistent_tsp).unwrap()
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Having already logged any differences, log any shards that simply aren't present in the database
+            for (tenant_shard_id, memory_tsp) in &expect_shards {
+                if !persistent_shards.contains_key(tenant_shard_id) {
+                    tracing::error!(
+                        "Shard {} found in memory but not in database: {}",
+                        tenant_shard_id,
+                        serde_json::to_string(memory_tsp)
+                            .map_err(|e| ApiError::InternalServerError(e.into()))?
+                    );
+                }
+            }
+
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
                 "Shard consistency failure"
             )));
         }
 
-        Ok(())
+        node_result
     }
 
     /// For debug/support: a JSON dump of the [`Scheduler`].  Returns a response so that
@@ -7485,13 +7537,12 @@ impl Service {
     pub(crate) async fn safekeepers_list(
         &self,
     ) -> Result<Vec<SafekeeperDescribeResponse>, DatabaseError> {
-        Ok(self
-            .persistence
+        self.persistence
             .list_safekeepers()
             .await?
             .into_iter()
             .map(|v| v.as_describe_response())
-            .collect::<Vec<_>>())
+            .collect::<Result<Vec<_>, _>>()
     }
 
     pub(crate) async fn get_safekeeper(
@@ -7501,12 +7552,12 @@ impl Service {
         self.persistence
             .safekeeper_get(id)
             .await
-            .map(|v| v.as_describe_response())
+            .and_then(|v| v.as_describe_response())
     }
 
     pub(crate) async fn upsert_safekeeper(
         &self,
-        record: crate::persistence::SafekeeperPersistence,
+        record: crate::persistence::SafekeeperUpsert,
     ) -> Result<(), DatabaseError> {
         self.persistence.safekeeper_upsert(record).await
     }

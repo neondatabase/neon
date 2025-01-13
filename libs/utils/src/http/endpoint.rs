@@ -15,7 +15,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use routerify::ext::RequestExt;
 use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, info_span, warn, Instrument};
@@ -350,33 +350,49 @@ pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, A
     };
     let seconds = match parse_query_param(&req, "seconds")? {
         None => 5,
-        Some(seconds @ 1..=30) => seconds,
-        Some(_) => return Err(ApiError::BadRequest(anyhow!("duration must be 1-30 secs"))),
+        Some(seconds @ 1..=60) => seconds,
+        Some(_) => return Err(ApiError::BadRequest(anyhow!("duration must be 1-60 secs"))),
     };
     let frequency_hz = match parse_query_param(&req, "frequency")? {
         None => 99,
         Some(1001..) => return Err(ApiError::BadRequest(anyhow!("frequency must be <=1000 Hz"))),
         Some(frequency) => frequency,
     };
-
-    // Only allow one profiler at a time.
-    static PROFILE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-    let _lock = PROFILE_LOCK
-        .try_lock()
-        .map_err(|_| ApiError::Conflict("profiler already running".into()))?;
+    let force: bool = parse_query_param(&req, "force")?.unwrap_or_default();
 
     // Take the profile.
-    let report = tokio::task::spawn_blocking(move || {
+    static PROFILE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+    static PROFILE_CANCEL: Lazy<Notify> = Lazy::new(Notify::new);
+
+    let report = {
+        // Only allow one profiler at a time. If force is true, cancel a running profile (e.g. a
+        // Grafana continuous profile). We use a try_lock() loop when cancelling instead of waiting
+        // for a lock(), to avoid races where the notify isn't currently awaited.
+        let _lock = loop {
+            match PROFILE_LOCK.try_lock() {
+                Ok(lock) => break lock,
+                Err(_) if force => PROFILE_CANCEL.notify_waiters(),
+                Err(_) => return Err(ApiError::Conflict("profiler already running".into())),
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await; // don't busy-wait
+        };
+
         let guard = ProfilerGuardBuilder::default()
             .frequency(frequency_hz)
             .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-            .build()?;
-        std::thread::sleep(Duration::from_secs(seconds));
-        guard.report().build()
-    })
-    .await
-    .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
-    .map_err(|pprof_err| ApiError::InternalServerError(pprof_err.into()))?;
+            .build()
+            .map_err(|err| ApiError::InternalServerError(err.into()))?;
+
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(seconds)) => {},
+            _ = PROFILE_CANCEL.notified() => {},
+        };
+
+        guard
+            .report()
+            .build()
+            .map_err(|err| ApiError::InternalServerError(err.into()))?
+    };
 
     // Return the report in the requested format.
     match format {
@@ -417,6 +433,7 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
     enum Format {
         Jemalloc,
         Pprof,
+        Svg,
     }
 
     // Parameters.
@@ -424,8 +441,23 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
         None => Format::Pprof,
         Some("jemalloc") => Format::Jemalloc,
         Some("pprof") => Format::Pprof,
+        Some("svg") => Format::Svg,
         Some(format) => return Err(ApiError::BadRequest(anyhow!("invalid format {format}"))),
     };
+
+    // Functions and mappings to strip when symbolizing pprof profiles. If true,
+    // also remove child frames.
+    static STRIP_FUNCTIONS: Lazy<Vec<(Regex, bool)>> = Lazy::new(|| {
+        vec![
+            (Regex::new("^__rust").unwrap(), false),
+            (Regex::new("^_start$").unwrap(), false),
+            (Regex::new("^irallocx_prof").unwrap(), true),
+            (Regex::new("^prof_alloc_prep").unwrap(), true),
+            (Regex::new("^std::rt::lang_start").unwrap(), false),
+            (Regex::new("^std::sys::backtrace::__rust").unwrap(), false),
+        ]
+    });
+    const STRIP_MAPPINGS: &[&str] = &["libc", "libgcc", "pthread", "vdso"];
 
     // Obtain profiler handle.
     let mut prof_ctl = jemalloc_pprof::PROF_CTL
@@ -464,24 +496,9 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
                 // Symbolize the profile.
                 // TODO: consider moving this upstream to jemalloc_pprof and avoiding the
                 // serialization roundtrip.
-                static STRIP_FUNCTIONS: Lazy<Vec<(Regex, bool)>> = Lazy::new(|| {
-                    // Functions to strip from profiles. If true, also remove child frames.
-                    vec![
-                        (Regex::new("^__rust").unwrap(), false),
-                        (Regex::new("^_start$").unwrap(), false),
-                        (Regex::new("^irallocx_prof").unwrap(), true),
-                        (Regex::new("^prof_alloc_prep").unwrap(), true),
-                        (Regex::new("^std::rt::lang_start").unwrap(), false),
-                        (Regex::new("^std::sys::backtrace::__rust").unwrap(), false),
-                    ]
-                });
                 let profile = pprof::decode(&bytes)?;
                 let profile = pprof::symbolize(profile)?;
-                let profile = pprof::strip_locations(
-                    profile,
-                    &["libc", "libgcc", "pthread", "vdso"],
-                    &STRIP_FUNCTIONS,
-                );
+                let profile = pprof::strip_locations(profile, STRIP_MAPPINGS, &STRIP_FUNCTIONS);
                 pprof::encode(&profile)
             })
             .await
@@ -492,6 +509,27 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
                 .header(CONTENT_TYPE, "application/octet-stream")
                 .header(CONTENT_DISPOSITION, "attachment; filename=\"heap.pb\"")
                 .body(Body::from(data))
+                .map_err(|err| ApiError::InternalServerError(err.into()))
+        }
+
+        Format::Svg => {
+            let body = tokio::task::spawn_blocking(move || {
+                let bytes = prof_ctl.dump_pprof()?;
+                let profile = pprof::decode(&bytes)?;
+                let profile = pprof::symbolize(profile)?;
+                let profile = pprof::strip_locations(profile, STRIP_MAPPINGS, &STRIP_FUNCTIONS);
+                let mut opts = inferno::flamegraph::Options::default();
+                opts.title = "Heap inuse".to_string();
+                opts.count_name = "bytes".to_string();
+                pprof::flamegraph(profile, &mut opts)
+            })
+            .await
+            .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
+            .map_err(ApiError::InternalServerError)?;
+            Response::builder()
+                .status(200)
+                .header(CONTENT_TYPE, "image/svg+xml")
+                .body(Body::from(body))
                 .map_err(|err| ApiError::InternalServerError(err.into()))
         }
     }

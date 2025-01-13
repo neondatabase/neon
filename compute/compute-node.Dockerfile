@@ -976,22 +976,9 @@ RUN apt update && apt install --no-install-recommends --no-install-suggests -y p
 
 FROM rust-extensions-build-pgrx12 AS pg-jsonschema-pg-build
 ARG PG_VERSION
-# version 0.3.3 supports v17
 # last release v0.3.3 - Oct 16, 2024
-#
-# there were no breaking changes
-# so we can use the same version for all postgres versions
-RUN case "${PG_VERSION}" in \
-    "v14" | "v15" | "v16" | "v17") \
-        export PG_JSONSCHEMA_VERSION=0.3.3 \
-        export PG_JSONSCHEMA_CHECKSUM=40c2cffab4187e0233cb8c3bde013be92218c282f95f4469c5282f6b30d64eac \
-    ;; \
-    *) \
-        echo "unexpected PostgreSQL version" && exit 1 \
-    ;; \
-    esac && \
-    wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v${PG_JSONSCHEMA_VERSION}.tar.gz -O pg_jsonschema.tar.gz && \
-    echo "${PG_JSONSCHEMA_CHECKSUM} pg_jsonschema.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v0.3.3.tar.gz -O pg_jsonschema.tar.gz && \
+    echo "40c2cffab4187e0233cb8c3bde013be92218c282f95f4469c5282f6b30d64eac pg_jsonschema.tar.gz" | sha256sum --check && \
     mkdir pg_jsonschema-src && cd pg_jsonschema-src && tar xzf ../pg_jsonschema.tar.gz --strip-components=1 -C . && \
     # see commit 252b3685a27a0f4c31a0f91e983c6314838e89e8
     # `unsafe-postgres` feature allows to build pgx extensions
@@ -1012,22 +999,9 @@ RUN case "${PG_VERSION}" in \
 FROM rust-extensions-build-pgrx12 AS pg-graphql-pg-build
 ARG PG_VERSION
 
-# version 1.5.9 supports v17
 # last release v1.5.9 - Oct 16, 2024
-#
-# there were no breaking changes
-# so we can use the same version for all postgres versions
-RUN case "${PG_VERSION}" in \
-    "v14" | "v15" | "v16" | "v17") \
-        export PG_GRAPHQL_VERSION=1.5.9 \
-        export PG_GRAPHQL_CHECKSUM=cf768385a41278be1333472204fc0328118644ae443182cf52f7b9b23277e497 \
-    ;; \
-    *) \
-        echo "unexpected PostgreSQL version" && exit 1 \
-    ;; \
-    esac && \
-    wget https://github.com/supabase/pg_graphql/archive/refs/tags/v${PG_GRAPHQL_VERSION}.tar.gz -O pg_graphql.tar.gz && \
-    echo "${PG_GRAPHQL_CHECKSUM} pg_graphql.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/supabase/pg_graphql/archive/refs/tags/v1.5.9.tar.gz -O pg_graphql.tar.gz && \
+    echo "cf768385a41278be1333472204fc0328118644ae443182cf52f7b9b23277e497 pg_graphql.tar.gz" | sha256sum --check && \
     mkdir pg_graphql-src && cd pg_graphql-src && tar xzf ../pg_graphql.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "=0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
@@ -1167,22 +1141,13 @@ FROM rust-extensions-build AS pg-mooncake-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-# The topmost commit in the `neon` branch at the time of writing this
-# https://github.com/Mooncake-Labs/pg_mooncake/commits/neon/
-# https://github.com/Mooncake-Labs/pg_mooncake/commit/077c92c452bb6896a7b7776ee95f039984f076af
-ENV PG_MOONCAKE_VERSION=077c92c452bb6896a7b7776ee95f039984f076af
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 
-RUN case "${PG_VERSION}" in \
-        'v14') \
-            echo "pg_mooncake is not supported on Postgres ${PG_VERSION}" && exit 0;; \
-    esac && \
-    git clone --depth 1 --branch neon https://github.com/Mooncake-Labs/pg_mooncake.git pg_mooncake-src && \
-    cd pg_mooncake-src && \
-    git checkout "${PG_MOONCAKE_VERSION}" && \
-    git submodule update --init --depth 1 --recursive && \
-    make BUILD_TYPE=release -j $(getconf _NPROCESSORS_ONLN) && \
-    make BUILD_TYPE=release -j $(getconf _NPROCESSORS_ONLN) install && \
+RUN wget https://github.com/Mooncake-Labs/pg_mooncake/releases/download/v0.1.0/pg_mooncake-0.1.0.tar.gz -O pg_mooncake.tar.gz && \
+    echo "eafd059b77f541f11525eb8affcd66a176968cbd8fe7c0d436e733f2aa4da59f pg_mooncake.tar.gz" | sha256sum --check && \
+    mkdir pg_mooncake-src && cd pg_mooncake-src && tar xzf ../pg_mooncake.tar.gz --strip-components=1 -C . && \
+    make release -j $(getconf _NPROCESSORS_ONLN) && \
+    make install -j $(getconf _NPROCESSORS_ONLN) && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_mooncake.control
 
 #########################################################################################
@@ -1267,20 +1232,6 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
     make -j $(getconf _NPROCESSORS_ONLN) \
         PG_CONFIG=/usr/local/pgsql/bin/pg_config \
         -C pgxn/neon_rmgr \
-        -s install && \
-    case "${PG_VERSION}" in \
-        "v14" | "v15") \
-        ;; \
-        "v16" | "v17") \
-            echo "Skipping HNSW for PostgreSQL ${PG_VERSION}" && exit 0 \
-        ;; \
-        *) \
-            echo "unexpected PostgreSQL version" && exit 1 \
-        ;; \
-        esac && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        PG_CONFIG=/usr/local/pgsql/bin/pg_config \
-        -C pgxn/hnsw \
         -s install
 
 #########################################################################################
@@ -1296,17 +1247,6 @@ USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
 RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy
-
-#########################################################################################
-#
-# Final compute-tools image
-#
-#########################################################################################
-
-FROM debian:$DEBIAN_FLAVOR AS compute-tools-image
-
-COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
-COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
 
 #########################################################################################
 #
