@@ -20,7 +20,6 @@ tokio = { workspace = true, features = ["io-util"] }
 tonic.workspace = true
 tracing.workspace = true
 utils.workspace = true
-smallvec.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 
 [build-dependencies]
