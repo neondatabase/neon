@@ -33,9 +33,8 @@ from ssl import Purpose
 import websockets
 from fixtures.log_helper import log
 
+
 # Enable verbose logging of all the traffic
-
-
 def enable_verbose_logging():
     logger = logging.getLogger("websockets")
     logger.setLevel(logging.DEBUG)
