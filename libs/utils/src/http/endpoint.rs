@@ -350,8 +350,8 @@ pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, A
     };
     let seconds = match parse_query_param(&req, "seconds")? {
         None => 5,
-        Some(seconds @ 1..=30) => seconds,
-        Some(_) => return Err(ApiError::BadRequest(anyhow!("duration must be 1-30 secs"))),
+        Some(seconds @ 1..=60) => seconds,
+        Some(_) => return Err(ApiError::BadRequest(anyhow!("duration must be 1-60 secs"))),
     };
     let frequency_hz = match parse_query_param(&req, "frequency")? {
         None => 99,
