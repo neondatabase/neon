@@ -170,7 +170,6 @@ RUN case "${PG_VERSION}" in \
     wget https://download.osgeo.org/postgis/source/postgis-${POSTGIS_VERSION}.tar.gz -O postgis.tar.gz && \
     echo "${POSTGIS_CHECKSUM} postgis.tar.gz" | sha256sum --check && \
     mkdir postgis-src && cd postgis-src && tar xzf ../postgis.tar.gz --strip-components=1 -C . && \
-    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
     ./autogen.sh && \
     ./configure --with-sfcgal=/usr/local/bin/sfcgal-config && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
@@ -220,11 +219,7 @@ RUN case "${PG_VERSION}" in \
     cmake -GNinja -DCMAKE_BUILD_TYPE=Release .. && \
     ninja -j $(getconf _NPROCESSORS_ONLN) && \
     ninja -j $(getconf _NPROCESSORS_ONLN) install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrouting.control && \
-    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
-    cp /usr/local/pgsql/share/extension/pgrouting.control /extensions/postgis && \
-    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
-    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/postgis.tar.zst -T -
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrouting.control
 
 #########################################################################################
 #
@@ -842,13 +837,8 @@ RUN case "${PG_VERSION}" in "v17") \
     wget  https://github.com/neondatabase/postgresql_anonymizer/archive/refs/tags/neon_1.1.1.tar.gz -O pg_anon.tar.gz && \
     echo "321ea8d5c1648880aafde850a2c576e4a9e7b9933a34ce272efc839328999fa9  pg_anon.tar.gz" | sha256sum --check && \
     mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
-    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control && \
-    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
-    mkdir -p /extensions/anon && cp /usr/local/pgsql/share/extension/anon.control /extensions/anon && \
-    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
-    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/anon.tar.zst -T -
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control
 
 #########################################################################################
 #
@@ -1065,8 +1055,8 @@ ARG PG_VERSION
 # NOTE: local_proxy depends on the version of pg_session_jwt
 # Do not update without approve from proxy team
 # Make sure the version is reflected in proxy/src/serverless/local_conn_pool.rs
-RUN wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v0.1.2-v17.tar.gz -O pg_session_jwt.tar.gz && \
-    echo "c8ecbed9cb8c6441bce5134a176002b043018adf9d05a08e457dda233090a86e pg_session_jwt.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v0.2.0.tar.gz -O pg_session_jwt.tar.gz && \
+    echo "5ace028e591f2e000ca10afa5b1ca62203ebff014c2907c0ec3b29c36f28a1bb pg_session_jwt.tar.gz" | sha256sum --check && \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "0.12.6"/pgrx = { version = "=0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release

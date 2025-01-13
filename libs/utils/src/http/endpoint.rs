@@ -372,7 +372,11 @@ pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, A
             match PROFILE_LOCK.try_lock() {
                 Ok(lock) => break lock,
                 Err(_) if force => PROFILE_CANCEL.notify_waiters(),
-                Err(_) => return Err(ApiError::Conflict("profiler already running".into())),
+                Err(_) => {
+                    return Err(ApiError::Conflict(
+                        "profiler already running (use ?force=true to cancel it)".into(),
+                    ))
+                }
             }
             tokio::time::sleep(Duration::from_millis(1)).await; // don't busy-wait
         };
