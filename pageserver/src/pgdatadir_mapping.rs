@@ -1081,7 +1081,7 @@ impl Timeline {
             if has_relmap_file {
                 result.add_key(relmap_file_key(spcnode, dbnode));
             }
-            result.add_key(rel_dir_to_key(spcnode, dbnode));
+            // result.add_key(rel_dir_to_key(spcnode, dbnode));
 
             let mut rels: Vec<RelTag> = self
                 .list_rels(spcnode, dbnode, Version::Lsn(lsn), ctx)
@@ -1651,7 +1651,7 @@ impl DatadirModification<'_> {
             let buf = DbDirectory::ser(&dbdir)?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
         }
-        if REL_STORE_V2 && r.is_none() {
+        if !REL_STORE_V2 && r.is_none() {
             // Create RelDirectory
             let buf = RelDirectory::ser(&RelDirectory {
                 rels: HashSet::new(),
