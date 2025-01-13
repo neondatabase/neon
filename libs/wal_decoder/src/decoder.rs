@@ -129,7 +129,7 @@ impl MetadataRecord {
 
         // Next, filter the metadata record by shard.
         for (shard, record) in shard_records.iter_mut() {
-            let metadata_record_for_shard = match metadata_record {
+            match metadata_record {
                 Some(
                     MetadataRecord::Heapam(HeapamRecord::ClearVmBits(ref clear_vm_bits))
                     | MetadataRecord::Neonrmgr(NeonrmgrRecord::ClearVmBits(ref clear_vm_bits)),
@@ -149,9 +149,8 @@ impl MetadataRecord {
                         .new_heap_blkno
                         .filter(|&blkno| is_local_vm_page(blkno));
                     // If neither VM page belongs to this shard, discard the record.
-                    if updated_old_heap_blkno.is_none() && updated_new_heap_blkno.is_none() {
-                        None
-                    } else {
+                    if updated_old_heap_blkno.is_some() || updated_new_heap_blkno.is_some() {
+                        // Clone the record and update it for the current shard.
                         let mut for_shard = metadata_record.clone();
                         match for_shard {
                             Some(
@@ -164,7 +163,7 @@ impl MetadataRecord {
                             ) => {
                                 clear_vm_bits.old_heap_blkno = updated_old_heap_blkno;
                                 clear_vm_bits.new_heap_blkno = updated_new_heap_blkno;
-                                for_shard
+                                record.metadata_record = for_shard;
                             }
                             _ => {
                                 unreachable!("for_shard is a clone of what we checked above")
@@ -175,15 +174,16 @@ impl MetadataRecord {
                 Some(MetadataRecord::LogicalMessage(LogicalMessageRecord::Put(_))) => {
                     // Filter LogicalMessage records (AUX files) to only be stored on shard zero
                     if shard.is_shard_zero() {
-                        metadata_record.clone()
-                    } else {
-                        None
+                        record.metadata_record = metadata_record;
+                        // No other shards should receive this record, so we stop traversing shards early.
+                        break;
                     }
                 }
-                _ => metadata_record.clone(),
-            };
-
-            record.metadata_record = metadata_record_for_shard;
+                _ => {
+                    // All other metadata records are sent to all shards.
+                    record.metadata_record = metadata_record.clone();
+                }
+            }
         }
 
         Ok(())
