@@ -25,8 +25,6 @@ async fn try_connect(client: &ConnectionWithCredentialsProvider) -> anyhow::Resu
     let mut conn = client.get_async_pubsub().await?;
     tracing::info!("subscribing to a channel `{CPLANE_CHANNEL_NAME}`");
     conn.subscribe(CPLANE_CHANNEL_NAME).await?;
-    tracing::info!("subscribing to a channel `{PROXY_CHANNEL_NAME}`");
-    conn.subscribe(PROXY_CHANNEL_NAME).await?;
     Ok(conn)
 }
 
@@ -72,7 +70,6 @@ pub(crate) enum Notification {
     )]
     PasswordUpdate { password_update: PasswordUpdate },
     #[serde(rename = "/cancel_session")]
-    Cancel(CancelSession),
 
     #[serde(
         other,
@@ -207,46 +204,6 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
 
         tracing::debug!(?msg, "received a message");
         match msg {
-            Notification::Cancel(cancel_session) => {
-                tracing::Span::current().record(
-                    "session_id",
-                    tracing::field::display(cancel_session.session_id),
-                );
-                Metrics::get()
-                    .proxy
-                    .redis_events_count
-                    .inc(RedisEventsCount::CancelSession);
-                if let Some(cancel_region) = cancel_session.region_id {
-                    // If the message is not for this region, ignore it.
-                    if cancel_region != self.region_id {
-                        return Ok(());
-                    }
-                }
-
-                // TODO: Remove unspecified peer_addr after the complete migration to the new format
-                let peer_addr = cancel_session
-                    .peer_addr
-                    .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-                let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?cancel_session.session_id);
-                cancel_span.follows_from(tracing::Span::current());
-                // This instance of cancellation_handler doesn't have a RedisPublisherClient so it can't publish the message.
-                match self
-                    .cancellation_handler
-                    .cancel_session(
-                        cancel_session.cancel_key_data,
-                        uuid::Uuid::nil(),
-                        peer_addr,
-                        cancel_session.peer_addr.is_some(),
-                    )
-                    .instrument(cancel_span)
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(e) => {
-                        tracing::warn!("failed to cancel session: {e}");
-                    }
-                }
-            }
             Notification::AllowedIpsUpdate { .. }
             | Notification::PasswordUpdate { .. }
             | Notification::BlockPublicOrVpcAccessUpdated { .. }
@@ -293,7 +250,6 @@ fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
                 password_update.project_id,
                 password_update.role_name,
             ),
-        Notification::Cancel(_) => unreachable!("cancel message should be handled separately"),
         Notification::BlockPublicOrVpcAccessUpdated { .. } => {
             // https://github.com/neondatabase/neon/pull/10073
         }
@@ -439,35 +395,6 @@ mod tests {
                 }
             }
         );
-
-        Ok(())
-    }
-    #[test]
-    fn parse_cancel_session() -> anyhow::Result<()> {
-        let cancel_key_data = CancelKeyData {
-            backend_pid: 42,
-            cancel_key: 41,
-        };
-        let uuid = uuid::Uuid::new_v4();
-        let msg = Notification::Cancel(CancelSession {
-            cancel_key_data,
-            region_id: None,
-            session_id: uuid,
-            peer_addr: None,
-        });
-        let text = serde_json::to_string(&msg)?;
-        let result: Notification = serde_json::from_str(&text)?;
-        assert_eq!(msg, result);
-
-        let msg = Notification::Cancel(CancelSession {
-            cancel_key_data,
-            region_id: Some("region".to_string()),
-            session_id: uuid,
-            peer_addr: None,
-        });
-        let text = serde_json::to_string(&msg)?;
-        let result: Notification = serde_json::from_str(&text)?;
-        assert_eq!(msg, result,);
 
         Ok(())
     }

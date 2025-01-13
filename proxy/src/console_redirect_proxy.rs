@@ -177,7 +177,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                 cancel_span.follows_from(tracing::Span::current());
                 async move {
                     cancellation_handler_clone
-                        .cancel_session_auth(
+                        .cancel_session(
                             cancel_key_data,
                             ctx,
                             config.authentication_config.ip_allowlist_check_enabled,
@@ -220,8 +220,6 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     .or_else(|e| stream.throw_error(e))
     .await?;
 
-    node.cancel_closure
-        .set_ip_allowlist(ip_allowlist.unwrap_or_default());
     let session = cancellation_handler.get_session();
     prepare_client_connection(&node, &session, &mut stream).await?;
 
