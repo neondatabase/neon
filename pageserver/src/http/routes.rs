@@ -3545,7 +3545,7 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/unblock_gc",
             |r| api_handler(r, timeline_gc_unblocking_handler),
         )
-        .post(
+        .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/page_trace",
             |r| api_handler(r, timeline_page_trace_handler),
         )
