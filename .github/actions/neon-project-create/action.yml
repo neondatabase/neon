@@ -87,10 +87,9 @@ runs:
           
           curl -X PUT \
             "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/storage/proxy/control/v1/tenant/${TENANT_ID}/shard_split" \
-            --header "Accept: application/json" \
-            --header "Content-Type: application/json" \
-            --header "Authorization: Bearer ${API_KEY}" \
-            --data "{\"new_shard_count\": $((SHARD_COUNT)), \"new_stripe_size\": $((STRIPE_SIZE))}"
+            -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${API_KEY}" \
+            -d "{\"new_shard_count\": $SHARD_COUNT, \"new_stripe_size\": $STRIPE_SIZE}"
+            
         fi
 
       env:
