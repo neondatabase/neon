@@ -459,16 +459,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{table}");
         }
         Command::Tenants { node_id: None } => {
-            let mut resp = storcon_client
-                .dispatch::<(), Vec<TenantDescribeResponse>>(
-                    Method::GET,
-                    "control/v1/tenant".to_string(),
-                    None,
-                )
-                .await?;
-
-            resp.sort_by(|a, b| a.tenant_id.cmp(&b.tenant_id));
-
+            // Set up output formatting
             let mut table = comfy_table::Table::new();
             table.set_header([
                 "TenantId",
@@ -477,15 +468,47 @@ async fn main() -> anyhow::Result<()> {
                 "Placement",
                 "Scheduling",
             ]);
-            for tenant in resp {
-                let shard_zero = tenant.shards.into_iter().next().unwrap();
-                table.add_row([
-                    format!("{}", tenant.tenant_id),
-                    format!("{}", shard_zero.tenant_shard_id.shard_count.literal()),
-                    format!("{:?}", tenant.stripe_size),
-                    format!("{:?}", tenant.policy),
-                    format!("{:?}", shard_zero.scheduling_policy),
-                ]);
+
+            // Pagination loop over listing API
+            let mut offset = 0;
+            const LIMIT: usize = 1000;
+            loop {
+                let resp = storcon_client
+                    .dispatch::<(), Vec<TenantDescribeResponse>>(
+                        Method::GET,
+                        format!("control/v1/tenant?limit={LIMIT}&offset={offset}"),
+                        None,
+                    )
+                    .await?;
+
+                if resp.is_empty() {
+                    // End of data reached
+                    break;
+                }
+
+                // Give some visual feedback while we're building up the table (comfy_table doesn't have
+                // streaming output)
+                if resp.len() >= LIMIT {
+                    eprint!(".");
+                }
+
+                offset += resp.len();
+
+                for tenant in resp {
+                    let shard_zero = tenant.shards.into_iter().next().unwrap();
+                    table.add_row([
+                        format!("{}", tenant.tenant_id),
+                        format!("{}", shard_zero.tenant_shard_id.shard_count.literal()),
+                        format!("{:?}", tenant.stripe_size),
+                        format!("{:?}", tenant.policy),
+                        format!("{:?}", shard_zero.scheduling_policy),
+                    ]);
+                }
+            }
+
+            // Terminate progress dots
+            if table.row_count() > LIMIT {
+                eprint!("");
             }
 
             println!("{table}");
