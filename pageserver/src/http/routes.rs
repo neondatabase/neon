@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use enumset::EnumSet;
@@ -54,6 +53,7 @@ use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeTravelError;
 use scopeguard::defer;
 use tenant_size_model::{svg::SvgBranchKind, SizeResult, StorageModel};
+use tokio::time::Instant;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -1562,7 +1562,6 @@ async fn timeline_page_trace_handler(
     let deadline = Instant::now() + Duration::from_secs(time_limit_secs);
 
     loop {
-        let timeout = deadline.saturating_duration_since(Instant::now());
         tokio::select! {
             event = trace_rx.recv() => {
                 let Some(event) = event else {
@@ -1575,10 +1574,7 @@ async fn timeline_page_trace_handler(
                     break;
                 }
             }
-            _ = tokio::time::sleep(timeout) => {
-                // Time threshold reached
-                break;
-            }
+            _ = tokio::time::sleep_until(deadline) => break,
             _ = cancel.cancelled() => return Err(ApiError::Cancelled),
         }
     }
