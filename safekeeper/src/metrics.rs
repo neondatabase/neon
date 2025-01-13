@@ -214,7 +214,7 @@ pub static WAL_RECEIVERS: Lazy<IntGauge> = Lazy::new(|| {
 pub static WAL_READERS: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "safekeeper_wal_readers",
-        "Number of active WAL readers (may serve pageservers or other safekeepers",
+        "Number of active WAL readers (may serve pageservers or other safekeepers)",
         &["kind", "target"]
     )
     .expect("Failed to register safekeeper_wal_receivers")
