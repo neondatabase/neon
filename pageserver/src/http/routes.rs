@@ -1524,6 +1524,8 @@ async fn timeline_gc_unblocking_handler(
     block_or_unblock_gc(request, false).await
 }
 
+/// Traces GetPage@LSN requests for a timeline, and emits metadata in an efficient binary encoding.
+/// Use the `pagectl page-trace` command to decode and analyze the output.
 async fn timeline_page_trace_handler(
     request: Request<Body>,
     cancel: CancellationToken,
