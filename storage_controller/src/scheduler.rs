@@ -1229,8 +1229,6 @@ mod tests {
         assert_eq!(scheduler.get_az_for_new_tenant(), Some(az_a_tag.clone()));
     }
 
-    use test_log::test;
-
     /// Test that when selecting AZs for many new tenants, we get the expected balance across nodes
     #[test]
     fn az_selection_many() {

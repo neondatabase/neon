@@ -2385,8 +2385,6 @@ pub(crate) mod tests {
         optimizations
     }
 
-    use test_log::test;
-
     /// Test the balancing behavior of shard scheduling: that it achieves a balance, and
     /// that it converges.
     #[test]
