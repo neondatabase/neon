@@ -1885,10 +1885,25 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return response.json()
 
     def tenant_list(self):
+        """
+        Debug tenant listing API: actually dumps a map of _shards_, not tenants
+        """
         response = self.request(
             "GET",
             f"{self.api}/debug/v1/tenant",
             headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
+    def tenant_control_list(self, **kwargs):
+        """
+        Control API tenant listing: a vector of the same content returned by tenant_describe
+        """
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/tenant",
+            headers=self.headers(TokenScope.ADMIN),
+            params=kwargs,
         )
         return response.json()
 

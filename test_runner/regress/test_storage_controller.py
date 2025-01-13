@@ -113,6 +113,20 @@ def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination)
     for tid in tenant_ids:
         env.create_tenant(tid, shard_count=shards_per_tenant)
 
+    # Tenant listing API should work
+    listed_tenants = env.storage_controller.tenant_control_list()
+    log.info(f"listed_tenants: {listed_tenants}")
+    assert set(t["tenant_id"] for t in listed_tenants) == set(str(t) for t in tenant_ids)
+
+    paged = env.storage_controller.tenant_control_list(limit=2, start_after=listed_tenants[0]["tenant_id"])
+    assert len(paged) == 2
+    assert paged[0] == listed_tenants[1]
+    assert paged[1] == listed_tenants[2]
+    paged = env.storage_controller.tenant_list(
+        limit=1000, start_after="ffffffffffffffffffffffffffffffff"
+    )
+    assert paged == []
+
     # Validate high level metrics
     assert (
         env.storage_controller.get_metric_value("storage_controller_tenant_shards")
