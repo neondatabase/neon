@@ -477,16 +477,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{table}");
         }
         Command::Tenants { node_id: None } => {
-            let mut resp = storcon_client
-                .dispatch::<(), Vec<TenantDescribeResponse>>(
-                    Method::GET,
-                    "control/v1/tenant".to_string(),
-                    None,
-                )
-                .await?;
-
-            resp.sort_by(|a, b| a.tenant_id.cmp(&b.tenant_id));
-
+            // Set up output formatting
             let mut table = comfy_table::Table::new();
             table.set_header([
                 "TenantId",
@@ -496,20 +487,55 @@ async fn main() -> anyhow::Result<()> {
                 "Placement",
                 "Scheduling",
             ]);
-            for tenant in resp {
-                let shard_zero = tenant.shards.into_iter().next().unwrap();
-                table.add_row([
-                    format!("{}", tenant.tenant_id),
-                    shard_zero
-                        .preferred_az_id
-                        .as_ref()
-                        .cloned()
-                        .unwrap_or("".to_string()),
-                    format!("{}", shard_zero.tenant_shard_id.shard_count.literal()),
-                    format!("{:?}", tenant.stripe_size),
-                    format!("{:?}", tenant.policy),
-                    format!("{:?}", shard_zero.scheduling_policy),
-                ]);
+
+            // Pagination loop over listing API
+            let mut start_after = None;
+            const LIMIT: usize = 1000;
+            loop {
+                let path = match start_after {
+                    None => format!("control/v1/tenant?limit={LIMIT}"),
+                    Some(start_after) => {
+                        format!("control/v1/tenant?limit={LIMIT}&start_after={start_after}")
+                    }
+                };
+
+                let resp = storcon_client
+                    .dispatch::<(), Vec<TenantDescribeResponse>>(Method::GET, path, None)
+                    .await?;
+
+                if resp.is_empty() {
+                    // End of data reached
+                    break;
+                }
+
+                // Give some visual feedback while we're building up the table (comfy_table doesn't have
+                // streaming output)
+                if resp.len() >= LIMIT {
+                    eprint!(".");
+                }
+
+                start_after = Some(resp.last().unwrap().tenant_id);
+
+                for tenant in resp {
+                    let shard_zero = tenant.shards.into_iter().next().unwrap();
+                    table.add_row([
+                        format!("{}", tenant.tenant_id),
+                        shard_zero
+                            .preferred_az_id
+                            .as_ref()
+                            .cloned()
+                            .unwrap_or("".to_string()),
+                        format!("{}", shard_zero.tenant_shard_id.shard_count.literal()),
+                        format!("{:?}", tenant.stripe_size),
+                        format!("{:?}", tenant.policy),
+                        format!("{:?}", shard_zero.scheduling_policy),
+                    ]);
+                }
+            }
+
+            // Terminate progress dots
+            if table.row_count() > LIMIT {
+                eprint!("");
             }
 
             println!("{table}");
