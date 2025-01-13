@@ -13,7 +13,7 @@ use crate::wal_reader_stream::StreamingWalReader;
 use crate::wal_storage::WalReader;
 use anyhow::{bail, Context as AnyhowContext};
 use bytes::Bytes;
-use futures::future::Either;
+use futures::FutureExt;
 use parking_lot::Mutex;
 use postgres_backend::PostgresBackend;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
@@ -402,7 +402,7 @@ impl SafekeeperPostgresHandler {
     /// Wrapper around handle_start_replication_guts handling result. Error is
     /// handled here while we're still in walsender ttid span; with API
     /// extension, this can probably be moved into postgres_backend.
-    pub async fn handle_start_replication<IO: AsyncRead + AsyncWrite + Unpin>(
+    pub async fn handle_start_replication<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         start_pos: Lsn,
@@ -427,7 +427,7 @@ impl SafekeeperPostgresHandler {
         Ok(())
     }
 
-    pub async fn handle_start_replication_guts<IO: AsyncRead + AsyncWrite + Unpin>(
+    pub async fn handle_start_replication_guts<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         start_pos: Lsn,
@@ -516,7 +516,7 @@ impl SafekeeperPostgresHandler {
                     send_buf: vec![0u8; MAX_SEND_SIZE],
                 };
 
-                Either::Left(sender.run())
+                FutureExt::boxed(sender.run())
             }
             PostgresClientProtocol::Interpreted {
                 format,
@@ -590,7 +590,7 @@ impl SafekeeperPostgresHandler {
                         rx,
                     };
 
-                    Either::Right(Either::Left(sender.run()))
+                    FutureExt::boxed(sender.run())
                 } else {
                     let wal_reader = StreamingWalReader::new(
                         wal_residence_guard,
@@ -623,7 +623,7 @@ impl SafekeeperPostgresHandler {
                         rx,
                     };
 
-                    Either::Right(Either::Right(async move {
+                    FutureExt::boxed(async move {
                         let send_and_cancel = async move {
                             let res = sender.run().await;
                             reader_cancel.cancel();
@@ -637,7 +637,7 @@ impl SafekeeperPostgresHandler {
                         }
 
                         sender_res
-                    }))
+                    })
                 }
             }
         };
