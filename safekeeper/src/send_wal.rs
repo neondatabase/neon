@@ -81,7 +81,7 @@ impl WalSenders {
 
     fn create_or_update_interpreted_reader<
         FFilter: Fn(&Arc<InterpretedWalReaderHandle>) -> bool,
-        FUp: FnOnce(&Arc<InterpretedWalReaderHandle>),
+        FUp: FnOnce(&Arc<InterpretedWalReaderHandle>) -> anyhow::Result<()>,
         FNew: FnOnce() -> InterpretedWalReaderHandle,
     >(
         self: &Arc<WalSenders>,
@@ -89,7 +89,7 @@ impl WalSenders {
         filter: FFilter,
         update: FUp,
         create: FNew,
-    ) {
+    ) -> anyhow::Result<()> {
         let state = &mut self.mutex.lock();
 
         let mut selected_interpreted_reader = None;
@@ -112,13 +112,15 @@ impl WalSenders {
 
         let selected_or_new = match selected_interpreted_reader {
             Some(selected) => {
-                update(&selected);
+                update(&selected)?;
                 selected
             }
             None => Arc::new(create()),
         };
 
         slot_state.interpreted_wal_reader = Some(selected_or_new);
+
+        Ok(())
     }
 
     /// Get state of all walsenders.
@@ -557,7 +559,9 @@ impl SafekeeperPostgresHandler {
                                     "Fanning out interpreted wal reader at {}",
                                     start_pos
                                 );
-                                reader.fanout(shard, tx, start_pos).unwrap();
+                                reader
+                                    .fanout(shard, tx, start_pos)
+                                    .with_context(|| "Failed to fan out reader")
                             }
                         },
                         || {
@@ -576,7 +580,7 @@ impl SafekeeperPostgresHandler {
                                 wal_stream, start_pos, tx, shard, pg_version, &appname,
                             )
                         },
-                    );
+                    )?;
 
                     let sender = InterpretedWalSender {
                         format,
