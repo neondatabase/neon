@@ -5281,6 +5281,7 @@ impl Service {
 
         if persistent_shards != expect_shards {
             tracing::error!("Consistency check failed on shards.");
+
             tracing::error!(
                 "Shards in memory: {}",
                 serde_json::to_string(&expect_shards)
@@ -5291,6 +5292,51 @@ impl Service {
                 serde_json::to_string(&persistent_shards)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
+
+            // The total dump log lines above are useful in testing but in the field grafana will
+            // usually just drop them because they're so large. So we also do some explicit logging
+            // of just the diffs.
+            let persistent_shards = persistent_shards
+                .into_iter()
+                .map(|tsp| (tsp.get_tenant_shard_id().unwrap(), tsp))
+                .collect::<HashMap<_, _>>();
+            let expect_shards = expect_shards
+                .into_iter()
+                .map(|tsp| (tsp.get_tenant_shard_id().unwrap(), tsp))
+                .collect::<HashMap<_, _>>();
+            for (tenant_shard_id, persistent_tsp) in &persistent_shards {
+                match expect_shards.get(tenant_shard_id) {
+                    None => {
+                        tracing::error!(
+                            "Shard {} found in database but not in memory",
+                            tenant_shard_id
+                        );
+                    }
+                    Some(expect_tsp) => {
+                        if expect_tsp != persistent_tsp {
+                            tracing::error!(
+                                "Shard {} is inconsistent.  In memory: {}, database has: {}",
+                                tenant_shard_id,
+                                serde_json::to_string(expect_tsp).unwrap(),
+                                serde_json::to_string(&persistent_tsp).unwrap()
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Having already logged any differences, log any shards that simply aren't present in the database
+            for (tenant_shard_id, memory_tsp) in &expect_shards {
+                if !persistent_shards.contains_key(tenant_shard_id) {
+                    tracing::error!(
+                        "Shard {} found in memory but not in database: {}",
+                        tenant_shard_id,
+                        serde_json::to_string(memory_tsp)
+                            .map_err(|e| ApiError::InternalServerError(e.into()))?
+                    );
+                }
+            }
+
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
                 "Shard consistency failure"
             )));
