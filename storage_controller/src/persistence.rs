@@ -1,14 +1,13 @@
 pub(crate) mod split_state;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
 use self::split_state::SplitState;
 use diesel::prelude::*;
 use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
-use diesel_async::pooled_connection::bb8::Pool;
-use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::RunQueryDsl;
 use diesel_async::{AsyncConnection, AsyncPgConnection};
 use itertools::Itertools;
@@ -64,7 +63,11 @@ const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 /// updated, and reads of nodes are always from memory, not the database.  We only require that
 /// we can UPDATE a node's scheduling mode reasonably quickly to mark a bad node offline.
 pub struct Persistence {
-    connection_pool: Pool<AsyncPgConnection>,
+    connection_pool: Arc<
+        diesel::r2d2::Pool<
+            diesel::r2d2::ConnectionManager<AsyncConnectionWrapper<AsyncPgConnection>>,
+        >,
+    >,
 }
 
 /// Legacy format, for use in JSON compat objects in test environment
@@ -80,7 +83,7 @@ pub(crate) enum DatabaseError {
     #[error(transparent)]
     Connection(#[from] diesel::result::ConnectionError),
     #[error(transparent)]
-    ConnectionPool(#[from] diesel_async::pooled_connection::bb8::RunError),
+    ConnectionPool(#[from] diesel::r2d2::PoolError),
     #[error("Logical error: {0}")]
     Logical(String),
     #[error("Migration error: {0}")]
@@ -156,11 +159,14 @@ impl Persistence {
     const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(60);
 
     pub async fn new(database_url: String) -> Self {
-        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(database_url);
+        let manager =
+            diesel::r2d2::ConnectionManager::<AsyncConnectionWrapper<AsyncPgConnection>>::new(
+                database_url,
+            );
 
         // We will use a connection pool: this is primarily to _limit_ our connection count, rather than to optimize time
         // to execute queries (database queries are not generally on latency-sensitive paths).
-        let connection_pool = Pool::builder()
+        let connection_pool = diesel::r2d2::Pool::builder()
             .max_size(Self::MAX_CONNECTIONS)
             .max_lifetime(Some(Self::MAX_CONNECTION_LIFETIME))
             .idle_timeout(Some(Self::IDLE_CONNECTION_TIMEOUT))
@@ -168,8 +174,9 @@ impl Persistence {
             .min_idle(Some(1))
             .test_on_check_out(true)
             .build(manager)
-            .await
             .expect("Could not build connection pool");
+
+        let connection_pool = Arc::new(connection_pool);
 
         Self { connection_pool }
     }
@@ -204,17 +211,12 @@ impl Persistence {
         use diesel_migrations::{HarnessWithOutput, MigrationHarness};
 
         // Can't use self.with_conn here as we do spawn_blocking which requires static.
-        let conn = self
-            .connection_pool
-            .dedicated_connection()
-            .await
-            .map_err(|e| DatabaseError::Migration(e.to_string()))?;
-        let mut async_wrapper: AsyncConnectionWrapper<AsyncPgConnection> =
-            AsyncConnectionWrapper::from(conn);
+        let connection_pool = self.connection_pool.clone();
         tokio::task::spawn_blocking(move || {
+            let mut conn = connection_pool.get()?;
             let mut retry_count = 0;
             loop {
-                let result = HarnessWithOutput::write_to_stdout(&mut async_wrapper)
+                let result = HarnessWithOutput::write_to_stdout(&mut conn)
                     .run_pending_migrations(MIGRATIONS)
                     .map(|_| ())
                     .map_err(|e| DatabaseError::Migration(e.to_string()));
@@ -293,7 +295,8 @@ impl Persistence {
             + 'a,
         R: Send + 'b,
     {
-        let mut conn = self.connection_pool.get().await?;
+        let connection_pool = self.connection_pool.clone();
+        let mut conn = tokio::task::spawn_blocking(move || connection_pool.get()).await.unwrap()?;
         let mut retry_count = 0;
         loop {
             match conn

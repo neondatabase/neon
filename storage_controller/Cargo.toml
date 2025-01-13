@@ -47,7 +47,7 @@ diesel = { version = "2.2.6", features = [
     "serde_json",
     "chrono",
 ] }
-diesel-async = { version = "0.5.2", features = ["postgres", "bb8", "async-connection-wrapper"] }
+diesel-async = { version = "0.5.2", features = ["postgres", "r2d2", "async-connection-wrapper"] }
 diesel_migrations = { version = "2.2.0" }
 scoped-futures = "0.1.4"
 
