@@ -179,7 +179,6 @@ pub struct TenantDescribeResponseShard {
 /// specifies some constraints, e.g. asking it to get off particular node(s)
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateRequest {
-    pub tenant_shard_id: TenantShardId,
     pub node_id: NodeId,
 }
 
