@@ -1709,8 +1709,8 @@ impl PageServerHandler {
         // If a page trace is running, submit an event for this request.
         if let Some(page_trace) = timeline.page_trace.load().as_ref() {
             let time = SystemTime::now();
-            for (rel_tag, blknum, _timer) in &requests {
-                let key = rel_block_to_key(*rel_tag, *blknum).to_compact();
+            for batch in &requests {
+                let key = rel_block_to_key(batch.req.rel, batch.req.blkno).to_compact();
                 // Ignore error (trace buffer may be full or tracer may have disconnected).
                 _ = page_trace.try_send(PageTraceEvent {
                     key,
