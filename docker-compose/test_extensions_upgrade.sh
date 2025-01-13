@@ -11,11 +11,6 @@ if [ -z ${OLDTAG+x} ] || [ -z ${NEWTAG+x} ] || [ -z "${OLDTAG}" ] || [ -z "${NEW
   exit 1
 fi
 export PG_VERSION=${PG_VERSION:-16}
-export PGUSER=cloud_admin
-export PGPASSWORD=cloud_admin
-export PGHOST=127.0.0.1
-export PGPORT=55433
-export PGDATABASE=postgres
 function wait_for_ready {
   TIME=0
   while ! docker compose logs compute_is_ready | grep -q "accepting connections" && [ ${TIME} -le 300 ] ; do
@@ -29,8 +24,8 @@ function wait_for_ready {
 }
 function create_extensions() {
   for ext in ${1}; do
-    echo "CREATE EXTENSION IF NOT EXISTS ${ext};"
-  done | psql -X -v ON_ERROR_STOP=1
+    docker compose exec neon-test-extensions psql -X -v ON_ERROR_STOP=1 -d contrib_regression -c "CREATE EXTENSION IF NOT EXISTS ${ext}"
+  done
 }
 EXTENSIONS='[
 {"extname": "plv8", "extdir": "plv8-src"},
@@ -48,26 +43,26 @@ EXTENSIONS='[
 {"extname": "pg_ivm", "extdir": "pg_ivm-src"}
 ]'
 EXTNAMES=$(echo ${EXTENSIONS} | jq -r '.[].extname' | paste -sd ' ' -)
-TAG=${NEWTAG} docker compose up --build -d
+TAG=${NEWTAG} docker compose --profile test-extensions up --build -d
 wait_for_ready
+docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regression"
 create_extensions "${EXTNAMES}"
 query="select json_object_agg(extname,extversion) from pg_extension where extname in ('${EXTNAMES// /\',\'}')"
-new_vers=$(psql -Aqt -c "$query" )
-docker compose down
+new_vers=$(docker compose exec neon-test-extensions psql -Aqt -d contrib_regression -c "$query")
+docker compose --profile test-extensions down
 TAG=${OLDTAG} docker compose --profile test-extensions up --build -d --force-recreate
 wait_for_ready
 # XXX this is about to be included into the image, for test only
 docker compose cp  ext-src neon-test-extensions:/
-psql -c "CREATE DATABASE contrib_regression"
-export PGDATABASE=contrib_regression
+docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regression"
 create_extensions "${EXTNAMES}"
 query="select pge.extname from pg_extension pge join (select key as extname, value as extversion from json_each_text('${new_vers}')) x on pge.extname=x.extname and pge.extversion <> x.extversion"
-exts=$(psql -Aqt -c "$query")
+exts=$(docker compose exec neon-test-extensions psql -Aqt -d contrib_regression -c "$query")
 if [ -z "${exts}" ]; then
   echo "No extensions were upgraded"
 else
-  tenant_id=$(psql -Aqt -c "SHOW neon.tenant_id")
-  timeline_id=$(psql -Aqt -c "SHOW neon.timeline_id")
+  tenant_id=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.tenant_id")
+  timeline_id=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.timeline_id")
   for ext in ${exts}; do
     echo Testing ${ext}...
     EXTDIR=$(echo ${EXTENSIONS} | jq -r '.[] | select(.extname=="'${ext}'") | .extdir')
@@ -84,15 +79,15 @@ else
     TENANT_ID=${tenant_id} TIMELINE_ID=${new_timeline_id} TAG=${OLDTAG} docker compose down compute compute_is_ready
     COMPUTE_TAG=${NEWTAG} TAG=${OLDTAG} TENANT_ID=${tenant_id} TIMELINE_ID=${new_timeline_id} docker compose up -d --build compute compute_is_ready
     wait_for_ready
-    TID=$(psql -Aqt -c "SHOW neon.timeline_id")
+    TID=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.timeline_id")
     if [ ${TID} != ${new_timeline_id} ]; then
       echo Timeline mismatch
       exit 1
     fi
-    psql -d contrib_regression -c "\dx ${ext}"
+    docker compose exec neon-test-extensions psql -d contrib_regression -c "\dx ${ext}"
     docker compose exec -e PGPASSWORD=cloud_admin neon-test-extensions sh -c /ext-src/${EXTDIR}/test-upgrade.sh
-    psql -d contrib_regression -c "alter extension ${ext} update"
-    psql -d contrib_regression -c "\dx ${ext}"
+    docker compose exec neon-test-extensions psql -d contrib_regression -c "alter extension ${ext} update"
+    docker compose exec neon-test-extensions psql -d contrib_regression -c "\dx ${ext}"
   done
 fi
 docker compose --profile test-extensions down
