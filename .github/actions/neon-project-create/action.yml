@@ -82,16 +82,15 @@ runs:
           TENANT_ID=`${PSQL} ${dsn} -t -A -c "SHOW neon.tenant_id"`
           
           echo "Splitting project ${project_id} with tenant_id ${TENANT_ID} into $((SHARD_COUNT)) shards with stripe size $((STRIPE_SIZE))"
-         
+
+          echo "curl -X PUT https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/storage/proxy/control/v1/tenant/${TENANT_ID}/shard_split with body {\"new_shard_count\": $((SHARD_COUNT)), \"new_stripe_size\": $((STRIPE_SIZE))}"
+          
           curl -X PUT \
             "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/storage/proxy/control/v1/tenant/${TENANT_ID}/shard_split" \
             --header "Accept: application/json" \
             --header "Content-Type: application/json" \
             --header "Authorization: Bearer ${API_KEY}" \
-            --data "{
-              \"new_shard_count\": $((SHARD_COUNT)),
-              \"new_stripe_size\": $((STRIPE_SIZE))
-            }"
+            --data "{\"new_shard_count\": $((SHARD_COUNT)), \"new_stripe_size\": $((STRIPE_SIZE))}"
         fi
 
       env:
