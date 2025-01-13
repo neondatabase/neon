@@ -928,7 +928,10 @@ jobs:
 
       - name: Get the prevous staging build tag
         id: oldtag
-        run: echo oldtag=$(git rev-list --count remotes/origin/main) >>$GITHUB_OUTPUT
+        run: |
+          oldtag=$(git rev-list --count remotes/origin/main)
+          ((oldtag -= 1))
+          echo oldtag=$oldtag >>$GITHUB_OUTPUT
 
       - name: Test extension upgrade
         timeout-minutes: 20
