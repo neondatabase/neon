@@ -886,6 +886,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/login-action@v3
@@ -926,7 +928,7 @@ jobs:
 
       - name: Get the prevous staging build tag
         id: oldtag
-        run: echo oldtag=$(git rev-list --count main) >>$GITHUB_OUTPUT
+        run: echo oldtag=$(git rev-list --count remotes/origin/main) >>$GITHUB_OUTPUT
 
       - name: Test extension upgrade
         timeout-minutes: 20
