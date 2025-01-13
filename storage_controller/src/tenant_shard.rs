@@ -953,7 +953,7 @@ impl TenantShard {
             // trims extra secondaries after a PlacementPolicy::Attached(N) was
             // modified to decrease N.
 
-            let mut secondary_scores = self
+            let secondary_scores = self
                 .intent
                 .get_secondary()
                 .iter()
@@ -986,8 +986,11 @@ impl TenantShard {
                 self.intent.get_secondary()
             );
             } else {
-                secondary_scores.sort_by_key(|score| score.1.unwrap());
-                let victim = secondary_scores.last().unwrap().0;
+                let victim = secondary_scores
+                    .iter()
+                    .max_by_key(|score| score.1.unwrap())
+                    .unwrap()
+                    .0;
                 return Some(ScheduleOptimization {
                     sequence: self.sequence,
                     action: ScheduleOptimizationAction::RemoveSecondary(victim),

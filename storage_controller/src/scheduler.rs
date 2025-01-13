@@ -827,9 +827,13 @@ impl Scheduler {
         }
 
         // Find the AZ with the lowest number of shards currently allocated
-        let mut azs = azs.into_iter().collect::<Vec<_>>();
-        azs.sort_by_key(|i| (i.1.home_shard_count, i.0));
-        Some(azs.first().unwrap().0.clone())
+        Some(
+            azs.into_iter()
+                .min_by_key(|i| (i.1.home_shard_count, i.0))
+                .unwrap()
+                .0
+                .clone(),
+        )
     }
 
     pub(crate) fn get_node_az(&self, node_id: &NodeId) -> Option<AvailabilityZone> {
