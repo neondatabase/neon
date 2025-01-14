@@ -26,7 +26,6 @@ use safekeeper_api::models::{
 };
 use safekeeper_api::Term;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_util::sync::CancellationToken;
 use utils::failpoint_support;
 use utils::pageserver_feedback::PageserverFeedback;
 use utils::postgres_client::PostgresClientProtocol;
@@ -602,15 +601,8 @@ impl SafekeeperPostgresHandler {
                         MAX_SEND_SIZE,
                     );
 
-                    let reader_cancel = CancellationToken::new();
-                    let reader = InterpretedWalReader::new(
-                        wal_reader,
-                        start_pos,
-                        tx,
-                        shard,
-                        pg_version,
-                        reader_cancel.clone(),
-                    );
+                    let reader =
+                        InterpretedWalReader::new(wal_reader, start_pos, tx, shard, pg_version);
 
                     let sender = InterpretedWalSender {
                         format,
@@ -625,19 +617,15 @@ impl SafekeeperPostgresHandler {
                     };
 
                     FutureExt::boxed(async move {
-                        let send_and_cancel = async move {
-                            let res = sender.run().await;
-                            reader_cancel.cancel();
-                            res
-                        };
-
-                        let (reader_res, sender_res) =
-                            tokio::join!(reader.run(start_pos, &appname), send_and_cancel);
-                        if let Err(err) = reader_res {
-                            tracing::error!("Interpreted wal reader encountered error: {err}");
+                        // Sender returns an Err on all code paths.
+                        // If the sender finishes first, we will drop the reader future.
+                        // If the reader finishes first, the sender will finish too since
+                        // the wal sender has dropped.
+                        let res = tokio::try_join!(sender.run(), reader.run(start_pos, &appname));
+                        match res.map(|_| ()) {
+                            Ok(_) => unreachable!("sender finishes with Err by convention"),
+                            err_res => err_res,
                         }
-
-                        sender_res
                     })
                 }
             }
@@ -651,7 +639,6 @@ impl SafekeeperPostgresHandler {
             tli,
         };
 
-        // TODO: cancel things nicely
         let res = tokio::select! {
             // todo: add read|write .context to these errors
             r = send_fut => r,

@@ -15,7 +15,6 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::error::SendError;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
-use tokio_util::sync::CancellationToken;
 use tracing::{info_span, Instrument};
 use utils::lsn::Lsn;
 use utils::postgres_client::Compression;
@@ -80,7 +79,6 @@ pub(crate) struct InterpretedWalReader {
     shard_notification_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AttachShardNotification>>,
     state: Arc<std::sync::RwLock<InterpretedWalReaderState>>,
     pg_version: u32,
-    cancel: CancellationToken,
 }
 
 /// A handle for [`InterpretedWalReader`] which allows for interacting with it
@@ -90,10 +88,6 @@ pub(crate) struct InterpretedWalReaderHandle {
     join_handle: JoinHandle<Result<(), InterpretedWalReaderError>>,
     state: Arc<std::sync::RwLock<InterpretedWalReaderState>>,
     shard_notification_tx: tokio::sync::mpsc::UnboundedSender<AttachShardNotification>,
-    // Currently, the task is aborted on [`Self`] drop. Cancellation token is here
-    // in case we want to refine the approach later.
-    #[allow(unused)]
-    cancel: CancellationToken,
 }
 
 struct ShardSenderState {
@@ -153,8 +147,6 @@ impl InterpretedWalReader {
         pg_version: u32,
         appname: &Option<String>,
     ) -> InterpretedWalReaderHandle {
-        let cancel = CancellationToken::new();
-
         let state = Arc::new(std::sync::RwLock::new(InterpretedWalReaderState::Running {
             current_position: start_pos,
         }));
@@ -174,7 +166,6 @@ impl InterpretedWalReader {
             shard_notification_rx: Some(shard_notification_rx),
             state: state.clone(),
             pg_version,
-            cancel: cancel.clone(),
         };
 
         let metric = WAL_READERS
@@ -201,7 +192,6 @@ impl InterpretedWalReader {
             join_handle,
             state,
             shard_notification_tx,
-            cancel,
         }
     }
 
@@ -213,7 +203,6 @@ impl InterpretedWalReader {
         tx: tokio::sync::mpsc::Sender<Batch>,
         shard: ShardIdentity,
         pg_version: u32,
-        cancel: CancellationToken,
     ) -> InterpretedWalReader {
         let state = Arc::new(std::sync::RwLock::new(InterpretedWalReaderState::Running {
             current_position: start_pos,
@@ -232,7 +221,6 @@ impl InterpretedWalReader {
             shard_notification_rx: None,
             state: state.clone(),
             pg_version,
-            cancel,
         }
     }
 
@@ -241,7 +229,7 @@ impl InterpretedWalReader {
         self,
         start_pos: Lsn,
         appname: &Option<String>,
-    ) -> Result<(), InterpretedWalReaderError> {
+    ) -> Result<(), CopyStreamHandlerEnd> {
         let metric = WAL_READERS
             .get_metric_with_label_values(&["future", appname.as_deref().unwrap_or("safekeeper")])
             .unwrap();
@@ -251,7 +239,16 @@ impl InterpretedWalReader {
             metric.dec();
         }
 
-        self.run_impl(start_pos).await
+        let res = self.run_impl(start_pos).await;
+        if let Err(err) = res {
+            tracing::error!("Interpreted wal reader encountered error: {err}");
+        } else {
+            tracing::info!("Interpreted wal reader exiting");
+        }
+
+        Err(CopyStreamHandlerEnd::Other(anyhow!(
+            "interpreted wal reader finished"
+        )))
     }
 
     /// Send interpreted WAL to one or more [`InterpretedWalSender`]s
@@ -261,7 +258,6 @@ impl InterpretedWalReader {
         let defer_state = self.state.clone();
         scopeguard::defer! {
             *defer_state.write().unwrap() = InterpretedWalReaderState::Done;
-            tracing::info!("Interpreted wal reader exiting");
         }
 
         let mut wal_decoder = WalStreamDecoder::new(start_pos, self.pg_version);
@@ -426,13 +422,8 @@ impl InterpretedWalReader {
                         );
                     }
                 }
-                _ = self.cancel.cancelled() => {
-                    break;
-                }
             }
         }
-
-        Ok(())
     }
 }
 
