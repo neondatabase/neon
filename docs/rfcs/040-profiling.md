@@ -176,20 +176,20 @@ so this is not a priority at the moment.
 across the fleet, and archives them as time series. This can be used to analyze resource usage over
 time, either in aggregate or zoomed in to specific events and nodes.
 
-Profiles are retained for 30 days. Profile ingestion volume for CPU+heap at 20 second intervals
-is aboout 0.9 GB/node/day, or about $0.50/node/day ($0.50/GB).
+Profiles are retained for 30 days. Profile ingestion volume for CPU+heap at 60-second intervals
+is about 0.5 GB/node/day, or about $0.25/node/day = $7.5/node/month ($0.50/GB).
 
 It is currently enabled in [staging](https://neonstaging.grafana.net/a/grafana-pyroscope-app/profiles-explorer)
 for Pageserver and Safekeeper.
 
 ### Scraping
 
-* CPU profiling: 19 seconds at 19 Hz every 20 seconds.
-* Heap profiling: heap snapshot with 2 MB frequency every 20 seconds.
+* CPU profiling: 59 seconds at 19 Hz every 60 seconds.
+* Heap profiling: heap snapshot with 2 MB frequency every 60 seconds.
 
 There are two main approaches that can be taken for CPU profiles:
 
-* Continuous low-frequency profiles (e.g. 19 Hz for 20 seconds every 20 seconds).
+* Continuous low-frequency profiles (e.g. 19 Hz for 60 seconds every 60 seconds).
 * Occasional high-frequency profiles (e.g. 99 Hz for 5 seconds every 60 seconds).
 
 We choose continuous low-frequency profiles where possible. This has a fixed low overhead, instead
@@ -208,7 +208,7 @@ With Rust:
 
 * CPU profiles at 19 Hz frequency: 0.1% overhead.
 * Heap profiles at 2 MB frequency: 3% allocation overhead.
-* Profile call/encoding/symbolization: 20 ms every 20 seconds, or 0.1% of 1 CPU (for Pageserver).
+* Profile call/encoding/symbolization: 20 ms every 60 seconds, or 0.03% of 1 CPU (for Pageserver).
 * Profile symbolization caches: 125 MB memory, or 0.4% of 32 GB (for Pageserver).
 
 Benchmarks with pprof-rs showed that the CPU time for taking a stack trace of a 40-frame stack was
