@@ -3781,35 +3781,34 @@ impl Timeline {
                 return Err(FlushLayerError::Cancelled);
             }
 
-            let mut layers_to_upload = Vec::new();
-            layers_to_upload.extend(
-                self.create_image_layers(
-                    &rel_partition,
-                    self.initdb_lsn,
-                    ImageLayerCreationMode::Initial,
-                    ctx,
-                )
-                .await?,
-            );
+            // Ensure that we have a single call to `create_image_layers` with a combined dense keyspace.
+            // So that the key ranges don't overlap.
+            let mut partitions = KeyPartitioning::default();
+            partitions.parts.extend(rel_partition.parts);
             if !metadata_partition.parts.is_empty() {
                 assert_eq!(
                     metadata_partition.parts.len(),
                     1,
                     "currently sparse keyspace should only contain a single metadata keyspace"
                 );
-                layers_to_upload.extend(
-                    self.create_image_layers(
-                        // Safety: create_image_layers treat sparse keyspaces differently that it does not scan
-                        // every single key within the keyspace, and therefore, it's safe to force converting it
-                        // into a dense keyspace before calling this function.
-                        &metadata_partition.into_dense(),
-                        self.initdb_lsn,
-                        ImageLayerCreationMode::Initial,
-                        ctx,
-                    )
-                    .await?,
-                );
+                // Safety: create_image_layers treat sparse keyspaces differently that it does not scan
+                // every single key within the keyspace, and therefore, it's safe to force converting it
+                // into a dense keyspace before calling this function.
+                partitions
+                    .parts
+                    .extend(metadata_partition.into_dense().parts);
             }
+
+            let mut layers_to_upload = Vec::new();
+            layers_to_upload.extend(
+                self.create_image_layers(
+                    &partitions,
+                    self.initdb_lsn,
+                    ImageLayerCreationMode::Initial,
+                    ctx,
+                )
+                .await?,
+            );
 
             (layers_to_upload, None)
         } else {
