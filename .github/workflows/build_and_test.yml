@@ -346,9 +346,9 @@ jobs:
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
-  report-benchmarks-failures:
+  report-benchmarks-results-to-slack:
     needs: [ benchmarks, create-test-report ]
-    if: github.ref_name == 'main' && failure() && needs.benchmarks.result == 'failure'
+    if: github.ref_name == 'main' && !cancelled() && contains(fromJSON('["success", "failure"]'), needs.benchmarks.result)
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
