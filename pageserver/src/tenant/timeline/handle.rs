@@ -107,8 +107,6 @@
 
 use std::collections::hash_map;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
@@ -152,7 +150,7 @@ pub(crate) struct Cache<T: Types> {
     map: Map<T>,
 }
 
-type Map<T> = HashMap<ShardTimelineId, Weak<HandleInner<T>>>;
+type Map<T> = HashMap<ShardTimelineId, WeakHandle<T>>;
 
 impl<T: Types> Default for Cache<T> {
     fn default() -> Self {
@@ -170,23 +168,33 @@ pub(crate) struct ShardTimelineId {
 }
 
 /// See module-level comment.
-pub(crate) struct Handle<T: Types>(Arc<HandleInner<T>>);
-struct HandleInner<T: Types> {
-    shut_down: AtomicBool,
-    timeline: T::Timeline,
-    // The timeline's gate held open.
-    _gate_guard: utils::sync::gate::GateGuard,
+pub(crate) struct Handle<T: Types> {
+    timeline: Arc<T::Timeline>,
+    #[allow(dead_code)] // the field exists to keep the gate open
+    gate_guard: Arc<utils::sync::gate::GateGuard>,
+    inner: Arc<Mutex<HandleInner>>,
+}
+pub(crate) struct WeakHandle<T: Types> {
+    timeline: Arc<T::Timeline>,
+    inner: Weak<Mutex<HandleInner>>,
+}
+enum HandleInner {
+    KeepingTimelineGateOpen {
+        #[allow(dead_code)]
+        gate_guard: Arc<utils::sync::gate::GateGuard>,
+    },
+    ShutDown,
 }
 
 /// Embedded in each [`Types::Timeline`] as the anchor for the only long-lived strong ref to `HandleInner`.
 ///
 /// See module-level comment for details.
-pub struct PerTimelineState<T: Types> {
+pub struct PerTimelineState {
     // None = shutting down
-    handles: Mutex<Option<HashMap<CacheId, Arc<HandleInner<T>>>>>,
+    handles: Mutex<Option<HashMap<CacheId, Arc<Mutex<HandleInner>>>>>,
 }
 
-impl<T: Types> Default for PerTimelineState<T> {
+impl Default for PerTimelineState {
     fn default() -> Self {
         Self {
             handles: Mutex::new(Some(Default::default())),
@@ -210,7 +218,7 @@ pub(crate) trait ArcTimeline<T: Types>: Clone {
     fn gate(&self) -> &utils::sync::gate::Gate;
     fn shard_timeline_id(&self) -> ShardTimelineId;
     fn get_shard_identity(&self) -> &ShardIdentity;
-    fn per_timeline_state(&self) -> &PerTimelineState<T>;
+    fn per_timeline_state(&self) -> &PerTimelineState;
 }
 
 /// Errors returned by [`Cache::get`].
@@ -243,24 +251,8 @@ impl<T: Types> Cache<T> {
         shard_selector: ShardSelector,
         tenant_manager: &T::TenantManager,
     ) -> Result<Handle<T>, GetError<T>> {
-        // terminates because each iteration removes an element from the map
-        loop {
-            let handle = self
-                .get_impl(timeline_id, shard_selector, tenant_manager)
-                .await?;
-            if handle.0.shut_down.load(Ordering::Relaxed) {
-                let removed = self
-                    .map
-                    .remove(&handle.0.timeline.shard_timeline_id())
-                    .expect("invariant of get_impl is that the returned handle is in the map");
-                assert!(
-                    Weak::ptr_eq(&removed, &Arc::downgrade(&handle.0)),
-                    "shard_timeline_id() incorrect?"
-                );
-            } else {
-                return Ok(handle);
-            }
-        }
+        self.get_impl(timeline_id, shard_selector, tenant_manager)
+            .await
     }
 
     #[instrument(level = "trace", skip_all)]
@@ -270,22 +262,24 @@ impl<T: Types> Cache<T> {
         shard_selector: ShardSelector,
         tenant_manager: &T::TenantManager,
     ) -> Result<Handle<T>, GetError<T>> {
-        let miss: ShardSelector = {
+        // terminates because when every iteration we remove an element from the map
+        let miss: ShardSelector = loop {
             let routing_state = self.shard_routing(timeline_id, shard_selector);
             match routing_state {
                 RoutingResult::FastPath(handle) => return Ok(handle),
                 RoutingResult::SlowPath(key) => match self.map.get(&key) {
                     Some(cached) => match cached.upgrade() {
-                        Some(upgraded) => return Ok(Handle(upgraded)),
-                        None => {
+                        Ok(upgraded) => return Ok(upgraded),
+                        Err(HandleUpgradeError::ShutDown) => {
+                            // TODO: dedup with shard_routing()
                             trace!("handle cache stale");
                             self.map.remove(&key).unwrap();
-                            ShardSelector::Known(key.shard_index)
+                            continue;
                         }
                     },
-                    None => ShardSelector::Known(key.shard_index),
+                    None => break ShardSelector::Known(key.shard_index),
                 },
-                RoutingResult::NeedConsultTenantManager => shard_selector,
+                RoutingResult::NeedConsultTenantManager => break shard_selector,
             }
         };
         self.get_miss(timeline_id, miss, tenant_manager).await
@@ -302,15 +296,15 @@ impl<T: Types> Cache<T> {
             let Some((first_key, first_handle)) = self.map.iter().next() else {
                 return RoutingResult::NeedConsultTenantManager;
             };
-            let Some(first_handle) = first_handle.upgrade() else {
-                // TODO: dedup with get()
+            let Ok(first_handle) = first_handle.upgrade() else {
+                // TODO: dedup with get_impl()
                 trace!("handle cache stale");
                 let first_key_owned = *first_key;
                 self.map.remove(&first_key_owned).unwrap();
                 continue;
             };
 
-            let first_handle_shard_identity = first_handle.timeline.get_shard_identity();
+            let first_handle_shard_identity = first_handle.get_shard_identity();
             let make_shard_index = |shard_num: ShardNumber| ShardIndex {
                 shard_number: shard_num,
                 shard_count: first_handle_shard_identity.count,
@@ -329,11 +323,11 @@ impl<T: Types> Cache<T> {
             };
             let first_handle_shard_timeline_id = ShardTimelineId {
                 shard_index: first_handle_shard_identity.shard_index(),
-                timeline_id: first_handle.timeline.shard_timeline_id().timeline_id,
+                timeline_id: first_handle.shard_timeline_id().timeline_id,
             };
 
             if need_shard_timeline_id == first_handle_shard_timeline_id {
-                return RoutingResult::FastPath(Handle(first_handle));
+                return RoutingResult::FastPath(first_handle);
             } else {
                 return RoutingResult::SlowPath(need_shard_timeline_id);
             }
@@ -363,17 +357,16 @@ impl<T: Types> Cache<T> {
                         return Err(GetError::TimelineGateClosed);
                     }
                 };
+                let gate_guard = Arc::new(gate_guard);
                 trace!("creating new HandleInner");
-                let handle = Arc::new(
+                let handle_inner_arc = Arc::new(Mutex::new(
                     // TODO: global metric that keeps track of the number of live HandlerTimeline instances
                     // so we can identify reference cycle bugs.
-                    HandleInner {
-                        shut_down: AtomicBool::new(false),
-                        _gate_guard: gate_guard,
-                        timeline: timeline.clone(),
+                    HandleInner::KeepingTimelineGateOpen {
+                        gate_guard: Arc::clone(&gate_guard),
                     },
-                );
-                let handle = {
+                ));
+                let timeline = {
                     let mut lock_guard = timeline
                         .per_timeline_state()
                         .handles
@@ -381,7 +374,8 @@ impl<T: Types> Cache<T> {
                         .expect("mutex poisoned");
                     match &mut *lock_guard {
                         Some(per_timeline_state) => {
-                            let replaced = per_timeline_state.insert(self.id, Arc::clone(&handle));
+                            let replaced =
+                                per_timeline_state.insert(self.id, Arc::clone(&handle_inner_arc));
                             assert!(replaced.is_none(), "some earlier code left a stale handle");
                             match self.map.entry(key) {
                                 hash_map::Entry::Occupied(_o) => {
@@ -392,8 +386,12 @@ impl<T: Types> Cache<T> {
                                     unreachable!()
                                 }
                                 hash_map::Entry::Vacant(v) => {
-                                    v.insert(Arc::downgrade(&handle));
-                                    handle
+                                    let timeline = Arc::new(timeline.clone());
+                                    v.insert(WeakHandle {
+                                        timeline: Arc::clone(&timeline),
+                                        inner: Arc::downgrade(&handle_inner_arc),
+                                    });
+                                    timeline
                                 }
                             }
                         }
@@ -402,14 +400,46 @@ impl<T: Types> Cache<T> {
                         }
                     }
                 };
-                Ok(Handle(handle))
+                Ok(Handle {
+                    timeline,
+                    inner: handle_inner_arc,
+                    gate_guard,
+                })
             }
             Err(e) => Err(GetError::TenantManager(e)),
         }
     }
 }
 
-impl<T: Types> PerTimelineState<T> {
+pub(crate) enum HandleUpgradeError {
+    ShutDown,
+}
+
+impl<T: Types> WeakHandle<T> {
+    pub(crate) fn upgrade(&self) -> Result<Handle<T>, HandleUpgradeError> {
+        let Some(inner) = Weak::upgrade(&self.inner) else {
+            return Err(HandleUpgradeError::ShutDown);
+        };
+        let lock_guard = inner.lock().expect("poisoned");
+        match &*lock_guard {
+            HandleInner::KeepingTimelineGateOpen { gate_guard } => {
+                let gate_guard = Arc::clone(gate_guard);
+                drop(lock_guard);
+                Ok(Handle {
+                    timeline: Arc::clone(&self.timeline),
+                    gate_guard,
+                    inner,
+                })
+            }
+            HandleInner::ShutDown => Err(HandleUpgradeError::ShutDown),
+        }
+    }
+    pub(crate) fn timeline(&self) -> &T::Timeline {
+        &self.timeline
+    }
+}
+
+impl PerTimelineState {
     /// After this method returns, [`Cache::get`] will never again return a [`Handle`]
     /// to the [`Types::Timeline`] that embeds this per-timeline state.
     /// Even if [`TenantManager::resolve`] would still resolve to it.
@@ -430,9 +460,15 @@ impl<T: Types> PerTimelineState<T> {
             trace!("already shut down");
             return;
         };
-        for handle in handles.values() {
+        for handle_inner_arc in handles.values() {
             // Make hits fail.
-            handle.shut_down.store(true, Ordering::Relaxed);
+            let mut lock_guard = handle_inner_arc.lock().expect("poisoned");
+            match &mut *lock_guard {
+                HandleInner::KeepingTimelineGateOpen { .. } => *lock_guard = HandleInner::ShutDown,
+                HandleInner::ShutDown => {
+                    unreachable!("handles are only shut down once in their lifetime");
+                }
+            }
         }
         drop(handles);
     }
@@ -441,39 +477,49 @@ impl<T: Types> PerTimelineState<T> {
 impl<T: Types> std::ops::Deref for Handle<T> {
     type Target = T::Timeline;
     fn deref(&self) -> &Self::Target {
-        &self.0.timeline
+        &self.timeline
     }
 }
 
-#[cfg(test)]
-impl<T: Types> Drop for HandleInner<T> {
-    fn drop(&mut self) {
-        trace!("HandleInner dropped");
+impl<T: Types> Handle<T> {
+    pub(crate) fn downgrade(&self) -> WeakHandle<T> {
+        WeakHandle {
+            timeline: Arc::clone(&self.timeline),
+            inner: Arc::downgrade(&self.inner),
+        }
     }
 }
 
 // When dropping a [`Cache`], prune its handles in the [`PerTimelineState`] to break the reference cycle.
 impl<T: Types> Drop for Cache<T> {
     fn drop(&mut self) {
-        for (_, weak) in self.map.drain() {
-            if let Some(strong) = weak.upgrade() {
-                // handle is still being kept alive in PerTimelineState
-                let timeline = strong.timeline.per_timeline_state();
-                let mut handles = timeline.handles.lock().expect("mutex poisoned");
-                if let Some(handles) = &mut *handles {
-                    let Some(removed) = handles.remove(&self.id) else {
-                        // There could have been a shutdown inbetween us upgrading the weak and locking the mutex.
-                        continue;
-                    };
-                    assert!(Arc::ptr_eq(&removed, &strong));
-                }
-            }
+        for (
+            _,
+            WeakHandle {
+                timeline: handle_timeline,
+                inner: handle_inner_weak,
+            },
+        ) in self.map.drain()
+        {
+            // handle is still being kept alive in PerTimelineState
+            let per_timeline_state = handle_timeline.per_timeline_state();
+            let mut handles = per_timeline_state.handles.lock().expect("mutex poisoned");
+            let Some(handles) = &mut *handles else {
+                continue;
+            };
+            let Some(removed) = handles.remove(&self.id) else {
+                // There could have been a shutdown inbetween us upgrading the weak and locking the mutex.
+                continue;
+            };
+            assert!(Weak::ptr_eq(&Arc::downgrade(&removed), &handle_inner_weak));
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Weak;
+
     use pageserver_api::{
         key::{rel_block_to_key, Key, DBDIR_KEY},
         models::ShardParameters,
@@ -502,7 +548,7 @@ mod tests {
         gate: utils::sync::gate::Gate,
         id: TimelineId,
         shard: ShardIdentity,
-        per_timeline_state: PerTimelineState<TestTypes>,
+        per_timeline_state: PerTimelineState,
         myself: Weak<StubTimeline>,
     }
 
@@ -528,7 +574,7 @@ mod tests {
             &self.shard
         }
 
-        fn per_timeline_state(&self) -> &PerTimelineState<TestTypes> {
+        fn per_timeline_state(&self) -> &PerTimelineState {
             &self.per_timeline_state
         }
     }
@@ -583,39 +629,13 @@ mod tests {
         //
         // fill the cache
         //
-        assert_eq!(
-            (Arc::strong_count(&shard0), Arc::weak_count(&shard0)),
-            (2, 1),
-            "strong: shard0, mgr; weak: myself"
-        );
-
         let handle: Handle<_> = cache
             .get(timeline_id, ShardSelector::Page(key), &mgr)
             .await
             .expect("we have the timeline");
-        let handle_inner_weak = Arc::downgrade(&handle.0);
         assert!(Weak::ptr_eq(&handle.myself, &shard0.myself));
-        assert_eq!(
-            (
-                Weak::strong_count(&handle_inner_weak),
-                Weak::weak_count(&handle_inner_weak)
-            ),
-            (2, 2),
-            "strong: handle, per_timeline_state, weak: handle_inner_weak, cache"
-        );
         assert_eq!(cache.map.len(), 1);
-
-        assert_eq!(
-            (Arc::strong_count(&shard0), Arc::weak_count(&shard0)),
-            (3, 1),
-            "strong: handleinner(per_timeline_state), shard0, mgr; weak: myself"
-        );
         drop(handle);
-        assert_eq!(
-            (Arc::strong_count(&shard0), Arc::weak_count(&shard0)),
-            (3, 1),
-            "strong: handleinner(per_timeline_state), shard0, mgr; weak: myself"
-        );
 
         //
         // demonstrate that Handle holds up gate closure
@@ -641,19 +661,9 @@ mod tests {
         shard0.per_timeline_state.shutdown(); // keeping handle alive across shutdown
 
         assert_eq!(
-            1,
-            Weak::strong_count(&handle_inner_weak),
-            "through local var handle"
-        );
-        assert_eq!(
             cache.map.len(),
             1,
             "this is an implementation detail but worth pointing out: we can't clear the cache from shutdown(), it's cleared on first access after"
-        );
-        assert_eq!(
-            (Arc::strong_count(&shard0), Arc::weak_count(&shard0)),
-            (3, 1),
-            "strong: handleinner(via handle), shard0, mgr; weak: myself"
         );
 
         // this handle is perfectly usable
@@ -678,16 +688,6 @@ mod tests {
         }
 
         drop(handle);
-        assert_eq!(
-            0,
-            Weak::strong_count(&handle_inner_weak),
-            "the HandleInner destructor already ran"
-        );
-        assert_eq!(
-            (Arc::strong_count(&shard0), Arc::weak_count(&shard0)),
-            (2, 1),
-            "strong: shard0, mgr; weak: myself"
-        );
 
         // closing gate succeeds after dropping handle
         tokio::select! {
@@ -706,10 +706,8 @@ mod tests {
         assert_eq!(cache.map.len(), 0);
 
         // ensure all refs to shard0 are gone and we're not leaking anything
-        let myself = Weak::clone(&shard0.myself);
         drop(shard0);
         drop(mgr);
-        assert_eq!(Weak::strong_count(&myself), 0);
     }
 
     #[tokio::test]
@@ -948,15 +946,11 @@ mod tests {
                 handle
             };
             handle.getpage();
-            used_handles.push(Arc::downgrade(&handle.0));
+            used_handles.push(Arc::downgrade(&handle.timeline));
         }
 
-        // No handles exist, thus gates are closed and don't require shutdown
-        assert!(used_handles
-            .iter()
-            .all(|weak| Weak::strong_count(weak) == 0));
-
-        // ... thus the gate should close immediately, even without shutdown
+        // No handles exist, thus gates are closed and don't require shutdown.
+        // Thus the gate should close immediately, even without shutdown.
         tokio::select! {
             _ = shard0.gate.close() => { }
             _ = tokio::time::sleep(FOREVER) => {

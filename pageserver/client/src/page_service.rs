@@ -1,6 +1,9 @@
-use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
-use futures::SinkExt;
+use futures::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
 use pageserver_api::{
     models::{
         PagestreamBeMessage, PagestreamFeMessage, PagestreamGetPageRequest,
@@ -10,7 +13,6 @@ use pageserver_api::{
 };
 use tokio::task::JoinHandle;
 use tokio_postgres::CopyOutStream;
-use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use utils::{
     id::{TenantId, TimelineId},
@@ -62,15 +64,28 @@ impl Client {
             .client
             .copy_both_simple(&format!("pagestream_v3 {tenant_id} {timeline_id}"))
             .await?;
+        let (sink, stream) = copy_both.split(); // TODO: actually support splitting of the CopyBothDuplex so the lock inside this split adaptor goes away.
         let Client {
             cancel_on_client_drop,
             conn_task,
             client: _,
         } = self;
+        let shared = Arc::new(Mutex::new(PagestreamShared::ConnTaskRunning(
+            ConnTaskRunning {
+                cancel_on_client_drop,
+                conn_task,
+            },
+        )));
         Ok(PagestreamClient {
-            copy_both: Box::pin(copy_both),
-            conn_task,
-            cancel_on_client_drop,
+            sink: PagestreamSender {
+                shared: shared.clone(),
+                sink,
+            },
+            stream: PagestreamReceiver {
+                shared: shared.clone(),
+                stream,
+            },
+            shared,
         })
     }
 
@@ -97,7 +112,28 @@ impl Client {
 
 /// Create using [`Client::pagestream`].
 pub struct PagestreamClient {
-    copy_both: Pin<Box<tokio_postgres::CopyBothDuplex<bytes::Bytes>>>,
+    shared: Arc<Mutex<PagestreamShared>>,
+    sink: PagestreamSender,
+    stream: PagestreamReceiver,
+}
+
+pub struct PagestreamSender {
+    #[allow(dead_code)]
+    shared: Arc<Mutex<PagestreamShared>>,
+    sink: SplitSink<tokio_postgres::CopyBothDuplex<bytes::Bytes>, bytes::Bytes>,
+}
+
+pub struct PagestreamReceiver {
+    #[allow(dead_code)]
+    shared: Arc<Mutex<PagestreamShared>>,
+    stream: SplitStream<tokio_postgres::CopyBothDuplex<bytes::Bytes>>,
+}
+
+enum PagestreamShared {
+    ConnTaskRunning(ConnTaskRunning),
+    ConnTaskCancelledJoinHandleReturnedOrDropped,
+}
+struct ConnTaskRunning {
     cancel_on_client_drop: Option<tokio_util::sync::DropGuard>,
     conn_task: JoinHandle<()>,
 }
@@ -110,11 +146,11 @@ pub struct RelTagBlockNo {
 impl PagestreamClient {
     pub async fn shutdown(self) {
         let Self {
-            copy_both,
-            cancel_on_client_drop: cancel_conn_task,
-            conn_task,
-        } = self;
-        // The `copy_both` contains internal channel sender, the receiver of which is polled by `conn_task`.
+            shared,
+            sink,
+            stream,
+        } = { self };
+        // The `copy_both` split into `sink` and `stream` contains internal channel sender, the receiver of which is polled by `conn_task`.
         // When `conn_task` observes the sender has been dropped, it sends a `FeMessage::CopyFail` into the connection.
         // (see https://github.com/neondatabase/rust-postgres/blob/2005bf79573b8add5cf205b52a2b208e356cc8b0/tokio-postgres/src/copy_both.rs#L56).
         //
@@ -131,27 +167,77 @@ impl PagestreamClient {
         //
         // NB: page_service doesn't have a use case to exit the `pagestream` mode currently.
         // => https://github.com/neondatabase/neon/issues/6390
-        let _ = cancel_conn_task.unwrap();
+        let ConnTaskRunning {
+            cancel_on_client_drop,
+            conn_task,
+        } = {
+            let mut guard = shared.lock().unwrap();
+            match std::mem::replace(
+                &mut *guard,
+                PagestreamShared::ConnTaskCancelledJoinHandleReturnedOrDropped,
+            ) {
+                PagestreamShared::ConnTaskRunning(conn_task_running) => conn_task_running,
+                PagestreamShared::ConnTaskCancelledJoinHandleReturnedOrDropped => unreachable!(),
+            }
+        };
+        let _ = cancel_on_client_drop.unwrap();
         conn_task.await.unwrap();
-        drop(copy_both);
+
+        // Now drop the split copy_both.
+        drop(sink);
+        drop(stream);
+    }
+
+    pub fn split(self) -> (PagestreamSender, PagestreamReceiver) {
+        let Self {
+            shared: _,
+            sink,
+            stream,
+        } = self;
+        (sink, stream)
     }
 
     pub async fn getpage(
         &mut self,
         req: PagestreamGetPageRequest,
     ) -> anyhow::Result<PagestreamGetPageResponse> {
-        let req = PagestreamFeMessage::GetPage(req);
-        let req: bytes::Bytes = req.serialize();
-        // let mut req = tokio_util::io::ReaderStream::new(&req);
-        let mut req = tokio_stream::once(Ok(req));
+        self.getpage_send(req).await?;
+        self.getpage_recv().await
+    }
 
-        self.copy_both.send_all(&mut req).await?;
+    pub async fn getpage_send(&mut self, req: PagestreamGetPageRequest) -> anyhow::Result<()> {
+        self.sink.getpage_send(req).await
+    }
 
-        let next: Option<Result<bytes::Bytes, _>> = self.copy_both.next().await;
+    pub async fn getpage_recv(&mut self) -> anyhow::Result<PagestreamGetPageResponse> {
+        self.stream.getpage_recv().await
+    }
+}
+
+impl PagestreamSender {
+    // TODO: maybe make this impl Sink instead for better composability?
+    pub async fn send(&mut self, msg: PagestreamFeMessage) -> anyhow::Result<()> {
+        let msg = msg.serialize();
+        self.sink.send_all(&mut tokio_stream::once(Ok(msg))).await?;
+        Ok(())
+    }
+
+    pub async fn getpage_send(&mut self, req: PagestreamGetPageRequest) -> anyhow::Result<()> {
+        self.send(PagestreamFeMessage::GetPage(req)).await
+    }
+}
+
+impl PagestreamReceiver {
+    // TODO: maybe make this impl Stream instead for better composability?
+    pub async fn recv(&mut self) -> anyhow::Result<PagestreamBeMessage> {
+        let next: Option<Result<bytes::Bytes, _>> = self.stream.next().await;
         let next: bytes::Bytes = next.unwrap()?;
+        PagestreamBeMessage::deserialize(next)
+    }
 
-        let msg = PagestreamBeMessage::deserialize(next)?;
-        match msg {
+    pub async fn getpage_recv(&mut self) -> anyhow::Result<PagestreamGetPageResponse> {
+        let next: PagestreamBeMessage = self.recv().await?;
+        match next {
             PagestreamBeMessage::GetPage(p) => Ok(p),
             PagestreamBeMessage::Error(e) => anyhow::bail!("Error: {:?}", e),
             PagestreamBeMessage::Exists(_)
@@ -160,7 +246,14 @@ impl PagestreamClient {
             | PagestreamBeMessage::GetSlruSegment(_) => {
                 anyhow::bail!(
                     "unexpected be message kind in response to getpage request: {}",
-                    msg.kind()
+                    next.kind()
+                )
+            }
+            #[cfg(feature = "testing")]
+            PagestreamBeMessage::Test(_) => {
+                anyhow::bail!(
+                    "unexpected be message kind in response to getpage request: {}",
+                    next.kind()
                 )
             }
         }
