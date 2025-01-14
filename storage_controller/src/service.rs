@@ -6390,7 +6390,7 @@ impl Service {
     /// available.  A return value of 0 indicates that everything is fully reconciled already.
     fn reconcile_all(&self) -> usize {
         let mut locked = self.inner.write().unwrap();
-        let (nodes, tenants, _scheduler) = locked.parts_mut();
+        let (nodes, tenants, scheduler) = locked.parts_mut();
         let pageservers = nodes.clone();
 
         // This function is an efficient place to update lazy statistics, since we are walking
@@ -6450,6 +6450,9 @@ impl Service {
                 }
             }
         }
+
+        // Some metrics are calculated from SchedulerNode state, update these periodically
+        scheduler.update_metrics();
 
         // Process any deferred tenant drops
         for (tenant_id, guard) in drop_detached_tenants {
