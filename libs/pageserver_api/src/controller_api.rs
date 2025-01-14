@@ -179,7 +179,6 @@ pub struct TenantDescribeResponseShard {
 /// specifies some constraints, e.g. asking it to get off particular node(s)
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateRequest {
-    pub tenant_shard_id: TenantShardId,
     pub node_id: NodeId,
 }
 
@@ -320,6 +319,38 @@ impl From<NodeSchedulingPolicy> for String {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
+pub enum SkSchedulingPolicy {
+    Active,
+    Disabled,
+    Decomissioned,
+}
+
+impl FromStr for SkSchedulingPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "active" => Self::Active,
+            "disabled" => Self::Disabled,
+            "decomissioned" => Self::Decomissioned,
+            _ => return Err(anyhow::anyhow!("Unknown scheduling state '{s}'")),
+        })
+    }
+}
+
+impl From<SkSchedulingPolicy> for String {
+    fn from(value: SkSchedulingPolicy) -> String {
+        use SkSchedulingPolicy::*;
+        match value {
+            Active => "active",
+            Disabled => "disabled",
+            Decomissioned => "decomissioned",
+        }
+        .to_string()
+    }
+}
+
 /// Controls how tenant shards are mapped to locations on pageservers, e.g. whether
 /// to create secondary locations.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -334,6 +365,16 @@ pub enum PlacementPolicy {
     /// have been idle for a long time, where we do not mind some delay in making
     /// them available in future.
     Detached,
+}
+
+impl PlacementPolicy {
+    pub fn want_secondaries(&self) -> usize {
+        match self {
+            PlacementPolicy::Attached(secondary_count) => *secondary_count,
+            PlacementPolicy::Secondary => 1,
+            PlacementPolicy::Detached => 0,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -387,6 +428,7 @@ pub struct SafekeeperDescribeResponse {
     pub port: i32,
     pub http_port: i32,
     pub availability_zone_id: String,
+    pub scheduling_policy: SkSchedulingPolicy,
 }
 
 #[cfg(test)]

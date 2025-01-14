@@ -91,15 +91,6 @@ pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "pageserver_layers_visited_per_read_global",
-        "Number of layers visited to reconstruct one key",
-        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
-    )
-    .expect("failed to define a metric")
-});
-
 pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_layers_visited_per_vectored_read_global",
@@ -1854,6 +1845,7 @@ pub(crate) static LIVE_CONNECTIONS: Lazy<IntCounterPairVec> = Lazy::new(|| {
 
 #[derive(Clone, Copy, enum_map::Enum, IntoStaticStr)]
 pub(crate) enum ComputeCommandKind {
+    PageStreamV3,
     PageStreamV2,
     Basebackup,
     Fullbackup,
@@ -2337,13 +2329,15 @@ macro_rules! redo_bytes_histogram_count_buckets {
 pub(crate) struct WalIngestMetrics {
     pub(crate) bytes_received: IntCounter,
     pub(crate) records_received: IntCounter,
+    pub(crate) records_observed: IntCounter,
     pub(crate) records_committed: IntCounter,
     pub(crate) records_filtered: IntCounter,
     pub(crate) gap_blocks_zeroed_on_rel_extend: IntCounter,
     pub(crate) clear_vm_bits_unknown: IntCounterVec,
 }
 
-pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
+pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
+    WalIngestMetrics {
     bytes_received: register_int_counter!(
         "pageserver_wal_ingest_bytes_received",
         "Bytes of WAL ingested from safekeepers",
@@ -2352,6 +2346,11 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMet
     records_received: register_int_counter!(
         "pageserver_wal_ingest_records_received",
         "Number of WAL records received from safekeepers"
+    )
+    .expect("failed to define a metric"),
+    records_observed: register_int_counter!(
+        "pageserver_wal_ingest_records_observed",
+        "Number of WAL records observed from safekeepers. These are metadata only records for shard 0."
     )
     .expect("failed to define a metric"),
     records_committed: register_int_counter!(
@@ -2375,6 +2374,7 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMet
         &["entity"],
     )
     .expect("failed to define a metric"),
+}
 });
 
 pub(crate) static PAGESERVER_TIMELINE_WAL_RECORDS_RECEIVED: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -3885,7 +3885,6 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
 
     // histograms
     [
-        &READ_NUM_LAYERS_VISITED,
         &VEC_READ_NUM_LAYERS_VISITED,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,

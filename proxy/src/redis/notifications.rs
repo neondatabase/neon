@@ -30,6 +30,11 @@ async fn try_connect(client: &ConnectionWithCredentialsProvider) -> anyhow::Resu
     Ok(conn)
 }
 
+#[derive(Debug, Deserialize)]
+struct NotificationHeader<'a> {
+    topic: &'a str,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "topic", content = "data")]
 pub(crate) enum Notification {
@@ -68,7 +73,15 @@ pub(crate) enum Notification {
     PasswordUpdate { password_update: PasswordUpdate },
     #[serde(rename = "/cancel_session")]
     Cancel(CancelSession),
+
+    #[serde(
+        other,
+        deserialize_with = "deserialize_unknown_topic",
+        skip_serializing
+    )]
+    UnknownTopic,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub(crate) struct AllowedIpsUpdate {
     project_id: ProjectIdInt,
@@ -96,6 +109,7 @@ pub(crate) struct PasswordUpdate {
     project_id: ProjectIdInt,
     role_name: RoleNameInt,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub(crate) struct CancelSession {
     pub(crate) region_id: Option<String>,
@@ -111,6 +125,15 @@ where
 {
     let s = String::deserialize(deserializer)?;
     serde_json::from_str(&s).map_err(<D::Error as serde::de::Error>::custom)
+}
+
+// https://github.com/serde-rs/serde/issues/1714
+fn deserialize_unknown_topic<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserializer.deserialize_any(serde::de::IgnoredAny)?;
+    Ok(())
 }
 
 struct MessageHandler<C: ProjectInfoCache + Send + Sync + 'static> {
@@ -141,27 +164,47 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
             region_id,
         }
     }
+
     pub(crate) async fn increment_active_listeners(&self) {
         self.cache.increment_active_listeners().await;
     }
+
     pub(crate) async fn decrement_active_listeners(&self) {
         self.cache.decrement_active_listeners().await;
     }
+
     #[tracing::instrument(skip(self, msg), fields(session_id = tracing::field::Empty))]
     async fn handle_message(&self, msg: redis::Msg) -> anyhow::Result<()> {
         let payload: String = msg.get_payload()?;
         tracing::debug!(?payload, "received a message payload");
 
         let msg: Notification = match serde_json::from_str(&payload) {
+            Ok(Notification::UnknownTopic) => {
+                match serde_json::from_str::<NotificationHeader>(&payload) {
+                    // don't update the metric for redis errors if it's just a topic we don't know about.
+                    Ok(header) => tracing::warn!(topic = header.topic, "unknown topic"),
+                    Err(e) => {
+                        Metrics::get().proxy.redis_errors_total.inc(RedisErrors {
+                            channel: msg.get_channel_name(),
+                        });
+                        tracing::error!("broken message: {e}");
+                    }
+                };
+                return Ok(());
+            }
             Ok(msg) => msg,
             Err(e) => {
                 Metrics::get().proxy.redis_errors_total.inc(RedisErrors {
                     channel: msg.get_channel_name(),
                 });
-                tracing::error!("broken message: {e}");
+                match serde_json::from_str::<NotificationHeader>(&payload) {
+                    Ok(header) => tracing::error!(topic = header.topic, "broken message: {e}"),
+                    Err(_) => tracing::error!("broken message: {e}"),
+                };
                 return Ok(());
             }
         };
+
         tracing::debug!(?msg, "received a message");
         match msg {
             Notification::Cancel(cancel_session) => {
@@ -232,6 +275,8 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                     invalidate_cache(cache, msg);
                 });
             }
+
+            Notification::UnknownTopic => unreachable!(),
         }
 
         Ok(())
@@ -258,6 +303,7 @@ fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
         Notification::AllowedVpcEndpointsUpdatedForProjects { .. } => {
             // https://github.com/neondatabase/neon/pull/10073
         }
+        Notification::UnknownTopic => unreachable!(),
     }
 }
 
@@ -422,6 +468,32 @@ mod tests {
         let text = serde_json::to_string(&msg)?;
         let result: Notification = serde_json::from_str(&text)?;
         assert_eq!(msg, result,);
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_unknown_topic() -> anyhow::Result<()> {
+        let with_data = json!({
+            "type": "message",
+            "topic": "/doesnotexist",
+            "data": {
+                "payload": "ignored"
+            },
+            "extra_fields": "something"
+        })
+        .to_string();
+        let result: Notification = serde_json::from_str(&with_data)?;
+        assert_eq!(result, Notification::UnknownTopic);
+
+        let without_data = json!({
+            "type": "message",
+            "topic": "/doesnotexist",
+            "extra_fields": "something"
+        })
+        .to_string();
+        let result: Notification = serde_json::from_str(&without_data)?;
+        assert_eq!(result, Notification::UnknownTopic);
 
         Ok(())
     }

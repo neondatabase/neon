@@ -112,6 +112,13 @@ enum Command {
         #[arg(long)]
         node: NodeId,
     },
+    /// Migrate the secondary location for a tenant shard to a specific pageserver.
+    TenantShardMigrateSecondary {
+        #[arg(long)]
+        tenant_shard_id: TenantShardId,
+        #[arg(long)]
+        node: NodeId,
+    },
     /// Cancel any ongoing reconciliation for this shard
     TenantShardCancelReconcile {
         #[arg(long)]
@@ -540,15 +547,26 @@ async fn main() -> anyhow::Result<()> {
             tenant_shard_id,
             node,
         } => {
-            let req = TenantShardMigrateRequest {
-                tenant_shard_id,
-                node_id: node,
-            };
+            let req = TenantShardMigrateRequest { node_id: node };
 
             storcon_client
                 .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
                     Method::PUT,
                     format!("control/v1/tenant/{tenant_shard_id}/migrate"),
+                    Some(req),
+                )
+                .await?;
+        }
+        Command::TenantShardMigrateSecondary {
+            tenant_shard_id,
+            node,
+        } => {
+            let req = TenantShardMigrateRequest { node_id: node };
+
+            storcon_client
+                .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
+                    Method::PUT,
+                    format!("control/v1/tenant/{tenant_shard_id}/migrate_secondary"),
                     Some(req),
                 )
                 .await?;
@@ -915,10 +933,7 @@ async fn main() -> anyhow::Result<()> {
                             .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
                                 Method::PUT,
                                 format!("control/v1/tenant/{}/migrate", mv.tenant_shard_id),
-                                Some(TenantShardMigrateRequest {
-                                    tenant_shard_id: mv.tenant_shard_id,
-                                    node_id: mv.to,
-                                }),
+                                Some(TenantShardMigrateRequest { node_id: mv.to }),
                             )
                             .await
                             .map_err(|e| (mv.tenant_shard_id, mv.from, mv.to, e))
@@ -1035,7 +1050,15 @@ async fn main() -> anyhow::Result<()> {
             resp.sort_by(|a, b| a.id.cmp(&b.id));
 
             let mut table = comfy_table::Table::new();
-            table.set_header(["Id", "Version", "Host", "Port", "Http Port", "AZ Id"]);
+            table.set_header([
+                "Id",
+                "Version",
+                "Host",
+                "Port",
+                "Http Port",
+                "AZ Id",
+                "Scheduling",
+            ]);
             for sk in resp {
                 table.add_row([
                     format!("{}", sk.id),
@@ -1043,7 +1066,8 @@ async fn main() -> anyhow::Result<()> {
                     sk.host,
                     format!("{}", sk.port),
                     format!("{}", sk.http_port),
-                    sk.availability_zone_id.to_string(),
+                    sk.availability_zone_id.clone(),
+                    String::from(sk.scheduling_policy),
                 ]);
             }
             println!("{table}");
