@@ -108,10 +108,8 @@
 use std::collections::hash_map;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::Weak;
 
 use pageserver_api::shard::ShardIdentity;
 use tokio::sync::OwnedMutexGuard;
@@ -121,7 +119,6 @@ use utils::id::TimelineId;
 use utils::shard::ShardIndex;
 use utils::shard::ShardNumber;
 
-use crate::page_service::GetActiveTimelineError;
 use crate::tenant::mgr::ShardSelector;
 
 /// The requirement for Debug is so that #[derive(Debug)] works in some places.
@@ -176,6 +173,7 @@ pub(crate) struct Handle<T: Types>(T::Timeline, tokio::sync::OwnedMutexGuard<Han
 pub(crate) struct WeakHandle<T: Types>(T::Timeline, Arc<tokio::sync::Mutex<HandleInner>>);
 enum HandleInner {
     KeepingTimelineGateOpen {
+        #[allow(dead_code)]
         gate_guard: utils::sync::gate::GateGuard,
     },
     ShutDown,
@@ -405,9 +403,7 @@ impl<T: Types> WeakHandle<T> {
     pub(crate) async fn upgrade(&self) -> Result<Handle<T>, HandleUpgradeError> {
         let lock_guard = self.1.clone().lock_owned().await;
         match &*lock_guard {
-            HandleInner::KeepingTimelineGateOpen { gate_guard } => {
-                Ok(Handle(self.0.clone(), lock_guard))
-            }
+            HandleInner::KeepingTimelineGateOpen { .. } => Ok(Handle(self.0.clone(), lock_guard)),
             HandleInner::ShutDown => Err(HandleUpgradeError::ShutDown),
         }
     }
@@ -471,6 +467,8 @@ impl<T: Types> PerTimelineState<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Weak;
+
     use pageserver_api::{
         key::{rel_block_to_key, Key, DBDIR_KEY},
         models::ShardParameters,
