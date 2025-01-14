@@ -29,6 +29,32 @@ jobs:
       fail-fast: false # allow other variants to continue even if one fails
       matrix:
         target_project: [new_empty_project, large_existing_project]
+        stripe_size: [null, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+        include:
+          - target_project: new_empty_project
+            stripe_size: 128  # 1 MiB
+          - target_project: new_empty_project
+            stripe_size: 256 # 2 MiB
+          - target_project: new_empty_project
+            stripe_size: 512 # 4 MiB
+          - target_project: new_empty_project
+            stripe_size: 1024 # 8 MiB
+          - target_project: new_empty_project 
+            stripe_size: 2048 # 16 MiB
+          - target_project: new_empty_project
+            stripe_size: 4096 # 32 MiB
+          - target_project: new_empty_project 
+            stripe_size: 8192 # 64 MiB
+          - target_project: new_empty_project
+            stripe_size: 16384 # 128 MiB
+          - target_project: new_empty_project
+            stripe_size: 32768 # 256 MiB # note that this is different from null because using null will shard_split the project only if it reaches the threshold
+                               # while here it is sharded from the beginning with a shard size of 256 MiB
+          - target_project: new_empty_project
+            stripe_size: null # run with neon defaults which will shard split only when reaching the threshold
+          - target_project: large_existing_project
+          stripe_size: null # cannot re-shared or choose different stripe size for existing, already sharded project
+      max-parallel: 1 # we want to run each stripe size sequentially to be able to compare the results
     permissions:
       contents: write
       statuses: write
@@ -75,10 +101,10 @@ jobs:
         postgres_version: 16
         compute_units: '[7, 7]' # we want to test large compute here to avoid compute-side bottleneck
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-        shard_split_project: true
+        shard_split_project: ${{ matrix.stripe_size != null && 'true' || 'false' }}
         admin_api_key: ${{ secrets.NEON_STAGING_ADMIN_API_KEY }} 
         shard_count: 8
-        stripe_size: 512
+        stripe_size: ${{ matrix.stripe_size }}
 
     - name: Initialize Neon project
       if: ${{ matrix.target_project == 'new_empty_project' }}
