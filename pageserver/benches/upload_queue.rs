@@ -53,7 +53,7 @@ fn bench_upload_queue_next_ready(c: &mut Criterion) {
 
         // Construct the queue.
         let mut queue = UploadQueue::Uninitialized;
-        let queue = queue.initialize_with_current_remote_index_part(&index)?;
+        let queue = queue.initialize_with_current_remote_index_part(&index, 0)?;
 
         // Populate inprogress_tasks with a bunch of layer1 deletions.
         let delete = UploadOp::Delete(Delete {
