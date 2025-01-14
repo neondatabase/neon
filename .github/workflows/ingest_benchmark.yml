@@ -53,7 +53,7 @@ jobs:
           - target_project: new_empty_project
             stripe_size: null # run with neon defaults which will shard split only when reaching the threshold
           - target_project: large_existing_project
-          stripe_size: null # cannot re-shared or choose different stripe size for existing, already sharded project
+            stripe_size: null # cannot re-shared or choose different stripe size for existing, already sharded project
       max-parallel: 1 # we want to run each stripe size sequentially to be able to compare the results
     permissions:
       contents: write
