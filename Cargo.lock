@@ -4479,6 +4479,8 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -8023,6 +8025,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "parquet",
+ "postgres-types",
  "prettyplease",
  "proc-macro2",
  "prost",
@@ -8049,6 +8052,7 @@ dependencies = [
  "time",
  "time-macros",
  "tokio",
+ "tokio-postgres",
  "tokio-rustls 0.26.0",
  "tokio-stream",
  "tokio-util",
