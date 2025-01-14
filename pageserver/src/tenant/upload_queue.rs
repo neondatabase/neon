@@ -19,8 +19,7 @@ use tracing::info;
 
 /// Kill switch for upload queue reordering in case it causes problems.
 /// TODO: remove this once we have confidence in it.
-static DISABLE_UPLOAD_QUEUE_REORDERING: Lazy<bool> =
-    Lazy::new(|| std::env::var("DISABLE_UPLOAD_QUEUE_REORDERING").as_deref() == Ok("true"));
+static DISABLE_UPLOAD_QUEUE_REORDERING: Lazy<bool> = Lazy::new(|| true);
 
 // clippy warns that Uninitialized is much smaller than Initialized, which wastes
 // memory for Uninitialized variants. Doesn't matter in practice, there are not
