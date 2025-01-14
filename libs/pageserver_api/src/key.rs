@@ -24,7 +24,9 @@ pub struct Key {
 
 /// When working with large numbers of Keys in-memory, it is more efficient to handle them as i128 than as
 /// a struct of fields.
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize, Debug)]
+#[derive(
+    Clone, Copy, Default, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize, Debug,
+)]
 pub struct CompactKey(i128);
 
 /// The storage key size.
