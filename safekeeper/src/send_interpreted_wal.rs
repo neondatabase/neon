@@ -280,7 +280,8 @@ impl InterpretedWalReader {
                         Some(some) => some.map_err(InterpretedWalReaderError::ReadOrInterpret)?,
                         None => {
                             // [`StreamingWalReader::next`] is an endless stream of WAL.
-                            // It shouldn't ever finish unless it panicked.
+                            // It shouldn't ever finish unless it panicked or became internally
+                            // inconsistent.
                             return Result::Err(InterpretedWalReaderError::WalStreamClosed);
                         }
                     };
