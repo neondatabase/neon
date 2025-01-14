@@ -44,6 +44,18 @@ pub(crate) trait FetchAuthRules: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<Vec<AuthRule>, FetchAuthRulesError>> + Send;
 }
 
+#[derive(Clone)]
+pub(crate) struct StaticAuthRules(pub Vec<AuthRule>);
+impl FetchAuthRules for StaticAuthRules {
+    async fn fetch_auth_rules(
+        &self,
+        _ctx: &RequestContext,
+        _endpoint: EndpointId,
+    ) -> Result<Vec<AuthRule>, FetchAuthRulesError> {
+        Ok(self.0.clone())
+    }
+}
+
 #[derive(Error, Debug)]
 pub(crate) enum FetchAuthRulesError {
     #[error(transparent)]

@@ -230,10 +230,9 @@ impl super::ControlPlaneApi for MockControlPlane {
         _ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
+        let res = self.do_get_auth_info(user_info).await?;
         Ok((
-            Cached::new_uncached(Arc::new(
-                self.do_get_auth_info(user_info).await?.allowed_ips,
-            )),
+            Cached::new_uncached(Arc::new((res.allowed_ips, res.auth_rules))),
             None,
         ))
     }

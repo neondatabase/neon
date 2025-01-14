@@ -323,7 +323,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
             self.caches.project_info.insert_allowed_ips(
                 project_id,
                 normalized_ep_int,
-                Arc::new(auth_info.allowed_ips),
+                Arc::new((auth_info.allowed_ips, auth_info.auth_rules)),
             );
             ctx.set_project_id(project_id);
         }
@@ -349,7 +349,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
             .allowed_ips_cache_misses
             .inc(CacheOutcome::Miss);
         let auth_info = self.do_get_auth_info(ctx, user_info).await?;
-        let allowed_ips = Arc::new(auth_info.allowed_ips);
+        let allowed_ips = Arc::new((auth_info.allowed_ips, auth_info.auth_rules));
         let user = &user_info.user;
         if let Some(project_id) = auth_info.project_id {
             let normalized_ep_int = normalized_ep.into();
