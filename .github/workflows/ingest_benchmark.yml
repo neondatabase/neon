@@ -28,8 +28,6 @@ jobs:
     strategy:
       fail-fast: false # allow other variants to continue even if one fails
       matrix:
-        target_project: [new_empty_project, large_existing_project]
-        stripe_size: [null, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
         include:
           - target_project: new_empty_project
             stripe_size: 128  # 1 MiB
