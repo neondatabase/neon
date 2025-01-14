@@ -144,6 +144,8 @@ pub struct NodeDescribeResponse {
     pub availability: NodeAvailabilityWrapper,
     pub scheduling: NodeSchedulingPolicy,
 
+    pub availability_zone_id: String,
+
     pub listen_http_addr: String,
     pub listen_http_port: u16,
 

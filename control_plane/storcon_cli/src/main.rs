@@ -402,11 +402,12 @@ async fn main() -> anyhow::Result<()> {
             resp.sort_by(|a, b| a.listen_http_addr.cmp(&b.listen_http_addr));
 
             let mut table = comfy_table::Table::new();
-            table.set_header(["Id", "Hostname", "Scheduling", "Availability"]);
+            table.set_header(["Id", "Hostname", "AZ", "Scheduling", "Availability"]);
             for node in resp {
                 table.add_row([
                     format!("{}", node.id),
                     node.listen_http_addr,
+                    node.availability_zone_id,
                     format!("{:?}", node.scheduling),
                     format!("{:?}", node.availability),
                 ]);
