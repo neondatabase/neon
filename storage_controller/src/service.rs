@@ -6512,7 +6512,7 @@ impl Service {
                 // Shard was dropped between planning and execution;
                 continue;
             };
-            tracing::info!("Applying optimization: {optimization:?}");
+            tracing::info!(tenant_shard_id=%tenant_shard_id, "Applying optimization: {optimization:?}");
             if shard.apply_optimization(scheduler, optimization) {
                 optimizations_applied += 1;
                 if self.maybe_reconcile_shard(shard, nodes).is_some() {
