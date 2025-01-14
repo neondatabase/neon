@@ -1,6 +1,12 @@
 name: Pre-merge checks
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/_check-codestyle-python.yml
+      - .github/workflows/_check-codestyle-rust.yml
+      - .github/workflows/build-build-tools-image.yml
+      - .github/workflows/pre-merge-checks.yml
   merge_group:
     branches:
       - main
@@ -17,8 +23,10 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       python-changed: ${{ steps.python-src.outputs.any_changed }}
+      rust-changed: ${{ steps.rust-src.outputs.any_changed }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: tj-actions/changed-files@4edd678ac3f81e2dc578756871e4d00c19191daf # v45.0.4
         id: python-src
         with:
@@ -30,11 +38,25 @@ jobs:
             poetry.lock
             pyproject.toml
 
+      - uses: tj-actions/changed-files@4edd678ac3f81e2dc578756871e4d00c19191daf # v45.0.4
+        id: rust-src
+        with:
+          files: |
+            .github/workflows/_check-codestyle-rust.yml
+            .github/workflows/build-build-tools-image.yml
+            .github/workflows/pre-merge-checks.yml
+            **/**.rs
+            **/Cargo.toml
+            Cargo.toml
+            Cargo.lock
+
       - name: PRINT ALL CHANGED FILES FOR DEBUG PURPOSES
         env:
           PYTHON_CHANGED_FILES: ${{ steps.python-src.outputs.all_changed_files }}
+          RUST_CHANGED_FILES: ${{ steps.rust-src.outputs.all_changed_files }}
         run: |
           echo "${PYTHON_CHANGED_FILES}"
+          echo "${RUST_CHANGED_FILES}"
 
   build-build-tools-image:
     if: needs.get-changed-files.outputs.python-changed == 'true'
@@ -55,6 +77,16 @@ jobs:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm-x64
     secrets: inherit
 
+  check-codestyle-rust:
+    if: needs.get-changed-files.outputs.rust-changed == 'true'
+    needs: [ get-changed-files, build-build-tools-image ]
+    uses: ./.github/workflows/_check-codestyle-rust.yml
+    with:
+      # `-bookworm-x64` suffix should match the combination in `build-build-tools-image`
+      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm-x64
+      archs: '["x64"]'
+    secrets: inherit
+
   # To get items from the merge queue merged into main we need to satisfy "Status checks that are required".
   # Currently we require 2 jobs (checks with exact name):
   # - conclusion
@@ -67,6 +99,7 @@ jobs:
     needs:
       - get-changed-files
       - check-codestyle-python
+      - check-codestyle-rust
     runs-on: ubuntu-22.04
     steps:
       - name: Create fake `neon-cloud-e2e` check
