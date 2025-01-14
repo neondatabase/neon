@@ -87,7 +87,7 @@ impl Display for AvailabilityZone {
 #[derive(Serialize, Deserialize)]
 pub struct ShardsPreferredAzsRequest {
     #[serde(flatten)]
-    pub preferred_az_ids: HashMap<TenantShardId, AvailabilityZone>,
+    pub preferred_az_ids: HashMap<TenantShardId, Option<AvailabilityZone>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -143,6 +143,8 @@ pub struct NodeDescribeResponse {
 
     pub availability: NodeAvailabilityWrapper,
     pub scheduling: NodeSchedulingPolicy,
+
+    pub availability_zone_id: String,
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,

@@ -2517,7 +2517,7 @@ impl Service {
                     .map(|t| {
                         (
                             t.get_tenant_shard_id().expect("Corrupt shard in database"),
-                            load_in_az.clone(),
+                            Some(load_in_az.clone()),
                         )
                     })
                     .collect(),
@@ -6390,7 +6390,7 @@ impl Service {
     /// available.  A return value of 0 indicates that everything is fully reconciled already.
     fn reconcile_all(&self) -> usize {
         let mut locked = self.inner.write().unwrap();
-        let (nodes, tenants, _scheduler) = locked.parts_mut();
+        let (nodes, tenants, scheduler) = locked.parts_mut();
         let pageservers = nodes.clone();
 
         // This function is an efficient place to update lazy statistics, since we are walking
@@ -6451,6 +6451,9 @@ impl Service {
             }
         }
 
+        // Some metrics are calculated from SchedulerNode state, update these periodically
+        scheduler.update_metrics();
+
         // Process any deferred tenant drops
         for (tenant_id, guard) in drop_detached_tenants {
             self.maybe_drop_tenant(tenant_id, &mut locked, &guard);
@@ -6509,7 +6512,7 @@ impl Service {
                 // Shard was dropped between planning and execution;
                 continue;
             };
-            tracing::info!("Applying optimization: {optimization:?}");
+            tracing::info!(tenant_shard_id=%tenant_shard_id, "Applying optimization: {optimization:?}");
             if shard.apply_optimization(scheduler, optimization) {
                 optimizations_applied += 1;
                 if self.maybe_reconcile_shard(shard, nodes).is_some() {

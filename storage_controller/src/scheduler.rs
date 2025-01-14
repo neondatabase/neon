@@ -1,4 +1,4 @@
-use crate::{node::Node, tenant_shard::TenantShard};
+use crate::{metrics::NodeLabelGroup, node::Node, tenant_shard::TenantShard};
 use itertools::Itertools;
 use pageserver_api::{controller_api::AvailabilityZone, models::PageserverUtilization};
 use serde::Serialize;
@@ -871,6 +871,33 @@ impl Scheduler {
     #[cfg(test)]
     pub(crate) fn get_node_attached_shard_count(&self, node_id: NodeId) -> usize {
         self.nodes.get(&node_id).unwrap().attached_shard_count
+    }
+
+    /// Some metrics that we only calculate periodically: this is simpler than
+    /// rigorously updating them on every change.
+    pub(crate) fn update_metrics(&self) {
+        for (node_id, node) in &self.nodes {
+            let node_id_str = format!("{}", node_id);
+            let label_group = NodeLabelGroup {
+                az: &node.az.0,
+                node_id: &node_id_str,
+            };
+
+            crate::metrics::METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_node_shards
+                .set(label_group.clone(), node.shard_count as i64);
+
+            crate::metrics::METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_node_attached_shards
+                .set(label_group.clone(), node.attached_shard_count as i64);
+
+            crate::metrics::METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_node_home_shards
+                .set(label_group.clone(), node.home_shard_count as i64);
+        }
     }
 }
 
