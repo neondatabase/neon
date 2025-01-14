@@ -87,7 +87,7 @@ impl Display for AvailabilityZone {
 #[derive(Serialize, Deserialize)]
 pub struct ShardsPreferredAzsRequest {
     #[serde(flatten)]
-    pub preferred_az_ids: HashMap<TenantShardId, AvailabilityZone>,
+    pub preferred_az_ids: HashMap<TenantShardId, Option<AvailabilityZone>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -144,6 +144,8 @@ pub struct NodeDescribeResponse {
     pub availability: NodeAvailabilityWrapper,
     pub scheduling: NodeSchedulingPolicy,
 
+    pub availability_zone_id: String,
+
     pub listen_http_addr: String,
     pub listen_http_port: u16,
 
@@ -179,7 +181,6 @@ pub struct TenantDescribeResponseShard {
 /// specifies some constraints, e.g. asking it to get off particular node(s)
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateRequest {
-    pub tenant_shard_id: TenantShardId,
     pub node_id: NodeId,
 }
 
@@ -366,6 +367,16 @@ pub enum PlacementPolicy {
     /// have been idle for a long time, where we do not mind some delay in making
     /// them available in future.
     Detached,
+}
+
+impl PlacementPolicy {
+    pub fn want_secondaries(&self) -> usize {
+        match self {
+            PlacementPolicy::Attached(secondary_count) => *secondary_count,
+            PlacementPolicy::Secondary => 1,
+            PlacementPolicy::Detached => 0,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]

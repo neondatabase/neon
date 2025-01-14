@@ -104,16 +104,18 @@ RUN cd postgres && \
         esac; \
     done;
 
+# Set PATH for all the subsequent build steps
+ENV PATH="/usr/local/pgsql/bin:$PATH"
+
 #########################################################################################
 #
 # Layer "postgis-build"
 # Build PostGIS from the upstream PostGIS mirror.
 #
 #########################################################################################
-FROM build-deps AS postgis-build
+FROM pg-build AS postgis-build
 ARG DEBIAN_VERSION
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 RUN apt update && \
     apt install --no-install-recommends --no-install-suggests -y \
     gdal-bin libboost-dev libboost-thread-dev libboost-filesystem-dev \
@@ -151,8 +153,6 @@ RUN case "${DEBIAN_VERSION}" in \
     DESTDIR=/sfcgal ninja install -j $(getconf _NPROCESSORS_ONLN) && \
     ninja clean && cp -R /sfcgal/* /
 
-ENV PATH="/usr/local/pgsql/bin:$PATH"
-
 # Postgis 3.5.0 supports v17
 RUN case "${PG_VERSION}" in \
     "v17") \
@@ -170,7 +170,6 @@ RUN case "${PG_VERSION}" in \
     wget https://download.osgeo.org/postgis/source/postgis-${POSTGIS_VERSION}.tar.gz -O postgis.tar.gz && \
     echo "${POSTGIS_CHECKSUM} postgis.tar.gz" | sha256sum --check && \
     mkdir postgis-src && cd postgis-src && tar xzf ../postgis.tar.gz --strip-components=1 -C . && \
-    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
     ./autogen.sh && \
     ./configure --with-sfcgal=/usr/local/bin/sfcgal-config && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
@@ -220,11 +219,7 @@ RUN case "${PG_VERSION}" in \
     cmake -GNinja -DCMAKE_BUILD_TYPE=Release .. && \
     ninja -j $(getconf _NPROCESSORS_ONLN) && \
     ninja -j $(getconf _NPROCESSORS_ONLN) install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrouting.control && \
-    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
-    cp /usr/local/pgsql/share/extension/pgrouting.control /extensions/postgis && \
-    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
-    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/postgis.tar.zst -T -
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrouting.control
 
 #########################################################################################
 #
@@ -232,9 +227,8 @@ RUN case "${PG_VERSION}" in \
 # Build plv8
 #
 #########################################################################################
-FROM build-deps AS plv8-build
+FROM pg-build AS plv8-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 COPY compute/patches/plv8-3.1.10.patch /plv8-3.1.10.patch
 
@@ -269,7 +263,6 @@ RUN case "${PG_VERSION}" in \
     # generate and copy upgrade scripts
     mkdir -p upgrade && ./generate_upgrade.sh ${PLV8_TAG#v} && \
     cp upgrade/* /usr/local/pgsql/share/extension/ && \
-    export PATH="/usr/local/pgsql/bin:$PATH" && \
     make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
     rm -rf /plv8-* && \
     find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
@@ -296,9 +289,8 @@ RUN case "${PG_VERSION}" in \
 # Build h3_pg
 #
 #########################################################################################
-FROM build-deps AS h3-pg-build
+FROM pg-build AS h3-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # not version-specific
 # last release v4.1.0 - Jan 18, 2023
@@ -319,7 +311,6 @@ RUN mkdir -p /h3/usr/ && \
 RUN wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.1.3.tar.gz -O h3-pg.tar.gz && \
     echo "5c17f09a820859ffe949f847bebf1be98511fb8f1bd86f94932512c00479e324 h3-pg.tar.gz" | sha256sum --check && \
     mkdir h3-pg-src && cd h3-pg-src && tar xzf ../h3-pg.tar.gz --strip-components=1 -C . && \
-    export PATH="/usr/local/pgsql/bin:$PATH" && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/h3.control && \
@@ -331,17 +322,16 @@ RUN wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.1.3.tar.gz -O h3
 # compile unit extension
 #
 #########################################################################################
-FROM build-deps AS unit-pg-build
+FROM pg-build AS unit-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # not version-specific
 # last release 7.9 - Sep 15, 2024
 RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.9.tar.gz -O postgresql-unit.tar.gz && \
     echo "e46de6245dcc8b2c2ecf29873dbd43b2b346773f31dd5ce4b8315895a052b456 postgresql-unit.tar.gz" | sha256sum --check && \
     mkdir postgresql-unit-src && cd postgresql-unit-src && tar xzf ../postgresql-unit.tar.gz --strip-components=1 -C . && \
-    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
     # unit extension's "create extension" script relies on absolute install path to fill some reference tables.
     # We move the extension from '/usr/local/pgsql/' to '/usr/local/'  after it is build. So we need to adjust the path.
     # This one-liner removes pgsql/ part of the path.
@@ -355,9 +345,8 @@ RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.9.tar.gz -
 # compile pgvector extension
 #
 #########################################################################################
-FROM build-deps AS vector-pg-build
+FROM pg-build AS vector-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 COPY compute/patches/pgvector.patch /pgvector.patch
 
@@ -371,8 +360,8 @@ RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.0.tar.gz -O
     echo "867a2c328d4928a5a9d6f052cd3bc78c7d60228a9b914ad32aa3db88e9de27b0 pgvector.tar.gz" | sha256sum --check && \
     mkdir pgvector-src && cd pgvector-src && tar xzf ../pgvector.tar.gz --strip-components=1 -C . && \
     patch -p1 < /pgvector.patch && \
-    make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
-    make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" && \
+    make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/vector.control
 
 #########################################################################################
@@ -381,16 +370,15 @@ RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.0.tar.gz -O
 # compile pgjwt extension
 #
 #########################################################################################
-FROM build-deps AS pgjwt-pg-build
+FROM pg-build AS pgjwt-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # not version-specific
 # doesn't use releases, last commit f3d82fd - Mar 2, 2023
 RUN wget https://github.com/michelp/pgjwt/archive/f3d82fd30151e754e19ce5d6a06c71c20689ce3d.tar.gz -O pgjwt.tar.gz && \
     echo "dae8ed99eebb7593b43013f6532d772b12dfecd55548d2673f2dfd0163f6d2b9 pgjwt.tar.gz" | sha256sum --check && \
     mkdir pgjwt-src && cd pgjwt-src && tar xzf ../pgjwt.tar.gz --strip-components=1 -C . && \
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgjwt.control
 
 #########################################################################################
@@ -399,17 +387,16 @@ RUN wget https://github.com/michelp/pgjwt/archive/f3d82fd30151e754e19ce5d6a06c71
 # compile hypopg extension
 #
 #########################################################################################
-FROM build-deps AS hypopg-pg-build
+FROM pg-build AS hypopg-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # HypoPG 1.4.1 supports v17
 # last release 1.4.1 - Apr 28, 2024
 RUN wget https://github.com/HypoPG/hypopg/archive/refs/tags/1.4.1.tar.gz -O hypopg.tar.gz && \
     echo "9afe6357fd389d8d33fad81703038ce520b09275ec00153c6c89282bcdedd6bc hypopg.tar.gz" | sha256sum --check && \
     mkdir hypopg-src && cd hypopg-src && tar xzf ../hypopg.tar.gz --strip-components=1 -C . && \
-    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/hypopg.control
 
 #########################################################################################
@@ -418,17 +405,16 @@ RUN wget https://github.com/HypoPG/hypopg/archive/refs/tags/1.4.1.tar.gz -O hypo
 # compile pg_hashids extension
 #
 #########################################################################################
-FROM build-deps AS pg-hashids-pg-build
+FROM pg-build AS pg-hashids-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # not version-specific
 # last release v1.2.1 -Jan 12, 2018
 RUN wget https://github.com/iCyberon/pg_hashids/archive/refs/tags/v1.2.1.tar.gz -O pg_hashids.tar.gz && \
     echo "74576b992d9277c92196dd8d816baa2cc2d8046fe102f3dcd7f3c3febed6822a pg_hashids.tar.gz" | sha256sum --check && \
     mkdir pg_hashids-src && cd pg_hashids-src && tar xzf ../pg_hashids.tar.gz --strip-components=1 -C . && \
-    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
+    make -j $(getconf _NPROCESSORS_ONLN) USE_PGXS=1 && \
+    make -j $(getconf _NPROCESSORS_ONLN) install USE_PGXS=1 && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_hashids.control
 
 #########################################################################################
@@ -437,9 +423,8 @@ RUN wget https://github.com/iCyberon/pg_hashids/archive/refs/tags/v1.2.1.tar.gz 
 # compile rum extension
 #
 #########################################################################################
-FROM build-deps AS rum-pg-build
+FROM pg-build AS rum-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 COPY compute/patches/rum.patch /rum.patch
 
@@ -450,8 +435,8 @@ RUN wget https://github.com/postgrespro/rum/archive/cb1edffc57736cd2a4455f8d0fea
     echo "65e0a752e99f4c3226400c9b899f997049e93503db8bf5c8072efa136d32fd83 rum.tar.gz" | sha256sum --check && \
     mkdir rum-src && cd rum-src && tar xzf ../rum.tar.gz --strip-components=1 -C . && \
     patch -p1 < /rum.patch && \
-    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
+    make -j $(getconf _NPROCESSORS_ONLN) USE_PGXS=1 && \
+    make -j $(getconf _NPROCESSORS_ONLN) install USE_PGXS=1 && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/rum.control
 
 #########################################################################################
@@ -460,17 +445,16 @@ RUN wget https://github.com/postgrespro/rum/archive/cb1edffc57736cd2a4455f8d0fea
 # compile pgTAP extension
 #
 #########################################################################################
-FROM build-deps AS pgtap-pg-build
+FROM pg-build AS pgtap-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # pgtap 1.3.3 supports v17
 # last release v1.3.3 - Apr 8, 2024
 RUN wget https://github.com/theory/pgtap/archive/refs/tags/v1.3.3.tar.gz -O pgtap.tar.gz && \
     echo "325ea79d0d2515bce96bce43f6823dcd3effbd6c54cb2a4d6c2384fffa3a14c7 pgtap.tar.gz" | sha256sum --check && \
     mkdir pgtap-src && cd pgtap-src && tar xzf ../pgtap.tar.gz --strip-components=1 -C . && \
-    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgtap.control
 
 #########################################################################################
@@ -479,17 +463,16 @@ RUN wget https://github.com/theory/pgtap/archive/refs/tags/v1.3.3.tar.gz -O pgta
 # compile ip4r extension
 #
 #########################################################################################
-FROM build-deps AS ip4r-pg-build
+FROM pg-build AS ip4r-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # not version-specific
 # last release v2.4.2 - Jul 29, 2023
 RUN wget https://github.com/RhodiumToad/ip4r/archive/refs/tags/2.4.2.tar.gz -O ip4r.tar.gz && \
     echo "0f7b1f159974f49a47842a8ab6751aecca1ed1142b6d5e38d81b064b2ead1b4b ip4r.tar.gz" | sha256sum --check && \
     mkdir ip4r-src && cd ip4r-src && tar xzf ../ip4r.tar.gz --strip-components=1 -C . && \
-    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/ip4r.control
 
 #########################################################################################
@@ -498,17 +481,16 @@ RUN wget https://github.com/RhodiumToad/ip4r/archive/refs/tags/2.4.2.tar.gz -O i
 # compile Prefix extension
 #
 #########################################################################################
-FROM build-deps AS prefix-pg-build
+FROM pg-build AS prefix-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # not version-specific
 # last release v1.2.10  - Jul 5, 2023
 RUN wget https://github.com/dimitri/prefix/archive/refs/tags/v1.2.10.tar.gz -O prefix.tar.gz && \
     echo "4342f251432a5f6fb05b8597139d3ccde8dcf87e8ca1498e7ee931ca057a8575 prefix.tar.gz" | sha256sum --check && \
     mkdir prefix-src && cd prefix-src && tar xzf ../prefix.tar.gz --strip-components=1 -C . && \
-    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/prefix.control
 
 #########################################################################################
@@ -517,17 +499,16 @@ RUN wget https://github.com/dimitri/prefix/archive/refs/tags/v1.2.10.tar.gz -O p
 # compile hll extension
 #
 #########################################################################################
-FROM build-deps AS hll-pg-build
+FROM pg-build AS hll-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # not version-specific
 # last release v2.18 - Aug 29, 2023
 RUN wget https://github.com/citusdata/postgresql-hll/archive/refs/tags/v2.18.tar.gz -O hll.tar.gz && \
     echo "e2f55a6f4c4ab95ee4f1b4a2b73280258c5136b161fe9d059559556079694f0e hll.tar.gz" | sha256sum --check && \
     mkdir hll-src && cd hll-src && tar xzf ../hll.tar.gz --strip-components=1 -C . && \
-    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/hll.control
 
 #########################################################################################
@@ -536,17 +517,16 @@ RUN wget https://github.com/citusdata/postgresql-hll/archive/refs/tags/v2.18.tar
 # compile plpgsql_check extension
 #
 #########################################################################################
-FROM build-deps AS plpgsql-check-pg-build
+FROM pg-build AS plpgsql-check-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # plpgsql_check v2.7.11 supports v17
 # last release v2.7.11 - Sep 16, 2024
 RUN wget https://github.com/okbob/plpgsql_check/archive/refs/tags/v2.7.11.tar.gz -O plpgsql_check.tar.gz && \
     echo "208933f8dbe8e0d2628eb3851e9f52e6892b8e280c63700c0f1ce7883625d172 plpgsql_check.tar.gz" | sha256sum --check && \
     mkdir plpgsql_check-src && cd plpgsql_check-src && tar xzf ../plpgsql_check.tar.gz --strip-components=1 -C . && \
-    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
+    make -j $(getconf _NPROCESSORS_ONLN) USE_PGXS=1 && \
+    make -j $(getconf _NPROCESSORS_ONLN) install USE_PGXS=1 && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plpgsql_check.control
 
 #########################################################################################
@@ -555,11 +535,8 @@ RUN wget https://github.com/okbob/plpgsql_check/archive/refs/tags/v2.7.11.tar.gz
 # compile timescaledb extension
 #
 #########################################################################################
-FROM build-deps AS timescaledb-pg-build
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
-
+FROM pg-build AS timescaledb-pg-build
 ARG PG_VERSION
-ENV PATH="/usr/local/pgsql/bin:$PATH"
 
 RUN case "${PG_VERSION}" in \
       "v14" | "v15") \
@@ -590,11 +567,8 @@ RUN case "${PG_VERSION}" in \
 # compile pg_hint_plan extension
 #
 #########################################################################################
-FROM build-deps AS pg-hint-plan-pg-build
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
-
+FROM pg-build AS pg-hint-plan-pg-build
 ARG PG_VERSION
-ENV PATH="/usr/local/pgsql/bin:$PATH"
 
 # version-specific, has separate releases for each version
 RUN case "${PG_VERSION}" in \
@@ -632,14 +606,12 @@ RUN case "${PG_VERSION}" in \
 # compile pg_cron extension
 #
 #########################################################################################
-FROM build-deps AS pg-cron-pg-build
+FROM pg-build AS pg-cron-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # This is an experimental extension that we do not support on prod yet.
 # !Do not remove!
 # We set it in shared_preload_libraries and computes will fail to start if library is not found.
-ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/citusdata/pg_cron/archive/refs/tags/v1.6.4.tar.gz -O pg_cron.tar.gz && \
     echo "52d1850ee7beb85a4cb7185731ef4e5a90d1de216709d8988324b0d02e76af61 pg_cron.tar.gz" | sha256sum --check && \
     mkdir pg_cron-src && cd pg_cron-src && tar xzf ../pg_cron.tar.gz --strip-components=1 -C . && \
@@ -653,9 +625,8 @@ RUN wget https://github.com/citusdata/pg_cron/archive/refs/tags/v1.6.4.tar.gz -O
 # compile rdkit extension
 #
 #########################################################################################
-FROM build-deps AS rdkit-pg-build
+FROM pg-build AS rdkit-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 RUN apt update && \
     apt install --no-install-recommends --no-install-suggests -y \
@@ -673,7 +644,13 @@ RUN apt update && \
 # Use new version only for v17
 # because Release_2024_09_1 has some backward incompatible changes
 # https://github.com/rdkit/rdkit/releases/tag/Release_2024_09_1
-ENV PATH="/usr/local/pgsql/bin/:/usr/local/pgsql/:$PATH"
+
+# XXX: /usr/local/pgsql/bin is already in PATH, and that should be enough to find
+# pg_config. For some reason the rdkit cmake script doesn't work with just that,
+# however. By also adding /usr/local/pgsql, it works, which is weird because there
+# are no executables in that directory.
+ENV PATH="/usr/local/pgsql:$PATH"
+
 RUN case "${PG_VERSION}" in \
     "v17") \
         export RDKIT_VERSION=Release_2024_09_1 \
@@ -726,13 +703,11 @@ RUN case "${PG_VERSION}" in \
 # compile pg_uuidv7 extension
 #
 #########################################################################################
-FROM build-deps AS pg-uuidv7-pg-build
+FROM pg-build AS pg-uuidv7-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # not version-specific
 # last release v1.6.0 - Oct 9, 2024
-ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/fboulnois/pg_uuidv7/archive/refs/tags/v1.6.0.tar.gz -O pg_uuidv7.tar.gz && \
     echo "0fa6c710929d003f6ce276a7de7a864e9d1667b2d78be3dc2c07f2409eb55867 pg_uuidv7.tar.gz" | sha256sum --check && \
     mkdir pg_uuidv7-src && cd pg_uuidv7-src && tar xzf ../pg_uuidv7.tar.gz --strip-components=1 -C . && \
@@ -746,13 +721,11 @@ RUN wget https://github.com/fboulnois/pg_uuidv7/archive/refs/tags/v1.6.0.tar.gz 
 # compile pg_roaringbitmap extension
 #
 #########################################################################################
-FROM build-deps AS pg-roaringbitmap-pg-build
+FROM pg-build AS pg-roaringbitmap-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # not version-specific
 # last release v0.5.4 - Jun 28, 2022
-ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/ChenHuajun/pg_roaringbitmap/archive/refs/tags/v0.5.4.tar.gz -O pg_roaringbitmap.tar.gz && \
     echo "b75201efcb1c2d1b014ec4ae6a22769cc7a224e6e406a587f5784a37b6b5a2aa pg_roaringbitmap.tar.gz" | sha256sum --check && \
     mkdir pg_roaringbitmap-src && cd pg_roaringbitmap-src && tar xzf ../pg_roaringbitmap.tar.gz --strip-components=1 -C . && \
@@ -766,16 +739,14 @@ RUN wget https://github.com/ChenHuajun/pg_roaringbitmap/archive/refs/tags/v0.5.4
 # compile pg_semver extension
 #
 #########################################################################################
-FROM build-deps AS pg-semver-pg-build
+FROM pg-build AS pg-semver-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # Release 0.40.0 breaks backward compatibility with previous versions
 # see release note https://github.com/theory/pg-semver/releases/tag/v0.40.0
 # Use new version only for v17
 #
 # last release v0.40.0 - Jul 22, 2024
-ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN case "${PG_VERSION}" in \
     "v17") \
         export SEMVER_VERSION=0.40.0 \
@@ -802,13 +773,11 @@ RUN case "${PG_VERSION}" in \
 # compile pg_embedding extension
 #
 #########################################################################################
-FROM build-deps AS pg-embedding-pg-build
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+FROM pg-build AS pg-embedding-pg-build
 
 # This is our extension, support stopped in favor of pgvector
 # TODO: deprecate it
 ARG PG_VERSION
-ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN case "${PG_VERSION}" in \
       "v14" | "v15") \
         export PG_EMBEDDING_VERSION=0.3.5 \
@@ -829,26 +798,19 @@ RUN case "${PG_VERSION}" in \
 # compile anon extension
 #
 #########################################################################################
-FROM build-deps AS pg-anon-pg-build
+FROM pg-build AS pg-anon-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # This is an experimental extension, never got to real production.
 # !Do not remove! It can be present in shared_preload_libraries and compute will fail to start if library is not found.
-ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN case "${PG_VERSION}" in "v17") \
     echo "postgresql_anonymizer does not yet support PG17" && exit 0;; \
     esac && \
     wget  https://github.com/neondatabase/postgresql_anonymizer/archive/refs/tags/neon_1.1.1.tar.gz -O pg_anon.tar.gz && \
     echo "321ea8d5c1648880aafde850a2c576e4a9e7b9933a34ce272efc839328999fa9  pg_anon.tar.gz" | sha256sum --check && \
     mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
-    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control && \
-    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
-    mkdir -p /extensions/anon && cp /usr/local/pgsql/share/extension/anon.control /extensions/anon && \
-    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
-    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/anon.tar.zst -T -
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control
 
 #########################################################################################
 #
@@ -856,9 +818,8 @@ RUN case "${PG_VERSION}" in "v17") \
 # This layer is used to build `pgrx` deps
 #
 #########################################################################################
-FROM build-deps AS rust-extensions-build
+FROM pg-build AS rust-extensions-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 RUN apt update && \
     apt install --no-install-recommends --no-install-suggests -y curl libclang-dev && \
@@ -866,7 +827,7 @@ RUN apt update && \
     useradd -ms /bin/bash nonroot -b /home
 
 ENV HOME=/home/nonroot
-ENV PATH="/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
+ENV PATH="/home/nonroot/.cargo/bin:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 
@@ -893,9 +854,8 @@ USER root
 # and eventually get merged with `rust-extensions-build`
 #
 #########################################################################################
-FROM build-deps AS rust-extensions-build-pgrx12
+FROM pg-build AS rust-extensions-build-pgrx12
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 RUN apt update && \
     apt install --no-install-recommends --no-install-suggests -y curl libclang-dev && \
@@ -903,7 +863,7 @@ RUN apt update && \
     useradd -ms /bin/bash nonroot -b /home
 
 ENV HOME=/home/nonroot
-ENV PATH="/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
+ENV PATH="/home/nonroot/.cargo/bin:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 
@@ -976,22 +936,9 @@ RUN apt update && apt install --no-install-recommends --no-install-suggests -y p
 
 FROM rust-extensions-build-pgrx12 AS pg-jsonschema-pg-build
 ARG PG_VERSION
-# version 0.3.3 supports v17
 # last release v0.3.3 - Oct 16, 2024
-#
-# there were no breaking changes
-# so we can use the same version for all postgres versions
-RUN case "${PG_VERSION}" in \
-    "v14" | "v15" | "v16" | "v17") \
-        export PG_JSONSCHEMA_VERSION=0.3.3 \
-        export PG_JSONSCHEMA_CHECKSUM=40c2cffab4187e0233cb8c3bde013be92218c282f95f4469c5282f6b30d64eac \
-    ;; \
-    *) \
-        echo "unexpected PostgreSQL version" && exit 1 \
-    ;; \
-    esac && \
-    wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v${PG_JSONSCHEMA_VERSION}.tar.gz -O pg_jsonschema.tar.gz && \
-    echo "${PG_JSONSCHEMA_CHECKSUM} pg_jsonschema.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v0.3.3.tar.gz -O pg_jsonschema.tar.gz && \
+    echo "40c2cffab4187e0233cb8c3bde013be92218c282f95f4469c5282f6b30d64eac pg_jsonschema.tar.gz" | sha256sum --check && \
     mkdir pg_jsonschema-src && cd pg_jsonschema-src && tar xzf ../pg_jsonschema.tar.gz --strip-components=1 -C . && \
     # see commit 252b3685a27a0f4c31a0f91e983c6314838e89e8
     # `unsafe-postgres` feature allows to build pgx extensions
@@ -1012,22 +959,9 @@ RUN case "${PG_VERSION}" in \
 FROM rust-extensions-build-pgrx12 AS pg-graphql-pg-build
 ARG PG_VERSION
 
-# version 1.5.9 supports v17
 # last release v1.5.9 - Oct 16, 2024
-#
-# there were no breaking changes
-# so we can use the same version for all postgres versions
-RUN case "${PG_VERSION}" in \
-    "v14" | "v15" | "v16" | "v17") \
-        export PG_GRAPHQL_VERSION=1.5.9 \
-        export PG_GRAPHQL_CHECKSUM=cf768385a41278be1333472204fc0328118644ae443182cf52f7b9b23277e497 \
-    ;; \
-    *) \
-        echo "unexpected PostgreSQL version" && exit 1 \
-    ;; \
-    esac && \
-    wget https://github.com/supabase/pg_graphql/archive/refs/tags/v${PG_GRAPHQL_VERSION}.tar.gz -O pg_graphql.tar.gz && \
-    echo "${PG_GRAPHQL_CHECKSUM} pg_graphql.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/supabase/pg_graphql/archive/refs/tags/v1.5.9.tar.gz -O pg_graphql.tar.gz && \
+    echo "cf768385a41278be1333472204fc0328118644ae443182cf52f7b9b23277e497 pg_graphql.tar.gz" | sha256sum --check && \
     mkdir pg_graphql-src && cd pg_graphql-src && tar xzf ../pg_graphql.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "=0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
@@ -1091,8 +1025,8 @@ ARG PG_VERSION
 # NOTE: local_proxy depends on the version of pg_session_jwt
 # Do not update without approve from proxy team
 # Make sure the version is reflected in proxy/src/serverless/local_conn_pool.rs
-RUN wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v0.1.2-v17.tar.gz -O pg_session_jwt.tar.gz && \
-    echo "c8ecbed9cb8c6441bce5134a176002b043018adf9d05a08e457dda233090a86e pg_session_jwt.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v0.2.0.tar.gz -O pg_session_jwt.tar.gz && \
+    echo "5ace028e591f2e000ca10afa5b1ca62203ebff014c2907c0ec3b29c36f28a1bb pg_session_jwt.tar.gz" | sha256sum --check && \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "0.12.6"/pgrx = { version = "=0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release
@@ -1104,13 +1038,11 @@ RUN wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v0.1.2
 #
 #########################################################################################
 
-FROM build-deps AS wal2json-pg-build
+FROM pg-build AS wal2json-pg-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # wal2json wal2json_2_6 supports v17
 # last release wal2json_2_6 - Apr 25, 2024
-ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/eulerto/wal2json/archive/refs/tags/wal2json_2_6.tar.gz -O wal2json.tar.gz && \
     echo "18b4bdec28c74a8fc98a11c72de38378a760327ef8e5e42e975b0029eb96ba0d wal2json.tar.gz" | sha256sum --check && \
     mkdir wal2json-src && cd wal2json-src && tar xzf ../wal2json.tar.gz --strip-components=1 -C . && \
@@ -1123,13 +1055,11 @@ RUN wget https://github.com/eulerto/wal2json/archive/refs/tags/wal2json_2_6.tar.
 # compile pg_ivm extension
 #
 #########################################################################################
-FROM build-deps AS pg-ivm-build
+FROM pg-build AS pg-ivm-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # pg_ivm v1.9 supports v17
 # last release v1.9 - Jul 31
-ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/sraoss/pg_ivm/archive/refs/tags/v1.9.tar.gz -O pg_ivm.tar.gz && \
     echo "59e15722939f274650abf637f315dd723c87073496ca77236b044cb205270d8b pg_ivm.tar.gz" | sha256sum --check && \
     mkdir pg_ivm-src && cd pg_ivm-src && tar xzf ../pg_ivm.tar.gz --strip-components=1 -C . && \
@@ -1143,13 +1073,11 @@ RUN wget https://github.com/sraoss/pg_ivm/archive/refs/tags/v1.9.tar.gz -O pg_iv
 # compile pg_partman extension
 #
 #########################################################################################
-FROM build-deps AS pg-partman-build
+FROM pg-build AS pg-partman-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # should support v17 https://github.com/pgpartman/pg_partman/discussions/693
 # last release 5.1.0  Apr 2, 2024
-ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/pgpartman/pg_partman/archive/refs/tags/v5.1.0.tar.gz -O pg_partman.tar.gz && \
     echo "3e3a27d7ff827295d5c55ef72f07a49062d6204b3cb0b9a048645d6db9f3cb9f pg_partman.tar.gz" | sha256sum --check && \
     mkdir pg_partman-src && cd pg_partman-src && tar xzf ../pg_partman.tar.gz --strip-components=1 -C . && \
@@ -1165,9 +1093,6 @@ RUN wget https://github.com/pgpartman/pg_partman/archive/refs/tags/v5.1.0.tar.gz
 #########################################################################################
 FROM rust-extensions-build AS pg-mooncake-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
-
-ENV PATH="/usr/local/pgsql/bin/:$PATH"
 
 RUN wget https://github.com/Mooncake-Labs/pg_mooncake/releases/download/v0.1.0/pg_mooncake-0.1.0.tar.gz -O pg_mooncake.tar.gz && \
     echo "eafd059b77f541f11525eb8affcd66a176968cbd8fe7c0d436e733f2aa4da59f pg_mooncake.tar.gz" | sha256sum --check && \
@@ -1183,11 +1108,8 @@ RUN wget https://github.com/Mooncake-Labs/pg_mooncake/releases/download/v0.1.0/p
 #
 #########################################################################################
 
-FROM build-deps AS pg-repack-build
+FROM pg-build AS pg-repack-build
 ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
-
-ENV PATH="/usr/local/pgsql/bin/:$PATH"
 
 RUN wget https://github.com/reorg/pg_repack/archive/refs/tags/ver_1.5.2.tar.gz -O pg_repack.tar.gz && \
     echo '4516cad42251ed3ad53ff619733004db47d5755acac83f75924cd94d1c4fb681 pg_repack.tar.gz' | sha256sum --check && \
@@ -1258,20 +1180,6 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
     make -j $(getconf _NPROCESSORS_ONLN) \
         PG_CONFIG=/usr/local/pgsql/bin/pg_config \
         -C pgxn/neon_rmgr \
-        -s install && \
-    case "${PG_VERSION}" in \
-        "v14" | "v15") \
-        ;; \
-        "v16" | "v17") \
-            echo "Skipping HNSW for PostgreSQL ${PG_VERSION}" && exit 0 \
-        ;; \
-        *) \
-            echo "unexpected PostgreSQL version" && exit 1 \
-        ;; \
-        esac && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        PG_CONFIG=/usr/local/pgsql/bin/pg_config \
-        -C pgxn/hnsw \
         -s install
 
 #########################################################################################
@@ -1287,17 +1195,6 @@ USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
 RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy
-
-#########################################################################################
-#
-# Final compute-tools image
-#
-#########################################################################################
-
-FROM debian:$DEBIAN_FLAVOR AS compute-tools-image
-
-COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
-COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
 
 #########################################################################################
 #
@@ -1335,11 +1232,11 @@ RUN set -e \
 #
 #########################################################################################
 
-FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.1 AS postgres-exporter
+FROM quay.io/prometheuscommunity/postgres-exporter:v0.16.0 AS postgres-exporter
 
 # Keep the version the same as in build-tools.Dockerfile and
 # test_runner/regress/test_compute_metrics.py.
-FROM burningalchemist/sql_exporter:0.16.0 AS sql-exporter
+FROM burningalchemist/sql_exporter:0.17.0 AS sql-exporter
 
 #########################################################################################
 #

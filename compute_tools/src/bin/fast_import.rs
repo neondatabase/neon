@@ -17,7 +17,7 @@
 //!
 //! # Local Testing
 //!
-//! - Comment out most of the pgxns in The Dockerfile.compute-tools to speed up the build.
+//! - Comment out most of the pgxns in compute-node.Dockerfile to speed up the build.
 //! - Build the image with the following command:
 //!
 //! ```bash

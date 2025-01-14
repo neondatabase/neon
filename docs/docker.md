@@ -7,15 +7,11 @@ Currently we build two main images:
 - [neondatabase/neon](https://hub.docker.com/repository/docker/neondatabase/neon) — image with pre-built `pageserver`, `safekeeper` and `proxy` binaries and all the required runtime dependencies. Built from [/Dockerfile](/Dockerfile).
 - [neondatabase/compute-node-v16](https://hub.docker.com/repository/docker/neondatabase/compute-node-v16) — compute node image with pre-built Postgres binaries from [neondatabase/postgres](https://github.com/neondatabase/postgres). Similar images exist for v15 and v14. Built from [/compute-node/Dockerfile](/compute/compute-node.Dockerfile).
 
-And additional intermediate image:
-
-- [neondatabase/compute-tools](https://hub.docker.com/repository/docker/neondatabase/compute-tools) — compute node configuration management tools.
-
 ## Build pipeline
 
 We build all images after a successful `release` tests run and push automatically to Docker Hub with two parallel CI jobs
 
-1. `neondatabase/compute-tools` and `neondatabase/compute-node-v16` (and -v15 and -v14)
+1. `neondatabase/compute-node-v17` (and -16, -v15, -v14)
 
 2. `neondatabase/neon`
 
