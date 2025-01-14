@@ -3243,7 +3243,9 @@ impl Timeline {
             // space. If that's not the case, we had at least one key encounter a gap in the image layer
             // and stop the search as a result of that.
             let mut removed = keyspace.remove_overlapping_with(&image_covered_keyspace);
-            // Do not fire missing key error for sparse keys.
+            // Do not fire missing key error and end early for sparse keys. Note that we hava already removed
+            // non-inherited keyspaces before, so we can safely do a full `SPARSE_RANGE` remove instead of
+            // figuring out what is the inherited key range and do a fine-grained pruning.
             removed.remove_overlapping_with(&KeySpace {
                 ranges: vec![SPARSE_RANGE],
             });
@@ -3781,35 +3783,29 @@ impl Timeline {
                 return Err(FlushLayerError::Cancelled);
             }
 
-            let mut layers_to_upload = Vec::new();
-            layers_to_upload.extend(
-                self.create_image_layers(
-                    &rel_partition,
-                    self.initdb_lsn,
-                    ImageLayerCreationMode::Initial,
-                    ctx,
-                )
-                .await?,
-            );
+            let mut partitions = KeyPartitioning::default();
+            partitions.parts.extend(rel_partition.parts);
             if !metadata_partition.parts.is_empty() {
                 assert_eq!(
                     metadata_partition.parts.len(),
                     1,
                     "currently sparse keyspace should only contain a single metadata keyspace"
                 );
-                layers_to_upload.extend(
-                    self.create_image_layers(
-                        // Safety: create_image_layers treat sparse keyspaces differently that it does not scan
-                        // every single key within the keyspace, and therefore, it's safe to force converting it
-                        // into a dense keyspace before calling this function.
-                        &metadata_partition.into_dense(),
-                        self.initdb_lsn,
-                        ImageLayerCreationMode::Initial,
-                        ctx,
-                    )
-                    .await?,
-                );
+                partitions
+                    .parts
+                    .extend(metadata_partition.into_dense().parts);
             }
+
+            let mut layers_to_upload = Vec::new();
+            layers_to_upload.extend(
+                self.create_image_layers(
+                    &partitions,
+                    self.initdb_lsn,
+                    ImageLayerCreationMode::Initial,
+                    ctx,
+                )
+                .await?,
+            );
 
             (layers_to_upload, None)
         } else {

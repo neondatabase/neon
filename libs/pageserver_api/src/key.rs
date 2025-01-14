@@ -5,6 +5,7 @@ use postgres_ffi::Oid;
 use postgres_ffi::RepOriginId;
 use serde::{Deserialize, Serialize};
 use std::{fmt, ops::Range};
+use utils::const_assert;
 
 use crate::reltag::{BlockNumber, RelTag, SlruKind};
 
@@ -46,6 +47,12 @@ pub const AUX_KEY_PREFIX: u8 = 0x62;
 
 /// The key prefix of ReplOrigin keys.
 pub const REPL_ORIGIN_KEY_PREFIX: u8 = 0x63;
+
+/// The key prefix of db directory keys.
+pub const DB_DIR_KEY_PREFIX: u8 = 0x64;
+
+/// The key prefix of rel direcotry keys.
+pub const REL_DIR_KEY_PREFIX: u8 = 0x65;
 
 /// Check if the key falls in the range of metadata keys.
 pub const fn is_metadata_key_slice(key: &[u8]) -> bool {
@@ -100,6 +107,24 @@ impl Key {
             field6: 0,
         }..Key {
             field1: AUX_KEY_PREFIX + 1,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }
+    }
+
+    pub fn rel_dir_sparse_key_range() -> Range<Self> {
+        Key {
+            field1: REL_DIR_KEY_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }..Key {
+            field1: REL_DIR_KEY_PREFIX + 1,
             field2: 0,
             field3: 0,
             field4: 0,
@@ -439,6 +464,36 @@ pub fn rel_dir_to_key(spcnode: Oid, dbnode: Oid) -> Key {
 }
 
 #[inline(always)]
+pub fn rel_tag_sparse_key(spcnode: Oid, dbnode: Oid, relnode: Oid, forknum: u8) -> Key {
+    Key {
+        field1: REL_DIR_KEY_PREFIX,
+        field2: spcnode,
+        field3: dbnode,
+        field4: relnode,
+        field5: forknum,
+        field6: 1,
+    }
+}
+
+pub fn rel_tag_sparse_key_range(spcnode: Oid, dbnode: Oid) -> Range<Key> {
+    Key {
+        field1: REL_DIR_KEY_PREFIX,
+        field2: spcnode,
+        field3: dbnode,
+        field4: 0,
+        field5: 0,
+        field6: 0,
+    }..Key {
+        field1: REL_DIR_KEY_PREFIX,
+        field2: spcnode,
+        field3: dbnode,
+        field4: u32::MAX,
+        field5: u8::MAX,
+        field6: u32::MAX,
+    } // it's fine to exclude the last key b/c we only use field6 == 1
+}
+
+#[inline(always)]
 pub fn rel_block_to_key(rel: RelTag, blknum: BlockNumber) -> Key {
     Key {
         field1: 0x00,
@@ -732,9 +787,9 @@ impl Key {
         self.field1 == RELATION_SIZE_PREFIX
     }
 
-    pub fn sparse_non_inherited_keyspace() -> Range<Key> {
+    pub const fn sparse_non_inherited_keyspace() -> Range<Key> {
         // The two keys are adjacent; if we will have non-adjancent keys in the future, we should return a keyspace
-        debug_assert_eq!(AUX_KEY_PREFIX + 1, REPL_ORIGIN_KEY_PREFIX);
+        const_assert!(AUX_KEY_PREFIX + 1 == REPL_ORIGIN_KEY_PREFIX);
         Key {
             field1: AUX_KEY_PREFIX,
             field2: 0,
