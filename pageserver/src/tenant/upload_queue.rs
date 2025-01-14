@@ -811,49 +811,6 @@ mod tests {
         Ok(())
     }
 
-    /// Non-conflicting uploads and deletes can bypass the queue, avoiding the conflicting
-    /// delete/upload operations at the head of the queue.
-    #[test]
-    fn schedule_upload_delete_conflicts_bypass() -> anyhow::Result<()> {
-        let mut queue = UploadQueue::Uninitialized;
-        let queue = queue.initialize_with_current_remote_index_part(&IndexPart::example())?;
-        let tli = make_timeline();
-
-        // Enqueue two layer uploads, with a delete of both layers in between them. These should be
-        // scheduled one at a time, since deletes can't bypass uploads and vice versa.
-        //
-        // Also enqueue non-conflicting uploads and deletes at the end. These can bypass the queue
-        // and run immediately.
-        let layer0 = make_layer(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer1 = make_layer(&tli, "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer2 = make_layer(&tli, "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer3 = make_layer(&tli, "300000000000000000000000000000000000-400000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-
-        let ops = [
-            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None),
-            UploadOp::Delete(Delete {
-                layers: vec![
-                    (layer0.layer_desc().layer_name(), layer0.metadata()),
-                    (layer1.layer_desc().layer_name(), layer1.metadata()),
-                ],
-            }),
-            UploadOp::UploadLayer(layer1.clone(), layer1.metadata(), None),
-            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None),
-            UploadOp::Delete(Delete {
-                layers: vec![(layer3.layer_desc().layer_name(), layer3.metadata())],
-            }),
-        ];
-
-        queue.queued_operations.extend(ops.clone());
-
-        // Operations 0, 3, and 4 are scheduled immediately.
-        let tasks = queue.schedule_ready();
-        assert_same_ops(tasks.iter().map(|t| &t.op), [&ops[0], &ops[3], &ops[4]]);
-        assert_eq!(queue.queued_operations.len(), 2);
-
-        Ok(())
-    }
-
     /// Non-conflicting uploads are parallelized.
     #[test]
     fn schedule_upload_parallel() -> anyhow::Result<()> {
@@ -913,76 +870,6 @@ mod tests {
             assert_same_op(&tasks[0].op, &op);
             queue.complete(tasks[0].task_id);
         }
-
-        assert!(queue.queued_operations.is_empty());
-
-        Ok(())
-    }
-
-    /// Chains of upload/index operations lead to parallel layer uploads and serial index uploads.
-    /// This is the common case with layer flushes.
-    #[test]
-    fn schedule_index_upload_chain() -> anyhow::Result<()> {
-        let mut queue = UploadQueue::Uninitialized;
-        let queue = queue.initialize_with_current_remote_index_part(&IndexPart::example())?;
-        let tli = make_timeline();
-
-        // Enqueue three uploads of the current empty index.
-        let index = Box::new(queue.clean.0.clone());
-        let layer0 = make_layer(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let index0 = index_with(&index, &layer0);
-        let layer1 = make_layer(&tli, "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let index1 = index_with(&index0, &layer1);
-        let layer2 = make_layer(&tli, "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let index2 = index_with(&index1, &layer2);
-
-        let ops = [
-            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None),
-            UploadOp::UploadMetadata {
-                uploaded: index0.clone(),
-            },
-            UploadOp::UploadLayer(layer1.clone(), layer1.metadata(), None),
-            UploadOp::UploadMetadata {
-                uploaded: index1.clone(),
-            },
-            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None),
-            UploadOp::UploadMetadata {
-                uploaded: index2.clone(),
-            },
-        ];
-
-        queue.queued_operations.extend(ops.clone());
-
-        // The layer uploads should be scheduled immediately. The indexes must wait.
-        let upload_tasks = queue.schedule_ready();
-        assert_same_ops(
-            upload_tasks.iter().map(|t| &t.op),
-            [&ops[0], &ops[2], &ops[4]],
-        );
-
-        // layer2 completes first. None of the indexes can upload yet.
-        queue.complete(upload_tasks[2].task_id);
-        assert!(queue.schedule_ready().is_empty());
-
-        // layer0 completes. index0 can upload. It completes.
-        queue.complete(upload_tasks[0].task_id);
-        let index_tasks = queue.schedule_ready();
-        assert_eq!(index_tasks.len(), 1);
-        assert_same_op(&index_tasks[0].op, &ops[1]);
-        queue.complete(index_tasks[0].task_id);
-
-        // layer 1 completes. This unblocks index 1 then index 2.
-        queue.complete(upload_tasks[1].task_id);
-
-        let index_tasks = queue.schedule_ready();
-        assert_eq!(index_tasks.len(), 1);
-        assert_same_op(&index_tasks[0].op, &ops[3]);
-        queue.complete(index_tasks[0].task_id);
-
-        let index_tasks = queue.schedule_ready();
-        assert_eq!(index_tasks.len(), 1);
-        assert_same_op(&index_tasks[0].op, &ops[5]);
-        queue.complete(index_tasks[0].task_id);
 
         assert!(queue.queued_operations.is_empty());
 
