@@ -312,13 +312,14 @@ async fn auth_quirks(
                 // the token has a required IP claim.
                 if let Some(expected_ip) = token.get("ip") {
                     // todo: don't panic here, obviously.
-                    let expected_ip: IpAddr = expected_ip
+                    let allowed_ips: Vec<IpPattern> = expected_ip
                         .as_str()
                         .expect("jwt should not have an invalid IP claim")
-                        .parse()
-                        .expect("jwt should not have an invalid IP claim");
+                        .split(',')
+                        .map(|s| s.parse().expect("jwt should not have an invalid IP claim"))
+                        .collect();
 
-                    if ctx.peer_addr() != expected_ip {
+                    if !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips) {
                         return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
                     }
                 }
