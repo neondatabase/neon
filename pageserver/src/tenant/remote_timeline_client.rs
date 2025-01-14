@@ -425,8 +425,16 @@ impl RemoteTimelineClient {
     /// an index file upload, i.e., it's not empty.
     /// The given `index_part` must be the one on the remote.
     pub fn init_upload_queue(&self, index_part: &IndexPart) -> anyhow::Result<()> {
+        // Set the maximum number of inprogress tasks to the remote storage concurrency. There's
+        // certainly no point in starting more upload tasks than this.
+        let inprogress_limit = self
+            .conf
+            .remote_storage_config
+            .as_ref()
+            .and_then(|r| r.concurrency_limit())
+            .unwrap_or(0);
         let mut upload_queue = self.upload_queue.lock().unwrap();
-        upload_queue.initialize_with_current_remote_index_part(index_part)?;
+        upload_queue.initialize_with_current_remote_index_part(index_part, inprogress_limit)?;
         self.update_remote_physical_size_gauge(Some(index_part));
         info!(
             "initialized upload queue from remote index with {} layer files",
@@ -441,8 +449,16 @@ impl RemoteTimelineClient {
         &self,
         local_metadata: &TimelineMetadata,
     ) -> anyhow::Result<()> {
+        // Set the maximum number of inprogress tasks to the remote storage concurrency. There's
+        // certainly no point in starting more upload tasks than this.
+        let inprogress_limit = self
+            .conf
+            .remote_storage_config
+            .as_ref()
+            .and_then(|r| r.concurrency_limit())
+            .unwrap_or(0);
         let mut upload_queue = self.upload_queue.lock().unwrap();
-        upload_queue.initialize_empty_remote(local_metadata)?;
+        upload_queue.initialize_empty_remote(local_metadata, inprogress_limit)?;
         self.update_remote_physical_size_gauge(None);
         info!("initialized upload queue as empty");
         Ok(())
@@ -458,9 +474,15 @@ impl RemoteTimelineClient {
         let deleted_at = index_part.deleted_at.ok_or(anyhow::anyhow!(
             "bug: it is responsibility of the caller to provide index part from MaybeDeletedIndexPart::Deleted"
         ))?;
+        let inprogress_limit = self
+            .conf
+            .remote_storage_config
+            .as_ref()
+            .and_then(|r| r.concurrency_limit())
+            .unwrap_or(0);
 
         let mut upload_queue = self.upload_queue.lock().unwrap();
-        upload_queue.initialize_with_current_remote_index_part(index_part)?;
+        upload_queue.initialize_with_current_remote_index_part(index_part, inprogress_limit)?;
         self.update_remote_physical_size_gauge(Some(index_part));
         self.stop_impl(&mut upload_queue);
 
@@ -2355,6 +2377,7 @@ impl RemoteTimelineClient {
                     // but for this use case it doesnt really makes sense to bring unsafe code only for this usage point.
                     // Deletion is not really perf sensitive so there shouldnt be any problems with cloning a fraction of it.
                     let upload_queue_for_deletion = UploadQueueInitialized {
+                        inprogress_limit: initialized.inprogress_limit,
                         task_counter: 0,
                         dirty: initialized.dirty.clone(),
                         clean: initialized.clean.clone(),
