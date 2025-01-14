@@ -74,32 +74,30 @@ impl StreamingWalReader {
             end_watch,
             buffer: vec![0; buffer_size],
             buffer_size,
-            start_changed_rx: Some(start_changed_rx),
         };
 
         // When a change notification is received while polling the internal
         // reader, stop polling the read future and service the change.
-        let stream = futures::stream::unfold(state, |mut state| async move {
-            let mut change_rx = state.start_changed_rx.take().unwrap();
+        let stream = futures::stream::unfold(
+            (state, start_changed_rx),
+            |(mut state, mut rx)| async move {
+                let wal_or_reset = tokio::select! {
+                    read_res = state.read() => { WalOrReset::Wal(read_res) },
+                    changed_res = rx.changed() => {
+                        assert!(changed_res.is_ok());
+                        let new_start_pos = rx.borrow_and_update();
+                        WalOrReset::Reset(*new_start_pos)
+                    }
+                };
 
-            let wal_or_reset = tokio::select! {
-                read_res = state.read() => { WalOrReset::Wal(read_res) },
-                changed_res = change_rx.changed() => {
-                    assert!(changed_res.is_ok());
-                    let new_start_pos = change_rx.borrow_and_update();
-                    WalOrReset::Reset(*new_start_pos)
+                if let WalOrReset::Reset(lsn) = wal_or_reset {
+                    state.wal_reader.start = lsn;
+                    state.wal_reader.reader = None;
                 }
-            };
 
-            state.start_changed_rx = Some(change_rx);
-
-            if let WalOrReset::Reset(lsn) = wal_or_reset {
-                state.wal_reader.start = lsn;
-                state.wal_reader.reader = None;
-            }
-
-            Some((wal_or_reset, state))
-        })
+                Some((wal_or_reset, (state, rx)))
+            },
+        )
         .boxed();
 
         Self {
@@ -143,7 +141,6 @@ struct WalReaderStreamState {
     end_watch: EndWatch,
     buffer: Vec<u8>,
     buffer_size: usize,
-    start_changed_rx: Option<tokio::sync::watch::Receiver<Lsn>>,
 }
 
 impl WalReaderStreamState {
