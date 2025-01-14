@@ -1000,15 +1000,10 @@ RUN wget https://github.com/kelvich/pg_tiktoken/archive/9118dd4549b7d8c0bbc98e04
 FROM rust-extensions-build AS pg-pgx-ulid-build
 ARG PG_VERSION
 
-# doesn't support v17 yet
-# https://github.com/pksunkara/pgx_ulid/pull/52
-RUN case "${PG_VERSION}" in "v17") \
-    echo "pgx_ulid does not support pg17 as of the latest version (0.1.5)" && exit 0;; \
-    esac && \
-    wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.5.tar.gz -O pgx_ulid.tar.gz && \
-    echo "9d1659a2da65af0133d5451c454de31b37364e3502087dadf579f790bc8bef17 pgx_ulid.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.2.0.tar.gz -O pgx_ulid.tar.gz && \
+    echo "cef6a9a2e5e7bd1a10a18989286586ee9e6c1c06005a4055cff190de41bf3e9f pgx_ulid.tar.gz" | sha256sum --check && \
     mkdir pgx_ulid-src && cd pgx_ulid-src && tar xzf ../pgx_ulid.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx       = "^0.11.2"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx       = "^0.12.7"/pgrx = { version = "=0.12.7", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/ulid.control
 
