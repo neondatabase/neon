@@ -12,9 +12,9 @@ use metrics::{
     pow2_buckets,
     proto::MetricFamily,
     register_histogram, register_histogram_vec, register_int_counter, register_int_counter_pair,
-    register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge, Gauge, GaugeVec,
-    Histogram, HistogramVec, IntCounter, IntCounterPair, IntCounterPairVec, IntCounterVec,
-    IntGauge, IntGaugeVec, DISK_FSYNC_SECONDS_BUCKETS,
+    register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge,
+    register_int_gauge_vec, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
+    IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, DISK_FSYNC_SECONDS_BUCKETS,
 };
 use once_cell::sync::Lazy;
 use postgres_ffi::XLogSegNo;
@@ -208,6 +208,14 @@ pub static WAL_RECEIVERS: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(
         "safekeeper_wal_receivers",
         "Number of currently connected WAL receivers (i.e. connected computes)"
+    )
+    .expect("Failed to register safekeeper_wal_receivers")
+});
+pub static WAL_READERS: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "safekeeper_wal_readers",
+        "Number of active WAL readers (may serve pageservers or other safekeepers)",
+        &["kind", "target"]
     )
     .expect("Failed to register safekeeper_wal_receivers")
 });
@@ -443,6 +451,7 @@ pub struct FullTimelineInfo {
     pub timeline_is_active: bool,
     pub num_computes: u32,
     pub last_removed_segno: XLogSegNo,
+    pub interpreted_wal_reader_tasks: usize,
 
     pub epoch_start_lsn: Lsn,
     pub mem_state: TimelineMemState,
@@ -472,6 +481,7 @@ pub struct TimelineCollector {
     disk_usage: GenericGaugeVec<AtomicU64>,
     acceptor_term: GenericGaugeVec<AtomicU64>,
     written_wal_bytes: GenericGaugeVec<AtomicU64>,
+    interpreted_wal_reader_tasks: GenericGaugeVec<AtomicU64>,
     written_wal_seconds: GaugeVec,
     flushed_wal_seconds: GaugeVec,
     collect_timeline_metrics: Gauge,
@@ -670,6 +680,16 @@ impl TimelineCollector {
         .unwrap();
         descs.extend(active_timelines_count.desc().into_iter().cloned());
 
+        let interpreted_wal_reader_tasks = GenericGaugeVec::new(
+            Opts::new(
+                "safekeeper_interpreted_wal_reader_tasks",
+                "Number of active interpreted wal reader tasks, grouped by timeline",
+            ),
+            &["tenant_id", "timeline_id"],
+        )
+        .unwrap();
+        descs.extend(interpreted_wal_reader_tasks.desc().into_iter().cloned());
+
         TimelineCollector {
             global_timelines,
             descs,
@@ -693,6 +713,7 @@ impl TimelineCollector {
             collect_timeline_metrics,
             timelines_count,
             active_timelines_count,
+            interpreted_wal_reader_tasks,
         }
     }
 }
@@ -721,6 +742,7 @@ impl Collector for TimelineCollector {
         self.disk_usage.reset();
         self.acceptor_term.reset();
         self.written_wal_bytes.reset();
+        self.interpreted_wal_reader_tasks.reset();
         self.written_wal_seconds.reset();
         self.flushed_wal_seconds.reset();
 
@@ -782,6 +804,9 @@ impl Collector for TimelineCollector {
             self.written_wal_bytes
                 .with_label_values(labels)
                 .set(tli.wal_storage.write_wal_bytes);
+            self.interpreted_wal_reader_tasks
+                .with_label_values(labels)
+                .set(tli.interpreted_wal_reader_tasks as u64);
             self.written_wal_seconds
                 .with_label_values(labels)
                 .set(tli.wal_storage.write_wal_seconds);
@@ -834,6 +859,7 @@ impl Collector for TimelineCollector {
         mfs.extend(self.disk_usage.collect());
         mfs.extend(self.acceptor_term.collect());
         mfs.extend(self.written_wal_bytes.collect());
+        mfs.extend(self.interpreted_wal_reader_tasks.collect());
         mfs.extend(self.written_wal_seconds.collect());
         mfs.extend(self.flushed_wal_seconds.collect());
 
