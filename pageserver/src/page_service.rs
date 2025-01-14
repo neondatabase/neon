@@ -594,7 +594,7 @@ enum BatchedFeMessage {
     #[cfg(feature = "testing")]
     Test {
         span: Span,
-        shard: timeline::handle::Handle<TenantManagerTypes>,
+        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         requests: Vec<BatchedTestRequest>,
     },
     RespondError {
@@ -896,7 +896,7 @@ impl PageServerHandler {
                         .await?;
                 BatchedFeMessage::Test {
                     span,
-                    shard,
+                    shard: shard.downgrade(),
                     requests: vec![BatchedTestRequest { req, timer }],
                 }
             }
@@ -979,9 +979,7 @@ impl PageServerHandler {
                     assert_eq!(accum_requests.len(), max_batch_size.get());
                     return false;
                 }
-                if (accum_shard.tenant_shard_id, accum_shard.timeline_id)
-                    != (this_shard.tenant_shard_id, this_shard.timeline_id)
-                {
+                if !Arc::ptr_eq(accum_shard.timeline(), this_shard.timeline()) {
                     trace!("stopping batching because timeline object mismatch");
                     // TODO: we _could_ batch & execute each shard seperately (and in parallel).
                     // But the current logic for keeping responses in order does not support that.
@@ -1138,7 +1136,7 @@ impl PageServerHandler {
                         let npages = requests.len();
                         trace!(npages, "handling getpage request");
                         let res = self
-                            .handle_test_request_batch(&shard, requests, ctx)
+                            .handle_test_request_batch(&*shard.upgrade()?, requests, ctx)
                             .instrument(span.clone())
                             .await;
                         assert_eq!(res.len(), npages);
