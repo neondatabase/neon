@@ -1826,7 +1826,7 @@ impl Timeline {
         self.cancel.cancel();
 
         // Ensure Prevent new page service requests from starting.
-        self.handles.shutdown().await;
+        self.handles.shutdown();
 
         // Transition the remote_client into a state where it's only useful for timeline deletion.
         // (The deletion use case is why we can't just hook up remote_client to Self::cancel).)

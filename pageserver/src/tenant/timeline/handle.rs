@@ -462,7 +462,7 @@ impl PerTimelineState {
     /// After this method returns, all subsequent [`Handle::upgrade`] will fail
     /// and they will not be holding the [`ArcTimeline`]'s gate open.
     #[instrument(level = "trace", skip_all)]
-    pub(super) async fn shutdown(&self) {
+    pub(super) fn shutdown(&self) {
         let handles = self
             .handles
             .lock()
@@ -475,7 +475,7 @@ impl PerTimelineState {
             trace!("already shut down");
             return;
         };
-        for state in handles.values().map(|h| &*h) {
+        for state in handles.values() {
             // Make further cache hits
             let mut lock_guard = state.lock().expect("poisoned");
             lock_guard.shutdown();
@@ -663,7 +663,7 @@ mod tests {
         assert!(Weak::ptr_eq(&handle.myself, &shard0.myself));
 
         // SHUTDOWN
-        shard0.per_timeline_state.shutdown().await; // keeping handle alive across shutdown
+        shard0.per_timeline_state.shutdown(); // keeping handle alive across shutdown
 
         assert_eq!(
             cache.map.len(),
@@ -754,7 +754,7 @@ mod tests {
         assert_eq!(cache.map.len(), 2);
 
         // delete timeline A
-        timeline_a.per_timeline_state.shutdown().await;
+        timeline_a.per_timeline_state.shutdown();
         mgr.shards.retain(|t| t.id != timeline_a.id);
         assert!(
             mgr.resolve(timeline_a.id, ShardSelector::Page(key))
@@ -882,7 +882,7 @@ mod tests {
         assert!(Weak::ptr_eq(&parent_handle.myself, &parent.myself));
 
         // invalidate the cache
-        parent.per_timeline_state.shutdown().await;
+        parent.per_timeline_state.shutdown();
 
         // the cache will now return the child, even though the parent handle still exists
         for i in 0..2 {
