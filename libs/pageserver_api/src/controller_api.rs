@@ -416,8 +416,6 @@ pub struct MetadataHealthListOutdatedResponse {
 }
 
 /// Publicly exposed safekeeper description
-///
-/// The `active` flag which we have in the DB is not included on purpose: it is deprecated.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SafekeeperDescribeResponse {
     pub id: NodeId,
@@ -430,6 +428,11 @@ pub struct SafekeeperDescribeResponse {
     pub port: i32,
     pub http_port: i32,
     pub availability_zone_id: String,
+    pub scheduling_policy: SkSchedulingPolicy,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeeperSchedulingPolicyRequest {
     pub scheduling_policy: SkSchedulingPolicy,
 }
 
