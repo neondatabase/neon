@@ -252,8 +252,8 @@ impl InterpretedWalReader {
     }
 
     /// Send interpreted WAL to one or more [`InterpretedWalSender`]s
-    /// Stops when an error is encountered or when [`InterpretedWalReaderHandle::cancel`]
-    /// is called.
+    /// Stops when an error is encountered or when the [`InterpretedWalReaderHandle`]
+    /// goes out of scope.
     async fn run_impl(mut self, start_pos: Lsn) -> Result<(), InterpretedWalReaderError> {
         let defer_state = self.state.clone();
         scopeguard::defer! {
