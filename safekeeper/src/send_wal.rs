@@ -80,13 +80,13 @@ impl WalSenders {
     }
 
     fn create_or_update_interpreted_reader<
-        FFilter: Fn(&Arc<InterpretedWalReaderHandle>) -> bool,
         FUp: FnOnce(&Arc<InterpretedWalReaderHandle>) -> anyhow::Result<()>,
         FNew: FnOnce() -> InterpretedWalReaderHandle,
     >(
         self: &Arc<WalSenders>,
         id: WalSenderId,
-        filter: FFilter,
+        start_pos: Lsn,
+        max_delta_for_fanout: Option<u64>,
         update: FUp,
         create: FNew,
     ) -> anyhow::Result<()> {
@@ -96,7 +96,20 @@ impl WalSenders {
         for slot in state.slots.iter().flatten() {
             if let WalSenderState::Interpreted(slot_state) = slot {
                 if let Some(ref interpreted_reader) = slot_state.interpreted_wal_reader {
-                    if filter(interpreted_reader) {
+                    let select = match (interpreted_reader.current_position(), max_delta_for_fanout)
+                    {
+                        (Some(pos), Some(max_delta)) => {
+                            let delta = pos.0.abs_diff(start_pos.0);
+                            delta <= max_delta
+                        }
+                        // Reader is not active
+                        (None, _) => false,
+                        // Gating fanout by max delta is disabled.
+                        // Attach to any active reader.
+                        (_, None) => true,
+                    };
+
+                    if select {
                         selected_interpreted_reader = Some(interpreted_reader.clone());
                         break;
                     }
@@ -534,24 +547,8 @@ impl SafekeeperPostgresHandler {
                     let ws_id = ws_guard.id();
                     ws_guard.walsenders().create_or_update_interpreted_reader(
                         ws_id,
-                        |reader| {
-                            match (reader.current_position(), self.conf.max_delta_for_fanout) {
-                                (Some(pos), Some(max_delta)) => {
-                                    let delta = if pos.0 >= start_pos.0 {
-                                        pos.0 - start_pos.0
-                                    } else {
-                                        start_pos.0 - pos.0
-                                    };
-
-                                    delta <= max_delta
-                                }
-                                // Reader is not active
-                                (None, _) => false,
-                                // Gating fanout by max delta is disabled.
-                                // Attach to any active reader.
-                                (_, None) => true,
-                            }
-                        },
+                        start_pos,
+                        self.conf.max_delta_for_fanout,
                         {
                             let tx = tx.clone();
                             |reader| {
