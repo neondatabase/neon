@@ -107,7 +107,6 @@
 
 use std::collections::hash_map;
 use std::collections::HashMap;
-use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
@@ -440,28 +439,13 @@ impl<T: Types> WeakHandle<T> {
     }
 }
 
-impl<T: Types> Deref for Handle<T> {
-    type Target = T::Timeline;
-
-    fn deref(&self) -> &Self::Target {
-        &self.timeline
-    }
-}
-
-impl<T: Types> Handle<T> {
-    pub(crate) fn downgrade(&self) -> WeakHandle<T> {
-        WeakHandle {
-            timeline: Arc::clone(&self.timeline),
-            inner: Arc::downgrade(&self.inner),
-        }
-    }
-}
-
 impl PerTimelineState {
-    /// Invalidate all handles to this timeline in all [`Cache`]s.
+    /// After this method returns, [`Cache::get`] will never again return a [`Handle`]
+    /// to the [`Types::Timeline`] that embeds this per-timeline state.
+    /// Even if [`TenantManager::resolve`] would still resolve to it.
     ///
-    /// After this method returns, all subsequent [`WeakHandle::upgrade`] will fail
-    /// and they will not be holding the [`ArcTimeline`]'s gate open.
+    /// Already-alive [`Handle`]s for will remain open, usable, and keeping the [`ArcTimeline`] alive.
+    /// That's ok because they're short-lived. See module-level comment for details.
     #[instrument(level = "trace", skip_all)]
     pub(super) fn shutdown(&self) {
         let handles = self
@@ -476,22 +460,32 @@ impl PerTimelineState {
             trace!("already shut down");
             return;
         };
-        for state in handles.values() {
-            // Make further cache hits
-            let mut lock_guard = state.lock().expect("poisoned");
-            lock_guard.shutdown();
+        for handle_inner_arc in handles.values() {
+            // Make hits fail.
+            let mut lock_guard = handle_inner_arc.lock().expect("poisoned");
+            match &mut *lock_guard {
+                HandleInner::KeepingTimelineGateOpen { .. } => *lock_guard = HandleInner::ShutDown,
+                HandleInner::ShutDown => {
+                    unreachable!("handles are only shut down once in their lifetime");
+                }
+            }
         }
         drop(handles);
     }
 }
 
-impl HandleInner {
-    pub(crate) fn shutdown(&mut self) {
-        match self {
-            HandleInner::KeepingTimelineGateOpen { .. } => *self = HandleInner::ShutDown,
-            HandleInner::ShutDown => {
-                unreachable!("handles are only shut down once in their lifetime");
-            }
+impl<T: Types> std::ops::Deref for Handle<T> {
+    type Target = T::Timeline;
+    fn deref(&self) -> &Self::Target {
+        &self.timeline
+    }
+}
+
+impl<T: Types> Handle<T> {
+    pub(crate) fn downgrade(&self) -> WeakHandle<T> {
+        WeakHandle {
+            timeline: Arc::clone(&self.timeline),
+            inner: Arc::downgrade(&self.inner),
         }
     }
 }
