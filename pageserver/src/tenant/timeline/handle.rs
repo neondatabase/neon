@@ -459,7 +459,7 @@ impl<T: Types> Handle<T> {
 impl PerTimelineState {
     /// Invalidate all handles to this timeline in all [`Cache`]s.
     ///
-    /// After this method returns, all subsequent [`Handle::upgrade`] will fail
+    /// After this method returns, all subsequent [`WeakHandle::upgrade`] will fail
     /// and they will not be holding the [`ArcTimeline`]'s gate open.
     #[instrument(level = "trace", skip_all)]
     pub(super) fn shutdown(&self) {
