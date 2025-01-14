@@ -30,6 +30,7 @@ use utils::failpoint_support;
 use utils::pageserver_feedback::PageserverFeedback;
 use utils::postgres_client::PostgresClientProtocol;
 
+use itertools::Itertools;
 use std::cmp::{max, min};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -49,6 +50,12 @@ const NEON_STATUS_UPDATE_TAG_BYTE: u8 = b'z';
 pub struct WalSenders {
     mutex: Mutex<WalSendersShared>,
     walreceivers: Arc<WalReceivers>,
+}
+
+pub struct WalSendersTimelineMetricValues {
+    pub ps_feedback_counter: u64,
+    pub last_ps_feedback: PageserverFeedback,
+    pub interpreted_wal_reader_tasks: usize,
 }
 
 impl WalSenders {
@@ -169,9 +176,25 @@ impl WalSenders {
     }
 
     /// Returns total counter of pageserver feedbacks received and last feedback.
-    pub fn get_ps_feedback_stats(self: &Arc<WalSenders>) -> (u64, PageserverFeedback) {
+    pub fn info_for_metrics(self: &Arc<WalSenders>) -> WalSendersTimelineMetricValues {
         let shared = self.mutex.lock();
-        (shared.ps_feedback_counter, shared.last_ps_feedback)
+
+        let interpreted_wal_reader_tasks = shared
+            .slots
+            .iter()
+            .filter_map(|ss| match ss {
+                Some(WalSenderState::Interpreted(int)) => int.interpreted_wal_reader.as_ref(),
+                Some(WalSenderState::Vanilla(_)) => None,
+                None => None,
+            })
+            .unique_by(|reader| Arc::as_ptr(reader))
+            .count();
+
+        WalSendersTimelineMetricValues {
+            ps_feedback_counter: shared.ps_feedback_counter,
+            last_ps_feedback: shared.last_ps_feedback,
+            interpreted_wal_reader_tasks,
+        }
     }
 
     /// Get aggregated hot standby feedback (we send it to compute).

@@ -26,6 +26,7 @@ hex.workspace = true
 humantime.workspace = true
 http.workspace = true
 hyper0.workspace = true
+itertools.workspace = true
 futures.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
