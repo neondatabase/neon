@@ -403,7 +403,7 @@ impl timeline::handle::ArcTimeline<TenantManagerTypes> for Arc<Timeline> {
         Timeline::shard_timeline_id(self)
     }
 
-    fn per_timeline_state(&self) -> &timeline::handle::PerTimelineState<TenantManagerTypes> {
+    fn per_timeline_state(&self) -> &timeline::handle::PerTimelineState {
         &self.handles
     }
 

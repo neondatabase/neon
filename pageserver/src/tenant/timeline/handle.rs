@@ -189,12 +189,12 @@ enum HandleInner {
 /// Embedded in each [`Types::Timeline`] as the anchor for the only long-lived strong ref to `HandleInner`.
 ///
 /// See module-level comment for details.
-pub struct PerTimelineState<T: Types> {
+pub struct PerTimelineState {
     // None = shutting down
-    handles: Mutex<Option<HashMap<CacheId, (T::Timeline, Arc<tokio::sync::Mutex<HandleInner>>)>>>,
+    handles: Mutex<Option<HashMap<CacheId, Arc<tokio::sync::Mutex<HandleInner>>>>>,
 }
 
-impl<T: Types> Default for PerTimelineState<T> {
+impl Default for PerTimelineState {
     fn default() -> Self {
         Self {
             handles: Mutex::new(Some(Default::default())),
@@ -218,7 +218,7 @@ pub(crate) trait ArcTimeline<T: Types>: Clone {
     fn gate(&self) -> &utils::sync::gate::Gate;
     fn shard_timeline_id(&self) -> ShardTimelineId;
     fn get_shard_identity(&self) -> &ShardIdentity;
-    fn per_timeline_state(&self) -> &PerTimelineState<T>;
+    fn per_timeline_state(&self) -> &PerTimelineState;
 }
 
 /// Errors returned by [`Cache::get`].
@@ -371,8 +371,8 @@ impl<T: Types> Cache<T> {
                         .expect("mutex poisoned");
                     match &mut *lock_guard {
                         Some(per_timeline_state) => {
-                            let replaced = per_timeline_state
-                                .insert(self.id, (timeline.clone(), Arc::clone(&handle_inner_arc)));
+                            let replaced =
+                                per_timeline_state.insert(self.id, Arc::clone(&handle_inner_arc));
                             assert!(replaced.is_none(), "some earlier code left a stale handle");
                             match self.map.entry(key) {
                                 hash_map::Entry::Occupied(_o) => {
@@ -456,7 +456,7 @@ impl HandleInner {
     }
 }
 
-impl<T: Types> PerTimelineState<T> {
+impl PerTimelineState {
     /// Invalidate all handles to this timeline in all [`Cache`]s.
     ///
     /// After this method returns, all subsequent [`Handle::upgrade`] will fail
@@ -475,7 +475,7 @@ impl<T: Types> PerTimelineState<T> {
             trace!("already shut down");
             return;
         };
-        for (_, state) in handles.values().map(|h| &*h) {
+        for state in handles.values().map(|h| &*h) {
             // Make further cache hits
             let mut lock_guard = state.lock().await;
             lock_guard.shutdown();
@@ -505,12 +505,7 @@ impl<T: Types> Drop for Cache<T> {
                 // There could have been a shutdown inbetween us upgrading the weak and locking the mutex.
                 continue;
             };
-            let (_removed_timeline, removed_handle_inner_arc) = removed;
-            // TODO (extend ArcTimeline trait): assert!(Arc::ptr_eq(&removed_timeline, &timeline));
-            assert!(Weak::ptr_eq(
-                &Arc::downgrade(&removed_handle_inner_arc),
-                &handle_inner_weak
-            ));
+            assert!(Weak::ptr_eq(&Arc::downgrade(&removed), &handle_inner_weak));
         }
     }
 }
@@ -547,7 +542,7 @@ mod tests {
         gate: utils::sync::gate::Gate,
         id: TimelineId,
         shard: ShardIdentity,
-        per_timeline_state: PerTimelineState<TestTypes>,
+        per_timeline_state: PerTimelineState,
         myself: Weak<StubTimeline>,
     }
 
@@ -573,7 +568,7 @@ mod tests {
             &self.shard
         }
 
-        fn per_timeline_state(&self) -> &PerTimelineState<TestTypes> {
+        fn per_timeline_state(&self) -> &PerTimelineState {
             &self.per_timeline_state
         }
     }
