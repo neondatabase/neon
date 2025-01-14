@@ -458,7 +458,9 @@ impl BrokerService for Broker {
         &self,
         request: Request<tonic::Streaming<SafekeeperTimelineInfo>>,
     ) -> Result<Response<()>, Status> {
-        let &RemoteAddr(remote_addr) = request.extensions().get()
+        let &RemoteAddr(remote_addr) = request
+            .extensions()
+            .get()
             .expect("RemoteAddr inserted by handler");
         let mut publisher = self.registry.register_publisher(remote_addr);
 
@@ -482,7 +484,9 @@ impl BrokerService for Broker {
         &self,
         request: Request<SubscribeSafekeeperInfoRequest>,
     ) -> Result<Response<Self::SubscribeSafekeeperInfoStream>, Status> {
-        let &RemoteAddr(remote_addr) = request.extensions().get()
+        let &RemoteAddr(remote_addr) = request
+            .extensions()
+            .get()
             .expect("RemoteAddr inserted by handler");
         let proto_key = request
             .into_inner()
@@ -534,7 +538,9 @@ impl BrokerService for Broker {
         &self,
         request: Request<SubscribeByFilterRequest>,
     ) -> std::result::Result<Response<Self::SubscribeByFilterStream>, Status> {
-        let &RemoteAddr(remote_addr) = request.extensions().get()
+        let &RemoteAddr(remote_addr) = request
+            .extensions()
+            .get()
             .expect("RemoteAddr inserted by handler");
         let proto_filter = request.into_inner();
         let ttid_filter = proto_filter.tenant_timeline_id.as_ref();
