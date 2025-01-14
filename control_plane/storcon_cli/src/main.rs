@@ -1,5 +1,5 @@
 use futures::StreamExt;
-use std::{str::FromStr, time::Duration};
+use std::{collections::HashMap, str::FromStr, time::Duration};
 
 use clap::{Parser, Subcommand};
 use pageserver_api::{
@@ -480,6 +480,7 @@ async fn main() -> anyhow::Result<()> {
             let mut table = comfy_table::Table::new();
             table.set_header([
                 "TenantId",
+                "Preferred AZ",
                 "ShardCount",
                 "StripeSize",
                 "Placement",
@@ -489,6 +490,11 @@ async fn main() -> anyhow::Result<()> {
                 let shard_zero = tenant.shards.into_iter().next().unwrap();
                 table.add_row([
                     format!("{}", tenant.tenant_id),
+                    shard_zero
+                        .preferred_az_id
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or("".to_string()),
                     format!("{}", shard_zero.tenant_shard_id.shard_count.literal()),
                     format!("{:?}", tenant.stripe_size),
                     format!("{:?}", tenant.policy),
@@ -615,6 +621,19 @@ async fn main() -> anyhow::Result<()> {
                     None,
                 )
                 .await?;
+
+            let nodes = storcon_client
+                .dispatch::<(), Vec<NodeDescribeResponse>>(
+                    Method::GET,
+                    "control/v1/node".to_string(),
+                    None,
+                )
+                .await?;
+            let nodes = nodes
+                .into_iter()
+                .map(|n| (n.id, n))
+                .collect::<HashMap<_, _>>();
+
             println!("Tenant {tenant_id}");
             let mut table = comfy_table::Table::new();
             table.add_row(["Policy", &format!("{:?}", policy)]);
@@ -623,7 +642,14 @@ async fn main() -> anyhow::Result<()> {
             println!("{table}");
             println!("Shards:");
             let mut table = comfy_table::Table::new();
-            table.set_header(["Shard", "Attached", "Secondary", "Last error", "status"]);
+            table.set_header([
+                "Shard",
+                "Attached",
+                "Attached AZ",
+                "Secondary",
+                "Last error",
+                "status",
+            ]);
             for shard in shards {
                 let secondary = shard
                     .node_secondary
@@ -646,11 +672,18 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let status = status_parts.join(",");
 
+                let attached_node = shard
+                    .node_attached
+                    .as_ref()
+                    .map(|id| nodes.get(id).expect("Shard references nonexistent node"));
+
                 table.add_row([
                     format!("{}", shard.tenant_shard_id),
-                    shard
-                        .node_attached
-                        .map(|n| format!("{}", n))
+                    attached_node
+                        .map(|n| format!("{} ({})", n.listen_http_addr, n.id))
+                        .unwrap_or(String::new()),
+                    attached_node
+                        .map(|n| n.availability_zone_id.clone())
                         .unwrap_or(String::new()),
                     secondary,
                     shard.last_error,
