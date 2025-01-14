@@ -84,7 +84,10 @@ impl StreamingWalReader {
                 let wal_or_reset = tokio::select! {
                     read_res = state.read() => { WalOrReset::Wal(read_res) },
                     changed_res = rx.changed() => {
-                        assert!(changed_res.is_ok());
+                        if changed_res.is_err() {
+                            return None;
+                        }
+
                         let new_start_pos = rx.borrow_and_update();
                         WalOrReset::Reset(*new_start_pos)
                     }
