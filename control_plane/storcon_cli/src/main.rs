@@ -1,12 +1,16 @@
 use futures::StreamExt;
-use std::{collections::HashMap, str::FromStr, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+    time::Duration,
+};
 
 use clap::{Parser, Subcommand};
 use pageserver_api::{
     controller_api::{
         AvailabilityZone, NodeAvailabilityWrapper, NodeDescribeResponse, NodeShardResponse,
-        SafekeeperDescribeResponse, ShardSchedulingPolicy, TenantCreateRequest,
-        TenantDescribeResponse, TenantPolicyRequest,
+        SafekeeperDescribeResponse, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
+        TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
     },
     models::{
         EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
@@ -152,6 +156,12 @@ enum Command {
     TenantWarmup {
         #[arg(long)]
         tenant_id: TenantId,
+    },
+    TenantSetPreferredAz {
+        #[arg(long)]
+        tenant_id: TenantId,
+        #[arg(long)]
+        preferred_az: String,
     },
     /// Uncleanly drop a tenant from the storage controller: this doesn't delete anything from pageservers. Appropriate
     /// if you e.g. used `tenant-warmup` by mistake on a tenant ID that doesn't really exist, or is in some other region.
@@ -691,6 +701,55 @@ async fn main() -> anyhow::Result<()> {
                 ]);
             }
             println!("{table}");
+        }
+        Command::TenantSetPreferredAz {
+            tenant_id,
+            preferred_az,
+        } => {
+            // First learn about the tenant's shards
+            let describe_response = storcon_client
+                .dispatch::<(), TenantDescribeResponse>(
+                    Method::GET,
+                    format!("control/v1/tenant/{tenant_id}"),
+                    None,
+                )
+                .await?;
+
+            // Learn about nodes to validate the AZ ID
+            let nodes = storcon_client
+                .dispatch::<(), Vec<NodeDescribeResponse>>(
+                    Method::GET,
+                    "control/v1/node".to_string(),
+                    None,
+                )
+                .await?;
+            let azs = nodes
+                .into_iter()
+                .map(|n| (n.availability_zone_id))
+                .collect::<HashSet<_>>();
+            if !azs.contains(&preferred_az) {
+                anyhow::bail!(
+                    "AZ {} not found on any node: known AZs are: {:?}",
+                    preferred_az,
+                    azs
+                );
+            }
+
+            // Construct a request that modifies all the tenant's shards
+            let req = ShardsPreferredAzsRequest {
+                preferred_az_ids: describe_response
+                    .shards
+                    .into_iter()
+                    .map(|s| (s.tenant_shard_id, AvailabilityZone(preferred_az.clone())))
+                    .collect(),
+            };
+            storcon_client
+                .dispatch::<ShardsPreferredAzsRequest, ()>(
+                    Method::PUT,
+                    "control/v1/preferred_azs".to_string(),
+                    Some(req),
+                )
+                .await?;
         }
         Command::TenantWarmup { tenant_id } => {
             let describe_response = storcon_client
