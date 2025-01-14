@@ -173,7 +173,6 @@ pub(crate) struct ShardTimelineId {
 pub(crate) struct Handle<T: Types> {
     timeline: Arc<T::Timeline>,
     inner: tokio::sync::OwnedMutexGuard<HandleInner>,
-    _dont_hold_across_await_points: std::marker::PhantomData<*const u8>,
 }
 pub(crate) struct WeakHandle<T: Types> {
     timeline: Arc<T::Timeline>,
@@ -401,7 +400,6 @@ impl<T: Types> Cache<T> {
                 Ok(Handle {
                     timeline,
                     inner: handle_locked,
-                    _dont_hold_across_await_points: Default::default(),
                 })
             }
             Err(e) => Err(GetError::TenantManager(e)),
@@ -423,7 +421,6 @@ impl<T: Types> WeakHandle<T> {
             HandleInner::KeepingTimelineGateOpen { .. } => Ok(Handle {
                 timeline: Arc::clone(&self.timeline),
                 inner: lock_guard,
-                _dont_hold_across_await_points: Default::default(),
             }),
             HandleInner::ShutDown => Err(HandleUpgradeError::ShutDown),
         }
@@ -442,9 +439,6 @@ impl<T: Types> Deref for Handle<T> {
 }
 
 impl<T: Types> Handle<T> {
-    pub(crate) fn timeline(&self) -> &T::Timeline {
-        &self.timeline
-    }
     pub(crate) fn downgrade(&self) -> WeakHandle<T> {
         WeakHandle {
             timeline: Arc::clone(&self.timeline),
