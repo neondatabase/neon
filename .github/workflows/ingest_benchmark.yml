@@ -76,6 +76,7 @@ jobs:
         compute_units: '[7, 7]' # we want to test large compute here to avoid compute-side bottleneck
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
         shard-split-project: true
+        admin-api-key: ${{ secrets.NEON_STAGING_ADMIN_API_KEY }} 
         shard-count: 8
         stripe-size: 512
 
