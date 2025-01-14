@@ -48,7 +48,7 @@ def test_slow_flush(neon_env_builder: NeonEnvBuilder, neon_binpath: Path, kind: 
         "assuming pageserver connection handle is in a state where TCP has backpressured pageserver=>client response flush() into userspace"
     )
 
-    if kind == "pageserver":
+    if kind == "pageserver-stop":
         log.info("try to shut down the pageserver cleanly")
         env.pageserver.stop()
     elif kind == "tenant-detach":
