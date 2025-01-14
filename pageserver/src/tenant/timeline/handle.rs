@@ -292,17 +292,10 @@ impl<T: Types> Cache<T> {
     ) -> RoutingResult<T> {
         loop {
             // terminates because when every iteration we remove an element from the map
-            let Some((first_key, first_handle)) = self.map.iter().next() else {
+            let Some((first_key, WeakHandle { timeline, inner })) = self.map.iter().next() else {
                 return RoutingResult::NeedConsultTenantManager;
             };
-            let Ok(first_handle) = first_handle.upgrade().await else {
-                // TODO: dedup with get_impl()
-                trace!("handle cache stale");
-                let first_key_owned = *first_key;
-                self.map.remove(&first_key_owned).unwrap();
-                continue;
-            };
-
+            let first_handle = timeline;
             let first_handle_shard_identity = first_handle.get_shard_identity();
             let make_shard_index = |shard_num: ShardNumber| ShardIndex {
                 shard_number: shard_num,
