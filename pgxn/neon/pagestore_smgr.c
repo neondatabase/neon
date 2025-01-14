@@ -405,6 +405,56 @@ compact_prefetch_buffers(void)
 	return false;
 }
 
+/*
+ * If there might be responses still in the TCP buffer, then
+ * we should try to use those, so as to reduce any TCP backpressure
+ * on the OS/PS side.
+ *
+ * This procedure handles that.
+ *
+ * Note that this is only valid as long as the only pipelined
+ * operations in the TCP buffer are getPage@Lsn requests.
+ */
+static void
+prefetch_pump_state(void)
+{
+	while (MyPState->ring_receive != MyPState->ring_flush)
+	{
+		NeonResponse   *response;
+		PrefetchRequest *slot;
+		MemoryContext	old;
+
+		slot = GetPrfSlot(MyPState->ring_receive);
+
+		old = MemoryContextSwitchTo(MyPState->errctx);
+		response = page_server->try_receive(slot->shard_no);
+		MemoryContextSwitchTo(old);
+
+		if (response == NULL)
+			break;
+
+		/* The slot should still be valid */
+		if (slot->status != PRFS_REQUESTED ||
+			slot->response != NULL ||
+			slot->my_ring_index != MyPState->ring_receive)
+			neon_shard_log(slot->shard_no, ERROR,
+						   "Incorrect prefetch slot state after receive: status=%d response=%p my=%lu receive=%lu",
+						   slot->status, slot->response,
+						   (long) slot->my_ring_index, (long) MyPState->ring_receive);
+
+		/* update prefetch state */
+		MyPState->n_responses_buffered += 1;
+		MyPState->n_requests_inflight -= 1;
+		MyPState->ring_receive += 1;
+		MyNeonCounters->getpage_prefetches_buffered =
+			MyPState->n_responses_buffered;
+
+		/* update slot state */
+		slot->status = PRFS_RECEIVED;
+		slot->response = response;
+	}
+}
+
 void
 readahead_buffer_resize(int newsize, void *extra)
 {
@@ -2808,6 +2858,8 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			   MyPState->ring_last <= ring_index);
 	}
 
+	prefetch_pump_state();
+
 	return false;
 }
 
@@ -2848,6 +2900,8 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 
 	Assert(ring_index < MyPState->ring_unused &&
 		   MyPState->ring_last <= ring_index);
+
+	prefetch_pump_state();
 
 	return false;
 }
@@ -2890,6 +2944,8 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 	 * properties of this smgr API call.
 	 */
 	neon_log(SmgrTrace, "writeback noop");
+
+	prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -3145,6 +3201,8 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1, NULL);
 	neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
 
+	prefetch_pump_state();
+
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
 	{
@@ -3281,6 +3339,8 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 	neon_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns,
 					  buffers, nblocks, read);
+
+	prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
@@ -3450,6 +3510,8 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 
 	lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
 
+	prefetch_pump_state();
+
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
 		#if PG_MAJORVERSION_NUM >= 17
@@ -3502,6 +3564,8 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 	neon_wallog_pagev(reln, forknum, blkno, nblocks, (const char **) buffers, false);
 
 	lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
+
+	prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -3791,6 +3855,8 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 	}
 
 	neon_log(SmgrTrace, "[NEON_SMGR] immedsync noop");
+
+	prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
