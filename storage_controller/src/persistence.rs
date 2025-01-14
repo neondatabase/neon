@@ -708,10 +708,11 @@ impl Persistence {
         Ok(())
     }
 
+    /// Note that passing None for a shard clears the preferred AZ (rather than leaving it unmodified)
     pub(crate) async fn set_tenant_shard_preferred_azs(
         &self,
-        preferred_azs: Vec<(TenantShardId, AvailabilityZone)>,
-    ) -> DatabaseResult<Vec<(TenantShardId, AvailabilityZone)>> {
+        preferred_azs: Vec<(TenantShardId, Option<AvailabilityZone>)>,
+    ) -> DatabaseResult<Vec<(TenantShardId, Option<AvailabilityZone>)>> {
         use crate::schema::tenant_shards::dsl::*;
 
         self.with_measured_conn(DatabaseOperation::SetPreferredAzs, move |conn| {
@@ -722,7 +723,7 @@ impl Persistence {
                     .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
                     .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
                     .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
-                    .set(preferred_az_id.eq(preferred_az.0.clone()))
+                    .set(preferred_az_id.eq(preferred_az.as_ref().map(|az| az.0.clone())))
                     .execute(conn)?;
 
                 if updated == 1 {

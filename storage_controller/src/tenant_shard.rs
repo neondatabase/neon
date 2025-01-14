@@ -1708,8 +1708,8 @@ impl TenantShard {
         self.intent.preferred_az_id.as_ref()
     }
 
-    pub(crate) fn set_preferred_az(&mut self, preferred_az_id: AvailabilityZone) {
-        self.intent.preferred_az_id = Some(preferred_az_id);
+    pub(crate) fn set_preferred_az(&mut self, preferred_az_id: Option<AvailabilityZone>) {
+        self.intent.preferred_az_id = preferred_az_id;
     }
 
     /// Returns all the nodes to which this tenant shard is attached according to the

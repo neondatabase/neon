@@ -161,7 +161,7 @@ enum Command {
         #[arg(long)]
         tenant_id: TenantId,
         #[arg(long)]
-        preferred_az: String,
+        preferred_az: Option<String>,
     },
     /// Uncleanly drop a tenant from the storage controller: this doesn't delete anything from pageservers. Appropriate
     /// if you e.g. used `tenant-warmup` by mistake on a tenant ID that doesn't really exist, or is in some other region.
@@ -723,16 +723,22 @@ async fn main() -> anyhow::Result<()> {
                     None,
                 )
                 .await?;
-            let azs = nodes
-                .into_iter()
-                .map(|n| (n.availability_zone_id))
-                .collect::<HashSet<_>>();
-            if !azs.contains(&preferred_az) {
-                anyhow::bail!(
-                    "AZ {} not found on any node: known AZs are: {:?}",
-                    preferred_az,
-                    azs
-                );
+
+            if let Some(preferred_az) = &preferred_az {
+                let azs = nodes
+                    .into_iter()
+                    .map(|n| (n.availability_zone_id))
+                    .collect::<HashSet<_>>();
+                if !azs.contains(preferred_az) {
+                    anyhow::bail!(
+                        "AZ {} not found on any node: known AZs are: {:?}",
+                        preferred_az,
+                        azs
+                    );
+                }
+            } else {
+                // Make it obvious to the user that since they've omitted an AZ, we're clearing it
+                eprintln!("Clearing preferred AZ for tenant {}", tenant_id);
             }
 
             // Construct a request that modifies all the tenant's shards
@@ -740,7 +746,12 @@ async fn main() -> anyhow::Result<()> {
                 preferred_az_ids: describe_response
                     .shards
                     .into_iter()
-                    .map(|s| (s.tenant_shard_id, AvailabilityZone(preferred_az.clone())))
+                    .map(|s| {
+                        (
+                            s.tenant_shard_id,
+                            preferred_az.clone().map(AvailabilityZone),
+                        )
+                    })
                     .collect(),
             };
             storcon_client

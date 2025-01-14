@@ -2517,7 +2517,7 @@ impl Service {
                     .map(|t| {
                         (
                             t.get_tenant_shard_id().expect("Corrupt shard in database"),
-                            load_in_az.clone(),
+                            Some(load_in_az.clone()),
                         )
                     })
                     .collect(),

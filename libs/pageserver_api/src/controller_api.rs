@@ -87,7 +87,7 @@ impl Display for AvailabilityZone {
 #[derive(Serialize, Deserialize)]
 pub struct ShardsPreferredAzsRequest {
     #[serde(flatten)]
-    pub preferred_az_ids: HashMap<TenantShardId, AvailabilityZone>,
+    pub preferred_az_ids: HashMap<TenantShardId, Option<AvailabilityZone>>,
 }
 
 #[derive(Serialize, Deserialize)]
