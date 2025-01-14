@@ -113,6 +113,19 @@ def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination)
     for tid in tenant_ids:
         env.create_tenant(tid, shard_count=shards_per_tenant)
 
+    # Tenant listing API should work
+    listed_tenants = env.storage_controller.tenant_list()
+    log.info(f"listed_tenants: {listed_tenants}")
+    assert set(t["tenant_id"] for t in listed_tenants) == set(str(t) for t in tenant_ids)
+    paged = env.storage_controller.tenant_list(limit=2, start_after=listed_tenants[0]["tenant_id"])
+    assert len(paged) == 2
+    assert paged[0] == listed_tenants[1]
+    assert paged[1] == listed_tenants[2]
+    paged = env.storage_controller.tenant_list(
+        limit=1000, start_after="ffffffffffffffffffffffffffffffff"
+    )
+    assert paged == []
+
     # Validate high level metrics
     assert (
         env.storage_controller.get_metric_value("storage_controller_tenant_shards")
@@ -1506,7 +1519,7 @@ class PageserverFailpoint(Failure):
 
 
 def build_node_to_tenants_map(env: NeonEnv) -> dict[int, list[TenantId]]:
-    tenants = env.storage_controller.tenant_list()
+    tenants = env.storage_controller.tenant_shard_dump()
 
     node_to_tenants: dict[int, list[TenantId]] = {}
     for t in tenants:
@@ -2631,7 +2644,7 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
     # Validate that the storcon attempts to forward the request, but stops.
     # when it realises it is still the current leader.
     with pytest.raises(StorageControllerApiException, match="Leader is stepped down instance"):
-        env.storage_controller.tenant_list()
+        env.storage_controller.tenant_shard_dump()
 
     # Validate that we can step down multiple times and the observed state
     # doesn't change.
@@ -2781,7 +2794,7 @@ def test_storage_controller_leadership_transfer(
         # Check that the stepped down instance forwards requests
         # to the new leader while it's still running.
         storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_1_port}")
-        env.storage_controller.tenant_list()
+        env.storage_controller.tenant_shard_dump()
         env.storage_controller.node_configure(env.pageservers[0].id, {"scheduling": "Pause"})
         status = env.storage_controller.node_status(env.pageservers[0].id)
         assert status["scheduling"] == "Pause"
