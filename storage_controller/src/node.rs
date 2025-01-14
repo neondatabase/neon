@@ -299,6 +299,7 @@ impl Node {
             id: self.id,
             availability: self.availability.clone().into(),
             scheduling: self.scheduling,
+            availability_zone_id: self.availability_zone_id.0.clone(),
             listen_http_addr: self.listen_http_addr.clone(),
             listen_http_port: self.listen_http_port,
             listen_pg_addr: self.listen_pg_addr.clone(),

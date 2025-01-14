@@ -43,6 +43,17 @@ impl RemoteStorageKind {
     }
 }
 
+impl RemoteStorageConfig {
+    /// Helper to fetch the configured concurrency limit.
+    pub fn concurrency_limit(&self) -> Option<usize> {
+        match &self.storage {
+            RemoteStorageKind::LocalFs { .. } => None,
+            RemoteStorageKind::AwsS3(c) => Some(c.concurrency_limit.into()),
+            RemoteStorageKind::AzureContainer(c) => Some(c.concurrency_limit.into()),
+        }
+    }
+}
+
 fn default_timeout() -> Duration {
     RemoteStorageConfig::DEFAULT_TIMEOUT
 }

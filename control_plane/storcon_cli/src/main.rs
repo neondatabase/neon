@@ -1,12 +1,16 @@
 use futures::StreamExt;
-use std::{str::FromStr, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+    time::Duration,
+};
 
 use clap::{Parser, Subcommand};
 use pageserver_api::{
     controller_api::{
         AvailabilityZone, NodeAvailabilityWrapper, NodeDescribeResponse, NodeShardResponse,
-        SafekeeperDescribeResponse, ShardSchedulingPolicy, TenantCreateRequest,
-        TenantDescribeResponse, TenantPolicyRequest,
+        SafekeeperDescribeResponse, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
+        TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
     },
     models::{
         EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
@@ -112,6 +116,13 @@ enum Command {
         #[arg(long)]
         node: NodeId,
     },
+    /// Migrate the secondary location for a tenant shard to a specific pageserver.
+    TenantShardMigrateSecondary {
+        #[arg(long)]
+        tenant_shard_id: TenantShardId,
+        #[arg(long)]
+        node: NodeId,
+    },
     /// Cancel any ongoing reconciliation for this shard
     TenantShardCancelReconcile {
         #[arg(long)]
@@ -145,6 +156,12 @@ enum Command {
     TenantWarmup {
         #[arg(long)]
         tenant_id: TenantId,
+    },
+    TenantSetPreferredAz {
+        #[arg(long)]
+        tenant_id: TenantId,
+        #[arg(long)]
+        preferred_az: Option<String>,
     },
     /// Uncleanly drop a tenant from the storage controller: this doesn't delete anything from pageservers. Appropriate
     /// if you e.g. used `tenant-warmup` by mistake on a tenant ID that doesn't really exist, or is in some other region.
@@ -395,11 +412,12 @@ async fn main() -> anyhow::Result<()> {
             resp.sort_by(|a, b| a.listen_http_addr.cmp(&b.listen_http_addr));
 
             let mut table = comfy_table::Table::new();
-            table.set_header(["Id", "Hostname", "Scheduling", "Availability"]);
+            table.set_header(["Id", "Hostname", "AZ", "Scheduling", "Availability"]);
             for node in resp {
                 table.add_row([
                     format!("{}", node.id),
                     node.listen_http_addr,
+                    node.availability_zone_id,
                     format!("{:?}", node.scheduling),
                     format!("{:?}", node.availability),
                 ]);
@@ -472,6 +490,7 @@ async fn main() -> anyhow::Result<()> {
             let mut table = comfy_table::Table::new();
             table.set_header([
                 "TenantId",
+                "Preferred AZ",
                 "ShardCount",
                 "StripeSize",
                 "Placement",
@@ -481,6 +500,11 @@ async fn main() -> anyhow::Result<()> {
                 let shard_zero = tenant.shards.into_iter().next().unwrap();
                 table.add_row([
                     format!("{}", tenant.tenant_id),
+                    shard_zero
+                        .preferred_az_id
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or("".to_string()),
                     format!("{}", shard_zero.tenant_shard_id.shard_count.literal()),
                     format!("{:?}", tenant.stripe_size),
                     format!("{:?}", tenant.policy),
@@ -540,15 +564,26 @@ async fn main() -> anyhow::Result<()> {
             tenant_shard_id,
             node,
         } => {
-            let req = TenantShardMigrateRequest {
-                tenant_shard_id,
-                node_id: node,
-            };
+            let req = TenantShardMigrateRequest { node_id: node };
 
             storcon_client
                 .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
                     Method::PUT,
                     format!("control/v1/tenant/{tenant_shard_id}/migrate"),
+                    Some(req),
+                )
+                .await?;
+        }
+        Command::TenantShardMigrateSecondary {
+            tenant_shard_id,
+            node,
+        } => {
+            let req = TenantShardMigrateRequest { node_id: node };
+
+            storcon_client
+                .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
+                    Method::PUT,
+                    format!("control/v1/tenant/{tenant_shard_id}/migrate_secondary"),
                     Some(req),
                 )
                 .await?;
@@ -596,6 +631,19 @@ async fn main() -> anyhow::Result<()> {
                     None,
                 )
                 .await?;
+
+            let nodes = storcon_client
+                .dispatch::<(), Vec<NodeDescribeResponse>>(
+                    Method::GET,
+                    "control/v1/node".to_string(),
+                    None,
+                )
+                .await?;
+            let nodes = nodes
+                .into_iter()
+                .map(|n| (n.id, n))
+                .collect::<HashMap<_, _>>();
+
             println!("Tenant {tenant_id}");
             let mut table = comfy_table::Table::new();
             table.add_row(["Policy", &format!("{:?}", policy)]);
@@ -604,7 +652,14 @@ async fn main() -> anyhow::Result<()> {
             println!("{table}");
             println!("Shards:");
             let mut table = comfy_table::Table::new();
-            table.set_header(["Shard", "Attached", "Secondary", "Last error", "status"]);
+            table.set_header([
+                "Shard",
+                "Attached",
+                "Attached AZ",
+                "Secondary",
+                "Last error",
+                "status",
+            ]);
             for shard in shards {
                 let secondary = shard
                     .node_secondary
@@ -627,11 +682,18 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let status = status_parts.join(",");
 
+                let attached_node = shard
+                    .node_attached
+                    .as_ref()
+                    .map(|id| nodes.get(id).expect("Shard references nonexistent node"));
+
                 table.add_row([
                     format!("{}", shard.tenant_shard_id),
-                    shard
-                        .node_attached
-                        .map(|n| format!("{}", n))
+                    attached_node
+                        .map(|n| format!("{} ({})", n.listen_http_addr, n.id))
+                        .unwrap_or(String::new()),
+                    attached_node
+                        .map(|n| n.availability_zone_id.clone())
                         .unwrap_or(String::new()),
                     secondary,
                     shard.last_error,
@@ -639,6 +701,66 @@ async fn main() -> anyhow::Result<()> {
                 ]);
             }
             println!("{table}");
+        }
+        Command::TenantSetPreferredAz {
+            tenant_id,
+            preferred_az,
+        } => {
+            // First learn about the tenant's shards
+            let describe_response = storcon_client
+                .dispatch::<(), TenantDescribeResponse>(
+                    Method::GET,
+                    format!("control/v1/tenant/{tenant_id}"),
+                    None,
+                )
+                .await?;
+
+            // Learn about nodes to validate the AZ ID
+            let nodes = storcon_client
+                .dispatch::<(), Vec<NodeDescribeResponse>>(
+                    Method::GET,
+                    "control/v1/node".to_string(),
+                    None,
+                )
+                .await?;
+
+            if let Some(preferred_az) = &preferred_az {
+                let azs = nodes
+                    .into_iter()
+                    .map(|n| (n.availability_zone_id))
+                    .collect::<HashSet<_>>();
+                if !azs.contains(preferred_az) {
+                    anyhow::bail!(
+                        "AZ {} not found on any node: known AZs are: {:?}",
+                        preferred_az,
+                        azs
+                    );
+                }
+            } else {
+                // Make it obvious to the user that since they've omitted an AZ, we're clearing it
+                eprintln!("Clearing preferred AZ for tenant {}", tenant_id);
+            }
+
+            // Construct a request that modifies all the tenant's shards
+            let req = ShardsPreferredAzsRequest {
+                preferred_az_ids: describe_response
+                    .shards
+                    .into_iter()
+                    .map(|s| {
+                        (
+                            s.tenant_shard_id,
+                            preferred_az.clone().map(AvailabilityZone),
+                        )
+                    })
+                    .collect(),
+            };
+            storcon_client
+                .dispatch::<ShardsPreferredAzsRequest, ()>(
+                    Method::PUT,
+                    "control/v1/preferred_azs".to_string(),
+                    Some(req),
+                )
+                .await?;
         }
         Command::TenantWarmup { tenant_id } => {
             let describe_response = storcon_client
@@ -915,10 +1037,7 @@ async fn main() -> anyhow::Result<()> {
                             .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
                                 Method::PUT,
                                 format!("control/v1/tenant/{}/migrate", mv.tenant_shard_id),
-                                Some(TenantShardMigrateRequest {
-                                    tenant_shard_id: mv.tenant_shard_id,
-                                    node_id: mv.to,
-                                }),
+                                Some(TenantShardMigrateRequest { node_id: mv.to }),
                             )
                             .await
                             .map_err(|e| (mv.tenant_shard_id, mv.from, mv.to, e))

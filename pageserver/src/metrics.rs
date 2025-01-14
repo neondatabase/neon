@@ -91,15 +91,6 @@ pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "pageserver_layers_visited_per_read_global",
-        "Number of layers visited to reconstruct one key",
-        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
-    )
-    .expect("failed to define a metric")
-});
-
 pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_layers_visited_per_vectored_read_global",
@@ -1238,6 +1229,16 @@ pub(crate) struct SmgrOpTimerInner {
     timings: SmgrOpTimerState,
 }
 
+/// The stages of request processing are represented by the enum variants.
+/// Used as part of [`SmgrOpTimerInner::timings`].
+///
+/// Request processing calls into the `SmgrOpTimer::observe_*` methods at the
+/// transition points.
+/// These methods bump relevant counters and then update [`SmgrOpTimerInner::timings`]
+/// to the next state.
+///
+/// Each request goes through every stage, in all configurations.
+///
 #[derive(Debug)]
 enum SmgrOpTimerState {
     Received {
@@ -1247,13 +1248,13 @@ enum SmgrOpTimerState {
         #[allow(dead_code)]
         received_at: Instant,
     },
-    ParsedRoutedNowThrottling {
+    Throttling {
         throttle_started_at: Instant,
     },
-    ParsedRoutedThrottledNowBatching {
+    Batching {
         throttle_done_at: Instant,
     },
-    BatchedNowExecuting {
+    Executing {
         execution_started_at: Instant,
     },
     Flushing,
@@ -1262,6 +1263,7 @@ enum SmgrOpTimerState {
 
 // NB: when adding observation points, remember to update the Drop impl.
 impl SmgrOpTimer {
+    /// See [`SmgrOpTimerState`] for more context.
     pub(crate) fn observe_throttle_start(&mut self, at: Instant) {
         let Some(inner) = self.0.as_mut() else {
             return;
@@ -1270,24 +1272,26 @@ impl SmgrOpTimer {
             return;
         };
         inner.throttling.count_accounted_start.inc();
-        inner.timings = SmgrOpTimerState::ParsedRoutedNowThrottling {
+        inner.timings = SmgrOpTimerState::Throttling {
             throttle_started_at: at,
         };
     }
+
+    /// See [`SmgrOpTimerState`] for more context.
     pub(crate) fn observe_throttle_done(&mut self, throttle: ThrottleResult) {
         let Some(inner) = self.0.as_mut() else {
             return;
         };
-        let SmgrOpTimerState::ParsedRoutedNowThrottling {
+        let SmgrOpTimerState::Throttling {
             throttle_started_at,
-        } = &mut inner.timings
+        } = &inner.timings
         else {
             return;
         };
         inner.throttling.count_accounted_finish.inc();
         match throttle {
             ThrottleResult::NotThrottled { end } => {
-                inner.timings = SmgrOpTimerState::ParsedRoutedThrottledNowBatching {
+                inner.timings = SmgrOpTimerState::Batching {
                     throttle_done_at: end,
                 };
             }
@@ -1299,20 +1303,19 @@ impl SmgrOpTimer {
                     .wait_time
                     .inc_by((end - *throttle_started_at).as_micros().try_into().unwrap());
                 // state transition
-                inner.timings = SmgrOpTimerState::ParsedRoutedThrottledNowBatching {
+                inner.timings = SmgrOpTimerState::Batching {
                     throttle_done_at: end,
                 };
             }
         }
     }
 
+    /// See [`SmgrOpTimerState`] for more context.
     pub(crate) fn observe_execution_start(&mut self, at: Instant) {
         let Some(inner) = self.0.as_mut() else {
             return;
         };
-        let SmgrOpTimerState::ParsedRoutedThrottledNowBatching { throttle_done_at } =
-            &mut inner.timings
-        else {
+        let SmgrOpTimerState::Batching { throttle_done_at } = &inner.timings else {
             return;
         };
         // update metrics
@@ -1322,13 +1325,15 @@ impl SmgrOpTimer {
             .per_timeline_batch_wait_time
             .observe(batch.as_secs_f64());
         // state transition
-        inner.timings = SmgrOpTimerState::BatchedNowExecuting {
+        inner.timings = SmgrOpTimerState::Executing {
             execution_started_at: at,
         }
     }
 
     /// For all but the first caller, this is a no-op.
     /// The first callers receives Some, subsequent ones None.
+    ///
+    /// See [`SmgrOpTimerState`] for more context.
     pub(crate) fn observe_execution_end_flush_start(
         &mut self,
         at: Instant,
@@ -1338,9 +1343,9 @@ impl SmgrOpTimer {
         let Some(mut inner) = self.0.take() else {
             return None;
         };
-        let SmgrOpTimerState::BatchedNowExecuting {
+        let SmgrOpTimerState::Executing {
             execution_started_at,
-        } = &mut inner.timings
+        } = &inner.timings
         else {
             return None;
         };
@@ -1373,6 +1378,14 @@ impl SmgrOpTimer {
     }
 }
 
+/// The last stage of request processing is serializing and flushing the request
+/// into the TCP connection. We want to make slow flushes observable
+/// _while they are occuring_, so this struct provides a wrapper method [`Self::measure`]
+/// to periodically bump the metric.
+///
+/// If in the future we decide that we're not interested in live updates, we can
+/// add another `observe_*` method to [`SmgrOpTimer`], follow the existing pattern there,
+/// and remove this struct from the code base.
 pub(crate) struct SmgrOpFlushInProgress {
     flush_started_at: Instant,
     global_micros: IntCounter,
@@ -1450,6 +1463,8 @@ pub enum SmgrQueryType {
     GetPageAtLsn,
     GetDbSize,
     GetSlruSegment,
+    #[cfg(feature = "testing")]
+    Test,
 }
 
 pub(crate) struct SmgrQueryTimePerTimeline {
@@ -3863,7 +3878,6 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
 
     // histograms
     [
-        &READ_NUM_LAYERS_VISITED,
         &VEC_READ_NUM_LAYERS_VISITED,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,

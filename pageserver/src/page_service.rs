@@ -554,6 +554,12 @@ struct BatchedGetPageRequest {
     timer: SmgrOpTimer,
 }
 
+#[cfg(feature = "testing")]
+struct BatchedTestRequest {
+    req: models::PagestreamTestRequest,
+    timer: SmgrOpTimer,
+}
+
 enum BatchedFeMessage {
     Exists {
         span: Span,
@@ -585,6 +591,12 @@ enum BatchedFeMessage {
         shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         req: models::PagestreamGetSlruSegmentRequest,
     },
+    #[cfg(feature = "testing")]
+    Test {
+        span: Span,
+        shard: timeline::handle::Handle<TenantManagerTypes>,
+        requests: Vec<BatchedTestRequest>,
+    },
     RespondError {
         span: Span,
         error: BatchedPageStreamError,
@@ -603,6 +615,12 @@ impl BatchedFeMessage {
             BatchedFeMessage::GetPage { pages, .. } => {
                 for page in pages {
                     page.timer.observe_execution_start(at);
+                }
+            }
+            #[cfg(feature = "testing")]
+            BatchedFeMessage::Test { requests, .. } => {
+                for req in requests {
+                    req.timer.observe_execution_start(at);
                 }
             }
             BatchedFeMessage::RespondError { .. } => {}
@@ -866,6 +884,22 @@ impl PageServerHandler {
                     pages: smallvec::smallvec![BatchedGetPageRequest { req, timer }],
                 }
             }
+            #[cfg(feature = "testing")]
+            PagestreamFeMessage::Test(req) => {
+                let span = tracing::info_span!(parent: parent_span, "handle_test_request");
+                let shard = timeline_handles
+                    .get(tenant_id, timeline_id, ShardSelector::Zero)
+                    .instrument(span.clone()) // sets `shard_id` field
+                    .await?;
+                let timer =
+                    record_op_start_and_throttle(&shard, metrics::SmgrQueryType::Test, received_at)
+                        .await?;
+                BatchedFeMessage::Test {
+                    span,
+                    shard,
+                    requests: vec![BatchedTestRequest { req, timer }],
+                }
+            }
         };
         Ok(Some(batched_msg))
     }
@@ -924,6 +958,46 @@ impl PageServerHandler {
             {
                 // ok to batch
                 accum_pages.extend(this_pages);
+                Ok(())
+            }
+            #[cfg(feature = "testing")]
+            (
+                Ok(BatchedFeMessage::Test {
+                    shard: accum_shard,
+                    requests: accum_requests,
+                    ..
+                }),
+                BatchedFeMessage::Test {
+                    shard: this_shard,
+                    requests: this_requests,
+                    ..
+                },
+            ) if (|| {
+                assert!(this_requests.len() == 1);
+                if accum_requests.len() >= max_batch_size.get() {
+                    trace!(%max_batch_size, "stopping batching because of batch size");
+                    assert_eq!(accum_requests.len(), max_batch_size.get());
+                    return false;
+                }
+                if (accum_shard.tenant_shard_id, accum_shard.timeline_id)
+                    != (this_shard.tenant_shard_id, this_shard.timeline_id)
+                {
+                    trace!("stopping batching because timeline object mismatch");
+                    // TODO: we _could_ batch & execute each shard seperately (and in parallel).
+                    // But the current logic for keeping responses in order does not support that.
+                    return false;
+                }
+                let this_batch_key = this_requests[0].req.batch_key;
+                let accum_batch_key = accum_requests[0].req.batch_key;
+                if this_requests[0].req.batch_key != accum_requests[0].req.batch_key {
+                    trace!(%accum_batch_key, %this_batch_key, "stopping batching because batch key changed");
+                    return false;
+                }
+                true
+            })() =>
+            {
+                // ok to batch
+                accum_requests.extend(this_requests);
                 Ok(())
             }
             // something batched already but this message is unbatchable
@@ -1049,6 +1123,27 @@ impl PageServerHandler {
                         .await
                         .map(|msg| (msg, timer))
                         .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
+                    span,
+                )
+            }
+            #[cfg(feature = "testing")]
+            BatchedFeMessage::Test {
+                span,
+                shard,
+                requests,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::test");
+                (
+                    {
+                        let npages = requests.len();
+                        trace!(npages, "handling getpage request");
+                        let res = self
+                            .handle_test_request_batch(&shard, requests, ctx)
+                            .instrument(span.clone())
+                            .await;
+                        assert_eq!(res.len(), npages);
+                        res
+                    },
                     span,
                 )
             }
@@ -1773,6 +1868,51 @@ impl PageServerHandler {
         Ok(PagestreamBeMessage::GetSlruSegment(
             PagestreamGetSlruSegmentResponse { req: *req, segment },
         ))
+    }
+
+    // NB: this impl mimics what we do for batched getpage requests.
+    #[cfg(feature = "testing")]
+    #[instrument(skip_all, fields(shard_id))]
+    async fn handle_test_request_batch(
+        &mut self,
+        timeline: &Timeline,
+        requests: Vec<BatchedTestRequest>,
+        _ctx: &RequestContext,
+    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
+        // real requests would do something with the timeline
+        let mut results = Vec::with_capacity(requests.len());
+        for _req in requests.iter() {
+            tokio::task::yield_now().await;
+
+            results.push({
+                if timeline.cancel.is_cancelled() {
+                    Err(PageReconstructError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            });
+        }
+
+        // TODO: avoid creating the new Vec here
+        Vec::from_iter(
+            requests
+                .into_iter()
+                .zip(results.into_iter())
+                .map(|(req, res)| {
+                    res.map(|()| {
+                        (
+                            PagestreamBeMessage::Test(models::PagestreamTestResponse {
+                                req: req.req.clone(),
+                            }),
+                            req.timer,
+                        )
+                    })
+                    .map_err(|e| BatchedPageStreamError {
+                        err: PageStreamError::from(e),
+                        req: req.req.hdr,
+                    })
+                }),
+        )
     }
 
     /// Note on "fullbackup":
