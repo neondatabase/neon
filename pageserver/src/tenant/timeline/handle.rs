@@ -169,8 +169,14 @@ pub(crate) struct ShardTimelineId {
 }
 
 /// See module-level comment.
-pub(crate) struct Handle<T: Types>(T::Timeline, tokio::sync::OwnedMutexGuard<HandleInner>);
-pub(crate) struct WeakHandle<T: Types>(T::Timeline, Arc<tokio::sync::Mutex<HandleInner>>);
+pub(crate) struct Handle<T: Types> {
+    timeline: T::Timeline,
+    inner: tokio::sync::OwnedMutexGuard<HandleInner>,
+}
+pub(crate) struct WeakHandle<T: Types> {
+    timeline: T::Timeline,
+    inner: Arc<tokio::sync::Mutex<HandleInner>>,
+}
 enum HandleInner {
     KeepingTimelineGateOpen {
         #[allow(dead_code)]
@@ -376,10 +382,10 @@ impl<T: Types> Cache<T> {
                                     unreachable!()
                                 }
                                 hash_map::Entry::Vacant(v) => {
-                                    v.insert(WeakHandle(
-                                        timeline.clone(),
-                                        Arc::clone(&handle_inner_arc),
-                                    ));
+                                    v.insert(WeakHandle {
+                                        timeline: timeline.clone(),
+                                        inner: Arc::clone(&handle_inner_arc),
+                                    });
                                 }
                             }
                         }
@@ -388,7 +394,10 @@ impl<T: Types> Cache<T> {
                         }
                     }
                 }
-                Ok(Handle(timeline.clone(), handle_locked))
+                Ok(Handle {
+                    timeline: timeline.clone(),
+                    inner: handle_locked,
+                })
             }
             Err(e) => Err(GetError::TenantManager(e)),
         }
@@ -401,14 +410,17 @@ pub(crate) enum HandleUpgradeError {
 
 impl<T: Types> WeakHandle<T> {
     pub(crate) async fn upgrade(&self) -> Result<Handle<T>, HandleUpgradeError> {
-        let lock_guard = self.1.clone().lock_owned().await;
+        let lock_guard = self.inner.clone().lock_owned().await;
         match &*lock_guard {
-            HandleInner::KeepingTimelineGateOpen { .. } => Ok(Handle(self.0.clone(), lock_guard)),
+            HandleInner::KeepingTimelineGateOpen { .. } => Ok(Handle {
+                timeline: self.timeline.clone(),
+                inner: lock_guard,
+            }),
             HandleInner::ShutDown => Err(HandleUpgradeError::ShutDown),
         }
     }
     pub(crate) fn timeline(&self) -> &T::Timeline {
-        &self.0
+        &self.timeline
     }
 }
 
@@ -416,13 +428,16 @@ impl<T: Types> Deref for Handle<T> {
     type Target = T::Timeline;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.timeline
     }
 }
 
 impl<T: Types> Handle<T> {
     pub(crate) fn downgrade(&self) -> WeakHandle<T> {
-        WeakHandle(self.0.clone(), Arc::clone(OwnedMutexGuard::mutex(&self.1)))
+        WeakHandle {
+            timeline: self.timeline.clone(),
+            inner: Arc::clone(OwnedMutexGuard::mutex(&self.inner)),
+        }
     }
 }
 
@@ -468,7 +483,14 @@ impl<T: Types> PerTimelineState<T> {
 // When dropping a [`Cache`], prune its handles in the [`PerTimelineState`] to break the reference cycle.
 impl<T: Types> Drop for Cache<T> {
     fn drop(&mut self) {
-        for (_, WeakHandle(timeline, handle_inner_arc)) in self.map.drain() {
+        for (
+            _,
+            WeakHandle {
+                timeline,
+                inner: handle_inner_arc,
+            },
+        ) in self.map.drain()
+        {
             // handle is still being kept alive in PerTimelineState
             let per_timeline_state = timeline.per_timeline_state();
             let mut handles = per_timeline_state.handles.lock().expect("mutex poisoned");
@@ -609,7 +631,7 @@ mod tests {
             .get(timeline_id, ShardSelector::Page(key), &mgr)
             .await
             .expect("we have the timeline");
-        let handle_inner_weak = Arc::downgrade(&handle.0);
+        let handle_inner_weak = Arc::downgrade(&handle.timeline);
         assert!(Weak::ptr_eq(&handle.myself, &shard0.myself));
         // assert_eq!(
         //     (
@@ -964,7 +986,7 @@ mod tests {
                 handle
             };
             handle.getpage();
-            used_handles.push(Arc::downgrade(&handle.0));
+            used_handles.push(Arc::downgrade(&handle.timeline));
         }
 
         // No handles exist, thus gates are closed and don't require shutdown
