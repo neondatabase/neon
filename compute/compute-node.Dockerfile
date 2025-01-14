@@ -1391,7 +1391,6 @@ RUN make PG_VERSION="${PG_VERSION}" -C compute
 
 FROM neon-pg-ext-build AS neon-pg-ext-test
 ARG PG_VERSION
-RUN apt-get update && apt-get install -y curl jq
 RUN mkdir /ext-src
 
 #COPY --from=postgis-build /postgis.tar.gz /ext-src/
