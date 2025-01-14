@@ -167,7 +167,12 @@ impl UploadQueueInitialized {
                 // If other operations are interleaved between index uploads we don't try to
                 // coalesce them, since we may as well update the index concurrently with them.
                 // This keeps the index fresh and avoids starvation.
-                let mut replaced_ops = Vec::new();
+                //
+                // NB: we assume that all uploaded indexes have the same remote path. This
+                // is true at the time of writing: the path only depends on the tenant,
+                // timeline and generation, all of which are static for a timeline instance.
+                // Otherwise, we must be careful not to coalesce different paths.
+                let mut coalesced_ops = Vec::new();
                 if matches!(op, UploadOp::UploadMetadata { .. }) {
                     while let Some(UploadOp::UploadMetadata { .. }) = self.queued_operations.get(i)
                     {
@@ -177,12 +182,12 @@ impl UploadQueueInitialized {
                         if !self.is_ready(i) {
                             break;
                         }
-                        replaced_ops.push(op);
+                        coalesced_ops.push(op);
                         op = self.queued_operations.remove(i).expect("i can't disappear");
                     }
                 }
 
-                return Some((op, replaced_ops));
+                return Some((op, coalesced_ops));
             }
 
             // Nothing can bypass a barrier or shutdown. If it wasn't scheduled above, give up.
