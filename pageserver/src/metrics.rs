@@ -1472,6 +1472,8 @@ pub enum SmgrQueryType {
     GetPageAtLsn,
     GetDbSize,
     GetSlruSegment,
+    #[cfg(feature = "testing")]
+    Test,
 }
 
 pub(crate) struct SmgrQueryTimePerTimeline {
