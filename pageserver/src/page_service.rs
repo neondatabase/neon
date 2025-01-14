@@ -907,9 +907,7 @@ impl PageServerHandler {
                     assert_eq!(accum_pages.len(), max_batch_size.get());
                     return false;
                 }
-                if (accum_shard.tenant_shard_id, accum_shard.timeline_id)
-                    != (this_shard.tenant_shard_id, this_shard.timeline_id)
-                {
+                if !Arc::ptr_eq(accum_shard.timeline(), this_shard.timeline()) {
                     trace!(%accum_lsn, %this_lsn, "stopping batching because timeline object mismatch");
                     // TODO: we _could_ batch & execute each shard seperately (and in parallel).
                     // But the current logic for keeping responses in order does not support that.
