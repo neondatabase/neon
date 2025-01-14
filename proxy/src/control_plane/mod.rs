@@ -54,6 +54,7 @@ pub(crate) struct AuthInfo {
     pub(crate) allowed_ips: Vec<IpPattern>,
     /// Project ID. This is used for cache invalidation.
     pub(crate) project_id: Option<ProjectIdInt>,
+    pub(crate) auth_rules: Vec<AuthRule>,
 }
 
 /// Info for establishing a connection to a compute node.

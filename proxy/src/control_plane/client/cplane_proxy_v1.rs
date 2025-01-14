@@ -153,9 +153,22 @@ impl NeonControlPlaneClient {
                 .proxy
                 .allowed_ips_number
                 .observe(allowed_ips.len() as f64);
+
+            let auth_rules = body
+                .jwks
+                .into_iter()
+                .map(|jwks| AuthRule {
+                    id: jwks.id,
+                    jwks_url: jwks.jwks_url,
+                    audience: jwks.jwt_audience,
+                    role_names: jwks.role_names,
+                })
+                .collect();
+
             Ok(AuthInfo {
                 secret,
                 allowed_ips,
+                auth_rules,
                 project_id: body.project_id,
             })
         }
