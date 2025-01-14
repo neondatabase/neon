@@ -967,14 +967,7 @@ impl PageServerHandler {
                 fail::fail_point!("ps::handle-pagerequest-message::exists");
                 (
                     vec![self
-                        .handle_get_rel_exists_request(
-                            &*shard
-                                .upgrade()
-                                // TODO: need sensitive to cancel()
-                                .await?,
-                            &req,
-                            ctx,
-                        )
+                        .handle_get_rel_exists_request(&*shard.upgrade()?, &req, ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -991,7 +984,7 @@ impl PageServerHandler {
                 fail::fail_point!("ps::handle-pagerequest-message::nblocks");
                 (
                     vec![self
-                        .handle_get_nblocks_request(&*shard.upgrade().await?, &req, ctx)
+                        .handle_get_nblocks_request(&*shard.upgrade()?, &req, ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -1012,7 +1005,7 @@ impl PageServerHandler {
                         trace!(npages, "handling getpage request");
                         let res = self
                             .handle_get_page_at_lsn_request_batched(
-                                &*shard.upgrade().await?,
+                                &*shard.upgrade()?,
                                 effective_request_lsn,
                                 pages,
                                 ctx,
@@ -1034,7 +1027,7 @@ impl PageServerHandler {
                 fail::fail_point!("ps::handle-pagerequest-message::dbsize");
                 (
                     vec![self
-                        .handle_db_size_request(&*shard.upgrade().await?, &req, ctx)
+                        .handle_db_size_request(&*shard.upgrade()?, &req, ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -1051,7 +1044,7 @@ impl PageServerHandler {
                 fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
                 (
                     vec![self
-                        .handle_get_slru_segment_request(&*shard.upgrade().await?, &req, ctx)
+                        .handle_get_slru_segment_request(&*shard.upgrade()?, &req, ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))

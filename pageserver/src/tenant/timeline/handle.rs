@@ -264,11 +264,11 @@ impl<T: Types> Cache<T> {
         tenant_manager: &T::TenantManager,
     ) -> Result<Handle<T>, GetError<T>> {
         let miss: ShardSelector = {
-            let routing_state = self.shard_routing(timeline_id, shard_selector).await;
+            let routing_state = self.shard_routing(timeline_id, shard_selector);
             match routing_state {
                 RoutingResult::FastPath(handle) => return Ok(handle),
                 RoutingResult::SlowPath(key) => match self.map.get(&key) {
-                    Some(cached) => match cached.upgrade().await {
+                    Some(cached) => match cached.upgrade() {
                         Ok(upgraded) => return Ok(upgraded),
                         Err(HandleUpgradeError::ShutDown) => {
                             // TODO: dedup with shard_routing()
@@ -286,7 +286,7 @@ impl<T: Types> Cache<T> {
     }
 
     #[inline(always)]
-    async fn shard_routing(
+    fn shard_routing(
         &mut self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
@@ -296,7 +296,7 @@ impl<T: Types> Cache<T> {
             let Some((first_key, first_handle)) = self.map.iter().next() else {
                 return RoutingResult::NeedConsultTenantManager;
             };
-            let Ok(first_handle) = first_handle.upgrade().await else {
+            let Ok(first_handle) = first_handle.upgrade() else {
                 // TODO: dedup with get_impl()
                 trace!("handle cache stale");
                 let first_key_owned = *first_key;
@@ -416,7 +416,7 @@ pub(crate) enum HandleUpgradeError {
 }
 
 impl<T: Types> WeakHandle<T> {
-    pub(crate) async fn upgrade(&self) -> Result<Handle<T>, HandleUpgradeError> {
+    pub(crate) fn upgrade(&self) -> Result<Handle<T>, HandleUpgradeError> {
         let Some(inner) = Weak::upgrade(&self.inner) else {
             return Err(HandleUpgradeError::ShutDown);
         };
