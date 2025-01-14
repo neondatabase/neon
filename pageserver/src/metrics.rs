@@ -1293,7 +1293,7 @@ impl SmgrOpTimer {
         };
         let SmgrOpTimerState::Throttling {
             throttle_started_at,
-        } = &mut inner.timings
+        } = &inner.timings
         else {
             return;
         };
@@ -1324,7 +1324,7 @@ impl SmgrOpTimer {
         let Some(inner) = self.0.as_mut() else {
             return;
         };
-        let SmgrOpTimerState::Batching { throttle_done_at } = &mut inner.timings else {
+        let SmgrOpTimerState::Batching { throttle_done_at } = &inner.timings else {
             return;
         };
         // update metrics
@@ -1354,7 +1354,7 @@ impl SmgrOpTimer {
         };
         let SmgrOpTimerState::Executing {
             execution_started_at,
-        } = &mut inner.timings
+        } = &inner.timings
         else {
             return None;
         };
