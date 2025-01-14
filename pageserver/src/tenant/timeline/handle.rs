@@ -263,7 +263,8 @@ impl<T: Types> Cache<T> {
         shard_selector: ShardSelector,
         tenant_manager: &T::TenantManager,
     ) -> Result<Handle<T>, GetError<T>> {
-        let miss: ShardSelector = {
+        // terminates because when every iteration we remove an element from the map
+        let miss: ShardSelector = loop {
             let routing_state = self.shard_routing(timeline_id, shard_selector);
             match routing_state {
                 RoutingResult::FastPath(handle) => return Ok(handle),
@@ -274,12 +275,12 @@ impl<T: Types> Cache<T> {
                             // TODO: dedup with shard_routing()
                             trace!("handle cache stale");
                             self.map.remove(&key).unwrap();
-                            ShardSelector::Known(key.shard_index)
+                            continue;
                         }
                     },
-                    None => ShardSelector::Known(key.shard_index),
+                    None => break ShardSelector::Known(key.shard_index),
                 },
-                RoutingResult::NeedConsultTenantManager => shard_selector,
+                RoutingResult::NeedConsultTenantManager => break shard_selector,
             }
         };
         self.get_miss(timeline_id, miss, tenant_manager).await
