@@ -1,6 +1,12 @@
 name: Pre-merge checks
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/_check-codestyle-python.yml
+      - .github/workflows/_check-codestyle-rust.yml
+      - .github/workflows/build-build-tools-image.yml
+      - .github/workflows/pre-merge-checks.yml
   merge_group:
     branches:
       - main
