@@ -465,6 +465,27 @@ impl<T: Types> PerTimelineState<T> {
     }
 }
 
+// When dropping a [`Cache`], prune its handles in the [`PerTimelineState`] to break the reference cycle.
+impl<T: Types> Drop for Cache<T> {
+    fn drop(&mut self) {
+        for (_, WeakHandle(timeline, handle_inner_arc)) in self.map.drain() {
+            // handle is still being kept alive in PerTimelineState
+            let per_timeline_state = timeline.per_timeline_state();
+            let mut handles = per_timeline_state.handles.lock().expect("mutex poisoned");
+            let Some(handles) = &mut *handles else {
+                continue;
+            };
+            let Some(removed) = handles.remove(&self.id) else {
+                // There could have been a shutdown inbetween us upgrading the weak and locking the mutex.
+                continue;
+            };
+            let (_removed_timeline, removed_handle_inner_arc) = removed;
+            // TODO (extend ArcTimeline trait): assert!(Arc::ptr_eq(&removed_timeline, &timeline));
+            assert!(Arc::ptr_eq(&removed_handle_inner_arc, &handle_inner_arc));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Weak;
