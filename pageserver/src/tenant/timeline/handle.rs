@@ -113,7 +113,6 @@ use std::sync::Mutex;
 use std::sync::Weak;
 
 use pageserver_api::shard::ShardIdentity;
-use tokio::sync::OwnedMutexGuard;
 use tracing::instrument;
 use tracing::trace;
 use utils::id::TimelineId;
@@ -172,16 +171,18 @@ pub(crate) struct ShardTimelineId {
 /// See module-level comment.
 pub(crate) struct Handle<T: Types> {
     timeline: Arc<T::Timeline>,
-    inner: tokio::sync::OwnedMutexGuard<HandleInner>,
+    #[allow(dead_code)] // the field exists to keep the gate open
+    gate_guard: Arc<utils::sync::gate::GateGuard>,
+    inner: Arc<Mutex<HandleInner>>,
 }
 pub(crate) struct WeakHandle<T: Types> {
     timeline: Arc<T::Timeline>,
-    inner: Weak<tokio::sync::Mutex<HandleInner>>,
+    inner: Weak<Mutex<HandleInner>>,
 }
 enum HandleInner {
     KeepingTimelineGateOpen {
         #[allow(dead_code)]
-        gate_guard: utils::sync::gate::GateGuard,
+        gate_guard: Arc<utils::sync::gate::GateGuard>,
     },
     ShutDown,
 }
@@ -191,7 +192,7 @@ enum HandleInner {
 /// See module-level comment for details.
 pub struct PerTimelineState {
     // None = shutting down
-    handles: Mutex<Option<HashMap<CacheId, Arc<tokio::sync::Mutex<HandleInner>>>>>,
+    handles: Mutex<Option<HashMap<CacheId, Arc<Mutex<HandleInner>>>>>,
 }
 
 impl Default for PerTimelineState {
@@ -356,13 +357,15 @@ impl<T: Types> Cache<T> {
                         return Err(GetError::TimelineGateClosed);
                     }
                 };
+                let gate_guard = Arc::new(gate_guard);
                 trace!("creating new HandleInner");
-                let handle_inner_arc = Arc::new(tokio::sync::Mutex::new(
+                let handle_inner_arc = Arc::new(Mutex::new(
                     // TODO: global metric that keeps track of the number of live HandlerTimeline instances
                     // so we can identify reference cycle bugs.
-                    HandleInner::KeepingTimelineGateOpen { gate_guard },
+                    HandleInner::KeepingTimelineGateOpen {
+                        gate_guard: Arc::clone(&gate_guard),
+                    },
                 ));
-                let handle_locked = handle_inner_arc.clone().try_lock_owned().unwrap();
                 let timeline = {
                     let mut lock_guard = timeline
                         .per_timeline_state()
@@ -399,7 +402,8 @@ impl<T: Types> Cache<T> {
                 };
                 Ok(Handle {
                     timeline,
-                    inner: handle_locked,
+                    inner: handle_inner_arc,
+                    gate_guard,
                 })
             }
             Err(e) => Err(GetError::TenantManager(e)),
@@ -413,15 +417,20 @@ pub(crate) enum HandleUpgradeError {
 
 impl<T: Types> WeakHandle<T> {
     pub(crate) async fn upgrade(&self) -> Result<Handle<T>, HandleUpgradeError> {
-        let Some(inner) = self.inner.upgrade() else {
+        let Some(inner) = Weak::upgrade(&self.inner) else {
             return Err(HandleUpgradeError::ShutDown);
         };
-        let lock_guard = inner.clone().lock_owned().await;
+        let lock_guard = inner.lock().expect("poisoned");
         match &*lock_guard {
-            HandleInner::KeepingTimelineGateOpen { .. } => Ok(Handle {
-                timeline: Arc::clone(&self.timeline),
-                inner: lock_guard,
-            }),
+            HandleInner::KeepingTimelineGateOpen { gate_guard } => {
+                let gate_guard = Arc::clone(gate_guard);
+                drop(lock_guard);
+                Ok(Handle {
+                    timeline: Arc::clone(&self.timeline),
+                    gate_guard,
+                    inner,
+                })
+            }
             HandleInner::ShutDown => Err(HandleUpgradeError::ShutDown),
         }
     }
@@ -442,18 +451,7 @@ impl<T: Types> Handle<T> {
     pub(crate) fn downgrade(&self) -> WeakHandle<T> {
         WeakHandle {
             timeline: Arc::clone(&self.timeline),
-            inner: Arc::downgrade(OwnedMutexGuard::mutex(&self.inner)),
-        }
-    }
-}
-
-impl HandleInner {
-    pub(crate) fn shutdown(&mut self) {
-        match self {
-            HandleInner::KeepingTimelineGateOpen { .. } => *self = HandleInner::ShutDown,
-            HandleInner::ShutDown => {
-                unreachable!("handles are only shut down once in their lifetime");
-            }
+            inner: Arc::downgrade(&self.inner),
         }
     }
 }
@@ -479,10 +477,21 @@ impl PerTimelineState {
         };
         for state in handles.values().map(|h| &*h) {
             // Make further cache hits
-            let mut lock_guard = state.lock().await;
+            let mut lock_guard = state.lock().expect("poisoned");
             lock_guard.shutdown();
         }
         drop(handles);
+    }
+}
+
+impl HandleInner {
+    pub(crate) fn shutdown(&mut self) {
+        match self {
+            HandleInner::KeepingTimelineGateOpen { .. } => *self = HandleInner::ShutDown,
+            HandleInner::ShutDown => {
+                unreachable!("handles are only shut down once in their lifetime");
+            }
+        }
     }
 }
 
