@@ -171,11 +171,11 @@ pub(crate) struct ShardTimelineId {
 
 /// See module-level comment.
 pub(crate) struct Handle<T: Types> {
-    timeline: T::Timeline,
+    timeline: Arc<T::Timeline>,
     inner: tokio::sync::OwnedMutexGuard<HandleInner>,
 }
 pub(crate) struct WeakHandle<T: Types> {
-    timeline: T::Timeline,
+    timeline: Arc<T::Timeline>,
     inner: Weak<tokio::sync::Mutex<HandleInner>>,
 }
 enum HandleInner {
@@ -363,7 +363,7 @@ impl<T: Types> Cache<T> {
                     HandleInner::KeepingTimelineGateOpen { gate_guard },
                 ));
                 let handle_locked = handle_inner_arc.clone().try_lock_owned().unwrap();
-                {
+                let timeline = {
                     let mut lock_guard = timeline
                         .per_timeline_state()
                         .handles
@@ -383,10 +383,12 @@ impl<T: Types> Cache<T> {
                                     unreachable!()
                                 }
                                 hash_map::Entry::Vacant(v) => {
+                                    let timeline = Arc::new(timeline.clone());
                                     v.insert(WeakHandle {
-                                        timeline: timeline.clone(),
+                                        timeline: Arc::clone(&timeline),
                                         inner: Arc::downgrade(&handle_inner_arc),
                                     });
+                                    timeline
                                 }
                             }
                         }
@@ -394,9 +396,9 @@ impl<T: Types> Cache<T> {
                             return Err(GetError::PerTimelineStateShutDown);
                         }
                     }
-                }
+                };
                 Ok(Handle {
-                    timeline: timeline.clone(),
+                    timeline,
                     inner: handle_locked,
                 })
             }
@@ -417,7 +419,7 @@ impl<T: Types> WeakHandle<T> {
         let lock_guard = inner.clone().lock_owned().await;
         match &*lock_guard {
             HandleInner::KeepingTimelineGateOpen { .. } => Ok(Handle {
-                timeline: self.timeline.clone(),
+                timeline: Arc::clone(&self.timeline),
                 inner: lock_guard,
             }),
             HandleInner::ShutDown => Err(HandleUpgradeError::ShutDown),
@@ -439,7 +441,7 @@ impl<T: Types> Deref for Handle<T> {
 impl<T: Types> Handle<T> {
     pub(crate) fn downgrade(&self) -> WeakHandle<T> {
         WeakHandle {
-            timeline: self.timeline.clone(), // FIXME: avoid this clone, it hits shared cache line
+            timeline: Arc::clone(&self.timeline),
             inner: Arc::downgrade(OwnedMutexGuard::mutex(&self.inner)),
         }
     }
