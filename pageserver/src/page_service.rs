@@ -39,7 +39,6 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::failpoint_support;
 use utils::sync::spsc_fold;
 use utils::{
     auth::{Claims, Scope, SwappableJwtAuth},
@@ -1221,10 +1220,7 @@ impl PageServerHandler {
             });
 
             // what we want to do
-            let flush_fut = async {
-                failpoint_support::sleep_millis_async!("page_service:flush:pre");
-                pgb_writer.flush().await
-            };
+            let flush_fut = pgb_writer.flush();
             // metric for how long flushing takes
             let flush_fut = match flushing_timer {
                 Some(flushing_timer) => {
@@ -1873,28 +1869,25 @@ impl PageServerHandler {
         ))
     }
 
+    // NB: this impl mimics what we do for batched getpage requests.
     #[cfg(feature = "testing")]
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_test_request_batch(
         &mut self,
         timeline: &Timeline,
         requests: Vec<BatchedTestRequest>,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
     ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
-        use pageserver_api::models::PagestreamTestResponse;
-
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-
         // real requests would do something with the timeline
         let mut results = Vec::with_capacity(requests.len());
-        for req in requests.iter() {
+        for _req in requests.iter() {
             tokio::task::yield_now().await;
 
             results.push({
                 if timeline.cancel.is_cancelled() {
                     Err(PageStreamError::Shutdown)
                 } else {
-                    Ok(PagestreamTestResponse { req: req.req.clone() })
+                    Ok(())
                 }
             });
         }
@@ -1905,7 +1898,7 @@ impl PageServerHandler {
                 .into_iter()
                 .zip(results.into_iter())
                 .map(|(req, res)| {
-                    res.map(|page| {
+                    res.map(|()| {
                         (
                             PagestreamBeMessage::Test(models::PagestreamTestResponse {
                                 req: req.req.clone(),

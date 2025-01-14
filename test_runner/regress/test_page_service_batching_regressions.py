@@ -19,8 +19,6 @@ def test_slow_flush(neon_env_builder: NeonEnvBuilder, neon_binpath: Path):
     env = neon_env_builder.init_start()
 
     log.info("make flush appear slow")
-    ps_http = env.pageserver.http_client()
-    ps_http.configure_failpoints(("page_service:flush:pre", "return(10000000)"))
 
     log.info("filling pipe")
     child = subprocess.Popen(

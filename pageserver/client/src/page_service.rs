@@ -118,11 +118,13 @@ pub struct PagestreamClient {
 }
 
 pub struct PagestreamSender {
+    #[allow(dead_code)]
     shared: Arc<Mutex<PagestreamShared>>,
     sink: SplitSink<tokio_postgres::CopyBothDuplex<bytes::Bytes>, bytes::Bytes>,
 }
 
 pub struct PagestreamReceiver {
+    #[allow(dead_code)]
     shared: Arc<Mutex<PagestreamShared>>,
     stream: SplitStream<tokio_postgres::CopyBothDuplex<bytes::Bytes>>,
 }
@@ -188,7 +190,7 @@ impl PagestreamClient {
 
     pub fn split(self) -> (PagestreamSender, PagestreamReceiver) {
         let Self {
-            shared,
+            shared: _,
             sink,
             stream,
         } = self;

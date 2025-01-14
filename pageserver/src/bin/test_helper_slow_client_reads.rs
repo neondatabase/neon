@@ -4,11 +4,10 @@ use std::{
 };
 
 use clap::Parser;
-use pageserver_api::models::{PagestreamGetPageRequest, PagestreamRequest, PagestreamTestRequest};
+use pageserver_api::models::{PagestreamRequest, PagestreamTestRequest};
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
-    shard::TenantShardId,
 };
 
 #[derive(clap::Parser)]
@@ -27,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
     } = Args::parse();
     let client = pageserver_client::page_service::Client::new(connstr).await?;
     let client = client.pagestream(tenant_id, timeline_id).await?;
-    let (mut sender, mut receiver) = client.split();
+    let (mut sender, _receiver) = client.split();
 
     eprintln!("filling the pipe");
     let mut msg = 0;
@@ -44,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
                 message: format!("message {}", msg),
             },
         ));
-        let Ok(res) = tokio::time::timeout(Duration::from_secs(1), fut).await else {
+        let Ok(res) = tokio::time::timeout(Duration::from_secs(10), fut).await else {
             eprintln!("pipe seems full");
             break;
         };
@@ -53,6 +52,8 @@ async fn main() -> anyhow::Result<()> {
 
     stdout().write(b"R")?;
     stdout().flush()?;
+
+    eprintln!("waiting for signal to tell us to exit");
 
     let mut buf = [0u8; 1];
     stdin().read_exact(&mut buf)?;
