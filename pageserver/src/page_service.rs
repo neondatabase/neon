@@ -617,6 +617,7 @@ impl BatchedFeMessage {
                     page.timer.observe_execution_start(at);
                 }
             }
+            #[cfg(feature = "testing")]
             BatchedFeMessage::Test { requests, .. } => {
                 for req in requests {
                     req.timer.observe_execution_start(at);
@@ -960,6 +961,7 @@ impl PageServerHandler {
                 accum_pages.extend(this_pages);
                 Ok(())
             }
+            #[cfg(feature = "testing")]
             (
                 Ok(BatchedFeMessage::Test {
                     shard: accum_shard,
@@ -1885,7 +1887,7 @@ impl PageServerHandler {
 
             results.push({
                 if timeline.cancel.is_cancelled() {
-                    Err(PageStreamError::Shutdown)
+                    Err(PageReconstructError::Cancelled)
                 } else {
                     Ok(())
                 }

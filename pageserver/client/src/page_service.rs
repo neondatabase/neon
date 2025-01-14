@@ -228,10 +228,11 @@ impl PagestreamSender {
 }
 
 impl PagestreamReceiver {
+    // TODO: maybe make this impl Stream instead for better composability?
     pub async fn recv(&mut self) -> anyhow::Result<PagestreamBeMessage> {
         let next: Option<Result<bytes::Bytes, _>> = self.stream.next().await;
         let next: bytes::Bytes = next.unwrap()?;
-        Ok(PagestreamBeMessage::deserialize(next)?)
+        PagestreamBeMessage::deserialize(next)
     }
 
     pub async fn getpage_recv(&mut self) -> anyhow::Result<PagestreamGetPageResponse> {
@@ -242,8 +243,14 @@ impl PagestreamReceiver {
             PagestreamBeMessage::Exists(_)
             | PagestreamBeMessage::Nblocks(_)
             | PagestreamBeMessage::DbSize(_)
-            | PagestreamBeMessage::GetSlruSegment(_)
-            | PagestreamBeMessage::Test(_) => {
+            | PagestreamBeMessage::GetSlruSegment(_) => {
+                anyhow::bail!(
+                    "unexpected be message kind in response to getpage request: {}",
+                    next.kind()
+                )
+            }
+            #[cfg(feature = "testing")]
+            PagestreamBeMessage::Test(_) => {
                 anyhow::bail!(
                     "unexpected be message kind in response to getpage request: {}",
                     next.kind()

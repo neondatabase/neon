@@ -1641,15 +1641,16 @@ impl PagestreamFeMessage {
                 bytes.put_u8(req.kind);
                 bytes.put_u32(req.segno);
             }
-
+            #[cfg(feature = "testing")]
             Self::Test(req) => {
                 bytes.put_u8(5);
                 bytes.put_u64(req.hdr.reqid);
                 bytes.put_u64(req.hdr.request_lsn.0);
                 bytes.put_u64(req.hdr.not_modified_since.0);
                 bytes.put_u64(req.batch_key);
-                bytes.put_u64(req.message.as_bytes().len() as u64);
-                bytes.put_slice(req.message.as_bytes());
+                let message = req.message.as_bytes();
+                bytes.put_u64(message.len() as u64);
+                bytes.put_slice(message);
             }
         }
 
@@ -1797,11 +1798,13 @@ impl PagestreamBeMessage {
                         bytes.put(&resp.segment[..]);
                     }
 
+                    #[cfg(feature = "testing")]
                     Self::Test(resp) => {
                         bytes.put_u8(Tag::Test as u8);
                         bytes.put_u64(resp.req.batch_key);
-                        bytes.put_u64(resp.req.message.as_bytes().len() as u64);
-                        bytes.put_slice(resp.req.message.as_bytes());
+                        let message = resp.req.message.as_bytes();
+                        bytes.put_u64(message.len() as u64);
+                        bytes.put_slice(message);
                     }
                 }
             }
@@ -1872,14 +1875,16 @@ impl PagestreamBeMessage {
                         bytes.put(&resp.segment[..]);
                     }
 
+                    #[cfg(feature = "testing")]
                     Self::Test(resp) => {
                         bytes.put_u8(Tag::Test as u8);
                         bytes.put_u64(resp.req.hdr.reqid);
                         bytes.put_u64(resp.req.hdr.request_lsn.0);
                         bytes.put_u64(resp.req.hdr.not_modified_since.0);
                         bytes.put_u64(resp.req.batch_key);
-                        bytes.put_u64(resp.req.message.as_bytes().len() as u64);
-                        bytes.put_slice(resp.req.message.as_bytes());
+                        let message = resp.req.message.as_bytes();
+                        bytes.put_u64(message.len() as u64);
+                        bytes.put_slice(message);
                     }
                 }
             }

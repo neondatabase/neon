@@ -113,3 +113,7 @@ harness = false
 [[bench]]
 name = "upload_queue"
 harness = false
+
+[[bin]]
+name = "test_helper_slow_client_reads"
+required-features = [ "testing" ]

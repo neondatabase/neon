@@ -32,6 +32,7 @@ def test_slow_flush(neon_env_builder: NeonEnvBuilder, neon_binpath: Path):
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
     )
+    assert child.stdout is not None
     buf = child.stdout.read(1)
     if len(buf) != 1:
         raise Exception("unexpected EOF")

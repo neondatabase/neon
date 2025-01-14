@@ -50,7 +50,8 @@ async fn main() -> anyhow::Result<()> {
         let _: () = res?;
     }
 
-    stdout().write(b"R")?;
+    let n = stdout().write(b"R")?;
+    assert_eq!(n, 1);
     stdout().flush()?;
 
     eprintln!("waiting for signal to tell us to exit");
