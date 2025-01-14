@@ -39,6 +39,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::failpoint_support;
 use utils::sync::spsc_fold;
 use utils::{
     auth::{Claims, Scope, SwappableJwtAuth},
@@ -1127,7 +1128,10 @@ impl PageServerHandler {
             });
 
             // what we want to do
-            let flush_fut = pgb_writer.flush();
+            let flush_fut = async {
+                failpoint_support::sleep_millis_async!("page_service:flush:pre");
+                pgb_writer.flush().await
+            };
             // metric for how long flushing takes
             let flush_fut = match flushing_timer {
                 Some(flushing_timer) => {
