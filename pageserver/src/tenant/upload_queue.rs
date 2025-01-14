@@ -22,6 +22,11 @@ use tracing::info;
 static DISABLE_UPLOAD_QUEUE_REORDERING: Lazy<bool> =
     Lazy::new(|| std::env::var("DISABLE_UPLOAD_QUEUE_REORDERING").as_deref() == Ok("true"));
 
+/// Kill switch for index upload coalescing in case it causes problems.
+/// TODO: remove this once we have confidence in it.
+static DISABLE_UPLOAD_QUEUE_INDEX_COALESCING: Lazy<bool> =
+    Lazy::new(|| std::env::var("DISABLE_UPLOAD_QUEUE_INDEX_COALESCING").as_deref() == Ok("true"));
+
 // clippy warns that Uninitialized is much smaller than Initialized, which wastes
 // memory for Uninitialized variants. Doesn't matter in practice, there are not
 // that many upload queues in a running pageserver, and most of them are initialized
@@ -130,10 +135,12 @@ impl UploadQueueInitialized {
     /// the first operation in the queue, to avoid head-of-line blocking -- an operation can jump
     /// the queue if it doesn't conflict with operations ahead of it.
     ///
+    /// Also returns any operations that were coalesced into this one, e.g. multiple index uploads.
+    ///
     /// None may be returned even if the queue isn't empty, if no operations are ready yet.
     ///
     /// NB: this is quadratic, but queues are expected to be small, and bounded by inprogress_limit.
-    pub fn next_ready(&mut self) -> Option<UploadOp> {
+    pub fn next_ready(&mut self) -> Option<(UploadOp, Vec<UploadOp>)> {
         // If inprogress_tasks is already at limit, don't schedule anything more.
         if self.inprogress_limit > 0 && self.inprogress_tasks.len() >= self.inprogress_limit {
             return None;
@@ -151,7 +158,36 @@ impl UploadQueueInitialized {
                     return None;
                 }
 
-                return self.queued_operations.remove(i);
+                let mut op = self.queued_operations.remove(i).expect("i can't disappear");
+
+                // Coalesce any back-to-back index uploads by only uploading the newest one that's
+                // ready. This typically happens with layer/index/layer/index/... sequences, where
+                // the layers bypass the indexes, leaving the indexes queued.
+                //
+                // If other operations are interleaved between index uploads we don't try to
+                // coalesce them, since we may as well update the index concurrently with them.
+                // This keeps the index fresh and avoids starvation.
+                //
+                // NB: we assume that all uploaded indexes have the same remote path. This
+                // is true at the time of writing: the path only depends on the tenant,
+                // timeline and generation, all of which are static for a timeline instance.
+                // Otherwise, we must be careful not to coalesce different paths.
+                let mut coalesced_ops = Vec::new();
+                if matches!(op, UploadOp::UploadMetadata { .. }) {
+                    while let Some(UploadOp::UploadMetadata { .. }) = self.queued_operations.get(i)
+                    {
+                        if *DISABLE_UPLOAD_QUEUE_INDEX_COALESCING {
+                            break;
+                        }
+                        if !self.is_ready(i) {
+                            break;
+                        }
+                        coalesced_ops.push(op);
+                        op = self.queued_operations.remove(i).expect("i can't disappear");
+                    }
+                }
+
+                return Some((op, coalesced_ops));
             }
 
             // Nothing can bypass a barrier or shutdown. If it wasn't scheduled above, give up.
@@ -225,11 +261,12 @@ impl UploadQueueInitialized {
     fn schedule_ready(&mut self) -> Vec<Arc<UploadTask>> {
         let mut tasks = Vec::new();
         // NB: schedule operations one by one, to handle conflicts with inprogress_tasks.
-        while let Some(op) = self.next_ready() {
+        while let Some((op, coalesced_ops)) = self.next_ready() {
             self.task_counter += 1;
             let task = Arc::new(UploadTask {
                 task_id: self.task_counter,
                 op,
+                coalesced_ops,
                 retries: 0.into(),
             });
             self.inprogress_tasks.insert(task.task_id, task.clone());
@@ -407,9 +444,13 @@ impl UploadQueue {
 pub struct UploadTask {
     /// Unique ID of this task. Used as the key in `inprogress_tasks` above.
     pub task_id: u64,
+    /// Number of task retries.
     pub retries: AtomicU32,
-
+    /// The upload operation.
     pub op: UploadOp,
+    /// Any upload operations that were coalesced into this operation. This typically happens with
+    /// back-to-back index uploads, see `UploadQueueInitialized::next_ready()`.
+    pub coalesced_ops: Vec<UploadOp>,
 }
 
 /// A deletion of some layers within the lifetime of a timeline.  This is not used
@@ -512,9 +553,8 @@ impl UploadOp {
                 })
             }
 
-            // Indexes can never bypass each other.
-            // TODO: we could coalesce them though, by only uploading the newest ready index. This
-            // is left for later, out of caution.
+            // Indexes can never bypass each other. They can coalesce though, and
+            // `UploadQueue::next_ready()` currently does this when possible.
             (UploadOp::UploadMetadata { .. }, UploadOp::UploadMetadata { .. }) => false,
         }
     }
@@ -897,9 +937,9 @@ mod tests {
         Ok(())
     }
 
-    /// Index uploads are serialized.
+    /// Index uploads are coalesced.
     #[test]
-    fn schedule_index_serial() -> anyhow::Result<()> {
+    fn schedule_index_coalesce() -> anyhow::Result<()> {
         let mut queue = UploadQueue::Uninitialized;
         let queue = queue.initialize_with_current_remote_index_part(&IndexPart::example(), 0)?;
 
@@ -920,13 +960,11 @@ mod tests {
 
         queue.queued_operations.extend(ops.clone());
 
-        // The uploads should run serially.
-        for op in ops {
-            let tasks = queue.schedule_ready();
-            assert_eq!(tasks.len(), 1);
-            assert_same_op(&tasks[0].op, &op);
-            queue.complete(tasks[0].task_id);
-        }
+        // The index uploads are coalesced into a single operation.
+        let tasks = queue.schedule_ready();
+        assert_eq!(tasks.len(), 1);
+        assert_same_op(&tasks[0].op, &ops[2]);
+        assert_same_ops(&tasks[0].coalesced_ops, &ops[0..2]);
 
         assert!(queue.queued_operations.is_empty());
 
@@ -985,18 +1023,14 @@ mod tests {
         assert_same_op(&index_tasks[0].op, &ops[1]);
         queue.complete(index_tasks[0].task_id);
 
-        // layer 1 completes. This unblocks index 1 then index 2.
+        // layer 1 completes. This unblocks index 1 and 2, which coalesce into
+        // a single upload for index 2.
         queue.complete(upload_tasks[1].task_id);
 
         let index_tasks = queue.schedule_ready();
         assert_eq!(index_tasks.len(), 1);
-        assert_same_op(&index_tasks[0].op, &ops[3]);
-        queue.complete(index_tasks[0].task_id);
-
-        let index_tasks = queue.schedule_ready();
-        assert_eq!(index_tasks.len(), 1);
         assert_same_op(&index_tasks[0].op, &ops[5]);
-        queue.complete(index_tasks[0].task_id);
+        assert_same_ops(&index_tasks[0].coalesced_ops, &ops[3..4]);
 
         assert!(queue.queued_operations.is_empty());
 
@@ -1018,11 +1052,12 @@ mod tests {
         let index_deref = index_without(&index_upload, &layer);
 
         let ops = [
-            // Initial upload.
+            // Initial upload, with a barrier to prevent index coalescing.
             UploadOp::UploadLayer(layer.clone(), layer.metadata(), None),
             UploadOp::UploadMetadata {
                 uploaded: index_upload.clone(),
             },
+            UploadOp::Barrier(tokio::sync::watch::channel(()).0),
             // Dereference the layer and delete it.
             UploadOp::UploadMetadata {
                 uploaded: index_deref.clone(),
@@ -1063,11 +1098,12 @@ mod tests {
         let index_ref = index_with(&index_deref, &layer);
 
         let ops = [
-            // Initial upload.
+            // Initial upload, with a barrier to prevent index coalescing.
             UploadOp::UploadLayer(layer.clone(), layer.metadata(), None),
             UploadOp::UploadMetadata {
                 uploaded: index_upload.clone(),
             },
+            UploadOp::Barrier(tokio::sync::watch::channel(()).0),
             // Dereference the layer.
             UploadOp::UploadMetadata {
                 uploaded: index_deref.clone(),
