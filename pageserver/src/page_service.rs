@@ -232,6 +232,7 @@ pub async fn libpq_listener_main(
 type ConnectionHandlerResult = anyhow::Result<()>;
 
 #[instrument(skip_all, fields(peer_addr))]
+#[allow(clippy::too_many_arguments)]
 async fn page_service_conn_main(
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
