@@ -14,7 +14,7 @@ pub mod uninit;
 mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
@@ -23,6 +23,7 @@ use fail::fail_point;
 use handle::ShardTimelineId;
 use offload::OffloadError;
 use once_cell::sync::Lazy;
+use pageserver_api::models::PageTraceEvent;
 use pageserver_api::{
     config::tenant_conf_defaults::DEFAULT_COMPACTION_THRESHOLD,
     key::{
@@ -42,6 +43,7 @@ use rand::Rng;
 use remote_storage::DownloadError;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
+use tokio::sync::mpsc::Sender;
 use tokio::{
     runtime::Handle,
     sync::{oneshot, watch},
@@ -433,6 +435,9 @@ pub struct Timeline {
 
     /// Cf. [`crate::tenant::CreateTimelineIdempotency`].
     pub(crate) create_idempotency: crate::tenant::CreateTimelineIdempotency,
+
+    /// If Some, collects GetPage metadata for an ongoing PageTrace.
+    pub(crate) page_trace: ArcSwapOption<Sender<PageTraceEvent>>,
 }
 
 pub type TimelineDeleteProgress = Arc<tokio::sync::Mutex<DeleteTimelineFlow>>;
@@ -2380,6 +2385,8 @@ impl Timeline {
                 attach_wal_lag_cooldown,
 
                 create_idempotency,
+
+                page_trace: Default::default(),
             };
 
             result.repartition_threshold =
