@@ -3211,7 +3211,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     # some small tests for the scheduling policy querying and returning APIs
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
-    assert newest_info["scheduling_policy"] == "Disabled"
+    assert newest_info["scheduling_policy"] == "Pause"
     target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
