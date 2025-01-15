@@ -31,7 +31,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
 use compute_tools::extension_server::{get_pg_version, PostgresMajorVersion};
 use nix::unistd::Pid;
-use tracing::{info, info_span, warn, Instrument};
+use tracing::{error, info, info_span, warn, Instrument};
 use utils::fs_ext::is_directory_empty;
 
 #[path = "fast_import/aws_s3_sync.rs"]
@@ -231,7 +231,18 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     let restore_pg_connstring =
         format!("host=localhost port=5432 user={superuser} dbname=postgres");
 
+    let timeout_duration = std::time::Duration::from_secs(600); // 10 minutes
+    let start_time = std::time::Instant::now();
+    let retry_interval = std::time::Duration::from_secs_f32(0.3);
+
     loop {
+        if start_time.elapsed() > timeout_duration {
+            error!(
+                "timeout exceeded: failed to poll postgres and create database within 10 minutes"
+            );
+            std::process::exit(1);
+        }
+
         match tokio_postgres::connect(&restore_pg_connstring, tokio_postgres::NoTls).await {
             Ok((client, connection)) => {
                 // Spawn the connection handling task to maintain the connection
@@ -247,16 +258,24 @@ pub(crate) async fn main() -> anyhow::Result<()> {
                         break;
                     }
                     Err(e) => {
-                        warn!("failed to create database: {}", e);
+                        warn!(
+                            "failed to create database: {}, retying in {}s",
+                            e,
+                            retry_interval.as_secs_f32()
+                        );
+                        tokio::time::sleep(retry_interval).await;
                         continue;
                     }
                 }
             }
             Err(_) => {
-                info!("postgres not ready yet, retrying in 0.3s");
-                tokio::time::sleep(std::time::Duration::from_secs_f32(0.3)).await;
+                info!(format!(
+                    "postgres not ready yet, retrying in {}s",
+                    retry_interval.as_secs_f32()
+                ));
+                tokio::time::sleep(retry_interval).await;
                 continue;
-            },
+            }
         }
     }
 
