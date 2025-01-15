@@ -349,17 +349,6 @@ impl<T: Types> Cache<T> {
         shard_selector: ShardSelector,
         tenant_manager: &T::TenantManager,
     ) -> Result<Handle<T>, GetError<T>> {
-        self.get_impl(timeline_id, shard_selector, tenant_manager)
-            .await
-    }
-
-    #[instrument(level = "trace", skip_all)]
-    async fn get_impl(
-        &mut self,
-        timeline_id: TimelineId,
-        shard_selector: ShardSelector,
-        tenant_manager: &T::TenantManager,
-    ) -> Result<Handle<T>, GetError<T>> {
         // terminates because when every iteration we remove an element from the map
         let miss: ShardSelector = loop {
             let routing_state = self.shard_routing(timeline_id, shard_selector);
