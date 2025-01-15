@@ -152,6 +152,16 @@ impl IndexPart {
         };
         is_same_remote_layer_path(name, metadata, name, index_metadata)
     }
+
+    /// Check for invariants in the index: this is useful when uploading an index to ensure that if
+    /// we encounter a bug, we do not persist buggy metadata.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.metadata.ancestor_timeline().is_none() && self.layer_metadata.is_empty() {
+            return Err("Index has no ancestor and no layers".to_string());
+        }
+
+        Ok(())
+    }
 }
 
 /// Metadata gathered for each of the layer files.
