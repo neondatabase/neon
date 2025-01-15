@@ -49,7 +49,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
-    fs_ext, pausable_failpoint,
+    fs_ext,
+    guard_arc_swap::GuardArcSwap,
+    pausable_failpoint,
     postgres_client::PostgresClientProtocol,
     sync::gate::{Gate, GateGuard},
 };
@@ -351,12 +353,8 @@ pub struct Timeline {
     // though let's keep them both for better error visibility.
     pub initdb_lsn: Lsn,
 
-    /// Ensures only a single thread is calculating/modifying the partitioning.
-    partitioning_lock: tokio::sync::Mutex<()>,
-
-    /// The repartitioning result. This should never be modified directly. Write to this struct
-    /// requires holding `partitioning_lock`.
-    partitioning: ArcSwap<((KeyPartitioning, SparseKeyPartitioning), Lsn)>,
+    /// The repartitioning result. Allows a single writer and multiple readers.
+    pub(crate) partitioning: GuardArcSwap<((KeyPartitioning, SparseKeyPartitioning), Lsn)>,
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
@@ -2340,11 +2338,10 @@ impl Timeline {
                     LogicalSize::empty_initial()
                 },
 
-                partitioning_lock: tokio::sync::Mutex::new(()),
-                partitioning: ArcSwap::new(Arc::new((
+                partitioning: GuardArcSwap::new((
                     (KeyPartitioning::new(), KeyPartitioning::new().into_sparse()),
                     Lsn(0),
-                ))),
+                )),
                 repartition_threshold: 0,
                 last_image_layer_creation_check_at: AtomicLsn::new(0),
                 last_image_layer_creation_check_instant: Mutex::new(None),
@@ -4028,7 +4025,7 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<((KeyPartitioning, SparseKeyPartitioning), Lsn), CompactionError> {
-        let Ok(_partitioning_guard) = self.partitioning_lock.try_lock() else {
+        let Ok(mut guard) = self.partitioning.try_write_guard() else {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
@@ -4036,7 +4033,7 @@ impl Timeline {
                 "repartition() called concurrently"
             )));
         };
-        let ((dense_partition, sparse_partition), partition_lsn) = &*self.partitioning.load_full();
+        let ((dense_partition, sparse_partition), partition_lsn) = &*guard.read();
         if lsn < *partition_lsn {
             return Err(CompactionError::Other(anyhow!(
                 "repartition() called with LSN going backwards, this should not happen"
@@ -4065,7 +4062,7 @@ impl Timeline {
             parts: vec![sparse_ks],
         }; // no partitioning for metadata keys for now
         let result = ((dense_partitioning, sparse_partitioning), lsn);
-        self.partitioning.store(Arc::new(result.clone()));
+        guard.write(result.clone());
         Ok(result)
     }
 
