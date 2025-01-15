@@ -10,6 +10,8 @@ mod layer_desc;
 mod layer_name;
 pub mod merge_iterator;
 
+use crate::LogIfSlowFutureExt;
+
 use crate::context::{AccessStatsBehavior, RequestContext};
 use bytes::Bytes;
 use futures::stream::FuturesUnordered;
@@ -418,7 +420,7 @@ impl IoConcurrency {
         match self {
             IoConcurrency::Serial => fut.await,
             IoConcurrency::FuturesUnordered { ios_tx, .. } => {
-                let mut fut = Box::pin(fut);
+                let mut fut = Box::pin(fut.log_if_slow("spawned_io", Duration::from_secs(1)));
                 // opportunistic poll to give some boost (unproven if it helps, but sounds like a good idea)
                 if let Poll::Ready(()) = futures::poll!(&mut fut) {
                     return;
