@@ -1925,7 +1925,7 @@ impl Timeline {
             output
         }
 
-        let mut key_exist = false;
+        let mut key_exists = false;
         for (i, split_for_lsn) in split_history.into_iter().enumerate() {
             // TODO: there could be image keys inside the splits, and we can compute records_since_last_image accordingly.
             records_since_last_image += split_for_lsn.len();
@@ -1952,12 +1952,12 @@ impl Timeline {
                     break;
                 }
             }
-            if replay_history.is_empty() && !key_exist {
+            if replay_history.is_empty() && !key_exists {
                 // The key does not exist at earlier LSN, we can skip this iteration.
                 retention.push(Vec::new());
                 continue;
             } else {
-                key_exist = true;
+                key_exists = true;
             }
             let Some((_, _, val)) = replay_history.first() else {
                 unreachable!("replay history should not be empty once it exists")
