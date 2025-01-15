@@ -19,6 +19,12 @@ Some commands from shell history used in combination with this script:
  NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY=serial ./target/release/neon_local pageserver restart
  NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY=parallel ./target/release/neon_local pageserver restart
 
+cat >> .neon/pageserver_1/pageserver.toml <<"EOF"
+# customizations
+virtual_file_io_mode = "direct"
+page_service_pipelining={mode="pipelined", max_batch_size=32, execution="concurrent-futures"}
+EOF
+
 starting from scrach:
     psql 'postgresql://localhost:1235/storage_controller' -c 'DELETE FROM tenant_shards'
     NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY=... ./target/release/neon_local pageserver restart
