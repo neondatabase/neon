@@ -5655,7 +5655,7 @@ dependencies = [
  "crc32c",
  "criterion",
  "desim",
- "env_logger",
+ "env_logger 0.10.2",
  "fail",
  "futures",
  "hex",
