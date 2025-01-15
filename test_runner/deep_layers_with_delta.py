@@ -64,6 +64,11 @@ total 67M
 -rw-r--r-- 1 christian 1.9M Dec 13 12:42 000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000003633D91-00000000037AE2E9-v1-00000001
 -rw-r--r-- 1 christian    0 Dec 13 12:42 ephemeral-22
 
+Now use pagebench to measure perf, e.g.
+
+./target/release/pagebench get-page-latest-lsn --num-clients=1  --queue-depth 100 --runtime=5s
+
+
 """
 
 
