@@ -1121,14 +1121,13 @@ impl Persistence {
             }
             let scheduling_policy_ = String::from(scheduling_policy_);
 
-            let inserted_updated = diesel::update(safekeepers.filter(id.eq(id_)))
+            let rows_affected = diesel::update(safekeepers.filter(id.eq(id_)))
                 .set(scheduling_policy.eq(scheduling_policy_))
                 .execute(conn)?;
 
-            if inserted_updated != 1 {
+            if rows_affected != 1 {
                 return Err(DatabaseError::Logical(format!(
-                    "unexpected number of rows ({})",
-                    inserted_updated
+                    "unexpected number of rows ({rows_affected})",
                 )));
             }
 
