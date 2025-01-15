@@ -336,7 +336,7 @@ impl FromStr for SkSchedulingPolicy {
             "active" => Self::Active,
             "pause" => Self::Pause,
             "decomissioned" => Self::Decomissioned,
-            _ => return Err(anyhow::anyhow!("Unknown scheduling state '{s}'")),
+            _ => return Err(anyhow::anyhow!("Unknown scheduling policy '{s}', try active,pause,decomissioned")),
         })
     }
 }
