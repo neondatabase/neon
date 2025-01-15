@@ -3208,6 +3208,17 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     assert eq_safekeeper_records(body, inserted_now)
 
+    # some small tests for the scheduling policy querying and returning APIs
+    newest_info = target.get_safekeeper(inserted["id"])
+    assert newest_info
+    assert newest_info["scheduling_policy"] == "Disabled"
+    target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
+    newest_info = target.get_safekeeper(inserted["id"])
+    assert newest_info
+    assert newest_info["scheduling_policy"] == "Decomissioned"
+    # Ensure idempotency
+    target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
+
 
 def eq_safekeeper_records(a: dict[str, Any], b: dict[str, Any]) -> bool:
     compared = [dict(a), dict(b)]
