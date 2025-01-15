@@ -1884,11 +1884,26 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         return response.json()
 
-    def tenant_list(self):
+    def tenant_shard_dump(self):
+        """
+        Debug listing API: dumps the internal map of tenant shards
+        """
         response = self.request(
             "GET",
             f"{self.api}/debug/v1/tenant",
             headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
+    def tenant_list(self, **kwargs):
+        """
+        Control API tenant listing: a vector of the same content returned by tenant_describe
+        """
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/tenant",
+            headers=self.headers(TokenScope.ADMIN),
+            params=kwargs,
         )
         return response.json()
 
@@ -2238,7 +2253,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         """
         Get the intent and observed placements of all tenants known to the storage controller.
         """
-        tenants = self.tenant_list()
+        tenants = self.tenant_shard_dump()
 
         tenant_placement: defaultdict[str, dict[str, Any]] = defaultdict(
             lambda: {

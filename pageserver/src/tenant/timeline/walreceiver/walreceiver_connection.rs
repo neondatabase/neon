@@ -264,6 +264,8 @@ pub(super) async fn handle_walreceiver_connection(
 
     let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx).await?;
 
+    let shard = vec![*timeline.get_shard_identity()];
+
     let interpreted_proto_config = match protocol {
         PostgresClientProtocol::Vanilla => None,
         PostgresClientProtocol::Interpreted {
@@ -403,7 +405,7 @@ pub(super) async fn handle_walreceiver_connection(
                 // need to advance last record LSN on all shards. If we've not ingested the latest
                 // record, then set the LSN of the modification past it. This way all shards
                 // advance their last record LSN at the same time.
-                let needs_last_record_lsn_advance = match next_record_lsn.map(Lsn::from) {
+                let needs_last_record_lsn_advance = match next_record_lsn {
                     Some(lsn) if lsn > modification.get_lsn() => {
                         modification.set_lsn(lsn).unwrap();
                         true
@@ -476,10 +478,12 @@ pub(super) async fn handle_walreceiver_connection(
                         // Deserialize and interpret WAL record
                         let interpreted = InterpretedWalRecord::from_bytes_filtered(
                             recdata,
-                            modification.tline.get_shard_identity(),
+                            &shard,
                             next_record_lsn,
                             modification.tline.pg_version,
-                        )?;
+                        )?
+                        .remove(timeline.get_shard_identity())
+                        .unwrap();
 
                         if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes)
                             && uncommitted_records > 0
