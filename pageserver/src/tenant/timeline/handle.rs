@@ -46,19 +46,21 @@
 //!
 //! The `HandleInner`  is allocated as a `Arc<Mutex<HandleInner>>` and
 //! referenced weakly and strongly from various places which we are now illustrating.
-//! For bevity, we will omit the `Arc<Mutex<>>` part in the following.
+//! For brevity, we will omit the `Arc<Mutex<>>` part in the following and instead
+//! use `strong ref` and `weak ref` when referring to the `Arc<Mutex<HandleInner>>`
+//! or `Weak<Mutex<HandleInner>>`, respectively.
 //!
 //! - The `Handle` is a strong ref.
 //! - The `WeakHandle` is a weak ref.
-//! - The only long-lived strong reference is stored in the `PerTimelineState`.
-//! - The `Cache` stores a weak ref.
+//! - The `PerTimelineState` contains a `HashMap<CacheId, strong ref>`.
+//! - The `Cache` is a `HashMap<unique identifier for the shard, weak ref>`.
 //!
 //! Lifetimes:
 //! - `WeakHandle` and `Handle`: single pagestream request.
 //! - `Cache`: single page service connection.
 //! - `PerTimelineState`:  lifetime of the Timeline object (i.e., i.e., till `Timeline::shutdown`).
 //!
-//! ## Request Handling Flow
+//! ## Request Handling Flow (= filling and using the `Cache``)
 //!
 //! To dispatch a request, the page service connection calls `Cache::get`.
 //!
@@ -86,7 +88,7 @@
 //! > method invocation.
 //!
 //! Why do we want to avoid that?
-//! Because the gate is a shared location in memory and entering it invovles
+//! Because the gate is a shared location in memory and entering it involves
 //! bumping refcounts, which leads to cache contention if done frequently
 //! from multiple cores in parallel.
 //!
@@ -94,17 +96,19 @@
 //! That `Arc` is private to the `HandleInner` and hence to the connection.
 //! (Review the "Data Structures" section if that is unclear to you.)
 //!
-//! A `WeakHandle` is a weak ref to the HandleInner.
-//! When upgrading a `WeakHandle`, we acquire a strong ref to the `Arc<GateGuard>`.
+//! A `WeakHandle` is a weak ref to the `HandleInner`.
+//! When upgrading a `WeakHandle`, we upgrade to a strong ref to the `HandleInner` and
+//! further acquire an additional strong ref to the `Arc<GateGuard>` inside it.
 //! Again, this manipulation of ref counts is is cheap because `Arc` is private to the connection.
 //!
 //! When downgrading a `Handle` to a `WeakHandle`, we drop the `Arc<GateGuard>`.
 //! Again, this is cheap because the `Arc` is private to the connection.
 //!
-//! In addition to the GateGuard, we need to provide `impl Deref for Handle` and `impl Deref for WeakHandle`.
+//! In addition to the GateGuard, we need to provide `Deref<Target=Timeline>` impls
+//! for `Handle` or `WeakHandle`.
 //! For this, both `Handle` and `WeakHandle` need access to the `Arc<Timeline>`.
-//! Upgrading a `WeakHandle` does not consume the `Handle`, so we can't move the `Arc<Timeline>` out of
-//! `Handle` into `WeakHandle`.
+//! Upgrading a `WeakHandle` does not consume the `Handle`, so we can't move the
+//! `Arc<Timeline>` out of `Handle` into `WeakHandle`.
 //! We could clone the `Arc<Timeline>` when upgrading a `WeakHandle`, but that would cause contention
 //! on the shared memory location that trakcs the refcount of the `Arc<Timeline>`.
 //! Instead, we wrap the `Arc<Timeline>` into another `Arc`.
@@ -125,7 +129,8 @@
 //! ```
 //!
 //! The former cycle is a memory leak if not broken.
-//! The latter cycle further prevent the Timeline from shutting down.
+//! The latter cycle further prevents the Timeline from shutting down
+//! because we certainly won't drop the Timeline while the GateGuard is alive.
 //! Preventing shutdown is the whole point of this handle/cache system,
 //! but when the Timeline needs to shut down, we need to break the cycle.
 //!
@@ -137,19 +142,17 @@
 //! [`HandleInner::ShutDown`], which drops the only long-lived strong ref to the
 //! `Arc<GateGuard>`.
 //!
-//!
-//!
 //! `PerTimelineState::shutdown` drops all the `HandleInners` it contains,
 //! thereby breaking the cycle.
-//! It also initiates draining of already existing `Handle`s, by
-//! poisoning things so that no new `HandleInner`'s can be tracked
-//! in the shut down `PerTimelineState`.
+//! It also initiates draining of already existing `Handle`s by
+//! poisoning things so that no new `HandleInner`'s can be added
+//! to the `PerTimelineState`, which will make subsequent `Cache::get` fail.
 //!
 //! Concurrently existing / already upgraded `Handle`s will extend the
-//! existence of the cycle.
+//! lifetime of the `Arc<Mutex<HandleInner>>` and hence cycles.
 //! However, since `Handle`s are short-lived and new `Handle`s are not
-//! handed out after either `PerTimelineState::shutdown` or `Cache` drop,
-//! that extension of the cycle is bounded.
+//! handed out from `Cache::get` or `WeakHandle::upgrade` after
+//! `PerTimelineState::shutdown`, that extension of the cycle is bounded.
 //!
 //! Concurrently existing `WeakHandle`s will fail to `upgrade()`:
 //! while they will succeed in upgradingtheir weak arc ref to a strong ref,
