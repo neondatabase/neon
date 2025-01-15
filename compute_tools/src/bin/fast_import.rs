@@ -87,6 +87,9 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     if args.s3_prefix.is_none() && args.source_connection_string.is_none() {
         anyhow::bail!("either s3_prefix or source_connection_string must be specified");
     }
+    if args.s3_prefix.is_some() && args.source_connection_string.is_some() {
+        anyhow::bail!("only one of s3_prefix or source_connection_string can be specified");
+    }
 
     let working_directory = args.working_directory;
     let pg_bin_dir = args.pg_bin_dir;
@@ -227,13 +230,14 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     // Create neondb database in the running postgres
     let restore_pg_connstring =
         format!("host=localhost port=5432 user={superuser} dbname=postgres");
+
     loop {
         match tokio_postgres::connect(&restore_pg_connstring, tokio_postgres::NoTls).await {
             Ok((client, connection)) => {
                 // Spawn the connection handling task to maintain the connection
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
-                        eprintln!("connection error: {}", e);
+                        warn!("connection error: {}", e);
                     }
                 });
 
@@ -243,12 +247,16 @@ pub(crate) async fn main() -> anyhow::Result<()> {
                         break;
                     }
                     Err(e) => {
-                        info!("failed to create database: {}", e);
-                        break;
+                        warn!("failed to create database: {}", e);
+                        continue;
                     }
                 }
             }
-            Err(_) => continue,
+            Err(_) => {
+                info!("postgres not ready yet, retrying in 0.3s");
+                tokio::time::sleep(std::time::Duration::from_secs_f32(0.3)).await;
+                continue;
+            },
         }
     }
 
