@@ -65,7 +65,7 @@ pub(crate) enum FetchAuthRulesError {
     RoleJwksNotConfigured,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AuthRule {
     pub(crate) id: String,
     pub(crate) jwks_url: url::Url,

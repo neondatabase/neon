@@ -367,209 +367,209 @@ impl Cache for ProjectInfoCacheImpl {
     }
 }
 
-// #[cfg(test)]
-// #[expect(clippy::unwrap_used)]
-// mod tests {
-//     use super::*;
-//     use crate::scram::ServerSecret;
-//     use crate::types::ProjectId;
+#[cfg(test)]
+#[expect(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::scram::ServerSecret;
+    use crate::types::ProjectId;
 
-//     #[tokio::test]
-//     async fn test_project_info_cache_settings() {
-//         tokio::time::pause();
-//         let cache = ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
-//             size: 2,
-//             max_roles: 2,
-//             ttl: Duration::from_secs(1),
-//             gc_interval: Duration::from_secs(600),
-//         });
-//         let project_id: ProjectId = "project".into();
-//         let endpoint_id: EndpointId = "endpoint".into();
-//         let user1: RoleName = "user1".into();
-//         let user2: RoleName = "user2".into();
-//         let secret1 = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
-//         let secret2 = None;
-//         let allowed_ips = Arc::new(vec![
-//             "127.0.0.1".parse().unwrap(),
-//             "127.0.0.2".parse().unwrap(),
-//         ]);
-//         cache.insert_role_secret(
-//             (&project_id).into(),
-//             (&endpoint_id).into(),
-//             (&user1).into(),
-//             secret1.clone(),
-//         );
-//         cache.insert_role_secret(
-//             (&project_id).into(),
-//             (&endpoint_id).into(),
-//             (&user2).into(),
-//             secret2.clone(),
-//         );
-//         cache.insert_allowed_ips(
-//             (&project_id).into(),
-//             (&endpoint_id).into(),
-//             allowed_ips.clone(),
-//         );
+    #[tokio::test]
+    async fn test_project_info_cache_settings() {
+        tokio::time::pause();
+        let cache = ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
+            size: 2,
+            max_roles: 2,
+            ttl: Duration::from_secs(1),
+            gc_interval: Duration::from_secs(600),
+        });
+        let project_id: ProjectId = "project".into();
+        let endpoint_id: EndpointId = "endpoint".into();
+        let user1: RoleName = "user1".into();
+        let user2: RoleName = "user2".into();
+        let secret1 = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
+        let secret2 = None;
+        let allowed_ips = Arc::new((
+            vec!["127.0.0.1".parse().unwrap(), "127.0.0.2".parse().unwrap()],
+            vec![],
+        ));
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user1).into(),
+            secret1.clone(),
+        );
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user2).into(),
+            secret2.clone(),
+        );
+        cache.insert_allowed_ips(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            allowed_ips.clone(),
+        );
 
-//         let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
-//         assert!(cached.cached());
-//         assert_eq!(cached.value, secret1);
-//         let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
-//         assert!(cached.cached());
-//         assert_eq!(cached.value, secret2);
+        let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
+        assert!(cached.cached());
+        assert_eq!(cached.value, secret1);
+        let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
+        assert!(cached.cached());
+        assert_eq!(cached.value, secret2);
 
-//         // Shouldn't add more than 2 roles.
-//         let user3: RoleName = "user3".into();
-//         let secret3 = Some(AuthSecret::Scram(ServerSecret::mock([3; 32])));
-//         cache.insert_role_secret(
-//             (&project_id).into(),
-//             (&endpoint_id).into(),
-//             (&user3).into(),
-//             secret3.clone(),
-//         );
-//         assert!(cache.get_role_secret(&endpoint_id, &user3).is_none());
+        // Shouldn't add more than 2 roles.
+        let user3: RoleName = "user3".into();
+        let secret3 = Some(AuthSecret::Scram(ServerSecret::mock([3; 32])));
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user3).into(),
+            secret3.clone(),
+        );
+        assert!(cache.get_role_secret(&endpoint_id, &user3).is_none());
 
-//         let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
-//         assert!(cached.cached());
-//         assert_eq!(cached.value, allowed_ips);
+        let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
+        assert!(cached.cached());
+        assert_eq!(cached.value, allowed_ips);
 
-//         tokio::time::advance(Duration::from_secs(2)).await;
-//         let cached = cache.get_role_secret(&endpoint_id, &user1);
-//         assert!(cached.is_none());
-//         let cached = cache.get_role_secret(&endpoint_id, &user2);
-//         assert!(cached.is_none());
-//         let cached = cache.get_allowed_ips(&endpoint_id);
-//         assert!(cached.is_none());
-//     }
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let cached = cache.get_role_secret(&endpoint_id, &user1);
+        assert!(cached.is_none());
+        let cached = cache.get_role_secret(&endpoint_id, &user2);
+        assert!(cached.is_none());
+        let cached = cache.get_allowed_ips(&endpoint_id);
+        assert!(cached.is_none());
+    }
 
-//     #[tokio::test]
-//     async fn test_project_info_cache_invalidations() {
-//         tokio::time::pause();
-//         let cache = Arc::new(ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
-//             size: 2,
-//             max_roles: 2,
-//             ttl: Duration::from_secs(1),
-//             gc_interval: Duration::from_secs(600),
-//         }));
-//         cache.clone().increment_active_listeners().await;
-//         tokio::time::advance(Duration::from_secs(2)).await;
+    #[tokio::test]
+    async fn test_project_info_cache_invalidations() {
+        tokio::time::pause();
+        let cache = Arc::new(ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
+            size: 2,
+            max_roles: 2,
+            ttl: Duration::from_secs(1),
+            gc_interval: Duration::from_secs(600),
+        }));
+        cache.clone().increment_active_listeners().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
 
-//         let project_id: ProjectId = "project".into();
-//         let endpoint_id: EndpointId = "endpoint".into();
-//         let user1: RoleName = "user1".into();
-//         let user2: RoleName = "user2".into();
-//         let secret1 = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
-//         let secret2 = Some(AuthSecret::Scram(ServerSecret::mock([2; 32])));
-//         let allowed_ips = Arc::new(vec![
-//             "127.0.0.1".parse().unwrap(),
-//             "127.0.0.2".parse().unwrap(),
-//         ]);
-//         cache.insert_role_secret(
-//             (&project_id).into(),
-//             (&endpoint_id).into(),
-//             (&user1).into(),
-//             secret1.clone(),
-//         );
-//         cache.insert_role_secret(
-//             (&project_id).into(),
-//             (&endpoint_id).into(),
-//             (&user2).into(),
-//             secret2.clone(),
-//         );
-//         cache.insert_allowed_ips(
-//             (&project_id).into(),
-//             (&endpoint_id).into(),
-//             allowed_ips.clone(),
-//         );
+        let project_id: ProjectId = "project".into();
+        let endpoint_id: EndpointId = "endpoint".into();
+        let user1: RoleName = "user1".into();
+        let user2: RoleName = "user2".into();
+        let secret1 = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
+        let secret2 = Some(AuthSecret::Scram(ServerSecret::mock([2; 32])));
+        let allowed_ips = Arc::new((
+            vec!["127.0.0.1".parse().unwrap(), "127.0.0.2".parse().unwrap()],
+            vec![],
+        ));
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user1).into(),
+            secret1.clone(),
+        );
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user2).into(),
+            secret2.clone(),
+        );
+        cache.insert_allowed_ips(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            allowed_ips.clone(),
+        );
 
-//         tokio::time::advance(Duration::from_secs(2)).await;
-//         // Nothing should be invalidated.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        // Nothing should be invalidated.
 
-//         let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
-//         // TTL is disabled, so it should be impossible to invalidate this value.
-//         assert!(!cached.cached());
-//         assert_eq!(cached.value, secret1);
+        let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
+        // TTL is disabled, so it should be impossible to invalidate this value.
+        assert!(!cached.cached());
+        assert_eq!(cached.value, secret1);
 
-//         cached.invalidate(); // Shouldn't do anything.
-//         let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
-//         assert_eq!(cached.value, secret1);
+        cached.invalidate(); // Shouldn't do anything.
+        let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
+        assert_eq!(cached.value, secret1);
 
-//         let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
-//         assert!(!cached.cached());
-//         assert_eq!(cached.value, secret2);
+        let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
+        assert!(!cached.cached());
+        assert_eq!(cached.value, secret2);
 
-//         // The only way to invalidate this value is to invalidate via the api.
-//         cache.invalidate_role_secret_for_project((&project_id).into(), (&user2).into());
-//         assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
+        // The only way to invalidate this value is to invalidate via the api.
+        cache.invalidate_role_secret_for_project((&project_id).into(), (&user2).into());
+        assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
 
-//         let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
-//         assert!(!cached.cached());
-//         assert_eq!(cached.value, allowed_ips);
-//     }
+        let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
+        assert!(!cached.cached());
+        assert_eq!(cached.value, allowed_ips);
+    }
 
-//     #[tokio::test]
-//     async fn test_increment_active_listeners_invalidate_added_before() {
-//         tokio::time::pause();
-//         let cache = Arc::new(ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
-//             size: 2,
-//             max_roles: 2,
-//             ttl: Duration::from_secs(1),
-//             gc_interval: Duration::from_secs(600),
-//         }));
+    #[tokio::test]
+    async fn test_increment_active_listeners_invalidate_added_before() {
+        tokio::time::pause();
+        let cache = Arc::new(ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
+            size: 2,
+            max_roles: 2,
+            ttl: Duration::from_secs(1),
+            gc_interval: Duration::from_secs(600),
+        }));
 
-//         let project_id: ProjectId = "project".into();
-//         let endpoint_id: EndpointId = "endpoint".into();
-//         let user1: RoleName = "user1".into();
-//         let user2: RoleName = "user2".into();
-//         let secret1 = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
-//         let secret2 = Some(AuthSecret::Scram(ServerSecret::mock([2; 32])));
-//         let allowed_ips = Arc::new(vec![
-//             "127.0.0.1".parse().unwrap(),
-//             "127.0.0.2".parse().unwrap(),
-//         ]);
-//         cache.insert_role_secret(
-//             (&project_id).into(),
-//             (&endpoint_id).into(),
-//             (&user1).into(),
-//             secret1.clone(),
-//         );
-//         cache.clone().increment_active_listeners().await;
-//         tokio::time::advance(Duration::from_millis(100)).await;
-//         cache.insert_role_secret(
-//             (&project_id).into(),
-//             (&endpoint_id).into(),
-//             (&user2).into(),
-//             secret2.clone(),
-//         );
+        let project_id: ProjectId = "project".into();
+        let endpoint_id: EndpointId = "endpoint".into();
+        let user1: RoleName = "user1".into();
+        let user2: RoleName = "user2".into();
+        let secret1 = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
+        let secret2 = Some(AuthSecret::Scram(ServerSecret::mock([2; 32])));
+        let allowed_ips = Arc::new((
+            vec!["127.0.0.1".parse().unwrap(), "127.0.0.2".parse().unwrap()],
+            vec![],
+        ));
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user1).into(),
+            secret1.clone(),
+        );
+        cache.clone().increment_active_listeners().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user2).into(),
+            secret2.clone(),
+        );
 
-//         // Added before ttl was disabled + ttl should be still cached.
-//         let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
-//         assert!(cached.cached());
-//         let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
-//         assert!(cached.cached());
+        // Added before ttl was disabled + ttl should be still cached.
+        let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
+        assert!(cached.cached());
+        let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
+        assert!(cached.cached());
 
-//         tokio::time::advance(Duration::from_secs(1)).await;
-//         // Added before ttl was disabled + ttl should expire.
-//         assert!(cache.get_role_secret(&endpoint_id, &user1).is_none());
-//         assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        // Added before ttl was disabled + ttl should expire.
+        assert!(cache.get_role_secret(&endpoint_id, &user1).is_none());
+        assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
 
-//         // Added after ttl was disabled + ttl should not be cached.
-//         cache.insert_allowed_ips(
-//             (&project_id).into(),
-//             (&endpoint_id).into(),
-//             allowed_ips.clone(),
-//         );
-//         let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
-//         assert!(!cached.cached());
+        // Added after ttl was disabled + ttl should not be cached.
+        cache.insert_allowed_ips(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            allowed_ips.clone(),
+        );
+        let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
+        assert!(!cached.cached());
 
-//         tokio::time::advance(Duration::from_secs(1)).await;
-//         // Added before ttl was disabled + ttl still should expire.
-//         assert!(cache.get_role_secret(&endpoint_id, &user1).is_none());
-//         assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
-//         // Shouldn't be invalidated.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        // Added before ttl was disabled + ttl still should expire.
+        assert!(cache.get_role_secret(&endpoint_id, &user1).is_none());
+        assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
+        // Shouldn't be invalidated.
 
-//         let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
-//         assert!(!cached.cached());
-//         assert_eq!(cached.value, allowed_ips);
-//     }
-// }
+        let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
+        assert!(!cached.cached());
+        assert_eq!(cached.value, allowed_ips);
+    }
+}
