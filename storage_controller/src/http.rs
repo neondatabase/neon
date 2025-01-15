@@ -1309,7 +1309,7 @@ async fn handle_upsert_safekeeper(mut req: Request<Body>) -> Result<Response<Bod
 async fn handle_safekeeper_scheduling_policy(
     mut req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Infra)?;
+    check_permissions(&req, Scope::Admin)?;
 
     let body = json_request::<SafekeeperSchedulingPolicyRequest>(&mut req).await?;
     let id = parse_request_param::<i64>(&req, "id")?;
