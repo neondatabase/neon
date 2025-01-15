@@ -58,7 +58,7 @@ async fn smoke_test() {
     };
 
     let img_before = {
-        let mut data = ValuesReconstructState::new(IoConcurrency::todo());
+        let mut data = ValuesReconstructState::new(IoConcurrency::serial());
         layer
             .get_values_reconstruct_data(
                 controlfile_keyspace.clone(),
@@ -93,7 +93,7 @@ async fn smoke_test() {
 
     // on accesses when the layer is evicted, it will automatically be downloaded.
     let img_after = {
-        let mut data = ValuesReconstructState::new(IoConcurrency::todo());
+        let mut data = ValuesReconstructState::new(IoConcurrency::serial());
         layer
             .get_values_reconstruct_data(
                 controlfile_keyspace.clone(),

@@ -203,9 +203,10 @@ impl std::fmt::Debug for SelectedIoConcurrency {
 }
 
 impl IoConcurrency {
-    #[deprecated]
-    pub(crate) fn todo() -> Self {
-        // To test futuresunordered, we can create a gate guard here and Box::leak it
+    /// TODO: over time, work towards removing this method.
+    /// Requires finding a long-lived root for the IoConcurrency and funneling it through
+    /// to the place that does the get_values_reconstruct_data call.
+    pub(crate) fn serial() -> Self {
         Self::spawn(SelectedIoConcurrency::Serial)
     }
     pub(crate) fn spawn_from_env(gate_guard: GateGuard) -> IoConcurrency {
