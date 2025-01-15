@@ -911,7 +911,7 @@ pageserver_receive(shardno_t shard_no)
 		}
 		PG_CATCH();
 		{
-			neon_shard_log(shard_no, LOG, "pageserver_receive: disconnect due malformatted response");
+			neon_shard_log(shard_no, LOG, "pageserver_receive: disconnect due to failure while parsing response");
 			pageserver_disconnect(shard_no);
 			PG_RE_THROW();
 		}
@@ -978,7 +978,7 @@ pageserver_try_receive(shardno_t shard_no)
 		}
 		PG_CATCH();
 		{
-			neon_shard_log(shard_no, LOG, "pageserver_receive: disconnect due malformatted response");
+			neon_shard_log(shard_no, LOG, "pageserver_receive: disconnect due to failure while parsing response");
 			pageserver_disconnect(shard_no);
 			PG_RE_THROW();
 		}
