@@ -28,7 +28,6 @@ use std::ops::Range;
 use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 use tracing::{trace, Instrument};
@@ -351,11 +350,12 @@ impl IoConcurrency {
         match self {
             IoConcurrency::Serial => fut.await,
             IoConcurrency::FuturesUnordered { ios_tx, .. } => {
-                let mut fut = Box::pin(fut.log_if_slow("spawned_io", Duration::from_secs(1)));
-                // opportunistic poll to give some boost (unproven if it helps, but sounds like a good idea)
-                if let Poll::Ready(()) = futures::poll!(&mut fut) {
-                    return;
-                }
+                let fut = Box::pin(fut.log_if_slow("spawned_io", Duration::from_secs(1)));
+                // NB: experiments showed that doing an opportunistic poll of `fut` here was bad for throughput
+                // while insignificant for latency.
+                // It would make sense to revisit the tokio-epoll-uring API in the future such that we can try
+                // a submission here, but never poll the future. That way, io_uring can make proccess while
+                // the future sits in the ios_tx queue.
                 match ios_tx.send(fut) {
                     Ok(()) => {}
                     Err(_) => {
