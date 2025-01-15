@@ -53,6 +53,16 @@ pub(crate) struct StorageControllerMetricGroup {
     /// How many shards are not scheduled into their preferred AZ
     pub(crate) storage_controller_schedule_az_violation: measured::Gauge,
 
+    /// How many shard locations (secondary or attached) on each node
+    pub(crate) storage_controller_node_shards: measured::GaugeVec<NodeLabelGroupSet>,
+
+    /// How many _attached_ shard locations on each node
+    pub(crate) storage_controller_node_attached_shards: measured::GaugeVec<NodeLabelGroupSet>,
+
+    /// How many _home_ shard locations on each node (i.e. the node's AZ matches the shard's
+    /// preferred AZ)
+    pub(crate) storage_controller_node_home_shards: measured::GaugeVec<NodeLabelGroupSet>,
+
     /// How many shards would like to reconcile but were blocked by concurrency limits
     pub(crate) storage_controller_pending_reconciles: measured::Gauge,
 
@@ -130,6 +140,15 @@ impl Default for StorageControllerMetrics {
             encoder: Mutex::new(measured::text::BufferedTextEncoder::new()),
         }
     }
+}
+
+#[derive(measured::LabelGroup, Clone)]
+#[label(set = NodeLabelGroupSet)]
+pub(crate) struct NodeLabelGroup<'a> {
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) az: &'a str,
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) node_id: &'a str,
 }
 
 #[derive(measured::LabelGroup)]

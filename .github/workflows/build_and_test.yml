@@ -346,25 +346,22 @@ jobs:
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
-  report-benchmarks-failures:
+  report-benchmarks-results-to-slack:
     needs: [ benchmarks, create-test-report ]
-    if: github.ref_name == 'main' && failure() && needs.benchmarks.result == 'failure'
-    permissions:
-      id-token: write # aws-actions/configure-aws-credentials
-      statuses: write
-      contents: write
-      pull-requests: write
+    if: github.ref_name == 'main' && !cancelled() && contains(fromJSON('["success", "failure"]'), needs.benchmarks.result)
     runs-on: ubuntu-22.04
 
     steps:
-    - uses: slackapi/slack-github-action@v1
+    - uses: slackapi/slack-github-action@v2
       with:
-        channel-id: C060CNA47S9 # on-call-staging-storage-stream
-        slack-message: |
-          Benchmarks failed on main <${{ github.event.head_commit.url }}|${{ github.sha }}>
-          <${{ needs.create-test-report.outputs.report-url }}|Allure report>
-      env:
-        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        method: chat.postMessage
+        token: ${{ secrets.SLACK_BOT_TOKEN }}
+        payload: |
+          channel: "${{ vars.SLACK_ON_CALL_STORAGE_STAGING_STREAM }}"
+          text: |
+            Benchmarks on main: *${{ needs.benchmarks.result }}*
+            - <${{ needs.create-test-report.outputs.report-url }}|Allure report>
+            - <${{ github.event.head_commit.url }}|${{ github.sha }}>
 
   create-test-report:
     needs: [ check-permissions, build-and-test-locally, coverage-report, build-build-tools-image, benchmarks ]

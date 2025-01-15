@@ -365,8 +365,9 @@ pub struct Tenant {
 
     /// Throttle applied at the top of [`Timeline::get`].
     /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
-    pub(crate) pagestream_throttle:
-        Arc<throttle::Throttle<crate::metrics::tenant_throttling::Pagestream>>,
+    pub(crate) pagestream_throttle: Arc<throttle::Throttle>,
+
+    pub(crate) pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
 
     /// An ongoing timeline detach concurrency limiter.
     ///
@@ -1687,6 +1688,7 @@ impl Tenant {
                     TimelineResources {
                         remote_client,
                         pagestream_throttle: self.pagestream_throttle.clone(),
+                        pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
                         l0_flush_global_state: self.l0_flush_global_state.clone(),
                     },
                     LoadTimelineCause::Attach,
@@ -3992,6 +3994,9 @@ impl Tenant {
         Ok(timeline)
     }
 
+    /// [`Tenant::shutdown`] must be called before dropping the returned [`Tenant`] object
+    /// to ensure proper cleanup of background tasks and metrics.
+    //
     // Allow too_many_arguments because a constructor's argument list naturally grows with the
     // number of attributes in the struct: breaking these out into a builder wouldn't be helpful.
     #[allow(clippy::too_many_arguments)]
@@ -4100,8 +4105,10 @@ impl Tenant {
             gate: Gate::default(),
             pagestream_throttle: Arc::new(throttle::Throttle::new(
                 Tenant::get_pagestream_throttle_config(conf, &attached_conf.tenant_conf),
-                crate::metrics::tenant_throttling::Metrics::new(&tenant_shard_id),
             )),
+            pagestream_throttle_metrics: Arc::new(
+                crate::metrics::tenant_throttling::Pagestream::new(&tenant_shard_id),
+            ),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
@@ -5008,6 +5015,7 @@ impl Tenant {
         TimelineResources {
             remote_client: self.build_timeline_remote_client(timeline_id),
             pagestream_throttle: self.pagestream_throttle.clone(),
+            pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
         }
     }
@@ -5682,7 +5690,7 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
     use itertools::Itertools;
-    use pageserver_api::key::{Key, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
+    use pageserver_api::key::{Key, AUX_KEY_PREFIX, NON_INHERITED_RANGE, RELATION_SIZE_PREFIX};
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
     use pageserver_api::value::Value;
@@ -7741,7 +7749,18 @@ mod tests {
         let base_key = Key::from_hex("620000000033333333444444445500000000").unwrap();
         let base_key_child = Key::from_hex("620000000033333333444444445500000001").unwrap();
         let base_key_nonexist = Key::from_hex("620000000033333333444444445500000002").unwrap();
+        let base_key_overwrite = Key::from_hex("620000000033333333444444445500000003").unwrap();
+
+        let base_inherited_key = Key::from_hex("610000000033333333444444445500000000").unwrap();
+        let base_inherited_key_child =
+            Key::from_hex("610000000033333333444444445500000001").unwrap();
+        let base_inherited_key_nonexist =
+            Key::from_hex("610000000033333333444444445500000002").unwrap();
+        let base_inherited_key_overwrite =
+            Key::from_hex("610000000033333333444444445500000003").unwrap();
+
         assert_eq!(base_key.field1, AUX_KEY_PREFIX); // in case someone accidentally changed the prefix...
+        assert_eq!(base_inherited_key.field1, RELATION_SIZE_PREFIX);
 
         let tline = tenant
             .create_test_timeline_with_layers(
@@ -7750,7 +7769,18 @@ mod tests {
                 DEFAULT_PG_VERSION,
                 &ctx,
                 Vec::new(), // delta layers
-                vec![(Lsn(0x20), vec![(base_key, test_img("metadata key 1"))])], // image layers
+                vec![(
+                    Lsn(0x20),
+                    vec![
+                        (base_inherited_key, test_img("metadata inherited key 1")),
+                        (
+                            base_inherited_key_overwrite,
+                            test_img("metadata key overwrite 1a"),
+                        ),
+                        (base_key, test_img("metadata key 1")),
+                        (base_key_overwrite, test_img("metadata key overwrite 1b")),
+                    ],
+                )], // image layers
                 Lsn(0x20), // it's fine to not advance LSN to 0x30 while using 0x30 to get below because `get_vectored_impl` does not wait for LSN
             )
             .await?;
@@ -7764,7 +7794,18 @@ mod tests {
                 Vec::new(), // delta layers
                 vec![(
                     Lsn(0x30),
-                    vec![(base_key_child, test_img("metadata key 2"))],
+                    vec![
+                        (
+                            base_inherited_key_child,
+                            test_img("metadata inherited key 2"),
+                        ),
+                        (
+                            base_inherited_key_overwrite,
+                            test_img("metadata key overwrite 2a"),
+                        ),
+                        (base_key_child, test_img("metadata key 2")),
+                        (base_key_overwrite, test_img("metadata key overwrite 2b")),
+                    ],
                 )], // image layers
                 Lsn(0x30),
             )
@@ -7786,6 +7827,26 @@ mod tests {
             get_vectored_impl_wrapper(&tline, base_key_nonexist, lsn, &ctx).await?,
             None
         );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, base_key_overwrite, lsn, &ctx).await?,
+            Some(test_img("metadata key overwrite 1b"))
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, base_inherited_key, lsn, &ctx).await?,
+            Some(test_img("metadata inherited key 1"))
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, base_inherited_key_child, lsn, &ctx).await?,
+            None
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, base_inherited_key_nonexist, lsn, &ctx).await?,
+            None
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, base_inherited_key_overwrite, lsn, &ctx).await?,
+            Some(test_img("metadata key overwrite 1a"))
+        );
 
         // test vectored get on child timeline
         assert_eq!(
@@ -7799,6 +7860,82 @@ mod tests {
         assert_eq!(
             get_vectored_impl_wrapper(&child, base_key_nonexist, lsn, &ctx).await?,
             None
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_inherited_key, lsn, &ctx).await?,
+            Some(test_img("metadata inherited key 1"))
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_inherited_key_child, lsn, &ctx).await?,
+            Some(test_img("metadata inherited key 2"))
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_inherited_key_nonexist, lsn, &ctx).await?,
+            None
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_key_overwrite, lsn, &ctx).await?,
+            Some(test_img("metadata key overwrite 2b"))
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_inherited_key_overwrite, lsn, &ctx).await?,
+            Some(test_img("metadata key overwrite 2a"))
+        );
+
+        // test vectored scan on parent timeline
+        let mut reconstruct_state = ValuesReconstructState::new();
+        let res = tline
+            .get_vectored_impl(
+                KeySpace::single(Key::metadata_key_range()),
+                lsn,
+                &mut reconstruct_state,
+                &ctx,
+            )
+            .await?;
+
+        assert_eq!(
+            res.into_iter()
+                .map(|(k, v)| (k, v.unwrap()))
+                .collect::<Vec<_>>(),
+            vec![
+                (base_inherited_key, test_img("metadata inherited key 1")),
+                (
+                    base_inherited_key_overwrite,
+                    test_img("metadata key overwrite 1a")
+                ),
+                (base_key, test_img("metadata key 1")),
+                (base_key_overwrite, test_img("metadata key overwrite 1b")),
+            ]
+        );
+
+        // test vectored scan on child timeline
+        let mut reconstruct_state = ValuesReconstructState::new();
+        let res = child
+            .get_vectored_impl(
+                KeySpace::single(Key::metadata_key_range()),
+                lsn,
+                &mut reconstruct_state,
+                &ctx,
+            )
+            .await?;
+
+        assert_eq!(
+            res.into_iter()
+                .map(|(k, v)| (k, v.unwrap()))
+                .collect::<Vec<_>>(),
+            vec![
+                (base_inherited_key, test_img("metadata inherited key 1")),
+                (
+                    base_inherited_key_child,
+                    test_img("metadata inherited key 2")
+                ),
+                (
+                    base_inherited_key_overwrite,
+                    test_img("metadata key overwrite 2a")
+                ),
+                (base_key_child, test_img("metadata key 2")),
+                (base_key_overwrite, test_img("metadata key overwrite 2b")),
+            ]
         );
 
         Ok(())

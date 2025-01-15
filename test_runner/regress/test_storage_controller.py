@@ -113,6 +113,19 @@ def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination)
     for tid in tenant_ids:
         env.create_tenant(tid, shard_count=shards_per_tenant)
 
+    # Tenant listing API should work
+    listed_tenants = env.storage_controller.tenant_list()
+    log.info(f"listed_tenants: {listed_tenants}")
+    assert set(t["tenant_id"] for t in listed_tenants) == set(str(t) for t in tenant_ids)
+    paged = env.storage_controller.tenant_list(limit=2, start_after=listed_tenants[0]["tenant_id"])
+    assert len(paged) == 2
+    assert paged[0] == listed_tenants[1]
+    assert paged[1] == listed_tenants[2]
+    paged = env.storage_controller.tenant_list(
+        limit=1000, start_after="ffffffffffffffffffffffffffffffff"
+    )
+    assert paged == []
+
     # Validate high level metrics
     assert (
         env.storage_controller.get_metric_value("storage_controller_tenant_shards")
@@ -1052,7 +1065,7 @@ def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
     that just hits the endpoints to check that they don't bitrot.
     """
 
-    neon_env_builder.num_pageservers = 2
+    neon_env_builder.num_pageservers = 3
     env = neon_env_builder.init_start()
 
     tenant_id = TenantId.generate()
@@ -1077,7 +1090,7 @@ def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
         "GET", f"{env.storage_controller_api}/debug/v1/scheduler"
     )
     # Two nodes, in a dict of node_id->node
-    assert len(response.json()["nodes"]) == 2
+    assert len(response.json()["nodes"]) == 3
     assert sum(v["shard_count"] for v in response.json()["nodes"].values()) == 3
     assert all(v["may_schedule"] for v in response.json()["nodes"].values())
 
@@ -1088,13 +1101,25 @@ def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
         headers=env.storage_controller.headers(TokenScope.ADMIN),
     )
 
+    # Secondary migration API: superficial check that it migrates
+    secondary_dest = env.pageservers[2].id
+    env.storage_controller.request(
+        "PUT",
+        f"{env.storage_controller_api}/control/v1/tenant/{tenant_id}-0002/migrate_secondary",
+        headers=env.storage_controller.headers(TokenScope.ADMIN),
+        json={"tenant_shard_id": f"{tenant_id}-0002", "node_id": secondary_dest},
+    )
+    assert env.storage_controller.tenant_describe(tenant_id)["shards"][0]["node_secondary"] == [
+        secondary_dest
+    ]
+
     # Node unclean drop API
     response = env.storage_controller.request(
         "POST",
         f"{env.storage_controller_api}/debug/v1/node/{env.pageservers[1].id}/drop",
         headers=env.storage_controller.headers(TokenScope.ADMIN),
     )
-    assert len(env.storage_controller.node_list()) == 1
+    assert len(env.storage_controller.node_list()) == 2
 
     # Tenant unclean drop API
     response = env.storage_controller.request(
@@ -1494,7 +1519,7 @@ class PageserverFailpoint(Failure):
 
 
 def build_node_to_tenants_map(env: NeonEnv) -> dict[int, list[TenantId]]:
-    tenants = env.storage_controller.tenant_list()
+    tenants = env.storage_controller.tenant_shard_dump()
 
     node_to_tenants: dict[int, list[TenantId]] = {}
     for t in tenants:
@@ -1812,7 +1837,13 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     """
     output_dir = neon_env_builder.test_output_dir
     shard_count = 4
-    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    env.create_tenant(tenant_id, placement_policy='{"Attached":1}', shard_count=shard_count)
+
     base_args = [env.neon_binpath / "storcon_cli", "--api", env.storage_controller_api]
 
     def storcon_cli(args):
@@ -1841,7 +1872,7 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     # List nodes
     node_lines = storcon_cli(["nodes"])
     # Table header, footer, and one line of data
-    assert len(node_lines) == 5
+    assert len(node_lines) == 7
     assert "localhost" in node_lines[3]
 
     # Pause scheduling onto a node
@@ -1859,10 +1890,21 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     storcon_cli(["node-configure", "--node-id", "1", "--availability", "offline"])
     assert "Offline" in storcon_cli(["nodes"])[3]
 
+    # Restore node, verify status changes in CLI output
+    env.pageservers[0].start()
+
+    def is_online():
+        assert "Offline" not in storcon_cli(["nodes"])
+
+    wait_until(is_online)
+
+    # Let everything stabilize after node failure to avoid interfering with subsequent steps
+    env.storage_controller.reconcile_until_idle(timeout_secs=10)
+
     # List tenants
     tenant_lines = storcon_cli(["tenants"])
     assert len(tenant_lines) == 5
-    assert str(env.initial_tenant) in tenant_lines[3]
+    assert str(tenant_id) in tenant_lines[3]
 
     # Setting scheduling policies intentionally result in warnings, they're for rare use.
     env.storage_controller.allowed_errors.extend(
@@ -1870,23 +1912,58 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     )
 
     # Describe a tenant
-    tenant_lines = storcon_cli(["tenant-describe", "--tenant-id", str(env.initial_tenant)])
+    tenant_lines = storcon_cli(["tenant-describe", "--tenant-id", str(tenant_id)])
     assert len(tenant_lines) >= 3 + shard_count * 2
-    assert str(env.initial_tenant) in tenant_lines[0]
+    assert str(tenant_id) in tenant_lines[0]
+
+    # Migrate an attached location
+    def other_ps_id(current_ps_id):
+        return (
+            env.pageservers[0].id
+            if current_ps_id == env.pageservers[1].id
+            else env.pageservers[1].id
+        )
+
+    storcon_cli(
+        [
+            "tenant-shard-migrate",
+            "--tenant-shard-id",
+            f"{tenant_id}-0004",
+            "--node",
+            str(
+                other_ps_id(
+                    env.storage_controller.tenant_describe(tenant_id)["shards"][0]["node_attached"]
+                )
+            ),
+        ]
+    )
+
+    # Migrate a secondary location
+    storcon_cli(
+        [
+            "tenant-shard-migrate-secondary",
+            "--tenant-shard-id",
+            f"{tenant_id}-0004",
+            "--node",
+            str(
+                other_ps_id(
+                    env.storage_controller.tenant_describe(tenant_id)["shards"][0][
+                        "node_secondary"
+                    ][0]
+                )
+            ),
+        ]
+    )
 
     # Pause changes on a tenant
-    storcon_cli(["tenant-policy", "--tenant-id", str(env.initial_tenant), "--scheduling", "stop"])
+    storcon_cli(["tenant-policy", "--tenant-id", str(tenant_id), "--scheduling", "stop"])
     assert "Stop" in storcon_cli(["tenants"])[3]
 
     # Cancel ongoing reconcile on a tenant
-    storcon_cli(
-        ["tenant-shard-cancel-reconcile", "--tenant-shard-id", f"{env.initial_tenant}-0104"]
-    )
+    storcon_cli(["tenant-shard-cancel-reconcile", "--tenant-shard-id", f"{tenant_id}-0104"])
 
     # Change a tenant's placement
-    storcon_cli(
-        ["tenant-policy", "--tenant-id", str(env.initial_tenant), "--placement", "secondary"]
-    )
+    storcon_cli(["tenant-policy", "--tenant-id", str(tenant_id), "--placement", "secondary"])
     assert "Secondary" in storcon_cli(["tenants"])[3]
 
     # Modify a tenant's config
@@ -1894,7 +1971,7 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
         [
             "patch-tenant-config",
             "--tenant-id",
-            str(env.initial_tenant),
+            str(tenant_id),
             "--config",
             json.dumps({"pitr_interval": "1m"}),
         ]
@@ -2567,7 +2644,7 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
     # Validate that the storcon attempts to forward the request, but stops.
     # when it realises it is still the current leader.
     with pytest.raises(StorageControllerApiException, match="Leader is stepped down instance"):
-        env.storage_controller.tenant_list()
+        env.storage_controller.tenant_shard_dump()
 
     # Validate that we can step down multiple times and the observed state
     # doesn't change.
@@ -2717,7 +2794,7 @@ def test_storage_controller_leadership_transfer(
         # Check that the stepped down instance forwards requests
         # to the new leader while it's still running.
         storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_1_port}")
-        env.storage_controller.tenant_list()
+        env.storage_controller.tenant_shard_dump()
         env.storage_controller.node_configure(env.pageservers[0].id, {"scheduling": "Pause"})
         status = env.storage_controller.node_status(env.pageservers[0].id)
         assert status["scheduling"] == "Pause"
@@ -3149,11 +3226,12 @@ def eq_safekeeper_records(a: dict[str, Any], b: dict[str, Any]) -> bool:
 @run_only_on_default_postgres("this is like a 'unit test' against storcon db")
 def test_shard_preferred_azs(neon_env_builder: NeonEnvBuilder):
     def assign_az(ps_cfg):
-        az = f"az-{ps_cfg['id']}"
+        az = f"az-{ps_cfg['id'] % 2}"
+        log.info("Assigned AZ {az}")
         ps_cfg["availability_zone"] = az
 
     neon_env_builder.pageserver_config_override = assign_az
-    neon_env_builder.num_pageservers = 2
+    neon_env_builder.num_pageservers = 4
     env = neon_env_builder.init_configs()
     env.start()
 
@@ -3168,8 +3246,14 @@ def test_shard_preferred_azs(neon_env_builder: NeonEnvBuilder):
 
         assert shards[0]["preferred_az_id"] == expected_az
 
+    # When all other schedule scoring parameters are equal, tenants should round-robin on AZs
+    assert env.storage_controller.tenant_describe(tids[0])["shards"][0]["preferred_az_id"] == "az-0"
+    assert env.storage_controller.tenant_describe(tids[1])["shards"][0]["preferred_az_id"] == "az-1"
+    assert env.storage_controller.tenant_describe(tids[2])["shards"][0]["preferred_az_id"] == "az-0"
+
+    # Try modifying preferred AZ
     updated = env.storage_controller.set_preferred_azs(
-        {TenantShardId(tid, 0, 0): "foo" for tid in tids}
+        {TenantShardId(tid, 0, 0): "az-0" for tid in tids}
     )
 
     assert set(updated) == set([TenantShardId(tid, 0, 0) for tid in tids])
@@ -3177,29 +3261,24 @@ def test_shard_preferred_azs(neon_env_builder: NeonEnvBuilder):
     for tid in tids:
         shards = env.storage_controller.tenant_describe(tid)["shards"]
         assert len(shards) == 1
-        assert shards[0]["preferred_az_id"] == "foo"
+        assert shards[0]["preferred_az_id"] == "az-0"
 
-    # Generate a layer to avoid shard split handling on ps from tripping
-    # up on debug assert.
-    timeline_id = TimelineId.generate()
-    env.create_timeline("bar", tids[0], timeline_id)
-
-    workload = Workload(env, tids[0], timeline_id, branch_name="bar")
-    workload.init()
-    workload.write_rows(256)
-    workload.validate()
+    # Having modified preferred AZ, we should get moved there
+    env.storage_controller.reconcile_until_idle(max_interval=0.1)
+    for tid in tids:
+        shard = env.storage_controller.tenant_describe(tid)["shards"][0]
+        attached_to = shard["node_attached"]
+        attached_in_az = env.get_pageserver(attached_to).az_id
+        assert shard["preferred_az_id"] == attached_in_az == "az-0"
 
     env.storage_controller.tenant_shard_split(tids[0], shard_count=2)
+    env.storage_controller.reconcile_until_idle(max_interval=0.1)
     shards = env.storage_controller.tenant_describe(tids[0])["shards"]
     assert len(shards) == 2
     for shard in shards:
         attached_to = shard["node_attached"]
-        expected_az = env.get_pageserver(attached_to).az_id
-
-        # The scheduling optimization logic is not yet AZ-aware, so doesn't succeed
-        # in putting the tenant shards in the preferred AZ.
-        # To be fixed in https://github.com/neondatabase/neon/pull/9916
-        # assert shard["preferred_az_id"] == expected_az
+        attached_in_az = env.get_pageserver(attached_to).az_id
+        assert shard["preferred_az_id"] == attached_in_az == "az-0"
 
 
 @run_only_on_default_postgres("Postgres version makes no difference here")
