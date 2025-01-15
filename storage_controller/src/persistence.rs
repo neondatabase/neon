@@ -108,6 +108,7 @@ pub(crate) enum DatabaseOperation {
     ListMetadataHealthUnhealthy,
     ListMetadataHealthOutdated,
     ListSafekeepers,
+    InsertTimeline,
     GetLeader,
     UpdateLeader,
     SetPreferredAzs,
@@ -1049,7 +1050,7 @@ impl Persistence {
     pub(crate) async fn list_safekeepers(&self) -> DatabaseResult<Vec<SafekeeperPersistence>> {
         let safekeepers: Vec<SafekeeperPersistence> = self
             .with_measured_conn(
-                DatabaseOperation::ListNodes,
+                DatabaseOperation::ListSafekeepers,
                 move |conn| -> DatabaseResult<_> {
                     Ok(crate::schema::safekeepers::table.load::<SafekeeperPersistence>(conn)?)
                 },
@@ -1057,6 +1058,60 @@ impl Persistence {
             .await?;
 
         tracing::info!("list_safekeepers: loaded {} nodes", safekeepers.len());
+
+        Ok(safekeepers)
+    }
+
+    pub(crate) async fn list_safekeepers_with_timeline_count(
+        &self,
+    ) -> DatabaseResult<Vec<(NodeId, String, u64)>> {
+        #[derive(QueryableByName, PartialEq, Debug)]
+        struct SafekeeperTimelineCountResponse {
+            #[diesel(sql_type = diesel::sql_types::Int8)]
+            sk_id: i64,
+            #[diesel(sql_type = diesel::sql_types::Varchar)]
+            az_id: String,
+            #[diesel(sql_type = diesel::sql_types::Int8)]
+            timeline_count: i64,
+        }
+        let safekeepers: Vec<SafekeeperTimelineCountResponse> = self
+            .with_measured_conn(
+                DatabaseOperation::ListSafekeepers,
+                move |conn| -> DatabaseResult<_> {
+                    let query = diesel::sql_query("\
+                        SELECT safekeepers.id as sk_id, safekeepers.availability_zone_id as az_id, COUNT(*) as timeline_count \
+                        FROM (select tenant_id, timeline_id, unnest(sk_set) as sk_id from timelines) as timelines_unnested \
+                        JOIN safekeepers ON (safekeepers.id = timelines_unnested.id)\
+                    ");
+                    let results: Vec<_> = query.load(conn)?;
+                    Ok(results)
+                },
+            )
+            .await?;
+
+        let safekeepers = safekeepers
+            .into_iter()
+            .map(|sk| {
+                if sk.sk_id < 0 {
+                    return Err(DatabaseError::Logical(format!(
+                        "invalid safekeeper id: {}",
+                        sk.sk_id
+                    )));
+                }
+                if sk.timeline_count < 0 {
+                    return Err(DatabaseError::Logical(format!(
+                        "invalid timeline count {} for sk: {}",
+                        sk.timeline_count, sk.sk_id
+                    )));
+                }
+                Ok((NodeId(sk.sk_id as u64), sk.az_id, sk.timeline_count as u64))
+            })
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+
+        tracing::info!(
+            "list_safekeepers_with_timeline_count: loaded {} safekeepers",
+            safekeepers.len()
+        );
 
         Ok(safekeepers)
     }
@@ -1133,6 +1188,32 @@ impl Persistence {
 
             Ok(())
         })
+        .await
+    }
+
+    /// Timelines must be persisted before we schedule them for the first time.
+    pub(crate) async fn insert_timeline(&self, entry: TimelinePersistence) -> DatabaseResult<()> {
+        use crate::schema::timelines;
+
+        self.with_measured_conn(
+            DatabaseOperation::InsertTimeline,
+            move |conn| -> DatabaseResult<()> {
+                let inserted_updated = diesel::insert_into(timelines::table)
+                    .values(&entry)
+                    .on_conflict((timelines::tenant_id, timelines::timeline_id))
+                    .do_nothing()
+                    .execute(conn)?;
+
+                if inserted_updated != 1 {
+                    return Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({})",
+                        inserted_updated
+                    )));
+                }
+
+                Ok(())
+            },
+        )
         .await
     }
 }
@@ -1361,4 +1442,16 @@ struct InsertUpdateSafekeeper<'a> {
     http_port: i32,
     availability_zone_id: &'a str,
     scheduling_policy: Option<&'a str>,
+}
+
+#[derive(Insertable, AsChangeset)]
+#[diesel(table_name = crate::schema::timelines)]
+pub(crate) struct TimelinePersistence {
+    pub(crate) tenant_id: String,
+    pub(crate) timeline_id: String,
+    pub(crate) generation: i32,
+    pub(crate) sk_set: Vec<i64>,
+    pub(crate) new_sk_set: Vec<i64>,
+    pub(crate) cplane_notified_generation: i32,
+    pub(crate) status: String,
 }

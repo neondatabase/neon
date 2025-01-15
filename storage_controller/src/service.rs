@@ -26,7 +26,7 @@ use crate::{
     peer_client::GlobalObservedState,
     persistence::{
         AbortShardSplitStatus, ControllerPersistence, DatabaseResult, MetadataHealthPersistence,
-        ShardGenerationState, TenantFilter,
+        ShardGenerationState, TenantFilter, TimelinePersistence,
     },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
     scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
@@ -35,7 +35,7 @@ use crate::{
         ScheduleOptimization, ScheduleOptimizationAction,
     },
 };
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use control_plane::storage_controller::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
 };
@@ -54,7 +54,7 @@ use pageserver_api::{
     },
     models::{
         SecondaryProgress, TenantConfigPatchRequest, TenantConfigRequest,
-        TimelineArchivalConfigRequest, TopTenantShardsRequest,
+        TimelineArchivalConfigRequest, TimelineCreateResponseStorcon, TopTenantShardsRequest,
     },
 };
 use reqwest::StatusCode;
@@ -3273,8 +3273,10 @@ impl Service {
         &self,
         tenant_id: TenantId,
         mut create_req: TimelineCreateRequest,
-    ) -> Result<TimelineInfo, ApiError> {
+    ) -> Result<TimelineCreateResponseStorcon, ApiError> {
+        let safekeepers = create_req.safekeepers.unwrap_or_default();
         tracing::info!(
+            %safekeepers,
             "Creating timeline {}/{}",
             tenant_id,
             create_req.new_timeline_id,
@@ -3287,8 +3289,9 @@ impl Service {
         )
         .await;
         failpoint_support::sleep_millis_async!("tenant-create-timeline-shared-lock");
+        let timeline_id = create_req.new_timeline_id.clone();
 
-        self.tenant_remote_mutation(tenant_id, move |mut targets| async move {
+        let on_ps_fut = self.tenant_remote_mutation(tenant_id, move |mut targets| async move {
             if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant not found").into(),
@@ -3404,8 +3407,38 @@ impl Service {
             }
 
             Ok(timeline_info)
+        });
+        let on_sk_fut = async {
+            if safekeepers {
+                // Choose initial set of safekeepers respecting affinity
+                let sks = self.safekeepers_for_new_timeline().await?;
+                let sks_persistence = sks.iter().map(|sk| sk.0 as i64).collect::<Vec<_>>();
+                // Add timeline to db
+                let timeline_persist = TimelinePersistence {
+                    tenant_id: tenant_id.to_string(),
+                    timeline_id: timeline_id.to_string(),
+                    generation: 0,
+                    sk_set: sks_persistence.clone(),
+                    new_sk_set: sks_persistence.clone(),
+                    cplane_notified_generation: 0,
+                    status: "creating".to_string(),
+                };
+                self.persistence.insert_timeline(timeline_persist).await?;
+                // TODO: reconcile: create timeline on safekeepers, return success if quorum is met after timeout (or all sks return before timeout)
+                // TODO: call /notify-safekeepers on cplane
+                Ok::<_, ApiError>((Some(0), Some(sks)))
+            } else {
+                Ok((None, None))
+            }
+        };
+        let (on_ps_res, on_sk_res) = tokio::join!(on_ps_fut, on_sk_fut);
+        let (safekeepers_generation, safekeepers) = on_sk_res?;
+        let timeline_info = on_ps_res??;
+        Ok(TimelineCreateResponseStorcon {
+            timeline_info,
+            safekeepers_generation,
+            safekeepers,
         })
-        .await?
     }
 
     pub(crate) async fn tenant_timeline_archival_config(
@@ -7651,6 +7684,33 @@ impl Service {
         }
 
         global_observed
+    }
+
+    pub(crate) async fn safekeepers_for_new_timeline(&self) -> Result<Vec<NodeId>, ApiError> {
+        let mut all_safekeepers = self
+            .persistence
+            .list_safekeepers_with_timeline_count()
+            .await?;
+        all_safekeepers.sort_by_key(|sk| sk.2);
+        let mut sks = Vec::new();
+        let mut azs = HashSet::new();
+        // TODO: assign to safekeepers with smallest number of timelines
+        for (sk_id, az_id, _timeline_count) in all_safekeepers.iter() {
+            if !azs.insert(az_id) {
+                continue;
+            }
+            sks.push(*sk_id);
+            if sks.len() == 3 {
+                break;
+            }
+        }
+        if sks.len() == 3 {
+            return Ok(sks);
+        } else {
+            return Err(ApiError::InternalServerError(anyhow!(
+                "couldn't find three safekeepers in different AZs for new timeline"
+            )));
+        }
     }
 
     pub(crate) async fn safekeepers_list(
