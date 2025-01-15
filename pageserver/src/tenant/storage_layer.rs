@@ -14,7 +14,7 @@ use crate::context::{AccessStatsBehavior, RequestContext};
 use bytes::Bytes;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
-use pageserver_api::key::{Key, NON_INHERITED_SPARSE_RANGE};
+use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::value::Value;
@@ -496,7 +496,7 @@ impl ValuesReconstructState {
     ) -> ValueReconstructSituation {
         let state = self.keys.entry(*key).or_default();
 
-        let is_sparse_key = NON_INHERITED_SPARSE_RANGE.contains(key);
+        let is_sparse_key = key.is_sparse();
 
         match state.situation {
             ValueReconstructSituation::Complete => {

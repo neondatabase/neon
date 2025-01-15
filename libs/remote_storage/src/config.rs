@@ -43,6 +43,17 @@ impl RemoteStorageKind {
     }
 }
 
+impl RemoteStorageConfig {
+    /// Helper to fetch the configured concurrency limit.
+    pub fn concurrency_limit(&self) -> Option<usize> {
+        match &self.storage {
+            RemoteStorageKind::LocalFs { .. } => None,
+            RemoteStorageKind::AwsS3(c) => Some(c.concurrency_limit.into()),
+            RemoteStorageKind::AzureContainer(c) => Some(c.concurrency_limit.into()),
+        }
+    }
+}
+
 fn default_timeout() -> Duration {
     RemoteStorageConfig::DEFAULT_TIMEOUT
 }
@@ -115,13 +126,15 @@ fn default_max_keys_per_list_response() -> Option<i32> {
 }
 
 fn default_azure_conn_pool_size() -> usize {
-    // Conservative default: no connection pooling.  At time of writing this is the Azure
-    // SDK's default as well, due to historic reports of hard-to-reproduce issues
+    // By default, the Azure SDK does no connection pooling, due to historic reports of hard-to-reproduce issues
     // (https://github.com/hyperium/hyper/issues/2312)
     //
     // However, using connection pooling is important to avoid exhausting client ports when
     // doing huge numbers of requests (https://github.com/neondatabase/cloud/issues/20971)
-    0
+    //
+    // We therefore enable a modest pool size by default: this may be configured to zero if
+    // issues like the alleged upstream hyper issue appear.
+    8
 }
 
 impl Debug for S3Config {

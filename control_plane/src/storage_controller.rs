@@ -822,10 +822,7 @@ impl StorageController {
         self.dispatch(
             Method::PUT,
             format!("control/v1/tenant/{tenant_shard_id}/migrate"),
-            Some(TenantShardMigrateRequest {
-                tenant_shard_id,
-                node_id,
-            }),
+            Some(TenantShardMigrateRequest { node_id }),
         )
         .await
     }

@@ -13,6 +13,7 @@ use thiserror::Error;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
 
+use crate::auth::backend::ComputeUserInfo;
 use crate::auth::parse_endpoint_param;
 use crate::cancellation::CancelClosure;
 use crate::config::ComputeConfig;
@@ -250,6 +251,7 @@ impl ConnCfg {
         ctx: &RequestContext,
         aux: MetricsAuxInfo,
         config: &ComputeConfig,
+        user_info: ComputeUserInfo,
     ) -> Result<PostgresConnection, ConnectionError> {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (socket_addr, stream, host) = self.connect_raw(config.timeout).await?;
@@ -294,8 +296,9 @@ impl ConnCfg {
                 process_id,
                 secret_key,
             },
-            vec![],
+            vec![], // TODO: deprecated, will be removed
             host.to_string(),
+            user_info,
         );
 
         let connection = PostgresConnection {
