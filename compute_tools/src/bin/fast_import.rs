@@ -41,6 +41,9 @@ mod child_stdio_to_log;
 #[path = "fast_import/s3_uri.rs"]
 mod s3_uri;
 
+const PG_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+const PG_WAIT_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
+
 #[derive(clap::Parser)]
 struct Args {
     #[clap(long)]
@@ -231,12 +234,10 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     let restore_pg_connstring =
         format!("host=localhost port=5432 user={superuser} dbname=postgres");
 
-    let timeout_duration = std::time::Duration::from_secs(600); // 10 minutes
     let start_time = std::time::Instant::now();
-    let retry_interval = std::time::Duration::from_secs_f32(0.3);
 
     loop {
-        if start_time.elapsed() > timeout_duration {
+        if start_time.elapsed() > PG_WAIT_TIMEOUT {
             error!(
                 "timeout exceeded: failed to poll postgres and create database within 10 minutes"
             );
@@ -261,19 +262,19 @@ pub(crate) async fn main() -> anyhow::Result<()> {
                         warn!(
                             "failed to create database: {}, retying in {}s",
                             e,
-                            retry_interval.as_secs_f32()
+                            PG_WAIT_RETRY_INTERVAL.as_secs_f32()
                         );
-                        tokio::time::sleep(retry_interval).await;
+                        tokio::time::sleep(PG_WAIT_RETRY_INTERVAL).await;
                         continue;
                     }
                 }
             }
             Err(_) => {
-                info!(format!(
+                info!(
                     "postgres not ready yet, retrying in {}s",
-                    retry_interval.as_secs_f32()
-                ));
-                tokio::time::sleep(retry_interval).await;
+                    PG_WAIT_RETRY_INTERVAL.as_secs_f32()
+                );
+                tokio::time::sleep(PG_WAIT_RETRY_INTERVAL).await;
                 continue;
             }
         }
