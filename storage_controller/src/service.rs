@@ -47,7 +47,7 @@ use pageserver_api::{
         AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
         NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
         SafekeeperDescribeResponse, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
-        ShardsPreferredAzsResponse, TenantCreateRequest, TenantCreateResponse,
+        ShardsPreferredAzsResponse, SkSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
         TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
         TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
         TenantShardMigrateResponse,
@@ -7649,6 +7649,16 @@ impl Service {
         record: crate::persistence::SafekeeperUpsert,
     ) -> Result<(), DatabaseError> {
         self.persistence.safekeeper_upsert(record).await
+    }
+
+    pub(crate) async fn set_safekeeper_scheduling_policy(
+        &self,
+        id: i64,
+        scheduling_policy: SkSchedulingPolicy,
+    ) -> Result<(), DatabaseError> {
+        self.persistence
+            .set_safekeeper_scheduling_policy(id, scheduling_policy)
+            .await
     }
 
     pub(crate) async fn update_shards_preferred_azs(

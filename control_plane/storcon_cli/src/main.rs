@@ -9,8 +9,9 @@ use clap::{Parser, Subcommand};
 use pageserver_api::{
     controller_api::{
         AvailabilityZone, NodeAvailabilityWrapper, NodeDescribeResponse, NodeShardResponse,
-        SafekeeperDescribeResponse, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
-        TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
+        SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest, ShardSchedulingPolicy,
+        ShardsPreferredAzsRequest, SkSchedulingPolicy, TenantCreateRequest, TenantDescribeResponse,
+        TenantPolicyRequest,
     },
     models::{
         EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
@@ -231,6 +232,13 @@ enum Command {
     },
     /// List safekeepers known to the storage controller
     Safekeepers {},
+    /// Set the scheduling policy of the specified safekeeper
+    SafekeeperScheduling {
+        #[arg(long)]
+        node_id: NodeId,
+        #[arg(long)]
+        scheduling_policy: SkSchedulingPolicyArg,
+    },
 }
 
 #[derive(Parser)]
@@ -278,6 +286,24 @@ impl FromStr for PlacementPolicyArg {
             }
             _ => Err(anyhow::anyhow!(
                 "Unknown placement policy '{s}', try detached,secondary,attached:<n>"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SkSchedulingPolicyArg(SkSchedulingPolicy);
+
+impl FromStr for SkSchedulingPolicyArg {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self(SkSchedulingPolicy::Active)),
+            "disabled" => Ok(Self(SkSchedulingPolicy::Disabled)),
+            "decomissioned" => Ok(Self(SkSchedulingPolicy::Decomissioned)),
+            _ => Err(anyhow::anyhow!(
+                "Unknown scheduling policy '{s}', try active,disabled,decomissioned"
             )),
         }
     }
@@ -1201,6 +1227,23 @@ async fn main() -> anyhow::Result<()> {
                 ]);
             }
             println!("{table}");
+        }
+        Command::SafekeeperScheduling {
+            node_id,
+            scheduling_policy,
+        } => {
+            let scheduling_policy = scheduling_policy.0;
+            storcon_client
+                .dispatch::<SafekeeperSchedulingPolicyRequest, ()>(
+                    Method::POST,
+                    format!("control/v1/safekeeper/{node_id}/scheduling_policy"),
+                    Some(SafekeeperSchedulingPolicyRequest { scheduling_policy }),
+                )
+                .await?;
+            println!(
+                "Scheduling policy of {node_id} set to {}",
+                String::from(scheduling_policy)
+            );
         }
     }
 
