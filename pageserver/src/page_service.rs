@@ -560,6 +560,9 @@ struct BatchedTestRequest {
     timer: SmgrOpTimer,
 }
 
+/// NB: we only hold [`timeline::handle::WeakHandle`] inside this enum,
+/// so that we don't keep the [`Timeline::gate`] open while the batch
+/// is being built up inside the [`spsc_fold`] (pagestream pipelining).
 enum BatchedFeMessage {
     Exists {
         span: Span,
