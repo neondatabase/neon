@@ -1059,4 +1059,75 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_weak_handles() {
+        crate::tenant::harness::setup_logging();
+        let timeline_id = TimelineId::generate();
+        let shard0 = Arc::new_cyclic(|myself| StubTimeline {
+            gate: Default::default(),
+            id: timeline_id,
+            shard: ShardIdentity::unsharded(),
+            per_timeline_state: PerTimelineState::default(),
+            myself: myself.clone(),
+        });
+        let mgr = StubManager {
+            shards: vec![shard0.clone()],
+        };
+
+        let refcount_start = Arc::strong_count(&shard0);
+
+        let key = DBDIR_KEY;
+
+        let mut cache = Cache::<TestTypes>::default();
+
+        let handle = cache
+            .get(timeline_id, ShardSelector::Page(key), &mgr)
+            .await
+            .expect("we have the timeline");
+        assert!(Weak::ptr_eq(&handle.myself, &shard0.myself));
+
+        let weak_handle = handle.downgrade();
+
+        drop(handle);
+
+        let upgraded_handle = weak_handle.upgrade().ok().expect("we can upgrade it");
+
+        // Start shutdown
+        shard0.per_timeline_state.shutdown();
+
+        // Upgrades during shutdown don't work, even if upgraded_handle exists.
+        weak_handle
+            .upgrade()
+            .err()
+            .expect("can't upgrade weak handle as soon as shutdown started");
+
+        // But upgraded_handle is still alive, so the gate won't close.
+        tokio::select! {
+            _ = shard0.gate.close() => {
+                panic!("handle is keeping gate open");
+            }
+            _ = tokio::time::sleep(FOREVER) => { }
+        }
+
+        // Drop the last handle.
+        drop(upgraded_handle);
+
+        // The gate should close now, despite there still being a weak_handle.
+        tokio::select! {
+            _ = shard0.gate.close() => { }
+            _ = tokio::time::sleep(FOREVER) => {
+                panic!("only strong handle is dropped and we shut down per-timeline-state")
+            }
+        }
+
+        // The weak handle still can't be upgraded.
+        weak_handle
+            .upgrade()
+            .err()
+            .expect("still shouldn't be able to upgrade the weak handle");
+
+        // There should be no strong references to the timeline object except the one on "stack".
+        assert_eq!(Arc::strong_count(&shard0), refcount_start);
+    }
 }
