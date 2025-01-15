@@ -3428,32 +3428,6 @@ impl Timeline {
             }
         }
 
-        // TODO: move this to a function
-        trace!("waiting for futures to complete");
-        match &reconstruct_state.io_concurrency {
-            super::storage_layer::IoConcurrency::Serial => (),
-            super::storage_layer::IoConcurrency::FuturesUnordered { barriers_tx, .. } => {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                match barriers_tx.send(tx) {
-                    Ok(()) => {}
-                    Err(_) => {
-                        return Err(GetVectoredError::Other(anyhow::anyhow!(
-                            "concurrent io task dropped its barriers_rx, likely it panicked"
-                        )));
-                    }
-                }
-                match rx.await {
-                    Ok(()) => {}
-                    Err(_) => {
-                        return Err(GetVectoredError::Other(anyhow::anyhow!(
-                            "concurrent io task dropped the barrier_done, likely it panicked"
-                        )));
-                    }
-                }
-            }
-        }
-        trace!("futures completed");
-
         Ok(TimelineVisitOutcome {
             completed_keyspace,
             image_covered_keyspace: image_covered_keyspace.consume_keyspace(),
