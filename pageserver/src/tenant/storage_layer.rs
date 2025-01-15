@@ -10,8 +10,6 @@ mod layer_desc;
 mod layer_name;
 pub mod merge_iterator;
 
-use crate::LogIfSlowFutureExt;
-
 use crate::context::{AccessStatsBehavior, RequestContext};
 use bytes::Bytes;
 use futures::stream::FuturesUnordered;
@@ -350,7 +348,7 @@ impl IoConcurrency {
         match self {
             IoConcurrency::Serial => fut.await,
             IoConcurrency::FuturesUnordered { ios_tx, .. } => {
-                let fut = Box::pin(fut.log_if_slow("spawned_io", Duration::from_secs(1)));
+                let fut = Box::pin(fut);
                 // NB: experiments showed that doing an opportunistic poll of `fut` here was bad for throughput
                 // while insignificant for latency.
                 // It would make sense to revisit the tokio-epoll-uring API in the future such that we can try
