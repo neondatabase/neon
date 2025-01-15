@@ -114,13 +114,13 @@
 //!
 //! The attentive reader may have noticed the following reference cycle around the `Arc<Timeline>`:
 //!
-//! ```
+//! ```text
 //! Timeline --owns--> PerTimelineState --strong--> HandleInner --strong--> WeakHandle --strong--> Timeline
 //! ```
 //!
 //! Further, there is this cycle:
 //!
-//! ```
+//! ```text
 //! Timeline --owns--> PerTimelineState --strong--> HandleInner --strong--> GateGuard --keepalive--> Timeline
 //! ```
 //!
