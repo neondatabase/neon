@@ -2638,7 +2638,7 @@ mod tests {
         context::RequestContext,
         tenant::{
             config::AttachmentMode,
-            harness::{TenantHarness, TIMELINE_ID},
+            harness::{TenantShardHarness, TIMELINE_ID},
             storage_layer::layer::local_layer_path,
             TenantShard, Timeline,
         },
@@ -2697,7 +2697,7 @@ mod tests {
     }
 
     struct TestSetup {
-        harness: TenantHarness,
+        harness: TenantShardHarness,
         tenant: Arc<TenantShard>,
         timeline: Arc<Timeline>,
         tenant_ctx: RequestContext,
@@ -2706,7 +2706,7 @@ mod tests {
     impl TestSetup {
         async fn new(test_name: &str) -> anyhow::Result<Self> {
             let test_name = Box::leak(Box::new(format!("remote_timeline_client__{test_name}")));
-            let harness = TenantHarness::create(test_name).await?;
+            let harness = TenantShardHarness::create(test_name).await?;
             let (tenant, ctx) = harness.load().await;
 
             let timeline = tenant

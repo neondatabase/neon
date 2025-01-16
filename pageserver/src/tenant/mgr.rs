@@ -2838,14 +2838,14 @@ mod tests {
 
     use crate::tenant::mgr::TenantSlot;
 
-    use super::{super::harness::TenantHarness, TenantsMap};
+    use super::{super::harness::TenantShardHarness, TenantsMap};
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_awaits_in_progress_tenant() {
         // Test that if an InProgress tenant is in the map during shutdown, the shutdown will gracefully
         // wait for it to complete before proceeding.
 
-        let h = TenantHarness::create("shutdown_awaits_in_progress_tenant")
+        let h = TenantShardHarness::create("shutdown_awaits_in_progress_tenant")
             .await
             .unwrap();
         let (t, _ctx) = h.load().await;

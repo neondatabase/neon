@@ -6064,7 +6064,7 @@ mod tests {
     use utils::{id::TimelineId, lsn::Lsn};
 
     use crate::tenant::{
-        harness::{test_img, TenantHarness},
+        harness::{test_img, TenantShardHarness},
         layer_map::LayerMap,
         storage_layer::{Layer, LayerName},
         timeline::{DeltaLayerTestDesc, EvictionError},
@@ -6073,7 +6073,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_heatmap_generation() {
-        let harness = TenantHarness::create("heatmap_generation").await.unwrap();
+        let harness = TenantShardHarness::create("heatmap_generation")
+            .await
+            .unwrap();
 
         let covered_delta = DeltaLayerTestDesc::new_with_inferred_key_range(
             Lsn(0x10)..Lsn(0x20),
@@ -6163,7 +6165,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_layer_eviction_attempts_at_the_same_time() {
-        let harness = TenantHarness::create("two_layer_eviction_attempts_at_the_same_time")
+        let harness = TenantShardHarness::create("two_layer_eviction_attempts_at_the_same_time")
             .await
             .unwrap();
 

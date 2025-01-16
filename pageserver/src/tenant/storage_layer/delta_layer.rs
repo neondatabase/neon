@@ -1622,7 +1622,7 @@ pub(crate) mod test {
     use crate::{
         context::DownloadBehavior,
         task_mgr::TaskKind,
-        tenant::{disk_btree::tests::TestDisk, harness::TenantHarness},
+        tenant::{disk_btree::tests::TestDisk, harness::TenantShardHarness},
         DEFAULT_PG_VERSION,
     };
     use bytes::Bytes;
@@ -1879,7 +1879,8 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn test_delta_layer_vectored_read_end_to_end() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_delta_layer_oversized_vectored_read").await?;
+        let harness =
+            TenantShardHarness::create("test_delta_layer_oversized_vectored_read").await?;
         let (tenant, ctx) = harness.load().await;
 
         let timeline_id = TimelineId::generate();
@@ -1982,7 +1983,7 @@ pub(crate) mod test {
         use bytes::Bytes;
         use pageserver_api::record::NeonWalRecord;
 
-        let h = crate::tenant::harness::TenantHarness::create("truncate_delta_smoke")
+        let h = crate::tenant::harness::TenantShardHarness::create("truncate_delta_smoke")
             .await
             .unwrap();
         let (tenant, ctx) = h.load().await;
@@ -2268,7 +2269,9 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn delta_layer_iterator() {
-        let harness = TenantHarness::create("delta_layer_iterator").await.unwrap();
+        let harness = TenantShardHarness::create("delta_layer_iterator")
+            .await
+            .unwrap();
         let (tenant, ctx) = harness.load().await;
 
         let tline = tenant
