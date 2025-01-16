@@ -20,7 +20,6 @@ use chrono::NaiveDateTime;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
-use metrics::core::Metric;
 use pageserver_api::models;
 use pageserver_api::models::CompactInfoResponse;
 use pageserver_api::models::LsnLease;
