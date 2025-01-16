@@ -440,18 +440,8 @@ impl KeyHistoryRetention {
         if !guard.contains_key(key) {
             return false;
         }
-        let layer_generation = guard.get_from_key(key).metadata().generation;
-        drop(guard);
-        if layer_generation == tline.generation {
-            info!(
-                key=%key,
-                ?layer_generation,
-                "discard layer due to duplicated layer key in the same generation",
-            );
-            true
-        } else {
-            false
-        }
+        info!(key=%key, "discard layer due to duplicated layer key");
+        true
     }
 
     /// Pipe a history of a single key to the writers.
