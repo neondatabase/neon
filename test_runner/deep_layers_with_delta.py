@@ -35,7 +35,7 @@ EOF
  ./target/debug/neon_local endpoint create foo
  echo 'full_page_writes=off' >> .neon/endpoints/foo/postgresql.conf
  ./target/debug/neon_local endpoint start foo
- pushd test_runner; poetry run python3 deep_layers_with_delta.py; popd
+ pushd test_runner; poetry run python3 deep_layers_with_delta.py 20; popd
 ```
 
 Layer files created:
@@ -72,6 +72,7 @@ Now use pagebench to measure perf, e.g.
 
 """
 
+import sys
 import psycopg2
 from fixtures.common_types import TenantShardId, TimelineId
 from fixtures.pageserver.http import PageserverHttpClient
@@ -91,6 +92,6 @@ timeline_id = TimelineId(timlines[0]["timeline_id"])
 connstr = "postgresql://cloud_admin@localhost:55432/postgres"
 conn = psycopg2.connect(connstr)
 
-shape = L0StackShape(logical_table_size_mib=50, delta_stack_height=20)
+shape = L0StackShape(logical_table_size_mib=50, delta_stack_height=int(sys.argv[1]))
 
 make_l0_stack_standalone(vps_http, ps_http, tenant_shard_id, timeline_id, conn, shape)
