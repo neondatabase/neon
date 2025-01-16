@@ -66,6 +66,7 @@ RUN cd postgres && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/interfaces/libpq install && \
     # Enable some of contrib extensions
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/autoinc.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/dblink.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/bloom.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/earthdistance.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/insert_username.control && \
@@ -871,7 +872,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
     rm rustup-init && \
-    cargo install --locked --version 0.12.6 cargo-pgrx && \
+    cargo install --locked --version 0.12.9 cargo-pgrx && \
     /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
 USER root
@@ -908,19 +909,19 @@ RUN apt update && apt install --no-install-recommends --no-install-suggests -y p
     mkdir pgrag-src && cd pgrag-src && tar xzf ../pgrag.tar.gz --strip-components=1 -C . && \
     \
     cd exts/rag && \
-    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/rag.control && \
     \
     cd ../rag_bge_small_en_v15 && \
-    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux \
         REMOTE_ONNX_URL=http://pg-ext-s3-gateway/pgrag-data/bge_small_en_v15.onnx \
         cargo pgrx install --release --features remote_onnx && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/rag_bge_small_en_v15.control && \
     \
     cd ../rag_jina_reranker_v1_tiny_en && \
-    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux \
         REMOTE_ONNX_URL=http://pg-ext-s3-gateway/pgrag-data/jina_reranker_v1_tiny_en.onnx \
         cargo pgrx install --release --features remote_onnx && \
@@ -945,7 +946,8 @@ RUN wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v0.3.3.tar.
     # against postgres forks that decided to change their ABI name (like us).
     # With that we can build extensions without forking them and using stock
     # pgx. As this feature is new few manual version bumps were required.
-    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx-tests = "0.12.6"/pgrx-tests = "0.12.9"/g' Cargo.toml && \
     cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_jsonschema.control
 
@@ -963,7 +965,8 @@ ARG PG_VERSION
 RUN wget https://github.com/supabase/pg_graphql/archive/refs/tags/v1.5.9.tar.gz -O pg_graphql.tar.gz && \
     echo "cf768385a41278be1333472204fc0328118644ae443182cf52f7b9b23277e497 pg_graphql.tar.gz" | sha256sum --check && \
     mkdir pg_graphql-src && cd pg_graphql-src && tar xzf ../pg_graphql.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx = "=0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "=0.12.6"/pgrx = { version = "=0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx-tests = "=0.12.6"/pgrx-tests = "=0.12.9"/g' Cargo.toml && \
     cargo pgrx install --release && \
     # it's needed to enable extension because it uses untrusted C language
     sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_graphql.control && \
@@ -984,9 +987,8 @@ ARG PG_VERSION
 RUN wget https://github.com/kelvich/pg_tiktoken/archive/9118dd4549b7d8c0bbc98e04322499f7bf2fa6f7.tar.gz -O pg_tiktoken.tar.gz && \
     echo "a5bc447e7920ee149d3c064b8b9f0086c0e83939499753178f7d35788416f628 pg_tiktoken.tar.gz" | sha256sum --check && \
     mkdir pg_tiktoken-src && cd pg_tiktoken-src && tar xzf ../pg_tiktoken.tar.gz --strip-components=1 -C . && \
-    # TODO update pgrx version in the pg_tiktoken repo and remove this line
-    sed -i 's/pgrx = { version = "=0.10.2",/pgrx = { version = "0.11.3",/g' Cargo.toml && \
-    sed -i 's/pgrx-tests = "=0.10.2"/pgrx-tests = "0.11.3"/g' Cargo.toml && \
+    sed -i 's/pgrx = { version = "=0.12.6",/pgrx = { version = "0.12.9",/g' Cargo.toml && \
+    sed -i 's/pgrx-tests = "=0.12.6"/pgrx-tests = "0.12.9"/g' Cargo.toml && \
     cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_tiktoken.control
 
@@ -1028,7 +1030,11 @@ ARG PG_VERSION
 RUN wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v0.2.0.tar.gz -O pg_session_jwt.tar.gz && \
     echo "5ace028e591f2e000ca10afa5b1ca62203ebff014c2907c0ec3b29c36f28a1bb pg_session_jwt.tar.gz" | sha256sum --check && \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "=0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/version = "0.12.6"/version = "0.12.9"/g' pgrx-tests/Cargo.toml && \
+    sed -i 's/pgrx = "=0.12.6"/pgrx = { version = "=0.12.9", features = [ "unsafe-postgres" ] }/g' pgrx-tests/Cargo.toml && \
+    sed -i 's/pgrx-macros = "=0.12.6"/pgrx-macros = "=0.12.9"/g' pgrx-tests/Cargo.toml && \
+    sed -i 's/pgrx-pg-config = "=0.12.6"/pgrx-pg-config = "=0.12.9"/g' pgrx-tests/Cargo.toml && \
     cargo pgrx install --release
 
 #########################################################################################

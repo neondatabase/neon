@@ -29,7 +29,7 @@ use utils::{
     lsn::Lsn,
 };
 
-const SK_PROTOCOL_VERSION: u32 = 2;
+pub const SK_PROTOCOL_VERSION: u32 = 2;
 pub const UNKNOWN_SERVER_VERSION: u32 = 0;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -317,7 +317,14 @@ pub enum ProposerAcceptorMessage {
 
 impl ProposerAcceptorMessage {
     /// Parse proposer message.
-    pub fn parse(msg_bytes: Bytes) -> Result<ProposerAcceptorMessage> {
+    pub fn parse(msg_bytes: Bytes, proto_version: u32) -> Result<ProposerAcceptorMessage> {
+        if proto_version != SK_PROTOCOL_VERSION {
+            bail!(
+                "incompatible protocol version {}, expected {}",
+                proto_version,
+                SK_PROTOCOL_VERSION
+            );
+        }
         // xxx using Reader is inefficient but easy to work with bincode
         let mut stream = msg_bytes.reader();
         // u64 is here to avoid padding; it will be removed once we stop packing C structs into the wire as is

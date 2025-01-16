@@ -6,9 +6,12 @@ use std::{cmp::max, ops::Deref, time::SystemTime};
 use anyhow::{bail, Result};
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::{
-    membership::Configuration, models::TimelineTermBumpResponse, ServerInfo, Term, INITIAL_TERM,
+    membership::Configuration,
+    models::{TimelineMembershipSwitchResponse, TimelineTermBumpResponse},
+    ServerInfo, Term, INITIAL_TERM,
 };
 use serde::{Deserialize, Serialize};
+use tracing::info;
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -256,6 +259,31 @@ where
         Ok(TimelineTermBumpResponse {
             previous_term: before,
             current_term: after,
+        })
+    }
+
+    /// Switch into membership configuration `to` if it is higher than the
+    /// current one.
+    pub async fn membership_switch(
+        &mut self,
+        to: Configuration,
+    ) -> Result<TimelineMembershipSwitchResponse> {
+        let before = self.mconf.clone();
+        // Is switch allowed?
+        if to.generation <= self.mconf.generation {
+            info!(
+                "ignoring request to switch membership conf to lower {}, current conf {}",
+                to, self.mconf
+            );
+        } else {
+            let mut state = self.start_change();
+            state.mconf = to.clone();
+            self.finish_change(&state).await?;
+            info!("switched membership conf to {} from {}", to, before);
+        }
+        Ok(TimelineMembershipSwitchResponse {
+            previous_conf: before,
+            current_conf: self.mconf.clone(),
         })
     }
 }

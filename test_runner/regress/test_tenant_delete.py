@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 
 import pytest
@@ -253,29 +254,8 @@ def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder)
     ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "pause"))
 
     def timeline_create():
-        try:
-            ps_http.timeline_create(env.pg_version, tenant_id, TimelineId.generate(), timeout=1)
-            raise RuntimeError("creation succeeded even though it shouldn't")
-        except ReadTimeout:
-            pass
-
-    Thread(target=timeline_create).start()
-
-    def hit_initdb_upload_failpoint():
-        env.pageserver.assert_log_contains(f"at failpoint {BEFORE_INITDB_UPLOAD_FAILPOINT}")
-
-    wait_until(hit_initdb_upload_failpoint)
-
-    def creation_connection_timed_out():
-        env.pageserver.assert_log_contains(
-            "POST.*/timeline.* request was dropped before completing"
-        )
-
-    # Wait so that we hit the timeout and the connection is dropped
-    # (But timeline creation still continues)
-    wait_until(creation_connection_timed_out)
-
-    ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "pause"))
+        ps_http.timeline_create(env.pg_version, tenant_id, TimelineId.generate(), timeout=1)
+        raise RuntimeError("creation succeeded even though it shouldn't")
 
     def tenant_delete():
         def tenant_delete_inner():
@@ -283,21 +263,46 @@ def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder)
 
         wait_until(tenant_delete_inner)
 
-    Thread(target=tenant_delete).start()
+    # We will spawn background threads for timeline creation and tenant deletion.  They will both
+    # get blocked on our failpoint.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        create_fut = executor.submit(timeline_create)
 
-    def deletion_arrived():
-        env.pageserver.assert_log_contains(
-            f"cfg failpoint: {DELETE_BEFORE_CLEANUP_FAILPOINT} pause"
-        )
+        def hit_initdb_upload_failpoint():
+            env.pageserver.assert_log_contains(f"at failpoint {BEFORE_INITDB_UPLOAD_FAILPOINT}")
 
-    wait_until(deletion_arrived)
+        wait_until(hit_initdb_upload_failpoint)
 
-    ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "off"))
+        def creation_connection_timed_out():
+            env.pageserver.assert_log_contains(
+                "POST.*/timeline.* request was dropped before completing"
+            )
 
-    # Disable the failpoint and wait for deletion to finish
-    ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "off"))
+        # Wait so that we hit the timeout and the connection is dropped
+        # (But timeline creation still continues)
+        wait_until(creation_connection_timed_out)
 
-    ps_http.tenant_delete(tenant_id)
+        with pytest.raises(ReadTimeout):
+            # Our creation failed from the client's point of view.
+            create_fut.result()
+
+        ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "pause"))
+
+        delete_fut = executor.submit(tenant_delete)
+
+        def deletion_arrived():
+            env.pageserver.assert_log_contains(
+                f"cfg failpoint: {DELETE_BEFORE_CLEANUP_FAILPOINT} pause"
+            )
+
+        wait_until(deletion_arrived)
+
+        ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "off"))
+
+        # Disable the failpoint and wait for deletion to finish
+        ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "off"))
+
+        delete_fut.result()
 
     # Physical deletion should have happened
     assert_prefix_empty(

@@ -200,9 +200,14 @@ impl SafekeeperPostgresHandler {
     pub async fn handle_start_wal_push<IO: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
+        proto_version: u32,
+        allow_timeline_creation: bool,
     ) -> Result<(), QueryError> {
         let mut tli: Option<WalResidentTimeline> = None;
-        if let Err(end) = self.handle_start_wal_push_guts(pgb, &mut tli).await {
+        if let Err(end) = self
+            .handle_start_wal_push_guts(pgb, &mut tli, proto_version, allow_timeline_creation)
+            .await
+        {
             // Log the result and probably send it to the client, closing the stream.
             let handle_end_fut = pgb.handle_copy_stream_end(end);
             // If we managed to create the timeline, augment logging with current LSNs etc.
@@ -222,6 +227,8 @@ impl SafekeeperPostgresHandler {
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         tli: &mut Option<WalResidentTimeline>,
+        proto_version: u32,
+        allow_timeline_creation: bool,
     ) -> Result<(), CopyStreamHandlerEnd> {
         // The `tli` parameter is only used for passing _out_ a timeline, one should
         // not have been passed in.
@@ -250,12 +257,17 @@ impl SafekeeperPostgresHandler {
             conn_id: self.conn_id,
             pgb_reader: &mut pgb_reader,
             peer_addr,
+            proto_version,
             acceptor_handle: &mut acceptor_handle,
             global_timelines: self.global_timelines.clone(),
         };
 
-        // Read first message and create timeline if needed.
-        let res = network_reader.read_first_message().await;
+        // Read first message and create timeline if needed and allowed. This
+        // won't be when timelines will be always created by storcon and
+        // allow_timeline_creation becomes false.
+        let res = network_reader
+            .read_first_message(allow_timeline_creation)
+            .await;
 
         let network_res = if let Ok((timeline, next_msg)) = res {
             let pageserver_feedback_rx: tokio::sync::broadcast::Receiver<PageserverFeedback> =
@@ -313,6 +325,7 @@ struct NetworkReader<'a, IO> {
     conn_id: ConnectionId,
     pgb_reader: &'a mut PostgresBackendReader<IO>,
     peer_addr: SocketAddr,
+    proto_version: u32,
     // WalAcceptor is spawned when we learn server info from walproposer and
     // create timeline; handle is put here.
     acceptor_handle: &'a mut Option<JoinHandle<anyhow::Result<()>>>,
@@ -322,9 +335,10 @@ struct NetworkReader<'a, IO> {
 impl<IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'_, IO> {
     async fn read_first_message(
         &mut self,
+        allow_timeline_creation: bool,
     ) -> Result<(WalResidentTimeline, ProposerAcceptorMessage), CopyStreamHandlerEnd> {
         // Receive information about server to create timeline, if not yet.
-        let next_msg = read_message(self.pgb_reader).await?;
+        let next_msg = read_message(self.pgb_reader, self.proto_version).await?;
         let tli = match next_msg {
             ProposerAcceptorMessage::Greeting(ref greeting) => {
                 info!(
@@ -336,17 +350,22 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'_, IO> {
                     system_id: greeting.system_id,
                     wal_seg_size: greeting.wal_seg_size,
                 };
-                let tli = self
-                    .global_timelines
-                    .create(
-                        self.ttid,
-                        Configuration::empty(),
-                        server_info,
-                        Lsn::INVALID,
-                        Lsn::INVALID,
-                    )
-                    .await
-                    .context("create timeline")?;
+                let tli = if allow_timeline_creation {
+                    self.global_timelines
+                        .create(
+                            self.ttid,
+                            Configuration::empty(),
+                            server_info,
+                            Lsn::INVALID,
+                            Lsn::INVALID,
+                        )
+                        .await
+                        .context("create timeline")?
+                } else {
+                    self.global_timelines
+                        .get(self.ttid)
+                        .context("get timeline")?
+                };
                 tli.wal_residence_guard().await?
             }
             _ => {
@@ -375,7 +394,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'_, IO> {
         ));
 
         // Forward all messages to WalAcceptor
-        read_network_loop(self.pgb_reader, msg_tx, next_msg).await
+        read_network_loop(self.pgb_reader, msg_tx, next_msg, self.proto_version).await
     }
 }
 
@@ -383,9 +402,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'_, IO> {
 /// TODO: Return Ok(None) on graceful termination.
 async fn read_message<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_reader: &mut PostgresBackendReader<IO>,
+    proto_version: u32,
 ) -> Result<ProposerAcceptorMessage, CopyStreamHandlerEnd> {
     let copy_data = pgb_reader.read_copy_message().await?;
-    let msg = ProposerAcceptorMessage::parse(copy_data)?;
+    let msg = ProposerAcceptorMessage::parse(copy_data, proto_version)?;
     Ok(msg)
 }
 
@@ -393,6 +413,7 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_reader: &mut PostgresBackendReader<IO>,
     msg_tx: Sender<ProposerAcceptorMessage>,
     mut next_msg: ProposerAcceptorMessage,
+    proto_version: u32,
 ) -> Result<(), CopyStreamHandlerEnd> {
     /// Threshold for logging slow WalAcceptor sends.
     const SLOW_THRESHOLD: Duration = Duration::from_secs(5);
@@ -425,7 +446,7 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
         WAL_RECEIVER_QUEUE_DEPTH_TOTAL.inc();
         WAL_RECEIVER_QUEUE_SIZE_TOTAL.add(size as i64);
 
-        next_msg = read_message(pgb_reader).await?;
+        next_msg = read_message(pgb_reader, proto_version).await?;
     }
 }
 

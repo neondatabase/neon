@@ -1104,6 +1104,37 @@ impl Persistence {
         })
         .await
     }
+
+    pub(crate) async fn set_safekeeper_scheduling_policy(
+        &self,
+        id_: i64,
+        scheduling_policy_: SkSchedulingPolicy,
+    ) -> Result<(), DatabaseError> {
+        use crate::schema::safekeepers::dsl::*;
+
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            #[derive(Insertable, AsChangeset)]
+            #[diesel(table_name = crate::schema::safekeepers)]
+            struct UpdateSkSchedulingPolicy<'a> {
+                id: i64,
+                scheduling_policy: &'a str,
+            }
+            let scheduling_policy_ = String::from(scheduling_policy_);
+
+            let rows_affected = diesel::update(safekeepers.filter(id.eq(id_)))
+                .set(scheduling_policy.eq(scheduling_policy_))
+                .execute(conn)?;
+
+            if rows_affected != 1 {
+                return Err(DatabaseError::Logical(format!(
+                    "unexpected number of rows ({rows_affected})",
+                )));
+            }
+
+            Ok(())
+        })
+        .await
+    }
 }
 
 /// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
