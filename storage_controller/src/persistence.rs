@@ -1393,6 +1393,9 @@ impl SafekeeperPersistence {
             scheduling_policy,
         })
     }
+    pub(crate) fn base_url(&self) -> String {
+        format!("http://{}:{}", self.host, self.http_port)
+    }
 }
 
 /// What we expect from the upsert http api

@@ -280,7 +280,7 @@ pub struct TimelineCreateRequest {
     pub new_timeline_id: TimelineId,
     #[serde(flatten)]
     pub mode: TimelineCreateRequestMode,
-    /// Whether to also create timeline on the safekeepers
+    /// Whether to also create timeline on the safekeepers (specific to storcon API)
     pub safekeepers: Option<bool>,
 }
 

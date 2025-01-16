@@ -6313,6 +6313,8 @@ dependencies = [
  "rand 0.8.5",
  "reqwest",
  "routerify",
+ "safekeeper_api",
+ "safekeeper_client",
  "scopeguard",
  "serde",
  "serde_json",
