@@ -413,7 +413,7 @@ pub struct Timeline {
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     gc_lock: tokio::sync::Mutex<()>,
 
-    /// Cloned from [`super::Tenant::pagestream_throttle`] on construction.
+    /// Cloned from [`super::TenantShard::pagestream_throttle`] on construction.
     pub(crate) pagestream_throttle: Arc<crate::tenant::throttle::Throttle>,
 
     /// Size estimator for aux file v2
@@ -2675,7 +2675,7 @@ impl Timeline {
         //     (1) and (4)
         // TODO: this is basically a no-op now, should we remove it?
         self.remote_client.schedule_barrier()?;
-        // Tenant::create_timeline will wait for these uploads to happen before returning, or
+        // TenantShard::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
 
         // Now that we have the full layer map, we may calculate the visibility of layers within it (a global scan)
@@ -5634,8 +5634,8 @@ impl Timeline {
 
     /// Force create an image layer and place it into the layer map.
     ///
-    /// DO NOT use this function directly. Use [`Tenant::branch_timeline_test_with_layers`]
-    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are
+    /// DO NOT use this function directly. Use [`TenantShard::branch_timeline_test_with_layers`]
+    /// or [`TenantShard::create_test_timeline_with_layers`] to ensure all these layers are
     /// placed into the layer map in one run AND be validated.
     #[cfg(test)]
     pub(super) async fn force_create_image_layer(
@@ -5681,8 +5681,8 @@ impl Timeline {
 
     /// Force create a delta layer and place it into the layer map.
     ///
-    /// DO NOT use this function directly. Use [`Tenant::branch_timeline_test_with_layers`]
-    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are
+    /// DO NOT use this function directly. Use [`TenantShard::branch_timeline_test_with_layers`]
+    /// or [`TenantShard::create_test_timeline_with_layers`] to ensure all these layers are
     /// placed into the layer map in one run AND be validated.
     #[cfg(test)]
     pub(super) async fn force_create_delta_layer(

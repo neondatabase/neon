@@ -193,7 +193,7 @@ pub struct TenantSharedResources {
     pub l0_flush_global_state: L0FlushGlobalState,
 }
 
-/// A [`Tenant`] is really an _attached_ tenant.  The configuration
+/// A [`TenantShard`] is really an _attached_ tenant.  The configuration
 /// for an attached tenant is a subset of the [`LocationConf`], represented
 /// in this struct.
 #[derive(Clone)]
@@ -295,7 +295,7 @@ pub struct TenantShard {
     shard_identity: ShardIdentity,
 
     /// The remote storage generation, used to protect S3 objects from split-brain.
-    /// Does not change over the lifetime of the [`Tenant`] object.
+    /// Does not change over the lifetime of the [`TenantShard`] object.
     ///
     /// This duplicates the generation stored in LocationConf, but that structure is mutable:
     /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
@@ -334,7 +334,7 @@ pub struct TenantShard {
     // Access to global deletion queue for when this tenant wants to schedule a deletion
     deletion_queue_client: DeletionQueueClient,
 
-    /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
+    /// Cached logical sizes updated updated on each [`TenantShard::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
     cached_synthetic_tenant_size: Arc<AtomicU64>,
 
@@ -364,7 +364,7 @@ pub struct TenantShard {
     pub(crate) gate: Gate,
 
     /// Throttle applied at the top of [`Timeline::get`].
-    /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
+    /// All [`TenantShard::timelines`] of a given [`TenantShard`] instance share the same [`throttle::Throttle`] instance.
     pub(crate) pagestream_throttle: Arc<throttle::Throttle>,
 
     pub(crate) pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
@@ -860,7 +860,7 @@ impl Debug for SetStoppingError {
     }
 }
 
-/// Arguments to [`Tenant::create_timeline`].
+/// Arguments to [`TenantShard::create_timeline`].
 ///
 /// Not usable as an idempotency key for timeline creation because if [`CreateTimelineParamsBranch::ancestor_start_lsn`]
 /// is `None`, the result of the timeline create call is not deterministic.
@@ -895,7 +895,7 @@ pub(crate) struct CreateTimelineParamsImportPgdata {
     pub(crate) idempotency_key: import_pgdata::index_part_format::IdempotencyKey,
 }
 
-/// What is used to determine idempotency of a [`Tenant::create_timeline`] call in  [`Tenant::start_creating_timeline`] in  [`Tenant::start_creating_timeline`].
+/// What is used to determine idempotency of a [`TenantShard::create_timeline`] call in  [`TenantShard::start_creating_timeline`] in  [`TenantShard::start_creating_timeline`].
 ///
 /// Each [`Timeline`] object holds [`Self`] as an immutable property in [`Timeline::create_idempotency`].
 ///
@@ -933,7 +933,7 @@ pub(crate) struct CreatingTimelineIdempotencyImportPgdata {
     idempotency_key: import_pgdata::index_part_format::IdempotencyKey,
 }
 
-/// What is returned by [`Tenant::start_creating_timeline`].
+/// What is returned by [`TenantShard::start_creating_timeline`].
 #[must_use]
 enum StartCreatingTimelineResult {
     CreateGuard(TimelineCreateGuard),
@@ -961,13 +961,13 @@ struct TimelineInitAndSyncNeedsSpawnImportPgdata {
     guard: TimelineCreateGuard,
 }
 
-/// What is returned by [`Tenant::create_timeline`].
+/// What is returned by [`TenantShard::create_timeline`].
 enum CreateTimelineResult {
     Created(Arc<Timeline>),
     Idempotent(Arc<Timeline>),
-    /// IMPORTANT: This [`Arc<Timeline>`] object is not in [`Tenant::timelines`] when
+    /// IMPORTANT: This [`Arc<Timeline>`] object is not in [`TenantShard::timelines`] when
     /// we return this result, nor will this concrete object ever be added there.
-    /// Cf method comment on [`Tenant::create_timeline_import_pgdata`].
+    /// Cf method comment on [`TenantShard::create_timeline_import_pgdata`].
     ImportSpawned(Arc<Timeline>),
 }
 
@@ -1336,7 +1336,7 @@ impl TenantShard {
                     }
                 }
 
-                // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
+                // Ideally we should use TenantShard::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
                 enum BrokenVerbosity {
                     Error,
                     Info
@@ -1704,7 +1704,7 @@ impl TenantShard {
 
             match effect {
                 TimelineInitAndSyncResult::ReadyToActivate(_) => {
-                    // activation happens later, on Tenant::activate
+                    // activation happens later, on TenantShard::activate
                 }
                 TimelineInitAndSyncResult::NeedsSpawnImportPgdata(
                     TimelineInitAndSyncNeedsSpawnImportPgdata {
@@ -2333,14 +2333,14 @@ impl TenantShard {
     /// This is used by tests & import-from-basebackup.
     ///
     /// The returned [`UninitializedTimeline`] contains no data nor metadata and it is in
-    /// a state that will fail [`Tenant::load_remote_timeline`] because `disk_consistent_lsn=Lsn(0)`.
+    /// a state that will fail [`TenantShard::load_remote_timeline`] because `disk_consistent_lsn=Lsn(0)`.
     ///
     /// The caller is responsible for getting the timeline into a state that will be accepted
-    /// by [`Tenant::load_remote_timeline`] / [`Tenant::attach`].
+    /// by [`TenantShard::load_remote_timeline`] / [`TenantShard::attach`].
     /// Then they may call [`UninitializedTimeline::finish_creation`] to add the timeline
-    /// to the [`Tenant::timelines`].
+    /// to the [`TenantShard::timelines`].
     ///
-    /// Tests should use `Tenant::create_test_timeline` to set up the minimum required metadata keys.
+    /// Tests should use `TenantShard::create_test_timeline` to set up the minimum required metadata keys.
     pub(crate) async fn create_empty_timeline(
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
@@ -2635,9 +2635,9 @@ impl TenantShard {
         Ok(activated_timeline)
     }
 
-    /// The returned [`Arc<Timeline>`] is NOT in the [`Tenant::timelines`] map until the import
+    /// The returned [`Arc<Timeline>`] is NOT in the [`TenantShard::timelines`] map until the import
     /// completes in the background. A DIFFERENT [`Arc<Timeline>`] will be inserted into the
-    /// [`Tenant::timelines`] map when the import completes.
+    /// [`TenantShard::timelines`] map when the import completes.
     /// We only return an [`Arc<Timeline>`] here so the API handler can create a [`pageserver_api::models::TimelineInfo`]
     /// for the response.
     async fn create_timeline_import_pgdata(
@@ -2780,10 +2780,10 @@ impl TenantShard {
         // Reload timeline from remote.
         // This proves that the remote state is attachable, and it reuses the code.
         //
-        // TODO: think about whether this is safe to do with concurrent Tenant::shutdown.
+        // TODO: think about whether this is safe to do with concurrent TenantShard::shutdown.
         // timeline_create_guard hols the tenant gate open, so, shutdown cannot _complete_ until we exit.
-        // But our activate() call might launch new background tasks after Tenant::shutdown
-        // already went past shutting down the Tenant::timelines, which this timeline here is no part of.
+        // But our activate() call might launch new background tasks after TenantShard::shutdown
+        // already went past shutting down the TenantShard::timelines, which this timeline here is no part of.
         // I think the same problem exists with the bootstrap & branch mgmt API tasks (tenant shutting
         // down while bootstrapping/branching + activating), but, the race condition is much more likely
         // to manifest because of the long runtime of this import task.
@@ -2798,7 +2798,7 @@ impl TenantShard {
         // };
         let timeline_id = timeline.timeline_id;
 
-        // load from object storage like Tenant::attach does
+        // load from object storage like TenantShard::attach does
         let resources = self.build_timeline_resources(timeline_id);
         let index_part = resources
             .remote_client
@@ -3268,7 +3268,7 @@ impl TenantShard {
             }
             Err(SetStoppingError::AlreadyStopping(other)) => {
                 // give caller the option to wait for this this shutdown
-                info!("Tenant::shutdown: AlreadyStopping");
+                info!("TenantShard::shutdown: AlreadyStopping");
                 return Err(other);
             }
         };
@@ -3882,7 +3882,7 @@ impl TenantShard {
         update: F,
     ) -> anyhow::Result<TenantConfOpt> {
         // Use read-copy-update in order to avoid overwriting the location config
-        // state if this races with [`Tenant::set_new_location_config`]. Note that
+        // state if this races with [`TenantShard::set_new_location_config`]. Note that
         // this race is not possible if both request types come from the storage
         // controller (as they should!) because an exclusive op lock is required
         // on the storage controller side.
@@ -3994,7 +3994,7 @@ impl TenantShard {
         Ok(timeline)
     }
 
-    /// [`Tenant::shutdown`] must be called before dropping the returned [`Tenant`] object
+    /// [`TenantShard::shutdown`] must be called before dropping the returned [`TenantShard`] object
     /// to ensure proper cleanup of background tasks and metrics.
     //
     // Allow too_many_arguments because a constructor's argument list naturally grows with the
@@ -4243,11 +4243,11 @@ impl TenantShard {
 
         // Perform GC for each timeline.
         //
-        // Note that we don't hold the `Tenant::gc_cs` lock here because we don't want to delay the
+        // Note that we don't hold the `TenantShard::gc_cs` lock here because we don't want to delay the
         // branch creation task, which requires the GC lock. A GC iteration can run concurrently
         // with branch creation.
         //
-        // See comments in [`Tenant::branch_timeline`] for more information about why branch
+        // See comments in [`TenantShard::branch_timeline`] for more information about why branch
         // creation task can run concurrently with timeline's GC iteration.
         for timeline in gc_timelines {
             if cancel.is_cancelled() {
@@ -4277,7 +4277,7 @@ impl TenantShard {
 
     /// Refreshes the Timeline::gc_info for all timelines, returning the
     /// vector of timelines which have [`Timeline::get_last_record_lsn`] past
-    /// [`Tenant::get_gc_horizon`].
+    /// [`TenantShard::get_gc_horizon`].
     ///
     /// This is usually executed as part of periodic gc, but can now be triggered more often.
     pub(crate) async fn refresh_gc_info(
@@ -7285,7 +7285,7 @@ mod tests {
             let tline = tenant
                 .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
                 .await?;
-            // Leave the timeline ID in [`Tenant::timelines_creating`] to exclude attempting to create it again
+            // Leave the timeline ID in [`TenantShard::timelines_creating`] to exclude attempting to create it again
             let raw_tline = tline.raw_timeline().unwrap();
             raw_tline
                 .shutdown(super::timeline::ShutdownMode::Hard)

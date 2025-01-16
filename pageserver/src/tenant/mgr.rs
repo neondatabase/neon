@@ -107,7 +107,7 @@ pub(crate) enum TenantShardMap {
     /// [`init_tenant_mgr`] is done, all on-disk tenants have been loaded.
     /// New tenants can be added using [`tenant_map_acquire_slot`].
     Open(BTreeMap<TenantShardId, TenantSlot>),
-    /// The pageserver has entered shutdown mode via [`TenantManager::shutdown`].
+    /// The pageserver has entered shutdown mode via [`TenantShardManager::shutdown`].
     /// Existing tenants are still accessible, but no new tenants can be created.
     ShuttingDown(BTreeMap<TenantShardId, TenantSlot>),
 }
@@ -685,7 +685,7 @@ pub async fn init_tenant_mgr(
     })
 }
 
-/// Wrapper for Tenant::spawn that checks invariants before running
+/// Wrapper for TenantShard::spawn that checks invariants before running
 #[allow(clippy::too_many_arguments)]
 fn tenant_spawn(
     conf: &'static PageServerConf,
@@ -884,7 +884,7 @@ impl TenantShardManager {
     /// undergoing a state change (i.e. slot is InProgress).
     ///
     /// The return Tenant is not guaranteed to be active: check its status after obtaing it, or
-    /// use [`Tenant::wait_to_become_active`] before using it if you will do I/O on it.
+    /// use [`TenantShard::wait_to_become_active`] before using it if you will do I/O on it.
     pub(crate) fn get_attached_tenant_shard(
         &self,
         tenant_shard_id: TenantShardId,
@@ -1530,7 +1530,7 @@ impl TenantShardManager {
 
         // Phase 1: Write out child shards' remote index files, in the parent tenant's current generation
         if let Err(e) = tenant.split_prepare(&child_shards).await {
-            // If [`Tenant::split_prepare`] fails, we must reload the tenant, because it might
+            // If [`TenantShard::split_prepare`] fails, we must reload the tenant, because it might
             // have been left in a partially-shut-down state.
             tracing::warn!("Failed to prepare for split: {e}, reloading Tenant before returning");
             return Err(e);

@@ -16,7 +16,7 @@ use super::Timeline;
 /// A timeline with some of its files on disk, being initialized.
 /// This struct ensures the atomicity of the timeline init: it's either properly created and inserted into pageserver's memory, or
 /// its local files are removed.  If we crash while this class exists, then the timeline's local
-/// state is cleaned up during [`Tenant::clean_up_timelines`], because the timeline's content isn't in remote storage.
+/// state is cleaned up during [`TenantShard::clean_up_timelines`], because the timeline's content isn't in remote storage.
 ///
 /// The caller is responsible for proper timeline data filling before the final init.
 #[must_use]
@@ -163,13 +163,13 @@ pub(crate) fn cleanup_timeline_directory(create_guard: TimelineCreateGuard) {
             error!("Failed to clean up uninitialized timeline directory {timeline_path:?}: {e:?}")
         }
     }
-    // Having cleaned up, we can release this TimelineId in `[Tenant::timelines_creating]` to allow other
+    // Having cleaned up, we can release this TimelineId in `[TenantShard::timelines_creating]` to allow other
     // timeline creation attempts under this TimelineId to proceed
     drop(create_guard);
 }
 
 /// A guard for timeline creations in process: as long as this object exists, the timeline ID
-/// is kept in `[Tenant::timelines_creating]` to exclude concurrent attempts to create the same timeline.
+/// is kept in `[TenantShard::timelines_creating]` to exclude concurrent attempts to create the same timeline.
 #[must_use]
 pub(crate) struct TimelineCreateGuard {
     pub(crate) _tenant_gate_guard: GateGuard,
