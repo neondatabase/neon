@@ -284,8 +284,6 @@ async fn page_service_conn_main(
     socket.set_timeout(Some(std::time::Duration::from_millis(socket_timeout_ms)));
     let socket = Box::pin(socket);
 
-    let socket = tokio::io::BufStream::with_capacity(128<<10, 128<<10, socket);
-
     fail::fail_point!("ps::connection-start::pre-login");
 
     // XXX: pgbackend.run() should take the connection_ctx,
