@@ -71,6 +71,7 @@ RUN set -e \
         ca-certificates \
 	# System postgres for use with client libraries (e.g. in storage controller)
         postgresql-15 \
+        openssl \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
     && useradd -d /data neon \
     && chown -R neon:neon /data
@@ -102,11 +103,6 @@ RUN mkdir -p /data/.neon/ && \
        "availability_zone='local'\n" \
   > /data/.neon/pageserver.toml && \
   chown -R neon:neon /data/.neon
-
-# When running a binary that links with libpq, default to using our most recent postgres version.  Binaries
-# that want a particular postgres version will select it explicitly: this is just a default.
-ENV LD_LIBRARY_PATH=/usr/local/v${DEFAULT_PG_VERSION}/lib
-
 
 VOLUME ["/data"]
 USER neon

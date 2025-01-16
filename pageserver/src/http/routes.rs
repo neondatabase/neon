@@ -27,6 +27,7 @@ use pageserver_api::models::LocationConfigMode;
 use pageserver_api::models::LsnLease;
 use pageserver_api::models::LsnLeaseRequest;
 use pageserver_api::models::OffloadedTimelineInfo;
+use pageserver_api::models::PageTraceEvent;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantConfigPatchRequest;
 use pageserver_api::models::TenantDetails;
@@ -51,7 +52,9 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeTravelError;
+use scopeguard::defer;
 use tenant_size_model::{svg::SvgBranchKind, SizeResult, StorageModel};
+use tokio::time::Instant;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -97,8 +100,8 @@ use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::DEFAULT_PG_VERSION;
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
-    CompactInfoResponse, StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest,
-    TimelineGcRequest, TimelineInfo,
+    StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
+    TimelineInfo,
 };
 use utils::{
     auth::SwappableJwtAuth,
@@ -1521,6 +1524,71 @@ async fn timeline_gc_unblocking_handler(
     block_or_unblock_gc(request, false).await
 }
 
+/// Traces GetPage@LSN requests for a timeline, and emits metadata in an efficient binary encoding.
+/// Use the `pagectl page-trace` command to decode and analyze the output.
+async fn timeline_page_trace_handler(
+    request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let state = get_state(&request);
+    check_permission(&request, None)?;
+
+    let size_limit: usize = parse_query_param(&request, "size_limit_bytes")?.unwrap_or(1024 * 1024);
+    let time_limit_secs: u64 = parse_query_param(&request, "time_limit_secs")?.unwrap_or(5);
+
+    // Convert size limit to event limit based on the serialized size of an event. The event size is
+    // fixed, as the default bincode serializer uses fixed-width integer encoding.
+    let event_size = bincode::serialize(&PageTraceEvent::default())
+        .map_err(|err| ApiError::InternalServerError(err.into()))?
+        .len();
+    let event_limit = size_limit / event_size;
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    // Install a page trace, unless one is already in progress. We just use a buffered channel,
+    // which may 2x the memory usage in the worst case, but it's still bounded.
+    let (trace_tx, mut trace_rx) = tokio::sync::mpsc::channel(event_limit);
+    let cur = timeline.page_trace.load();
+    let installed = cur.is_none()
+        && timeline
+            .page_trace
+            .compare_and_swap(cur, Some(Arc::new(trace_tx)))
+            .is_none();
+    if !installed {
+        return Err(ApiError::Conflict("page trace already active".to_string()));
+    }
+    defer!(timeline.page_trace.store(None)); // uninstall on return
+
+    // Collect the trace and return it to the client. We could stream the response, but this is
+    // simple and fine.
+    let mut body = Vec::with_capacity(size_limit);
+    let deadline = Instant::now() + Duration::from_secs(time_limit_secs);
+
+    while body.len() < size_limit {
+        tokio::select! {
+            event = trace_rx.recv() => {
+                let Some(event) = event else {
+                    break; // shouldn't happen (sender doesn't close, unless timeline dropped)
+                };
+                bincode::serialize_into(&mut body, &event)
+                    .map_err(|err| ApiError::InternalServerError(err.into()))?;
+            }
+            _ = tokio::time::sleep_until(deadline) => break, // time limit reached
+            _ = cancel.cancelled() => return Err(ApiError::Cancelled),
+        }
+    }
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .body(hyper::Body::from(body))
+        .unwrap())
+}
+
 /// Adding a block is `POST ../block_gc`, removing a block is `POST ../unblock_gc`.
 ///
 /// Both are technically unsafe because they might fire off index uploads, thus they are POST.
@@ -2052,15 +2120,7 @@ async fn timeline_compact_info_handler(
         let tenant = state
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
-        let res = tenant.get_scheduled_compaction_tasks(timeline_id);
-        let mut resp = Vec::new();
-        for item in res {
-            resp.push(CompactInfoResponse {
-                compact_key_range: item.compact_key_range,
-                compact_lsn_range: item.compact_lsn_range,
-                sub_compaction: item.sub_compaction,
-            });
-        }
+        let resp = tenant.get_scheduled_compaction_tasks(timeline_id);
         json_response(StatusCode::OK, resp)
     }
     .instrument(info_span!("timeline_compact_info", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
@@ -3486,6 +3546,10 @@ pub fn make_router(
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/unblock_gc",
             |r| api_handler(r, timeline_gc_unblocking_handler),
+        )
+        .get(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/page_trace",
+            |r| api_handler(r, timeline_page_trace_handler),
         )
         .post("/v1/tenant/:tenant_shard_id/heatmap_upload", |r| {
             api_handler(r, secondary_upload_handler)
