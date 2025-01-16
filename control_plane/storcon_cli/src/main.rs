@@ -298,7 +298,7 @@ impl FromStr for SkSchedulingPolicyArg {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        SkSchedulingPolicy::from_str(s).map(|v| Self(v))
+        SkSchedulingPolicy::from_str(s).map(Self)
     }
 }
 
