@@ -16,10 +16,11 @@ Measure impact of that.
 Some commands from shell history used in combination with this script:
 
 ```
+ export NEON_REPO_DIR=$PWD/.neon
  ./target/release/neon_local stop
- rm -rf .neon
+ rm -rf $NEON_REPO_DIR
  ./target/release/neon_local init
- cat >> .neon/pageserver_1/pageserver.toml <<"EOF"
+ cat >>  $NEON_REPO_DIR/pageserver_1/pageserver.toml <<"EOF"
  # customizations
  virtual_file_io_mode = "direct"
  page_service_pipelining={mode="pipelined", max_batch_size=32, execution="concurrent-futures"}
@@ -31,9 +32,9 @@ EOF
  sleep 2
  ./target/release/neon_local tenant create --set-default
  ./target/debug/neon_local endpoint stop foo
- rm -rf .neon/endpoints/foo
+ rm -rf  $NEON_REPO_DIR/endpoints/foo
  ./target/debug/neon_local endpoint create foo
- echo 'full_page_writes=off' >> .neon/endpoints/foo/postgresql.conf
+ echo 'full_page_writes=off' >>  $NEON_REPO_DIR/endpoints/foo/postgresql.conf
  ./target/debug/neon_local endpoint start foo
  pushd test_runner; poetry run python3 deep_layers_with_delta.py 20; popd
 ```
