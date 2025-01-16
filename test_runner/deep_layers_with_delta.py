@@ -74,6 +74,7 @@ Now use pagebench to measure perf, e.g.
 """
 
 import sys
+
 import psycopg2
 from fixtures.common_types import TenantShardId, TimelineId
 from fixtures.pageserver.http import PageserverHttpClient

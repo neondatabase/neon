@@ -1214,10 +1214,10 @@ class NeonEnv:
             for pageserver in self.pageservers:
                 futs.append(
                     executor.submit(
-                        lambda ps=pageserver: ps.start(
+                        lambda ps=pageserver: ps.start(  # type: ignore[misc]
                             extra_env_vars=extra_ps_env_vars or {},
                             timeout_in_seconds=timeout_in_seconds,
-                        )
+                        ),
                     )
                 )
 
