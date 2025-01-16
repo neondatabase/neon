@@ -29,7 +29,7 @@ use utils::{
 };
 
 use crate::{
-    key::Key,
+    key::{CompactKey, Key},
     reltag::RelTag,
     shard::{ShardCount, ShardStripeSize, TenantShardId},
 };
@@ -272,6 +272,8 @@ pub struct CompactInfoResponse {
     pub compact_key_range: Option<CompactKeyRange>,
     pub compact_lsn_range: Option<CompactLsnRange>,
     pub sub_compaction: bool,
+    pub running: bool,
+    pub job_id: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1975,6 +1977,23 @@ impl PagestreamBeMessage {
             Self::Error(_) => "Error",
             Self::DbSize(_) => "DbSize",
             Self::GetSlruSegment(_) => "GetSlruSegment",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PageTraceEvent {
+    pub key: CompactKey,
+    pub effective_lsn: Lsn,
+    pub time: SystemTime,
+}
+
+impl Default for PageTraceEvent {
+    fn default() -> Self {
+        Self {
+            key: Default::default(),
+            effective_lsn: Default::default(),
+            time: std::time::UNIX_EPOCH,
         }
     }
 }
