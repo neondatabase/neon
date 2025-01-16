@@ -2,6 +2,7 @@ import json
 import re
 import time
 from enum import Enum
+from pathlib import Path
 
 import psycopg2
 import psycopg2.errors
@@ -14,6 +15,7 @@ from fixtures.pageserver.http import (
     ImportPgdataIdemptencyKey,
     PageserverApiException,
 )
+from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind
 from pytest_httpserver import HTTPServer
@@ -94,13 +96,15 @@ def test_pgdata_import_smoke(
     while True:
         relblock_size = vanilla_pg.safe_psql_scalar("select pg_relation_size('t')")
         log.info(
-            f"relblock size: {relblock_size/8192} pages (target: {target_relblock_size//8192}) pages"
+            f"relblock size: {relblock_size / 8192} pages (target: {target_relblock_size // 8192}) pages"
         )
         if relblock_size >= target_relblock_size:
             break
         addrows = int((target_relblock_size - relblock_size) // 8192)
         assert addrows >= 1, "forward progress"
-        vanilla_pg.safe_psql(f"insert into t select generate_series({nrows+1}, {nrows + addrows})")
+        vanilla_pg.safe_psql(
+            f"insert into t select generate_series({nrows + 1}, {nrows + addrows})"
+        )
         nrows += addrows
     expect_nrows = nrows
     expect_sum = (
@@ -334,6 +338,36 @@ def test_fast_import_binary(
     log.info(f"Result: {res}")
     assert res[0][0] == 10
     new_pgdata_vanilla_pg.stop()
+
+
+def test_fast_import_restore_to_connstring(
+    test_output_dir,
+    vanilla_pg: VanillaPostgres,
+    port_distributor: PortDistributor,
+    fast_import: FastImport,
+    pg_distrib_dir: Path,
+    pg_version: PgVersion,
+):
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("CREATE TABLE foo (a int); INSERT INTO foo SELECT generate_series(1, 10);")
+
+    pgdatadir = test_output_dir / "restore-pgdata"
+    pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
+    port = port_distributor.get_port()
+    with VanillaPostgres(pgdatadir, pg_bin, port) as restore_vanilla_pg:
+        restore_vanilla_pg.configure(["shared_preload_libraries='neon_rmgr'"])
+        restore_vanilla_pg.start()
+
+        fast_import.run(
+            source_connection_string=vanilla_pg.connstr(),
+            restore_connection_string=restore_vanilla_pg.connstr(),
+        )
+        vanilla_pg.stop()
+
+        # database name and user are hardcoded in fast_import binary, and they are different from normal vanilla postgres
+        res = restore_vanilla_pg.safe_psql("SELECT count(*) FROM foo;")
+        log.info(f"Result: {res}")
+        assert res[0][0] == 10
 
 
 # TODO: Maybe test with pageserver?
