@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
 from enum import StrEnum
@@ -354,7 +355,7 @@ def test_pageserver_gc_compaction_interrupt(neon_env_builder: NeonEnvBuilder):
         # - while we are doing the compaction
         # - while we finished the compaction but not yet uploaded the metadata
         # - after we uploaded the metadata
-        time_to_sleep = random.randint(0, expected_compaction_time_seconds)
+        time_to_sleep = random.randint(0, max(5, math.ceil(expected_compaction_time_seconds)))
         if time_to_sleep == 0 or i == 1:
             start = time.time()
             wait_until(compaction_finished, timeout=60)
