@@ -995,24 +995,50 @@ RUN wget https://github.com/kelvich/pg_tiktoken/archive/9118dd4549b7d8c0bbc98e04
 #########################################################################################
 #
 # Layer "pg-pgx-ulid-build"
-# Compile "pgx_ulid" extension
+# Compile "pgx_ulid" extension for v16 and below
 #
 #########################################################################################
 
 FROM rust-extensions-build AS pg-pgx-ulid-build
 ARG PG_VERSION
 
-# doesn't support v17 yet
-# https://github.com/pksunkara/pgx_ulid/pull/52
-RUN case "${PG_VERSION}" in "v17") \
-    echo "pgx_ulid does not support pg17 as of the latest version (0.1.5)" && exit 0;; \
+RUN case "${PG_VERSION}" in \
+    "v14" | "v15" | "v16") \
+        ;; \
+    *) \
+        echo "skipping the version of pgx_ulid for $PG_VERSION" && exit 0 \
+        ;; \
     esac && \
     wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.5.tar.gz -O pgx_ulid.tar.gz && \
-    echo "9d1659a2da65af0133d5451c454de31b37364e3502087dadf579f790bc8bef17 pgx_ulid.tar.gz" | sha256sum --check && \
+    echo "9d1659a2da65af0133d5451c454de31b37364e3502087dadf579f790bc8bef17  pgx_ulid.tar.gz" | sha256sum --check && \
     mkdir pgx_ulid-src && cd pgx_ulid-src && tar xzf ../pgx_ulid.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx       = "^0.11.2"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx       = "^0.11.2"/pgrx       = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
-    echo "trusted = true" >> /usr/local/pgsql/share/extension/ulid.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/ulid.control
+
+#########################################################################################
+#
+# Layer "pg-pgx-ulid-pgrx12-build"
+# Compile "pgx_ulid" extension for v17 and up
+#
+#########################################################################################
+
+FROM rust-extensions-build-pgrx12 AS pg-pgx-ulid-pgrx12-build
+ARG PG_VERSION
+
+RUN case "${PG_VERSION}" in \
+    "v17") \
+        ;; \
+    *) \
+        echo "skipping the version of pgx_ulid for $PG_VERSION" && exit 0 \
+        ;; \
+    esac && \
+    wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.2.0.tar.gz -O pgx_ulid.tar.gz && \
+    echo "cef6a9a2e5e7bd1a10a18989286586ee9e6c1c06005a4055cff190de41bf3e9f pgx_ulid.tar.gz" | sha256sum --check && \
+    mkdir pgx_ulid-src && cd pgx_ulid-src && tar xzf ../pgx_ulid.tar.gz --strip-components=1 -C . && \
+    sed -i 's/pgrx       = "^0.12.7"/pgrx       = { version = "0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    cargo pgrx install --release && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgx_ulid.control
 
 #########################################################################################
 #
@@ -1157,6 +1183,7 @@ COPY --from=timescaledb-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-hint-plan-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-cron-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-pgx-ulid-pgrx12-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-session-jwt-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-uuidv7-pg-build /usr/local/pgsql/ /usr/local/pgsql/
