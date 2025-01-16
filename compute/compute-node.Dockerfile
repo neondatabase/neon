@@ -1129,7 +1129,7 @@ RUN git clone --depth 1 --branch v0.2.0 https://github.com/duckdb/pg_duckdb.git 
     cd pg_duckdb-src && \
     make install -j $(getconf _NPROCESSORS_ONLN) && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control && \
-    file=/usr/local/pgsql/share/extension/pg_duckdb--0.2.0--0.3.0.sql && \
+    file=/usr/local/pgsql/share/extension/pg_duckdb--0.1.0--0.2.0.sql && \
     echo 'GRANT ALL ON FUNCTION duckdb.cache(TEXT, TEXT) TO neon_superuser;' >> $file && \
     echo 'GRANT ALL ON FUNCTION duckdb.cache_info() TO neon_superuser;' >> $file && \
     echo 'GRANT ALL ON FUNCTION duckdb.cache_delete(cache_key TEXT) TO neon_superuser;' >> $file && \
