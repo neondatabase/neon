@@ -10,7 +10,7 @@ use crate::{
     tenant::{
         config::AttachmentMode,
         mgr::GetTenantError,
-        mgr::TenantManager,
+        mgr::TenantShardManager,
         remote_timeline_client::remote_heatmap_path,
         span::debug_assert_current_span_has_tenant_id,
         tasks::{warn_when_period_overrun, BackgroundLoopKind},
@@ -35,7 +35,7 @@ use tracing::{info_span, instrument, Instrument};
 use utils::{backoff, completion::Barrier, yielding_loop::yielding_loop};
 
 pub(super) async fn heatmap_uploader_task(
-    tenant_manager: Arc<TenantManager>,
+    tenant_manager: Arc<TenantShardManager>,
     remote_storage: GenericRemoteStorage,
     command_queue: tokio::sync::mpsc::Receiver<CommandRequest<UploadCommand>>,
     background_jobs_can_start: Barrier,
@@ -61,7 +61,7 @@ pub(super) async fn heatmap_uploader_task(
 /// handling loop and mutates it as needed: there are no locks here, because that event loop
 /// can hold &mut references to this type throughout.
 struct HeatmapUploader {
-    tenant_manager: Arc<TenantManager>,
+    tenant_manager: Arc<TenantShardManager>,
     remote_storage: GenericRemoteStorage,
     cancel: CancellationToken,
 

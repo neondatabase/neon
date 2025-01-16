@@ -292,12 +292,12 @@ static TENANTS: Lazy<std::sync::RwLock<TenantsMap>> =
 /// Responsible for storing and mutating the collection of all tenants
 /// that this pageserver has state for.
 ///
-/// Every Tenant and SecondaryTenant instance lives inside the TenantManager.
+/// Every TenantShard and SecondaryTenant instance lives inside the TenantShardManager.
 ///
-/// The most important role of the TenantManager is to prevent conflicts: e.g. trying to attach
+/// The most important role of the TenantShardManager is to prevent conflicts: e.g. trying to attach
 /// the same tenant twice concurrently, or trying to configure the same tenant into secondary
 /// and attached modes concurrently.
-pub struct TenantManager {
+pub struct TenantShardManager {
     conf: &'static PageServerConf,
     // TODO: currently this is a &'static pointing to TENANTs.  When we finish refactoring
     // out of that static variable, the TenantManager can own this.
@@ -493,7 +493,7 @@ pub async fn init_tenant_mgr(
     resources: TenantSharedResources,
     init_order: InitializationOrder,
     cancel: CancellationToken,
-) -> anyhow::Result<TenantManager> {
+) -> anyhow::Result<TenantShardManager> {
     let mut tenants = BTreeMap::new();
 
     let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Warn);
@@ -676,7 +676,7 @@ pub async fn init_tenant_mgr(
 
     *tenants_map = TenantsMap::Open(tenants);
 
-    Ok(TenantManager {
+    Ok(TenantShardManager {
         conf,
         tenants: &TENANTS,
         resources,
@@ -873,7 +873,7 @@ pub(crate) enum UpsertLocationError {
     InternalError(anyhow::Error),
 }
 
-impl TenantManager {
+impl TenantShardManager {
     /// Convenience function so that anyone with a TenantManager can get at the global configuration, without
     /// having to pass it around everywhere as a separate object.
     pub(crate) fn get_conf(&self) -> &'static PageServerConf {

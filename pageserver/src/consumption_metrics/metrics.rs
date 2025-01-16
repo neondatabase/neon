@@ -1,4 +1,4 @@
-use crate::tenant::mgr::TenantManager;
+use crate::tenant::mgr::TenantShardManager;
 use crate::{context::RequestContext, tenant::timeline::logical_size::CurrentLogicalSize};
 use chrono::{DateTime, Utc};
 use consumption_metrics::EventType;
@@ -213,7 +213,7 @@ impl MetricsKey {
 }
 
 pub(super) async fn collect_all_metrics(
-    tenant_manager: &Arc<TenantManager>,
+    tenant_manager: &Arc<TenantShardManager>,
     cached_metrics: &Cache,
     ctx: &RequestContext,
 ) -> Vec<NewRawMetric> {
