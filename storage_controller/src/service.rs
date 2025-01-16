@@ -7273,7 +7273,7 @@ impl Service {
     /// Create a node fill plan (pick secondaries to promote), based on:
     /// 1. Shards which have a secondary on this node, and this node is in their home AZ, and are currently attached to a node
     ///    outside their home AZ, should be migrated back here.
-    /// 2. If after step 1 we have not migrated enough shards for this ndoe to have its fair share of
+    /// 2. If after step 1 we have not migrated enough shards for this node to have its fair share of
     ///    attached shards, we will promote more shards from the nodes with the most attached shards, unless
     ///    those shards have a home AZ that doesn't match the node we're filling.
     fn fill_node_plan(&self, node_id: NodeId) -> Vec<TenantShardId> {
@@ -7309,17 +7309,16 @@ impl Service {
                 continue;
             }
 
-            if !respect_azs {
-                if let Some(primary) = tenant_shard.intent.get_attached() {
-                    free_tids_by_node.entry(*primary).or_default().push(*tsid);
-                }
-            }
-
             // AZ check: when filling nodes after a restart, our intent is to move _back_ the
             // shards which belong on this node, not to promote shards whose scheduling preference
             // would be on their currently attached node.  So will avoid promoting shards whose
             // home AZ doesn't match the AZ of the node we're filling.
             match tenant_shard.preferred_az() {
+                _ if !respect_azs => {
+                    if let Some(primary) = tenant_shard.intent.get_attached() {
+                        free_tids_by_node.entry(*primary).or_default().push(*tsid);
+                    }
+                }
                 None => {
                     // Shard doesn't have an AZ preference: it is elegible to be moved, but we
                     // will only do so if our target shard count requires it.
