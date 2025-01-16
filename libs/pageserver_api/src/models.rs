@@ -33,7 +33,6 @@ use crate::{
     reltag::RelTag,
     shard::{ShardCount, ShardStripeSize, TenantShardId},
 };
-use anyhow::bail;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 /// The state of a tenant in this pageserver.
@@ -1423,9 +1422,8 @@ enum PagestreamFeMessageTag {
     Exists = 0,
     Nblocks = 1,
     GetPage = 2,
-    Error = 3,
-    DbSize = 4,
-    GetSlruSegment = 5,
+    DbSize = 3,
+    GetSlruSegment = 4,
     /* future tags above this line */
     /// For testing purposes, not available in production.
     #[cfg(feature = "testing")]
@@ -1454,9 +1452,8 @@ impl TryFrom<u8> for PagestreamFeMessageTag {
             0 => Ok(PagestreamFeMessageTag::Exists),
             1 => Ok(PagestreamFeMessageTag::Nblocks),
             2 => Ok(PagestreamFeMessageTag::GetPage),
-            3 => Ok(PagestreamFeMessageTag::Error),
-            4 => Ok(PagestreamFeMessageTag::DbSize),
-            5 => Ok(PagestreamFeMessageTag::GetSlruSegment),
+            3 => Ok(PagestreamFeMessageTag::DbSize),
+            4 => Ok(PagestreamFeMessageTag::GetSlruSegment),
             #[cfg(feature = "testing")]
             99 => Ok(PagestreamFeMessageTag::Test),
             _ => Err(value),
@@ -1798,7 +1795,6 @@ impl PagestreamFeMessage {
                     String::from_utf8(buf)?
                 },
             })),
-            _ => bail!("unknown smgr message tag: {:?}", msg_tag),
         }
     }
 }
