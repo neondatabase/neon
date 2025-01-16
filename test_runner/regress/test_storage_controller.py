@@ -2212,6 +2212,7 @@ def test_graceful_cluster_restart(
     tenants where we fill based on a target shard count.
     """
     neon_env_builder.num_azs = num_azs
+
     neon_env_builder.num_pageservers = 2
     neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     env = neon_env_builder.init_configs()
@@ -2475,7 +2476,6 @@ def test_storage_controller_node_deletion(
     Test that deleting a node works & properly reschedules everything that was on the node.
     """
     neon_env_builder.num_pageservers = 3
-    neon_env_builder.num_azs = 3
     env = neon_env_builder.init_configs()
     env.start()
 
@@ -3512,12 +3512,7 @@ def eq_safekeeper_records(a: dict[str, Any], b: dict[str, Any]) -> bool:
 
 @run_only_on_default_postgres("this is like a 'unit test' against storcon db")
 def test_shard_preferred_azs(neon_env_builder: NeonEnvBuilder):
-    def assign_az(ps_cfg):
-        az = f"az-{ps_cfg['id'] % 2}"
-        log.info("Assigned AZ {az}")
-        ps_cfg["availability_zone"] = az
-
-    neon_env_builder.pageserver_config_override = assign_az
+    neon_env_builder.num_azs = 2
     neon_env_builder.num_pageservers = 4
     env = neon_env_builder.init_configs()
     env.start()
