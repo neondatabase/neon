@@ -51,6 +51,7 @@ tracing-subscriber.workspace = true
 tracing-utils.workspace = true
 thiserror.workspace = true
 url.workspace = true
+uuid.workspace = true
 prometheus.workspace = true
 
 postgres_initdb.workspace = true
