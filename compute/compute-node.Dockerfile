@@ -1134,7 +1134,7 @@ RUN git clone --depth 1 --branch v0.2.0 https://github.com/duckdb/pg_duckdb.git 
     echo 'GRANT ALL ON FUNCTION duckdb.cache_info() TO neon_superuser;' >> $file && \
     echo 'GRANT ALL ON FUNCTION duckdb.cache_delete(cache_key TEXT) TO neon_superuser;' >> $file && \
     echo 'GRANT ALL ON FUNCTION duckdb.install_extension(TEXT) TO neon_superuser;' >> $file && \
-    echo 'GRANT ALL ON FUNCTION duckdb.raw_query(TEXT) TO neon_superuser' >> $file && \
+    echo 'GRANT ALL ON FUNCTION duckdb.raw_query(TEXT) TO neon_superuser;' >> $file && \
     echo 'GRANT ALL ON PROCEDURE duckdb.recycle_ddb() TO neon_superuser;'  >> $file
         
 
