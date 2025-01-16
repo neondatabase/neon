@@ -25,9 +25,9 @@ export http_proxy https_proxy
 cleanup() {
     echo "show container information"
     docker ps
-    docker compose --profile test-extensions -f $COMPOSE_FILE logs
+    docker compose --profile parallel-test-extensions -f $COMPOSE_FILE logs
     echo "stop containers..."
-    docker compose --profile test-extensions -f $COMPOSE_FILE down
+    docker compose --profile parallel-test-extensions -f $COMPOSE_FILE down
 }
 
 for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
@@ -41,7 +41,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
       mv $SPEC_PATH/spec.json $SPEC_PATH/spec.bak
       jq '.cluster.settings += [{"name": "session_preload_libraries","value": "anon","vartype": "string"}]' "${SPEC_PATH}/spec.bak" > "${SPEC_PATH}/spec.json"
     fi
-    PG_VERSION=$pg_version PG_TEST_VERSION=$PG_TEST_VERSION docker compose --profile test-extensions -f $COMPOSE_FILE up --build -d
+    PG_VERSION=$pg_version PG_TEST_VERSION=$PG_TEST_VERSION docker compose --profile parallel-test-extensions -f $COMPOSE_FILE up --build -d
 
     echo "wait until the compute is ready. timeout after 60s. "
     cnt=0
@@ -53,7 +53,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
             cleanup
             exit 1
         fi
-        if docker compose --profile test-extensions -f $COMPOSE_FILE logs "compute_is_ready" | grep -q "accepting connections"; then
+        if docker compose --profile parallel-test-extensions -f $COMPOSE_FILE logs "compute_is_ready" | grep -q "accepting connections"; then
             echo "OK. The compute is ready to connect."
             echo "execute simple queries."
             docker exec $COMPUTE_CONTAINER_NAME /bin/bash -c "psql $PSQL_OPTION"
