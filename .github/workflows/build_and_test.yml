@@ -164,77 +164,11 @@ jobs:
 
   check-codestyle-rust:
     needs: [ check-permissions, build-build-tools-image ]
-    strategy:
-      matrix:
-        arch: [ x64, arm64 ]
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
-
-    container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
-      credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-      options: --init
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - name: Cache cargo deps
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            !~/.cargo/registry/src
-            ~/.cargo/git
-            target
-          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
-
-      # Some of our rust modules use FFI and need those to be checked
-      - name: Get postgres headers
-        run: make postgres-headers -j$(nproc)
-
-      # cargo hack runs the given cargo subcommand (clippy in this case) for all feature combinations.
-      # This will catch compiler & clippy warnings in all feature combinations.
-      # TODO: use cargo hack for build and test as well, but, that's quite expensive.
-      # NB: keep clippy args in sync with ./run_clippy.sh
-      #
-      # The only difference between "clippy --debug" and "clippy --release" is that in --release mode,
-      # #[cfg(debug_assertions)] blocks are not built. It's not worth building everything for second
-      # time just for that, so skip "clippy --release".
-      - run: |
-          CLIPPY_COMMON_ARGS="$( source .neon_clippy_args; echo "$CLIPPY_COMMON_ARGS")"
-          if [ "$CLIPPY_COMMON_ARGS" = "" ]; then
-            echo "No clippy args found in .neon_clippy_args"
-            exit 1
-          fi
-          echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
-      - name: Run cargo clippy (debug)
-        run: cargo hack --features default --ignore-unknown-features --feature-powerset clippy $CLIPPY_COMMON_ARGS
-
-      - name: Check documentation generation
-        run: cargo doc --workspace --no-deps --document-private-items
-        env:
-            RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
-
-      # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
-      - name: Check formatting
-        if: ${{ !cancelled() }}
-        run: cargo fmt --all -- --check
-
-      # https://github.com/facebookincubator/cargo-guppy/tree/bec4e0eb29dcd1faac70b1b5360267fc02bf830e/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
-      - name: Check rust dependencies
-        if: ${{ !cancelled() }}
-        run: |
-          cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
-          cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
-
-      # https://github.com/EmbarkStudios/cargo-deny
-      - name: Check rust licenses/bans/advisories/sources
-        if: ${{ !cancelled() }}
-        run: cargo deny check --hide-inclusion-graph
+    uses: ./.github/workflows/_check-codestyle-rust.yml
+    with:
+      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
+      archs: '["x64", "arm64"]'
+    secrets: inherit
 
   build-and-test-locally:
     needs: [ tag, build-build-tools-image ]
@@ -346,25 +280,22 @@ jobs:
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
-  report-benchmarks-failures:
+  report-benchmarks-results-to-slack:
     needs: [ benchmarks, create-test-report ]
-    if: github.ref_name == 'main' && failure() && needs.benchmarks.result == 'failure'
-    permissions:
-      id-token: write # aws-actions/configure-aws-credentials
-      statuses: write
-      contents: write
-      pull-requests: write
+    if: github.ref_name == 'main' && !cancelled() && contains(fromJSON('["success", "failure"]'), needs.benchmarks.result)
     runs-on: ubuntu-22.04
 
     steps:
-    - uses: slackapi/slack-github-action@v1
+    - uses: slackapi/slack-github-action@v2
       with:
-        channel-id: C060CNA47S9 # on-call-staging-storage-stream
-        slack-message: |
-          Benchmarks failed on main <${{ github.event.head_commit.url }}|${{ github.sha }}>
-          <${{ needs.create-test-report.outputs.report-url }}|Allure report>
-      env:
-        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        method: chat.postMessage
+        token: ${{ secrets.SLACK_BOT_TOKEN }}
+        payload: |
+          channel: "${{ vars.SLACK_ON_CALL_STORAGE_STAGING_STREAM }}"
+          text: |
+            Benchmarks on main: *${{ needs.benchmarks.result }}*
+            - <${{ needs.create-test-report.outputs.report-url }}|Allure report>
+            - <${{ github.event.head_commit.url }}|${{ github.sha }}>
 
   create-test-report:
     needs: [ check-permissions, build-and-test-locally, coverage-report, build-build-tools-image, benchmarks ]

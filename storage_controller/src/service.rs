@@ -47,7 +47,7 @@ use pageserver_api::{
         AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
         NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
         SafekeeperDescribeResponse, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
-        ShardsPreferredAzsResponse, TenantCreateRequest, TenantCreateResponse,
+        ShardsPreferredAzsResponse, SkSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
         TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
         TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
         TenantShardMigrateResponse,
@@ -2517,7 +2517,7 @@ impl Service {
                     .map(|t| {
                         (
                             t.get_tenant_shard_id().expect("Corrupt shard in database"),
-                            load_in_az.clone(),
+                            Some(load_in_az.clone()),
                         )
                     })
                     .collect(),
@@ -4158,17 +4158,42 @@ impl Service {
         .ok_or_else(|| ApiError::NotFound(anyhow::anyhow!("Tenant {tenant_id} not found").into()))
     }
 
-    pub(crate) fn tenant_list(&self) -> Vec<TenantDescribeResponse> {
+    /// limit & offset are pagination parameters. Since we are walking an in-memory HashMap, `offset` does not
+    /// avoid traversing data, it just avoid returning it. This is suitable for our purposes, since our in memory
+    /// maps are small enough to traverse fast, our pagination is just to avoid serializing huge JSON responses
+    /// in our external API.
+    pub(crate) fn tenant_list(
+        &self,
+        limit: Option<usize>,
+        start_after: Option<TenantId>,
+    ) -> Vec<TenantDescribeResponse> {
         let locked = self.inner.read().unwrap();
 
+        // Apply start_from parameter
+        let shard_range = match start_after {
+            None => locked.tenants.range(..),
+            Some(tenant_id) => locked.tenants.range(
+                TenantShardId {
+                    tenant_id,
+                    shard_number: ShardNumber(u8::MAX),
+                    shard_count: ShardCount(u8::MAX),
+                }..,
+            ),
+        };
+
         let mut result = Vec::new();
-        for (_tenant_id, tenant_shards) in
-            &locked.tenants.iter().group_by(|(id, _shard)| id.tenant_id)
-        {
+        for (_tenant_id, tenant_shards) in &shard_range.group_by(|(id, _shard)| id.tenant_id) {
             result.push(
                 self.tenant_describe_impl(tenant_shards.map(|(_k, v)| v))
                     .expect("Groups are always non-empty"),
             );
+
+            // Enforce `limit` parameter
+            if let Some(limit) = limit {
+                if result.len() >= limit {
+                    break;
+                }
+            }
         }
 
         result
@@ -6390,7 +6415,7 @@ impl Service {
     /// available.  A return value of 0 indicates that everything is fully reconciled already.
     fn reconcile_all(&self) -> usize {
         let mut locked = self.inner.write().unwrap();
-        let (nodes, tenants, _scheduler) = locked.parts_mut();
+        let (nodes, tenants, scheduler) = locked.parts_mut();
         let pageservers = nodes.clone();
 
         // This function is an efficient place to update lazy statistics, since we are walking
@@ -6451,6 +6476,9 @@ impl Service {
             }
         }
 
+        // Some metrics are calculated from SchedulerNode state, update these periodically
+        scheduler.update_metrics();
+
         // Process any deferred tenant drops
         for (tenant_id, guard) in drop_detached_tenants {
             self.maybe_drop_tenant(tenant_id, &mut locked, &guard);
@@ -6509,7 +6537,7 @@ impl Service {
                 // Shard was dropped between planning and execution;
                 continue;
             };
-            tracing::info!("Applying optimization: {optimization:?}");
+            tracing::info!(tenant_shard_id=%tenant_shard_id, "Applying optimization: {optimization:?}");
             if shard.apply_optimization(scheduler, optimization) {
                 optimizations_applied += 1;
                 if self.maybe_reconcile_shard(shard, nodes).is_some() {
@@ -7621,6 +7649,16 @@ impl Service {
         record: crate::persistence::SafekeeperUpsert,
     ) -> Result<(), DatabaseError> {
         self.persistence.safekeeper_upsert(record).await
+    }
+
+    pub(crate) async fn set_safekeeper_scheduling_policy(
+        &self,
+        id: i64,
+        scheduling_policy: SkSchedulingPolicy,
+    ) -> Result<(), DatabaseError> {
+        self.persistence
+            .set_safekeeper_scheduling_policy(id, scheduling_policy)
+            .await
     }
 
     pub(crate) async fn update_shards_preferred_azs(

@@ -708,10 +708,11 @@ impl Persistence {
         Ok(())
     }
 
+    /// Note that passing None for a shard clears the preferred AZ (rather than leaving it unmodified)
     pub(crate) async fn set_tenant_shard_preferred_azs(
         &self,
-        preferred_azs: Vec<(TenantShardId, AvailabilityZone)>,
-    ) -> DatabaseResult<Vec<(TenantShardId, AvailabilityZone)>> {
+        preferred_azs: Vec<(TenantShardId, Option<AvailabilityZone>)>,
+    ) -> DatabaseResult<Vec<(TenantShardId, Option<AvailabilityZone>)>> {
         use crate::schema::tenant_shards::dsl::*;
 
         self.with_measured_conn(DatabaseOperation::SetPreferredAzs, move |conn| {
@@ -722,7 +723,7 @@ impl Persistence {
                     .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
                     .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
                     .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
-                    .set(preferred_az_id.eq(preferred_az.0.clone()))
+                    .set(preferred_az_id.eq(preferred_az.as_ref().map(|az| az.0.clone())))
                     .execute(conn)?;
 
                 if updated == 1 {
@@ -1096,6 +1097,37 @@ impl Persistence {
                 return Err(DatabaseError::Logical(format!(
                     "unexpected number of rows ({})",
                     inserted_updated
+                )));
+            }
+
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn set_safekeeper_scheduling_policy(
+        &self,
+        id_: i64,
+        scheduling_policy_: SkSchedulingPolicy,
+    ) -> Result<(), DatabaseError> {
+        use crate::schema::safekeepers::dsl::*;
+
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            #[derive(Insertable, AsChangeset)]
+            #[diesel(table_name = crate::schema::safekeepers)]
+            struct UpdateSkSchedulingPolicy<'a> {
+                id: i64,
+                scheduling_policy: &'a str,
+            }
+            let scheduling_policy_ = String::from(scheduling_policy_);
+
+            let rows_affected = diesel::update(safekeepers.filter(id.eq(id_)))
+                .set(scheduling_policy.eq(scheduling_policy_))
+                .execute(conn)?;
+
+            if rows_affected != 1 {
+                return Err(DatabaseError::Logical(format!(
+                    "unexpected number of rows ({rows_affected})",
                 )));
             }
 
