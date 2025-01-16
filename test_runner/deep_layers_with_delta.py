@@ -15,33 +15,28 @@ Measure impact of that.
 
 Some commands from shell history used in combination with this script:
 
- NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY=futures-unordered ./target/release/neon_local pageserver restart
- NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY=serial ./target/release/neon_local pageserver restart
- NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY=parallel ./target/release/neon_local pageserver restart
-
-cat >> .neon/pageserver_1/pageserver.toml <<"EOF"
-# customizations
-virtual_file_io_mode = "direct"
-page_service_pipelining={mode="pipelined", max_batch_size=32, execution="concurrent-futures"}
+```
+ ./target/release/neon_local stop
+ rm -rf .neon
+ ./target/release/neon_local init
+ cat >> .neon/pageserver_1/pageserver.toml <<"EOF"
+ # customizations
+ virtual_file_io_mode = "direct"
+ page_service_pipelining={mode="pipelined", max_batch_size=32, execution="concurrent-futures"}
 EOF
+ ./target/release/neon_local start
 
-starting from scrach:
-    psql 'postgresql://localhost:1235/storage_controller' -c 'DELETE FROM tenant_shards'
-    NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY=... ./target/release/neon_local pageserver restart
-    ./target/debug/neon_local endpoint stop foo
-    rm -rf .neon/endpoints/foo
-    ./target/debug/neon_local endpoint create foo
-    echo 'full_page_writes=off' >> .neon/endpoints/foo/postgresql.conf
-    ./target/debug/neon_local endpoint start foo
-    non-package-mode-py3.10christian@neon-hetzner-dev-christian:[~/src/neon/test_runner]: poetry run python3 deep_layers_with_delta.py
-    Need 6400 pages, 38400 rows
-    0
-    modified rows 6400
-    1
-    modified rows 6400
-    ...
-    19
-    modified rows 6400
+ psql 'postgresql://localhost:1235/storage_controller' -c 'DELETE FROM tenant_shards'
+ NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY=futures-unordered ./target/release/neon_local pageserver restart
+ sleep 2
+ ./target/release/neon_local tenant create --set-default
+ ./target/debug/neon_local endpoint stop foo
+ rm -rf .neon/endpoints/foo
+ ./target/debug/neon_local endpoint create foo
+ echo 'full_page_writes=off' >> .neon/endpoints/foo/postgresql.conf
+ ./target/debug/neon_local endpoint start foo
+ pushd test_runner; poetry run python3 deep_layers_with_delta.py; popd
+```
 
 Layer files created:
 
@@ -77,82 +72,25 @@ Now use pagebench to measure perf, e.g.
 
 """
 
-
-from pathlib import Path
-import time
-from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
+import psycopg2
+from fixtures.common_types import TenantShardId, TimelineId
 from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.makelayers.l0stack import L0StackShape, make_l0_stack_standalone
 
 ps_http = PageserverHttpClient(port=9898, is_testing_enabled_or_skip=lambda: None)
 vps_http = PageserverHttpClient(port=1234, is_testing_enabled_or_skip=lambda: None)
 
 tenants = ps_http.tenant_list()
 assert len(tenants) == 1
-tenant_id = tenants[0]["id"]
+tenant_shard_id = TenantShardId.parse(tenants[0]["id"])
 
-timlines = ps_http.timeline_list(tenant_id)
+timlines = ps_http.timeline_list(tenant_shard_id)
 assert len(timlines) == 1
-timeline_id = timlines[0]["timeline_id"]
-
-config = {
-    "gc_period": "0s",  # disable periodic gc
-    "checkpoint_timeout": "10 years",
-    "compaction_period": "1h",  # doesn't matter, but 0 value will kill walredo every 10s
-    "compaction_threshold": 100000, # we just want L0s
-    "compaction_target_size": 134217728,
-    "checkpoint_distance": 268435456,
-    "image_creation_threshold": 100000, # we just want L0s
-}
-
-vps_http.set_tenant_config(tenant_id, config)
+timeline_id = TimelineId(timlines[0]["timeline_id"])
 
 connstr = "postgresql://cloud_admin@localhost:55432/postgres"
-
-import psycopg2
-
-def last_record_lsn(
-    pageserver_http_client: PageserverHttpClient,
-    tenant: TenantId | TenantShardId,
-    timeline: TimelineId,
-) -> Lsn:
-    detail = pageserver_http_client.timeline_detail(tenant, timeline)
-
-    lsn_str = detail["last_record_lsn"]
-    assert isinstance(lsn_str, str)
-    return Lsn(lsn_str)
-
 conn = psycopg2.connect(connstr)
-conn.autocommit = True
-cur = conn.cursor()
 
-# each tuple is 23 (header) + 100 bytes = 123 bytes
-# page header si 24 bytes
-# 8k page size
-# (8k-24bytes) / 123 bytes = 63 tuples per page
-# set fillfactor to 10 to have 6 tuples per page
-cur.execute("DROP TABLE IF EXISTS data")
-cur.execute("CREATE TABLE data(id bigint, row char(92)) with (fillfactor=10)")
-desired_size = 50 * 1024 * 1024  # 50MiB
-need_pages = desired_size // 8192
-need_rows = need_pages * 6
-print(f"Need {need_pages} pages, {need_rows} rows")
-cur.execute(f"INSERT INTO data SELECT i,'row'||i FROM generate_series(1, {need_rows}) as i")
+shape = L0StackShape(logical_table_size_mib=50, delta_stack_height=20)
 
-# every iteration updates one tuple in each page
-delta_stack_height = 20
-for i in range( 0, delta_stack_height):
-    print(i)
-    cur.execute(f"UPDATE data set row = row||',u' where id % 6 = {i%6}")
-    print("modified rows", cur.rowcount)
-    cur.execute("SELECT pg_current_wal_flush_lsn()")
-    flush_lsn = Lsn(cur.fetchall()[0][0])
-
-    while True:
-        last_record = last_record_lsn(ps_http, tenant_id, timeline_id)
-        if last_record >= flush_lsn:
-            break
-        time.sleep(0.1)
-
-    ps_http.timeline_checkpoint(tenant_id, timeline_id)
-    ps_http.timeline_compact(tenant_id, timeline_id)
-
+make_l0_stack_standalone(vps_http, ps_http, tenant_shard_id, timeline_id, conn, shape)

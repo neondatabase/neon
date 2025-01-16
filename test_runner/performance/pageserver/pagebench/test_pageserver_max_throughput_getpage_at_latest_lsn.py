@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import dataclasses
 import json
-from pathlib import Path
 import sys
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -238,7 +238,6 @@ def setup_tenant_template(env: NeonEnv, pg_bin: PgBin, scale: int):
     return (template_tenant, template_timeline, config)
 
 
-
 def run_pagebench_benchmark(
     env: NeonEnv, pg_bin: PgBin, record, duration_secs: int, n_clients: int
 ):
@@ -254,7 +253,7 @@ def run_pagebench_benchmark(
         pageserver_cpu_seconds_total: float
         pageserver_layers_visited_per_vectored_read_global_buckets: dict[int, int]
 
-        def __sub__(self, other: "Metrics") -> "Metrics":
+        def __sub__(self, other: Metrics) -> Metrics:
             return Metrics(
                 time=self.time - other.time,
                 pageserver_cpu_seconds_total=self.pageserver_cpu_seconds_total
@@ -265,7 +264,7 @@ def run_pagebench_benchmark(
                 },
             )
 
-        def normalize(self, by) -> "Metrics":
+        def normalize(self, by) -> Metrics:
             return Metrics(
                 time=self.time / by,
                 pageserver_cpu_seconds_total=self.pageserver_cpu_seconds_total / by,
@@ -277,6 +276,7 @@ def run_pagebench_benchmark(
 
     def get_metrics() -> Metrics:
         pageserver_metrics = ps_http.get_metrics()
+
         def parse_le_label(s):
             try:
                 return int(s)
@@ -285,6 +285,7 @@ def run_pagebench_benchmark(
                     return sys.maxsize
                 else:
                     raise
+
         return Metrics(
             time=time.time(),
             pageserver_cpu_seconds_total=pageserver_metrics.query_one(
@@ -328,7 +329,6 @@ def run_pagebench_benchmark(
 
     metrics = metrics_after - metrics_before
 
-
     #
     # Record the results
     #
@@ -368,4 +368,6 @@ def run_pagebench_benchmark(
                     report=MetricReport.TEST_PARAM,
                 )
         else:
-            record(f"counters.{metric}", metric_value=value, unit="", report=MetricReport.TEST_PARAM)
+            record(
+                f"counters.{metric}", metric_value=value, unit="", report=MetricReport.TEST_PARAM
+            )

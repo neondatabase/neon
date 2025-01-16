@@ -313,6 +313,10 @@ class PgProtocol:
         """
         return self.safe_psql(query, log_query=log_query)[0][0]
 
+    def show_timeline_id(self) -> TimelineId:
+        """SHOW neon.timeline_id"""
+        return TimelineId(cast("str", self.safe_psql("show neon.timeline_id")[0][0]))
+
 
 class PageserverWalReceiverProtocol(StrEnum):
     VANILLA = "vanilla"
