@@ -140,7 +140,7 @@ pub(super) async fn handle_walreceiver_connection(
 
     let (replication_client, connection) = {
         let mut config = wal_source_connconf.to_tokio_postgres_config();
-        config.application_name("pageserver");
+        config.application_name(format!("pageserver-{}", node.0).as_str());
         config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
         match time::timeout(connect_timeout, config.connect(postgres::NoTls)).await {
             Ok(client_and_conn) => client_and_conn?,
