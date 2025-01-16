@@ -2128,6 +2128,11 @@ impl Timeline {
             self.get_gc_compaction_watermark()
         };
 
+        if compact_below_lsn == Lsn::INVALID {
+            tracing::warn!("no layers to compact with gc: gc_cutoff not generated yet, skipping gc bottom-most compaction");
+            return Ok(vec![]);
+        }
+
         // Split compaction job to about 4GB each
         const GC_COMPACT_MAX_SIZE_MB: u64 = 4 * 1024;
         let sub_compaction_max_job_size_mb =
@@ -2322,6 +2327,11 @@ impl Timeline {
                 // each of the retain_lsn. Therefore, if the user-provided `compact_lsn_range.end` is larger than the real gc cutoff, we will use
                 // the real cutoff.
                 let mut gc_cutoff = if compact_lsn_range.end == Lsn::MAX {
+                    if real_gc_cutoff == Lsn::INVALID {
+                        // If the gc_cutoff is not generated yet, we should not compact anything.
+                        tracing::warn!("no layers to compact with gc: gc_cutoff not generated yet, skipping gc bottom-most compaction");
+                        return Ok(());
+                    }
                     real_gc_cutoff
                 } else {
                     compact_lsn_range.end
