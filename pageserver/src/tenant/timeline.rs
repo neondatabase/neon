@@ -51,7 +51,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
-    fs_ext, pausable_failpoint,
+    fs_ext,
+    guard_arc_swap::GuardArcSwap,
+    pausable_failpoint,
     postgres_client::PostgresClientProtocol,
     sync::gate::{Gate, GateGuard},
 };
@@ -353,8 +355,8 @@ pub struct Timeline {
     // though let's keep them both for better error visibility.
     pub initdb_lsn: Lsn,
 
-    /// When did we last calculate the partitioning? Make it pub to test cases.
-    pub(super) partitioning: tokio::sync::Mutex<((KeyPartitioning, SparseKeyPartitioning), Lsn)>,
+    /// The repartitioning result. Allows a single writer and multiple readers.
+    pub(crate) partitioning: GuardArcSwap<((KeyPartitioning, SparseKeyPartitioning), Lsn)>,
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
@@ -2340,7 +2342,8 @@ impl Timeline {
                     // initial logical size is 0.
                     LogicalSize::empty_initial()
                 },
-                partitioning: tokio::sync::Mutex::new((
+
+                partitioning: GuardArcSwap::new((
                     (KeyPartitioning::new(), KeyPartitioning::new().into_sparse()),
                     Lsn(0),
                 )),
@@ -4028,18 +4031,15 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<((KeyPartitioning, SparseKeyPartitioning), Lsn), CompactionError> {
-        let Ok(mut partitioning_guard) = self.partitioning.try_lock() else {
+        let Ok(mut guard) = self.partitioning.try_write_guard() else {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
-            // Note that there are a third "caller" that will take the `partitioning` lock. It is `gc_compaction_split_jobs` for
-            // gc-compaction where it uses the repartition data to determine the split jobs. In the future, it might use its own
-            // heuristics, but for now, we should allow concurrent access to it and let the caller retry compaction.
             return Err(CompactionError::Other(anyhow!(
-                "repartition() called concurrently, this is rare and a retry should be fine"
+                "repartition() called concurrently"
             )));
         };
-        let ((dense_partition, sparse_partition), partition_lsn) = &*partitioning_guard;
+        let ((dense_partition, sparse_partition), partition_lsn) = &*guard.read();
         if lsn < *partition_lsn {
             return Err(CompactionError::Other(anyhow!(
                 "repartition() called with LSN going backwards, this should not happen"
@@ -4067,9 +4067,9 @@ impl Timeline {
         let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
         }; // no partitioning for metadata keys for now
-        *partitioning_guard = ((dense_partitioning, sparse_partitioning), lsn);
-
-        Ok((partitioning_guard.0.clone(), partitioning_guard.1))
+        let result = ((dense_partitioning, sparse_partitioning), lsn);
+        guard.write(result.clone());
+        Ok(result)
     }
 
     // Is it time to create a new image layer for the given partition?
