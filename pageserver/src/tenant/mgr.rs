@@ -44,7 +44,9 @@ use crate::tenant::config::{
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::storage_layer::inmemory_layer;
 use crate::tenant::timeline::ShutdownMode;
-use crate::tenant::{AttachedTenantConf, GcError, LoadConfigError, SpawnMode, Tenant, TenantState};
+use crate::tenant::{
+    AttachedTenantConf, GcError, LoadConfigError, SpawnMode, TenantShard, TenantState,
+};
 use crate::virtual_file::MaybeFatalIo;
 use crate::{InitializationOrder, TEMP_FILE_SUFFIX};
 
@@ -69,7 +71,7 @@ use super::{GlobalShutDown, TenantSharedResources};
 /// having a properly acquired generation (Secondary doesn't need a generation)
 #[derive(Clone)]
 pub(crate) enum TenantSlot {
-    Attached(Arc<Tenant>),
+    Attached(Arc<TenantShard>),
     Secondary(Arc<SecondaryTenant>),
     /// In this state, other administrative operations acting on the TenantId should
     /// block, or return a retry indicator equivalent to HTTP 503.
@@ -88,7 +90,7 @@ impl std::fmt::Debug for TenantSlot {
 
 impl TenantSlot {
     /// Return the `Tenant` in this slot if attached, else None
-    fn get_attached(&self) -> Option<&Arc<Tenant>> {
+    fn get_attached(&self) -> Option<&Arc<TenantShard>> {
         match self {
             Self::Attached(t) => Some(t),
             Self::Secondary(_) => None,
@@ -166,7 +168,7 @@ impl TenantStartupMode {
 /// Result type for looking up a TenantId to a specific shard
 pub(crate) enum ShardResolveResult {
     NotFound,
-    Found(Arc<Tenant>),
+    Found(Arc<TenantShard>),
     // Wait for this barrrier, then query again
     InProgress(utils::completion::Barrier),
 }
@@ -175,7 +177,7 @@ impl TenantsMap {
     /// Convenience function for typical usage, where we want to get a `Tenant` object, for
     /// working with attached tenants.  If the TenantId is in the map but in Secondary state,
     /// None is returned.
-    pub(crate) fn get(&self, tenant_shard_id: &TenantShardId) -> Option<&Arc<Tenant>> {
+    pub(crate) fn get(&self, tenant_shard_id: &TenantShardId) -> Option<&Arc<TenantShard>> {
         match self {
             TenantsMap::Initializing => None,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
@@ -412,7 +414,7 @@ fn load_tenant_config(
         return None;
     }
 
-    Some(Tenant::load_tenant_config(conf, &tenant_shard_id))
+    Some(TenantShard::load_tenant_config(conf, &tenant_shard_id))
 }
 
 /// Initial stage of load: walk the local tenants directory, clean up any temp files,
@@ -606,7 +608,8 @@ pub async fn init_tenant_mgr(
         // Presence of a generation number implies attachment: attach the tenant
         // if it wasn't already, and apply the generation number.
         config_write_futs.push(async move {
-            let r = Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await;
+            let r =
+                TenantShard::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await;
             (tenant_shard_id, location_conf, r)
         });
     }
@@ -694,7 +697,7 @@ fn tenant_spawn(
     init_order: Option<InitializationOrder>,
     mode: SpawnMode,
     ctx: &RequestContext,
-) -> Result<Arc<Tenant>, GlobalShutDown> {
+) -> Result<Arc<TenantShard>, GlobalShutDown> {
     // All these conditions should have been satisfied by our caller: the tenant dir exists, is a well formed
     // path, and contains a configuration file.  Assertions that do synchronous I/O are limited to debug mode
     // to avoid impacting prod runtime performance.
@@ -705,7 +708,7 @@ fn tenant_spawn(
         .try_exists()
         .unwrap());
 
-    Tenant::spawn(
+    TenantShard::spawn(
         conf,
         tenant_shard_id,
         resources,
@@ -885,7 +888,7 @@ impl TenantManager {
     pub(crate) fn get_attached_tenant_shard(
         &self,
         tenant_shard_id: TenantShardId,
-    ) -> Result<Arc<Tenant>, GetTenantError> {
+    ) -> Result<Arc<TenantShard>, GetTenantError> {
         let locked = self.tenants.read().unwrap();
 
         let peek_slot = tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)?;
@@ -934,12 +937,12 @@ impl TenantManager {
         flush: Option<Duration>,
         mut spawn_mode: SpawnMode,
         ctx: &RequestContext,
-    ) -> Result<Option<Arc<Tenant>>, UpsertLocationError> {
+    ) -> Result<Option<Arc<TenantShard>>, UpsertLocationError> {
         debug_assert_current_span_has_tenant_id();
         info!("configuring tenant location to state {new_location_config:?}");
 
         enum FastPathModified {
-            Attached(Arc<Tenant>),
+            Attached(Arc<TenantShard>),
             Secondary(Arc<SecondaryTenant>),
         }
 
@@ -996,9 +999,13 @@ impl TenantManager {
         // phase of writing config and/or waiting for flush, before returning.
         match fast_path_taken {
             Some(FastPathModified::Attached(tenant)) => {
-                Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
-                    .await
-                    .fatal_err("write tenant shard config");
+                TenantShard::persist_tenant_config(
+                    self.conf,
+                    &tenant_shard_id,
+                    &new_location_config,
+                )
+                .await
+                .fatal_err("write tenant shard config");
 
                 // Transition to AttachedStale means we may well hold a valid generation
                 // still, and have been requested to go stale as part of a migration.  If
@@ -1027,9 +1034,13 @@ impl TenantManager {
                 return Ok(Some(tenant));
             }
             Some(FastPathModified::Secondary(_secondary_tenant)) => {
-                Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
-                    .await
-                    .fatal_err("write tenant shard config");
+                TenantShard::persist_tenant_config(
+                    self.conf,
+                    &tenant_shard_id,
+                    &new_location_config,
+                )
+                .await
+                .fatal_err("write tenant shard config");
 
                 return Ok(None);
             }
@@ -1119,7 +1130,7 @@ impl TenantManager {
         // Before activating either secondary or attached mode, persist the
         // configuration, so that on restart we will re-attach (or re-start
         // secondary) on the tenant.
-        Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
+        TenantShard::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
             .await
             .fatal_err("write tenant shard config");
 
@@ -1257,7 +1268,7 @@ impl TenantManager {
 
         let tenant_path = self.conf.tenant_path(&tenant_shard_id);
         let timelines_path = self.conf.timelines_path(&tenant_shard_id);
-        let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
+        let config = TenantShard::load_tenant_config(self.conf, &tenant_shard_id)?;
 
         if drop_cache {
             tracing::info!("Dropping local file cache");
@@ -1292,7 +1303,7 @@ impl TenantManager {
         Ok(())
     }
 
-    pub(crate) fn get_attached_active_tenant_shards(&self) -> Vec<Arc<Tenant>> {
+    pub(crate) fn get_attached_active_tenant_shards(&self) -> Vec<Arc<TenantShard>> {
         let locked = self.tenants.read().unwrap();
         match &*locked {
             TenantsMap::Initializing => Vec::new(),
@@ -1441,7 +1452,7 @@ impl TenantManager {
     #[instrument(skip_all, fields(tenant_id=%tenant.get_tenant_shard_id().tenant_id, shard_id=%tenant.get_tenant_shard_id().shard_slug(), new_shard_count=%new_shard_count.literal()))]
     pub(crate) async fn shard_split(
         &self,
-        tenant: Arc<Tenant>,
+        tenant: Arc<TenantShard>,
         new_shard_count: ShardCount,
         new_stripe_size: Option<ShardStripeSize>,
         ctx: &RequestContext,
@@ -1471,7 +1482,7 @@ impl TenantManager {
 
     pub(crate) async fn do_shard_split(
         &self,
-        tenant: Arc<Tenant>,
+        tenant: Arc<TenantShard>,
         new_shard_count: ShardCount,
         new_stripe_size: Option<ShardStripeSize>,
         ctx: &RequestContext,
@@ -1697,7 +1708,7 @@ impl TenantManager {
     /// For each resident layer in the parent shard, we will hard link it into all of the child shards.
     async fn shard_split_hardlink(
         &self,
-        parent_shard: &Tenant,
+        parent_shard: &TenantShard,
         child_shards: Vec<TenantShardId>,
     ) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
@@ -1974,7 +1985,7 @@ impl TenantManager {
             }
 
             let tenant_path = self.conf.tenant_path(&tenant_shard_id);
-            let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)
+            let config = TenantShard::load_tenant_config(self.conf, &tenant_shard_id)
                 .map_err(|e| Error::DetachReparent(e.into()))?;
 
             let shard_identity = config.shard;

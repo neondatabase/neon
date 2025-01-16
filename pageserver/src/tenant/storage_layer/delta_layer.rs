@@ -1618,7 +1618,7 @@ pub(crate) mod test {
     use crate::tenant::harness::TIMELINE_ID;
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
     use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
-    use crate::tenant::{Tenant, Timeline};
+    use crate::tenant::{TenantShard, Timeline};
     use crate::{
         context::DownloadBehavior,
         task_mgr::TaskKind,
@@ -2214,7 +2214,7 @@ pub(crate) mod test {
     }
 
     pub(crate) async fn produce_delta_layer(
-        tenant: &Tenant,
+        tenant: &TenantShard,
         tline: &Arc<Timeline>,
         mut deltas: Vec<(Key, Lsn, Value)>,
         ctx: &RequestContext,

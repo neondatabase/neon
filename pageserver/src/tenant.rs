@@ -273,7 +273,7 @@ pub(crate) enum SpawnMode {
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
 ///
-pub struct Tenant {
+pub struct TenantShard {
     // Global pageserver config parameters
     pub conf: &'static PageServerConf,
 
@@ -384,7 +384,7 @@ pub struct Tenant {
 
     l0_flush_global_state: L0FlushGlobalState,
 }
-impl std::fmt::Debug for Tenant {
+impl std::fmt::Debug for TenantShard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} ({})", self.tenant_shard_id, self.current_state())
     }
@@ -1099,7 +1099,7 @@ pub(crate) enum LoadConfigError {
     NotFound(Utf8PathBuf),
 }
 
-impl Tenant {
+impl TenantShard {
     /// Yet another helper for timeline initialization.
     ///
     /// - Initializes the Timeline struct and inserts it into the tenant's hash map
@@ -1277,7 +1277,7 @@ impl Tenant {
         init_order: Option<InitializationOrder>,
         mode: SpawnMode,
         ctx: &RequestContext,
-    ) -> Result<Arc<Tenant>, GlobalShutDown> {
+    ) -> Result<Arc<TenantShard>, GlobalShutDown> {
         let wal_redo_manager =
             WalRedoManager::new(PostgresRedoManager::new(conf, tenant_shard_id))?;
 
@@ -1291,7 +1291,7 @@ impl Tenant {
         let attach_mode = attached_conf.location.attach_mode;
         let generation = attached_conf.location.generation;
 
-        let tenant = Arc::new(Tenant::new(
+        let tenant = Arc::new(TenantShard::new(
             TenantState::Attaching,
             conf,
             attached_conf,
@@ -1342,7 +1342,7 @@ impl Tenant {
                     Info
                 }
                 let make_broken =
-                    |t: &Tenant, err: anyhow::Error, verbosity: BrokenVerbosity| {
+                    |t: &TenantShard, err: anyhow::Error, verbosity: BrokenVerbosity| {
                         match verbosity {
                             BrokenVerbosity::Info => {
                                 info!("attach cancelled, setting tenant state to Broken: {err}");
@@ -1565,7 +1565,7 @@ impl Tenant {
     /// No background tasks are started as part of this routine.
     ///
     async fn attach(
-        self: &Arc<Tenant>,
+        self: &Arc<TenantShard>,
         preload: Option<TenantPreload>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -1885,7 +1885,7 @@ impl Tenant {
     }
 
     async fn load_timelines_metadata(
-        self: &Arc<Tenant>,
+        self: &Arc<TenantShard>,
         timeline_ids: HashSet<TimelineId>,
         remote_storage: &GenericRemoteStorage,
         cancel: CancellationToken,
@@ -1940,7 +1940,7 @@ impl Tenant {
     }
 
     fn load_timeline_metadata(
-        self: &Arc<Tenant>,
+        self: &Arc<TenantShard>,
         timeline_id: TimelineId,
         remote_storage: GenericRemoteStorage,
         cancel: CancellationToken,
@@ -2480,7 +2480,7 @@ impl Tenant {
     /// the same timeline ID already exists, returns CreateTimelineError::AlreadyExists.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn create_timeline(
-        self: &Arc<Tenant>,
+        self: &Arc<TenantShard>,
         params: CreateTimelineParams,
         broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
@@ -2641,7 +2641,7 @@ impl Tenant {
     /// We only return an [`Arc<Timeline>`] here so the API handler can create a [`pageserver_api::models::TimelineInfo`]
     /// for the response.
     async fn create_timeline_import_pgdata(
-        self: &Arc<Tenant>,
+        self: &Arc<TenantShard>,
         params: CreateTimelineParamsImportPgdata,
         activate: ActivateTimelineArgs,
         ctx: &RequestContext,
@@ -2736,7 +2736,7 @@ impl Tenant {
 
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))]
     async fn create_timeline_import_pgdata_task(
-        self: Arc<Tenant>,
+        self: Arc<TenantShard>,
         timeline: Arc<Timeline>,
         index_part: import_pgdata::index_part_format::Root,
         activate: ActivateTimelineArgs,
@@ -2762,7 +2762,7 @@ impl Tenant {
     }
 
     async fn create_timeline_import_pgdata_task_impl(
-        self: Arc<Tenant>,
+        self: Arc<TenantShard>,
         timeline: Arc<Timeline>,
         index_part: import_pgdata::index_part_format::Root,
         activate: ActivateTimelineArgs,
@@ -3761,7 +3761,7 @@ enum ActivateTimelineArgs {
     No,
 }
 
-impl Tenant {
+impl TenantShard {
     pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
         self.tenant_conf.load().tenant_conf.clone()
     }
@@ -4010,7 +4010,7 @@ impl Tenant {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
-    ) -> Tenant {
+    ) -> TenantShard {
         debug_assert!(
             !attached_conf.location.generation.is_none() || conf.control_plane_api.is_none()
         );
@@ -4070,7 +4070,7 @@ impl Tenant {
             }
         });
 
-        Tenant {
+        TenantShard {
             tenant_shard_id,
             shard_identity,
             generation: attached_conf.location.generation,
@@ -4104,7 +4104,7 @@ impl Tenant {
             cancel: CancellationToken::default(),
             gate: Gate::default(),
             pagestream_throttle: Arc::new(throttle::Throttle::new(
-                Tenant::get_pagestream_throttle_config(conf, &attached_conf.tenant_conf),
+                TenantShard::get_pagestream_throttle_config(conf, &attached_conf.tenant_conf),
             )),
             pagestream_throttle_metrics: Arc::new(
                 crate::metrics::tenant_throttling::Pagestream::new(&tenant_shard_id),
@@ -5570,7 +5570,7 @@ pub(crate) mod harness {
             info_span!("TenantHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
         }
 
-        pub(crate) async fn load(&self) -> (Arc<Tenant>, RequestContext) {
+        pub(crate) async fn load(&self) -> (Arc<TenantShard>, RequestContext) {
             let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
             (
                 self.do_try_load(&ctx)
@@ -5584,10 +5584,10 @@ pub(crate) mod harness {
         pub(crate) async fn do_try_load(
             &self,
             ctx: &RequestContext,
-        ) -> anyhow::Result<Arc<Tenant>> {
+        ) -> anyhow::Result<Arc<TenantShard>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
-            let tenant = Arc::new(Tenant::new(
+            let tenant = Arc::new(TenantShard::new(
                 TenantState::Attaching,
                 self.conf,
                 AttachedTenantConf::try_from(LocationConf::attached_single(
@@ -6368,7 +6368,7 @@ mod tests {
     }
 
     async fn bulk_insert_compact_gc(
-        tenant: &Tenant,
+        tenant: &TenantShard,
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
         lsn: Lsn,
@@ -6380,7 +6380,7 @@ mod tests {
     }
 
     async fn bulk_insert_maybe_compact_gc(
-        tenant: &Tenant,
+        tenant: &TenantShard,
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
         mut lsn: Lsn,

@@ -2640,7 +2640,7 @@ mod tests {
             config::AttachmentMode,
             harness::{TenantHarness, TIMELINE_ID},
             storage_layer::layer::local_layer_path,
-            Tenant, Timeline,
+            TenantShard, Timeline,
         },
         DEFAULT_PG_VERSION,
     };
@@ -2698,7 +2698,7 @@ mod tests {
 
     struct TestSetup {
         harness: TenantHarness,
-        tenant: Arc<Tenant>,
+        tenant: Arc<TenantShard>,
         timeline: Arc<Timeline>,
         tenant_ctx: RequestContext,
     }

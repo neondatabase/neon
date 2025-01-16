@@ -7,7 +7,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::size::CalculateSyntheticSizeError;
 use crate::tenant::tasks::BackgroundLoopKind;
-use crate::tenant::{mgr::TenantManager, LogicalSizeCalculationCause, Tenant};
+use crate::tenant::{mgr::TenantManager, LogicalSizeCalculationCause, TenantShard};
 use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
 use itertools::Itertools as _;
@@ -425,7 +425,7 @@ async fn calculate_synthetic_size_worker(
     }
 }
 
-async fn calculate_and_log(tenant: &Tenant, cancel: &CancellationToken, ctx: &RequestContext) {
+async fn calculate_and_log(tenant: &TenantShard, cancel: &CancellationToken, ctx: &RequestContext) {
     const CAUSE: LogicalSizeCalculationCause =
         LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize;
 

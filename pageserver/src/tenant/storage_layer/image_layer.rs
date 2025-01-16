@@ -1141,7 +1141,7 @@ mod test {
             harness::{TenantHarness, TIMELINE_ID},
             storage_layer::{Layer, ResidentLayer},
             vectored_blob_io::StreamingVectoredReadPlanner,
-            Tenant, Timeline,
+            TenantShard, Timeline,
         },
         DEFAULT_PG_VERSION,
     };
@@ -1324,7 +1324,7 @@ mod test {
     }
 
     async fn produce_image_layer(
-        tenant: &Tenant,
+        tenant: &TenantShard,
         tline: &Arc<Timeline>,
         mut images: Vec<(Key, Bytes)>,
         lsn: Lsn,

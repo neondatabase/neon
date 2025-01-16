@@ -8,7 +8,7 @@ use utils::{fs_ext, id::TimelineId, lsn::Lsn, sync::gate::GateGuard};
 use crate::{
     context::RequestContext,
     import_datadir,
-    tenant::{CreateTimelineIdempotency, Tenant, TimelineOrOffloaded},
+    tenant::{CreateTimelineIdempotency, TenantShard, TimelineOrOffloaded},
 };
 
 use super::Timeline;
@@ -21,14 +21,14 @@ use super::Timeline;
 /// The caller is responsible for proper timeline data filling before the final init.
 #[must_use]
 pub struct UninitializedTimeline<'t> {
-    pub(crate) owning_tenant: &'t Tenant,
+    pub(crate) owning_tenant: &'t TenantShard,
     timeline_id: TimelineId,
     raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard)>,
 }
 
 impl<'t> UninitializedTimeline<'t> {
     pub(crate) fn new(
-        owning_tenant: &'t Tenant,
+        owning_tenant: &'t TenantShard,
         timeline_id: TimelineId,
         raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard)>,
     ) -> Self {
@@ -94,7 +94,7 @@ impl<'t> UninitializedTimeline<'t> {
     /// Prepares timeline data by loading it from the basebackup archive.
     pub(crate) async fn import_basebackup_from_tar(
         self,
-        tenant: Arc<Tenant>,
+        tenant: Arc<TenantShard>,
         copyin_read: &mut (impl tokio::io::AsyncRead + Send + Sync + Unpin),
         base_lsn: Lsn,
         broker_client: storage_broker::BrokerClientChannel,
@@ -173,7 +173,7 @@ pub(crate) fn cleanup_timeline_directory(create_guard: TimelineCreateGuard) {
 #[must_use]
 pub(crate) struct TimelineCreateGuard {
     pub(crate) _tenant_gate_guard: GateGuard,
-    pub(crate) owning_tenant: Arc<Tenant>,
+    pub(crate) owning_tenant: Arc<TenantShard>,
     pub(crate) timeline_id: TimelineId,
     pub(crate) timeline_path: Utf8PathBuf,
     pub(crate) idempotency: CreateTimelineIdempotency,
@@ -199,7 +199,7 @@ pub(crate) enum TimelineExclusionError {
 
 impl TimelineCreateGuard {
     pub(crate) fn new(
-        owning_tenant: &Arc<Tenant>,
+        owning_tenant: &Arc<TenantShard>,
         timeline_id: TimelineId,
         timeline_path: Utf8PathBuf,
         idempotency: CreateTimelineIdempotency,
