@@ -384,7 +384,7 @@ impl<T: Types> Cache<T> {
                 return RoutingResult::NeedConsultTenantManager;
             };
             let Ok(first_handle) = first_handle.upgrade() else {
-                // TODO: dedup with get_impl()
+                // TODO: dedup with get()
                 trace!("handle cache stale");
                 let first_key_owned = *first_key;
                 self.map.remove(&first_key_owned).unwrap();
