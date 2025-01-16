@@ -5411,6 +5411,15 @@ impl Service {
 
         expect_shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
 
+        // Because JSON contents of persistent tenants might disagree with the fields in current `TenantConfig`
+        // definition, we will do an encode/decode cycle to ensure any legacy fields are dropped and any new
+        // fields are added, before doing a comparison.
+        for tsp in &mut persistent_shards {
+            let config: TenantConfig = serde_json::from_str(&tsp.config)
+                .map_err(|e| ApiError::InternalServerError(e.into()))?;
+            tsp.config = serde_json::to_string(&config).expect("Encoding config is infallible");
+        }
+
         if persistent_shards != expect_shards {
             tracing::error!("Consistency check failed on shards.");
 
