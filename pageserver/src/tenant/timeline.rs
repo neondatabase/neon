@@ -76,6 +76,7 @@ use std::{pin::pin, sync::OnceLock};
 
 use crate::{
     aux_file::AuxFileSizeEstimator,
+    page_service::TenantManagerTypes,
     tenant::{
         config::AttachmentMode,
         layer_map::{LayerMap, SearchResult},
@@ -431,7 +432,7 @@ pub struct Timeline {
 
     pub(crate) l0_flush_global_state: L0FlushGlobalState,
 
-    pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
+    pub(crate) handles: handle::PerTimelineState<TenantManagerTypes>,
 
     pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
 
@@ -4625,6 +4626,10 @@ impl Drop for Timeline {
                 }
             }
         }
+        info!(
+            "Timeline {} for tenant {} is being dropped",
+            self.timeline_id, self.tenant_shard_id.tenant_id
+        );
     }
 }
 

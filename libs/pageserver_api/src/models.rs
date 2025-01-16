@@ -33,7 +33,6 @@ use crate::{
     reltag::RelTag,
     shard::{ShardCount, ShardStripeSize, TenantShardId},
 };
-use anyhow::bail;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 /// The state of a tenant in this pageserver.
@@ -1400,6 +1399,8 @@ pub enum PagestreamFeMessage {
     GetPage(PagestreamGetPageRequest),
     DbSize(PagestreamDbSizeRequest),
     GetSlruSegment(PagestreamGetSlruSegmentRequest),
+    #[cfg(feature = "testing")]
+    Test(PagestreamTestRequest),
 }
 
 // Wrapped in libpq CopyData
@@ -1411,6 +1412,22 @@ pub enum PagestreamBeMessage {
     Error(PagestreamErrorResponse),
     DbSize(PagestreamDbSizeResponse),
     GetSlruSegment(PagestreamGetSlruSegmentResponse),
+    #[cfg(feature = "testing")]
+    Test(PagestreamTestResponse),
+}
+
+// Keep in sync with `pagestore_client.h`
+#[repr(u8)]
+enum PagestreamFeMessageTag {
+    Exists = 0,
+    Nblocks = 1,
+    GetPage = 2,
+    DbSize = 3,
+    GetSlruSegment = 4,
+    /* future tags above this line */
+    /// For testing purposes, not available in production.
+    #[cfg(feature = "testing")]
+    Test = 99,
 }
 
 // Keep in sync with `pagestore_client.h`
@@ -1422,7 +1439,28 @@ enum PagestreamBeMessageTag {
     Error = 103,
     DbSize = 104,
     GetSlruSegment = 105,
+    /* future tags above this line */
+    /// For testing purposes, not available in production.
+    #[cfg(feature = "testing")]
+    Test = 199,
 }
+
+impl TryFrom<u8> for PagestreamFeMessageTag {
+    type Error = u8;
+    fn try_from(value: u8) -> Result<Self, u8> {
+        match value {
+            0 => Ok(PagestreamFeMessageTag::Exists),
+            1 => Ok(PagestreamFeMessageTag::Nblocks),
+            2 => Ok(PagestreamFeMessageTag::GetPage),
+            3 => Ok(PagestreamFeMessageTag::DbSize),
+            4 => Ok(PagestreamFeMessageTag::GetSlruSegment),
+            #[cfg(feature = "testing")]
+            99 => Ok(PagestreamFeMessageTag::Test),
+            _ => Err(value),
+        }
+    }
+}
+
 impl TryFrom<u8> for PagestreamBeMessageTag {
     type Error = u8;
     fn try_from(value: u8) -> Result<Self, u8> {
@@ -1433,6 +1471,8 @@ impl TryFrom<u8> for PagestreamBeMessageTag {
             103 => Ok(PagestreamBeMessageTag::Error),
             104 => Ok(PagestreamBeMessageTag::DbSize),
             105 => Ok(PagestreamBeMessageTag::GetSlruSegment),
+            #[cfg(feature = "testing")]
+            199 => Ok(PagestreamBeMessageTag::Test),
             _ => Err(value),
         }
     }
@@ -1550,6 +1590,20 @@ pub struct PagestreamDbSizeResponse {
     pub db_size: i64,
 }
 
+#[cfg(feature = "testing")]
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct PagestreamTestRequest {
+    pub hdr: PagestreamRequest,
+    pub batch_key: u64,
+    pub message: String,
+}
+
+#[cfg(feature = "testing")]
+#[derive(Debug)]
+pub struct PagestreamTestResponse {
+    pub req: PagestreamTestRequest,
+}
+
 // This is a cut-down version of TenantHistorySize from the pageserver crate, omitting fields
 // that require pageserver-internal types.  It is sufficient to get the total size.
 #[derive(Serialize, Deserialize, Debug)]
@@ -1569,7 +1623,7 @@ impl PagestreamFeMessage {
 
         match self {
             Self::Exists(req) => {
-                bytes.put_u8(0);
+                bytes.put_u8(PagestreamFeMessageTag::Exists as u8);
                 bytes.put_u64(req.hdr.reqid);
                 bytes.put_u64(req.hdr.request_lsn.0);
                 bytes.put_u64(req.hdr.not_modified_since.0);
@@ -1580,7 +1634,7 @@ impl PagestreamFeMessage {
             }
 
             Self::Nblocks(req) => {
-                bytes.put_u8(1);
+                bytes.put_u8(PagestreamFeMessageTag::Nblocks as u8);
                 bytes.put_u64(req.hdr.reqid);
                 bytes.put_u64(req.hdr.request_lsn.0);
                 bytes.put_u64(req.hdr.not_modified_since.0);
@@ -1591,7 +1645,7 @@ impl PagestreamFeMessage {
             }
 
             Self::GetPage(req) => {
-                bytes.put_u8(2);
+                bytes.put_u8(PagestreamFeMessageTag::GetPage as u8);
                 bytes.put_u64(req.hdr.reqid);
                 bytes.put_u64(req.hdr.request_lsn.0);
                 bytes.put_u64(req.hdr.not_modified_since.0);
@@ -1603,7 +1657,7 @@ impl PagestreamFeMessage {
             }
 
             Self::DbSize(req) => {
-                bytes.put_u8(3);
+                bytes.put_u8(PagestreamFeMessageTag::DbSize as u8);
                 bytes.put_u64(req.hdr.reqid);
                 bytes.put_u64(req.hdr.request_lsn.0);
                 bytes.put_u64(req.hdr.not_modified_since.0);
@@ -1611,12 +1665,23 @@ impl PagestreamFeMessage {
             }
 
             Self::GetSlruSegment(req) => {
-                bytes.put_u8(4);
+                bytes.put_u8(PagestreamFeMessageTag::GetSlruSegment as u8);
                 bytes.put_u64(req.hdr.reqid);
                 bytes.put_u64(req.hdr.request_lsn.0);
                 bytes.put_u64(req.hdr.not_modified_since.0);
                 bytes.put_u8(req.kind);
                 bytes.put_u32(req.segno);
+            }
+            #[cfg(feature = "testing")]
+            Self::Test(req) => {
+                bytes.put_u8(PagestreamFeMessageTag::Test as u8);
+                bytes.put_u64(req.hdr.reqid);
+                bytes.put_u64(req.hdr.request_lsn.0);
+                bytes.put_u64(req.hdr.not_modified_since.0);
+                bytes.put_u64(req.batch_key);
+                let message = req.message.as_bytes();
+                bytes.put_u64(message.len() as u64);
+                bytes.put_slice(message);
             }
         }
 
@@ -1645,56 +1710,66 @@ impl PagestreamFeMessage {
             ),
         };
 
-        match msg_tag {
-            0 => Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
-                hdr: PagestreamRequest {
-                    reqid,
-                    request_lsn,
-                    not_modified_since,
-                },
-                rel: RelTag {
-                    spcnode: body.read_u32::<BigEndian>()?,
+        match PagestreamFeMessageTag::try_from(msg_tag)
+            .map_err(|tag: u8| anyhow::anyhow!("invalid tag {tag}"))?
+        {
+            PagestreamFeMessageTag::Exists => {
+                Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
+                    hdr: PagestreamRequest {
+                        reqid,
+                        request_lsn,
+                        not_modified_since,
+                    },
+                    rel: RelTag {
+                        spcnode: body.read_u32::<BigEndian>()?,
+                        dbnode: body.read_u32::<BigEndian>()?,
+                        relnode: body.read_u32::<BigEndian>()?,
+                        forknum: body.read_u8()?,
+                    },
+                }))
+            }
+            PagestreamFeMessageTag::Nblocks => {
+                Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
+                    hdr: PagestreamRequest {
+                        reqid,
+                        request_lsn,
+                        not_modified_since,
+                    },
+                    rel: RelTag {
+                        spcnode: body.read_u32::<BigEndian>()?,
+                        dbnode: body.read_u32::<BigEndian>()?,
+                        relnode: body.read_u32::<BigEndian>()?,
+                        forknum: body.read_u8()?,
+                    },
+                }))
+            }
+            PagestreamFeMessageTag::GetPage => {
+                Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
+                    hdr: PagestreamRequest {
+                        reqid,
+                        request_lsn,
+                        not_modified_since,
+                    },
+                    rel: RelTag {
+                        spcnode: body.read_u32::<BigEndian>()?,
+                        dbnode: body.read_u32::<BigEndian>()?,
+                        relnode: body.read_u32::<BigEndian>()?,
+                        forknum: body.read_u8()?,
+                    },
+                    blkno: body.read_u32::<BigEndian>()?,
+                }))
+            }
+            PagestreamFeMessageTag::DbSize => {
+                Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
+                    hdr: PagestreamRequest {
+                        reqid,
+                        request_lsn,
+                        not_modified_since,
+                    },
                     dbnode: body.read_u32::<BigEndian>()?,
-                    relnode: body.read_u32::<BigEndian>()?,
-                    forknum: body.read_u8()?,
-                },
-            })),
-            1 => Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
-                hdr: PagestreamRequest {
-                    reqid,
-                    request_lsn,
-                    not_modified_since,
-                },
-                rel: RelTag {
-                    spcnode: body.read_u32::<BigEndian>()?,
-                    dbnode: body.read_u32::<BigEndian>()?,
-                    relnode: body.read_u32::<BigEndian>()?,
-                    forknum: body.read_u8()?,
-                },
-            })),
-            2 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
-                hdr: PagestreamRequest {
-                    reqid,
-                    request_lsn,
-                    not_modified_since,
-                },
-                rel: RelTag {
-                    spcnode: body.read_u32::<BigEndian>()?,
-                    dbnode: body.read_u32::<BigEndian>()?,
-                    relnode: body.read_u32::<BigEndian>()?,
-                    forknum: body.read_u8()?,
-                },
-                blkno: body.read_u32::<BigEndian>()?,
-            })),
-            3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
-                hdr: PagestreamRequest {
-                    reqid,
-                    request_lsn,
-                    not_modified_since,
-                },
-                dbnode: body.read_u32::<BigEndian>()?,
-            })),
-            4 => Ok(PagestreamFeMessage::GetSlruSegment(
+                }))
+            }
+            PagestreamFeMessageTag::GetSlruSegment => Ok(PagestreamFeMessage::GetSlruSegment(
                 PagestreamGetSlruSegmentRequest {
                     hdr: PagestreamRequest {
                         reqid,
@@ -1705,7 +1780,21 @@ impl PagestreamFeMessage {
                     segno: body.read_u32::<BigEndian>()?,
                 },
             )),
-            _ => bail!("unknown smgr message tag: {:?}", msg_tag),
+            #[cfg(feature = "testing")]
+            PagestreamFeMessageTag::Test => Ok(PagestreamFeMessage::Test(PagestreamTestRequest {
+                hdr: PagestreamRequest {
+                    reqid,
+                    request_lsn,
+                    not_modified_since,
+                },
+                batch_key: body.read_u64::<BigEndian>()?,
+                message: {
+                    let len = body.read_u64::<BigEndian>()?;
+                    let mut buf = vec![0; len as usize];
+                    body.read_exact(&mut buf)?;
+                    String::from_utf8(buf)?
+                },
+            })),
         }
     }
 }
@@ -1747,6 +1836,15 @@ impl PagestreamBeMessage {
                         bytes.put_u8(Tag::GetSlruSegment as u8);
                         bytes.put_u32((resp.segment.len() / BLCKSZ as usize) as u32);
                         bytes.put(&resp.segment[..]);
+                    }
+
+                    #[cfg(feature = "testing")]
+                    Self::Test(resp) => {
+                        bytes.put_u8(Tag::Test as u8);
+                        bytes.put_u64(resp.req.batch_key);
+                        let message = resp.req.message.as_bytes();
+                        bytes.put_u64(message.len() as u64);
+                        bytes.put_slice(message);
                     }
                 }
             }
@@ -1815,6 +1913,18 @@ impl PagestreamBeMessage {
                         bytes.put_u32(resp.req.segno);
                         bytes.put_u32((resp.segment.len() / BLCKSZ as usize) as u32);
                         bytes.put(&resp.segment[..]);
+                    }
+
+                    #[cfg(feature = "testing")]
+                    Self::Test(resp) => {
+                        bytes.put_u8(Tag::Test as u8);
+                        bytes.put_u64(resp.req.hdr.reqid);
+                        bytes.put_u64(resp.req.hdr.request_lsn.0);
+                        bytes.put_u64(resp.req.hdr.not_modified_since.0);
+                        bytes.put_u64(resp.req.batch_key);
+                        let message = resp.req.message.as_bytes();
+                        bytes.put_u64(message.len() as u64);
+                        bytes.put_slice(message);
                     }
                 }
             }
@@ -1958,6 +2068,28 @@ impl PagestreamBeMessage {
                         segment: segment.into(),
                     })
                 }
+                #[cfg(feature = "testing")]
+                Tag::Test => {
+                    let reqid = buf.read_u64::<BigEndian>()?;
+                    let request_lsn = Lsn(buf.read_u64::<BigEndian>()?);
+                    let not_modified_since = Lsn(buf.read_u64::<BigEndian>()?);
+                    let batch_key = buf.read_u64::<BigEndian>()?;
+                    let len = buf.read_u64::<BigEndian>()?;
+                    let mut msg = vec![0; len as usize];
+                    buf.read_exact(&mut msg)?;
+                    let message = String::from_utf8(msg)?;
+                    Self::Test(PagestreamTestResponse {
+                        req: PagestreamTestRequest {
+                            hdr: PagestreamRequest {
+                                reqid,
+                                request_lsn,
+                                not_modified_since,
+                            },
+                            batch_key,
+                            message,
+                        },
+                    })
+                }
             };
         let remaining = buf.into_inner();
         if !remaining.is_empty() {
@@ -1977,6 +2109,8 @@ impl PagestreamBeMessage {
             Self::Error(_) => "Error",
             Self::DbSize(_) => "DbSize",
             Self::GetSlruSegment(_) => "GetSlruSegment",
+            #[cfg(feature = "testing")]
+            Self::Test(_) => "Test",
         }
     }
 }
