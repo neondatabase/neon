@@ -1190,10 +1190,22 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 
 # pg_duckdb build requires source dir to be a git repo to get submodules
+# allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only 
+# cache management functions duckdb.cache(), duckdb.cache_info(), duckdb.cache_delete()
+# extension management function duckdb.install_extension()
+# for debugging purposes raw query and reset ddb duckdb.raw_query(), duckdb.recycle_ddb()
 RUN git clone --depth 1 --branch v0.2.0 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
     cd pg_duckdb-src && \
     make install -j $(getconf _NPROCESSORS_ONLN) && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control && \
+    file=/usr/local/pgsql/share/extension/pg_duckdb--0.2.0--0.3.0.sql && \
+    echo 'GRANT ALL ON FUNCTION duckdb.cache(TEXT, TEXT) TO neon_superuser;' >> $file && \
+    echo 'GRANT ALL ON FUNCTION duckdb.cache_info() TO neon_superuser;' >> $file && \
+    echo 'GRANT ALL ON FUNCTION duckdb.cache_delete(cache_key TEXT) TO neon_superuser;' >> $file && \
+    echo 'GRANT ALL ON FUNCTION duckdb.install_extension(TEXT) TO neon_superuser;' >> $file && \
+    echo 'GRANT ALL ON FUNCTION duckdb.raw_query(TEXT) TO neon_superuser' >> $file && \
+    echo 'GRANT ALL ON PROCEDURE duckdb.recycle_ddb() TO neon_superuser;'  >> $file
+        
 
 #########################################################################################
 #
