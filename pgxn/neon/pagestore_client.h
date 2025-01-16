@@ -34,6 +34,8 @@ typedef enum
 	T_NeonGetPageRequest,
 	T_NeonDbSizeRequest,
 	T_NeonGetSlruSegmentRequest,
+	/* future tags above this line */
+	T_NeonTestRequest = 99, /* only in cfg(feature = "testing") */
 
 	/* pagestore -> pagestore_client */
 	T_NeonExistsResponse = 100,
@@ -42,6 +44,8 @@ typedef enum
 	T_NeonErrorResponse,
 	T_NeonDbSizeResponse,
 	T_NeonGetSlruSegmentResponse,
+	/* future tags above this line */
+	T_NeonTestResponse = 199, /* only in cfg(feature = "testing") */
 } NeonMessageTag;
 
 typedef uint64 NeonRequestId;

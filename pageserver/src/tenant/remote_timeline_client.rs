@@ -382,6 +382,12 @@ pub(crate) struct RemoteTimelineClient {
     cancel: CancellationToken,
 }
 
+impl Drop for RemoteTimelineClient {
+    fn drop(&mut self) {
+        debug!("dropping RemoteTimelineClient");
+    }
+}
+
 impl RemoteTimelineClient {
     ///
     /// Create a remote storage client for given timeline

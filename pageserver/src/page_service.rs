@@ -424,7 +424,7 @@ impl timeline::handle::ArcTimeline<TenantManagerTypes> for Arc<Timeline> {
         Timeline::shard_timeline_id(self)
     }
 
-    fn per_timeline_state(&self) -> &timeline::handle::PerTimelineState {
+    fn per_timeline_state(&self) -> &timeline::handle::PerTimelineState<TenantManagerTypes> {
         &self.handles
     }
 
@@ -581,6 +581,9 @@ struct BatchedTestRequest {
     timer: SmgrOpTimer,
 }
 
+/// NB: we only hold [`timeline::handle::WeakHandle`] inside this enum,
+/// so that we don't keep the [`Timeline::gate`] open while the batch
+/// is being built up inside the [`spsc_fold`] (pagestream pipelining).
 enum BatchedFeMessage {
     Exists {
         span: Span,
@@ -964,7 +967,7 @@ impl PageServerHandler {
                     assert_eq!(accum_pages.len(), max_batch_size.get());
                     return false;
                 }
-                if !Arc::ptr_eq(accum_shard.timeline(), this_shard.timeline()) {
+                if !accum_shard.is_same_handle_as(&this_shard) {
                     trace!(%accum_lsn, %this_lsn, "stopping batching because timeline object mismatch");
                     // TODO: we _could_ batch & execute each shard seperately (and in parallel).
                     // But the current logic for keeping responses in order does not support that.
@@ -1002,7 +1005,7 @@ impl PageServerHandler {
                     assert_eq!(accum_requests.len(), max_batch_size.get());
                     return false;
                 }
-                if !Arc::ptr_eq(accum_shard.timeline(), this_shard.timeline()) {
+                if !accum_shard.is_same_handle_as(&this_shard) {
                     trace!("stopping batching because timeline object mismatch");
                     // TODO: we _could_ batch & execute each shard seperately (and in parallel).
                     // But the current logic for keeping responses in order does not support that.
