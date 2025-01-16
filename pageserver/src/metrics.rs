@@ -102,7 +102,7 @@ pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
 
 pub(crate) static CONCURRENT_INITDBS: Lazy<UIntGauge> = Lazy::new(|| {
     register_uint_gauge!(
-        "pageserver_cocurrent_initdb",
+        "pageserver_concurrent_initdb",
         "Number of initdb processes running"
     )
     .expect("failed to define a metric")
