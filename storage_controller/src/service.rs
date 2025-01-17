@@ -7876,7 +7876,6 @@ impl Service {
         all_safekeepers.sort_by_key(|sk| sk.2);
         let mut sks = Vec::new();
         let mut azs = HashSet::new();
-        // TODO: assign to safekeepers with smallest number of timelines
         for (sk_id, az_id, _timeline_count) in all_safekeepers.iter() {
             if !azs.insert(az_id) {
                 continue;
