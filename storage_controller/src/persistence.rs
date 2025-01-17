@@ -22,6 +22,7 @@ use pageserver_api::shard::ShardStripeSize;
 use pageserver_api::shard::{ShardCount, ShardNumber, TenantShardId};
 use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
+use utils::id::TimelineId;
 use utils::id::{NodeId, TenantId};
 
 use crate::metrics::{
@@ -1206,6 +1207,35 @@ impl Persistence {
                     .values(&entry)
                     .on_conflict((timelines::tenant_id, timelines::timeline_id))
                     .do_nothing()
+                    .execute(conn)?;
+
+                if inserted_updated != 1 {
+                    return Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({})",
+                        inserted_updated
+                    )));
+                }
+
+                Ok(())
+            },
+        )
+        .await
+    }
+    pub(crate) async fn update_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        timeline_status: TimelineStatus,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines;
+
+        self.with_measured_conn(
+            DatabaseOperation::InsertTimeline,
+            move |conn| -> DatabaseResult<()> {
+                let inserted_updated = diesel::update(timelines::table)
+                    .filter(timelines::tenant_id.eq(tenant_id.to_string()))
+                    .filter(timelines::timeline_id.eq(timeline_id.to_string()))
+                    .set(timelines::status.eq(String::from(timeline_status)))
                     .execute(conn)?;
 
                 if inserted_updated != 1 {
