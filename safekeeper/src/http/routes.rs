@@ -127,6 +127,13 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     json_response(StatusCode::OK, ())
 }
 
+async fn utilization_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    let global_timelines = get_global_timelines(&request);
+    let utilization = global_timelines.get_timeline_counts();
+    json_response(StatusCode::OK, utilization)
+}
+
 /// List all (not deleted) timelines.
 /// Note: it is possible to do the same with debug_dump.
 async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -620,6 +627,7 @@ pub fn make_router(
                 failpoints_handler(r, cancel).await
             })
         })
+        .get("/v1/uzilization", |r| request_span(r, utilization_handler))
         .delete("/v1/tenant/:tenant_id", |r| {
             request_span(r, tenant_delete_handler)
         })
