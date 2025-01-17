@@ -342,6 +342,53 @@ impl IoConcurrency {
         }
     }
 
+    /// Submit an IO to be executed in the background. DEADLOCK RISK, read the full doc string.
+    ///
+    /// The IO is represented as an opaque future.
+    /// IO completion must be handled inside the future, e.g., through a oneshot channel.
+    ///
+    /// The API seems simple but there are multiple **pitfalls** involving
+    /// DEADLOCK RISK.
+    ///
+    /// First, there are no guarantees about the exexecution of the IO.
+    /// It may be `await`ed in-place before this function returns.
+    /// It may be polled partially by this task and handed off to another task to be finished.
+    /// It may be polled and then dropped before returning ready.
+    ///
+    /// This means that submitted IOs must not be interedependent.
+    /// Interdependence may be through shared limited resources, e.g.,
+    /// - VirtualFile file descriptor cache slot acquisition
+    /// - tokio-epoll-uring slot
+    ///
+    /// # Why current usage is safe from deadlocks
+    ///
+    /// Textbook condition for a deadlock is that _all_ of the following be given
+    /// - Mutual exclusion
+    /// - Hold and wait
+    /// - No preemption
+    /// - Circular wait
+    ///
+    /// The current usage is safe because:
+    /// - Mutual exclusion: IO futures definitely use mutexes, no way around that for now
+    /// - Hold and wait: IO futures currently hold two kinds of locks/resources while waiting
+    ///   for acquisition of other resources:
+    ///    - VirtualFile file descriptor cache slot tokio mutex
+    ///    - tokio-epoll-uring slot (uses tokio notify => wait queue, much like mutex)
+    /// - No preemption: there's no taking-away of acquired locks/resources => given
+    /// - Circular wait: this is the part of the condition that isn't met: all IO futures
+    ///   first acquire VirtualFile mutex, then tokio-epoll-uring slot.
+    ///   There is no IO future that acquires slot before VirtualFile.
+    ///   Hence there can be no circular waiting.
+    ///   Hence there cannot be a deadlock.
+    ///
+    /// This is a very fragile situation and must be revisited whenver any code called from
+    /// inside the IO futures is changed.
+    ///
+    /// We will move away from opaque IO futures towards well-defined IOs at some point in
+    /// the future when we have shipped this first version of concurrent IO to production
+    /// and are ready to retire the Serial mode which runs the futures in place.
+    /// Right now, while brittle, the opaque IO approach allows us to ship the feature
+    /// with minimal changes to the code and minimal changes to existing behavior in Serial mode.
     pub(crate) async fn spawn_io<F>(&mut self, fut: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
@@ -378,6 +425,7 @@ impl ValuesReconstructState {
         }
     }
 
+    /// Absolutely read [`IoConcurrency::spawn_io`] to learn about assumptions & pitfalls.
     pub(crate) async fn spawn_io<F>(&mut self, fut: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
