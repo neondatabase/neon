@@ -63,7 +63,10 @@ impl SafekeeperClient {
         }
     }
 
-    pub(crate) async fn create_timeline(&self, req: TimelineCreateRequest) -> Result<TimelineStatus> {
+    pub(crate) async fn create_timeline(
+        &self,
+        req: &TimelineCreateRequest,
+    ) -> Result<TimelineStatus> {
         measured_request!(
             "create_timeline",
             crate::metrics::Method::Post,

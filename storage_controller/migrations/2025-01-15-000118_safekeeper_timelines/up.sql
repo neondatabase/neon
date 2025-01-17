@@ -8,3 +8,4 @@ CREATE TABLE timelines (
   cplane_notified_generation INTEGER NOT NULL,
   status VARCHAR NOT NULL
 );
+CREATE INDEX timelines_idx ON timelines(status, tenant_id, timeline_id);

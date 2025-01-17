@@ -1073,13 +1073,17 @@ impl Persistence {
             az_id: String,
             #[diesel(sql_type = diesel::sql_types::Int8)]
             timeline_count: i64,
+            #[diesel(sql_type = diesel::sql_types::Varchar)]
+            host: String,
+            #[diesel(sql_type = diesel::sql_types::Int8)]
+            port: i64,
         }
         let safekeepers: Vec<SafekeeperTimelineCountResponse> = self
             .with_measured_conn(
                 DatabaseOperation::ListSafekeepers,
                 move |conn| -> DatabaseResult<_> {
                     let query = diesel::sql_query("\
-                        SELECT safekeepers.id as sk_id, safekeepers.availability_zone_id as az_id, COUNT(*) as timeline_count \
+                        SELECT safekeepers.id as sk_id, safekeepers.availability_zone_id as az_id, COUNT(*) as timeline_count, safekeepers.host as host, safekeepers.port as port \
                         FROM (select tenant_id, timeline_id, unnest(sk_set) as sk_id from timelines) as timelines_unnested \
                         JOIN safekeepers ON (safekeepers.id = timelines_unnested.id)\
                     ");
@@ -1457,4 +1461,37 @@ pub(crate) struct TimelinePersistence {
     pub(crate) new_sk_set: Vec<i64>,
     pub(crate) cplane_notified_generation: i32,
     pub(crate) status: String,
+}
+
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+pub(crate) enum TimelineStatus {
+    Creating,
+    Created,
+    Deleting,
+    Deleted,
+}
+
+impl FromStr for TimelineStatus {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "creating" => TimelineStatus::Creating,
+            "created" => TimelineStatus::Created,
+            "deleting" => TimelineStatus::Deleting,
+            "deleted" => TimelineStatus::Deleted,
+            _ => return Err(anyhow::anyhow!("unexpected timeline status: {s}")),
+        })
+    }
+}
+
+impl From<TimelineStatus> for String {
+    fn from(value: TimelineStatus) -> Self {
+        match value {
+            TimelineStatus::Creating => "creating",
+            TimelineStatus::Created => "created",
+            TimelineStatus::Deleting => "deleting",
+            TimelineStatus::Deleted => "deleted",
+        }
+        .to_string()
+    }
 }
