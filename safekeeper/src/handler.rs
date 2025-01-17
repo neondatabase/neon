@@ -52,16 +52,70 @@ pub struct SafekeeperPostgresHandler {
 
 /// Parsed Postgres command.
 enum SafekeeperPostgresCommand {
-    StartWalPush,
-    StartReplication { start_lsn: Lsn, term: Option<Term> },
+    StartWalPush {
+        proto_version: u32,
+        // Eventually timelines will be always created explicitly by storcon.
+        // This option allows legacy behaviour for compute to do that until we
+        // fully migrate.
+        allow_timeline_creation: bool,
+    },
+    StartReplication {
+        start_lsn: Lsn,
+        term: Option<Term>,
+    },
     IdentifySystem,
     TimelineStatus,
-    JSONCtrl { cmd: AppendLogicalMessage },
+    JSONCtrl {
+        cmd: AppendLogicalMessage,
+    },
 }
 
 fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
     if cmd.starts_with("START_WAL_PUSH") {
-        Ok(SafekeeperPostgresCommand::StartWalPush)
+        // Allow additional options in postgres START_REPLICATION style like
+        //   START_WAL_PUSH (proto_version '3', allow_timeline_creation 'false').
+        // Parsing here is very naive and breaks in case of commas or
+        // whitespaces in values, but enough for our purposes.
+        let re = Regex::new(r"START_WAL_PUSH(\s+?\((.*)\))?").unwrap();
+        let caps = re
+            .captures(cmd)
+            .context(format!("failed to parse START_WAL_PUSH command {}", cmd))?;
+        // capture () content
+        let options = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        // default values
+        let mut proto_version = 2;
+        let mut allow_timeline_creation = true;
+        for kvstr in options.split(",") {
+            if kvstr.is_empty() {
+                continue;
+            }
+            let mut kvit = kvstr.split_whitespace();
+            let key = kvit.next().context(format!(
+                "failed to parse key in kv {} in command {}",
+                kvstr, cmd
+            ))?;
+            let value = kvit.next().context(format!(
+                "failed to parse value in kv {} in command {}",
+                kvstr, cmd
+            ))?;
+            let value_trimmed = value.trim_matches('\'');
+            if key == "proto_version" {
+                proto_version = value_trimmed.parse::<u32>().context(format!(
+                    "failed to parse proto_version value {} in command {}",
+                    value, cmd
+                ))?;
+            }
+            if key == "allow_timeline_creation" {
+                allow_timeline_creation = value_trimmed.parse::<bool>().context(format!(
+                    "failed to parse allow_timeline_creation value {} in command {}",
+                    value, cmd
+                ))?;
+            }
+        }
+        Ok(SafekeeperPostgresCommand::StartWalPush {
+            proto_version,
+            allow_timeline_creation,
+        })
     } else if cmd.starts_with("START_REPLICATION") {
         let re = Regex::new(
             // We follow postgres START_REPLICATION LOGICAL options to pass term.
@@ -95,7 +149,7 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
 
 fn cmd_to_string(cmd: &SafekeeperPostgresCommand) -> &str {
     match cmd {
-        SafekeeperPostgresCommand::StartWalPush => "START_WAL_PUSH",
+        SafekeeperPostgresCommand::StartWalPush { .. } => "START_WAL_PUSH",
         SafekeeperPostgresCommand::StartReplication { .. } => "START_REPLICATION",
         SafekeeperPostgresCommand::TimelineStatus => "TIMELINE_STATUS",
         SafekeeperPostgresCommand::IdentifySystem => "IDENTIFY_SYSTEM",
@@ -293,8 +347,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
             self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
 
             match cmd {
-                SafekeeperPostgresCommand::StartWalPush => {
-                    self.handle_start_wal_push(pgb)
+                SafekeeperPostgresCommand::StartWalPush {
+                    proto_version,
+                    allow_timeline_creation,
+                } => {
+                    self.handle_start_wal_push(pgb, proto_version, allow_timeline_creation)
                         .instrument(info_span!("WAL receiver"))
                         .await
                 }
@@ -464,6 +521,42 @@ impl SafekeeperPostgresHandler {
                 // set by safekeeper peer recovery
                 appname.starts_with("safekeeper")
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SafekeeperPostgresCommand;
+
+    /// Test parsing of START_WAL_PUSH command
+    #[test]
+    fn test_start_wal_push_parse() {
+        let cmd = "START_WAL_PUSH";
+        let parsed = super::parse_cmd(cmd).expect("failed to parse");
+        match parsed {
+            SafekeeperPostgresCommand::StartWalPush {
+                proto_version,
+                allow_timeline_creation,
+            } => {
+                assert_eq!(proto_version, 2);
+                assert!(allow_timeline_creation);
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        let cmd =
+            "START_WAL_PUSH (proto_version '3', allow_timeline_creation 'false', unknown 'hoho')";
+        let parsed = super::parse_cmd(cmd).expect("failed to parse");
+        match parsed {
+            SafekeeperPostgresCommand::StartWalPush {
+                proto_version,
+                allow_timeline_creation,
+            } => {
+                assert_eq!(proto_version, 3);
+                assert!(!allow_timeline_creation);
+            }
+            _ => panic!("unexpected command"),
         }
     }
 }

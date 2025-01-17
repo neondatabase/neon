@@ -51,12 +51,12 @@ use utils::{
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-// Configure jemalloc to sample allocations for profiles every 1 MB (1 << 20).
-// TODO: disabled because concurrent CPU profiles cause seg faults. See:
-// https://github.com/neondatabase/neon/issues/10225.
-//#[allow(non_upper_case_globals)]
-//#[export_name = "malloc_conf"]
-//pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:20\0";
+/// Configure jemalloc to profile heap allocations by sampling stack traces every 2 MB (1 << 21).
+/// This adds roughly 3% overhead for allocations on average, which is acceptable considering
+/// performance-sensitive code will avoid allocations as far as possible anyway.
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 const PID_FILE_NAME: &str = "safekeeper.pid";
 const ID_FILE_NAME: &str = "safekeeper.id";
@@ -207,6 +207,13 @@ struct Args {
     /// Also defines interval for eviction retries.
     #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_EVICTION_MIN_RESIDENT)]
     eviction_min_resident: Duration,
+    /// Enable fanning out WAL to different shards from the same reader
+    #[arg(long)]
+    wal_reader_fanout: bool,
+    /// Only fan out the WAL reader if the absoulte delta between the new requested position
+    /// and the current position of the reader is smaller than this value.
+    #[arg(long)]
+    max_delta_for_fanout: Option<u64>,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -370,6 +377,8 @@ async fn main() -> anyhow::Result<()> {
         control_file_save_interval: args.control_file_save_interval,
         partial_backup_concurrency: args.partial_backup_concurrency,
         eviction_min_resident: args.eviction_min_resident,
+        wal_reader_fanout: args.wal_reader_fanout,
+        max_delta_for_fanout: args.max_delta_for_fanout,
     });
 
     // initialize sentry if SENTRY_DSN is provided

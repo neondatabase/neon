@@ -17,7 +17,8 @@ use crate::{
 
 #[derive(Debug, Clone, Deserialize)]
 pub(in crate::http) struct ExtensionServerParams {
-    is_library: Option<bool>,
+    #[serde(default)]
+    is_library: bool,
 }
 
 /// Download a remote extension.
@@ -51,7 +52,7 @@ pub(in crate::http) async fn download_extension(
 
         remote_extensions.get_ext(
             &filename,
-            params.is_library.unwrap_or(false),
+            params.is_library,
             &compute.build_tag,
             &compute.pgversion,
         )

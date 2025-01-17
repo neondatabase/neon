@@ -708,10 +708,11 @@ impl Persistence {
         Ok(())
     }
 
+    /// Note that passing None for a shard clears the preferred AZ (rather than leaving it unmodified)
     pub(crate) async fn set_tenant_shard_preferred_azs(
         &self,
-        preferred_azs: Vec<(TenantShardId, AvailabilityZone)>,
-    ) -> DatabaseResult<Vec<(TenantShardId, AvailabilityZone)>> {
+        preferred_azs: Vec<(TenantShardId, Option<AvailabilityZone>)>,
+    ) -> DatabaseResult<Vec<(TenantShardId, Option<AvailabilityZone>)>> {
         use crate::schema::tenant_shards::dsl::*;
 
         self.with_measured_conn(DatabaseOperation::SetPreferredAzs, move |conn| {
@@ -722,7 +723,7 @@ impl Persistence {
                     .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
                     .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
                     .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
-                    .set(preferred_az_id.eq(preferred_az.0.clone()))
+                    .set(preferred_az_id.eq(preferred_az.as_ref().map(|az| az.0.clone())))
                     .execute(conn)?;
 
                 if updated == 1 {
@@ -1103,6 +1104,37 @@ impl Persistence {
         })
         .await
     }
+
+    pub(crate) async fn set_safekeeper_scheduling_policy(
+        &self,
+        id_: i64,
+        scheduling_policy_: SkSchedulingPolicy,
+    ) -> Result<(), DatabaseError> {
+        use crate::schema::safekeepers::dsl::*;
+
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            #[derive(Insertable, AsChangeset)]
+            #[diesel(table_name = crate::schema::safekeepers)]
+            struct UpdateSkSchedulingPolicy<'a> {
+                id: i64,
+                scheduling_policy: &'a str,
+            }
+            let scheduling_policy_ = String::from(scheduling_policy_);
+
+            let rows_affected = diesel::update(safekeepers.filter(id.eq(id_)))
+                .set(scheduling_policy.eq(scheduling_policy_))
+                .execute(conn)?;
+
+            if rows_affected != 1 {
+                return Err(DatabaseError::Logical(format!(
+                    "unexpected number of rows ({rows_affected})",
+                )));
+            }
+
+            Ok(())
+        })
+        .await
+    }
 }
 
 /// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
@@ -1258,7 +1290,6 @@ pub(crate) struct SafekeeperPersistence {
     pub(crate) version: i64,
     pub(crate) host: String,
     pub(crate) port: i32,
-    pub(crate) active: bool,
     pub(crate) http_port: i32,
     pub(crate) availability_zone_id: String,
     pub(crate) scheduling_policy: String,
@@ -1270,7 +1301,6 @@ impl SafekeeperPersistence {
             SkSchedulingPolicy::from_str(&self.scheduling_policy).map_err(|e| {
                 DatabaseError::Logical(format!("can't construct SkSchedulingPolicy: {e:?}"))
             })?;
-        // omit the `active` flag on purpose: it is deprecated.
         Ok(SafekeeperDescribeResponse {
             id: NodeId(self.id as u64),
             region_id: self.region_id.clone(),
@@ -1295,7 +1325,8 @@ pub(crate) struct SafekeeperUpsert {
     pub(crate) version: i64,
     pub(crate) host: String,
     pub(crate) port: i32,
-    pub(crate) active: bool,
+    /// The active flag will not be stored in the database and will be ignored.
+    pub(crate) active: Option<bool>,
     pub(crate) http_port: i32,
     pub(crate) availability_zone_id: String,
 }
@@ -1311,7 +1342,6 @@ impl SafekeeperUpsert {
             version: self.version,
             host: &self.host,
             port: self.port,
-            active: self.active,
             http_port: self.http_port,
             availability_zone_id: &self.availability_zone_id,
             // None means a wish to not update this column. We expose abilities to update it via other means.
@@ -1328,7 +1358,6 @@ struct InsertUpdateSafekeeper<'a> {
     version: i64,
     host: &'a str,
     port: i32,
-    active: bool,
     http_port: i32,
     availability_zone_id: &'a str,
     scheduling_policy: Option<&'a str>,

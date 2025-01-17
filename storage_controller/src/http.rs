@@ -15,7 +15,7 @@ use metrics::{BuildInfo, NeonMetrics};
 use pageserver_api::controller_api::{
     MetadataHealthListOutdatedRequest, MetadataHealthListOutdatedResponse,
     MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
-    ShardsPreferredAzsRequest, TenantCreateRequest,
+    SafekeeperSchedulingPolicyRequest, ShardsPreferredAzsRequest, TenantCreateRequest,
 };
 use pageserver_api::models::{
     TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
@@ -653,6 +653,10 @@ async fn handle_tenant_list(
 ) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let limit: Option<usize> = parse_query_param(&req, "limit")?;
+    let start_after: Option<TenantId> = parse_query_param(&req, "start_after")?;
+    tracing::info!("start_after: {:?}", start_after);
+
     match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
             return res;
@@ -660,7 +664,7 @@ async fn handle_tenant_list(
         ForwardOutcome::NotForwarded(_req) => {}
     };
 
-    json_response(StatusCode::OK, service.tenant_list())
+    json_response(StatusCode::OK, service.tenant_list(limit, start_after))
 }
 
 async fn handle_node_register(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -690,7 +694,8 @@ async fn handle_node_list(req: Request<Body>) -> Result<Response<Body>, ApiError
     };
 
     let state = get_state(&req);
-    let nodes = state.service.node_list().await?;
+    let mut nodes = state.service.node_list().await?;
+    nodes.sort_by_key(|n| n.get_id());
     let api_nodes = nodes.into_iter().map(|n| n.describe()).collect::<Vec<_>>();
 
     json_response(StatusCode::OK, api_nodes)
@@ -1005,6 +1010,29 @@ async fn handle_tenant_shard_migrate(
     )
 }
 
+async fn handle_tenant_shard_migrate_secondary(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
+    let migrate_req = json_request::<TenantShardMigrateRequest>(&mut req).await?;
+    json_response(
+        StatusCode::OK,
+        service
+            .tenant_shard_migrate_secondary(tenant_shard_id, migrate_req)
+            .await?,
+    )
+}
+
 async fn handle_tenant_shard_cancel_reconcile(
     service: Arc<Service>,
     req: Request<Body>,
@@ -1270,6 +1298,35 @@ async fn handle_upsert_safekeeper(mut req: Request<Body>) -> Result<Response<Bod
     let state = get_state(&req);
 
     state.service.upsert_safekeeper(body).await?;
+
+    Ok(Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .unwrap())
+}
+
+/// Sets the scheduling policy of the specified safekeeper
+async fn handle_safekeeper_scheduling_policy(
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let body = json_request::<SafekeeperSchedulingPolicyRequest>(&mut req).await?;
+    let id = parse_request_param::<i64>(&req, "id")?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+
+    state
+        .service
+        .set_safekeeper_scheduling_policy(id, body.scheduling_policy)
+        .await?;
 
     Ok(Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -1845,7 +1902,18 @@ pub fn make_router(
         })
         .post("/control/v1/safekeeper/:id", |r| {
             // id is in the body
-            named_request_span(r, handle_upsert_safekeeper, RequestName("v1_safekeeper"))
+            named_request_span(
+                r,
+                handle_upsert_safekeeper,
+                RequestName("v1_safekeeper_post"),
+            )
+        })
+        .post("/control/v1/safekeeper/:id/scheduling_policy", |r| {
+            named_request_span(
+                r,
+                handle_safekeeper_scheduling_policy,
+                RequestName("v1_safekeeper_status"),
+            )
         })
         // Tenant Shard operations
         .put("/control/v1/tenant/:tenant_shard_id/migrate", |r| {
@@ -1855,6 +1923,16 @@ pub fn make_router(
                 RequestName("control_v1_tenant_migrate"),
             )
         })
+        .put(
+            "/control/v1/tenant/:tenant_shard_id/migrate_secondary",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_shard_migrate_secondary,
+                    RequestName("control_v1_tenant_migrate_secondary"),
+                )
+            },
+        )
         .put(
             "/control/v1/tenant/:tenant_shard_id/cancel_reconcile",
             |r| {
