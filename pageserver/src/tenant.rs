@@ -95,6 +95,9 @@ use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::l0_flush::L0FlushGlobalState;
+use crate::metrics::CONCURRENT_INITDBS;
+use crate::metrics::INITDB_RUN_TIME;
+use crate::metrics::INITDB_SEMAPHORE_ACQUISITION_TIME;
 use crate::metrics::TENANT;
 use crate::metrics::{
     remove_tenant_metrics, BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN,
@@ -5347,8 +5350,17 @@ async fn run_initdb(
         initdb_bin_path, initdb_target_dir, initdb_lib_dir,
     );
 
-    let _permit = INIT_DB_SEMAPHORE.acquire().await;
+    let _permit = {
+        let _timer = INITDB_SEMAPHORE_ACQUISITION_TIME.start_timer();
+        INIT_DB_SEMAPHORE.acquire().await
+    };
 
+    CONCURRENT_INITDBS.inc();
+    scopeguard::defer! {
+        CONCURRENT_INITDBS.dec();
+    }
+
+    let _timer = INITDB_RUN_TIME.start_timer();
     let res = postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
         superuser: &conf.superuser,
         locale: &conf.locale,
