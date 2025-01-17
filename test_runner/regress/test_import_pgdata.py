@@ -320,10 +320,6 @@ def test_pgdata_import_smoke(
         br_initdb_endpoint.safe_psql("select * from othertable")
 
 
-@run_only_on_postgres(
-    [PgVersion.V14, PgVersion.V15, PgVersion.V16],
-    "newer control file catalog version and struct format isn't supported",
-)
 def test_fast_import_binary(
     test_output_dir,
     vanilla_pg: VanillaPostgres,
