@@ -1117,8 +1117,10 @@ RUN wget https://github.com/Mooncake-Labs/pg_mooncake/releases/download/v0.1.0/p
 FROM build-deps AS pg-duckdb-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY compute/patches/duckdb-v1-1-3.patch /duckdb-v1-1-3.patch
 
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
+
 
 # pg_duckdb build requires source dir to be a git repo to get submodules
 # allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only 
@@ -1127,6 +1129,10 @@ ENV PATH="/usr/local/pgsql/bin/:$PATH"
 # for debugging purposes raw query and reset ddb duckdb.raw_query(), duckdb.recycle_ddb()
 RUN git clone --depth 1 --branch v0.2.0 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
     cd pg_duckdb-src && \
+    git submodule update --init --recursive && \
+    cd thirdparty/duckdb && \
+    patch -p1 < /duckdb-v1-1-3.patch && \
+    cd ../.. && \
     make install -j $(getconf _NPROCESSORS_ONLN) && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control && \
     file=/usr/local/pgsql/share/extension/pg_duckdb--0.1.0--0.2.0.sql && \
