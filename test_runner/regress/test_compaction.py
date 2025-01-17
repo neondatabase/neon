@@ -246,6 +246,8 @@ def test_pageserver_gc_compaction_idempotent(
     # compact 3 times if mode is before_restart
     n_compactions = 3 if compaction_mode == "before_restart" else 1
     for _ in range(n_compactions):
+        # Force refresh gc info to have gc_cutoff generated
+        ps_http.timeline_gc(tenant_id, timeline_id, None)
         ps_http.timeline_compact(
             tenant_id,
             timeline_id,
@@ -524,6 +526,8 @@ def test_sharding_compaction(
         for shard in env.storage_controller.locate(tenant_id):
             pageserver = env.get_pageserver(shard["node_id"])
             tenant_shard_id = shard["shard_id"]
+            # Force refresh gc info to have gc_cutoff generated
+            pageserver.http_client().timeline_gc(tenant_shard_id, timeline_id, None)
             pageserver.http_client().timeline_compact(
                 tenant_shard_id,
                 timeline_id,
