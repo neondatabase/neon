@@ -1,5 +1,6 @@
 pub mod chaos_injector;
 mod context_iterator;
+pub mod safekeeper_reconciler;
 
 use hyper::Uri;
 use safekeeper_api::membership::{MemberSet, SafekeeperId};
@@ -80,6 +81,7 @@ use pageserver_client::{mgmt_api, BlockUnblock};
 use tokio::{sync::mpsc::error::TrySendError, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use utils::{
+    backoff,
     completion::Barrier,
     failpoint_support,
     generation::Generation,
@@ -154,6 +156,7 @@ enum TenantOperations {
     SecondaryDownload,
     TimelineCreate,
     TimelineDelete,
+    TimelineReconcile,
     AttachHook,
     TimelineArchivalConfig,
     TimelineDetachAncestor,
@@ -3474,14 +3477,31 @@ impl Service {
             let base_url = sk_p.base_url();
             let jwt = jwt.clone();
             let req = req.clone();
+            let cancel = self.cancel.clone();
             joinset.spawn(async move {
                 let client = SafekeeperClient::new(sk_clone, base_url, jwt);
-                // TODO: logging on error, retries
-                client.create_timeline(req).await.map_err(|e| {
-                    ApiError::InternalServerError(
-                        anyhow::Error::new(e).context("error creating timeline on safekeeper"),
-                    )
-                })
+                let req = req;
+                let retry_result = backoff::retry(
+                    || client.create_timeline(&req),
+                    |_e| {
+                        // TODO find right criteria here for deciding on retries
+                        false
+                    },
+                    3,
+                    5,
+                    "create timeline on safekeeper",
+                    &cancel,
+                )
+                .await;
+                if let Some(res) = retry_result {
+                    res.map_err(|e| {
+                        ApiError::InternalServerError(
+                            anyhow::Error::new(e).context("error creating timeline on safekeeper"),
+                        )
+                    })
+                } else {
+                    Err(ApiError::Cancelled)
+                }
             });
         }
         // After we have built the joinset, we now wait for the tasks to complete,
@@ -3525,7 +3545,7 @@ impl Service {
             reconcile_results.push(res);
         } else {
             // No error if cancelled or timed out: we already have feedback from a quorum of safekeepers
-            // TODO: maybe log?
+            tracing::info!("timeout for third reconciliation");
         }
         // check now if quorum was reached in reconcile_results
         let successful = reconcile_results

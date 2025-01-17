@@ -109,6 +109,8 @@ pub(crate) enum DatabaseOperation {
     ListMetadataHealthUnhealthy,
     ListMetadataHealthOutdated,
     ListSafekeepers,
+    ListTimelines,
+    LoadTimeline,
     InsertTimeline,
     GetLeader,
     UpdateLeader,
@@ -1250,6 +1252,65 @@ impl Persistence {
         )
         .await
     }
+
+    pub(crate) async fn get_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<TimelinePersistence> {
+        use crate::schema::timelines;
+        let mut timelines: Vec<TimelineFromDb> = self
+            .with_measured_conn(
+                DatabaseOperation::LoadTimeline,
+                move |conn| -> DatabaseResult<_> {
+                    Ok(timelines::table
+                        .filter(timelines::tenant_id.eq(tenant_id.to_string()))
+                        .filter(timelines::timeline_id.eq(timeline_id.to_string()))
+                        .load::<TimelineFromDb>(conn)?)
+                },
+            )
+            .await?;
+        if timelines.len() != 1 {
+            return Err(DatabaseError::Logical(format!(
+                "incorrect number of returned timelines: ({})",
+                timelines.len()
+            )));
+        }
+
+        let tl = timelines.pop().unwrap().to_persistence();
+
+        tracing::info!("get_timeline: loaded timeline");
+
+        Ok(tl)
+    }
+
+    pub(crate) async fn timelines_to_be_reconciled(
+        &self,
+    ) -> DatabaseResult<Vec<TimelinePersistence>> {
+        use crate::schema::timelines;
+        let timelines: Vec<TimelineFromDb> = self
+            .with_measured_conn(
+                DatabaseOperation::ListTimelines,
+                move |conn| -> DatabaseResult<_> {
+                    Ok(timelines::table
+                        .filter(
+                            timelines::status
+                                .eq(String::from(TimelineStatus::Creating))
+                                .or(timelines::status.eq(String::from(TimelineStatus::Deleting))),
+                        )
+                        .load::<TimelineFromDb>(conn)?)
+                },
+            )
+            .await?;
+        let timelines = timelines
+            .into_iter()
+            .map(|tl| tl.to_persistence())
+            .collect::<Vec<_>>();
+
+        tracing::info!("list_timelines: loaded {} timelines", timelines.len());
+
+        Ok(timelines)
+    }
 }
 
 /// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
@@ -1481,7 +1542,7 @@ struct InsertUpdateSafekeeper<'a> {
     scheduling_policy: Option<&'a str>,
 }
 
-#[derive(Insertable, AsChangeset)]
+#[derive(Insertable, AsChangeset, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::timelines)]
 pub(crate) struct TimelinePersistence {
     pub(crate) tenant_id: String,
@@ -1491,6 +1552,32 @@ pub(crate) struct TimelinePersistence {
     pub(crate) new_sk_set: Vec<i64>,
     pub(crate) cplane_notified_generation: i32,
     pub(crate) status: String,
+}
+
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = crate::schema::timelines)]
+pub(crate) struct TimelineFromDb {
+    pub(crate) tenant_id: String,
+    pub(crate) timeline_id: String,
+    pub(crate) generation: i32,
+    pub(crate) sk_set: Vec<Option<i64>>,
+    pub(crate) new_sk_set: Vec<Option<i64>>,
+    pub(crate) cplane_notified_generation: i32,
+    pub(crate) status: String,
+}
+
+impl TimelineFromDb {
+    fn to_persistence(self) -> TimelinePersistence {
+        TimelinePersistence {
+            tenant_id: self.tenant_id,
+            timeline_id: self.timeline_id,
+            generation: self.generation,
+            sk_set: self.sk_set.into_iter().filter_map(|v| v).collect(),
+            new_sk_set: self.new_sk_set.into_iter().filter_map(|v| v).collect(),
+            cplane_notified_generation: self.cplane_notified_generation,
+            status: self.status,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
