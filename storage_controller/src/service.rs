@@ -2109,12 +2109,6 @@ impl Service {
             create_req.new_tenant_id.tenant_id
         };
 
-        tracing::info!(
-            "Creating tenant {}, shard_count={:?}",
-            create_req.new_tenant_id,
-            create_req.shard_parameters.count,
-        );
-
         let create_ids = (0..create_req.shard_parameters.count.count())
             .map(|i| TenantShardId {
                 tenant_id,
@@ -2154,6 +2148,14 @@ impl Service {
                 locked.scheduler.get_az_for_new_tenant()
             }
         };
+
+        tracing::info!(
+            generation=?initial_generation,
+            preferred_az_id=?preferred_az_id,
+            tenant_id=%create_req.new_tenant_id,
+            shard_count=?create_req.shard_parameters.count,
+            "Creating tenant",
+        );
 
         // Ordering: we persist tenant shards before creating them on the pageserver.  This enables a caller
         // to clean up after themselves by issuing a tenant deletion if something goes wrong and we restart
