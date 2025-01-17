@@ -1793,6 +1793,23 @@ impl TenantShard {
             }
         }
     }
+
+    /// Returns true if the tenant shard is attached to a node that is outside the preferred AZ.
+    ///
+    /// If the shard does not have a preferred AZ, returns false.
+    pub(crate) fn is_attached_outside_preferred_az(&self, nodes: &HashMap<NodeId, Node>) -> bool {
+        self.intent
+            .get_attached()
+            .map(|node_id| {
+                Some(
+                    nodes
+                        .get(&node_id)
+                        .expect("referenced node exists")
+                        .get_availability_zone_id(),
+                ) == self.intent.preferred_az_id.as_ref()
+            })
+            .unwrap_or(false)
+    }
 }
 
 impl Drop for TenantShard {
