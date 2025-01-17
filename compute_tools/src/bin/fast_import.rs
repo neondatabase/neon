@@ -106,12 +106,10 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     let working_directory = args.working_directory;
     let pg_bin_dir = args.pg_bin_dir;
     let pg_lib_dir = args.pg_lib_dir;
-    let pg_port = if args.pg_port.is_some() {
-        args.pg_port.unwrap()
-    } else {
+    let pg_port = args.pg_port.unwrap_or_else(|| {
         info!("pg_port not specified, using default 5432");
         5432
-    };
+    });
 
     // Initialize AWS clients only if s3_prefix is specified
     let (aws_config, kms_client) = if args.s3_prefix.is_some() {
