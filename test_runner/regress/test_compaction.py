@@ -144,6 +144,10 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder, with_b
     log.info("Writing initial data ...")
     workload.write_rows(row_count, env.pageserver.id)
 
+    ps_http.timeline_gc(
+        tenant_id, timeline_id, None
+    )  # Force refresh gc info to have gc_cutoff generated
+
     child_workloads: list[Workload] = []
 
     for i in range(1, churn_rounds + 1):
@@ -239,8 +243,8 @@ def test_pageserver_gc_compaction_idempotent(
     workload.churn_rows(row_count, env.pageserver.id)
     env.create_branch("child_branch")  # so that we have a retain_lsn
     workload.churn_rows(row_count, env.pageserver.id)
-    # compact twice if mode is before_restart
-    n_compactions = 2 if compaction_mode == "before_restart" else 1
+    # compact 3 times if mode is before_restart
+    n_compactions = 3 if compaction_mode == "before_restart" else 1
     for _ in range(n_compactions):
         ps_http.timeline_compact(
             tenant_id,
@@ -262,21 +266,22 @@ def test_pageserver_gc_compaction_idempotent(
         ps_http.timeline_gc(
             tenant_id, timeline_id, None
         )  # Force refresh gc info to have gc_cutoff generated
-        ps_http.timeline_compact(
-            tenant_id,
-            timeline_id,
-            enhanced_gc_bottom_most_compaction=True,
-            body={
-                "scheduled": True,
-                "sub_compaction": True,
-                "compact_key_range": {
-                    "start": "000000000000000000000000000000000000",
-                    "end": "030000000000000000000000000000000000",
+        for _ in range(3):
+            ps_http.timeline_compact(
+                tenant_id,
+                timeline_id,
+                enhanced_gc_bottom_most_compaction=True,
+                body={
+                    "scheduled": True,
+                    "sub_compaction": True,
+                    "compact_key_range": {
+                        "start": "000000000000000000000000000000000000",
+                        "end": "030000000000000000000000000000000000",
+                    },
+                    "sub_compaction_max_job_size_mb": 16,
                 },
-                "sub_compaction_max_job_size_mb": 16,
-            },
-        )
-        wait_until(compaction_finished, timeout=60)
+            )
+            wait_until(compaction_finished, timeout=60)
 
     # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
     env.pageserver.assert_log_contains(
@@ -333,6 +338,9 @@ def test_pageserver_gc_compaction_interrupt(neon_env_builder: NeonEnvBuilder):
         assert queue_depth == 0
 
     expected_compaction_time_seconds = 5.0
+    ps_http.timeline_gc(
+        tenant_id, timeline_id, None
+    )  # Force refresh gc info to have gc_cutoff generated
     for i in range(1, churn_rounds + 1):
         log.info(f"Running churn round {i}/{churn_rounds} ...")
         workload.churn_rows(row_count, env.pageserver.id)
