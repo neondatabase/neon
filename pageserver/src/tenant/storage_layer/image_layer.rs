@@ -74,7 +74,9 @@ use utils::{
 };
 
 use super::layer_name::ImageLayerName;
-use super::{AsLayerDesc, LayerName, OnDiskValue, PersistentLayerDesc, ValuesReconstructState};
+use super::{
+    AsLayerDesc, LayerName, OnDiskValue, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -442,6 +444,7 @@ impl ImageLayerInner {
     // the reconstruct state with whatever is found.
     pub(super) async fn get_values_reconstruct_data(
         &self,
+        this: ResidentLayer,
         keyspace: KeySpace,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
@@ -451,7 +454,7 @@ impl ImageLayerInner {
             .await
             .map_err(GetVectoredError::Other)?;
 
-        self.do_reads_and_update_state(reads, reconstruct_state, ctx)
+        self.do_reads_and_update_state(this, reads, reconstruct_state, ctx)
             .await;
 
         reconstruct_state.on_image_layer_visited(&self.key_range);
@@ -573,6 +576,7 @@ impl ImageLayerInner {
 
     async fn do_reads_and_update_state(
         &self,
+        this: ResidentLayer,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
@@ -624,6 +628,7 @@ impl ImageLayerInner {
                 }
             }
 
+            let read_extend_residency = this.clone();
             let read_from = self.file.clone();
             let read_ctx = ctx.attached_child();
             reconstruct_state
@@ -661,6 +666,10 @@ impl ImageLayerInner {
                             }
                         }
                     }
+
+                    // keep layer resident until this IO is done; this spawned IO future generally outlives the
+                    // call to `self` / the `Arc<DownloadedLayer>` / the `ResidentLayer` that guarantees residency
+                    drop(read_extend_residency);
                 })
                 .await;
         }

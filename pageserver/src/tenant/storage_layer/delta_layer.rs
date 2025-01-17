@@ -76,7 +76,9 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{AsLayerDesc, LayerName, OnDiskValue, PersistentLayerDesc, ValuesReconstructState};
+use super::{
+    AsLayerDesc, LayerName, OnDiskValue, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -847,6 +849,7 @@ impl DeltaLayerInner {
     // can be further optimised to visit the index only once.
     pub(super) async fn get_values_reconstruct_data(
         &self,
+        this: ResidentLayer,
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValuesReconstructState,
@@ -879,7 +882,7 @@ impl DeltaLayerInner {
         .await
         .map_err(GetVectoredError::Other)?;
 
-        self.do_reads_and_update_state(reads, reconstruct_state, ctx)
+        self.do_reads_and_update_state(this, reads, reconstruct_state, ctx)
             .await;
 
         Ok(())
@@ -988,6 +991,7 @@ impl DeltaLayerInner {
 
     async fn do_reads_and_update_state(
         &self,
+        this: ResidentLayer,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
@@ -1020,6 +1024,7 @@ impl DeltaLayerInner {
                 );
             }
 
+            let read_extend_residency = this.clone();
             let read_from = self.file.clone();
             let read_ctx = ctx.attached_child();
             reconstruct_state
@@ -1064,6 +1069,10 @@ impl DeltaLayerInner {
                             }
                         }
                     }
+
+                    // keep layer resident until this IO is done; this spawned IO future generally outlives the
+                    // call to `self` / the `Arc<DownloadedLayer>` / the `ResidentLayer` that guarantees residency
+                    drop(read_extend_residency);
                 })
                 .await;
         }
