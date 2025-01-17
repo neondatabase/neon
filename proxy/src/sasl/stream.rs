@@ -1,13 +1,16 @@
 //! Abstraction for the string-oriented SASL protocols.
 
-use super::{messages::ServerMessage, Mechanism};
-use crate::stream::PqStream;
 use std::io;
+
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 
+use super::messages::ServerMessage;
+use super::Mechanism;
+use crate::stream::PqStream;
+
 /// Abstracts away all peculiarities of the libpq's protocol.
-pub struct SaslStream<'a, S> {
+pub(crate) struct SaslStream<'a, S> {
     /// The underlying stream.
     stream: &'a mut PqStream<S>,
     /// Current password message we received from client.
@@ -17,7 +20,7 @@ pub struct SaslStream<'a, S> {
 }
 
 impl<'a, S> SaslStream<'a, S> {
-    pub fn new(stream: &'a mut PqStream<S>, first: &'a str) -> Self {
+    pub(crate) fn new(stream: &'a mut PqStream<S>, first: &'a str) -> Self {
         Self {
             stream,
             current: bytes::Bytes::new(),
@@ -47,13 +50,19 @@ impl<S: AsyncWrite + Unpin> SaslStream<'_, S> {
         self.stream.write_message(&msg.to_reply()).await?;
         Ok(())
     }
+
+    // Queue a SASL message for the client.
+    fn send_noflush(&mut self, msg: &ServerMessage<&str>) -> io::Result<()> {
+        self.stream.write_message_noflush(&msg.to_reply())?;
+        Ok(())
+    }
 }
 
 /// SASL authentication outcome.
 /// It's much easier to match on those two variants
 /// than to peek into a noisy protocol error type.
 #[must_use = "caller must explicitly check for success"]
-pub enum Outcome<R> {
+pub(crate) enum Outcome<R> {
     /// Authentication succeeded and produced some value.
     Success(R),
     /// Authentication failed (reason attached).
@@ -63,7 +72,7 @@ pub enum Outcome<R> {
 impl<S: AsyncRead + AsyncWrite + Unpin> SaslStream<'_, S> {
     /// Perform SASL message exchange according to the underlying algorithm
     /// until user is either authenticated or denied access.
-    pub async fn authenticate<M: Mechanism>(
+    pub(crate) async fn authenticate<M: Mechanism>(
         mut self,
         mut mechanism: M,
     ) -> super::Result<Outcome<M::Output>> {
@@ -82,7 +91,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SaslStream<'_, S> {
                     continue;
                 }
                 Step::Success(result, reply) => {
-                    self.send(&ServerMessage::Final(&reply)).await?;
+                    self.send_noflush(&ServerMessage::Final(&reply))?;
                     Outcome::Success(result)
                 }
                 Step::Failure(reason) => Outcome::Failure(reason),

@@ -1,10 +1,9 @@
-use hmac::{
-    digest::{consts::U32, generic_array::GenericArray},
-    Hmac, Mac,
-};
+use hmac::digest::consts::U32;
+use hmac::digest::generic_array::GenericArray;
+use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-pub struct Pbkdf2 {
+pub(crate) struct Pbkdf2 {
     hmac: Hmac<Sha256>,
     prev: GenericArray<u8, U32>,
     hi: GenericArray<u8, U32>,
@@ -13,7 +12,7 @@ pub struct Pbkdf2 {
 
 // inspired from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L36-L61>
 impl Pbkdf2 {
-    pub fn start(str: &[u8], salt: &[u8], iterations: u32) -> Self {
+    pub(crate) fn start(str: &[u8], salt: &[u8], iterations: u32) -> Self {
         let hmac =
             Hmac::<Sha256>::new_from_slice(str).expect("HMAC is able to accept all key sizes");
 
@@ -33,11 +32,11 @@ impl Pbkdf2 {
         }
     }
 
-    pub fn cost(&self) -> u32 {
+    pub(crate) fn cost(&self) -> u32 {
         (self.iterations).clamp(0, 4096)
     }
 
-    pub fn turn(&mut self) -> std::task::Poll<[u8; 32]> {
+    pub(crate) fn turn(&mut self) -> std::task::Poll<[u8; 32]> {
         let Self {
             hmac,
             prev,
@@ -66,16 +65,17 @@ impl Pbkdf2 {
 
 #[cfg(test)]
 mod tests {
-    use super::Pbkdf2;
     use pbkdf2::pbkdf2_hmac_array;
     use sha2::Sha256;
+
+    use super::Pbkdf2;
 
     #[test]
     fn works() {
         let salt = b"sodium chloride";
         let pass = b"Ne0n_!5_50_C007";
 
-        let mut job = Pbkdf2::start(pass, salt, 600000);
+        let mut job = Pbkdf2::start(pass, salt, 60000);
         let hash = loop {
             let std::task::Poll::Ready(hash) = job.turn() else {
                 continue;
@@ -83,7 +83,7 @@ mod tests {
             break hash;
         };
 
-        let expected = pbkdf2_hmac_array::<Sha256, 32>(pass, salt, 600000);
+        let expected = pbkdf2_hmac_array::<Sha256, 32>(pass, salt, 60000);
         assert_eq!(hash, expected);
     }
 }

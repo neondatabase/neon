@@ -14,7 +14,7 @@ impl ParseCallbacks for PostgresFfiCallbacks {
     fn include_file(&self, filename: &str) {
         // This does the equivalent of passing bindgen::CargoCallbacks
         // to the builder .parse_callbacks() method.
-        let cargo_callbacks = bindgen::CargoCallbacks;
+        let cargo_callbacks = bindgen::CargoCallbacks::new();
         cargo_callbacks.include_file(filename)
     }
 
@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
         PathBuf::from("pg_install")
     };
 
-    for pg_version in &["v14", "v15", "v16"] {
+    for pg_version in &["v14", "v15", "v16", "v17"] {
         let mut pg_install_dir_versioned = pg_install_dir.join(pg_version);
         if pg_install_dir_versioned.is_relative() {
             let cwd = env::current_dir().context("Failed to get current_dir")?;
@@ -121,6 +121,7 @@ fn main() -> anyhow::Result<()> {
             .allowlist_type("XLogPageHeaderData")
             .allowlist_type("XLogLongPageHeaderData")
             .allowlist_var("XLOG_PAGE_MAGIC")
+            .allowlist_var("PG_MAJORVERSION_NUM")
             .allowlist_var("PG_CONTROL_FILE_SIZE")
             .allowlist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
             .allowlist_type("PageHeaderData")

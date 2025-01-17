@@ -1,47 +1,39 @@
+from __future__ import annotations
+
 import time
 from functools import partial
 from random import choice
 from string import ascii_lowercase
+from typing import TYPE_CHECKING, cast
 
-import pytest
-from fixtures.common_types import Lsn
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    AuxFileStore,
-    NeonEnv,
-    NeonEnvBuilder,
-    PgProtocol,
     logical_replication_sync,
     wait_for_last_flush_lsn,
 )
-from fixtures.utils import wait_until
+from fixtures.utils import USE_LFC, wait_until
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import (
+        Endpoint,
+        NeonEnv,
+        NeonEnvBuilder,
+        PgProtocol,
+        VanillaPostgres,
+    )
 
 
 def random_string(n: int):
     return "".join([choice(ascii_lowercase) for _ in range(n)])
 
 
-@pytest.mark.parametrize(
-    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.V2, AuxFileStore.CrossValidation]
-)
-def test_aux_file_v2_flag(neon_simple_env: NeonEnv, pageserver_aux_file_policy: AuxFileStore):
-    env = neon_simple_env
-    with env.pageserver.http_client() as client:
-        tenant_config = client.tenant_config(env.initial_tenant).effective_config
-        assert pageserver_aux_file_policy == tenant_config["switch_aux_file_policy"]
-
-
-@pytest.mark.parametrize(
-    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
-)
-def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
+def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg: VanillaPostgres):
     env = neon_simple_env
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_logical_replication", "empty")
-    endpoint = env.endpoints.create_start(
-        "test_logical_replication", config_lines=["log_statement=all"]
-    )
+    timeline_id = env.initial_timeline
+    endpoint = env.endpoints.create_start("main", config_lines=["log_statement=all"])
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
@@ -175,13 +167,10 @@ COMMIT;
 
 
 # Test that neon.logical_replication_max_snap_files works
-@pytest.mark.parametrize(
-    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
-)
-def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
-    def slot_removed(ep):
+def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg: VanillaPostgres):
+    def slot_removed(ep: Endpoint):
         assert (
-            endpoint.safe_psql(
+            ep.safe_psql(
                 "select count(*) from pg_replication_slots where slot_name = 'stale_slot'"
             )[0][0]
             == 0
@@ -189,10 +178,9 @@ def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
 
     env = neon_simple_env
 
-    env.neon_cli.create_branch("test_logical_replication", "empty")
     # set low neon.logical_replication_max_snap_files
     endpoint = env.endpoints.create_start(
-        "test_logical_replication",
+        "main",
         config_lines=["log_statement=all", "neon.logical_replication_max_snap_files=1"],
     )
 
@@ -219,14 +207,14 @@ def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
     log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
 
-    wait_until(number_of_iterations=10, interval=2, func=partial(slot_removed, endpoint))
+    wait_until(partial(slot_removed, endpoint))
 
 
 def test_ondemand_wal_download_in_replication_slot_funcs(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("init")
+    env.create_branch("init")
     endpoint = env.endpoints.create_start("init")
 
     with endpoint.connect().cursor() as cur:
@@ -273,11 +261,11 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
 
 
 # Tests that walsender correctly blocks until WAL is downloaded from safekeepers
-def test_lr_with_slow_safekeeper(neon_env_builder: NeonEnvBuilder, vanilla_pg):
+def test_lr_with_slow_safekeeper(neon_env_builder: NeonEnvBuilder, vanilla_pg: VanillaPostgres):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("init")
+    env.create_branch("init")
     endpoint = env.endpoints.create_start("init")
 
     with endpoint.connect().cursor() as cur:
@@ -343,7 +331,7 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
     assert [r[0] for r in vanilla_pg.safe_psql("select * from t")] == [1, 2, 3]
 
     log_path = vanilla_pg.pgdatadir / "pg.log"
-    with open(log_path, "r") as log_file:
+    with open(log_path) as log_file:
         logs = log_file.read()
         assert "could not receive data from WAL stream" not in logs
 
@@ -355,16 +343,13 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
 #
 # Most pages start with a contrecord, so we don't do anything special
 # to ensure that.
-@pytest.mark.parametrize(
-    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
-)
-def test_restart_endpoint(neon_simple_env: NeonEnv, vanilla_pg):
+def test_restart_endpoint(neon_simple_env: NeonEnv, vanilla_pg: VanillaPostgres):
     env = neon_simple_env
 
-    env.neon_cli.create_branch("init")
+    env.create_branch("init")
     endpoint = env.endpoints.create_start("init")
-    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = TenantId(cast("str", endpoint.safe_psql("show neon.tenant_id")[0][0]))
+    timeline_id = TimelineId(cast("str", endpoint.safe_psql("show neon.timeline_id")[0][0]))
 
     cur = endpoint.connect().cursor()
     cur.execute("create table t(key int, value text)")
@@ -402,13 +387,10 @@ def test_restart_endpoint(neon_simple_env: NeonEnv, vanilla_pg):
 # logical replication bug as such, but without logical replication,
 # records passed ot the WAL redo process are never large enough to hit
 # the bug.
-@pytest.mark.parametrize(
-    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
-)
-def test_large_records(neon_simple_env: NeonEnv, vanilla_pg):
+def test_large_records(neon_simple_env: NeonEnv, vanilla_pg: VanillaPostgres):
     env = neon_simple_env
 
-    env.neon_cli.create_branch("init")
+    env.create_branch("init")
     endpoint = env.endpoints.create_start("init")
 
     cur = endpoint.connect().cursor()
@@ -456,7 +438,7 @@ def test_large_records(neon_simple_env: NeonEnv, vanilla_pg):
 def test_slots_and_branching(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
-    tenant, timeline = env.neon_cli.create_tenant()
+    tenant, timeline = env.create_tenant()
     env.pageserver.http_client()
 
     main_branch = env.endpoints.create_start("main", tenant_id=tenant)
@@ -468,7 +450,7 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
     wait_for_last_flush_lsn(env, main_branch, tenant, timeline)
 
     # Create branch ws.
-    env.neon_cli.create_branch("ws", "main", tenant_id=tenant)
+    env.create_branch("ws", ancestor_branch_name="main", tenant_id=tenant)
     ws_branch = env.endpoints.create_start("ws", tenant_id=tenant)
 
     # Check that we can create slot with the same name
@@ -476,16 +458,13 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
     ws_cur.execute("select pg_create_logical_replication_slot('my_slot', 'pgoutput')")
 
 
-@pytest.mark.parametrize(
-    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
-)
 def test_replication_shutdown(neon_simple_env: NeonEnv):
     # Ensure Postgres can exit without stuck when a replication job is active + neon extension installed
     env = neon_simple_env
-    env.neon_cli.create_branch("test_replication_shutdown_publisher", "empty")
+    env.create_branch("test_replication_shutdown_publisher", ancestor_branch_name="main")
     pub = env.endpoints.create("test_replication_shutdown_publisher")
 
-    env.neon_cli.create_branch("test_replication_shutdown_subscriber")
+    env.create_branch("test_replication_shutdown_subscriber")
     sub = env.endpoints.create("test_replication_shutdown_subscriber")
 
     pub.respec(skip_pg_catalog_updates=False)
@@ -540,7 +519,7 @@ def test_replication_shutdown(neon_simple_env: NeonEnv):
             assert len(res) == 4
             assert [r[0] for r in res] == [10, 20, 30, 40]
 
-        wait_until(10, 0.5, check_that_changes_propagated)
+        wait_until(check_that_changes_propagated)
 
 
 def logical_replication_wait_flush_lsn_sync(publisher: PgProtocol) -> Lsn:
@@ -550,30 +529,35 @@ def logical_replication_wait_flush_lsn_sync(publisher: PgProtocol) -> Lsn:
     because for some WAL records like vacuum subscriber won't get any data at
     all.
     """
-    publisher_flush_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    publisher_flush_lsn = Lsn(
+        cast("str", publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    )
 
     def check_caughtup():
-        res = publisher.safe_psql(
-            """
+        res = cast(
+            "tuple[str, str, str]",
+            publisher.safe_psql(
+                """
 select sent_lsn, flush_lsn, pg_current_wal_flush_lsn() from pg_stat_replication sr, pg_replication_slots s
    where s.active_pid = sr.pid and s.slot_type = 'logical';
                                   """
-        )[0]
+            )[0],
+        )
         sent_lsn, flush_lsn, curr_publisher_flush_lsn = Lsn(res[0]), Lsn(res[1]), Lsn(res[2])
         log.info(
             f"sent_lsn={sent_lsn}, flush_lsn={flush_lsn}, publisher_flush_lsn={curr_publisher_flush_lsn}, waiting flush_lsn to reach {publisher_flush_lsn}"
         )
         assert flush_lsn >= publisher_flush_lsn
 
-    wait_until(30, 0.5, check_caughtup)
+    wait_until(check_caughtup)
     return publisher_flush_lsn
 
 
-# Test that subscriber takes into account quorum committed flush_lsn in
-# flush_lsn reporting to publisher. Without this, it may ack too far, losing
-# data on restart because publisher advances START_REPLICATION position to the
-# confirmed_flush_lsn of the slot.
-def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg):
+# Test that neon subscriber takes into account quorum committed flush_lsn in
+# flush_lsn reporting to publisher. Without this, subscriber may ack too far,
+# losing data on restart because publisher implicitly advances positition given
+# in START_REPLICATION to the confirmed_flush_lsn of the slot.
+def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg: VanillaPostgres):
     env = neon_simple_env
     # use vanilla as publisher to allow writes on it when safekeeper is down
     vanilla_pg.configure(
@@ -588,8 +572,20 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.start()
     vanilla_pg.safe_psql("create extension neon;")
 
-    env.neon_cli.create_branch("subscriber")
-    sub = env.endpoints.create("subscriber")
+    env.create_branch("subscriber")
+    # We want all data to fit into shared_buffers or LFC cache because later we
+    # stop safekeeper and insert more; this shouldn't cause page requests as
+    # they will be stuck.
+    if USE_LFC:
+        config_lines = ["neon.max_file_cache_size = 32MB", "neon.file_cache_size_limit = 32MB"]
+    else:
+        config_lines = [
+            "shared_buffers = 32MB",
+        ]
+    sub = env.endpoints.create(
+        "subscriber",
+        config_lines=config_lines,
+    )
     sub.start()
 
     with vanilla_pg.cursor() as pcur:
@@ -618,7 +614,7 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg):
     # logical_replication_wait_flush_lsn_sync is expected to hang while
     # safekeeper is down.
     vanilla_pg.safe_psql("checkpoint;")
-    assert sub.safe_psql_scalar("SELECT count(*) FROM t") == 1000
+    assert cast("int", sub.safe_psql_scalar("SELECT count(*) FROM t")) == 1000
 
     # restart subscriber and ensure it can catch up lost tail again
     sub.stop(mode="immediate")

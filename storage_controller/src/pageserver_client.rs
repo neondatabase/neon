@@ -2,12 +2,15 @@ use pageserver_api::{
     models::{
         detach_ancestor::AncestorDetached, LocationConfig, LocationConfigListResponse,
         PageserverUtilization, SecondaryProgress, TenantScanRemoteStorageResponse,
-        TenantShardSplitRequest, TenantShardSplitResponse, TimelineCreateRequest, TimelineInfo,
-        TopTenantShardsRequest, TopTenantShardsResponse,
+        TenantShardSplitRequest, TenantShardSplitResponse, TimelineArchivalConfigRequest,
+        TimelineCreateRequest, TimelineInfo, TopTenantShardsRequest, TopTenantShardsResponse,
     },
     shard::TenantShardId,
 };
-use pageserver_client::mgmt_api::{Client, Result};
+use pageserver_client::{
+    mgmt_api::{Client, Result},
+    BlockUnblock,
+};
 use reqwest::StatusCode;
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -227,6 +230,22 @@ impl PageserverClient {
         )
     }
 
+    pub(crate) async fn timeline_archival_config(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        req: &TimelineArchivalConfigRequest,
+    ) -> Result<()> {
+        measured_request!(
+            "timeline_archival_config",
+            crate::metrics::Method::Put,
+            &self.node_id_label,
+            self.inner
+                .timeline_archival_config(tenant_shard_id, timeline_id, req)
+                .await
+        )
+    }
+
     pub(crate) async fn timeline_detach_ancestor(
         &self,
         tenant_shard_id: TenantShardId,
@@ -238,6 +257,24 @@ impl PageserverClient {
             &self.node_id_label,
             self.inner
                 .timeline_detach_ancestor(tenant_shard_id, timeline_id)
+                .await
+        )
+    }
+
+    pub(crate) async fn timeline_block_unblock_gc(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        dir: BlockUnblock,
+    ) -> Result<()> {
+        // measuring these makes no sense because we synchronize with the gc loop and remote
+        // storage on block_gc so there should be huge outliers
+        measured_request!(
+            "timeline_block_unblock_gc",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner
+                .timeline_block_unblock_gc(tenant_shard_id, timeline_id, dir)
                 .await
         )
     }

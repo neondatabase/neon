@@ -5,19 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-pageserver_api.workspace = true
 pageserver_client.workspace = true
-thiserror.workspace = true
-async-trait.workspace = true
 reqwest.workspace = true
-utils.workspace = true
 serde.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
-tokio-postgres.workspace = true
-tokio-stream.workspace = true
-tokio.workspace = true
-futures.workspace = true
-tokio-util.workspace = true
-anyhow.workspace = true
-postgres.workspace = true
-bytes.workspace = true

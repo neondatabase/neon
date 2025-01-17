@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import re
-from typing import Any, Optional
+from typing import TYPE_CHECKING
 
 import pytest
 import requests
@@ -10,12 +12,15 @@ from werkzeug.wrappers.response import Response
 
 from fixtures.log_helper import log
 
+if TYPE_CHECKING:
+    from typing import Any
+
 
 class StorageControllerProxy:
     def __init__(self, server: HTTPServer):
         self.server: HTTPServer = server
         self.listen: str = f"http://{server.host}:{server.port}"
-        self.routing_to: Optional[str] = None
+        self.routing_to: str | None = None
 
     def route_to(self, storage_controller_api: str):
         self.routing_to = storage_controller_api
@@ -32,7 +37,7 @@ def proxy_request(method: str, url: str, **kwargs) -> requests.Response:
 
 
 @pytest.fixture(scope="function")
-def storage_controller_proxy(make_httpserver):
+def storage_controller_proxy(make_httpserver: HTTPServer):
     """
     Proxies requests into the storage controller to the currently
     selected storage controller instance via `StorageControllerProxy.route_to`.
@@ -46,7 +51,7 @@ def storage_controller_proxy(make_httpserver):
 
     log.info(f"Storage controller proxy listening on {self.listen}")
 
-    def handler(request: Request):
+    def handler(request: Request) -> Response:
         if self.route_to is None:
             log.info(f"Storage controller proxy has no routing configured for {request.url}")
             return Response("Routing not configured", status=503)

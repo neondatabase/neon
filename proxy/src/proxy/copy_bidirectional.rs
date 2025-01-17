@@ -1,10 +1,10 @@
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tracing::info;
-
 use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
+
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tracing::info;
 
 #[derive(Debug)]
 enum TransferState {
@@ -14,7 +14,7 @@ enum TransferState {
 }
 
 #[derive(Debug)]
-pub enum ErrorDirection {
+pub(crate) enum ErrorDirection {
     Read(io::Error),
     Write(io::Error),
 }
@@ -86,6 +86,8 @@ where
         let mut compute_to_client_result =
             transfer_one_direction(cx, &mut compute_to_client, compute, client)
                 .map_err(ErrorSource::from_compute)?;
+
+        // TODO: 1 info log, with a enum label for close direction.
 
         // Early termination checks from compute to client.
         if let TransferState::Done(_) = compute_to_client {
@@ -230,11 +232,10 @@ impl CopyBuffer {
                         io::ErrorKind::WriteZero,
                         "write zero byte into writer",
                     ))));
-                } else {
-                    self.pos += i;
-                    self.amt += i as u64;
-                    self.need_flush = true;
                 }
+                self.pos += i;
+                self.amt += i as u64;
+                self.need_flush = true;
             }
 
             // If pos larger than cap, this loop will never stop.
@@ -256,9 +257,11 @@ impl CopyBuffer {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
-    use super::*;
     use tokio::io::AsyncWriteExt;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_client_to_compute() {

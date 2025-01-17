@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fixtures.common_types import Lsn
@@ -32,7 +34,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
     """
     env = neon_env_builder.init_start()
 
-    tenant_id, _ = env.neon_cli.create_tenant(
+    tenant_id, _ = env.create_tenant(
         conf={
             # disable default GC and compaction
             "gc_period": "1000 m",
@@ -43,7 +45,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
         }
     )
 
-    timeline_id = env.neon_cli.create_branch("test_lsn_mapping", tenant_id=tenant_id)
+    timeline_id = env.create_branch("test_lsn_mapping", tenant_id=tenant_id)
     endpoint_main = env.endpoints.create_start("test_lsn_mapping", tenant_id=tenant_id)
     timeline_id = endpoint_main.safe_psql("show neon.timeline_id")[0][0]
 
@@ -123,8 +125,8 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
             endpoint_here.stop_and_destroy()
 
         # Do the "past" check again at a new branch to ensure that we don't return something before the branch cutoff
-        timeline_id_child = env.neon_cli.create_branch(
-            "test_lsn_mapping_child", tenant_id=tenant_id, ancestor_branch_name="test_lsn_mapping"
+        timeline_id_child = env.create_branch(
+            "test_lsn_mapping_child", ancestor_branch_name="test_lsn_mapping", tenant_id=tenant_id
         )
 
         # Timestamp is in the unreachable past
@@ -167,7 +169,7 @@ def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
         )
 
         _, offset = wait_until(
-            20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+            lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
         )
 
         with pytest.raises(ReadTimeout):
@@ -176,8 +178,6 @@ def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
         client.configure_failpoints((failpoint, "off"))
 
         _, offset = wait_until(
-            20,
-            0.5,
             lambda: env.pageserver.assert_log_contains(
                 "Cancelled request finished with an error: Cancelled$", offset
             ),
@@ -190,7 +190,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
 
     env = neon_env_builder.init_start()
 
-    new_timeline_id = env.neon_cli.create_branch("test_ts_of_lsn_api")
+    new_timeline_id = env.create_branch("test_ts_of_lsn_api")
     endpoint_main = env.endpoints.create_start("test_ts_of_lsn_api")
 
     cur = endpoint_main.connect().cursor()
@@ -205,7 +205,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
     for i in range(1000):
         cur.execute("INSERT INTO foo VALUES(%s)", (i,))
         # Get the timestamp at UTC
-        after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=timezone.utc)
+        after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=UTC)
         after_lsn = query_scalar(cur, "SELECT pg_current_wal_lsn()")
         tbl.append([i, after_timestamp, after_lsn])
         time.sleep(0.02)
@@ -271,11 +271,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
             )
             log.info("result: %s, after_ts: %s", result, after_timestamp)
 
-            # TODO use fromisoformat once we have Python 3.11+
-            # which has https://github.com/python/cpython/pull/92177
-            timestamp = datetime.strptime(result, "%Y-%m-%dT%H:%M:%S.%f000Z").replace(
-                tzinfo=timezone.utc
-            )
+            timestamp = datetime.fromisoformat(result).replace(tzinfo=UTC)
             assert timestamp < after_timestamp, "after_timestamp after timestamp"
             if i > 1:
                 before_timestamp = tbl[i - step_size][1]

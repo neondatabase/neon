@@ -2,10 +2,11 @@
 //! Low-level Block-oriented I/O functions
 //!
 
-use super::ephemeral_file::EphemeralFile;
 use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::context::RequestContext;
 use crate::page_cache::{self, FileId, PageReadGuard, PageWriteGuard, ReadBufResult, PAGE_SZ};
+#[cfg(test)]
+use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
 use std::ops::Deref;
@@ -41,7 +42,7 @@ pub enum BlockLease<'a> {
     #[cfg(test)]
     Arc(std::sync::Arc<[u8; PAGE_SZ]>),
     #[cfg(test)]
-    Vec(Vec<u8>),
+    IoBufferMut(IoBufferMut),
 }
 
 impl From<PageReadGuard<'static>> for BlockLease<'static> {
@@ -51,13 +52,13 @@ impl From<PageReadGuard<'static>> for BlockLease<'static> {
 }
 
 #[cfg(test)]
-impl<'a> From<std::sync::Arc<[u8; PAGE_SZ]>> for BlockLease<'a> {
+impl From<std::sync::Arc<[u8; PAGE_SZ]>> for BlockLease<'_> {
     fn from(value: std::sync::Arc<[u8; PAGE_SZ]>) -> Self {
         BlockLease::Arc(value)
     }
 }
 
-impl<'a> Deref for BlockLease<'a> {
+impl Deref for BlockLease<'_> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
@@ -68,7 +69,7 @@ impl<'a> Deref for BlockLease<'a> {
             #[cfg(test)]
             BlockLease::Arc(v) => v.deref(),
             #[cfg(test)]
-            BlockLease::Vec(v) => {
+            BlockLease::IoBufferMut(v) => {
                 TryFrom::try_from(&v[..]).expect("caller must ensure that v has PAGE_SZ")
             }
         }
@@ -81,16 +82,14 @@ impl<'a> Deref for BlockLease<'a> {
 /// Unlike traits, we also support the read function to be async though.
 pub(crate) enum BlockReaderRef<'a> {
     FileBlockReader(&'a FileBlockReader<'a>),
-    EphemeralFile(&'a EphemeralFile),
     Adapter(Adapter<&'a DeltaLayerInner>),
-    Slice(&'a [u8]),
     #[cfg(test)]
     TestDisk(&'a super::disk_btree::tests::TestDisk),
     #[cfg(test)]
     VirtualFile(&'a VirtualFile),
 }
 
-impl<'a> BlockReaderRef<'a> {
+impl BlockReaderRef<'_> {
     #[inline(always)]
     async fn read_blk(
         &self,
@@ -100,32 +99,12 @@ impl<'a> BlockReaderRef<'a> {
         use BlockReaderRef::*;
         match self {
             FileBlockReader(r) => r.read_blk(blknum, ctx).await,
-            EphemeralFile(r) => r.read_blk(blknum, ctx).await,
             Adapter(r) => r.read_blk(blknum, ctx).await,
-            Slice(s) => Self::read_blk_slice(s, blknum),
             #[cfg(test)]
             TestDisk(r) => r.read_blk(blknum),
             #[cfg(test)]
             VirtualFile(r) => r.read_blk(blknum, ctx).await,
         }
-    }
-}
-
-impl<'a> BlockReaderRef<'a> {
-    fn read_blk_slice(slice: &[u8], blknum: u32) -> std::io::Result<BlockLease> {
-        let start = (blknum as usize).checked_mul(PAGE_SZ).unwrap();
-        let end = start.checked_add(PAGE_SZ).unwrap();
-        if end > slice.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                format!("slice too short, len={} end={}", slice.len(), end),
-            ));
-        }
-        let slice = &slice[start..end];
-        let page_sized: &[u8; PAGE_SZ] = slice
-            .try_into()
-            .expect("we add PAGE_SZ to start, so the slice must have PAGE_SZ");
-        Ok(BlockLease::Slice(page_sized))
     }
 }
 

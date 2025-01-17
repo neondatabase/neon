@@ -17,9 +17,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
-use pageserver_api::models::{
-    self, AuxFilePolicy, LocationConfig, TenantHistorySize, TenantInfo, TimelineInfo,
-};
+use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
@@ -75,14 +73,14 @@ impl PageServerNode {
         }
     }
 
-    fn pageserver_make_identity_toml(&self, node_id: NodeId) -> toml_edit::Document {
-        toml_edit::Document::from_str(&format!("id={node_id}")).unwrap()
+    fn pageserver_make_identity_toml(&self, node_id: NodeId) -> toml_edit::DocumentMut {
+        toml_edit::DocumentMut::from_str(&format!("id={node_id}")).unwrap()
     }
 
     fn pageserver_init_make_toml(
         &self,
         conf: NeonLocalInitPageserverConf,
-    ) -> anyhow::Result<toml_edit::Document> {
+    ) -> anyhow::Result<toml_edit::DocumentMut> {
         assert_eq!(&PageServerConf::from(&conf), &self.conf, "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully");
 
         // TODO(christian): instead of what we do here, create a pageserver_api::config::ConfigToml (PR #7656)
@@ -97,21 +95,19 @@ impl PageServerNode {
 
         let mut overrides = vec![pg_distrib_dir_param, broker_endpoint_param];
 
-        if let Some(control_plane_api) = &self.env.control_plane_api {
-            overrides.push(format!(
-                "control_plane_api='{}'",
-                control_plane_api.as_str()
-            ));
+        overrides.push(format!(
+            "control_plane_api='{}'",
+            self.env.control_plane_api.as_str()
+        ));
 
-            // Storage controller uses the same auth as pageserver: if JWT is enabled
-            // for us, we will also need it to talk to them.
-            if matches!(conf.http_auth_type, AuthType::NeonJWT) {
-                let jwt_token = self
-                    .env
-                    .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
-                    .unwrap();
-                overrides.push(format!("control_plane_api_token='{}'", jwt_token));
-            }
+        // Storage controller uses the same auth as pageserver: if JWT is enabled
+        // for us, we will also need it to talk to them.
+        if matches!(conf.http_auth_type, AuthType::NeonJWT) {
+            let jwt_token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
+                .unwrap();
+            overrides.push(format!("control_plane_api_token='{}'", jwt_token));
         }
 
         if !conf.other.contains_key("remote_storage") {
@@ -137,9 +133,9 @@ impl PageServerNode {
 
         // Turn `overrides` into a toml document.
         // TODO: above code is legacy code, it should be refactored to use toml_edit directly.
-        let mut config_toml = toml_edit::Document::new();
+        let mut config_toml = toml_edit::DocumentMut::new();
         for fragment_str in overrides {
-            let fragment = toml_edit::Document::from_str(&fragment_str)
+            let fragment = toml_edit::DocumentMut::from_str(&fragment_str)
                 .expect("all fragments in `overrides` are valid toml documents, this function controls that");
             for (key, item) in fragment.iter() {
                 config_toml.insert(key, item.clone());
@@ -181,6 +177,23 @@ impl PageServerNode {
         );
         io::stdout().flush()?;
 
+        // If the config file we got as a CLI argument includes the `availability_zone`
+        // config, then use that to populate the `metadata.json` file for the pageserver.
+        // In production the deployment orchestrator does this for us.
+        let az_id = conf
+            .other
+            .get("availability_zone")
+            .map(|toml| {
+                let az_str = toml.to_string();
+                // Trim the (") chars from the toml representation
+                if az_str.starts_with('"') && az_str.ends_with('"') {
+                    az_str[1..az_str.len() - 1].to_string()
+                } else {
+                    az_str
+                }
+            })
+            .unwrap_or("local".to_string());
+
         let config = self
             .pageserver_init_make_toml(conf)
             .context("make pageserver toml")?;
@@ -216,6 +229,7 @@ impl PageServerNode {
         let (_http_host, http_port) =
             parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
         let http_port = http_port.unwrap_or(9898);
+
         // Intentionally hand-craft JSON: this acts as an implicit format compat test
         // in case the pageserver-side structure is edited, and reflects the real life
         // situation: the metadata is written by some other script.
@@ -226,7 +240,10 @@ impl PageServerNode {
                 postgres_port: self.pg_connection_config.port(),
                 http_host: "localhost".to_string(),
                 http_port,
-                other: HashMap::new(),
+                other: HashMap::from([(
+                    "availability_zone_id".to_string(),
+                    serde_json::json!(az_id),
+                )]),
             })
             .unwrap(),
         )
@@ -254,6 +271,7 @@ impl PageServerNode {
             )
         })?;
         let args = vec!["-D", datadir_path_str];
+
         background_process::start_process(
             "pageserver",
             &datadir,
@@ -303,22 +321,6 @@ impl PageServerNode {
         background_process::stop_process(immediate, "pageserver", &self.pid_file())
     }
 
-    pub async fn page_server_psql_client(
-        &self,
-    ) -> anyhow::Result<(
-        tokio_postgres::Client,
-        tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
-    )> {
-        let mut config = self.pg_connection_config.clone();
-        if self.conf.pg_auth_type == AuthType::NeonJWT {
-            let token = self
-                .env
-                .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
-            config = config.set_password(Some(token));
-        }
-        Ok(config.connect_no_tls().await?)
-    }
-
     pub async fn check_status(&self) -> mgmt_api::Result<()> {
         self.http_client.status().await
     }
@@ -331,17 +333,20 @@ impl PageServerNode {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
-                .transpose()?,
+                .transpose()
+                .context("Failed to parse 'checkpoint_distance' as an integer")?,
             checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
             compaction_target_size: settings
                 .remove("compaction_target_size")
                 .map(|x| x.parse::<u64>())
-                .transpose()?,
+                .transpose()
+                .context("Failed to parse 'compaction_target_size' as an integer")?,
             compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
             compaction_threshold: settings
                 .remove("compaction_threshold")
                 .map(|x| x.parse::<usize>())
-                .transpose()?,
+                .transpose()
+                .context("Failed to parse 'compaction_threshold' as an integer")?,
             compaction_algorithm: settings
                 .remove("compaction_algorithm")
                 .map(serde_json::from_str)
@@ -350,16 +355,19 @@ impl PageServerNode {
             gc_horizon: settings
                 .remove("gc_horizon")
                 .map(|x| x.parse::<u64>())
-                .transpose()?,
+                .transpose()
+                .context("Failed to parse 'gc_horizon' as an integer")?,
             gc_period: settings.remove("gc_period").map(|x| x.to_string()),
             image_creation_threshold: settings
                 .remove("image_creation_threshold")
                 .map(|x| x.parse::<usize>())
-                .transpose()?,
+                .transpose()
+                .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
             image_layer_creation_check_threshold: settings
                 .remove("image_layer_creation_check_threshold")
                 .map(|x| x.parse::<u8>())
-                .transpose()?,
+                .transpose()
+                .context("Failed to parse 'image_creation_check_threshold' as integer")?,
             pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
             walreceiver_connect_timeout: settings
                 .remove("walreceiver_connect_timeout")
@@ -396,15 +404,20 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `timeline_get_throttle` from json")?,
-            switch_aux_file_policy: settings
-                .remove("switch_aux_file_policy")
-                .map(|x| x.parse::<AuxFilePolicy>())
-                .transpose()
-                .context("Failed to parse 'switch_aux_file_policy'")?,
             lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
             lsn_lease_length_for_ts: settings
                 .remove("lsn_lease_length_for_ts")
                 .map(|x| x.to_string()),
+            timeline_offloading: settings
+                .remove("timeline_offloading")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'timeline_offloading' as bool")?,
+            wal_receiver_protocol_override: settings
+                .remove("wal_receiver_protocol_override")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("parse `wal_receiver_protocol_override` from json")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -416,120 +429,14 @@ impl PageServerNode {
     pub async fn tenant_config(
         &self,
         tenant_id: TenantId,
-        mut settings: HashMap<&str, &str>,
+        settings: HashMap<&str, &str>,
     ) -> anyhow::Result<()> {
-        let config = {
-            // Braces to make the diff easier to read
-            models::TenantConfig {
-                checkpoint_distance: settings
-                    .remove("checkpoint_distance")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'checkpoint_distance' as an integer")?,
-                checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
-                compaction_target_size: settings
-                    .remove("compaction_target_size")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'compaction_target_size' as an integer")?,
-                compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
-                compaction_threshold: settings
-                    .remove("compaction_threshold")
-                    .map(|x| x.parse::<usize>())
-                    .transpose()
-                    .context("Failed to parse 'compaction_threshold' as an integer")?,
-                compaction_algorithm: settings
-                    .remove("compactin_algorithm")
-                    .map(serde_json::from_str)
-                    .transpose()
-                    .context("Failed to parse 'compaction_algorithm' json")?,
-                gc_horizon: settings
-                    .remove("gc_horizon")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'gc_horizon' as an integer")?,
-                gc_period: settings.remove("gc_period").map(|x| x.to_string()),
-                image_creation_threshold: settings
-                    .remove("image_creation_threshold")
-                    .map(|x| x.parse::<usize>())
-                    .transpose()
-                    .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
-                image_layer_creation_check_threshold: settings
-                    .remove("image_layer_creation_check_threshold")
-                    .map(|x| x.parse::<u8>())
-                    .transpose()
-                    .context("Failed to parse 'image_creation_check_threshold' as integer")?,
-
-                pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
-                walreceiver_connect_timeout: settings
-                    .remove("walreceiver_connect_timeout")
-                    .map(|x| x.to_string()),
-                lagging_wal_timeout: settings
-                    .remove("lagging_wal_timeout")
-                    .map(|x| x.to_string()),
-                max_lsn_wal_lag: settings
-                    .remove("max_lsn_wal_lag")
-                    .map(|x| x.parse::<NonZeroU64>())
-                    .transpose()
-                    .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-                eviction_policy: settings
-                    .remove("eviction_policy")
-                    .map(serde_json::from_str)
-                    .transpose()
-                    .context("Failed to parse 'eviction_policy' json")?,
-                min_resident_size_override: settings
-                    .remove("min_resident_size_override")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'min_resident_size_override' as an integer")?,
-                evictions_low_residence_duration_metric_threshold: settings
-                    .remove("evictions_low_residence_duration_metric_threshold")
-                    .map(|x| x.to_string()),
-                heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
-                lazy_slru_download: settings
-                    .remove("lazy_slru_download")
-                    .map(|x| x.parse::<bool>())
-                    .transpose()
-                    .context("Failed to parse 'lazy_slru_download' as bool")?,
-                timeline_get_throttle: settings
-                    .remove("timeline_get_throttle")
-                    .map(serde_json::from_str)
-                    .transpose()
-                    .context("parse `timeline_get_throttle` from json")?,
-                switch_aux_file_policy: settings
-                    .remove("switch_aux_file_policy")
-                    .map(|x| x.parse::<AuxFilePolicy>())
-                    .transpose()
-                    .context("Failed to parse 'switch_aux_file_policy'")?,
-                lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
-                lsn_lease_length_for_ts: settings
-                    .remove("lsn_lease_length_for_ts")
-                    .map(|x| x.to_string()),
-            }
-        };
-
-        if !settings.is_empty() {
-            bail!("Unrecognized tenant settings: {settings:?}")
-        }
-
+        let config = Self::parse_config(settings)?;
         self.http_client
-            .tenant_config(&models::TenantConfigRequest { tenant_id, config })
+            .set_tenant_config(&models::TenantConfigRequest { tenant_id, config })
             .await?;
 
         Ok(())
-    }
-
-    pub async fn location_config(
-        &self,
-        tenant_shard_id: TenantShardId,
-        config: LocationConfig,
-        flush_ms: Option<Duration>,
-        lazy: bool,
-    ) -> anyhow::Result<()> {
-        Ok(self
-            .http_client
-            .location_config(tenant_shard_id, config, flush_ms, lazy)
-            .await?)
     }
 
     pub async fn timeline_list(
@@ -537,28 +444,6 @@ impl PageServerNode {
         tenant_shard_id: &TenantShardId,
     ) -> anyhow::Result<Vec<TimelineInfo>> {
         Ok(self.http_client.list_timelines(*tenant_shard_id).await?)
-    }
-
-    pub async fn timeline_create(
-        &self,
-        tenant_shard_id: TenantShardId,
-        new_timeline_id: TimelineId,
-        ancestor_start_lsn: Option<Lsn>,
-        ancestor_timeline_id: Option<TimelineId>,
-        pg_version: Option<u32>,
-        existing_initdb_timeline_id: Option<TimelineId>,
-    ) -> anyhow::Result<TimelineInfo> {
-        let req = models::TimelineCreateRequest {
-            new_timeline_id,
-            ancestor_start_lsn,
-            ancestor_timeline_id,
-            pg_version,
-            existing_initdb_timeline_id,
-        };
-        Ok(self
-            .http_client
-            .timeline_create(tenant_shard_id, &req)
-            .await?)
     }
 
     /// Import a basebackup prepared using either:
@@ -614,15 +499,5 @@ impl PageServerNode {
         }
 
         Ok(())
-    }
-
-    pub async fn tenant_synthetic_size(
-        &self,
-        tenant_shard_id: TenantShardId,
-    ) -> anyhow::Result<TenantHistorySize> {
-        Ok(self
-            .http_client
-            .tenant_synthetic_size(tenant_shard_id)
-            .await?)
     }
 }

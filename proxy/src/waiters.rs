@@ -1,19 +1,20 @@
+use std::pin::Pin;
+use std::task;
+
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use pin_project_lite::pin_project;
-use std::pin::Pin;
-use std::task;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
 #[derive(Debug, Error)]
-pub enum RegisterError {
+pub(crate) enum RegisterError {
     #[error("Waiter `{0}` already registered")]
     Occupied(String),
 }
 
 #[derive(Debug, Error)]
-pub enum NotifyError {
+pub(crate) enum NotifyError {
     #[error("Notify failed: waiter `{0}` not registered")]
     NotFound(String),
 
@@ -22,21 +23,21 @@ pub enum NotifyError {
 }
 
 #[derive(Debug, Error)]
-pub enum WaitError {
+pub(crate) enum WaitError {
     #[error("Wait failed: channel hangup")]
     Hangup,
 }
 
-pub struct Waiters<T>(pub(self) Mutex<HashMap<String, oneshot::Sender<T>>>);
+pub(crate) struct Waiters<T>(pub(self) Mutex<HashMap<String, oneshot::Sender<T>>>);
 
 impl<T> Default for Waiters<T> {
     fn default() -> Self {
-        Waiters(Default::default())
+        Waiters(Mutex::default())
     }
 }
 
 impl<T> Waiters<T> {
-    pub fn register(&self, key: String) -> Result<Waiter<'_, T>, RegisterError> {
+    pub(crate) fn register(&self, key: String) -> Result<Waiter<'_, T>, RegisterError> {
         let (tx, rx) = oneshot::channel();
 
         self.0
@@ -53,7 +54,7 @@ impl<T> Waiters<T> {
         })
     }
 
-    pub fn notify(&self, key: &str, value: T) -> Result<(), NotifyError>
+    pub(crate) fn notify(&self, key: &str, value: T) -> Result<(), NotifyError>
     where
         T: Send + Sync,
     {
@@ -72,14 +73,14 @@ struct DropKey<'a, T> {
     registry: &'a Waiters<T>,
 }
 
-impl<'a, T> Drop for DropKey<'a, T> {
+impl<T> Drop for DropKey<'_, T> {
     fn drop(&mut self) {
         self.registry.0.lock().remove(&self.key);
     }
 }
 
 pin_project! {
-    pub struct Waiter<'a, T> {
+    pub(crate) struct Waiter<'a, T> {
         #[pin]
         receiver: oneshot::Receiver<T>,
         guard: DropKey<'a, T>,
@@ -99,8 +100,9 @@ impl<T> std::future::Future for Waiter<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_waiter() -> anyhow::Result<()> {

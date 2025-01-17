@@ -16,7 +16,7 @@ use fail::fail_point;
 use pageserver_api::key::Key;
 use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use tokio::io;
 use tokio::io::AsyncWrite;
 use tracing::*;
@@ -30,9 +30,8 @@ use pageserver_api::reltag::{RelTag, SlruKind};
 
 use postgres_ffi::dispatch_pgversion;
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
-use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PGDATA_SUBDIRS, PG_HBA};
+use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PG_HBA};
 use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
-use postgres_ffi::TransactionId;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::PG_TLI;
 use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
@@ -60,6 +59,7 @@ pub async fn send_basebackup_tarball<'a, W>(
     req_lsn: Option<Lsn>,
     prev_lsn: Option<Lsn>,
     full_backup: bool,
+    replica: bool,
     ctx: &'a RequestContext,
 ) -> Result<(), BasebackupError>
 where
@@ -111,8 +111,8 @@ where
     };
 
     info!(
-        "taking basebackup lsn={}, prev_lsn={} (full_backup={})",
-        backup_lsn, prev_lsn, full_backup
+        "taking basebackup lsn={}, prev_lsn={} (full_backup={}, replica={})",
+        backup_lsn, prev_lsn, full_backup, replica
     );
 
     let basebackup = Basebackup {
@@ -121,6 +121,7 @@ where
         lsn: backup_lsn,
         prev_record_lsn: prev_lsn,
         full_backup,
+        replica,
         ctx,
     };
     basebackup
@@ -141,6 +142,7 @@ where
     lsn: Lsn,
     prev_record_lsn: Lsn,
     full_backup: bool,
+    replica: bool,
     ctx: &'a RequestContext,
 }
 
@@ -246,7 +248,7 @@ where
     }
 }
 
-impl<'a, W> Basebackup<'a, W>
+impl<W> Basebackup<'_, W>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
@@ -255,8 +257,11 @@ where
 
         let lazy_slru_download = self.timeline.get_lazy_slru_download() && !self.full_backup;
 
+        let pgversion = self.timeline.pg_version;
+        let subdirs = dispatch_pgversion!(pgversion, &pgv::bindings::PGDATA_SUBDIRS[..]);
+
         // Create pgdata subdirs structure
-        for dir in PGDATA_SUBDIRS.iter() {
+        for dir in subdirs.iter() {
             let header = new_tar_header_dir(dir)?;
             self.ar
                 .append(&header, &mut io::empty())
@@ -350,13 +355,30 @@ where
             }
         }
 
-        for (path, content) in self
+        let start_time = Instant::now();
+        let aux_files = self
             .timeline
             .list_aux_files(self.lsn, self.ctx)
             .await
-            .map_err(|e| BasebackupError::Server(e.into()))?
-        {
+            .map_err(|e| BasebackupError::Server(e.into()))?;
+        let aux_scan_time = start_time.elapsed();
+        let aux_estimated_size = aux_files
+            .values()
+            .map(|content| content.len())
+            .sum::<usize>();
+        info!(
+            "Scanned {} aux files in {}ms, aux file content size = {}",
+            aux_files.len(),
+            aux_scan_time.as_millis(),
+            aux_estimated_size
+        );
+
+        for (path, content) in aux_files {
             if path.starts_with("pg_replslot") {
+                // Do not create LR slots at standby because they are not used but prevent WAL truncation
+                if self.replica {
+                    continue;
+                }
                 let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
                 let restart_lsn = Lsn(u64::from_le_bytes(
                     content[offs..offs + 8].try_into().unwrap(),
@@ -606,7 +628,7 @@ where
     //
     // Extract twophase state files
     //
-    async fn add_twophase_file(&mut self, xid: TransactionId) -> Result<(), BasebackupError> {
+    async fn add_twophase_file(&mut self, xid: u64) -> Result<(), BasebackupError> {
         let img = self
             .timeline
             .get_twophase_file(xid, self.lsn, self.ctx)
@@ -617,7 +639,11 @@ where
         buf.extend_from_slice(&img[..]);
         let crc = crc32c::crc32c(&img[..]);
         buf.put_u32_le(crc);
-        let path = format!("pg_twophase/{:>08X}", xid);
+        let path = if self.timeline.pg_version < 17 {
+            format!("pg_twophase/{:>08X}", xid)
+        } else {
+            format!("pg_twophase/{:>016X}", xid)
+        };
         let header = new_tar_header(&path, buf.len() as u64)?;
         self.ar
             .append(&header, &buf[..])

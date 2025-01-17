@@ -8,3 +8,5 @@ instead of benchmarking the full stack.
 See https://github.com/neondatabase/neon/issues/5771
 for the context in which this was developed.
 """
+
+from __future__ import annotations

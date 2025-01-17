@@ -1,15 +1,17 @@
+from __future__ import annotations
+
 import concurrent.futures
 import os
+import threading
 import time
 from contextlib import closing
 from datetime import datetime
 from itertools import chain
 from pathlib import Path
-from typing import List
 
 import pytest
 import requests
-from fixtures.common_types import Lsn, TenantId
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import (
     PAGESERVER_GLOBAL_METRICS,
@@ -17,6 +19,7 @@ from fixtures.metrics import (
     parse_metrics,
 )
 from fixtures.neon_fixtures import (
+    Endpoint,
     NeonEnv,
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
@@ -32,7 +35,7 @@ from prometheus_client.samples import Sample
 def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     tenants_dir = neon_simple_env.pageserver.tenant_dir()
     initial_tenants = sorted(
-        map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
+        map(lambda t: t.split()[0], neon_simple_env.neon_cli.tenant_list().stdout.splitlines())
     )
     [d for d in tenants_dir.iterdir()]
 
@@ -59,11 +62,11 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     # an empty tenant dir with no config in it.
     neon_simple_env.pageserver.allowed_errors.append(".*Failed to load tenant config.*")
     new_tenants = sorted(
-        map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
+        map(lambda t: t.split()[0], neon_simple_env.neon_cli.tenant_list().stdout.splitlines())
     )
     assert initial_tenants == new_tenants, "should not create new tenants"
 
-    neon_simple_env.neon_cli.create_tenant()
+    neon_simple_env.create_tenant()
 
 
 def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
@@ -71,11 +74,11 @@ def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
 
     env = neon_env_builder.init_start()
     """Tests tenants with and without wal acceptors"""
-    tenant_1, _ = env.neon_cli.create_tenant()
-    tenant_2, _ = env.neon_cli.create_tenant()
+    tenant_1, _ = env.create_tenant()
+    tenant_2, _ = env.create_tenant()
 
-    env.neon_cli.create_timeline("test_tenants_normal_work", tenant_id=tenant_1)
-    env.neon_cli.create_timeline("test_tenants_normal_work", tenant_id=tenant_2)
+    env.create_timeline("test_tenants_normal_work", tenant_id=tenant_1)
+    env.create_timeline("test_tenants_normal_work", tenant_id=tenant_2)
 
     endpoint_tenant1 = env.endpoints.create_start(
         "test_tenants_normal_work",
@@ -102,11 +105,11 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.pageserver_config_override = "availability_zone='test_ps_az'"
 
     env = neon_env_builder.init_start()
-    tenant_1, _ = env.neon_cli.create_tenant()
-    tenant_2, _ = env.neon_cli.create_tenant()
+    tenant_1, _ = env.create_tenant()
+    tenant_2, _ = env.create_tenant()
 
-    timeline_1 = env.neon_cli.create_timeline("test_metrics_normal_work", tenant_id=tenant_1)
-    timeline_2 = env.neon_cli.create_timeline("test_metrics_normal_work", tenant_id=tenant_2)
+    timeline_1 = env.create_timeline("test_metrics_normal_work", tenant_id=tenant_1)
+    timeline_2 = env.create_timeline("test_metrics_normal_work", tenant_id=tenant_2)
 
     endpoint_tenant1 = env.endpoints.create_start("test_metrics_normal_work", tenant_id=tenant_1)
     endpoint_tenant2 = env.endpoints.create_start("test_metrics_normal_work", tenant_id=tenant_2)
@@ -191,7 +194,7 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
         io_metrics = query_all_safekeepers(
             "safekeeper_pg_io_bytes_total",
             {
-                "app_name": "pageserver",
+                "app_name": f"pageserver-{env.pageserver.id}",
                 "client_az": "test_ps_az",
                 "dir": io_direction,
                 "same_az": "false",
@@ -250,11 +253,11 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
     neon_env_builder.num_safekeepers = 3
 
     env = neon_env_builder.init_start()
-    tenant_1, _ = env.neon_cli.create_tenant()
-    tenant_2, _ = env.neon_cli.create_tenant()
+    tenant_1, _ = env.create_tenant()
+    tenant_2, _ = env.create_tenant()
 
-    env.neon_cli.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_1)
-    env.neon_cli.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_2)
+    env.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_1)
+    env.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_2)
 
     endpoint_tenant1 = env.endpoints.create_start(
         "test_metrics_removed_after_detach", tenant_id=tenant_1
@@ -272,7 +275,7 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
                 assert cur.fetchone() == (5000050000,)
         endpoint.stop()
 
-    def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> List[Sample]:
+    def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> list[Sample]:
         ps_metrics = env.pageserver.http_client().get_metrics()
         samples = []
         for metric_name in ps_metrics.metrics:
@@ -327,7 +330,7 @@ def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
         assert len(tenants) == 1
         assert all(t["state"]["slug"] != "Attaching" for t in tenants)
 
-    wait_until(10, 0.2, not_attaching)
+    wait_until(not_attaching)
 
     tenants = client.tenant_list()
 
@@ -366,14 +369,20 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
     - Bad response codes during shutdown (e.g. returning 500 instead of 503)
     - Issues where a tenant is still starting up while we receive a request for it
     - Issues with interrupting/resuming tenant/timeline creation in shutdown
+    - Issues with a timeline is not created successfully because of restart.
     """
     env = neon_env_builder.init_configs()
     env.start()
     tenant_id: TenantId = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    # Multiple creation requests which race will generate this error
+    # At this point, the initial tenant/timeline might not have been created successfully,
+    # and this is the case we want to test.
+
+    # Multiple creation requests which race will generate this error on the pageserver
+    # and storage controller respectively
     env.pageserver.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
+    env.storage_controller.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
 
     # Tenant creation requests which arrive out of order will generate complaints about
     # generation nubmers out of order.
@@ -422,7 +431,7 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
             env.pageserver.start()
 
             for f in futs:
-                f.result(timeout=10)
+                f.result(timeout=30)
 
     # The tenant should end up active
     wait_until_tenant_active(env.pageserver.http_client(), tenant_id, iterations=10, period=1)
@@ -457,7 +466,7 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
         "pageserver_directory_entries_count", {"tenant_id": str(env.initial_tenant)}
     )
 
-    def only_int(samples: List[Sample]) -> int:
+    def only_int(samples: list[Sample]) -> int:
         assert len(samples) == 1
         return int(samples[0].value)
 
@@ -473,3 +482,38 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
     assert counts
     log.info(f"directory counts: {counts}")
     assert counts[2] > COUNT_AT_LEAST_EXPECTED
+
+
+def test_timelines_parallel_endpoints(neon_simple_env: NeonEnv):
+    """
+    (Relaxed) regression test for issue that led to https://github.com/neondatabase/neon/pull/9268
+    Create many endpoints in parallel and then restart them
+    """
+    env = neon_simple_env
+
+    # This param needs to be 200+ to reproduce the limit issue
+    n_threads = 16
+    barrier = threading.Barrier(n_threads)
+
+    def test_timeline(branch_name: str, timeline_id: TimelineId, endpoint: Endpoint):
+        endpoint.start()
+        endpoint.stop()
+        # Use a barrier to make sure we restart endpoints at the same time
+        barrier.wait()
+        endpoint.start()
+
+    workers = []
+
+    for i in range(0, n_threads):
+        branch_name = f"branch_{i}"
+        timeline_id = env.create_branch(branch_name)
+        endpoint = env.endpoints.create(branch_name)
+        w = threading.Thread(target=test_timeline, args=[branch_name, timeline_id, endpoint])
+        workers.append(w)
+
+    # Only start the restarts once we're done creating all timelines & endpoints
+    for w in workers:
+        w.start()
+
+    for w in workers:
+        w.join()

@@ -13,7 +13,6 @@ use super::secret::ServerSecret;
 use super::signature::SignatureBuilder;
 use super::threadpool::ThreadPool;
 use super::ScramKey;
-use crate::config;
 use crate::intern::EndpointIdInt;
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
 
@@ -56,17 +55,17 @@ enum ExchangeState {
 }
 
 /// Server's side of SCRAM auth algorithm.
-pub struct Exchange<'a> {
+pub(crate) struct Exchange<'a> {
     state: ExchangeState,
     secret: &'a ServerSecret,
-    tls_server_end_point: config::TlsServerEndPoint,
+    tls_server_end_point: crate::tls::TlsServerEndPoint,
 }
 
 impl<'a> Exchange<'a> {
-    pub fn new(
+    pub(crate) fn new(
         secret: &'a ServerSecret,
         nonce: fn() -> [u8; SCRAM_RAW_NONCE_LEN],
-        tls_server_end_point: config::TlsServerEndPoint,
+        tls_server_end_point: crate::tls::TlsServerEndPoint,
     ) -> Self {
         Self {
             state: ExchangeState::Initial(SaslInitial { nonce }),
@@ -86,8 +85,7 @@ async fn derive_client_key(
 ) -> ScramKey {
     let salted_password = pool
         .spawn_job(endpoint, Pbkdf2::start(password, salt, iterations))
-        .await
-        .expect("job should not be cancelled");
+        .await;
 
     let make_key = |name| {
         let key = Hmac::<Sha256>::new_from_slice(&salted_password)
@@ -101,7 +99,7 @@ async fn derive_client_key(
     make_key(b"Client Key").into()
 }
 
-pub async fn exchange(
+pub(crate) async fn exchange(
     pool: &ThreadPool,
     endpoint: EndpointIdInt,
     secret: &ServerSecret,
@@ -121,7 +119,7 @@ impl SaslInitial {
     fn transition(
         &self,
         secret: &ServerSecret,
-        tls_server_end_point: &config::TlsServerEndPoint,
+        tls_server_end_point: &crate::tls::TlsServerEndPoint,
         input: &str,
     ) -> sasl::Result<sasl::Step<SaslSentInner, Infallible>> {
         let client_first_message = ClientFirstMessage::parse(input)
@@ -156,7 +154,7 @@ impl SaslSentInner {
     fn transition(
         &self,
         secret: &ServerSecret,
-        tls_server_end_point: &config::TlsServerEndPoint,
+        tls_server_end_point: &crate::tls::TlsServerEndPoint,
         input: &str,
     ) -> sasl::Result<sasl::Step<Infallible, super::ScramKey>> {
         let Self {
@@ -169,8 +167,8 @@ impl SaslSentInner {
             .ok_or(SaslError::BadClientMessage("invalid client-final-message"))?;
 
         let channel_binding = cbind_flag.encode(|_| match tls_server_end_point {
-            config::TlsServerEndPoint::Sha256(x) => Ok(x),
-            config::TlsServerEndPoint::Undefined => Err(SaslError::MissingBinding),
+            crate::tls::TlsServerEndPoint::Sha256(x) => Ok(x),
+            crate::tls::TlsServerEndPoint::Undefined => Err(SaslError::MissingBinding),
         })?;
 
         // This might've been caused by a MITM attack
@@ -210,7 +208,8 @@ impl sasl::Mechanism for Exchange<'_> {
     type Output = super::ScramKey;
 
     fn exchange(mut self, input: &str) -> sasl::Result<sasl::Step<Self, Self::Output>> {
-        use {sasl::Step, ExchangeState};
+        use sasl::Step;
+        use ExchangeState;
         match &self.state {
             ExchangeState::Initial(init) => {
                 match init.transition(self.secret, &self.tls_server_end_point, input)? {
@@ -218,14 +217,12 @@ impl sasl::Mechanism for Exchange<'_> {
                         self.state = ExchangeState::SaltSent(sent);
                         Ok(Step::Continue(self, msg))
                     }
-                    Step::Success(x, _) => match x {},
                     Step::Failure(msg) => Ok(Step::Failure(msg)),
                 }
             }
             ExchangeState::SaltSent(sent) => {
                 match sent.transition(self.secret, &self.tls_server_end_point, input)? {
                     Step::Success(keys, msg) => Ok(Step::Success(keys, msg)),
-                    Step::Continue(x, _) => match x {},
                     Step::Failure(msg) => Ok(Step::Failure(msg)),
                 }
             }

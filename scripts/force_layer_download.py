@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
@@ -5,10 +7,14 @@ import logging
 import signal
 import sys
 from collections import defaultdict
+from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Dict, List, Tuple
+from typing import TYPE_CHECKING
 
 import aiohttp
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 class ClientException(Exception):
@@ -89,7 +95,7 @@ class Client:
 class Completed:
     """The status dict returned by the API"""
 
-    status: Dict[str, Any]
+    status: dict[str, Any]
 
 
 sigint_received = asyncio.Event()
@@ -179,7 +185,7 @@ async def main_impl(args, report_out, client: Client):
     """
     Returns OS exit status.
     """
-    tenant_and_timline_ids: List[Tuple[str, str]] = []
+    tenant_and_timline_ids: list[tuple[str, str]] = []
     # fill tenant_and_timline_ids based on spec
     for spec in args.what:
         comps = spec.split(":")
@@ -188,9 +194,11 @@ async def main_impl(args, report_out, client: Client):
             tenant_ids = await client.get_tenant_ids()
             get_timeline_id_coros = [client.get_timeline_ids(tenant_id) for tenant_id in tenant_ids]
             gathered = await asyncio.gather(*get_timeline_id_coros, return_exceptions=True)
-            assert len(tenant_ids) == len(gathered)
             tenant_and_timline_ids = []
-            for tid, tlids in zip(tenant_ids, gathered):
+            for tid, tlids in zip(tenant_ids, gathered, strict=True):
+                # TODO: add error handling if tlids isinstance(Exception)
+                assert isinstance(tlids, list)
+
                 for tlid in tlids:
                     tenant_and_timline_ids.append((tid, tlid))
         elif len(comps) == 1:
@@ -215,14 +223,14 @@ async def main_impl(args, report_out, client: Client):
     tenant_and_timline_ids = tmp
 
     logging.info("create tasks and process them at specified concurrency")
-    task_q: asyncio.Queue[Tuple[str, Awaitable[Any]]] = asyncio.Queue()
+    task_q: asyncio.Queue[tuple[str, Awaitable[Any]]] = asyncio.Queue()
     tasks = {
         f"{tid}:{tlid}": do_timeline(client, tid, tlid) for tid, tlid in tenant_and_timline_ids
     }
     for task in tasks.items():
         task_q.put_nowait(task)
 
-    result_q: asyncio.Queue[Tuple[str, Any]] = asyncio.Queue()
+    result_q: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
     taskq_handlers = []
     for _ in range(0, args.concurrent_tasks):
         taskq_handlers.append(taskq_handler(task_q, result_q))

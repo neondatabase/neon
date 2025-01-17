@@ -14,9 +14,11 @@ use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use postgres_ffi::XLogSegNo;
 use postgres_ffi::MAX_SEND_SIZE;
+use safekeeper_api::models::WalSenderState;
 use serde::Deserialize;
 use serde::Serialize;
 
+use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName};
 use sha2::{Digest, Sha256};
 use utils::id::NodeId;
 use utils::id::TenantTimelineId;
@@ -24,7 +26,6 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
 use crate::safekeeper::TermHistory;
-use crate::send_wal::WalSenderState;
 use crate::state::TimelineMemState;
 use crate::state::TimelinePersistentState;
 use crate::timeline::get_timeline_dir;
@@ -50,6 +51,9 @@ pub struct Args {
 
     /// Dump full term history. True by default.
     pub dump_term_history: bool,
+
+    /// Dump last modified time of WAL segments. Uses value of `dump_all` by default.
+    pub dump_wal_last_modified: bool,
 
     /// Filter timelines by tenant_id.
     pub tenant_id: Option<TenantId>,
@@ -128,12 +132,19 @@ async fn build_from_tli_dump(
         None
     };
 
+    let wal_last_modified = if args.dump_wal_last_modified {
+        get_wal_last_modified(timeline_dir).ok().flatten()
+    } else {
+        None
+    };
+
     Timeline {
         tenant_id: timeline.ttid.tenant_id,
         timeline_id: timeline.ttid.timeline_id,
         control_file,
         memory,
         disk_content,
+        wal_last_modified,
     }
 }
 
@@ -156,6 +167,7 @@ pub struct Timeline {
     pub control_file: Option<TimelinePersistentState>,
     pub memory: Option<Memory>,
     pub disk_content: Option<DiskContent>,
+    pub wal_last_modified: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -195,23 +207,23 @@ pub struct FileInfo {
 }
 
 /// Build debug dump response, using the provided [`Args`] filters.
-pub async fn build(args: Args) -> Result<Response> {
+pub async fn build(args: Args, global_timelines: Arc<GlobalTimelines>) -> Result<Response> {
     let start_time = Utc::now();
-    let timelines_count = GlobalTimelines::timelines_count();
-    let config = GlobalTimelines::get_global_config();
+    let timelines_count = global_timelines.timelines_count();
+    let config = global_timelines.get_global_config();
 
     let ptrs_snapshot = if args.tenant_id.is_some() && args.timeline_id.is_some() {
         // If both tenant_id and timeline_id are specified, we can just get the
         // timeline directly, without taking a snapshot of the whole list.
         let ttid = TenantTimelineId::new(args.tenant_id.unwrap(), args.timeline_id.unwrap());
-        if let Ok(tli) = GlobalTimelines::get(ttid) {
+        if let Ok(tli) = global_timelines.get(ttid) {
             vec![tli]
         } else {
             vec![]
         }
     } else {
         // Otherwise, take a snapshot of the whole list.
-        GlobalTimelines::get_all()
+        global_timelines.get_all()
     };
 
     let mut timelines = Vec::new();
@@ -240,6 +252,13 @@ pub async fn build(args: Args) -> Result<Response> {
             runtime: runtime.clone(),
         });
     }
+
+    // Tokio forbids to drop runtime in async context, so this is a stupid way
+    // to drop it in non async context.
+    tokio::task::spawn_blocking(move || {
+        let _r = runtime;
+    })
+    .await?;
 
     Ok(Response {
         start_time,
@@ -302,14 +321,35 @@ fn build_file_info(entry: DirEntry) -> Result<FileInfo> {
     })
 }
 
+/// Get highest modified time of WAL segments in the directory.
+fn get_wal_last_modified(path: &Utf8Path) -> Result<Option<DateTime<Utc>>> {
+    let mut res = None;
+    for entry in fs::read_dir(path)? {
+        if entry.is_err() {
+            continue;
+        }
+        let entry = entry?;
+        /* Ignore files that are not XLOG segments */
+        let fname = entry.file_name();
+        if !IsXLogFileName(&fname) && !IsPartialXLogFileName(&fname) {
+            continue;
+        }
+
+        let metadata = entry.metadata()?;
+        let modified: DateTime<Utc> = DateTime::from(metadata.modified()?);
+        res = std::cmp::max(res, Some(modified));
+    }
+    Ok(res)
+}
+
 /// Converts SafeKeeperConf to Config, filtering out the fields that are not
 /// supposed to be exposed.
-fn build_config(config: SafeKeeperConf) -> Config {
+fn build_config(config: Arc<SafeKeeperConf>) -> Config {
     Config {
         id: config.my_id,
-        workdir: config.workdir.into(),
-        listen_pg_addr: config.listen_pg_addr,
-        listen_http_addr: config.listen_http_addr,
+        workdir: config.workdir.clone().into(),
+        listen_pg_addr: config.listen_pg_addr.clone(),
+        listen_http_addr: config.listen_http_addr.clone(),
         no_sync: config.no_sync,
         max_offloader_lag_bytes: config.max_offloader_lag_bytes,
         wal_backup_enabled: config.wal_backup_enabled,
@@ -343,7 +383,7 @@ pub async fn calculate_digest(
     let mut wal_reader = tli.get_walreader(request.from_lsn).await?;
 
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; MAX_SEND_SIZE];
+    let mut buf = vec![0u8; MAX_SEND_SIZE];
 
     let mut bytes_left = (request.until_lsn.0 - request.from_lsn.0) as usize;
     while bytes_left > 0 {

@@ -1,7 +1,12 @@
+from __future__ import annotations
+
+import json
+from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
@@ -9,14 +14,17 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
-    MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
     assert_prefix_not_empty,
+    many_small_layers_tenant_config,
     wait_for_upload,
 )
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.utils import run_pg_bench_small, wait_until
+from fixtures.workload import Workload
 from requests.exceptions import ReadTimeout
+from werkzeug.wrappers.request import Request
+from werkzeug.wrappers.response import Response
 
 
 def error_tolerant_delete(ps_http, tenant_id):
@@ -74,9 +82,9 @@ def test_tenant_delete_smoke(
     # may need to retry on some remote storage errors injected by the test harness
     error_tolerant_delete(ps_http, tenant_id)
 
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id=tenant_id,
-        conf=MANY_SMALL_LAYERS_TENANT_CONFIG,
+        conf=many_small_layers_tenant_config(),
     )
 
     # Default tenant and the one we created
@@ -85,9 +93,7 @@ def test_tenant_delete_smoke(
     # create two timelines one being the parent of another
     parent = None
     for timeline in ["first", "second"]:
-        timeline_id = env.neon_cli.create_branch(
-            timeline, tenant_id=tenant_id, ancestor_branch_name=parent
-        )
+        timeline_id = env.create_branch(timeline, ancestor_branch_name=parent, tenant_id=tenant_id)
         with env.endpoints.create_start(timeline, tenant_id=tenant_id) as endpoint:
             run_pg_bench_small(pg_bin, endpoint.connstr())
             wait_for_last_flush_lsn(env, endpoint, tenant=tenant_id, timeline=timeline_id)
@@ -141,8 +147,6 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
 
     env.pageserver.allowed_errors.extend(
         [
-            # happens with the cancellation bailing flushing loop earlier, leaving disk_consistent_lsn at zero
-            ".*Timeline got dropped without initializing, cleaning its files",
             # the response hit_pausable_failpoint_and_later_fail
             f".*Error processing HTTP request: InternalServerError\\(new timeline {env.initial_tenant}/{env.initial_timeline} has invalid disk_consistent_lsn",
         ]
@@ -182,21 +186,21 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
     deletion = None
 
     try:
-        wait_until(10, 1, has_hit_failpoint)
+        wait_until(has_hit_failpoint)
 
         # it should start ok, sync up with the stuck creation, then hang waiting for the timeline
         # to shut down.
         deletion = Thread(target=start_deletion)
         deletion.start()
 
-        wait_until(10, 1, deletion_has_started_waiting_for_timelines)
+        wait_until(deletion_has_started_waiting_for_timelines)
 
         pageserver_http.configure_failpoints((failpoint, "off"))
 
         creation.join()
         deletion.join()
 
-        wait_until(10, 1, tenant_is_deleted)
+        wait_until(tenant_is_deleted)
     finally:
         creation.join()
         if deletion is not None:
@@ -215,7 +219,7 @@ def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder)
     # (and there is no way to reconstruct the used remote storage kind)
     remote_storage_kind = RemoteStorageKind.MOCK_S3
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    env = neon_env_builder.init_start(initial_tenant_conf=many_small_layers_tenant_config())
     ps_http = env.pageserver.http_client()
     tenant_id = env.initial_tenant
 
@@ -250,51 +254,55 @@ def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder)
     ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "pause"))
 
     def timeline_create():
-        try:
-            ps_http.timeline_create(env.pg_version, tenant_id, TimelineId.generate(), timeout=1)
-            raise RuntimeError("creation succeeded even though it shouldn't")
-        except ReadTimeout:
-            pass
-
-    Thread(target=timeline_create).start()
-
-    def hit_initdb_upload_failpoint():
-        env.pageserver.assert_log_contains(f"at failpoint {BEFORE_INITDB_UPLOAD_FAILPOINT}")
-
-    wait_until(100, 0.1, hit_initdb_upload_failpoint)
-
-    def creation_connection_timed_out():
-        env.pageserver.assert_log_contains(
-            "POST.*/timeline.* request was dropped before completing"
-        )
-
-    # Wait so that we hit the timeout and the connection is dropped
-    # (But timeline creation still continues)
-    wait_until(100, 0.1, creation_connection_timed_out)
-
-    ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "pause"))
+        ps_http.timeline_create(env.pg_version, tenant_id, TimelineId.generate(), timeout=1)
+        raise RuntimeError("creation succeeded even though it shouldn't")
 
     def tenant_delete():
         def tenant_delete_inner():
             ps_http.tenant_delete(tenant_id)
 
-        wait_until(100, 0.5, tenant_delete_inner)
+        wait_until(tenant_delete_inner)
 
-    Thread(target=tenant_delete).start()
+    # We will spawn background threads for timeline creation and tenant deletion.  They will both
+    # get blocked on our failpoint.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        create_fut = executor.submit(timeline_create)
 
-    def deletion_arrived():
-        env.pageserver.assert_log_contains(
-            f"cfg failpoint: {DELETE_BEFORE_CLEANUP_FAILPOINT} pause"
-        )
+        def hit_initdb_upload_failpoint():
+            env.pageserver.assert_log_contains(f"at failpoint {BEFORE_INITDB_UPLOAD_FAILPOINT}")
 
-    wait_until(100, 0.1, deletion_arrived)
+        wait_until(hit_initdb_upload_failpoint)
 
-    ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "off"))
+        def creation_connection_timed_out():
+            env.pageserver.assert_log_contains(
+                "POST.*/timeline.* request was dropped before completing"
+            )
 
-    # Disable the failpoint and wait for deletion to finish
-    ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "off"))
+        # Wait so that we hit the timeout and the connection is dropped
+        # (But timeline creation still continues)
+        wait_until(creation_connection_timed_out)
 
-    ps_http.tenant_delete(tenant_id)
+        with pytest.raises(ReadTimeout):
+            # Our creation failed from the client's point of view.
+            create_fut.result()
+
+        ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "pause"))
+
+        delete_fut = executor.submit(tenant_delete)
+
+        def deletion_arrived():
+            env.pageserver.assert_log_contains(
+                f"cfg failpoint: {DELETE_BEFORE_CLEANUP_FAILPOINT} pause"
+            )
+
+        wait_until(deletion_arrived)
+
+        ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "off"))
+
+        # Disable the failpoint and wait for deletion to finish
+        ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "off"))
+
+        delete_fut.result()
 
     # Physical deletion should have happened
     assert_prefix_empty(
@@ -322,7 +330,7 @@ def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder)
     env.pageserver.stop()
 
 
-def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
+def test_tenant_delete_scrubber(pg_bin: PgBin, make_httpserver, neon_env_builder: NeonEnvBuilder):
     """
     Validate that creating and then deleting the tenant both survives the scrubber,
     and that one can run the scrubber without problems.
@@ -330,12 +338,12 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
 
     remote_storage_kind = RemoteStorageKind.MOCK_S3
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    env = neon_env_builder.init_start(initial_tenant_conf=many_small_layers_tenant_config())
 
     ps_http = env.pageserver.http_client()
     # create a tenant separate from the main tenant so that we have one remaining
     # after we deleted it, as the scrubber treats empty buckets as an error.
-    (tenant_id, timeline_id) = env.neon_cli.create_tenant()
+    (tenant_id, timeline_id) = env.create_tenant()
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
         run_pg_bench_small(pg_bin, endpoint.connstr())
@@ -347,6 +355,45 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
     healthy, _ = env.storage_scrubber.scan_metadata()
     assert healthy
 
+    timeline_lsns = {
+        "tenant_id": f"{tenant_id}",
+        "timeline_id": f"{timeline_id}",
+        "timeline_start_lsn": f"{last_flush_lsn}",
+        "backup_lsn": f"{last_flush_lsn}",
+    }
+
+    cloud_admin_url = f"http://{make_httpserver.host}:{make_httpserver.port}/"
+    cloud_admin_token = ""
+
+    def get_branches(request: Request):
+        # Compare definition with `BranchData` struct
+        dummy_data = {
+            "id": "test-branch-id",
+            "created_at": "",  # TODO
+            "updated_at": "",  # TODO
+            "name": "testbranchname",
+            "project_id": "test-project-id",
+            "timeline_id": f"{timeline_id}",
+            "default": False,
+            "deleted": False,
+            "logical_size": 42000,
+            "physical_size": 42000,
+            "written_size": 42000,
+        }
+        # This test does all its own compute configuration (by passing explicit pageserver ID to Workload functions),
+        # so we send controller notifications to /dev/null to prevent it fighting the test for control of the compute.
+        log.info(f"got get_branches request: {request.json}")
+        return Response(json.dumps(dummy_data), content_type="application/json", status=200)
+
+    make_httpserver.expect_request("/branches", method="GET").respond_with_handler(get_branches)
+
+    healthy, _ = env.storage_scrubber.scan_metadata_safekeeper(
+        timeline_lsns=[timeline_lsns],
+        cloud_admin_api_url=cloud_admin_url,
+        cloud_admin_api_token=cloud_admin_token,
+    )
+    assert healthy
+
     env.start()
     ps_http = env.pageserver.http_client()
     ps_http.tenant_delete(tenant_id)
@@ -354,3 +401,64 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
 
     healthy, _ = env.storage_scrubber.scan_metadata()
     assert healthy
+
+    healthy, _ = env.storage_scrubber.scan_metadata_safekeeper(
+        timeline_lsns=[timeline_lsns],
+        cloud_admin_api_url=cloud_admin_url,
+        cloud_admin_api_token=cloud_admin_token,
+    )
+    assert healthy
+
+
+def test_tenant_delete_stale_shards(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
+    """
+    Deleting a tenant should also delete any stale (pre-split) shards from remote storage.
+    """
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+
+    env = neon_env_builder.init_start()
+
+    # Create an unsharded tenant.
+    tenant_id, timeline_id = env.create_tenant()
+
+    # Write some data.
+    workload = Workload(env, tenant_id, timeline_id, branch_name="main")
+    workload.init()
+    workload.write_rows(256)
+    workload.validate()
+
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(("tenants", str(tenant_id))),
+    )
+
+    # Upload a heatmap as well.
+    env.pageserver.http_client().tenant_heatmap_upload(tenant_id)
+
+    # Split off a few shards, in two rounds.
+    env.storage_controller.tenant_shard_split(tenant_id, shard_count=4)
+    env.storage_controller.tenant_shard_split(tenant_id, shard_count=16)
+
+    # Delete the tenant. This should also delete data for the unsharded and count=4 parents.
+    env.storage_controller.pageserver_api().tenant_delete(tenant_id=tenant_id)
+
+    assert_prefix_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(("tenants", str(tenant_id))),
+        delimiter="",  # match partial prefixes, i.e. all shards
+    )
+
+    dirs = list(env.pageserver.tenant_dir(None).glob(f"{tenant_id}*"))
+    assert dirs == [], f"found tenant directories: {dirs}"
+
+    # The initial tenant created by the test harness should still be there.
+    # Only the tenant we deleted should be removed.
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(("tenants", str(env.initial_tenant))),
+    )
+    dirs = list(env.pageserver.tenant_dir(None).glob(f"{env.initial_tenant}*"))
+    assert dirs != [], "missing initial tenant directory"
+
+    env.stop()

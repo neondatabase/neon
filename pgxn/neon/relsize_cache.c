@@ -110,7 +110,8 @@ get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 
 		tag.rinfo = rinfo;
 		tag.forknum = forknum;
-		LWLockAcquire(relsize_lock, LW_SHARED);
+		/* We need exclusive lock here because of LRU list manipulation */
+		LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
 		entry = hash_search(relsize_hash, &tag, HASH_FIND, NULL);
 		if (entry != NULL)
 		{

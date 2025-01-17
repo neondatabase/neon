@@ -84,17 +84,17 @@ impl Value {
 
     fn to_u64(self) -> u64 {
         let b = &self.0;
-        (b[0] as u64) << 32
-            | (b[1] as u64) << 24
-            | (b[2] as u64) << 16
-            | (b[3] as u64) << 8
+        ((b[0] as u64) << 32)
+            | ((b[1] as u64) << 24)
+            | ((b[2] as u64) << 16)
+            | ((b[3] as u64) << 8)
             | b[4] as u64
     }
 
     fn to_blknum(self) -> u32 {
         let b = &self.0;
         assert!(b[0] == 0x80);
-        (b[1] as u32) << 24 | (b[2] as u32) << 16 | (b[3] as u32) << 8 | b[4] as u32
+        ((b[1] as u32) << 24) | ((b[2] as u32) << 16) | ((b[3] as u32) << 8) | b[4] as u32
     }
 }
 
@@ -131,7 +131,7 @@ struct OnDiskNode<'a, const L: usize> {
     values: &'a [u8],
 }
 
-impl<'a, const L: usize> OnDiskNode<'a, L> {
+impl<const L: usize> OnDiskNode<'_, L> {
     ///
     /// Interpret a PAGE_SZ page as a node.
     ///
@@ -532,7 +532,7 @@ pub struct DiskBtreeIterator<'a> {
     >,
 }
 
-impl<'a> DiskBtreeIterator<'a> {
+impl DiskBtreeIterator<'_> {
     pub async fn next(&mut self) -> Option<std::result::Result<(Vec<u8>, u64), DiskBtreeError>> {
         self.stream.next().await
     }

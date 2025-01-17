@@ -1,11 +1,13 @@
-use std::{
-    hash::BuildHasherDefault, marker::PhantomData, num::NonZeroUsize, ops::Index, sync::OnceLock,
-};
+use std::hash::BuildHasherDefault;
+use std::marker::PhantomData;
+use std::num::NonZeroUsize;
+use std::ops::Index;
+use std::sync::OnceLock;
 
 use lasso::{Capacity, MemoryLimits, Spur, ThreadedRodeo};
 use rustc_hash::FxHasher;
 
-use crate::{BranchId, EndpointId, ProjectId, RoleName};
+use crate::types::{BranchId, EndpointId, ProjectId, RoleName};
 
 pub trait InternId: Sized + 'static {
     fn get_interner() -> &'static StringInterner<Self>;
@@ -29,10 +31,10 @@ impl<Id: InternId> std::fmt::Display for InternedString<Id> {
 }
 
 impl<Id: InternId> InternedString<Id> {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         Id::get_interner().inner.resolve(&self.inner)
     }
-    pub fn get(s: &str) -> Option<Self> {
+    pub(crate) fn get(s: &str) -> Option<Self> {
         Id::get_interner().get(s)
     }
 }
@@ -53,7 +55,7 @@ impl<Id: InternId> std::ops::Deref for InternedString<Id> {
 impl<'de, Id: InternId> serde::de::Deserialize<'de> for InternedString<Id> {
     fn deserialize<D: serde::de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Visitor<Id>(PhantomData<Id>);
-        impl<'de, Id: InternId> serde::de::Visitor<'de> for Visitor<Id> {
+        impl<Id: InternId> serde::de::Visitor<'_> for Visitor<Id> {
             type Value = InternedString<Id>;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -78,10 +80,10 @@ impl<Id: InternId> serde::Serialize for InternedString<Id> {
 }
 
 impl<Id: InternId> StringInterner<Id> {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         StringInterner {
             inner: ThreadedRodeo::with_capacity_memory_limits_and_hasher(
-                Capacity::new(2500, NonZeroUsize::new(1 << 16).unwrap()),
+                Capacity::new(2500, NonZeroUsize::new(1 << 16).expect("value is nonzero")),
                 // unbounded
                 MemoryLimits::for_memory_usage(usize::MAX),
                 BuildHasherDefault::<FxHasher>::default(),
@@ -90,26 +92,24 @@ impl<Id: InternId> StringInterner<Id> {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    fn len(&self) -> usize {
         self.inner.len()
     }
 
-    pub fn current_memory_usage(&self) -> usize {
+    #[cfg(test)]
+    fn current_memory_usage(&self) -> usize {
         self.inner.current_memory_usage()
     }
 
-    pub fn get_or_intern(&self, s: &str) -> InternedString<Id> {
+    pub(crate) fn get_or_intern(&self, s: &str) -> InternedString<Id> {
         InternedString {
             inner: self.inner.get_or_intern(s),
             _id: PhantomData,
         }
     }
 
-    pub fn get(&self, s: &str) -> Option<InternedString<Id>> {
+    pub(crate) fn get(&self, s: &str) -> Option<InternedString<Id>> {
         Some(InternedString {
             inner: self.inner.get(s)?,
             _id: PhantomData,
@@ -135,7 +135,7 @@ impl<Id: InternId> Default for StringInterner<Id> {
 pub struct RoleNameTag;
 impl InternId for RoleNameTag {
     fn get_interner() -> &'static StringInterner<Self> {
-        pub static ROLE_NAMES: OnceLock<StringInterner<RoleNameTag>> = OnceLock::new();
+        static ROLE_NAMES: OnceLock<StringInterner<RoleNameTag>> = OnceLock::new();
         ROLE_NAMES.get_or_init(Default::default)
     }
 }
@@ -150,7 +150,7 @@ impl From<&RoleName> for RoleNameInt {
 pub struct EndpointIdTag;
 impl InternId for EndpointIdTag {
     fn get_interner() -> &'static StringInterner<Self> {
-        pub static ROLE_NAMES: OnceLock<StringInterner<EndpointIdTag>> = OnceLock::new();
+        static ROLE_NAMES: OnceLock<StringInterner<EndpointIdTag>> = OnceLock::new();
         ROLE_NAMES.get_or_init(Default::default)
     }
 }
@@ -170,7 +170,7 @@ impl From<EndpointId> for EndpointIdInt {
 pub struct BranchIdTag;
 impl InternId for BranchIdTag {
     fn get_interner() -> &'static StringInterner<Self> {
-        pub static ROLE_NAMES: OnceLock<StringInterner<BranchIdTag>> = OnceLock::new();
+        static ROLE_NAMES: OnceLock<StringInterner<BranchIdTag>> = OnceLock::new();
         ROLE_NAMES.get_or_init(Default::default)
     }
 }
@@ -190,7 +190,7 @@ impl From<BranchId> for BranchIdInt {
 pub struct ProjectIdTag;
 impl InternId for ProjectIdTag {
     fn get_interner() -> &'static StringInterner<Self> {
-        pub static ROLE_NAMES: OnceLock<StringInterner<ProjectIdTag>> = OnceLock::new();
+        static ROLE_NAMES: OnceLock<StringInterner<ProjectIdTag>> = OnceLock::new();
         ROLE_NAMES.get_or_init(Default::default)
     }
 }
@@ -207,24 +207,25 @@ impl From<ProjectId> for ProjectIdInt {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use std::sync::OnceLock;
 
-    use crate::intern::StringInterner;
-
     use super::InternId;
+    use crate::intern::StringInterner;
 
     struct MyId;
     impl InternId for MyId {
         fn get_interner() -> &'static StringInterner<Self> {
-            pub static ROLE_NAMES: OnceLock<StringInterner<MyId>> = OnceLock::new();
+            pub(crate) static ROLE_NAMES: OnceLock<StringInterner<MyId>> = OnceLock::new();
             ROLE_NAMES.get_or_init(Default::default)
         }
     }
 
     #[test]
     fn push_many_strings() {
-        use rand::{rngs::StdRng, Rng, SeedableRng};
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
         use rand_distr::Zipf;
 
         let endpoint_dist = Zipf::new(500000, 0.8).unwrap();

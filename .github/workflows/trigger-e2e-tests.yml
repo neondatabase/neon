@@ -34,8 +34,8 @@ jobs:
       build-tag: ${{ steps.build-tag.outputs.tag }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # Need `fetch-depth: 0` to count the number of commits in the branch
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -51,6 +51,8 @@ jobs:
             echo "tag=release-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
             echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
+            echo "tag=release-compute-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -c $CURRENT_SHA -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')
@@ -66,7 +68,7 @@ jobs:
       GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
       TAG: ${{ needs.tag.outputs.build-tag }}
     steps:
-      - name: Wait for `promote-images` job to finish
+      - name: Wait for `promote-images-dev` job to finish
         # It's important to have a timeout here, the script in the step can run infinitely
         timeout-minutes: 60
         run: |
@@ -77,17 +79,17 @@ jobs:
           # For PRs we use the run id as the tag
           BUILD_AND_TEST_RUN_ID=${TAG}
           while true; do
-            conclusion=$(gh run --repo ${GITHUB_REPOSITORY} view ${BUILD_AND_TEST_RUN_ID} --json jobs --jq '.jobs[] | select(.name == "promote-images") | .conclusion')
+            conclusion=$(gh run --repo ${GITHUB_REPOSITORY} view ${BUILD_AND_TEST_RUN_ID} --json jobs --jq '.jobs[] | select(.name == "promote-images-dev") | .conclusion')
             case "$conclusion" in
               success)
                 break
                 ;;
               failure | cancelled | skipped)
-                echo "The 'promote-images' job didn't succeed: '${conclusion}'. Exiting..."
+                echo "The 'promote-images-dev' job didn't succeed: '${conclusion}'. Exiting..."
                 exit 1
                 ;;
               *)
-                echo "The 'promote-images' hasn't succeed yet. Waiting..."
+                echo "The 'promote-images-dev' hasn't succeed yet. Waiting..."
                 sleep 60
                 ;;
             esac
@@ -102,12 +104,17 @@ jobs:
           # Default set of platforms to run e2e tests on
           platforms='["docker", "k8s"]'
 
-          # If the PR changes vendor/, pgxn/ or libs/vm_monitor/ directories, or Dockerfile.compute-node, add k8s-neonvm to the list of platforms.
+          # If a PR changes anything that affects computes, add k8s-neonvm to the list of platforms.
           # If the workflow run is not a pull request, add k8s-neonvm to the list.
           if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
             for f in $(gh api "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename'); do
               case "$f" in
-                vendor/*|pgxn/*|libs/vm_monitor/*|Dockerfile.compute-node)
+                # List of directories that contain code which affect compute images.
+                #
+                # This isn't exhaustive, just the paths that are most directly compute-related.
+                # For example, compute_ctl also depends on libs/utils, but we don't trigger
+                # an e2e run on that.
+                vendor/*|pgxn/*|compute_tools/*|libs/vm_monitor/*|compute/compute-node.Dockerfile)
                   platforms=$(echo "${platforms}" | jq --compact-output '. += ["k8s-neonvm"] | unique')
                   ;;
                 *)

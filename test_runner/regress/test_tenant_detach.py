@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 import asyncio
-import enum
 import random
 import time
+from enum import StrEnum
 from threading import Thread
-from typing import List, Optional
 
 import asyncpg
 import pytest
@@ -51,7 +52,7 @@ def do_gc_target(
         log.info("gc http thread returning")
 
 
-class ReattachMode(str, enum.Enum):
+class ReattachMode(StrEnum):
     REATTACH_EXPLICIT = "explicit"
     REATTACH_RESET = "reset"
     REATTACH_RESET_DROP = "reset_drop"
@@ -72,7 +73,7 @@ def test_tenant_reattach(neon_env_builder: NeonEnvBuilder, mode: str):
     pageserver_http = env.pageserver.http_client()
 
     # create new nenant
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id, timeline_id = env.create_tenant()
 
     env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
@@ -211,7 +212,7 @@ def test_tenant_reattach_while_busy(
         nonlocal updates_started, updates_finished, updates_to_perform
 
         # Wait until we have performed some updates
-        wait_until(20, 0.5, lambda: updates_finished > 500)
+        wait_until(lambda: updates_finished > 500)
 
         log.info("Detaching tenant")
         pageserver_http.tenant_detach(tenant_id)
@@ -241,7 +242,7 @@ def test_tenant_reattach_while_busy(
     pageserver_http = env.pageserver.http_client()
 
     # create new nenant
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         # Create layers aggressively
         conf={"checkpoint_distance": "100000"}
     )
@@ -266,13 +267,13 @@ def test_tenant_reattach_while_busy(
 
 
 def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
     pageserver_http = env.pageserver.http_client()
 
     env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
     # create new nenant
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id, timeline_id = env.initial_tenant, env.initial_timeline
 
     # assert tenant exists on disk
     assert env.pageserver.tenant_dir(tenant_id).exists()
@@ -492,7 +493,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         r".* Changing Active tenant to Broken state, reason: broken from test"
     )
 
-    def only_int(samples: List[Sample]) -> Optional[int]:
+    def only_int(samples: list[Sample]) -> int | None:
         if len(samples) == 1:
             return int(samples[0].value)
         assert len(samples) == 0
@@ -511,7 +512,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         )
         assert only_int(active) == 0 and only_int(broken) == 1 and only_int(broken_set) == 1
 
-    wait_until(10, 0.5, found_broken)
+    wait_until(found_broken)
 
     client.tenant_detach(env.initial_tenant)
 
@@ -523,7 +524,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         )
         assert only_int(broken) == 0 and len(broken_set) == 0
 
-    wait_until(10, 0.5, found_cleaned_up)
+    wait_until(found_cleaned_up)
 
     env.pageserver.tenant_attach(env.initial_tenant)
 
@@ -535,4 +536,4 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         )
         assert only_int(active) == 1 and len(broken_set) == 0
 
-    wait_until(10, 0.5, found_active)
+    wait_until(found_active)

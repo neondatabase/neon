@@ -28,7 +28,7 @@ use super::{
         self, period_jitter, period_warmup, JobGenerator, RunningJob, SchedulingResult,
         TenantBackgroundJobs,
     },
-    CommandRequest, UploadCommand,
+    CommandRequest, SecondaryTenantError, UploadCommand,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, Instrument};
@@ -108,7 +108,6 @@ impl scheduler::Completion for WriteComplete {
 /// when we last did a write.  We only populate this after doing at least one
 /// write for a tenant -- this avoids holding state for tenants that have
 /// uploads disabled.
-
 struct UploaderTenantState {
     // This Weak only exists to enable culling idle instances of this type
     // when the Tenant has been deallocated.
@@ -280,7 +279,10 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
         }.instrument(info_span!(parent: None, "heatmap_upload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))))
     }
 
-    fn on_command(&mut self, command: UploadCommand) -> anyhow::Result<UploadPending> {
+    fn on_command(
+        &mut self,
+        command: UploadCommand,
+    ) -> Result<UploadPending, SecondaryTenantError> {
         let tenant_shard_id = command.get_tenant_shard_id();
 
         tracing::info!(
@@ -288,8 +290,7 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
             "Starting heatmap write on command");
         let tenant = self
             .tenant_manager
-            .get_attached_tenant_shard(*tenant_shard_id)
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .get_attached_tenant_shard(*tenant_shard_id)?;
         if !tenant.is_active() {
             return Err(GetTenantError::NotActive(*tenant_shard_id).into());
         }

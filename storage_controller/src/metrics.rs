@@ -37,12 +37,34 @@ pub(crate) struct StorageControllerMetricGroup {
     /// Count of how many times we spawn a reconcile task
     pub(crate) storage_controller_reconcile_spawn: measured::Counter,
 
+    /// Size of the in-memory map of tenant shards
+    pub(crate) storage_controller_tenant_shards: measured::Gauge,
+
+    /// Size of the in-memory map of pageserver_nodes
+    pub(crate) storage_controller_pageserver_nodes: measured::Gauge,
+
     /// Reconciler tasks completed, broken down by success/failure/cancelled
     pub(crate) storage_controller_reconcile_complete:
         measured::CounterVec<ReconcileCompleteLabelGroupSet>,
 
     /// Count of how many times we make an optimization change to a tenant's scheduling
     pub(crate) storage_controller_schedule_optimization: measured::Counter,
+
+    /// How many shards are not scheduled into their preferred AZ
+    pub(crate) storage_controller_schedule_az_violation: measured::Gauge,
+
+    /// How many shard locations (secondary or attached) on each node
+    pub(crate) storage_controller_node_shards: measured::GaugeVec<NodeLabelGroupSet>,
+
+    /// How many _attached_ shard locations on each node
+    pub(crate) storage_controller_node_attached_shards: measured::GaugeVec<NodeLabelGroupSet>,
+
+    /// How many _home_ shard locations on each node (i.e. the node's AZ matches the shard's
+    /// preferred AZ)
+    pub(crate) storage_controller_node_home_shards: measured::GaugeVec<NodeLabelGroupSet>,
+
+    /// How many shards would like to reconcile but were blocked by concurrency limits
+    pub(crate) storage_controller_pending_reconciles: measured::Gauge,
 
     /// HTTP request status counters for handled requests
     pub(crate) storage_controller_http_request_status:
@@ -87,6 +109,10 @@ pub(crate) struct StorageControllerMetricGroup {
         measured::HistogramVec<DatabaseQueryLatencyLabelGroupSet, 5>,
 
     pub(crate) storage_controller_leadership_status: measured::GaugeVec<LeadershipStatusGroupSet>,
+
+    /// HTTP request status counters for handled requests
+    pub(crate) storage_controller_reconcile_long_running:
+        measured::CounterVec<ReconcileLongRunningLabelGroupSet>,
 }
 
 impl StorageControllerMetrics {
@@ -114,6 +140,15 @@ impl Default for StorageControllerMetrics {
             encoder: Mutex::new(measured::text::BufferedTextEncoder::new()),
         }
     }
+}
+
+#[derive(measured::LabelGroup, Clone)]
+#[label(set = NodeLabelGroupSet)]
+pub(crate) struct NodeLabelGroup<'a> {
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) az: &'a str,
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) node_id: &'a str,
 }
 
 #[derive(measured::LabelGroup)]
@@ -166,6 +201,17 @@ pub(crate) struct DatabaseQueryLatencyLabelGroup {
 #[label(set = LeadershipStatusGroupSet)]
 pub(crate) struct LeadershipStatusGroup {
     pub(crate) status: LeadershipStatus,
+}
+
+#[derive(measured::LabelGroup, Clone)]
+#[label(set = ReconcileLongRunningLabelGroupSet)]
+pub(crate) struct ReconcileLongRunningLabelGroup<'a> {
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) tenant_id: &'a str,
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) shard_number: &'a str,
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) sequence: &'a str,
 }
 
 #[derive(FixedCardinalityLabel, Clone, Copy)]
@@ -230,6 +276,7 @@ pub(crate) enum DatabaseErrorLabel {
     Connection,
     ConnectionPool,
     Logical,
+    Migration,
 }
 
 impl DatabaseError {
@@ -239,6 +286,7 @@ impl DatabaseError {
             Self::Connection(_) => DatabaseErrorLabel::Connection,
             Self::ConnectionPool(_) => DatabaseErrorLabel::ConnectionPool,
             Self::Logical(_) => DatabaseErrorLabel::Logical,
+            Self::Migration(_) => DatabaseErrorLabel::Migration,
         }
     }
 }

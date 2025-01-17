@@ -49,12 +49,11 @@ use std::sync::{RwLock, RwLockWriteGuard};
 
 use tokio::sync::watch;
 
-///
 /// Rcu allows multiple readers to read and hold onto a value without blocking
-/// (for very long).  Storing to the Rcu updates the value, making new readers
-/// immediately see the new value, but it also waits for all current readers to
-/// finish.
+/// (for very long).
 ///
+/// Storing to the Rcu updates the value, making new readers immediately see
+/// the new value, but it also waits for all current readers to finish.
 pub struct Rcu<V> {
     inner: RwLock<RcuInner<V>>,
 }
@@ -153,7 +152,7 @@ pub struct RcuWriteGuard<'a, V> {
     inner: RwLockWriteGuard<'a, RcuInner<V>>,
 }
 
-impl<'a, V> Deref for RcuWriteGuard<'a, V> {
+impl<V> Deref for RcuWriteGuard<'_, V> {
     type Target = V;
 
     fn deref(&self) -> &V {
@@ -161,7 +160,7 @@ impl<'a, V> Deref for RcuWriteGuard<'a, V> {
     }
 }
 
-impl<'a, V> RcuWriteGuard<'a, V> {
+impl<V> RcuWriteGuard<'_, V> {
     ///
     /// Store a new value. The new value will be written to the Rcu immediately,
     /// and will be immediately seen by any `read` calls that start afterwards.

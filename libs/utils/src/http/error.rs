@@ -28,6 +28,9 @@ pub enum ApiError {
     #[error("Resource temporarily unavailable: {0}")]
     ResourceUnavailable(Cow<'static, str>),
 
+    #[error("Too many requests: {0}")]
+    TooManyRequests(Cow<'static, str>),
+
     #[error("Shutting down")]
     ShuttingDown,
 
@@ -73,6 +76,10 @@ impl ApiError {
                 err.to_string(),
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
+            ApiError::TooManyRequests(err) => HttpErrorBody::response_from_msg_and_status(
+                err.to_string(),
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
             ApiError::Timeout(err) => HttpErrorBody::response_from_msg_and_status(
                 err.to_string(),
                 StatusCode::REQUEST_TIMEOUT,
@@ -82,7 +89,7 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
             ApiError::InternalServerError(err) => HttpErrorBody::response_from_msg_and_status(
-                err.to_string(),
+                format!("{err:#}"), // use alternative formatting so that we give the cause without backtrace
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
         }

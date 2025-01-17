@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import os
 import shutil
 import threading
 import time
 from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -24,6 +26,9 @@ from fixtures.utils import (
     query_scalar,
     wait_until,
 )
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
@@ -73,8 +78,8 @@ def populate_branch(
     tenant_id: TenantId,
     ps_http: PageserverHttpClient,
     create_table: bool,
-    expected_sum: Optional[int],
-) -> Tuple[TimelineId, Lsn]:
+    expected_sum: int | None,
+) -> tuple[TimelineId, Lsn]:
     # insert some data
     with pg_cur(endpoint) as cur:
         cur.execute("SHOW neon.timeline_id")
@@ -120,7 +125,7 @@ def check_timeline_attached(
     new_pageserver_http_client: PageserverHttpClient,
     tenant_id: TenantId,
     timeline_id: TimelineId,
-    old_timeline_detail: Dict[str, Any],
+    old_timeline_detail: dict[str, Any],
     old_current_lsn: Lsn,
 ):
     # new pageserver should be in sync (modulo wal tail or vacuum activity) with the old one because there was no new writes since checkpoint
@@ -219,7 +224,7 @@ def test_tenant_relocation(
 
     log.info("tenant to relocate %s initial_timeline_id %s", tenant_id, env.initial_timeline)
 
-    env.neon_cli.create_branch("test_tenant_relocation_main", tenant_id=tenant_id)
+    env.create_branch("test_tenant_relocation_main", tenant_id=tenant_id)
     ep_main = env.endpoints.create_start(
         branch_name="test_tenant_relocation_main", tenant_id=tenant_id
     )
@@ -232,7 +237,7 @@ def test_tenant_relocation(
         expected_sum=500500,
     )
 
-    env.neon_cli.create_branch(
+    env.create_branch(
         new_branch_name="test_tenant_relocation_second",
         ancestor_branch_name="test_tenant_relocation_main",
         ancestor_start_lsn=current_lsn_main,
@@ -293,11 +298,7 @@ def test_tenant_relocation(
         destination_ps.tenant_attach(tenant_id)
 
         # wait for tenant to finish attaching
-        wait_until(
-            number_of_iterations=10,
-            interval=1,
-            func=lambda: assert_tenant_state(destination_http, tenant_id, "Active"),
-        )
+        wait_until(lambda: assert_tenant_state(destination_http, tenant_id, "Active"))
 
         check_timeline_attached(
             destination_http,
@@ -404,7 +405,7 @@ def test_emergency_relocate_with_branches_slow_replay(
     # - A logical replication message between the inserts, so that we can conveniently
     #   pause the WAL ingestion between the two inserts.
     # - Child branch, created after the inserts
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id, _ = env.create_tenant()
 
     main_endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     with main_endpoint.cursor() as cur:
@@ -417,7 +418,7 @@ def test_emergency_relocate_with_branches_slow_replay(
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
     main_endpoint.stop()
-    env.neon_cli.create_branch("child", tenant_id=tenant_id, ancestor_start_lsn=current_lsn)
+    env.create_branch("child", tenant_id=tenant_id, ancestor_start_lsn=current_lsn)
 
     # Now kill the pageserver, remove the tenant directory, and restart. This simulates
     # the scenario that a pageserver dies unexpectedly and cannot be recovered, so we relocate
@@ -430,7 +431,9 @@ def test_emergency_relocate_with_branches_slow_replay(
 
     # This fail point will pause the WAL ingestion on the main branch, after the
     # the first insert
-    pageserver_http.configure_failpoints([("wal-ingest-logical-message-sleep", "return(5000)")])
+    pageserver_http.configure_failpoints(
+        [("pageserver-wal-ingest-logical-message-sleep", "return(5000)")]
+    )
 
     # Attach and wait a few seconds to give it time to load the tenants, attach to the
     # safekeepers, and to stream and ingest the WAL up to the pause-point.
@@ -448,11 +451,13 @@ def test_emergency_relocate_with_branches_slow_replay(
         assert cur.fetchall() == [("before pause",), ("after pause",)]
 
     # Sanity check that the failpoint was reached
-    env.pageserver.assert_log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
+    env.pageserver.assert_log_contains(
+        'failpoint "pageserver-wal-ingest-logical-message-sleep": sleep done'
+    )
     assert time.time() - before_attach_time > 5
 
     # Clean up
-    pageserver_http.configure_failpoints(("wal-ingest-logical-message-sleep", "off"))
+    pageserver_http.configure_failpoints(("pageserver-wal-ingest-logical-message-sleep", "off"))
 
 
 # Simulate hard crash of pageserver and re-attach a tenant with a branch
@@ -548,7 +553,7 @@ def test_emergency_relocate_with_branches_createdb(
     pageserver_http = env.pageserver.http_client()
 
     # create new nenant
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id, _ = env.create_tenant()
 
     main_endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     with main_endpoint.cursor() as cur:
@@ -556,7 +561,7 @@ def test_emergency_relocate_with_branches_createdb(
 
         cur.execute("CREATE DATABASE neondb")
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
-    env.neon_cli.create_branch("child", tenant_id=tenant_id, ancestor_start_lsn=current_lsn)
+    env.create_branch("child", tenant_id=tenant_id, ancestor_start_lsn=current_lsn)
 
     with main_endpoint.cursor(dbname="neondb") as cur:
         cur.execute("CREATE TABLE test_migrate_one AS SELECT generate_series(1,100)")
@@ -576,7 +581,9 @@ def test_emergency_relocate_with_branches_createdb(
     # bug reproduced easily even without this, as there is always some delay between
     # loading the timeline and establishing the connection to the safekeeper to stream and
     # ingest the WAL, but let's make this less dependent on accidental timing.
-    pageserver_http.configure_failpoints([("wal-ingest-logical-message-sleep", "return(5000)")])
+    pageserver_http.configure_failpoints(
+        [("pageserver-wal-ingest-logical-message-sleep", "return(5000)")]
+    )
     before_attach_time = time.time()
     env.pageserver.tenant_attach(tenant_id)
 
@@ -585,8 +592,10 @@ def test_emergency_relocate_with_branches_createdb(
         assert query_scalar(cur, "SELECT count(*) FROM test_migrate_one") == 200
 
     # Sanity check that the failpoint was reached
-    env.pageserver.assert_log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
+    env.pageserver.assert_log_contains(
+        'failpoint "pageserver-wal-ingest-logical-message-sleep": sleep done'
+    )
     assert time.time() - before_attach_time > 5
 
     # Clean up
-    pageserver_http.configure_failpoints(("wal-ingest-logical-message-sleep", "off"))
+    pageserver_http.configure_failpoints(("pageserver-wal-ingest-logical-message-sleep", "off"))

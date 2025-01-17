@@ -3,14 +3,14 @@
 use subtle::ConstantTimeEq;
 
 /// Faithfully taken from PostgreSQL.
-pub const SCRAM_KEY_LEN: usize = 32;
+pub(crate) const SCRAM_KEY_LEN: usize = 32;
 
 /// One of the keys derived from the user's password.
 /// We use the same structure for all keys, i.e.
 /// `ClientKey`, `StoredKey`, and `ServerKey`.
 #[derive(Clone, Default, Eq, Debug)]
 #[repr(transparent)]
-pub struct ScramKey {
+pub(crate) struct ScramKey {
     bytes: [u8; SCRAM_KEY_LEN],
 }
 
@@ -27,11 +27,11 @@ impl ConstantTimeEq for ScramKey {
 }
 
 impl ScramKey {
-    pub fn sha256(&self) -> Self {
+    pub(crate) fn sha256(&self) -> Self {
         super::sha256([self.as_ref()]).into()
     }
 
-    pub fn as_bytes(&self) -> [u8; SCRAM_KEY_LEN] {
+    pub(crate) fn as_bytes(&self) -> [u8; SCRAM_KEY_LEN] {
         self.bytes
     }
 }

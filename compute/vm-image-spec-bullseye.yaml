@@ -1,0 +1,121 @@
+# Supplemental file for neondatabase/autoscaling's vm-builder, for producing the VM compute image.
+---
+commands:
+  - name: cgconfigparser
+    user: root
+    sysvInitAction: sysinit
+    shell: 'cgconfigparser -l /etc/cgconfig.conf -s 1664'
+  # restrict permissions on /neonvm/bin/resize-swap, because we grant access to compute_ctl for
+  # running it as root.
+  - name: chmod-resize-swap
+    user: root
+    sysvInitAction: sysinit
+    shell: 'chmod 711 /neonvm/bin/resize-swap'
+  - name: chmod-set-disk-quota
+    user: root
+    sysvInitAction: sysinit
+    shell: 'chmod 711 /neonvm/bin/set-disk-quota'
+  - name: pgbouncer
+    user: postgres
+    sysvInitAction: respawn
+    shell: '/usr/local/bin/pgbouncer /etc/pgbouncer.ini 2>&1 > /dev/virtio-ports/tech.neon.log.0'
+  - name: local_proxy
+    user: postgres
+    sysvInitAction: respawn
+    shell: '/usr/local/bin/local_proxy --config-path /etc/local_proxy/config.json --pid-path /etc/local_proxy/pid --http 0.0.0.0:10432'
+  - name: postgres-exporter
+    user: nobody
+    sysvInitAction: respawn
+    shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres application_name=postgres-exporter" /bin/postgres_exporter --config.file=/etc/postgres_exporter.yml'
+  - name: sql-exporter
+    user: nobody
+    sysvInitAction: respawn
+    shell: '/bin/sql_exporter -config.file=/etc/sql_exporter.yml -web.listen-address=:9399'
+  - name: sql-exporter-autoscaling
+    user: nobody
+    sysvInitAction: respawn
+    shell: '/bin/sql_exporter -config.file=/etc/sql_exporter_autoscaling.yml -web.listen-address=:9499'
+shutdownHook: |
+  su -p postgres --session-command '/usr/local/bin/pg_ctl stop -D /var/db/postgres/compute/pgdata -m fast --wait -t 10'
+files:
+  - filename: compute_ctl-sudoers
+    content: |
+      # Allow postgres user (which is what compute_ctl runs as) to run /neonvm/bin/resize-swap
+      # and /neonvm/bin/set-disk-quota as root without requiring entering a password (NOPASSWD),
+      # regardless of hostname (ALL)
+      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota
+  - filename: cgconfig.conf
+    content: |
+      # Configuration for cgroups in VM compute nodes
+      group neon-postgres {
+          perm {
+              admin {
+                  uid = postgres;
+              }
+              task {
+                  gid = users;
+              }
+          }
+          memory {}
+      }
+build: |
+  # Build cgroup-tools
+  #
+  # At time of writing (2023-03-14), debian bullseye has a version of cgroup-tools (technically
+  # libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-monitor
+  # requires cgroup v2, so we'll build cgroup-tools ourselves.
+  FROM debian:bullseye-slim as libcgroup-builder
+  ENV LIBCGROUP_VERSION=v2.0.3
+
+  RUN set -exu \
+      && apt update \
+      && apt install --no-install-recommends -y \
+          git \
+          ca-certificates \
+          automake \
+          cmake \
+          make \
+          gcc \
+          byacc \
+          flex \
+          libtool \
+          libpam0g-dev \
+      && git clone --depth 1 -b $LIBCGROUP_VERSION https://github.com/libcgroup/libcgroup \
+      && INSTALL_DIR="/libcgroup-install" \
+      && mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/include" \
+      && cd libcgroup \
+      # extracted from bootstrap.sh, with modified flags:
+      && (test -d m4 || mkdir m4) \
+      && autoreconf -fi \
+      && rm -rf autom4te.cache \
+      && CFLAGS="-O3" ./configure --prefix="$INSTALL_DIR" --sysconfdir=/etc --localstatedir=/var --enable-opaque-hierarchy="name=systemd" \
+      # actually build the thing...
+      && make install
+merge: |
+  # tweak nofile limits
+  RUN set -e \
+      && echo 'fs.file-max = 1048576' >>/etc/sysctl.conf \
+      && test ! -e /etc/security || ( \
+         echo '*    - nofile 1048576' >>/etc/security/limits.conf \
+      && echo 'root - nofile 1048576' >>/etc/security/limits.conf \
+         )
+
+  # Allow postgres user (compute_ctl) to run swap resizer.
+  # Need to install sudo in order to allow this.
+  #
+  # Also, remove the 'read' permission from group/other on /neonvm/bin/resize-swap, just to be safe.
+  RUN set -e \
+      && apt update \
+      && apt install --no-install-recommends -y \
+             sudo \
+      && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+  COPY compute_ctl-sudoers /etc/sudoers.d/compute_ctl-sudoers
+
+  COPY cgconfig.conf /etc/cgconfig.conf
+
+  RUN set -e \
+      && chmod 0644 /etc/cgconfig.conf
+
+  COPY --from=libcgroup-builder /libcgroup-install/bin/*  /usr/bin/
+  COPY --from=libcgroup-builder /libcgroup-install/lib/*  /usr/lib/
+  COPY --from=libcgroup-builder /libcgroup-install/sbin/* /usr/sbin/

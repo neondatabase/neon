@@ -1,14 +1,12 @@
-use serde_json::Map;
-use serde_json::Value;
-use tokio_postgres::types::Kind;
-use tokio_postgres::types::Type;
-use tokio_postgres::Row;
+use postgres_client::types::{Kind, Type};
+use postgres_client::Row;
+use serde_json::{Map, Value};
 
 //
 // Convert json non-string types to strings, so that they can be passed to Postgres
 // as parameters.
 //
-pub fn json_to_pg_text(json: Vec<Value>) -> Vec<Option<String>> {
+pub(crate) fn json_to_pg_text(json: Vec<Value>) -> Vec<Option<String>> {
     json.iter().map(json_value_to_pg_text).collect()
 }
 
@@ -55,15 +53,15 @@ fn json_array_to_pg_array(value: &Value) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join(",");
 
-            Some(format!("{{{}}}", vals))
+            Some(format!("{{{vals}}}"))
         }
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum JsonConversionError {
+pub(crate) enum JsonConversionError {
     #[error("internal error compute returned invalid data: {0}")]
-    AsTextError(tokio_postgres::Error),
+    AsTextError(postgres_client::Error),
     #[error("parse int error: {0}")]
     ParseIntError(#[from] std::num::ParseIntError),
     #[error("parse float error: {0}")]
@@ -77,7 +75,7 @@ pub enum JsonConversionError {
 //
 // Convert postgres row with text-encoded values to JSON object
 //
-pub fn pg_text_row_to_json(
+pub(crate) fn pg_text_row_to_json(
     row: &Row,
     columns: &[Type],
     raw_output: bool,
@@ -157,10 +155,10 @@ fn pg_text_to_json(pg_value: Option<&str>, pg_type: &Type) -> Result<Value, Json
 // dimensions, we just return them as is.
 //
 fn pg_array_parse(pg_array: &str, elem_type: &Type) -> Result<Value, JsonConversionError> {
-    _pg_array_parse(pg_array, elem_type, false).map(|(v, _)| v)
+    pg_array_parse_inner(pg_array, elem_type, false).map(|(v, _)| v)
 }
 
-fn _pg_array_parse(
+fn pg_array_parse_inner(
     pg_array: &str,
     elem_type: &Type,
     nested: bool,
@@ -206,14 +204,17 @@ fn _pg_array_parse(
 
         if c == '\\' {
             escaped = true;
-            (i, c) = pg_array_chr.next().unwrap();
+            let Some(x) = pg_array_chr.next() else {
+                return Err(JsonConversionError::UnbalancedArray);
+            };
+            (i, c) = x;
         }
 
         match c {
             '{' if !quote => {
                 level += 1;
                 if level > 1 {
-                    let (res, off) = _pg_array_parse(&pg_array[i..], elem_type, true)?;
+                    let (res, off) = pg_array_parse_inner(&pg_array[i..], elem_type, true)?;
                     entries.push(res);
                     for _ in 0..off - 1 {
                         pg_array_chr.next();
@@ -255,9 +256,11 @@ fn _pg_array_parse(
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn test_atomic_types_to_pg_params() {

@@ -1,0 +1,79 @@
+name: Create Release PR
+
+on:
+  workflow_call:
+    inputs:
+      component-name:
+        description: 'Component name'
+        required: true
+        type: string
+      release-branch:
+        description: 'Release branch'
+        required: true
+        type: string
+    secrets:
+      ci-access-token:
+        description: 'CI access token'
+        required: true
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  create-release-branch:
+    runs-on: ubuntu-22.04
+
+    permissions:
+      contents: write # for `git push`
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: main
+
+    - name: Set variables
+      id: vars
+      env:
+        COMPONENT_NAME: ${{ inputs.component-name }}
+        RELEASE_BRANCH: ${{ inputs.release-branch }}
+      run: |
+        today=$(date +'%Y-%m-%d')
+        echo "title=${COMPONENT_NAME} release ${today}" | tee -a ${GITHUB_OUTPUT}
+        echo "rc-branch=rc/${RELEASE_BRANCH}/${today}"  | tee -a ${GITHUB_OUTPUT}
+
+    - name: Configure git
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+    - name: Create RC branch
+      env:
+        RC_BRANCH: ${{ steps.vars.outputs.rc-branch }}
+        TITLE: ${{ steps.vars.outputs.title }}
+      run: |
+        git checkout -b "${RC_BRANCH}"
+
+        # create an empty commit to distinguish workflow runs
+        # from other possible releases from the same commit
+        git commit --allow-empty -m "${TITLE}"
+
+        git push origin "${RC_BRANCH}"
+
+    - name: Create a PR into ${{ inputs.release-branch }}
+      env:
+        GH_TOKEN: ${{ secrets.ci-access-token }}
+        RC_BRANCH: ${{ steps.vars.outputs.rc-branch }}
+        RELEASE_BRANCH: ${{ inputs.release-branch }}
+        TITLE: ${{ steps.vars.outputs.title }}
+      run: |
+        cat << EOF > body.md
+          ## ${TITLE}
+
+          **Please merge this Pull Request using 'Create a merge commit' button**
+        EOF
+
+        gh pr create --title "${TITLE}" \
+                     --body-file "body.md" \
+                     --head "${RC_BRANCH}" \
+                     --base "${RELEASE_BRANCH}"

@@ -8,11 +8,15 @@ OBJS = \
 	file_cache.o \
 	hll.o \
 	libpagestore.o \
+	logical_replication_monitor.o \
 	neon.o \
+	neon_pgversioncompat.o \
+	neon_perf_counters.o \
 	neon_utils.o \
 	neon_walreader.o \
 	pagestore_smgr.o \
 	relsize_cache.o \
+	unstable_extensions.o \
 	walproposer.o \
 	walproposer_pg.o \
 	control_plane_connector.o \
@@ -23,7 +27,18 @@ SHLIB_LINK_INTERNAL = $(libpq)
 SHLIB_LINK = -lcurl
 
 EXTENSION = neon
-DATA = neon--1.0.sql neon--1.0--1.1.sql neon--1.1--1.2.sql neon--1.2--1.3.sql neon--1.3--1.2.sql neon--1.2--1.1.sql neon--1.1--1.0.sql  neon--1.3--1.4.sql neon--1.4--1.3.sql
+DATA = \
+	neon--1.0.sql \
+	neon--1.0--1.1.sql \
+	neon--1.1--1.2.sql \
+	neon--1.2--1.3.sql \
+	neon--1.3--1.4.sql \
+	neon--1.4--1.5.sql \
+	neon--1.5--1.4.sql \
+	neon--1.4--1.3.sql \
+	neon--1.3--1.2.sql \
+	neon--1.2--1.1.sql \
+	neon--1.1--1.0.sql
 PGFILEDESC = "neon - cloud storage for PostgreSQL"
 
 EXTRA_CLEAN = \
@@ -41,7 +56,7 @@ walproposer-lib: libwalproposer.a;
 
 .PHONY: libwalproposer.a
 libwalproposer.a: $(WALPROP_OBJS)
-	rm -f $@
+	$(RM) $@
 	$(AR) $(AROPT) $@ $^
 
 # needs vars:

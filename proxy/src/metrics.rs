@@ -1,17 +1,20 @@
 use std::sync::{Arc, OnceLock};
 
 use lasso::ThreadedRodeo;
+use measured::label::{
+    FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet,
+};
+use measured::metric::histogram::Thresholds;
+use measured::metric::name::MetricName;
 use measured::{
-    label::{FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet},
-    metric::{histogram::Thresholds, name::MetricName},
-    Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
-    LabelGroup, MetricGroup,
+    Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
+    MetricGroup,
 };
 use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
-
 use tokio::time::{self, Instant};
 
-use crate::console::messages::ColdStartInfo;
+use crate::control_plane::messages::ColdStartInfo;
+use crate::error::ErrorKind;
 
 #[derive(MetricGroup)]
 #[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]
@@ -323,23 +326,10 @@ pub enum ConnectionFailureKind {
     ComputeUncached,
 }
 
-#[derive(FixedCardinalityLabel, Copy, Clone)]
-#[label(singleton = "kind")]
-pub enum WakeupFailureKind {
-    BadComputeAddress,
-    ApiTransportError,
-    QuotaExceeded,
-    ApiConsoleLocked,
-    ApiConsoleBadRequest,
-    ApiConsoleOtherServerError,
-    ApiConsoleOtherError,
-    TimeoutError,
-}
-
 #[derive(LabelGroup)]
 #[label(set = ConnectionFailuresBreakdownSet)]
 pub struct ConnectionFailuresBreakdownGroup {
-    pub kind: WakeupFailureKind,
+    pub kind: ErrorKind,
     pub retry: Bool,
 }
 
@@ -361,6 +351,7 @@ pub enum CancellationSource {
 pub enum CancellationOutcome {
     NotFound,
     Found,
+    RateLimitExceeded,
 }
 
 #[derive(LabelGroup)]
@@ -397,6 +388,8 @@ pub struct LatencyTimer {
     protocol: Protocol,
     cold_start_info: ColdStartInfo,
     outcome: ConnectOutcome,
+
+    skip_reporting: bool,
 }
 
 impl LatencyTimer {
@@ -409,6 +402,20 @@ impl LatencyTimer {
             cold_start_info: ColdStartInfo::Unknown,
             // assume failed unless otherwise specified
             outcome: ConnectOutcome::Failed,
+            skip_reporting: false,
+        }
+    }
+
+    pub(crate) fn noop(protocol: Protocol) -> Self {
+        Self {
+            start: time::Instant::now(),
+            stop: None,
+            accumulated: Accumulated::default(),
+            protocol,
+            cold_start_info: ColdStartInfo::Unknown,
+            // assume failed unless otherwise specified
+            outcome: ConnectOutcome::Failed,
+            skip_reporting: true,
         }
     }
 
@@ -443,6 +450,10 @@ pub enum ConnectOutcome {
 
 impl Drop for LatencyTimer {
     fn drop(&mut self) {
+        if self.skip_reporting {
+            return;
+        }
+
         let duration = self
             .stop
             .unwrap_or_else(time::Instant::now)
@@ -548,6 +559,7 @@ pub enum RedisEventsCount {
 }
 
 pub struct ThreadPoolWorkers(usize);
+#[derive(Copy, Clone)]
 pub struct ThreadPoolWorkerId(pub usize);
 
 impl LabelValue for ThreadPoolWorkerId {
@@ -613,9 +625,6 @@ impl FixedCardinalitySet for ThreadPoolWorkers {
 #[derive(MetricGroup)]
 #[metric(new(workers: usize))]
 pub struct ThreadPoolMetrics {
-    pub injector_queue_depth: Gauge,
-    #[metric(init = GaugeVec::with_label_set(ThreadPoolWorkers(workers)))]
-    pub worker_queue_depth: GaugeVec<ThreadPoolWorkers>,
     #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
     pub worker_task_turns_total: CounterVec<ThreadPoolWorkers>,
     #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]

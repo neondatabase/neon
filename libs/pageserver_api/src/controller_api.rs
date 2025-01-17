@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -8,6 +9,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId};
 
+use crate::models::PageserverUtilization;
 use crate::{
     models::{ShardParameters, TenantConfig},
     shard::{ShardStripeSize, TenantShardId},
@@ -46,7 +48,7 @@ pub struct TenantCreateResponse {
     pub shards: Vec<TenantCreateResponseShard>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeRegisterRequest {
     pub node_id: NodeId,
 
@@ -55,6 +57,8 @@ pub struct NodeRegisterRequest {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+
+    pub availability_zone_id: AvailabilityZone,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -69,6 +73,26 @@ pub struct NodeConfigureRequest {
 pub struct TenantPolicyRequest {
     pub placement: Option<PlacementPolicy>,
     pub scheduling: Option<ShardSchedulingPolicy>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub struct AvailabilityZone(pub String);
+
+impl Display for AvailabilityZone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ShardsPreferredAzsRequest {
+    #[serde(flatten)]
+    pub preferred_az_ids: HashMap<TenantShardId, Option<AvailabilityZone>>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ShardsPreferredAzsResponse {
+    pub updated: Vec<TenantShardId>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -98,12 +122,29 @@ pub struct TenantDescribeResponse {
     pub config: TenantConfig,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NodeShardResponse {
+    pub node_id: NodeId,
+    pub shards: Vec<NodeShard>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NodeShard {
+    pub tenant_shard_id: TenantShardId,
+    /// Whether the shard is observed secondary on a specific node. True = yes, False = no, None = not on this node.
+    pub is_observed_secondary: Option<bool>,
+    /// Whether the shard is intended to be a secondary on a specific node. True = yes, False = no, None = not on this node.
+    pub is_intended_secondary: Option<bool>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct NodeDescribeResponse {
     pub id: NodeId,
 
     pub availability: NodeAvailabilityWrapper,
     pub scheduling: NodeSchedulingPolicy,
+
+    pub availability_zone_id: String,
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
@@ -129,34 +170,25 @@ pub struct TenantDescribeResponseShard {
     pub is_splitting: bool,
 
     pub scheduling_policy: ShardSchedulingPolicy,
+
+    pub preferred_az_id: Option<String>,
 }
 
+/// Migration request for a given tenant shard to a given node.
+///
 /// Explicitly migrating a particular shard is a low level operation
 /// TODO: higher level "Reschedule tenant" operation where the request
 /// specifies some constraints, e.g. asking it to get off particular node(s)
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateRequest {
-    pub tenant_shard_id: TenantShardId,
     pub node_id: NodeId,
 }
 
-/// Utilisation score indicating how good a candidate a pageserver
-/// is for scheduling the next tenant. See [`crate::models::PageserverUtilization`].
-/// Lower values are better.
-#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Debug)]
-pub struct UtilizationScore(pub u64);
-
-impl UtilizationScore {
-    pub fn worst() -> Self {
-        UtilizationScore(u64::MAX)
-    }
-}
-
-#[derive(Serialize, Clone, Copy, Debug)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(into = "NodeAvailabilityWrapper")]
 pub enum NodeAvailability {
     // Normal, happy state
-    Active(UtilizationScore),
+    Active(PageserverUtilization),
     // Node is warming up, but we expect it to become available soon. Covers
     // the time span between the re-attach response being composed on the storage controller
     // and the first successful heartbeat after the processing of the re-attach response
@@ -195,7 +227,9 @@ impl From<NodeAvailabilityWrapper> for NodeAvailability {
         match val {
             // Assume the worst utilisation score to begin with. It will later be updated by
             // the heartbeats.
-            NodeAvailabilityWrapper::Active => NodeAvailability::Active(UtilizationScore::worst()),
+            NodeAvailabilityWrapper::Active => {
+                NodeAvailability::Active(PageserverUtilization::full())
+            }
             NodeAvailabilityWrapper::WarmingUp => NodeAvailability::WarmingUp(Instant::now()),
             NodeAvailabilityWrapper::Offline => NodeAvailability::Offline,
         }
@@ -212,6 +246,17 @@ impl From<NodeAvailability> for NodeAvailabilityWrapper {
     }
 }
 
+/// Scheduling policy enables us to selectively disable some automatic actions that the
+/// controller performs on a tenant shard. This is only set to a non-default value by
+/// human intervention, and it is reset to the default value (Active) when the tenant's
+/// placement policy is modified away from Attached.
+///
+/// The typical use of a non-Active scheduling policy is one of:
+/// - Pinnning a shard to a node (i.e. migrating it there & setting a non-Active scheduling policy)
+/// - Working around a bug (e.g. if something is flapping and we need to stop it until the bug is fixed)
+///
+/// If you're not sure which policy to use to pin a shard to its current location, you probably
+/// want Pause.
 #[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum ShardSchedulingPolicy {
     // Normal mode: the tenant's scheduled locations may be updated at will, including
@@ -276,6 +321,42 @@ impl From<NodeSchedulingPolicy> for String {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
+pub enum SkSchedulingPolicy {
+    Active,
+    Pause,
+    Decomissioned,
+}
+
+impl FromStr for SkSchedulingPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "active" => Self::Active,
+            "pause" => Self::Pause,
+            "decomissioned" => Self::Decomissioned,
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unknown scheduling policy '{s}', try active,pause,decomissioned"
+                ))
+            }
+        })
+    }
+}
+
+impl From<SkSchedulingPolicy> for String {
+    fn from(value: SkSchedulingPolicy) -> String {
+        use SkSchedulingPolicy::*;
+        match value {
+            Active => "active",
+            Pause => "pause",
+            Decomissioned => "decomissioned",
+        }
+        .to_string()
+    }
+}
+
 /// Controls how tenant shards are mapped to locations on pageservers, e.g. whether
 /// to create secondary locations.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -290,6 +371,16 @@ pub enum PlacementPolicy {
     /// have been idle for a long time, where we do not mind some delay in making
     /// them available in future.
     Detached,
+}
+
+impl PlacementPolicy {
+    pub fn want_secondaries(&self) -> usize {
+        match self {
+            PlacementPolicy::Attached(secondary_count) => *secondary_count,
+            PlacementPolicy::Secondary => 1,
+            PlacementPolicy::Detached => 0,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -326,6 +417,27 @@ pub struct MetadataHealthListOutdatedRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MetadataHealthListOutdatedResponse {
     pub health_records: Vec<MetadataHealthRecord>,
+}
+
+/// Publicly exposed safekeeper description
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeeperDescribeResponse {
+    pub id: NodeId,
+    pub region_id: String,
+    /// 1 is special, it means just created (not currently posted to storcon).
+    /// Zero or negative is not really expected.
+    /// Otherwise the number from `release-$(number_of_commits_on_branch)` tag.
+    pub version: i64,
+    pub host: String,
+    pub port: i32,
+    pub http_port: i32,
+    pub availability_zone_id: String,
+    pub scheduling_policy: SkSchedulingPolicy,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeeperSchedulingPolicyRequest {
+    pub scheduling_policy: SkSchedulingPolicy,
 }
 
 #[cfg(test)]

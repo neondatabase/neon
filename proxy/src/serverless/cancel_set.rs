@@ -1,10 +1,8 @@
 //! A set for cancelling random http connections
 
-use std::{
-    hash::{BuildHasher, BuildHasherDefault},
-    num::NonZeroUsize,
-    time::Duration,
-};
+use std::hash::{BuildHasher, BuildHasherDefault};
+use std::num::NonZeroUsize;
+use std::time::Duration;
 
 use indexmap::IndexMap;
 use parking_lot::Mutex;
@@ -22,7 +20,7 @@ pub struct CancelSet {
     hasher: Hasher,
 }
 
-pub struct CancelShard {
+pub(crate) struct CancelShard {
     tokens: IndexMap<uuid::Uuid, (Instant, CancellationToken), Hasher>,
 }
 
@@ -40,7 +38,7 @@ impl CancelSet {
         }
     }
 
-    pub fn take(&self) -> Option<CancellationToken> {
+    pub(crate) fn take(&self) -> Option<CancellationToken> {
         for _ in 0..4 {
             if let Some(token) = self.take_raw(thread_rng().gen()) {
                 return Some(token);
@@ -50,12 +48,12 @@ impl CancelSet {
         None
     }
 
-    pub fn take_raw(&self, rng: usize) -> Option<CancellationToken> {
+    pub(crate) fn take_raw(&self, rng: usize) -> Option<CancellationToken> {
         NonZeroUsize::new(self.shards.len())
             .and_then(|len| self.shards[rng % len].lock().take(rng / len))
     }
 
-    pub fn insert(&self, id: uuid::Uuid, token: CancellationToken) -> CancelGuard<'_> {
+    pub(crate) fn insert(&self, id: uuid::Uuid, token: CancellationToken) -> CancelGuard<'_> {
         let shard = NonZeroUsize::new(self.shards.len()).map(|len| {
             let hash = self.hasher.hash_one(id) as usize;
             let shard = &self.shards[hash % len];
@@ -88,7 +86,7 @@ impl CancelShard {
     }
 }
 
-pub struct CancelGuard<'a> {
+pub(crate) struct CancelGuard<'a> {
     shard: Option<&'a Mutex<CancelShard>>,
     id: Uuid,
 }

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::control_plane_client::ControlPlaneGenerationsApi;
+use crate::controller_upcall_client::ControlPlaneGenerationsApi;
 use crate::metrics;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::remote_timeline_client::remote_timeline_path;
@@ -618,13 +618,11 @@ impl DeletionQueue {
     /// Caller may use the returned object to construct clients with new_client.
     /// Caller should tokio::spawn the background() members of the two worker objects returned:
     /// we don't spawn those inside new() so that the caller can use their runtime/spans of choice.
-    ///
-    /// If remote_storage is None, then the returned workers will also be None.
     pub fn new<C>(
         remote_storage: GenericRemoteStorage,
-        control_plane_client: Option<C>,
+        controller_upcall_client: Option<C>,
         conf: &'static PageServerConf,
-    ) -> (Self, Option<DeletionQueueWorkers<C>>)
+    ) -> (Self, DeletionQueueWorkers<C>)
     where
         C: ControlPlaneGenerationsApi + Send + Sync,
     {
@@ -656,18 +654,18 @@ impl DeletionQueue {
                 },
                 cancel: cancel.clone(),
             },
-            Some(DeletionQueueWorkers {
+            DeletionQueueWorkers {
                 frontend: ListWriter::new(conf, rx, backend_tx, cancel.clone()),
                 backend: Validator::new(
                     conf,
                     backend_rx,
                     executor_tx,
-                    control_plane_client,
+                    controller_upcall_client,
                     lsn_table.clone(),
                     cancel.clone(),
                 ),
                 executor: Deleter::new(remote_storage, executor_rx, cancel.clone()),
-            }),
+            },
         )
     }
 
@@ -696,7 +694,7 @@ impl DeletionQueue {
 mod test {
     use camino::Utf8Path;
     use hex_literal::hex;
-    use pageserver_api::{shard::ShardIndex, upcall_api::ReAttachResponseTenant};
+    use pageserver_api::{key::Key, shard::ShardIndex, upcall_api::ReAttachResponseTenant};
     use std::{io::ErrorKind, time::Duration};
     use tracing::info;
 
@@ -704,8 +702,7 @@ mod test {
     use tokio::task::JoinHandle;
 
     use crate::{
-        control_plane_client::RetryForeverError,
-        repository::Key,
+        controller_upcall_client::RetryForeverError,
         tenant::{harness::TenantHarness, storage_layer::DeltaLayerName},
     };
 
@@ -743,9 +740,7 @@ mod test {
             );
 
             tracing::debug!("Spawning worker for new queue queue");
-            let worker_join = workers
-                .unwrap()
-                .spawn_with(&tokio::runtime::Handle::current());
+            let worker_join = workers.spawn_with(&tokio::runtime::Handle::current());
 
             let old_worker_join = std::mem::replace(&mut self.worker_join, worker_join);
             let old_deletion_queue = std::mem::replace(&mut self.deletion_queue, deletion_queue);
@@ -843,6 +838,7 @@ mod test {
                 local_path: remote_fs_dir.clone(),
             },
             timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+            small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT,
         };
         let storage = GenericRemoteStorage::from_config(&storage_config)
             .await
@@ -856,7 +852,6 @@ mod test {
             harness.conf,
         );
 
-        let worker = worker.unwrap();
         let worker_join = worker.spawn_with(&tokio::runtime::Handle::current());
 
         Ok(TestSetup {
@@ -1150,18 +1145,24 @@ pub(crate) mod mock {
         rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,
         executor_rx: tokio::sync::mpsc::Receiver<DeleterMessage>,
         cancel: CancellationToken,
+        executed: Arc<AtomicUsize>,
     }
 
     impl ConsumerState {
-        async fn consume(&mut self, remote_storage: &GenericRemoteStorage) -> usize {
-            let mut executed = 0;
-
+        async fn consume(&mut self, remote_storage: &GenericRemoteStorage) {
             info!("Executing all pending deletions");
 
             // Transform all executor messages to generic frontend messages
-            while let Ok(msg) = self.executor_rx.try_recv() {
+            loop {
+                use either::Either;
+                let msg = tokio::select! {
+                    left = self.executor_rx.recv() => Either::Left(left),
+                    right = self.rx.recv() => Either::Right(right),
+                };
                 match msg {
-                    DeleterMessage::Delete(objects) => {
+                    Either::Left(None) => break,
+                    Either::Right(None) => break,
+                    Either::Left(Some(DeleterMessage::Delete(objects))) => {
                         for path in objects {
                             match remote_storage.delete(&path, &self.cancel).await {
                                 Ok(_) => {
@@ -1171,18 +1172,13 @@ pub(crate) mod mock {
                                     error!("Failed to delete {path}, leaking object! ({e})");
                                 }
                             }
-                            executed += 1;
+                            self.executed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    DeleterMessage::Flush(flush_op) => {
+                    Either::Left(Some(DeleterMessage::Flush(flush_op))) => {
                         flush_op.notify();
                     }
-                }
-            }
-
-            while let Ok(msg) = self.rx.try_recv() {
-                match msg {
-                    ListWriterQueueMessage::Delete(op) => {
+                    Either::Right(Some(ListWriterQueueMessage::Delete(op))) => {
                         let mut objects = op.objects;
                         for (layer, meta) in op.layers {
                             objects.push(remote_layer_path(
@@ -1204,33 +1200,27 @@ pub(crate) mod mock {
                                     error!("Failed to delete {path}, leaking object! ({e})");
                                 }
                             }
-                            executed += 1;
+                            self.executed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    ListWriterQueueMessage::Flush(op) => {
+                    Either::Right(Some(ListWriterQueueMessage::Flush(op))) => {
                         op.notify();
                     }
-                    ListWriterQueueMessage::FlushExecute(op) => {
+                    Either::Right(Some(ListWriterQueueMessage::FlushExecute(op))) => {
                         // We have already executed all prior deletions because mock does them inline
                         op.notify();
                     }
-                    ListWriterQueueMessage::Recover(_) => {
+                    Either::Right(Some(ListWriterQueueMessage::Recover(_))) => {
                         // no-op in mock
                     }
                 }
-                info!("All pending deletions have been executed");
             }
-
-            executed
         }
     }
 
     pub struct MockDeletionQueue {
         tx: tokio::sync::mpsc::UnboundedSender<ListWriterQueueMessage>,
         executor_tx: tokio::sync::mpsc::Sender<DeleterMessage>,
-        executed: Arc<AtomicUsize>,
-        remote_storage: Option<GenericRemoteStorage>,
-        consumer: std::sync::Mutex<ConsumerState>,
         lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
     }
 
@@ -1241,29 +1231,34 @@ pub(crate) mod mock {
 
             let executed = Arc::new(AtomicUsize::new(0));
 
+            let mut consumer = ConsumerState {
+                rx,
+                executor_rx,
+                cancel: CancellationToken::new(),
+                executed: executed.clone(),
+            };
+
+            tokio::spawn(async move {
+                if let Some(remote_storage) = &remote_storage {
+                    consumer.consume(remote_storage).await;
+                }
+            });
+
             Self {
                 tx,
                 executor_tx,
-                executed,
-                remote_storage,
-                consumer: std::sync::Mutex::new(ConsumerState {
-                    rx,
-                    executor_rx,
-                    cancel: CancellationToken::new(),
-                }),
                 lsn_table: Arc::new(std::sync::RwLock::new(VisibleLsnUpdates::new())),
             }
         }
 
         #[allow(clippy::await_holding_lock)]
         pub async fn pump(&self) {
-            if let Some(remote_storage) = &self.remote_storage {
-                // Permit holding mutex across await, because this is only ever
-                // called once at a time in tests.
-                let mut locked = self.consumer.lock().unwrap();
-                let count = locked.consume(remote_storage).await;
-                self.executed.fetch_add(count, Ordering::Relaxed);
-            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.executor_tx
+                .send(DeleterMessage::Flush(FlushOp { tx }))
+                .await
+                .expect("Failed to send flush message");
+            rx.await.ok();
         }
 
         pub(crate) fn new_client(&self) -> DeletionQueueClient {

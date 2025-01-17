@@ -7,6 +7,7 @@ use postgres_ffi::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
 use postgres_ffi::{
     XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
 };
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -26,7 +27,6 @@ macro_rules! xlog_utils_test {
 
 postgres_ffi::for_all_postgres_versions! { xlog_utils_test }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conf {
     pub pg_version: u32,
     pub pg_distrib_dir: PathBuf,
@@ -53,7 +53,7 @@ impl Conf {
 
         #[allow(clippy::manual_range_patterns)]
         match self.pg_version {
-            14 | 15 | 16 => Ok(path.join(format!("v{}", self.pg_version))),
+            14 | 15 | 16 | 17 => Ok(path.join(format!("v{}", self.pg_version))),
             _ => bail!("Unsupported postgres version: {}", self.pg_version),
         }
     }
@@ -93,9 +93,9 @@ impl Conf {
         );
         let output = self
             .new_pg_command("initdb")?
-            .arg("-D")
+            .arg("--pgdata")
             .arg(&self.datadir)
-            .args(["-U", "postgres", "--no-instructions", "--no-sync"])
+            .args(["--username", "postgres", "--no-instructions", "--no-sync"])
             .output()?;
         debug!("initdb output: {:?}", output);
         ensure!(
@@ -136,8 +136,8 @@ impl Conf {
 
     pub fn pg_waldump(
         &self,
-        first_segment_name: &str,
-        last_segment_name: &str,
+        first_segment_name: &OsStr,
+        last_segment_name: &OsStr,
     ) -> anyhow::Result<std::process::Output> {
         let first_segment_file = self.datadir.join(first_segment_name);
         let last_segment_file = self.datadir.join(last_segment_name);

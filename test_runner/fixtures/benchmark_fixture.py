@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import calendar
 import dataclasses
 import enum
@@ -7,10 +9,9 @@ import re
 import timeit
 from contextlib import contextmanager
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
-
-# Type-related stuff
-from typing import Callable, ClassVar, Dict, Iterator, Optional
+from typing import TYPE_CHECKING
 
 import allure
 import pytest
@@ -22,6 +23,10 @@ from _pytest.terminal import TerminalReporter
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonPageserver
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Mapping
+
 
 """
 This file contains fixtures for micro-benchmarks.
@@ -56,7 +61,7 @@ class PgBenchRunResult:
     number_of_threads: int
     number_of_transactions_actually_processed: int
     latency_average: float
-    latency_stddev: Optional[float]
+    latency_stddev: float | None
     tps: float
     run_duration: float
     run_start_timestamp: int
@@ -75,7 +80,13 @@ class PgBenchRunResult:
     ):
         stdout_lines = stdout.splitlines()
 
+        number_of_clients = 0
+        number_of_threads = 0
+        number_of_transactions_actually_processed = 0
+        latency_average = 0.0
         latency_stddev = None
+        tps = 0.0
+        scale = 0
 
         # we know significant parts of these values from test input
         # but to be precise take them from output
@@ -136,28 +147,38 @@ class PgBenchRunResult:
         )
 
 
+# Taken from https://github.com/postgres/postgres/blob/REL_15_1/src/bin/pgbench/pgbench.c#L5144-L5171
+#
+# This used to be a class variable on PgBenchInitResult. However later versions
+# of Python complain:
+#
+# ValueError: mutable default <class 'dict'> for field EXTRACTORS is not allowed: use default_factory
+#
+# When you do what the error tells you to do, it seems to fail our Python 3.9
+# test environment. So let's just move it to a private module constant, and move
+# on.
+_PGBENCH_INIT_EXTRACTORS: Mapping[str, re.Pattern[str]] = {
+    "drop_tables": re.compile(r"drop tables (\d+\.\d+) s"),
+    "create_tables": re.compile(r"create tables (\d+\.\d+) s"),
+    "client_side_generate": re.compile(r"client-side generate (\d+\.\d+) s"),
+    "server_side_generate": re.compile(r"server-side generate (\d+\.\d+) s"),
+    "vacuum": re.compile(r"vacuum (\d+\.\d+) s"),
+    "primary_keys": re.compile(r"primary keys (\d+\.\d+) s"),
+    "foreign_keys": re.compile(r"foreign keys (\d+\.\d+) s"),
+    "total": re.compile(r"done in (\d+\.\d+) s"),  # Total time printed by pgbench
+}
+
+
 @dataclasses.dataclass
 class PgBenchInitResult:
-    # Taken from https://github.com/postgres/postgres/blob/REL_15_1/src/bin/pgbench/pgbench.c#L5144-L5171
-    EXTRACTORS: ClassVar[Dict[str, re.Pattern]] = {  # type: ignore[type-arg]
-        "drop_tables": re.compile(r"drop tables (\d+\.\d+) s"),
-        "create_tables": re.compile(r"create tables (\d+\.\d+) s"),
-        "client_side_generate": re.compile(r"client-side generate (\d+\.\d+) s"),
-        "server_side_generate": re.compile(r"server-side generate (\d+\.\d+) s"),
-        "vacuum": re.compile(r"vacuum (\d+\.\d+) s"),
-        "primary_keys": re.compile(r"primary keys (\d+\.\d+) s"),
-        "foreign_keys": re.compile(r"foreign keys (\d+\.\d+) s"),
-        "total": re.compile(r"done in (\d+\.\d+) s"),  # Total time printed by pgbench
-    }
-
-    total: Optional[float]
-    drop_tables: Optional[float]
-    create_tables: Optional[float]
-    client_side_generate: Optional[float]
-    server_side_generate: Optional[float]
-    vacuum: Optional[float]
-    primary_keys: Optional[float]
-    foreign_keys: Optional[float]
+    total: float | None
+    drop_tables: float | None
+    create_tables: float | None
+    client_side_generate: float | None
+    server_side_generate: float | None
+    vacuum: float | None
+    primary_keys: float | None
+    foreign_keys: float | None
     duration: float
     start_timestamp: int
     end_timestamp: int
@@ -175,10 +196,10 @@ class PgBenchInitResult:
 
         last_line = stderr.splitlines()[-1]
 
-        timings: Dict[str, Optional[float]] = {}
+        timings: dict[str, float | None] = {}
         last_line_items = re.split(r"\(|\)|,", last_line)
         for item in last_line_items:
-            for key, regex in cls.EXTRACTORS.items():
+            for key, regex in _PGBENCH_INIT_EXTRACTORS.items():
                 if (m := regex.match(item.strip())) is not None:
                     if key in timings:
                         raise RuntimeError(
@@ -206,7 +227,7 @@ class PgBenchInitResult:
 
 
 @enum.unique
-class MetricReport(str, enum.Enum):  # str is a hack to make it json serializable
+class MetricReport(StrEnum):  # str is a hack to make it json serializable
     # this means that this is a constant test parameter
     # like number of transactions, or number of clients
     TEST_PARAM = "test_param"
@@ -235,12 +256,26 @@ class NeonBenchmarker:
         metric_value: float,
         unit: str,
         report: MetricReport,
+        # use this to associate additional key/value pairs in json format for associated Neon object IDs like project ID with the metric
+        labels: dict[str, str] | None = None,
     ):
         """
         Record a benchmark result.
         """
         # just to namespace the value
         name = f"{self.PROPERTY_PREFIX}_{metric_name}"
+        if labels is None:
+            labels = {}
+
+        # Sometimes mypy can't catch non-numeric values,
+        # so adding a check here
+        try:
+            float(metric_value)
+        except ValueError as e:
+            raise ValueError(
+                f"`metric_value` (`{metric_value}`) must be a NUMERIC-friendly data type"
+            ) from e
+
         self.property_recorder(
             name,
             {
@@ -248,6 +283,7 @@ class NeonBenchmarker:
                 "value": metric_value,
                 "unit": unit,
                 "report": report,
+                "labels": labels,
             },
         )
 
@@ -385,7 +421,7 @@ class NeonBenchmarker:
         self,
         pageserver: NeonPageserver,
         metric_name: str,
-        label_filters: Optional[Dict[str, str]] = None,
+        label_filters: dict[str, str] | None = None,
     ) -> int:
         """Fetch the value of given int counter from pageserver metrics."""
         all_metrics = pageserver.http_client().get_metrics()

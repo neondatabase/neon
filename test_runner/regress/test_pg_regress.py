@@ -3,10 +3,12 @@
 #
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
     NeonEnv,
@@ -16,10 +18,9 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import s3_storage
+from fixtures.utils import skip_in_debug_build
 
 if TYPE_CHECKING:
-    from typing import Optional
-
     from fixtures.neon_fixtures import PgBin
     from pytest import CaptureFixture
 
@@ -45,7 +46,7 @@ def post_checks(env: NeonEnv, test_output_dir: Path, db_name: str, endpoint: End
     data properly.
     """
 
-    ignored_files: Optional[list[str]] = None
+    ignored_files: list[str] | None = None
 
     # Neon handles unlogged relations in a special manner. During a
     # basebackup, we ship the init fork as the main fork. This presents a
@@ -107,12 +108,14 @@ def post_checks(env: NeonEnv, test_output_dir: Path, db_name: str, endpoint: End
 
     check_restored_datadir_content(test_output_dir, env, endpoint, ignored_files=ignored_files)
 
-    # Ensure that compaction works, on a timeline containing all the diversity that postgres regression tests create.
+    # Ensure that compaction/GC works, on a timeline containing all the diversity that postgres regression tests create.
     # There should have been compactions mid-test as well, this final check is in addition those.
     for shard, pageserver in tenant_get_shards(env, env.initial_tenant):
         pageserver.http_client().timeline_checkpoint(
             shard, env.initial_timeline, force_repartition=True, force_image_layer_creation=True
         )
+
+        pageserver.http_client().timeline_gc(shard, env.initial_timeline, None)
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
@@ -126,7 +129,7 @@ def test_pg_regress(
     capsys: CaptureFixture[str],
     base_dir: Path,
     pg_distrib_dir: Path,
-    shard_count: Optional[int],
+    shard_count: int | None,
 ):
     DBNAME = "regression"
 
@@ -200,7 +203,7 @@ def test_isolation(
     capsys: CaptureFixture[str],
     base_dir: Path,
     pg_distrib_dir: Path,
-    shard_count: Optional[int],
+    shard_count: int | None,
 ):
     DBNAME = "isolation_regression"
 
@@ -269,7 +272,7 @@ def test_sql_regress(
     capsys: CaptureFixture[str],
     base_dir: Path,
     pg_distrib_dir: Path,
-    shard_count: Optional[int],
+    shard_count: int | None,
 ):
     DBNAME = "regression"
 
@@ -324,3 +327,97 @@ def test_sql_regress(
         pg_bin.run(pg_regress_command, env=env_vars, cwd=runpath)
 
     post_checks(env, test_output_dir, DBNAME, endpoint)
+
+
+@skip_in_debug_build("only run with release build")
+def test_tx_abort_with_many_relations(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    This is not a pg_regress test as such, but perhaps it should be -- this test exercises postgres
+    behavior when aborting a transaction with lots of relations.
+
+    Reproducer for https://github.com/neondatabase/neon/issues/9505
+    """
+
+    env = neon_env_builder.init_start()
+    ep = env.endpoints.create_start(
+        "main",
+        tenant_id=env.initial_tenant,
+        config_lines=[
+            "shared_buffers=1000MB",
+            "max_locks_per_transaction=16384",
+        ],
+    )
+
+    # How many relations: this number is tuned to be long enough to take tens of seconds
+    # if the rollback code path is buggy, tripping the test's timeout.
+    n = 4000
+
+    def create():
+        # Create many relations
+        log.info(f"Creating {n} relations...")
+        ep.safe_psql_many(
+            [
+                "BEGIN",
+                f"""DO $$
+            DECLARE
+                i INT;
+                table_name TEXT;
+            BEGIN
+                FOR i IN 1..{n} LOOP
+                    table_name := 'table_' || i;
+                    EXECUTE 'CREATE TABLE IF NOT EXISTS ' || table_name || ' (id SERIAL PRIMARY KEY, data TEXT)';
+                END LOOP;
+            END $$;
+            """,
+                "COMMIT",
+            ]
+        )
+
+    def truncate():
+        # Truncate relations, then roll back the transaction containing the truncations
+        log.info(f"Truncating {n} relations...")
+        ep.safe_psql_many(
+            [
+                "BEGIN",
+                f"""DO $$
+            DECLARE
+                i INT;
+                table_name TEXT;
+            BEGIN
+                FOR i IN 1..{n} LOOP
+                    table_name := 'table_' || i;
+                    EXECUTE 'TRUNCATE ' || table_name ;
+                END LOOP;
+            END $$;
+            """,
+            ]
+        )
+
+    def rollback_and_wait():
+        log.info(f"Rolling back after truncating {n} relations...")
+        ep.safe_psql("ROLLBACK")
+
+        # Restart the endpoint: this ensures that we can read back what we just wrote, i.e. pageserver
+        # ingest has caught up.
+        ep.stop()
+        log.info(f"Starting endpoint after truncating {n} relations...")
+        ep.start()
+        log.info(f"Started endpoint after truncating {n} relations...")
+
+    # Actual create & truncate phases may be slow, these involves lots of WAL records.  We do not
+    # apply a special timeout, they are expected to complete within general test timeout
+    create()
+    truncate()
+
+    # Run in a thread because the failure case is to take pathologically long time, and we don't want
+    # to block the test executor on that.
+    with ThreadPoolExecutor(max_workers=1) as exec:
+        try:
+            # Rollback phase should be fast: this is one WAL record that we should process efficiently
+            fut = exec.submit(rollback_and_wait)
+            fut.result(timeout=5)
+        except:
+            exec.shutdown(wait=False, cancel_futures=True)
+            raise

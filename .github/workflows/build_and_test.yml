@@ -6,6 +6,7 @@ on:
       - main
       - release
       - release-proxy
+      - release-compute
   pull_request:
 
 defaults:
@@ -20,8 +21,6 @@ concurrency:
 env:
   RUST_BACKTRACE: 1
   COPT: '-Werror'
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
   # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
   E2E_CONCURRENCY_GROUP: ${{ github.repository }}-e2e-tests-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
 
@@ -54,8 +53,8 @@ jobs:
       build-tag: ${{steps.build-tag.outputs.tag}}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # Need `fetch-depth: 0` to count the number of commits in the branch
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -70,25 +69,28 @@ jobs:
             echo "tag=release-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
             echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
+            echo "tag=release-compute-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release', 'release-proxy', 'release-compute'"
             echo "tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
           fi
         shell: bash
         id: build-tag
 
-  check-build-tools-image:
-    needs: [ check-permissions ]
-    uses: ./.github/workflows/check-build-tools-image.yml
-
   build-build-tools-image:
-    needs: [ check-build-tools-image ]
+    needs: [ check-permissions ]
     uses: ./.github/workflows/build-build-tools-image.yml
-    with:
-      image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
     secrets: inherit
 
   check-codestyle-python:
+    needs: [ check-permissions, build-build-tools-image ]
+    uses: ./.github/workflows/_check-codestyle-python.yml
+    with:
+      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
+    secrets: inherit
+
+  check-codestyle-jsonnet:
     needs: [ check-permissions, build-build-tools-image ]
     runs-on: [ self-hosted, small ]
     container:
@@ -102,103 +104,78 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Cache poetry deps
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pypoetry/virtualenvs
-          key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-${{ hashFiles('poetry.lock') }}
+      - name: Check Jsonnet code formatting
+        run: |
+          make -C compute jsonnetfmt-test
 
-      - name: Install Python deps
-        run: ./scripts/pysync
-
-      - name: Run `ruff check` to ensure code format
-        run: poetry run ruff check .
-
-      - name: Run `ruff format` to ensure code format
-        run: poetry run ruff format --check .
-
-      - name: Run mypy to check types
-        run: poetry run mypy .
-
-  check-codestyle-rust:
-    needs: [ check-permissions, build-build-tools-image ]
-    strategy:
-      matrix:
-        arch: [ x64, arm64 ]
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
-
-    container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
-      credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-      options: --init
-
+  # Check that the vendor/postgres-* submodules point to the
+  # corresponding REL_*_STABLE_neon branches.
+  check-submodules:
+    needs: [ check-permissions ]
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: true
 
-#      Disabled for now
-#      - name: Restore cargo deps cache
-#        id: cache_cargo
-#        uses: actions/cache@v4
-#        with:
-#          path: |
-#            !~/.cargo/registry/src
-#            ~/.cargo/git/
-#            target/
-#          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+      - uses: dorny/paths-filter@v3
+        id: check-if-submodules-changed
+        with:
+          filters: |
+            vendor:
+              - 'vendor/**'
 
-      # Some of our rust modules use FFI and need those to be checked
-      - name: Get postgres headers
-        run: make postgres-headers -j$(nproc)
+      - name: Check vendor/postgres-v14 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
+        uses: jtmullen/submodule-branch-check-action@v1
+        with:
+          path: "vendor/postgres-v14"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          pass_if_unchanged: true
 
-      # cargo hack runs the given cargo subcommand (clippy in this case) for all feature combinations.
-      # This will catch compiler & clippy warnings in all feature combinations.
-      # TODO: use cargo hack for build and test as well, but, that's quite expensive.
-      # NB: keep clippy args in sync with ./run_clippy.sh
-      - run: |
-          CLIPPY_COMMON_ARGS="$( source .neon_clippy_args; echo "$CLIPPY_COMMON_ARGS")"
-          if [ "$CLIPPY_COMMON_ARGS" = "" ]; then
-            echo "No clippy args found in .neon_clippy_args"
-            exit 1
-          fi
-          echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
-      - name: Run cargo clippy (debug)
-        run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
-      - name: Run cargo clippy (release)
-        run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
+      - name: Check vendor/postgres-v15 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
+        uses: jtmullen/submodule-branch-check-action@v1
+        with:
+          path: "vendor/postgres-v15"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          pass_if_unchanged: true
 
-      - name: Check documentation generation
-        run: cargo doc --workspace --no-deps --document-private-items
-        env:
-            RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
+      - name: Check vendor/postgres-v16 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
+        uses: jtmullen/submodule-branch-check-action@v1
+        with:
+          path: "vendor/postgres-v16"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          pass_if_unchanged: true
 
-      # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
-      - name: Check formatting
-        if: ${{ !cancelled() }}
-        run: cargo fmt --all -- --check
+      - name: Check vendor/postgres-v17 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
+        uses: jtmullen/submodule-branch-check-action@v1
+        with:
+          path: "vendor/postgres-v17"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          pass_if_unchanged: true
 
-      # https://github.com/facebookincubator/cargo-guppy/tree/bec4e0eb29dcd1faac70b1b5360267fc02bf830e/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
-      - name: Check rust dependencies
-        if: ${{ !cancelled() }}
-        run: |
-          cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
-          cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
-
-      # https://github.com/EmbarkStudios/cargo-deny
-      - name: Check rust licenses/bans/advisories/sources
-        if: ${{ !cancelled() }}
-        run: cargo deny check --hide-inclusion-graph
+  check-codestyle-rust:
+    needs: [ check-permissions, build-build-tools-image ]
+    uses: ./.github/workflows/_check-codestyle-rust.yml
+    with:
+      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
+      archs: '["x64", "arm64"]'
+    secrets: inherit
 
   build-and-test-locally:
     needs: [ tag, build-build-tools-image ]
     strategy:
       fail-fast: false
       matrix:
-        arch: [ x64 ]
+        arch: [ x64, arm64 ]
         # Do not build or run tests in debug for release branches
         build-type: ${{ fromJson((startsWith(github.ref_name, 'release') && github.event_name == 'push') && '["release"]' || '["debug", "release"]') }}
         include:
@@ -207,11 +184,18 @@ jobs:
     uses: ./.github/workflows/_build-and-test-locally.yml
     with:
       arch: ${{ matrix.arch }}
-      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}
+      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
-      # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
-      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16"]' || '["v16"]' }}
+      # Run tests on all Postgres versions in release builds and only on the latest version in debug builds.
+      # Run without LFC on v17 release and debug builds only. For all the other cases LFC is enabled.
+      test-cfg: |
+        ${{ matrix.build-type == 'release' && '[{"pg_version":"v14", "lfc_state": "with-lfc"},
+                                                {"pg_version":"v15", "lfc_state": "with-lfc"},
+                                                {"pg_version":"v16", "lfc_state": "with-lfc"},
+                                                {"pg_version":"v17", "lfc_state": "with-lfc"},
+                                                {"pg_version":"v17", "lfc_state": "without-lfc"}]'
+                                           || '[{"pg_version":"v17", "lfc_state": "without-lfc" }]' }}
     secrets: inherit
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
@@ -222,7 +206,7 @@ jobs:
     needs: [ check-permissions, build-build-tools-image ]
     runs-on: [ self-hosted, small ]
     container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -235,7 +219,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pypoetry/virtualenvs
-          key: v1-${{ runner.os }}-${{ runner.arch }}-python-deps-${{ hashFiles('poetry.lock') }}
+          key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
 
       - name: Install Python deps
         run: ./scripts/pysync
@@ -253,9 +237,14 @@ jobs:
   benchmarks:
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     needs: [ check-permissions, build-and-test-locally, build-build-tools-image, get-benchmarks-durations ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
+      pull-requests: write
     runs-on: [ self-hosted, small ]
     container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -280,38 +269,48 @@ jobs:
           save_perf_report: ${{ github.ref_name == 'main' }}
           extra_params: --splits 5 --group ${{ matrix.pytest_split_group }}
           benchmark_durations: ${{ needs.get-benchmarks-durations.outputs.json }}
+          pg_version: v16
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
+          SYNC_BETWEEN_TESTS: true
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
-  report-benchmarks-failures:
+  report-benchmarks-results-to-slack:
     needs: [ benchmarks, create-test-report ]
-    if: github.ref_name == 'main' && failure() && needs.benchmarks.result == 'failure'
+    if: github.ref_name == 'main' && !cancelled() && contains(fromJSON('["success", "failure"]'), needs.benchmarks.result)
     runs-on: ubuntu-22.04
 
     steps:
-    - uses: slackapi/slack-github-action@v1
+    - uses: slackapi/slack-github-action@v2
       with:
-        channel-id: C060CNA47S9 # on-call-staging-storage-stream
-        slack-message: |
-          Benchmarks failed on main <${{ github.event.head_commit.url }}|${{ github.sha }}>
-          <${{ needs.create-test-report.outputs.report-url }}|Allure report>
-      env:
-        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        method: chat.postMessage
+        token: ${{ secrets.SLACK_BOT_TOKEN }}
+        payload: |
+          channel: "${{ vars.SLACK_ON_CALL_STORAGE_STAGING_STREAM }}"
+          text: |
+            Benchmarks on main: *${{ needs.benchmarks.result }}*
+            - <${{ needs.create-test-report.outputs.report-url }}|Allure report>
+            - <${{ github.event.head_commit.url }}|${{ github.sha }}>
 
   create-test-report:
     needs: [ check-permissions, build-and-test-locally, coverage-report, build-build-tools-image, benchmarks ]
     if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
+      pull-requests: write
     outputs:
       report-url: ${{ steps.create-allure-report.outputs.report-url }}
 
     runs-on: [ self-hosted, small ]
     container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -326,6 +325,7 @@ jobs:
         uses: ./.github/actions/allure-report-generate
         with:
           store-test-results-into-db: true
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
@@ -355,10 +355,15 @@ jobs:
             })
 
   coverage-report:
+    if: ${{ !startsWith(github.ref_name, 'release') }}
     needs: [ check-permissions, build-build-tools-image, build-and-test-locally ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
     runs-on: [ self-hosted, small ]
     container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -371,8 +376,8 @@ jobs:
         coverage-html: ${{ steps.upload-coverage-report-new.outputs.report-url }}
         coverage-json: ${{ steps.upload-coverage-report-new.outputs.summary-json }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # Need `fetch-depth: 0` for differential coverage (to get diff between two commits)
+      - uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 0
@@ -382,12 +387,14 @@ jobs:
         with:
           name: neon-${{ runner.os }}-${{ runner.arch }}-${{ matrix.build_type }}-artifact
           path: /tmp/neon
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Get coverage artifact
         uses: ./.github/actions/download
         with:
           name: coverage-data-artifact
           path: /tmp/coverage
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Merge coverage data
         run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
@@ -446,6 +453,8 @@ jobs:
           REPORT_URL_NEW: ${{ steps.upload-coverage-report-new.outputs.report-url }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         with:
+          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+          retries: 5
           script: |
             const { REPORT_URL_NEW, COMMIT_SHA } = process.env
 
@@ -459,8 +468,8 @@ jobs:
             })
 
   trigger-e2e-tests:
-    if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' }}
-    needs: [ check-permissions, promote-images, tag ]
+    if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute' }}
+    needs: [ check-permissions, promote-images-dev, tag ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
     secrets: inherit
 
@@ -473,13 +482,11 @@ jobs:
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 0
 
-      - uses: ./.github/actions/set-docker-config-dir
+      - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/setup-buildx-action@v3
         with:
           cache-binary: false
@@ -504,19 +511,24 @@ jobs:
             ADDITIONAL_RUSTFLAGS=${{ matrix.arch == 'arm64' && '-Ctarget-feature=+lse -Ctarget-cpu=neoverse-n1' || '' }}
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-bookworm
+            DEBIAN_VERSION=bookworm
           provenance: false
           push: true
           pull: true
           file: Dockerfile
-          cache-from: type=registry,ref=cache.neon.build/neon:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0},mode=max', matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/neon:cache-bookworm-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0}-{1},mode=max', 'bookworm', matrix.arch) || '' }}
           tags: |
-            neondatabase/neon:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
+            neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-${{ matrix.arch }}
 
   neon-image:
     needs: [ neon-image-arch, tag ]
     runs-on: ubuntu-22.04
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
 
     steps:
       - uses: docker/login-action@v3
@@ -527,14 +539,19 @@ jobs:
       - name: Create multi-arch image
         run: |
           docker buildx imagetools create -t neondatabase/neon:${{ needs.tag.outputs.build-tag }} \
-                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-x64 \
-                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-arm64
+                                          -t neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm \
+                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-x64 \
+                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-arm64
 
-      - uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Push multi-arch image to ECR
         run: |
@@ -543,22 +560,36 @@ jobs:
 
   compute-node-image-arch:
     needs: [ check-permissions, build-build-tools-image, tag ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15, v16 ]
+        version:
+          # Much data was already generated on old PG versions with bullseye's
+          # libraries, the locales of which can cause data incompatibilities.
+          # However, new PG versions should be build on newer images,
+          # as that reduces the support burden of old and ancient distros.
+          - pg: v14
+            debian: bullseye
+          - pg: v15
+            debian: bullseye
+          - pg: v16
+            debian: bullseye
+          - pg: v17
+            debian: bookworm
         arch: [ x64, arm64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 0
 
-      - uses: ./.github/actions/set-docker-config-dir
+      - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/setup-buildx-action@v3
         with:
           cache-binary: false
@@ -573,11 +604,15 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       - uses: docker/login-action@v3
         with:
@@ -591,63 +626,59 @@ jobs:
           context: .
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-            PG_VERSION=${{ matrix.version }}
+            PG_VERSION=${{ matrix.version.pg }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
+            DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
           push: true
           pull: true
-          file: Dockerfile.compute-node
-          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
+          file: compute/compute-node.Dockerfile
+          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
           tags: |
-            neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
+            neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
       - name: Build neon extensions test image
-        if: matrix.version == 'v16'
+        if: matrix.version.pg >= 'v16'
         uses: docker/build-push-action@v6
         with:
           context: .
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-            PG_VERSION=${{ matrix.version }}
+            PG_VERSION=${{ matrix.version.pg }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
+            DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
           push: true
           pull: true
-          file: Dockerfile.compute-node
+          file: compute/compute-node.Dockerfile
           target: neon-pg-ext-test
-          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           tags: |
-            neondatabase/neon-test-extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
-
-      - name: Build compute-tools image
-        # compute-tools are Postgres independent, so build it only once
-        if: matrix.version == 'v16'
-        uses: docker/build-push-action@v6
-        with:
-          target: compute-tools-image
-          context: .
-          build-args: |
-            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
-          provenance: false
-          push: true
-          pull: true
-          file: Dockerfile.compute-node
-          tags: |
-            neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
+            neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
   compute-node-image:
     needs: [ compute-node-image-arch, tag ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
     runs-on: ubuntu-22.04
 
     strategy:
       matrix:
-        version: [ v14, v15, v16 ]
+        version:
+          # see the comment for `compute-node-image-arch` job
+          - pg: v14
+            debian: bullseye
+          - pg: v15
+            debian: bullseye
+          - pg: v16
+            debian: bullseye
+          - pg: v17
+            debian: bookworm
 
     steps:
       - uses: docker/login-action@v3
@@ -657,40 +688,33 @@ jobs:
 
       - name: Create multi-arch compute-node image
         run: |
-          docker buildx imagetools create -t neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
-                                             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
-                                             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
+          docker buildx imagetools create -t neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
+                                          -t neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }} \
+                                             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
+                                             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
       - name: Create multi-arch neon-test-extensions image
-        if: matrix.version == 'v16'
+        if: matrix.version.pg >= 'v16'
         run: |
-          docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
-                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
-                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
+          docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
+                                          -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }} \
+                                             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
+                                             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
-      - name: Create multi-arch compute-tools image
-        if: matrix.version == 'v16'
-        run: |
-          docker buildx imagetools create -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }} \
-                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-x64 \
-                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-arm64
-
-      - uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
 
-      - name: Push multi-arch compute-node-${{ matrix.version }} image to ECR
-        run: |
-          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
-                                                                                neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Push multi-arch compute-tools image to ECR
-        if: matrix.version == 'v16'
+      - name: Push multi-arch compute-node-${{ matrix.version.pg }} image to ECR
         run: |
-          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{ needs.tag.outputs.build-tag }} \
-                                                                                neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}
+          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
+                                                                                neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
 
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
@@ -698,22 +722,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15, v16 ]
+        version:
+          # see the comment for `compute-node-image-arch` job
+          - pg: v14
+            debian: bullseye
+          - pg: v15
+            debian: bullseye
+          - pg: v16
+            debian: bullseye
+          - pg: v17
+            debian: bookworm
     env:
-      VM_BUILDER_VERSION: v0.29.3
+      VM_BUILDER_VERSION: v0.37.1
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
       - name: Downloading vm-builder
         run: |
           curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
           chmod +x vm-builder
 
-      - uses: ./.github/actions/set-docker-config-dir
+      - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
@@ -723,18 +753,19 @@ jobs:
       # it won't have the proper authentication (written at v0.6.0)
       - name: Pulling compute-node image
         run: |
-          docker pull neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+          docker pull neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
 
       - name: Build vm image
         run: |
           ./vm-builder \
-            -spec=vm-image-spec.yaml \
-            -src=neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
-            -dst=neondatabase/vm-compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+            -size=2G \
+            -spec=compute/vm-image-spec-${{ matrix.version.debian }}.yaml \
+            -src=neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
+            -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
 
       - name: Pushing vm-compute-node image
         run: |
-          docker push neondatabase/vm-compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+          docker push neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
 
   test-images:
     needs: [ check-permissions, tag, neon-image, compute-node-image ]
@@ -742,16 +773,14 @@ jobs:
       fail-fast: false
       matrix:
         arch: [ x64, arm64 ]
+        pg_version: [v16, v17]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
-      - uses: ./.github/actions/set-docker-config-dir
+      - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
@@ -783,7 +812,10 @@ jobs:
 
       - name: Verify docker-compose example and test extensions
         timeout-minutes: 20
-        run: env TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
+        env:
+          TAG: ${{needs.tag.outputs.build-tag}}
+          TEST_VERSION_ONLY: ${{ matrix.pg_version }}
+        run: ./docker-compose/docker_compose_test.sh
 
       - name: Print logs and clean up
         if: always()
@@ -791,15 +823,17 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml logs || 0
           docker compose -f ./docker-compose/docker-compose.yml down
 
-  promote-images:
-    permissions:
-      contents: read  # This is required for actions/checkout
-      id-token: write # This is required for Azure Login to work.
-    needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
+  promote-images-dev:
+    needs: [ check-permissions, tag, vm-compute-node-image, neon-image ]
     runs-on: ubuntu-22.04
 
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
+
     env:
-      VERSIONS: v14 v15 v16
+      VERSIONS: v14 v15 v16 v17
 
     steps:
       - uses: docker/login-action@v3
@@ -807,12 +841,15 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - name: Login to dev ECR
-        uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Copy vm-compute-node images to ECR
         run: |
@@ -821,27 +858,34 @@ jobs:
                                                neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
           done
 
-      - name: Azure login
-        if: github.ref_name == 'main'
-        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
+  promote-images-prod:
+    needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
+    runs-on: ubuntu-22.04
+    if: github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
+
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
+
+    env:
+      VERSIONS: v14 v15 v16 v17
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          client-id: ${{ secrets.AZURE_DEV_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_DEV_SUBSCRIPTION_ID }}
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
 
-      - name: Login to ACR
-        if: github.ref_name == 'main'
-        run: |
-          az acr login --name=neoneastus2
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Copy docker images to ACR-dev
-        if: github.ref_name == 'main'
-        run: |
-          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
-            docker buildx imagetools create \
-              -t neoneastus2.azurecr.io/neondatabase/${image}:${{ needs.tag.outputs.build-tag }} \
-                                        neondatabase/${image}:${{ needs.tag.outputs.build-tag }}
-          done
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
       - name: Add latest tag to images
         if: github.ref_name == 'main'
@@ -849,9 +893,6 @@ jobs:
           for repo in neondatabase 369495373322.dkr.ecr.eu-central-1.amazonaws.com; do
             docker buildx imagetools create -t $repo/neon:latest \
                                                $repo/neon:${{ needs.tag.outputs.build-tag }}
-
-            docker buildx imagetools create -t $repo/compute-tools:latest \
-                                               $repo/compute-tools:${{ needs.tag.outputs.build-tag }}
 
             for version in ${VERSIONS}; do
               docker buildx imagetools create -t $repo/compute-node-${version}:latest \
@@ -862,27 +903,62 @@ jobs:
             done
           done
           docker buildx imagetools create -t neondatabase/neon-test-extensions-v16:latest \
-                                             neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
+                                              neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
+
+      - name: Configure AWS-prod credentials
+        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: eu-central-1
+          mask-aws-account-id: true
+          role-to-assume: ${{ secrets.PROD_GHA_OIDC_ROLE }}
 
       - name: Login to prod ECR
         uses: docker/login-action@v3
-        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
         with:
           registry: 093970136003.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.PROD_GHA_RUNNER_LIMITED_AWS_ACCESS_KEY_ID }}
-          password: ${{ secrets.PROD_GHA_RUNNER_LIMITED_AWS_SECRET_ACCESS_KEY }}
 
       - name: Copy all images to prod ECR
-        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
         run: |
-          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
+          for image in neon {vm-,}compute-node-{v14,v15,v16,v17}; do
             docker buildx imagetools create -t 093970136003.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }} \
                                                369495373322.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }}
           done
 
+  push-to-acr-dev:
+    if: github.ref_name == 'main'
+    needs: [ tag, promote-images-dev ]
+    uses: ./.github/workflows/_push-to-acr.yml
+    with:
+      client_id: ${{ vars.AZURE_DEV_CLIENT_ID }}
+      image_tag: ${{ needs.tag.outputs.build-tag }}
+      images: neon vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
+      registry_name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
+      subscription_id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
+      tenant_id: ${{ vars.AZURE_TENANT_ID }}
+
+  push-to-acr-prod:
+    if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
+    needs: [ tag, promote-images-prod ]
+    uses: ./.github/workflows/_push-to-acr.yml
+    with:
+      client_id: ${{ vars.AZURE_PROD_CLIENT_ID }}
+      image_tag: ${{ needs.tag.outputs.build-tag }}
+      images: neon vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
+      registry_name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
+      subscription_id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
+      tenant_id: ${{ vars.AZURE_TENANT_ID }}
+
   trigger-custom-extensions-build-and-wait:
     needs: [ check-permissions, tag ]
     runs-on: ubuntu-22.04
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
+      pull-requests: write
     steps:
       - name: Set PR's status to pending and request a remote CI test
         run: |
@@ -955,40 +1031,90 @@ jobs:
           exit 1
 
   deploy:
-    needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait ]
-    if: github.ref_name == 'main' || github.ref_name == 'release'|| github.ref_name == 'release-proxy'
-
+    needs: [ check-permissions, promote-images-prod, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
+    # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
+    if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute') && !failure() && !cancelled()
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
     runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     steps:
-      - name: Fix git ownership
-        run: |
-          # Workaround for `fatal: detected dubious ownership in repository at ...`
-          #
-          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
-          #   Ref https://github.com/actions/checkout/issues/785
-          #
-          git config --global --add safe.directory ${{ github.workspace }}
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          for r in 14 15 16; do
-            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
-            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
-          done
+      - uses: actions/checkout@v4
 
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Create git tag and GitHub release
+        if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
+        uses: actions/github-script@v7
         with:
-          fetch-depth: 0
+          retries: 5
+          script: |
+            const tag = "${{ needs.tag.outputs.build-tag }}";
+
+            try {
+              const existingRef = await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `tags/${tag}`,
+              });
+
+              if (existingRef.data.object.sha !== context.sha) {
+                throw new Error(`Tag ${tag} already exists but points to a different commit (expected: ${context.sha}, actual: ${existingRef.data.object.sha}).`);
+              }
+
+              console.log(`Tag ${tag} already exists and points to ${context.sha} as expected.`);
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+
+              console.log(`Tag ${tag} does not exist. Creating it...`);
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `refs/tags/${tag}`,
+                sha: context.sha,
+              });
+              console.log(`Tag ${tag} created successfully.`);
+            }
+
+            // TODO: check how GitHub releases looks for proxy/compute releases and enable them if they're ok
+            if (context.ref !== 'refs/heads/release') {
+              console.log(`GitHub release skipped for ${context.ref}.`);
+              return;
+            }
+
+            try {
+              const existingRelease = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tag,
+              });
+
+              console.log(`Release for tag ${tag} already exists (ID: ${existingRelease.data.id}).`);
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+
+              console.log(`Release for tag ${tag} does not exist. Creating it...`);
+              await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tag,
+                generate_release_notes: true,
+              });
+              console.log(`Release for tag ${tag} created successfully.`);
+            }
 
       - name: Trigger deploy workflow
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f deployPreprodRegion=false
-            gh workflow --repo neondatabase/azure run deploy.yml -f dockerTag=${{needs.tag.outputs.build-tag}}
+            gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f deployPreprodRegion=false
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main \
+            gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main \
               -f deployPgSniRouter=false \
               -f deployProxy=false \
               -f deployStorage=true \
@@ -998,14 +1124,14 @@ jobs:
               -f dockerTag=${{needs.tag.outputs.build-tag}} \
               -f deployPreprodRegion=true
 
-            gh workflow --repo neondatabase/aws run deploy-prod.yml --ref main \
+            gh workflow --repo neondatabase/infra run deploy-prod.yml --ref main \
               -f deployStorage=true \
               -f deployStorageBroker=true \
               -f deployStorageController=true \
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
-            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main \
+            gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main \
               -f deployPgSniRouter=true \
               -f deployProxy=true \
               -f deployStorage=false \
@@ -1015,86 +1141,118 @@ jobs:
               -f dockerTag=${{needs.tag.outputs.build-tag}} \
               -f deployPreprodRegion=true
 
-            gh workflow --repo neondatabase/aws run deploy-proxy-prod.yml --ref main \
+            gh workflow --repo neondatabase/infra run deploy-proxy-prod.yml --ref main \
               -f deployPgSniRouter=true \
-              -f deployProxy=true \
+              -f deployProxyLink=true \
+              -f deployPrivatelinkProxy=true \
+              -f deployProxyScram=true \
+              -f deployProxyAuthBroker=true \
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
+          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
+            gh workflow --repo neondatabase/infra run deploy-compute-dev.yml --ref main -f dockerTag=${{needs.tag.outputs.build-tag}}
           else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main', 'release', 'release-proxy' or 'release-compute'"
             exit 1
           fi
 
-      - name: Create git tag
-        if: github.ref_name == 'release' || github.ref_name == 'release-proxy'
-        uses: actions/github-script@v7
-        with:
-          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
-          retries: 5
-          script: |
-            await github.rest.git.createRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: "refs/tags/${{ needs.tag.outputs.build-tag }}",
-              sha: context.sha,
-            })
-
-      # TODO: check how GitHub releases looks for proxy releases and enable it if it's ok
-      - name: Create GitHub release
-        if: github.ref_name == 'release'
-        uses: actions/github-script@v7
-        with:
-          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
-          retries: 5
-          script: |
-            await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: "${{ needs.tag.outputs.build-tag }}",
-              generate_release_notes: true,
-            })
-
+  # The job runs on `release` branch and copies compatibility data and Neon artifact from the last *release PR* to the latest directory
   promote-compatibility-data:
-    needs: [ check-permissions, promote-images, tag, build-and-test-locally ]
-    if: github.ref_name == 'release'
+    needs: [ deploy ]
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
+    # `!failure() && !cancelled()` is required because the workflow transitively depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
+    if: github.ref_name == 'release' && !failure() && !cancelled()
 
-    runs-on: [ self-hosted, small ]
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
-      options: --init
+    runs-on: ubuntu-22.04
     steps:
-      - name: Promote compatibility snapshot for the release
+      - name: Fetch GITHUB_RUN_ID and COMMIT_SHA for the last merged release PR
+        id: fetch-last-release-pr-info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch_name_and_pr_number=$(gh pr list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base release \
+            --state merged \
+            --limit 10 \
+            --json mergeCommit,headRefName,number \
+            --jq ".[] | select(.mergeCommit.oid==\"${GITHUB_SHA}\") | { branch_name: .headRefName, pr_number: .number }")
+          branch_name=$(echo "${branch_name_and_pr_number}" | jq -r '.branch_name')
+          pr_number=$(echo "${branch_name_and_pr_number}" | jq -r '.pr_number')
+
+          run_id=$(gh run list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --workflow build_and_test.yml \
+            --branch "${branch_name}" \
+            --json databaseId \
+            --limit 1 \
+            --jq '.[].databaseId')
+
+          last_commit_sha=$(gh pr view "${pr_number}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json commits \
+            --jq '.commits[-1].oid')
+
+          echo "run-id=${run_id}" | tee -a ${GITHUB_OUTPUT}
+          echo "commit-sha=${last_commit_sha}" | tee -a ${GITHUB_OUTPUT}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Promote compatibility snapshot and Neon artifact
         env:
           BUCKET: neon-github-public-dev
-          PREFIX: artifacts/latest
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          AWS_REGION: eu-central-1
+          COMMIT_SHA: ${{ steps.fetch-last-release-pr-info.outputs.commit-sha }}
+          RUN_ID: ${{ steps.fetch-last-release-pr-info.outputs.run-id }}
         run: |
-          # Update compatibility snapshot for the release
-          for pg_version in v14 v15 v16; do
-            for build_type in debug release; do
-              OLD_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}-${GITHUB_RUN_ID}.tar.zst
-              NEW_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}.tar.zst
+          old_prefix="artifacts/${COMMIT_SHA}/${RUN_ID}"
+          new_prefix="artifacts/latest"
 
-              time aws s3 mv --only-show-errors s3://${BUCKET}/${PREFIX}/${OLD_FILENAME} s3://${BUCKET}/${PREFIX}/${NEW_FILENAME}
+          files_to_promote=()
+          files_on_s3=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${old_prefix} | jq -r '.Contents[]?.Key' || true)
+
+          for arch in X64 ARM64; do
+            for build_type in debug release; do
+              neon_artifact_filename="neon-Linux-${arch}-${build_type}-artifact.tar.zst"
+              s3_key=$(echo "${files_on_s3}" | grep ${neon_artifact_filename} | sort --version-sort | tail -1 || true)
+              if [ -z "${s3_key}" ]; then
+                echo >&2 "Neither s3://${BUCKET}/${old_prefix}/${neon_artifact_filename} nor its version from previous attempts exist"
+                exit 1
+              fi
+
+              files_to_promote+=("s3://${BUCKET}/${s3_key}")
+
+              for pg_version in v14 v15 v16 v17; do
+                # We run less tests for debug builds, so we don't need to promote them
+                if [ "${build_type}" == "debug" ] && { [ "${arch}" == "ARM64" ] || [ "${pg_version}" != "v17" ] ; }; then
+                  continue
+                fi
+
+                compatibility_data_filename="compatibility-snapshot-${arch}-${build_type}-pg${pg_version}.tar.zst"
+                s3_key=$(echo "${files_on_s3}" | grep ${compatibility_data_filename} | sort --version-sort | tail -1 || true)
+                if [ -z "${s3_key}" ]; then
+                  echo >&2 "Neither s3://${BUCKET}/${old_prefix}/${compatibility_data_filename} nor its version from previous attempts exist"
+                  exit 1
+                fi
+
+                files_to_promote+=("s3://${BUCKET}/${s3_key}")
+              done
             done
           done
 
-          # Update Neon artifact for the release (reuse already uploaded artifact)
-          for build_type in debug release; do
-            OLD_PREFIX=artifacts/${COMMIT_SHA}/${GITHUB_RUN_ID}
-            FILENAME=neon-${{ runner.os }}-${{ runner.arch }}-${build_type}-artifact.tar.zst
-
-            S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${OLD_PREFIX} | jq -r '.Contents[]?.Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
-            if [ -z "${S3_KEY}" ]; then
-              echo >&2 "Neither s3://${BUCKET}/${OLD_PREFIX}/${FILENAME} nor its version from previous attempts exist"
-              exit 1
-            fi
-
-            time aws s3 cp --only-show-errors s3://${BUCKET}/${S3_KEY} s3://${BUCKET}/${PREFIX}/${FILENAME}
+          for f in "${files_to_promote[@]}"; do
+            time aws s3 cp --only-show-errors ${f} s3://${BUCKET}/${new_prefix}/
           done
 
   pin-build-tools-image:
-    needs: [ build-build-tools-image, promote-images, build-and-test-locally ]
+    needs: [ build-build-tools-image, promote-images-prod, build-and-test-locally ]
     if: github.ref_name == 'main'
     uses: ./.github/workflows/pin-build-tools-image.yml
     with:
@@ -1117,7 +1275,7 @@ jobs:
       - build-and-test-locally
       - check-codestyle-python
       - check-codestyle-rust
-      - promote-images
+      - promote-images-dev
       - test-images
       - trigger-custom-extensions-build-and-wait
     runs-on: ubuntu-22.04

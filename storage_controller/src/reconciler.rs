@@ -1,26 +1,28 @@
 use crate::pageserver_client::PageserverClient;
 use crate::persistence::Persistence;
-use crate::service;
-use pageserver_api::controller_api::PlacementPolicy;
+use crate::{compute_hook, service};
+use pageserver_api::controller_api::{AvailabilityZone, PlacementPolicy};
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_client::mgmt_api;
 use reqwest::StatusCode;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
-use utils::failpoint_support;
+use utils::backoff::exponential_backoff;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
+use utils::pausable_failpoint;
 use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
-use crate::tenant_shard::{IntentState, ObservedState, ObservedStateLocation};
+use crate::tenant_shard::{IntentState, ObservedState, ObservedStateDelta, ObservedStateLocation};
 
 const DEFAULT_HEATMAP_PERIOD: &str = "60s";
 
@@ -43,7 +45,15 @@ pub(super) struct Reconciler {
     pub(crate) reconciler_config: ReconcilerConfig,
 
     pub(crate) config: TenantConfig,
+    pub(crate) preferred_az: Option<AvailabilityZone>,
+
+    /// Observed state from the point of view of the reconciler.
+    /// This gets updated as the reconciliation makes progress.
     pub(crate) observed: ObservedState,
+
+    /// Snapshot of the observed state at the point when the reconciler
+    /// was spawned.
+    pub(crate) original_observed: ObservedState,
 
     pub(crate) service_config: service::Config,
 
@@ -201,11 +211,12 @@ impl Reconciler {
         lazy: bool,
     ) -> Result<(), ReconcileError> {
         if !node.is_available() && config.mode == LocationConfigMode::Detached {
-            // Attempts to detach from offline nodes may be imitated without doing I/O: a node which is offline
-            // will get fully reconciled wrt the shard's intent state when it is reactivated, irrespective of
-            // what we put into `observed`, in [`crate::service::Service::node_activate_reconcile`]
-            tracing::info!("Node {node} is unavailable during detach: proceeding anyway, it will be detached on next activation");
-            self.observed.locations.remove(&node.get_id());
+            // [`crate::service::Service::node_activate_reconcile`] will update the observed state
+            // when the node comes back online. At that point, the intent and observed states will
+            // be mismatched and a background reconciliation will detach.
+            tracing::info!(
+                "Node {node} is unavailable during detach: proceeding anyway, it will be detached via background reconciliation"
+            );
             return Ok(());
         }
 
@@ -441,6 +452,9 @@ impl Reconciler {
         }
     }
 
+    /// This function does _not_ mutate any state, so it is cancellation safe.
+    ///
+    /// This function does not respect [`Self::cancel`], callers should handle that.
     async fn await_lsn(
         &self,
         tenant_shard_id: TenantShardId,
@@ -452,7 +466,7 @@ impl Reconciler {
                 Ok(l) => l,
                 Err(e) => {
                     tracing::info!("🕑 Can't get LSNs on node {node} yet, waiting ({e})",);
-                    std::thread::sleep(Duration::from_millis(500));
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
             };
@@ -461,16 +475,13 @@ impl Reconciler {
             for (timeline_id, baseline_lsn) in &baseline {
                 match latest.get(timeline_id) {
                     Some(latest_lsn) => {
-                        tracing::info!("🕑 LSN origin {baseline_lsn} vs destination {latest_lsn}");
+                        tracing::info!(timeline_id = %timeline_id, "🕑 LSN origin {baseline_lsn} vs destination {latest_lsn}");
                         if latest_lsn < baseline_lsn {
                             any_behind = true;
                         }
                     }
                     None => {
-                        // Expected timeline isn't yet visible on migration destination.
-                        // (IRL we would have to account for timeline deletion, but this
-                        //  is just test helper)
-                        any_behind = true;
+                        // Timeline was deleted in the meantime - ignore it
                     }
                 }
             }
@@ -479,7 +490,7 @@ impl Reconciler {
                 tracing::info!("✅ LSN caught up.  Proceeding...");
                 break;
             } else {
-                std::thread::sleep(Duration::from_millis(500));
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
 
@@ -539,6 +550,8 @@ impl Reconciler {
             }
         }
 
+        pausable_failpoint!("reconciler-live-migrate-pre-generation-inc");
+
         // Increment generation before attaching to new pageserver
         self.generation = Some(
             self.persistence
@@ -558,27 +571,22 @@ impl Reconciler {
         self.location_config(&dest_ps, dest_conf, None, false)
             .await?;
 
+        pausable_failpoint!("reconciler-live-migrate-pre-await-lsn");
+
         if let Some(baseline) = baseline_lsns {
             tracing::info!("🕑 Waiting for LSN to catch up...");
-            self.await_lsn(self.tenant_shard_id, &dest_ps, baseline)
-                .await?;
+            tokio::select! {
+                r = self.await_lsn(self.tenant_shard_id, &dest_ps, baseline) => {r?;}
+                _ = self.cancel.cancelled() => {return Err(ReconcileError::Cancel)}
+            };
         }
 
         tracing::info!("🔁 Notifying compute to use pageserver {dest_ps}");
 
         // During a live migration it is unhelpful to proceed if we couldn't notify compute: if we detach
         // the origin without notifying compute, we will render the tenant unavailable.
-        while let Err(e) = self.compute_notify().await {
-            match e {
-                NotifyError::Fatal(_) => return Err(ReconcileError::Notify(e)),
-                NotifyError::ShuttingDown => return Err(ReconcileError::Cancel),
-                _ => {
-                    tracing::warn!(
-                        "Live migration blocked by compute notification error, retrying: {e}"
-                    );
-                }
-            }
-        }
+        self.compute_notify_blocking(&origin_ps).await?;
+        pausable_failpoint!("reconciler-live-migrate-post-notify");
 
         // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Attached(0), then
         // this location will be deleted in the general case reconciliation that runs after this.
@@ -600,6 +608,8 @@ impl Reconciler {
                 conf: Some(origin_secondary_conf),
             },
         );
+
+        pausable_failpoint!("reconciler-live-migrate-post-detach");
 
         tracing::info!("🔁 Switching to AttachedSingle mode on node {dest_ps}",);
         let dest_final_conf = build_location_config(
@@ -686,6 +696,11 @@ impl Reconciler {
     /// First we apply special case handling (e.g. for live migrations), and then a
     /// general case reconciliation where we walk through the intent by pageserver
     /// and call out to the pageserver to apply the desired state.
+    ///
+    /// An Ok(()) result indicates that we successfully attached the tenant, but _not_ that
+    /// all locations for the tenant are in the expected state. When nodes that are to be detached
+    /// or configured as secondary are unavailable, we may return Ok(()) but leave the shard in a
+    /// state where it still requires later reconciliation.
     pub(crate) async fn reconcile(&mut self) -> Result<(), ReconcileError> {
         // Prepare: if we have uncertain `observed` state for our would-be attachement location, then refresh it
         self.maybe_refresh_observed().await?;
@@ -739,6 +754,8 @@ impl Reconciler {
                     };
 
                     if increment_generation {
+                        pausable_failpoint!("reconciler-pre-increment-generation");
+
                         let generation = self
                             .persistence
                             .increment_generation(self.tenant_shard_id, node.get_id())
@@ -772,10 +789,18 @@ impl Reconciler {
                     tracing::info!(node_id=%node.get_id(), "Observed configuration already correct.")
                 }
                 _ => {
-                    // In all cases other than a matching observed configuration, we will
-                    // reconcile this location.
-                    tracing::info!(node_id=%node.get_id(), "Observed configuration requires update.");
-                    changes.push((node.clone(), wanted_conf))
+                    // Only try and configure secondary locations on nodes that are available.  This
+                    // allows the reconciler to "succeed" while some secondaries are offline (e.g. after
+                    // a node failure, where the failed node will have a secondary intent)
+                    if node.is_available() {
+                        tracing::info!(node_id=%node.get_id(), "Observed configuration requires update.");
+                        changes.push((node.clone(), wanted_conf))
+                    } else {
+                        tracing::info!(node_id=%node.get_id(), "Skipping configuration as secondary, node is unavailable");
+                        self.observed
+                            .locations
+                            .insert(node.get_id(), ObservedStateLocation { conf: None });
+                    }
                 }
             }
         }
@@ -801,10 +826,34 @@ impl Reconciler {
             if self.cancel.is_cancelled() {
                 return Err(ReconcileError::Cancel);
             }
-            self.location_config(&node, conf, None, false).await?;
+            // We only try to configure secondary locations if the node is available.  This does
+            // not stop us succeeding with the reconcile, because our core goal is to make the
+            // shard _available_ (the attached location), and configuring secondary locations
+            // can be done lazily when the node becomes available (via background reconciliation).
+            if node.is_available() {
+                self.location_config(&node, conf, None, false).await?;
+            } else {
+                // If the node is unavailable, we skip and consider the reconciliation successful: this
+                // is a common case where a pageserver is marked unavailable: we demote a location on
+                // that unavailable pageserver to secondary.
+                tracing::info!("Skipping configuring secondary location {node}, it is unavailable");
+                self.observed
+                    .locations
+                    .insert(node.get_id(), ObservedStateLocation { conf: None });
+            }
         }
 
-        failpoint_support::sleep_millis_async!("sleep-on-reconcile-epilogue");
+        // The condition below identifies a detach. We must have no attached intent and
+        // must have been attached to something previously. Pass this information to
+        // the [`ComputeHook`] such that it can update its tenant-wide state.
+        if self.intent.attached.is_none() && !self.detach.is_empty() {
+            // TODO: Consider notifying control plane about detaches. This would avoid situations
+            // where the compute tries to start-up with a stale set of pageservers.
+            self.compute_hook
+                .handle_detach(self.tenant_shard_id, self.shard.stripe_size);
+        }
+
+        pausable_failpoint!("reconciler-epilogue");
 
         Ok(())
     }
@@ -816,9 +865,12 @@ impl Reconciler {
             let result = self
                 .compute_hook
                 .notify(
-                    self.tenant_shard_id,
-                    node.get_id(),
-                    self.shard.stripe_size,
+                    compute_hook::ShardUpdate {
+                        tenant_shard_id: self.tenant_shard_id,
+                        node_id: node.get_id(),
+                        stripe_size: self.shard.stripe_size,
+                        preferred_az: self.preferred_az.as_ref().map(Cow::Borrowed),
+                    },
                     &self.cancel,
                 )
                 .await;
@@ -838,6 +890,150 @@ impl Reconciler {
         } else {
             Ok(())
         }
+    }
+
+    /// Compare the observed state snapshot from when the reconcile was created
+    /// with the final observed state in order to generate observed state deltas.
+    pub(crate) fn observed_deltas(&self) -> Vec<ObservedStateDelta> {
+        let mut deltas = Vec::default();
+
+        for (node_id, location) in &self.observed.locations {
+            let previous_location = self.original_observed.locations.get(node_id);
+            let do_upsert = match previous_location {
+                // Location config changed for node
+                Some(prev) if location.conf != prev.conf => true,
+                // New location config for node
+                None => true,
+                // Location config has not changed for node
+                _ => false,
+            };
+
+            if do_upsert {
+                deltas.push(ObservedStateDelta::Upsert(Box::new((
+                    *node_id,
+                    location.clone(),
+                ))));
+            }
+        }
+
+        for node_id in self.original_observed.locations.keys() {
+            if !self.observed.locations.contains_key(node_id) {
+                deltas.push(ObservedStateDelta::Delete(*node_id));
+            }
+        }
+
+        deltas
+    }
+
+    /// Keep trying to notify the compute indefinitely, only dropping out if:
+    /// - the node `origin` becomes unavailable -> Ok(())
+    /// - the node `origin` no longer has our tenant shard attached -> Ok(())
+    /// - our cancellation token fires -> Err(ReconcileError::Cancelled)
+    ///
+    /// This is used during live migration, where we do not wish to detach
+    /// an origin location until the compute definitely knows about the new
+    /// location.
+    ///
+    /// In cases where the origin node becomes unavailable, we return success, indicating
+    /// to the caller that they should continue irrespective of whether the compute was notified,
+    /// because the origin node is unusable anyway.  Notification will be retried later via the
+    /// [`Self::compute_notify_failure`] flag.
+    async fn compute_notify_blocking(&mut self, origin: &Node) -> Result<(), ReconcileError> {
+        let mut notify_attempts = 0;
+        while let Err(e) = self.compute_notify().await {
+            match e {
+                NotifyError::Fatal(_) => return Err(ReconcileError::Notify(e)),
+                NotifyError::ShuttingDown => return Err(ReconcileError::Cancel),
+                _ => {
+                    tracing::warn!(
+                        "Live migration blocked by compute notification error, retrying: {e}"
+                    );
+                }
+            }
+
+            // Did the origin pageserver become unavailable?
+            if !origin.is_available() {
+                tracing::info!("Giving up on compute notification because {origin} is unavailable");
+                break;
+            }
+
+            // Does the origin pageserver still host the shard we are interested in?  We should only
+            // continue waiting for compute notification to be acked if the old location is still usable.
+            let tenant_shard_id = self.tenant_shard_id;
+            match origin
+                .with_client_retries(
+                    |client| async move { client.get_location_config(tenant_shard_id).await },
+                    &self.service_config.jwt_token,
+                    1,
+                    3,
+                    Duration::from_secs(5),
+                    &self.cancel,
+                )
+                .await
+            {
+                Some(Ok(Some(location_conf))) => {
+                    if matches!(
+                        location_conf.mode,
+                        LocationConfigMode::AttachedMulti
+                            | LocationConfigMode::AttachedSingle
+                            | LocationConfigMode::AttachedStale
+                    ) {
+                        tracing::debug!(
+                            "Still attached to {origin}, will wait & retry compute notification"
+                        );
+                    } else {
+                        tracing::info!(
+                            "Giving up on compute notification because {origin} is in state {:?}",
+                            location_conf.mode
+                        );
+                        return Ok(());
+                    }
+                    // Fall through
+                }
+                Some(Ok(None)) => {
+                    tracing::info!(
+                        "No longer attached to {origin}, giving up on compute notification"
+                    );
+                    return Ok(());
+                }
+                Some(Err(e)) => {
+                    match e {
+                        mgmt_api::Error::Cancelled => {
+                            tracing::info!(
+                                "Giving up on compute notification because {origin} is unavailable"
+                            );
+                            return Ok(());
+                        }
+                        mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, _) => {
+                            tracing::info!(
+                                "No longer attached to {origin}, giving up on compute notification"
+                            );
+                            return Ok(());
+                        }
+                        e => {
+                            // Other API errors are unexpected here.
+                            tracing::warn!("Unexpected error checking location on {origin}: {e}");
+
+                            // Fall through, we will retry compute notification.
+                        }
+                    }
+                }
+                None => return Err(ReconcileError::Cancel),
+            };
+
+            exponential_backoff(
+                notify_attempts,
+                // Generous waits: control plane operations which might be blocking us usually complete on the order
+                // of hundreds to thousands of milliseconds, so no point busy polling.
+                1.0,
+                10.0,
+                &self.cancel,
+            )
+            .await;
+            notify_attempts += 1;
+        }
+
+        Ok(())
     }
 }
 

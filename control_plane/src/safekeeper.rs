@@ -5,6 +5,8 @@
 //! ```text
 //!   .neon/safekeepers/<safekeeper id>
 //! ```
+use std::error::Error as _;
+use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -25,7 +27,7 @@ use crate::{
 
 #[derive(Error, Debug)]
 pub enum SafekeeperHttpError {
-    #[error("Reqwest error: {0}")]
+    #[error("request error: {0}{}", .0.source().map(|e| format!(": {e}")).unwrap_or_default())]
     Transport(#[from] reqwest::Error),
 
     #[error("Error: {0}")]
@@ -34,12 +36,10 @@ pub enum SafekeeperHttpError {
 
 type Result<T> = result::Result<T, SafekeeperHttpError>;
 
-#[async_trait::async_trait]
-pub trait ResponseErrorMessageExt: Sized {
-    async fn error_from_body(self) -> Result<Self>;
+pub(crate) trait ResponseErrorMessageExt: Sized {
+    fn error_from_body(self) -> impl Future<Output = Result<Self>> + Send;
 }
 
-#[async_trait::async_trait]
 impl ResponseErrorMessageExt for reqwest::Response {
     async fn error_from_body(self) -> Result<Self> {
         let status = self.status();
@@ -114,7 +114,7 @@ impl SafekeeperNode {
 
     pub async fn start(
         &self,
-        extra_opts: Vec<String>,
+        extra_opts: &[String],
         retry_timeout: &Duration,
     ) -> anyhow::Result<()> {
         print!(
@@ -197,7 +197,7 @@ impl SafekeeperNode {
             ]);
         }
 
-        args.extend(extra_opts);
+        args.extend_from_slice(extra_opts);
 
         background_process::start_process(
             &format!("safekeeper-{id}"),

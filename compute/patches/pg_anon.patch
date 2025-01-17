@@ -1,0 +1,265 @@
+commit 00aa659afc9c7336ab81036edec3017168aabf40
+Author: Heikki Linnakangas <heikki@neon.tech>
+Date:   Tue Nov 12 16:59:19 2024 +0200
+
+    Temporarily disable test that depends on timezone
+
+diff --git a/tests/expected/generalization.out b/tests/expected/generalization.out
+index 23ef5fa..9e60deb 100644
+--- a/ext-src/pg_anon-src/tests/expected/generalization.out
++++ b/ext-src/pg_anon-src/tests/expected/generalization.out
+@@ -284,12 +284,9 @@ SELECT anon.generalize_tstzrange('19041107','century');
+  ["Tue Jan 01 00:00:00 1901 PST","Mon Jan 01 00:00:00 2001 PST")
+ (1 row)
+ 
+-SELECT anon.generalize_tstzrange('19041107','millennium');
+-                      generalize_tstzrange                       
+------------------------------------------------------------------
+- ["Thu Jan 01 00:00:00 1001 PST","Mon Jan 01 00:00:00 2001 PST")
+-(1 row)
+-
++-- temporarily disabled, see:
++-- https://gitlab.com/dalibo/postgresql_anonymizer/-/commit/199f0a392b37c59d92ae441fb8f037e094a11a52#note_2148017485
++--SELECT anon.generalize_tstzrange('19041107','millennium');
+ -- generalize_daterange
+ SELECT anon.generalize_daterange('19041107');
+   generalize_daterange   
+diff --git a/tests/sql/generalization.sql b/tests/sql/generalization.sql
+index b868344..b4fc977 100644
+--- a/ext-src/pg_anon-src/tests/sql/generalization.sql
++++ b/ext-src/pg_anon-src/tests/sql/generalization.sql
+@@ -61,7 +61,9 @@ SELECT anon.generalize_tstzrange('19041107','month');
+ SELECT anon.generalize_tstzrange('19041107','year');
+ SELECT anon.generalize_tstzrange('19041107','decade');
+ SELECT anon.generalize_tstzrange('19041107','century');
+-SELECT anon.generalize_tstzrange('19041107','millennium');
++-- temporarily disabled, see:
++-- https://gitlab.com/dalibo/postgresql_anonymizer/-/commit/199f0a392b37c59d92ae441fb8f037e094a11a52#note_2148017485
++--SELECT anon.generalize_tstzrange('19041107','millennium');
+ 
+ -- generalize_daterange
+ SELECT anon.generalize_daterange('19041107');
+
+commit 7dd414ee75f2875cffb1d6ba474df1f135a6fc6f
+Author: Alexey Masterov <alexeymasterov@neon.tech>
+Date:   Fri May 31 06:34:26 2024 +0000
+
+    These alternative expected files were added to consider the neon features
+
+diff --git a/ext-src/pg_anon-src/tests/expected/permissions_masked_role_1.out b/ext-src/pg_anon-src/tests/expected/permissions_masked_role_1.out
+new file mode 100644
+index 0000000..2539cfd
+--- /dev/null
++++ b/ext-src/pg_anon-src/tests/expected/permissions_masked_role_1.out
+@@ -0,0 +1,101 @@
++BEGIN;
++CREATE EXTENSION anon CASCADE;
++NOTICE:  installing required extension "pgcrypto"
++SELECT anon.init();
++ init 
++------
++ t
++(1 row)
++
++CREATE ROLE mallory_the_masked_user;
++SECURITY LABEL FOR anon ON ROLE mallory_the_masked_user IS 'MASKED';
++CREATE TABLE t1(i INT);
++ALTER TABLE t1 ADD COLUMN t TEXT;
++SECURITY LABEL FOR anon ON COLUMN t1.t
++IS 'MASKED WITH VALUE NULL';
++INSERT INTO t1 VALUES (1,'test');
++--
++-- We're checking the owner's permissions
++--
++-- see
++-- https://postgresql-anonymizer.readthedocs.io/en/latest/SECURITY/#permissions
++--
++SET ROLE mallory_the_masked_user;
++SELECT anon.pseudo_first_name(0) IS NOT NULL;
++ ?column? 
++----------
++ t
++(1 row)
++
++-- SHOULD FAIL
++DO $$
++BEGIN
++  PERFORM anon.init();
++  EXCEPTION WHEN insufficient_privilege
++  THEN RAISE NOTICE 'insufficient_privilege';
++END$$;
++NOTICE:  insufficient_privilege
++-- SHOULD FAIL
++DO $$
++BEGIN
++  PERFORM anon.anonymize_table('t1');
++  EXCEPTION WHEN insufficient_privilege
++  THEN RAISE NOTICE 'insufficient_privilege';
++END$$;
++NOTICE:  insufficient_privilege
++-- SHOULD FAIL
++SAVEPOINT fail_start_engine;
++SELECT anon.start_dynamic_masking();
++ERROR:  Only supersusers can start the dynamic masking engine.
++CONTEXT:  PL/pgSQL function anon.start_dynamic_masking(boolean) line 18 at RAISE
++ROLLBACK TO fail_start_engine;
++RESET ROLE;
++SELECT anon.start_dynamic_masking();
++ start_dynamic_masking 
++-----------------------
++ t
++(1 row)
++
++SET ROLE mallory_the_masked_user;
++SELECT * FROM mask.t1;
++ i | t 
++---+---
++ 1 | 
++(1 row)
++
++-- SHOULD FAIL
++DO $$
++BEGIN
++  SELECT * FROM public.t1;
++  EXCEPTION WHEN insufficient_privilege
++  THEN RAISE NOTICE 'insufficient_privilege';
++END$$;
++NOTICE:  insufficient_privilege
++-- SHOULD FAIL
++SAVEPOINT fail_stop_engine;
++SELECT anon.stop_dynamic_masking();
++ERROR:  Only supersusers can stop the dynamic masking engine.
++CONTEXT:  PL/pgSQL function anon.stop_dynamic_masking() line 18 at RAISE
++ROLLBACK TO fail_stop_engine;
++RESET ROLE;
++SELECT anon.stop_dynamic_masking();
++NOTICE:  The previous priviledges of 'mallory_the_masked_user' are not restored. You need to grant them manually.
++ stop_dynamic_masking 
++----------------------
++ t
++(1 row)
++
++SET ROLE mallory_the_masked_user;
++SELECT COUNT(*)=1 FROM anon.pg_masking_rules;
++ ?column? 
++----------
++ t
++(1 row)
++
++-- SHOULD FAIL
++SAVEPOINT fail_seclabel_on_role;
++SECURITY LABEL FOR anon ON ROLE mallory_the_masked_user IS NULL;
++ERROR:  permission denied
++DETAIL:  The current user must have the CREATEROLE attribute.
++ROLLBACK TO fail_seclabel_on_role;
++ROLLBACK;
+diff --git a/ext-src/pg_anon-src/tests/expected/permissions_owner_1.out b/ext-src/pg_anon-src/tests/expected/permissions_owner_1.out
+new file mode 100644
+index 0000000..8b090fe
+--- /dev/null
++++ b/ext-src/pg_anon-src/tests/expected/permissions_owner_1.out
+@@ -0,0 +1,104 @@
++BEGIN;
++CREATE EXTENSION anon CASCADE;
++NOTICE:  installing required extension "pgcrypto"
++SELECT anon.init();
++ init 
++------
++ t
++(1 row)
++
++CREATE ROLE oscar_the_owner;
++ALTER DATABASE :DBNAME OWNER TO oscar_the_owner;
++CREATE ROLE mallory_the_masked_user;
++SECURITY LABEL FOR anon ON ROLE mallory_the_masked_user IS 'MASKED';
++--
++-- We're checking the owner's permissions
++--
++-- see
++-- https://postgresql-anonymizer.readthedocs.io/en/latest/SECURITY/#permissions
++--
++SET ROLE oscar_the_owner;
++SELECT anon.pseudo_first_name(0) IS NOT NULL;
++ ?column? 
++----------
++ t
++(1 row)
++
++-- SHOULD FAIL
++DO $$
++BEGIN
++  PERFORM anon.init();
++  EXCEPTION WHEN insufficient_privilege
++  THEN RAISE NOTICE 'insufficient_privilege';
++END$$;
++NOTICE:  insufficient_privilege
++CREATE TABLE t1(i INT);
++ALTER TABLE t1 ADD COLUMN t TEXT;
++SECURITY LABEL FOR anon ON COLUMN t1.t
++IS 'MASKED WITH VALUE NULL';
++INSERT INTO t1 VALUES (1,'test');
++SELECT anon.anonymize_table('t1');
++ anonymize_table 
++-----------------
++ t
++(1 row)
++
++SELECT * FROM t1;
++ i | t 
++---+---
++ 1 | 
++(1 row)
++
++UPDATE t1 SET t='test' WHERE i=1;
++-- SHOULD FAIL
++SAVEPOINT fail_start_engine;
++SELECT anon.start_dynamic_masking();
++ start_dynamic_masking 
++-----------------------
++ t
++(1 row)
++
++ROLLBACK TO fail_start_engine;
++RESET ROLE;
++SELECT anon.start_dynamic_masking();
++ start_dynamic_masking 
++-----------------------
++ t
++(1 row)
++
++SET ROLE oscar_the_owner;
++SELECT * FROM t1;
++ i |  t   
++---+------
++ 1 | test
++(1 row)
++
++--SELECT * FROM mask.t1;
++-- SHOULD FAIL
++SAVEPOINT fail_stop_engine;
++SELECT anon.stop_dynamic_masking();
++ERROR:  permission denied for schema mask
++CONTEXT:  SQL statement "DROP VIEW mask.t1;"
++PL/pgSQL function anon.mask_drop_view(oid) line 3 at EXECUTE
++SQL statement "SELECT anon.mask_drop_view(oid)
++  FROM pg_catalog.pg_class
++  WHERE relnamespace=quote_ident(pg_catalog.current_setting('anon.sourceschema'))::REGNAMESPACE
++  AND relkind IN ('r','p','f')"
++PL/pgSQL function anon.stop_dynamic_masking() line 22 at PERFORM
++ROLLBACK TO fail_stop_engine;
++RESET ROLE;
++SELECT anon.stop_dynamic_masking();
++NOTICE:  The previous priviledges of 'mallory_the_masked_user' are not restored. You need to grant them manually.
++ stop_dynamic_masking 
++----------------------
++ t
++(1 row)
++
++SET ROLE oscar_the_owner;
++-- SHOULD FAIL
++SAVEPOINT fail_seclabel_on_role;
++SECURITY LABEL FOR anon ON ROLE mallory_the_masked_user IS NULL;
++ERROR:  permission denied
++DETAIL:  The current user must have the CREATEROLE attribute.
++ROLLBACK TO fail_seclabel_on_role;
++ROLLBACK;

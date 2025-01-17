@@ -12,6 +12,7 @@ use pageserver_api::key::rel_block_to_key;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_tar::Archive;
 use tracing::*;
+use wal_decoder::models::InterpretedWalRecord;
 use walkdir::WalkDir;
 
 use crate::context::RequestContext;
@@ -19,7 +20,6 @@ use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::*;
 use crate::tenant::Timeline;
 use crate::walingest::WalIngest;
-use crate::walrecord::DecodedWALRecord;
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::*;
@@ -278,6 +278,8 @@ async fn import_wal(
 
     let mut walingest = WalIngest::new(tline, startpoint, ctx).await?;
 
+    let shard = vec![*tline.get_shard_identity()];
+
     while last_lsn <= endpoint {
         // FIXME: assume postgresql tli 1 for now
         let filename = XLogFileName(1, segno, WAL_SEGMENT_SIZE);
@@ -310,11 +312,19 @@ async fn import_wal(
 
         let mut nrecords = 0;
         let mut modification = tline.begin_modification(last_lsn);
-        let mut decoded = DecodedWALRecord::default();
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                let interpreted = InterpretedWalRecord::from_bytes_filtered(
+                    recdata,
+                    &shard,
+                    lsn,
+                    tline.pg_version,
+                )?
+                .remove(tline.get_shard_identity())
+                .unwrap();
+
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
+                    .ingest_record(interpreted, &mut modification, ctx)
                     .await?;
                 WAL_INGEST.records_committed.inc();
 
@@ -405,6 +415,7 @@ pub async fn import_wal_from_tar(
     let mut offset = start_lsn.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = start_lsn;
     let mut walingest = WalIngest::new(tline, start_lsn, ctx).await?;
+    let shard = vec![*tline.get_shard_identity()];
 
     // Ingest wal until end_lsn
     info!("importing wal until {}", end_lsn);
@@ -449,11 +460,19 @@ pub async fn import_wal_from_tar(
         waldecoder.feed_bytes(&bytes[offset..]);
 
         let mut modification = tline.begin_modification(last_lsn);
-        let mut decoded = DecodedWALRecord::default();
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                let interpreted = InterpretedWalRecord::from_bytes_filtered(
+                    recdata,
+                    &shard,
+                    lsn,
+                    tline.pg_version,
+                )?
+                .remove(tline.get_shard_identity())
+                .unwrap();
+
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
+                    .ingest_record(interpreted, &mut modification, ctx)
                     .await?;
                 modification.commit(ctx).await?;
                 last_lsn = lsn;
@@ -563,22 +582,30 @@ async fn import_file(
     } else if file_path.starts_with("pg_xact") {
         let slru = SlruKind::Clog;
 
-        import_slru(modification, slru, file_path, reader, len, ctx).await?;
-        debug!("imported clog slru");
+        if modification.tline.tenant_shard_id.is_shard_zero() {
+            import_slru(modification, slru, file_path, reader, len, ctx).await?;
+            debug!("imported clog slru");
+        }
     } else if file_path.starts_with("pg_multixact/offsets") {
         let slru = SlruKind::MultiXactOffsets;
 
-        import_slru(modification, slru, file_path, reader, len, ctx).await?;
-        debug!("imported multixact offsets slru");
+        if modification.tline.tenant_shard_id.is_shard_zero() {
+            import_slru(modification, slru, file_path, reader, len, ctx).await?;
+            debug!("imported multixact offsets slru");
+        }
     } else if file_path.starts_with("pg_multixact/members") {
         let slru = SlruKind::MultiXactMembers;
 
-        import_slru(modification, slru, file_path, reader, len, ctx).await?;
-        debug!("imported multixact members slru");
+        if modification.tline.tenant_shard_id.is_shard_zero() {
+            import_slru(modification, slru, file_path, reader, len, ctx).await?;
+            debug!("imported multixact members slru");
+        }
     } else if file_path.starts_with("pg_twophase") {
-        let xid = u32::from_str_radix(file_name.as_ref(), 16)?;
-
         let bytes = read_all_bytes(reader).await?;
+
+        // In PostgreSQL v17, this is a 64-bit FullTransactionid. In previous versions,
+        // it's a 32-bit TransactionId, which fits in u64 anyway.
+        let xid = u64::from_str_radix(file_name.as_ref(), 16)?;
         modification
             .put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]), ctx)
             .await?;

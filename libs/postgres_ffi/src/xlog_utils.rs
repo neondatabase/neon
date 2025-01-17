@@ -7,13 +7,12 @@
 // have been named the same as the corresponding PostgreSQL functions instead.
 //
 
-use crc32c::crc32c_append;
-
 use super::super::waldecoder::WalStreamDecoder;
 use super::bindings::{
     CheckPoint, ControlFileData, DBState_DB_SHUTDOWNED, FullTransactionId, TimeLineID, TimestampTz,
     XLogLongPageHeaderData, XLogPageHeaderData, XLogRecPtr, XLogRecord, XLogSegNo, XLOG_PAGE_MAGIC,
 };
+use super::wal_generator::LogicalMessageGenerator;
 use super::PG_MAJORVERSION;
 use crate::pg_constants;
 use crate::PG_TLI;
@@ -26,11 +25,12 @@ use bytes::{Buf, Bytes};
 use log::*;
 
 use serde::Serialize;
+use std::ffi::{CString, OsStr};
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::ErrorKind;
 use std::io::SeekFrom;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::SystemTime;
 use utils::bin_ser::DeserializeError;
 use utils::bin_ser::SerializeError;
@@ -38,6 +38,7 @@ use utils::bin_ser::SerializeError;
 use utils::lsn::Lsn;
 
 pub const XLOG_FNAME_LEN: usize = 24;
+pub const XLP_BKP_REMOVABLE: u16 = 0x0004;
 pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
 pub const XLP_REM_LEN_OFFS: usize = 2 + 2 + 4 + 8;
 pub const XLOG_RECORD_CRC_OFFS: usize = 4 + 4 + 8 + 1 + 1 + 2;
@@ -78,19 +79,34 @@ pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize
     )
 }
 
-pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLineID) {
-    let tli = u32::from_str_radix(&fname[0..8], 16).unwrap();
-    let log = u32::from_str_radix(&fname[8..16], 16).unwrap() as XLogSegNo;
-    let seg = u32::from_str_radix(&fname[16..24], 16).unwrap() as XLogSegNo;
-    (log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli)
+pub fn XLogFromFileName(
+    fname: &OsStr,
+    wal_seg_size: usize,
+) -> anyhow::Result<(XLogSegNo, TimeLineID)> {
+    if let Some(fname_str) = fname.to_str() {
+        let tli = u32::from_str_radix(&fname_str[0..8], 16)?;
+        let log = u32::from_str_radix(&fname_str[8..16], 16)? as XLogSegNo;
+        let seg = u32::from_str_radix(&fname_str[16..24], 16)? as XLogSegNo;
+        Ok((log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli))
+    } else {
+        anyhow::bail!("non-ut8 filename: {:?}", fname);
+    }
 }
 
-pub fn IsXLogFileName(fname: &str) -> bool {
-    return fname.len() == XLOG_FNAME_LEN && fname.chars().all(|c| c.is_ascii_hexdigit());
+pub fn IsXLogFileName(fname: &OsStr) -> bool {
+    if let Some(fname) = fname.to_str() {
+        fname.len() == XLOG_FNAME_LEN && fname.chars().all(|c| c.is_ascii_hexdigit())
+    } else {
+        false
+    }
 }
 
-pub fn IsPartialXLogFileName(fname: &str) -> bool {
-    fname.ends_with(".partial") && IsXLogFileName(&fname[0..fname.len() - 8])
+pub fn IsPartialXLogFileName(fname: &OsStr) -> bool {
+    if let Some(fname) = fname.to_str() {
+        fname.ends_with(".partial") && IsXLogFileName(OsStr::new(&fname[0..fname.len() - 8]))
+    } else {
+        false
+    }
 }
 
 /// If LSN points to the beginning of the page, then shift it to first record,
@@ -135,6 +151,8 @@ pub fn get_current_timestamp() -> TimestampTz {
 mod timestamp_conversions {
     use std::time::Duration;
 
+    use anyhow::Context;
+
     use super::*;
 
     const UNIX_EPOCH_JDATE: u64 = 2440588; // == date2j(1970, 1, 1)
@@ -154,18 +172,18 @@ mod timestamp_conversions {
         }
     }
 
-    pub fn from_pg_timestamp(time: TimestampTz) -> SystemTime {
+    pub fn try_from_pg_timestamp(time: TimestampTz) -> anyhow::Result<SystemTime> {
         let time: u64 = time
             .try_into()
-            .expect("timestamp before millenium (postgres epoch)");
+            .context("timestamp before millenium (postgres epoch)")?;
         let since_unix_epoch = time + SECS_DIFF_UNIX_TO_POSTGRES_EPOCH * USECS_PER_SEC;
         SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_micros(since_unix_epoch))
-            .expect("SystemTime overflow")
+            .context("SystemTime overflow")
     }
 }
 
-pub use timestamp_conversions::{from_pg_timestamp, to_pg_timestamp};
+pub use timestamp_conversions::{to_pg_timestamp, try_from_pg_timestamp};
 
 // Returns (aligned) end_lsn of the last record in data_dir with WAL segments.
 // start_lsn must point to some previously known record boundary (beginning of
@@ -256,13 +274,6 @@ fn open_wal_segment(seg_file_path: &Path) -> anyhow::Result<Option<File>> {
             _ => Err(e.into()),
         },
     }
-}
-
-pub fn main() {
-    let mut data_dir = PathBuf::new();
-    data_dir.push(".");
-    let wal_end = find_end_of_wal(&data_dir, WAL_SEGMENT_SIZE, Lsn(0)).unwrap();
-    println!("wal_end={:?}", wal_end);
 }
 
 impl XLogRecord {
@@ -478,64 +489,14 @@ impl XlLogicalMessage {
 /// Create new WAL record for non-transactional logical message.
 /// Used for creating artificial WAL for tests, as LogicalMessage
 /// record is basically no-op.
-///
-/// NOTE: This leaves the xl_prev field zero. The safekeeper and
-/// pageserver tolerate that, but PostgreSQL does not.
-pub fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
-    let mut prefix_bytes: Vec<u8> = Vec::with_capacity(prefix.len() + 1);
-    prefix_bytes.write_all(prefix.as_bytes()).unwrap();
-    prefix_bytes.push(0);
-
-    let message_bytes = message.as_bytes();
-
-    let logical_message = XlLogicalMessage {
-        db_id: 0,
-        transactional: 0,
-        prefix_size: prefix_bytes.len() as u64,
-        message_size: message_bytes.len() as u64,
-    };
-
-    let mainrdata = logical_message.encode();
-    let mainrdata_len: usize = mainrdata.len() + prefix_bytes.len() + message_bytes.len();
-    // only short mainrdata is supported for now
-    assert!(mainrdata_len <= 255);
-    let mainrdata_len = mainrdata_len as u8;
-
-    let mut data: Vec<u8> = vec![pg_constants::XLR_BLOCK_ID_DATA_SHORT, mainrdata_len];
-    data.extend_from_slice(&mainrdata);
-    data.extend_from_slice(&prefix_bytes);
-    data.extend_from_slice(message_bytes);
-
-    let total_len = XLOG_SIZE_OF_XLOG_RECORD + data.len();
-
-    let mut header = XLogRecord {
-        xl_tot_len: total_len as u32,
-        xl_xid: 0,
-        xl_prev: 0,
-        xl_info: 0,
-        xl_rmid: 21,
-        __bindgen_padding_0: [0u8; 2usize],
-        xl_crc: 0, // crc will be calculated later
-    };
-
-    let header_bytes = header.encode().expect("failed to encode header");
-    let crc = crc32c_append(0, &data);
-    let crc = crc32c_append(crc, &header_bytes[0..XLOG_RECORD_CRC_OFFS]);
-    header.xl_crc = crc;
-
-    let mut wal: Vec<u8> = Vec::new();
-    wal.extend_from_slice(&header.encode().expect("failed to encode header"));
-    wal.extend_from_slice(&data);
-
-    // WAL start position must be aligned at 8 bytes,
-    // this will add padding for the next WAL record.
-    const PADDING: usize = 8;
-    let padding_rem = wal.len() % PADDING;
-    if padding_rem != 0 {
-        wal.resize(wal.len() + PADDING - padding_rem, 0);
-    }
-
-    wal
+pub fn encode_logical_message(prefix: &str, message: &str) -> Bytes {
+    // This function can take untrusted input, so discard any NUL bytes in the prefix string.
+    let prefix = CString::new(prefix.replace('\0', "")).expect("no NULs");
+    let message = message.as_bytes();
+    LogicalMessageGenerator::new(&prefix, message)
+        .next()
+        .unwrap()
+        .encode(Lsn(0))
 }
 
 #[cfg(test)]
@@ -545,14 +506,14 @@ mod tests {
     #[test]
     fn test_ts_conversion() {
         let now = SystemTime::now();
-        let round_trip = from_pg_timestamp(to_pg_timestamp(now));
+        let round_trip = try_from_pg_timestamp(to_pg_timestamp(now)).unwrap();
 
         let now_since = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         let round_trip_since = round_trip.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         assert_eq!(now_since.as_micros(), round_trip_since.as_micros());
 
         let now_pg = get_current_timestamp();
-        let round_trip_pg = to_pg_timestamp(from_pg_timestamp(now_pg));
+        let round_trip_pg = to_pg_timestamp(try_from_pg_timestamp(now_pg).unwrap());
 
         assert_eq!(now_pg, round_trip_pg);
     }

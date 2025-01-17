@@ -53,6 +53,7 @@ use compute_api::spec::Role;
 use nix::sys::signal::kill;
 use nix::sys::signal::Signal;
 use pageserver_api::shard::ShardStripeSize;
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -61,7 +62,7 @@ use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
 use crate::storage_controller::StorageController;
 
-use compute_api::responses::{ComputeState, ComputeStatus};
+use compute_api::responses::{ComputeStatus, ComputeStatusResponse};
 use compute_api::spec::{Cluster, ComputeFeature, ComputeMode, ComputeSpec};
 
 // contents of a endpoint.json file
@@ -97,7 +98,21 @@ impl ComputeControlPlane {
         for endpoint_dir in std::fs::read_dir(env.endpoints_path())
             .with_context(|| format!("failed to list {}", env.endpoints_path().display()))?
         {
-            let ep = Endpoint::from_dir_entry(endpoint_dir?, &env)?;
+            let ep_res = Endpoint::from_dir_entry(endpoint_dir?, &env);
+            let ep = match ep_res {
+                Ok(ep) => ep,
+                Err(e) => match e.downcast::<std::io::Error>() {
+                    Ok(e) => {
+                        // A parallel task could delete an endpoint while we have just scanned the directory
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            continue;
+                        } else {
+                            Err(e)?
+                        }
+                    }
+                    Err(e) => Err(e)?,
+                },
+            };
             endpoints.insert(ep.endpoint_id.clone(), Arc::new(ep));
         }
 
@@ -296,7 +311,15 @@ impl Endpoint {
         conf.append("wal_log_hints", "off");
         conf.append("max_replication_slots", "10");
         conf.append("hot_standby", "on");
+        // Set to 1MB to both exercise getPage requests/LFC, and still have enough room for
+        // Postgres to operate. Everything smaller might be not enough for Postgres under load,
+        // and can cause errors like 'no unpinned buffers available', see
+        // <https://github.com/neondatabase/neon/issues/9956>
         conf.append("shared_buffers", "1MB");
+        // Postgres defaults to effective_io_concurrency=1, which does not exercise the pageserver's
+        // batching logic.  Set this to 2 so that we exercise the code a bit without letting
+        // individual tests do a lot of concurrent work on underpowered test machines
+        conf.append("effective_io_concurrency", "2");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
         conf.append("wal_level", "logical");
@@ -561,6 +584,8 @@ impl Endpoint {
             operation_uuid: None,
             features: self.features.clone(),
             swap_size_bytes: None,
+            disk_quota_bytes: None,
+            disable_lfc_resizing: None,
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
@@ -598,6 +623,8 @@ impl Endpoint {
             remote_extensions,
             pgbouncer_settings: None,
             shard_stripe_size: Some(shard_stripe_size),
+            local_proxy_config: None,
+            reconfigure_concurrency: 1,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
@@ -702,7 +729,7 @@ impl Endpoint {
                     }
                 }
             }
-            std::thread::sleep(ATTEMPT_INTERVAL);
+            tokio::time::sleep(ATTEMPT_INTERVAL).await;
         }
 
         // disarm the scopeguard, let the child outlive this function (and neon_local invoction)
@@ -712,7 +739,7 @@ impl Endpoint {
     }
 
     // Call the /status HTTP API
-    pub async fn get_status(&self) -> Result<ComputeState> {
+    pub async fn get_status(&self) -> Result<ComputeStatusResponse> {
         let client = reqwest::Client::new();
 
         let response = client
@@ -788,7 +815,7 @@ impl Endpoint {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(120))
             .build()
             .unwrap();
         let response = client
@@ -797,6 +824,7 @@ impl Endpoint {
                 self.http_address.ip(),
                 self.http_address.port()
             ))
+            .header(CONTENT_TYPE.as_str(), "application/json")
             .body(format!(
                 "{{\"spec\":{}}}",
                 serde_json::to_string_pretty(&spec)?

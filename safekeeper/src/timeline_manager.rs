@@ -1,4 +1,5 @@
 //! The timeline manager task is responsible for managing the timeline's background tasks.
+//!
 //! It is spawned alongside each timeline and exits when the timeline is deleted.
 //! It watches for changes in the timeline state and decides when to spawn or kill background tasks.
 //! It also can manage some reactive state, like should the timeline be active for broker pushes or not.
@@ -11,29 +12,34 @@ use std::{
     time::Duration,
 };
 
+use futures::channel::oneshot;
 use postgres_ffi::XLogSegNo;
+use safekeeper_api::{models::PeerInfo, Term};
 use serde::{Deserialize, Serialize};
 use tokio::{
     task::{JoinError, JoinHandle},
     time::Instant,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, instrument, warn, Instrument};
 use utils::lsn::Lsn;
 
 use crate::{
     control_file::{FileStorage, Storage},
-    metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL, MISC_OPERATION_SECONDS},
+    metrics::{
+        MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL, MISC_OPERATION_SECONDS,
+        NUM_EVICTED_TIMELINES,
+    },
     rate_limit::{rand_duration, RateLimiter},
     recovery::recovery_main,
     remove_wal::calc_horizon_lsn,
-    safekeeper::Term,
     send_wal::WalSenders,
     state::TimelineState,
-    timeline::{ManagerTimeline, PeerInfo, ReadGuardSharedState, StateSK, WalResidentTimeline},
+    timeline::{ManagerTimeline, ReadGuardSharedState, StateSK, WalResidentTimeline},
     timeline_guard::{AccessService, GuardId, ResidenceGuard},
     timelines_set::{TimelineSetGuard, TimelinesSet},
     wal_backup::{self, WalBackupTaskHandle},
-    wal_backup_partial::{self, PartialRemoteSegment},
+    wal_backup_partial::{self, PartialBackup, PartialRemoteSegment},
     SafeKeeperConf,
 };
 
@@ -44,7 +50,7 @@ pub(crate) struct StateSnapshot {
     pub(crate) remote_consistent_lsn: Lsn,
 
     // persistent control file values
-    pub(crate) cfile_peer_horizon_lsn: Lsn,
+    pub(crate) cfile_commit_lsn: Lsn,
     pub(crate) cfile_remote_consistent_lsn: Lsn,
     pub(crate) cfile_backup_lsn: Lsn,
 
@@ -67,7 +73,7 @@ impl StateSnapshot {
             commit_lsn: state.inmem.commit_lsn,
             backup_lsn: state.inmem.backup_lsn,
             remote_consistent_lsn: state.inmem.remote_consistent_lsn,
-            cfile_peer_horizon_lsn: state.peer_horizon_lsn,
+            cfile_commit_lsn: state.commit_lsn,
             cfile_remote_consistent_lsn: state.remote_consistent_lsn,
             cfile_backup_lsn: state.backup_lsn,
             flush_lsn: read_guard.sk.flush_lsn(),
@@ -94,15 +100,21 @@ const REFRESH_INTERVAL: Duration = Duration::from_millis(300);
 pub enum ManagerCtlMessage {
     /// Request to get a guard for WalResidentTimeline, with WAL files available locally.
     GuardRequest(tokio::sync::oneshot::Sender<anyhow::Result<ResidenceGuard>>),
+    /// Get a guard for WalResidentTimeline if the timeline is not currently offloaded, else None
+    TryGuardRequest(tokio::sync::oneshot::Sender<Option<ResidenceGuard>>),
     /// Request to drop the guard.
     GuardDrop(GuardId),
+    /// Request to reset uploaded partial backup state.
+    BackupPartialReset(oneshot::Sender<anyhow::Result<Vec<String>>>),
 }
 
 impl std::fmt::Debug for ManagerCtlMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ManagerCtlMessage::GuardRequest(_) => write!(f, "GuardRequest"),
+            ManagerCtlMessage::TryGuardRequest(_) => write!(f, "TryGuardRequest"),
             ManagerCtlMessage::GuardDrop(id) => write!(f, "GuardDrop({:?})", id),
+            ManagerCtlMessage::BackupPartialReset(_) => write!(f, "BackupPartialReset"),
         }
     }
 }
@@ -143,6 +155,32 @@ impl ManagerCtl {
             .and_then(std::convert::identity)
     }
 
+    /// Issue a new guard if the timeline is currently not offloaded, else return None
+    /// Sends a message to the manager and waits for the response.
+    /// Can be blocked indefinitely if the manager is stuck.
+    pub async fn try_wal_residence_guard(&self) -> anyhow::Result<Option<ResidenceGuard>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.manager_tx
+            .send(ManagerCtlMessage::TryGuardRequest(tx))?;
+
+        // wait for the manager to respond with the guard
+        rx.await
+            .map_err(|e| anyhow::anyhow!("response read fail: {:?}", e))
+    }
+
+    /// Request timeline manager to reset uploaded partial segment state and
+    /// wait for the result.
+    pub async fn backup_partial_reset(&self) -> anyhow::Result<Vec<String>> {
+        let (tx, rx) = oneshot::channel();
+        self.manager_tx
+            .send(ManagerCtlMessage::BackupPartialReset(tx))
+            .expect("manager task is not running");
+        match rx.await {
+            Ok(res) => res,
+            Err(_) => anyhow::bail!("timeline manager is gone"),
+        }
+    }
+
     /// Must be called exactly once to bootstrap the manager.
     pub fn bootstrap_manager(
         &self,
@@ -181,7 +219,8 @@ pub(crate) struct Manager {
     pub(crate) wal_removal_task: Option<JoinHandle<anyhow::Result<u64>>>,
 
     // partial backup
-    pub(crate) partial_backup_task: Option<JoinHandle<Option<PartialRemoteSegment>>>,
+    pub(crate) partial_backup_task:
+        Option<(JoinHandle<Option<PartialRemoteSegment>>, CancellationToken)>,
     pub(crate) partial_backup_uploaded: Option<PartialRemoteSegment>,
 
     // misc
@@ -227,8 +266,15 @@ pub async fn main_task(
 
     // Start recovery task which always runs on the timeline.
     if !mgr.is_offloaded && mgr.conf.peer_recovery_enabled {
-        let tli = mgr.wal_resident_timeline();
-        mgr.recovery_task = Some(tokio::spawn(recovery_main(tli, mgr.conf.clone())));
+        // Recovery task is only spawned if we can get a residence guard (i.e. timeline is not already shutting down)
+        if let Ok(tli) = mgr.wal_resident_timeline() {
+            mgr.recovery_task = Some(tokio::spawn(recovery_main(tli, mgr.conf.clone())));
+        }
+    }
+
+    // If timeline is evicted, reflect that in the metric.
+    if mgr.is_offloaded {
+        NUM_EVICTED_TIMELINES.inc();
     }
 
     let last_state = 'outer: loop {
@@ -269,7 +315,12 @@ pub async fn main_task(
                 match mgr.global_rate_limiter.try_acquire_eviction() {
                     Some(_permit) => {
                         mgr.set_status(Status::EvictTimeline);
-                        mgr.evict_timeline().await;
+                        if !mgr.evict_timeline().await {
+                            // eviction failed, try again later
+                            mgr.evict_not_before =
+                                Instant::now() + rand_duration(&mgr.conf.eviction_min_resident);
+                            update_next_event(&mut next_event, mgr.evict_not_before);
+                        }
                     }
                     None => {
                         // we can't evict timeline now, will try again later
@@ -302,12 +353,12 @@ pub async fn main_task(
             _ = sleep_until(&next_event) => {
                 // we were waiting for some event (e.g. cfile save)
             }
-            res = await_task_finish(&mut mgr.wal_removal_task) => {
+            res = await_task_finish(mgr.wal_removal_task.as_mut()) => {
                 // WAL removal task finished
                 mgr.wal_removal_task = None;
                 mgr.update_wal_removal_end(res);
             }
-            res = await_task_finish(&mut mgr.partial_backup_task) => {
+            res = await_task_finish(mgr.partial_backup_task.as_mut().map(|(handle, _)| handle)) => {
                 // partial backup task finished
                 mgr.partial_backup_task = None;
                 mgr.update_partial_backup_end(res);
@@ -326,6 +377,13 @@ pub async fn main_task(
 
     // shutdown background tasks
     if mgr.conf.is_wal_backup_enabled() {
+        if let Some(backup_task) = mgr.backup_task.take() {
+            // If we fell through here, then the timeline is shutting down. This is important
+            // because otherwise joining on the wal_backup handle might hang.
+            assert!(mgr.tli.cancel.is_cancelled());
+
+            backup_task.join().await;
+        }
         wal_backup::update_task(&mut mgr, false, &last_state).await;
     }
 
@@ -335,8 +393,9 @@ pub async fn main_task(
         }
     }
 
-    if let Some(partial_backup_task) = &mut mgr.partial_backup_task {
-        if let Err(e) = partial_backup_task.await {
+    if let Some((handle, cancel)) = &mut mgr.partial_backup_task {
+        cancel.cancel();
+        if let Err(e) = handle.await {
             warn!("partial backup task failed: {:?}", e);
         }
     }
@@ -344,6 +403,11 @@ pub async fn main_task(
     if let Some(wal_removal_task) = &mut mgr.wal_removal_task {
         let res = wal_removal_task.await;
         mgr.update_wal_removal_end(res);
+    }
+
+    // If timeline is deleted while evicted decrement the gauge.
+    if mgr.tli.is_cancelled() && mgr.is_offloaded {
+        NUM_EVICTED_TIMELINES.dec();
     }
 
     mgr.set_status(Status::Finished);
@@ -387,10 +451,18 @@ impl Manager {
     /// Get a WalResidentTimeline.
     /// Manager code must use this function instead of one from `Timeline`
     /// directly, because it will deadlock.
-    pub(crate) fn wal_resident_timeline(&mut self) -> WalResidentTimeline {
+    ///
+    /// This function is fallible because the guard may not be created if the timeline is
+    /// shutting down.
+    pub(crate) fn wal_resident_timeline(&mut self) -> anyhow::Result<WalResidentTimeline> {
         assert!(!self.is_offloaded);
-        let guard = self.access_service.create_guard();
-        WalResidentTimeline::new(self.tli.clone(), guard)
+        let guard = self.access_service.create_guard(
+            self.tli
+                .gate
+                .enter()
+                .map_err(|_| anyhow::anyhow!("Timeline shutting down"))?,
+        );
+        Ok(WalResidentTimeline::new(self.tli.clone(), guard))
     }
 
     /// Get a snapshot of the timeline state.
@@ -460,7 +532,12 @@ impl Manager {
             return;
         }
 
-        if state.cfile_last_persist_at.elapsed() > self.conf.control_file_save_interval {
+        if state.cfile_last_persist_at.elapsed() > self.conf.control_file_save_interval
+            // If the control file's commit_lsn lags more than one segment behind the current
+            // commit_lsn, flush immediately to limit recovery time in case of a crash. We don't do
+            // this on the WAL ingest hot path since it incurs fsync latency.
+            || state.commit_lsn.saturating_sub(state.cfile_commit_lsn).0 >= self.wal_seg_size as u64
+        {
             let mut write_guard = self.tli.write_shared_state().await;
             // it should be done in the background because it blocks manager task, but flush() should
             // be fast enough not to be a problem now
@@ -499,6 +576,11 @@ impl Manager {
 
         if removal_horizon_segno > self.last_removed_segno {
             // we need to remove WAL
+            let Ok(timeline_gate_guard) = self.tli.gate.enter() else {
+                tracing::info!("Timeline shutdown, not spawning WAL removal task");
+                return;
+            };
+
             let remover = match self.tli.read_shared_state().await.sk {
                 StateSK::Loaded(ref sk) => {
                     crate::wal_storage::Storage::remove_up_to(&sk.wal_store, removal_horizon_segno)
@@ -513,6 +595,8 @@ impl Manager {
 
             self.wal_removal_task = Some(tokio::spawn(
                 async move {
+                    let _timeline_gate_guard = timeline_gate_guard;
+
                     remover.await?;
                     Ok(removal_horizon_segno)
                 }
@@ -559,12 +643,20 @@ impl Manager {
             return;
         }
 
+        let Ok(resident) = self.wal_resident_timeline() else {
+            // Shutting down
+            return;
+        };
+
         // Get WalResidentTimeline and start partial backup task.
-        self.partial_backup_task = Some(tokio::spawn(wal_backup_partial::main_task(
-            self.wal_resident_timeline(),
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn(wal_backup_partial::main_task(
+            resident,
             self.conf.clone(),
             self.global_rate_limiter.clone(),
-        )));
+            cancel.clone(),
+        ));
+        self.partial_backup_task = Some((handle, cancel));
     }
 
     /// Update the state after partial WAL backup task finished.
@@ -577,6 +669,39 @@ impl Manager {
                 warn!("partial backup task panicked: {:?}", e);
             }
         }
+    }
+
+    /// Reset partial backup state and remove its remote storage data. Since it
+    /// might concurrently uploading something, cancel the task first.
+    async fn backup_partial_reset(&mut self) -> anyhow::Result<Vec<String>> {
+        info!("resetting partial backup state");
+        // Force unevict timeline if it is evicted before erasing partial backup
+        // state. The intended use of this function is to drop corrupted remote
+        // state; we haven't enabled local files deletion yet anywhere,
+        // so direct switch is safe.
+        if self.is_offloaded {
+            self.tli.switch_to_present().await?;
+            // switch manager state as soon as possible
+            self.is_offloaded = false;
+        }
+
+        if let Some((handle, cancel)) = &mut self.partial_backup_task {
+            cancel.cancel();
+            info!("cancelled partial backup task, awaiting it");
+            // we're going to reset .partial_backup_uploaded to None anyway, so ignore the result
+            handle.await.ok();
+            self.partial_backup_task = None;
+        }
+
+        let tli = self.wal_resident_timeline()?;
+        let mut partial_backup = PartialBackup::new(tli, self.conf.clone()).await;
+        // Reset might fail e.g. when cfile is already reset but s3 removal
+        // failed, so set manager state to None beforehand. In any case caller
+        // is expected to retry until success.
+        self.partial_backup_uploaded = None;
+        let res = partial_backup.reset().await?;
+        info!("reset is done");
+        Ok(res)
     }
 
     /// Handle message arrived from ManagerCtl.
@@ -592,15 +717,44 @@ impl Manager {
                 let guard = if self.is_offloaded {
                     Err(anyhow::anyhow!("timeline is offloaded, can't get a guard"))
                 } else {
-                    Ok(self.access_service.create_guard())
+                    match self.tli.gate.enter() {
+                        Ok(gate_guard) => Ok(self.access_service.create_guard(gate_guard)),
+                        Err(_) => Err(anyhow::anyhow!(
+                            "timeline is shutting down, can't get a guard"
+                        )),
+                    }
                 };
 
                 if tx.send(guard).is_err() {
                     warn!("failed to reply with a guard, receiver dropped");
                 }
             }
+            Some(ManagerCtlMessage::TryGuardRequest(tx)) => {
+                let result = if self.is_offloaded {
+                    None
+                } else {
+                    match self.tli.gate.enter() {
+                        Ok(gate_guard) => Some(self.access_service.create_guard(gate_guard)),
+                        Err(_) => None,
+                    }
+                };
+
+                if tx.send(result).is_err() {
+                    warn!("failed to reply with a guard, receiver dropped");
+                }
+            }
             Some(ManagerCtlMessage::GuardDrop(guard_id)) => {
                 self.access_service.drop_guard(guard_id);
+            }
+            Some(ManagerCtlMessage::BackupPartialReset(tx)) => {
+                info!("resetting uploaded partial backup state");
+                let res = self.backup_partial_reset().await;
+                if let Err(ref e) = res {
+                    warn!("failed to reset partial backup state: {:?}", e);
+                }
+                if tx.send(res).is_err() {
+                    warn!("failed to send partial backup reset result, receiver dropped");
+                }
             }
             None => {
                 // can't happen, we're holding the sender
@@ -619,7 +773,11 @@ async fn sleep_until(option: &Option<tokio::time::Instant>) {
     }
 }
 
-async fn await_task_finish<T>(option: &mut Option<JoinHandle<T>>) -> Result<T, JoinError> {
+/// Future that resolves when the task is finished or never if the task is None.
+///
+/// Note: it accepts Option<&mut> instead of &mut Option<> because mapping the
+/// option to get the latter is hard.
+async fn await_task_finish<T>(option: Option<&mut JoinHandle<T>>) -> Result<T, JoinError> {
     if let Some(task) = option {
         task.await
     } else {

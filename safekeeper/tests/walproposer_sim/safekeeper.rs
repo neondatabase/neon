@@ -13,14 +13,17 @@ use desim::{
     node_os::NodeOs,
     proto::{AnyMessage, NetEvent, NodeEvent},
 };
-use hyper::Uri;
+use http::Uri;
 use safekeeper::{
-    safekeeper::{ProposerAcceptorMessage, SafeKeeper, ServerInfo, UNKNOWN_SERVER_VERSION},
+    safekeeper::{
+        ProposerAcceptorMessage, SafeKeeper, SK_PROTOCOL_VERSION, UNKNOWN_SERVER_VERSION,
+    },
     state::{TimelinePersistentState, TimelineState},
     timeline::TimelineError,
     wal_storage::Storage,
     SafeKeeperConf,
 };
+use safekeeper_api::{membership::Configuration, ServerInfo};
 use tracing::{debug, info_span, warn};
 use utils::{
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -59,7 +62,7 @@ impl GlobalMap {
 
             if state.commit_lsn < state.local_start_lsn {
                 bail!(
-                    "commit_lsn {} is higher than local_start_lsn {}",
+                    "commit_lsn {} is smaller than local_start_lsn {}",
                     state.commit_lsn,
                     state.local_start_lsn
                 );
@@ -95,24 +98,13 @@ impl GlobalMap {
         let commit_lsn = Lsn::INVALID;
         let local_start_lsn = Lsn::INVALID;
 
-        let state =
-            TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
-
-        if state.server.wal_seg_size == 0 {
-            bail!(TimelineError::UninitializedWalSegSize(ttid));
-        }
-
-        if state.server.pg_version == UNKNOWN_SERVER_VERSION {
-            bail!(TimelineError::UninitialinzedPgVersion(ttid));
-        }
-
-        if state.commit_lsn < state.local_start_lsn {
-            bail!(
-                "commit_lsn {} is higher than local_start_lsn {}",
-                state.commit_lsn,
-                state.local_start_lsn
-            );
-        }
+        let state = TimelinePersistentState::new(
+            &ttid,
+            Configuration::empty(),
+            server_info,
+            commit_lsn,
+            local_start_lsn,
+        )?;
 
         let disk_timeline = self.disk.put_state(&ttid, state);
         let control_store = DiskStateStorage::new(disk_timeline.clone());
@@ -188,6 +180,8 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         control_file_save_interval: Duration::from_secs(1),
         partial_backup_concurrency: 1,
         eviction_min_resident: Duration::ZERO,
+        wal_reader_fanout: false,
+        max_delta_for_fanout: None,
     };
 
     let mut global = GlobalMap::new(disk, conf.clone())?;
@@ -293,7 +287,7 @@ impl ConnState {
                 bail!("finished processing START_REPLICATION")
             }
 
-            let msg = ProposerAcceptorMessage::parse(copy_data)?;
+            let msg = ProposerAcceptorMessage::parse(copy_data, SK_PROTOCOL_VERSION)?;
             debug!("got msg: {:?}", msg);
             self.process(msg, global)
         } else {

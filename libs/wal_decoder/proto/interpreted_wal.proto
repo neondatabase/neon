@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package interpreted_wal;
+
+message InterpretedWalRecords {
+  repeated InterpretedWalRecord records = 1;
+  optional uint64 next_record_lsn = 2;
+}
+
+message InterpretedWalRecord {
+  optional bytes metadata_record = 1;
+  SerializedValueBatch batch = 2;
+  uint64 next_record_lsn = 3;
+  bool flush_uncommitted = 4;
+  uint32 xid = 5;
+}
+
+message SerializedValueBatch {
+  bytes raw = 1;
+  repeated ValueMeta metadata = 2;
+  uint64 max_lsn = 3;
+  uint64 len = 4;
+}
+
+enum ValueMetaType {
+  Serialized = 0;
+  Observed = 1;
+}
+
+message ValueMeta {
+  ValueMetaType type = 1;
+  CompactKey key = 2;
+  uint64 lsn = 3;
+  optional uint64 batch_offset = 4;
+  optional uint64 len = 5;
+  optional bool will_init = 6;
+}
+
+message CompactKey {
+  uint64 high = 1;
+  uint64 low = 2;
+}
+

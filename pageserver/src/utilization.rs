@@ -9,7 +9,7 @@ use utils::serde_percent::Percent;
 
 use pageserver_api::models::PageserverUtilization;
 
-use crate::{config::PageServerConf, tenant::mgr::TenantManager};
+use crate::{config::PageServerConf, metrics::NODE_UTILIZATION_SCORE, tenant::mgr::TenantManager};
 
 pub(crate) fn regenerate(
     conf: &PageServerConf,
@@ -58,13 +58,13 @@ pub(crate) fn regenerate(
         disk_usable_pct,
         shard_count,
         max_shard_count: MAX_SHARDS,
-        utilization_score: 0,
+        utilization_score: None,
         captured_at: utils::serde_system_time::SystemTime(captured_at),
     };
 
-    doc.refresh_score();
-
-    // TODO: make utilization_score into a metric
+    // Initialize `PageserverUtilization::utilization_score`
+    let score = doc.cached_score();
+    NODE_UTILIZATION_SCORE.set(score);
 
     Ok(doc)
 }

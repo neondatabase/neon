@@ -35,7 +35,7 @@ use super::{
         self, period_jitter, period_warmup, Completion, JobGenerator, SchedulingResult,
         TenantBackgroundJobs,
     },
-    SecondaryTenant,
+    GetTenantError, SecondaryTenant, SecondaryTenantError,
 };
 
 use crate::tenant::{
@@ -49,7 +49,7 @@ use futures::Future;
 use metrics::UIntGauge;
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
-use remote_storage::{DownloadError, Etag, GenericRemoteStorage};
+use remote_storage::{DownloadError, DownloadKind, DownloadOpts, Etag, GenericRemoteStorage};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
@@ -240,6 +240,19 @@ impl SecondaryDetail {
             next_download: None,
             timelines: HashMap::new(),
         }
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn total_resident_size(&self) -> u64 {
+        self.timelines
+            .values()
+            .map(|tl| {
+                tl.on_disk_layers
+                    .values()
+                    .map(|v| v.metadata.file_size)
+                    .sum::<u64>()
+            })
+            .sum::<u64>()
     }
 
     pub(super) fn evict_layer(
@@ -457,15 +470,16 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         result
     }
 
-    fn on_command(&mut self, command: DownloadCommand) -> anyhow::Result<PendingDownload> {
+    fn on_command(
+        &mut self,
+        command: DownloadCommand,
+    ) -> Result<PendingDownload, SecondaryTenantError> {
         let tenant_shard_id = command.get_tenant_shard_id();
 
         let tenant = self
             .tenant_manager
-            .get_secondary_tenant_shard(*tenant_shard_id);
-        let Some(tenant) = tenant else {
-            return Err(anyhow::anyhow!("Not found or not in Secondary mode"));
-        };
+            .get_secondary_tenant_shard(*tenant_shard_id)
+            .ok_or(GetTenantError::ShardNotFound(*tenant_shard_id))?;
 
         Ok(PendingDownload {
             target_time: None,
@@ -763,24 +777,7 @@ impl<'a> TenantDownloader<'a> {
         }
 
         // Metrics consistency check in testing builds
-        if cfg!(feature = "testing") {
-            let detail = self.secondary_state.detail.lock().unwrap();
-            let resident_size = detail
-                .timelines
-                .values()
-                .map(|tl| {
-                    tl.on_disk_layers
-                        .values()
-                        .map(|v| v.metadata.file_size)
-                        .sum::<u64>()
-                })
-                .sum::<u64>();
-            assert_eq!(
-                resident_size,
-                self.secondary_state.resident_size_metric.get()
-            );
-        }
-
+        self.secondary_state.validate_metrics();
         // Only update last_etag after a full successful download: this way will not skip
         // the next download, even if the heatmap's actual etag is unchanged.
         self.secondary_state.detail.lock().unwrap().last_download = Some(DownloadSummary {
@@ -829,6 +826,12 @@ impl<'a> TenantDownloader<'a> {
             layers_downloaded: 0,
             bytes_downloaded: 0,
         };
+
+        // Also expose heatmap bytes_total as a metric
+        self.secondary_state
+            .heatmap_total_size_metric
+            .set(heatmap_stats.bytes);
+
         // Accumulate list of things to delete while holding the detail lock, for execution after dropping the lock
         let mut delete_layers = Vec::new();
         let mut delete_timelines = Vec::new();
@@ -938,36 +941,36 @@ impl<'a> TenantDownloader<'a> {
     ) -> Result<HeatMapDownload, UpdateError> {
         debug_assert_current_span_has_tenant_id();
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
-        // TODO: pull up etag check into the request, to do a conditional GET rather than
-        // issuing a GET and then maybe ignoring the response body
-        // (https://github.com/neondatabase/neon/issues/6199)
         tracing::debug!("Downloading heatmap for secondary tenant",);
 
         let heatmap_path = remote_heatmap_path(tenant_shard_id);
         let cancel = &self.secondary_state.cancel;
+        let opts = DownloadOpts {
+            etag: prev_etag.cloned(),
+            kind: DownloadKind::Small,
+            ..Default::default()
+        };
 
         backoff::retry(
             || async {
-                let download = self
+                let download = match self
                     .remote_storage
-                    .download(&heatmap_path, cancel)
+                    .download(&heatmap_path, &opts, cancel)
                     .await
-                    .map_err(UpdateError::from)?;
+                {
+                    Ok(download) => download,
+                    Err(DownloadError::Unmodified) => return Ok(HeatMapDownload::Unmodified),
+                    Err(err) => return Err(err.into()),
+                };
 
-                SECONDARY_MODE.download_heatmap.inc();
-
-                if Some(&download.etag) == prev_etag {
-                    Ok(HeatMapDownload::Unmodified)
-                } else {
-                    let mut heatmap_bytes = Vec::new();
-                    let mut body = tokio_util::io::StreamReader::new(download.download_stream);
-                    let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
-                    Ok(HeatMapDownload::Modified(HeatMapModified {
-                        etag: download.etag,
-                        last_modified: download.last_modified,
-                        bytes: heatmap_bytes,
-                    }))
-                }
+                let mut heatmap_bytes = Vec::new();
+                let mut body = tokio_util::io::StreamReader::new(download.download_stream);
+                let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
+                Ok(HeatMapDownload::Modified(HeatMapModified {
+                    etag: download.etag,
+                    last_modified: download.last_modified,
+                    bytes: heatmap_bytes,
+                }))
             },
             |e| matches!(e, UpdateError::NoData | UpdateError::Cancelled),
             FAILED_DOWNLOAD_WARN_THRESHOLD,
@@ -978,6 +981,7 @@ impl<'a> TenantDownloader<'a> {
         .await
         .ok_or_else(|| UpdateError::Cancelled)
         .and_then(|x| x)
+        .inspect(|_| SECONDARY_MODE.download_heatmap.inc())
     }
 
     /// Download heatmap layers that are not present on local disk, or update their
@@ -1179,6 +1183,7 @@ impl<'a> TenantDownloader<'a> {
             &layer.name,
             &layer.metadata,
             &local_path,
+            &self.secondary_state.gate,
             &self.secondary_state.cancel,
             ctx,
         )

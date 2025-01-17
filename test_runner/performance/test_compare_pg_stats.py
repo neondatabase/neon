@@ -1,7 +1,8 @@
+from __future__ import annotations
+
 import os
 import threading
 import time
-from typing import List
 
 import pytest
 from fixtures.compare_fixtures import PgCompare
@@ -23,7 +24,7 @@ def test_compare_pg_stats_rw_with_pgbench_default(
     seed: int,
     scale: int,
     duration: int,
-    pg_stats_rw: List[PgStatTable],
+    pg_stats_rw: list[PgStatTable],
 ):
     env = neon_with_baseline
     # initialize pgbench
@@ -45,7 +46,7 @@ def test_compare_pg_stats_wo_with_pgbench_simple_update(
     seed: int,
     scale: int,
     duration: int,
-    pg_stats_wo: List[PgStatTable],
+    pg_stats_wo: list[PgStatTable],
 ):
     env = neon_with_baseline
     # initialize pgbench
@@ -67,7 +68,7 @@ def test_compare_pg_stats_ro_with_pgbench_select_only(
     seed: int,
     scale: int,
     duration: int,
-    pg_stats_ro: List[PgStatTable],
+    pg_stats_ro: list[PgStatTable],
 ):
     env = neon_with_baseline
     # initialize pgbench
@@ -89,7 +90,7 @@ def test_compare_pg_stats_wal_with_pgbench_default(
     seed: int,
     scale: int,
     duration: int,
-    pg_stats_wal: List[PgStatTable],
+    pg_stats_wal: list[PgStatTable],
 ):
     env = neon_with_baseline
     # initialize pgbench
@@ -106,7 +107,7 @@ def test_compare_pg_stats_wal_with_pgbench_default(
 @pytest.mark.parametrize("n_tables", [1, 10])
 @pytest.mark.parametrize("duration", get_durations_matrix(10))
 def test_compare_pg_stats_wo_with_heavy_write(
-    neon_with_baseline: PgCompare, n_tables: int, duration: int, pg_stats_wo: List[PgStatTable]
+    neon_with_baseline: PgCompare, n_tables: int, duration: int, pg_stats_wo: list[PgStatTable]
 ):
     env = neon_with_baseline
     with env.pg.connect().cursor() as cur:

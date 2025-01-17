@@ -3,7 +3,7 @@ use crate::{
     local_env::{LocalEnv, NeonStorageControllerConf},
 };
 use camino::{Utf8Path, Utf8PathBuf};
-use hyper::Uri;
+use hyper0::Uri;
 use nix::unistd::Pid;
 use pageserver_api::{
     controller_api::{
@@ -20,7 +20,16 @@ use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use reqwest::Method;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{fs, net::SocketAddr, path::PathBuf, str::FromStr, sync::OnceLock};
+use std::{
+    ffi::OsStr,
+    fs,
+    net::SocketAddr,
+    path::PathBuf,
+    process::ExitStatus,
+    str::FromStr,
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 use tokio::process::Command;
 use tracing::instrument;
 use url::Url;
@@ -28,6 +37,7 @@ use utils::{
     auth::{encode_from_key_file, Claims, Scope},
     id::{NodeId, TenantId},
 };
+use whoami::username;
 
 pub struct StorageController {
     env: LocalEnv,
@@ -167,23 +177,13 @@ impl StorageController {
         .expect("non-Unicode path")
     }
 
-    /// PIDFile for the postgres instance used to store storage controller state
-    fn postgres_pid_file(&self) -> Utf8PathBuf {
-        Utf8PathBuf::from_path_buf(
-            self.env
-                .base_data_dir
-                .join("storage_controller_postgres.pid"),
-        )
-        .expect("non-Unicode path")
-    }
-
     /// Find the directory containing postgres subdirectories, such `bin` and `lib`
     ///
     /// This usually uses STORAGE_CONTROLLER_POSTGRES_VERSION of postgres, but will fall back
     /// to other versions if that one isn't found.  Some automated tests create circumstances
     /// where only one version is available in pg_distrib_dir, such as `test_remote_extensions`.
     async fn get_pg_dir(&self, dir_name: &str) -> anyhow::Result<Utf8PathBuf> {
-        let prefer_versions = [STORAGE_CONTROLLER_POSTGRES_VERSION, 15, 14];
+        let prefer_versions = [STORAGE_CONTROLLER_POSTGRES_VERSION, 16, 15, 14];
 
         for v in prefer_versions {
             let path = Utf8PathBuf::from_path_buf(self.env.pg_dir(v, dir_name)?).unwrap();
@@ -211,13 +211,22 @@ impl StorageController {
     /// Readiness check for our postgres process
     async fn pg_isready(&self, pg_bin_dir: &Utf8Path, postgres_port: u16) -> anyhow::Result<bool> {
         let bin_path = pg_bin_dir.join("pg_isready");
-        let args = ["-h", "localhost", "-p", &format!("{}", postgres_port)];
+        let args = [
+            "-h",
+            "localhost",
+            "-U",
+            &username(),
+            "-d",
+            DB_NAME,
+            "-p",
+            &format!("{}", postgres_port),
+        ];
         let exitcode = Command::new(bin_path).args(args).spawn()?.wait().await?;
 
         Ok(exitcode.success())
     }
 
-    /// Create our database if it doesn't exist, and run migrations.
+    /// Create our database if it doesn't exist
     ///
     /// This function is equivalent to the `diesel setup` command in the diesel CLI.  We implement
     /// the same steps by hand to avoid imposing a dependency on installing diesel-cli for developers
@@ -225,7 +234,11 @@ impl StorageController {
     ///
     /// Returns the database url
     pub async fn setup_database(&self, postgres_port: u16) -> anyhow::Result<String> {
-        let database_url = format!("postgresql://localhost:{}/{DB_NAME}", postgres_port);
+        let database_url = format!(
+            "postgresql://{}@localhost:{}/{DB_NAME}",
+            &username(),
+            postgres_port
+        );
 
         let pg_bin_dir = self.get_pg_bin_dir().await?;
         let createdb_path = pg_bin_dir.join("createdb");
@@ -235,6 +248,10 @@ impl StorageController {
                 "localhost",
                 "-p",
                 &format!("{}", postgres_port),
+                "-U",
+                &username(),
+                "-O",
+                &username(),
                 DB_NAME,
             ])
             .output()
@@ -271,11 +288,36 @@ impl StorageController {
             // But tokio-postgres fork doesn't have this upstream commit:
             // https://github.com/sfackler/rust-postgres/commit/cb609be758f3fb5af537f04b584a2ee0cebd5e79
             // => we should rebase our fork => TODO https://github.com/neondatabase/neon/issues/8399
-            .user(&whoami::username())
+            .user(&username())
             .dbname(DB_NAME)
             .connect(tokio_postgres::NoTls)
             .await
             .map_err(anyhow::Error::new)
+    }
+
+    /// Wrapper for the pg_ctl binary, which we spawn as a short-lived subprocess when starting and stopping postgres
+    async fn pg_ctl<I, S>(&self, args: I) -> ExitStatus
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let pg_bin_dir = self.get_pg_bin_dir().await.unwrap();
+        let bin_path = pg_bin_dir.join("pg_ctl");
+
+        let pg_lib_dir = self.get_pg_lib_dir().await.unwrap();
+        let envs = [
+            ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+            ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+        ];
+
+        Command::new(bin_path)
+            .args(args)
+            .envs(envs)
+            .spawn()
+            .expect("Failed to spawn pg_ctl, binary_missing?")
+            .wait()
+            .await
+            .expect("Failed to wait for pg_ctl termination")
     }
 
     pub async fn start(&self, start_args: NeonStorageControllerStartArgs) -> anyhow::Result<()> {
@@ -296,7 +338,7 @@ impl StorageController {
                         .port(),
                 )
             } else {
-                let listen_url = self.env.control_plane_api.clone().unwrap();
+                let listen_url = self.env.control_plane_api.clone();
 
                 let listen = format!(
                     "{}:{}",
@@ -328,6 +370,19 @@ impl StorageController {
             let pg_log_path = pg_data_path.join("postgres.log");
 
             if !tokio::fs::try_exists(&pg_data_path).await? {
+                let initdb_args = [
+                    "--pgdata",
+                    pg_data_path.as_ref(),
+                    "--username",
+                    &username(),
+                    "--no-sync",
+                    "--no-instructions",
+                ];
+                tracing::info!(
+                    "Initializing storage controller database with args: {:?}",
+                    initdb_args
+                );
+
                 // Initialize empty database
                 let initdb_path = pg_bin_dir.join("initdb");
                 let mut child = Command::new(&initdb_path)
@@ -335,7 +390,7 @@ impl StorageController {
                         ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
                         ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
                     ])
-                    .args(["-D", pg_data_path.as_ref()])
+                    .args(initdb_args)
                     .spawn()
                     .expect("Failed to spawn initdb");
                 let status = child.wait().await?;
@@ -364,25 +419,44 @@ impl StorageController {
                 pg_data_path.as_ref(),
                 "-l",
                 pg_log_path.as_ref(),
+                "-U",
+                &username(),
                 "start",
             ];
+            tracing::info!(
+                "Starting storage controller database with args: {:?}",
+                db_start_args
+            );
 
-            background_process::start_process(
-                "storage_controller_db",
-                &self.env.base_data_dir,
-                pg_bin_dir.join("pg_ctl").as_std_path(),
-                db_start_args,
-                vec![
-                    ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-                    ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-                ],
-                background_process::InitialPidFile::Create(self.postgres_pid_file()),
-                &start_args.start_timeout,
-                || self.pg_isready(&pg_bin_dir, postgres_port),
-            )
-            .await?;
+            let db_start_status = self.pg_ctl(db_start_args).await;
+            let start_timeout: Duration = start_args.start_timeout.into();
+            let db_start_deadline = Instant::now() + start_timeout;
+            if !db_start_status.success() {
+                return Err(anyhow::anyhow!(
+                    "Failed to start postgres {}",
+                    db_start_status.code().unwrap()
+                ));
+            }
 
-            // Run migrations on every startup, in case something changed.
+            loop {
+                if Instant::now() > db_start_deadline {
+                    return Err(anyhow::anyhow!("Timed out waiting for postgres to start"));
+                }
+
+                match self.pg_isready(&pg_bin_dir, postgres_port).await {
+                    Ok(true) => {
+                        tracing::info!("storage controller postgres is now ready");
+                        break;
+                    }
+                    Ok(false) => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to check postgres status: {e}")
+                    }
+                }
+            }
+
             self.setup_database(postgres_port).await?;
         }
 
@@ -438,6 +512,8 @@ impl StorageController {
             &humantime::Duration::from(self.config.max_offline).to_string(),
             "--max-warming-up-interval",
             &humantime::Duration::from(self.config.max_warming_up).to_string(),
+            "--heartbeat-interval",
+            &humantime::Duration::from(self.config.heartbeat_interval).to_string(),
             "--address-for-peers",
             &address_for_peers.to_string(),
         ]
@@ -454,6 +530,11 @@ impl StorageController {
             let jwt_token =
                 encode_from_key_file(&claims, private_key).expect("failed to generate jwt token");
             args.push(format!("--jwt-token={jwt_token}"));
+
+            let peer_claims = Claims::new(None, Scope::Admin);
+            let peer_jwt_token = encode_from_key_file(&peer_claims, private_key)
+                .expect("failed to generate jwt token");
+            args.push(format!("--peer-jwt-token={peer_jwt_token}"));
         }
 
         if let Some(public_key) = &self.public_key {
@@ -472,6 +553,13 @@ impl StorageController {
 
         if let Some(lag) = self.config.max_secondary_lag_bytes.as_ref() {
             args.push(format!("--max-secondary-lag-bytes={lag}"))
+        }
+
+        if let Some(threshold) = self.config.long_reconcile_threshold {
+            args.push(format!(
+                "--long-reconcile-threshold={}",
+                humantime::Duration::from(threshold)
+            ))
         }
 
         args.push(format!(
@@ -533,15 +621,10 @@ impl StorageController {
         }
 
         let pg_data_path = self.env.base_data_dir.join("storage_controller_db");
-        let pg_bin_dir = self.get_pg_bin_dir().await?;
 
         println!("Stopping storage controller database...");
         let pg_stop_args = ["-D", &pg_data_path.to_string_lossy(), "stop"];
-        let stop_status = Command::new(pg_bin_dir.join("pg_ctl"))
-            .args(pg_stop_args)
-            .spawn()?
-            .wait()
-            .await?;
+        let stop_status = self.pg_ctl(pg_stop_args).await;
         if !stop_status.success() {
             match self.is_postgres_running().await {
                 Ok(false) => {
@@ -562,14 +645,9 @@ impl StorageController {
 
     async fn is_postgres_running(&self) -> anyhow::Result<bool> {
         let pg_data_path = self.env.base_data_dir.join("storage_controller_db");
-        let pg_bin_dir = self.get_pg_bin_dir().await?;
 
         let pg_status_args = ["-D", &pg_data_path.to_string_lossy(), "status"];
-        let status_exitcode = Command::new(pg_bin_dir.join("pg_ctl"))
-            .args(pg_status_args)
-            .spawn()?
-            .wait()
-            .await?;
+        let status_exitcode = self.pg_ctl(pg_status_args).await;
 
         // pg_ctl status returns this exit code if postgres is not running: in this case it is
         // fine that stop failed.  Otherwise it is an error that stop failed.
@@ -630,7 +708,7 @@ impl StorageController {
         } else {
             // The configured URL has the /upcall path prefix for pageservers to use: we will strip that out
             // for general purpose API access.
-            let listen_url = self.env.control_plane_api.clone().unwrap();
+            let listen_url = self.env.control_plane_api.clone();
             Url::from_str(&format!(
                 "http://{}:{}/{path}",
                 listen_url.host_str().unwrap(),
@@ -744,10 +822,7 @@ impl StorageController {
         self.dispatch(
             Method::PUT,
             format!("control/v1/tenant/{tenant_shard_id}/migrate"),
-            Some(TenantShardMigrateRequest {
-                tenant_shard_id,
-                node_id,
-            }),
+            Some(TenantShardMigrateRequest { node_id }),
         )
         .await
     }

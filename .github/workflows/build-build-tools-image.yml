@@ -3,32 +3,86 @@ name: Build build-tools image
 on:
   workflow_call:
     inputs:
-      image-tag:
-        description: "build-tools image tag"
-        required: true
+      archs:
+        description: "Json array of architectures to build"
+        # Default values are set in `check-image` job, `set-variables` step
         type: string
+        required: false
+      debians:
+        description: "Json array of Debian versions to build"
+        # Default values are set in `check-image` job, `set-variables` step
+        type: string
+        required: false
     outputs:
       image-tag:
         description: "build-tools tag"
-        value: ${{ inputs.image-tag }}
+        value: ${{ jobs.check-image.outputs.tag }}
       image:
         description: "build-tools image"
-        value: neondatabase/build-tools:${{ inputs.image-tag }}
+        value: neondatabase/build-tools:${{ jobs.check-image.outputs.tag }}
 
 defaults:
   run:
     shell: bash -euo pipefail {0}
 
-concurrency:
-  group: build-build-tools-image-${{ inputs.image-tag }}
-  cancel-in-progress: false
+# The initial idea was to prevent the waste of resources by not re-building the `build-tools` image
+# for the same tag in parallel workflow runs, and queue them to be skipped once we have
+# the first image pushed to Docker registry, but GitHub's concurrency mechanism is not working as expected.
+# GitHub can't have more than 1 job in a queue and removes the previous one, it causes failures if the dependent jobs.
+#
+# Ref https://github.com/orgs/community/discussions/41518
+#
+# concurrency:
+#   group: build-build-tools-image-${{ inputs.image-tag }}
+#   cancel-in-progress: false
 
 # No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
 permissions: {}
 
 jobs:
   check-image:
-    uses: ./.github/workflows/check-build-tools-image.yml
+    runs-on: ubuntu-22.04
+    outputs:
+      archs: ${{ steps.set-variables.outputs.archs }}
+      debians: ${{ steps.set-variables.outputs.debians }}
+      tag: ${{ steps.set-variables.outputs.image-tag }}
+      everything: ${{ steps.set-more-variables.outputs.everything }}
+      found: ${{ steps.set-more-variables.outputs.found }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set variables
+        id: set-variables
+        env:
+          ARCHS: ${{ inputs.archs || '["x64","arm64"]' }}
+          DEBIANS: ${{ inputs.debians || '["bullseye","bookworm"]' }}
+          IMAGE_TAG: |
+            ${{ hashFiles('build-tools.Dockerfile',
+                          '.github/workflows/build-build-tools-image.yml') }}
+        run: |
+          echo "archs=${ARCHS}"           | tee -a ${GITHUB_OUTPUT}
+          echo "debians=${DEBIANS}"       | tee -a ${GITHUB_OUTPUT}
+          echo "image-tag=${IMAGE_TAG}"   | tee -a ${GITHUB_OUTPUT}
+
+      - name: Set more variables
+        id: set-more-variables
+        env:
+          IMAGE_TAG: ${{ steps.set-variables.outputs.image-tag }}
+          EVERYTHING: |
+            ${{ contains(fromJson(steps.set-variables.outputs.archs), 'x64') &&
+                contains(fromJson(steps.set-variables.outputs.archs), 'arm64') &&
+                contains(fromJson(steps.set-variables.outputs.debians), 'bullseye') &&
+                contains(fromJson(steps.set-variables.outputs.debians), 'bookworm') }}
+        run: |
+          if docker manifest inspect neondatabase/build-tools:${IMAGE_TAG}; then
+            found=true
+          else
+            found=false
+          fi
+
+          echo "everything=${EVERYTHING}" | tee -a ${GITHUB_OUTPUT}
+          echo "found=${found}"           | tee -a ${GITHUB_OUTPUT}
 
   build-image:
     needs: [ check-image ]
@@ -36,27 +90,15 @@ jobs:
 
     strategy:
       matrix:
-        arch: [ x64, arm64 ]
+        arch: ${{ fromJson(needs.check-image.outputs.archs) }}
+        debian: ${{ fromJson(needs.check-image.outputs.debians) }}
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
-    env:
-      IMAGE_TAG: ${{ inputs.image-tag }}
-
     steps:
-      - name: Check `input.tag` is correct
-        env:
-          INPUTS_IMAGE_TAG: ${{ inputs.image-tag }}
-          CHECK_IMAGE_TAG : ${{ needs.check-image.outputs.image-tag }}
-        run: |
-          if [ "${INPUTS_IMAGE_TAG}" != "${CHECK_IMAGE_TAG}" ]; then
-            echo "'inputs.image-tag' (${INPUTS_IMAGE_TAG}) does not match the tag of the latest build-tools image 'inputs.image-tag' (${CHECK_IMAGE_TAG})"
-            exit 1
-          fi
-
       - uses: actions/checkout@v4
 
-      - uses: ./.github/actions/set-docker-config-dir
+      - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/setup-buildx-action@v3
         with:
           cache-binary: false
@@ -74,21 +116,21 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
+          file: build-tools.Dockerfile
           context: .
           provenance: false
           push: true
           pull: true
-          file: Dockerfile.build-tools
-          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0},mode=max', matrix.arch) || '' }}
-          tags: neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.arch }}
+          build-args: |
+            DEBIAN_VERSION=${{ matrix.debian }}
+          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.debian }}-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.debian, matrix.arch) || '' }}
+          tags: |
+            neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
 
   merge-images:
-    needs: [ build-image ]
+    needs: [ check-image, build-image ]
     runs-on: ubuntu-22.04
-
-    env:
-      IMAGE_TAG: ${{ inputs.image-tag }}
 
     steps:
       - uses: docker/login-action@v3
@@ -97,7 +139,23 @@ jobs:
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
       - name: Create multi-arch image
+        env:
+          DEFAULT_DEBIAN_VERSION: bookworm
+          ARCHS: ${{ join(fromJson(needs.check-image.outputs.archs), ' ') }}
+          DEBIANS: ${{ join(fromJson(needs.check-image.outputs.debians), ' ') }}
+          EVERYTHING: ${{ needs.check-image.outputs.everything }}
+          IMAGE_TAG: ${{ needs.check-image.outputs.tag }}
         run: |
-          docker buildx imagetools create -t neondatabase/build-tools:${IMAGE_TAG} \
-                                             neondatabase/build-tools:${IMAGE_TAG}-x64 \
-                                             neondatabase/build-tools:${IMAGE_TAG}-arm64
+          for debian in ${DEBIANS}; do
+            tags=("-t" "neondatabase/build-tools:${IMAGE_TAG}-${debian}")
+
+            if [ "${EVERYTHING}" == "true" ] && [ "${debian}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
+              tags+=("-t" "neondatabase/build-tools:${IMAGE_TAG}")
+            fi
+
+            for arch in ${ARCHS}; do
+              tags+=("neondatabase/build-tools:${IMAGE_TAG}-${debian}-${arch}")
+            done
+
+            docker buildx imagetools create "${tags[@]}"
+          done

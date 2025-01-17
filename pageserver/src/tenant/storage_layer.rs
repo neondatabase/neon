@@ -1,22 +1,21 @@
 //! Common traits and structs for layers
 
+pub mod batch_split_writer;
 pub mod delta_layer;
+pub mod filter_iterator;
 pub mod image_layer;
-pub(crate) mod inmemory_layer;
+pub mod inmemory_layer;
 pub(crate) mod layer;
 mod layer_desc;
 mod layer_name;
 pub mod merge_iterator;
 
-#[cfg(test)]
-pub mod split_writer;
-
 use crate::context::{AccessStatsBehavior, RequestContext};
-use crate::repository::Value;
-use crate::walrecord::NeonWalRecord;
 use bytes::Bytes;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
+use pageserver_api::record::NeonWalRecord;
+use pageserver_api::value::Value;
 use std::cmp::{Ordering, Reverse};
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
@@ -197,6 +196,9 @@ impl ValuesReconstructState {
     /// Returns true if this was the last value needed for the key and false otherwise.
     ///
     /// If the key is done after the update, mark it as such.
+    ///
+    /// If the key is in the sparse keyspace (i.e., aux files), we do not track them in
+    /// `key_done`.
     pub(crate) fn update_key(
         &mut self,
         key: &Key,
@@ -207,10 +209,18 @@ impl ValuesReconstructState {
             .keys
             .entry(*key)
             .or_insert(Ok(VectoredValueReconstructState::default()));
-
+        let is_sparse_key = key.is_sparse();
         if let Ok(state) = state {
             let key_done = match state.situation {
-                ValueReconstructSituation::Complete => unreachable!(),
+                ValueReconstructSituation::Complete => {
+                    if is_sparse_key {
+                        // Sparse keyspace might be visited multiple times because
+                        // we don't track unmapped keyspaces.
+                        return ValueReconstructSituation::Complete;
+                    } else {
+                        unreachable!()
+                    }
+                }
                 ValueReconstructSituation::Continue => match value {
                     Value::Image(img) => {
                         state.img = Some((lsn, img));
@@ -235,7 +245,9 @@ impl ValuesReconstructState {
 
             if key_done && state.situation == ValueReconstructSituation::Continue {
                 state.situation = ValueReconstructSituation::Complete;
-                self.keys_done.add_key(*key);
+                if !is_sparse_key {
+                    self.keys_done.add_key(*key);
+                }
             }
 
             state.situation
@@ -277,6 +289,16 @@ pub(crate) enum LayerId {
     InMemoryLayerId(InMemoryLayerFileId),
 }
 
+/// Uniquely identify a layer visit by the layer
+/// and LSN floor (or start LSN) of the reads.
+/// The layer itself is not enough since we may
+/// have different LSN lower bounds for delta layer reads.
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+struct LayerToVisitId {
+    layer_id: LayerId,
+    lsn_floor: Lsn,
+}
+
 /// Layer wrapper for the read path. Note that it is valid
 /// to use these layers even after external operations have
 /// been performed on them (compaction, freeze, etc.).
@@ -288,9 +310,9 @@ pub(crate) enum ReadableLayer {
 
 /// A partial description of a read to be done.
 #[derive(Debug, Clone)]
-struct ReadDesc {
+struct LayerVisit {
     /// An id used to resolve the readable layer within the fringe
-    layer_id: LayerId,
+    layer_to_visit_id: LayerToVisitId,
     /// Lsn range for the read, used for selecting the next read
     lsn_range: Range<Lsn>,
 }
@@ -304,12 +326,12 @@ struct ReadDesc {
 /// a two layer indexing scheme.
 #[derive(Debug)]
 pub(crate) struct LayerFringe {
-    planned_reads_by_lsn: BinaryHeap<ReadDesc>,
-    layers: HashMap<LayerId, LayerKeyspace>,
+    planned_visits_by_lsn: BinaryHeap<LayerVisit>,
+    visit_reads: HashMap<LayerToVisitId, LayerVisitReads>,
 }
 
 #[derive(Debug)]
-struct LayerKeyspace {
+struct LayerVisitReads {
     layer: ReadableLayer,
     target_keyspace: KeySpaceRandomAccum,
 }
@@ -317,23 +339,20 @@ struct LayerKeyspace {
 impl LayerFringe {
     pub(crate) fn new() -> Self {
         LayerFringe {
-            planned_reads_by_lsn: BinaryHeap::new(),
-            layers: HashMap::new(),
+            planned_visits_by_lsn: BinaryHeap::new(),
+            visit_reads: HashMap::new(),
         }
     }
 
     pub(crate) fn next_layer(&mut self) -> Option<(ReadableLayer, KeySpace, Range<Lsn>)> {
-        let read_desc = match self.planned_reads_by_lsn.pop() {
-            Some(desc) => desc,
-            None => return None,
-        };
+        let read_desc = self.planned_visits_by_lsn.pop()?;
 
-        let removed = self.layers.remove_entry(&read_desc.layer_id);
+        let removed = self.visit_reads.remove_entry(&read_desc.layer_to_visit_id);
 
         match removed {
             Some((
                 _,
-                LayerKeyspace {
+                LayerVisitReads {
                     layer,
                     mut target_keyspace,
                 },
@@ -352,20 +371,24 @@ impl LayerFringe {
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
     ) {
-        let layer_id = layer.id();
-        let entry = self.layers.entry(layer_id.clone());
+        let layer_to_visit_id = LayerToVisitId {
+            layer_id: layer.id(),
+            lsn_floor: lsn_range.start,
+        };
+
+        let entry = self.visit_reads.entry(layer_to_visit_id.clone());
         match entry {
             Entry::Occupied(mut entry) => {
                 entry.get_mut().target_keyspace.add_keyspace(keyspace);
             }
             Entry::Vacant(entry) => {
-                self.planned_reads_by_lsn.push(ReadDesc {
+                self.planned_visits_by_lsn.push(LayerVisit {
                     lsn_range,
-                    layer_id: layer_id.clone(),
+                    layer_to_visit_id: layer_to_visit_id.clone(),
                 });
                 let mut accum = KeySpaceRandomAccum::new();
                 accum.add_keyspace(keyspace);
-                entry.insert(LayerKeyspace {
+                entry.insert(LayerVisitReads {
                     layer,
                     target_keyspace: accum,
                 });
@@ -380,7 +403,7 @@ impl Default for LayerFringe {
     }
 }
 
-impl Ord for ReadDesc {
+impl Ord for LayerVisit {
     fn cmp(&self, other: &Self) -> Ordering {
         let ord = self.lsn_range.end.cmp(&other.lsn_range.end);
         if ord == std::cmp::Ordering::Equal {
@@ -391,19 +414,19 @@ impl Ord for ReadDesc {
     }
 }
 
-impl PartialOrd for ReadDesc {
+impl PartialOrd for LayerVisit {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl PartialEq for ReadDesc {
+impl PartialEq for LayerVisit {
     fn eq(&self, other: &Self) -> bool {
         self.lsn_range == other.lsn_range
     }
 }
 
-impl Eq for ReadDesc {}
+impl Eq for LayerVisit {}
 
 impl ReadableLayer {
     pub(crate) fn id(&self) -> LayerId {
@@ -435,10 +458,11 @@ impl ReadableLayer {
     }
 }
 
-/// Layers contain a hint indicating whether they are likely to be used for reads.  This is a hint rather
-/// than an authoritative value, so that we do not have to update it synchronously when changing the visibility
-/// of layers (for example when creating a branch that makes some previously covered layers visible).  It should
-/// be used for cache management but not for correctness-critical checks.
+/// Layers contain a hint indicating whether they are likely to be used for reads.
+///
+/// This is a hint rather than an authoritative value, so that we do not have to update it synchronously
+/// when changing the visibility of layers (for example when creating a branch that makes some previously
+/// covered layers visible).  It should be used for cache management but not for correctness-critical checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayerVisibilityHint {
     /// A Visible layer might be read while serving a read, because there is not an image layer between it
@@ -691,7 +715,7 @@ pub mod tests {
 /// Useful with `Key`, which has too verbose `{:?}` for printing multiple layers.
 struct RangeDisplayDebug<'a, T: std::fmt::Display>(&'a Range<T>);
 
-impl<'a, T: std::fmt::Display> std::fmt::Debug for RangeDisplayDebug<'a, T> {
+impl<T: std::fmt::Display> std::fmt::Debug for RangeDisplayDebug<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}..{}", self.0.start, self.0.end)
     }

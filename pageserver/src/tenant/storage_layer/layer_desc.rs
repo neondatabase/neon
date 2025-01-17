@@ -3,7 +3,7 @@ use pageserver_api::shard::TenantShardId;
 use std::ops::Range;
 use utils::{id::TimelineId, lsn::Lsn};
 
-use crate::repository::Key;
+use pageserver_api::key::Key;
 
 use super::{DeltaLayerName, ImageLayerName, LayerName};
 
@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use utils::id::TenantId;
 
-/// A unique identifier of a persistent layer. This is different from `LayerDescriptor`, which is only used in the
-/// benchmarks. This struct contains all necessary information to find the image / delta layer. It also provides
+/// A unique identifier of a persistent layer.
+///
+/// This is different from `LayerDescriptor`, which is only used in the benchmarks.
+/// This struct contains all necessary information to find the image / delta layer. It also provides
 /// a unified way to generate layer information like file name.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Hash)]
 pub struct PersistentLayerDesc {
@@ -55,6 +57,34 @@ impl std::fmt::Display for PersistentLayerKey {
     }
 }
 
+impl From<ImageLayerName> for PersistentLayerKey {
+    fn from(image_layer_name: ImageLayerName) -> Self {
+        Self {
+            key_range: image_layer_name.key_range,
+            lsn_range: PersistentLayerDesc::image_layer_lsn_range(image_layer_name.lsn),
+            is_delta: false,
+        }
+    }
+}
+
+impl From<DeltaLayerName> for PersistentLayerKey {
+    fn from(delta_layer_name: DeltaLayerName) -> Self {
+        Self {
+            key_range: delta_layer_name.key_range,
+            lsn_range: delta_layer_name.lsn_range,
+            is_delta: true,
+        }
+    }
+}
+
+impl From<LayerName> for PersistentLayerKey {
+    fn from(layer_name: LayerName) -> Self {
+        match layer_name {
+            LayerName::Image(i) => i.into(),
+            LayerName::Delta(d) => d.into(),
+        }
+    }
+}
 impl PersistentLayerDesc {
     pub fn key(&self) -> PersistentLayerKey {
         PersistentLayerKey {

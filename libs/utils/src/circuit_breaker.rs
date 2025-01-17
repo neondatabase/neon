@@ -5,8 +5,10 @@ use std::{
 
 use metrics::IntCounter;
 
-/// Circuit breakers are for operations that are expensive and fallible: if they fail repeatedly,
-/// we will stop attempting them for some period of time, to avoid denial-of-service from retries, and
+/// Circuit breakers are for operations that are expensive and fallible.
+///
+/// If a circuit breaker fails repeatedly, we will stop attempting it for some
+/// period of time, to avoid denial-of-service from retries, and
 /// to mitigate the log spam from repeated failures.
 pub struct CircuitBreaker {
     /// An identifier that enables us to log useful errors when a circuit is broken

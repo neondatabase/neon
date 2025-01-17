@@ -1,13 +1,29 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
 
+use std::fmt::Display;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::spec::{ComputeSpec, Database, Role};
+use crate::{
+    privilege::Privilege,
+    spec::{ComputeSpec, Database, ExtVersion, PgIdent, Role},
+};
 
 #[derive(Serialize, Debug, Deserialize)]
 pub struct GenericAPIError {
     pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InfoResponse {
+    pub num_cpus: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtensionInstallResponse {
+    pub extension: PgIdent,
+    pub version: ExtVersion,
 }
 
 /// Response of the /status API
@@ -18,16 +34,6 @@ pub struct ComputeStatusResponse {
     pub tenant: Option<String>,
     pub timeline: Option<String>,
     pub status: ComputeStatus,
-    #[serde(serialize_with = "rfc3339_serialize")]
-    pub last_active: Option<DateTime<Utc>>,
-    pub error: Option<String>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ComputeState {
-    pub status: ComputeStatus,
-    /// Timestamp of the last Postgres activity
     #[serde(serialize_with = "rfc3339_serialize")]
     pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
@@ -58,7 +64,22 @@ pub enum ComputeStatus {
     Terminated,
 }
 
-fn rfc3339_serialize<S>(x: &Option<DateTime<Utc>>, s: S) -> Result<S::Ok, S::Error>
+impl Display for ComputeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ComputeStatus::Empty => f.write_str("empty"),
+            ComputeStatus::ConfigurationPending => f.write_str("configuration-pending"),
+            ComputeStatus::Init => f.write_str("init"),
+            ComputeStatus::Running => f.write_str("running"),
+            ComputeStatus::Configuration => f.write_str("configuration"),
+            ComputeStatus::Failed => f.write_str("failed"),
+            ComputeStatus::TerminationPending => f.write_str("termination-pending"),
+            ComputeStatus::Terminated => f.write_str("terminated"),
+        }
+    }
+}
+
+pub fn rfc3339_serialize<S>(x: &Option<DateTime<Utc>>, s: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -137,4 +158,30 @@ pub enum ControlPlaneComputeStatus {
     // Compute is attached to some timeline / endpoint and
     // should be able to start with provided spec.
     Attached,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct InstalledExtension {
+    pub extname: String,
+    pub version: String,
+    pub n_databases: u32, // Number of databases using this extension
+    pub owned_by_superuser: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct InstalledExtensions {
+    pub extensions: Vec<InstalledExtension>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ExtensionInstallResult {
+    pub extension: PgIdent,
+    pub version: ExtVersion,
+}
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SetRoleGrantsResponse {
+    pub database: PgIdent,
+    pub schema: PgIdent,
+    pub privileges: Vec<Privilege>,
+    pub role: PgIdent,
 }

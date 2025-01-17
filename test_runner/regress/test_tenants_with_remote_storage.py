@@ -6,10 +6,11 @@
 # checkpoint_distance setting so that a lot of layer files are created.
 #
 
+from __future__ import annotations
+
 import asyncio
 import os
 from pathlib import Path
-from typing import List, Tuple
 
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
@@ -62,19 +63,18 @@ async def all_tenants_workload(env: NeonEnv, tenants_endpoints):
 def test_tenants_many(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
-    tenants_endpoints: List[Tuple[TenantId, Endpoint]] = []
+    tenants_endpoints: list[tuple[TenantId, Endpoint]] = []
 
     for _ in range(1, 5):
         # Use a tiny checkpoint distance, to create a lot of layers quickly
-        tenant, _ = env.neon_cli.create_tenant(
+        tenant, _ = env.create_tenant(
             conf={
                 "checkpoint_distance": "5000000",
             }
         )
-        env.neon_cli.create_timeline("test_tenants_many", tenant_id=tenant)
 
         endpoint = env.endpoints.create_start(
-            "test_tenants_many",
+            "main",
             tenant_id=tenant,
         )
         tenants_endpoints.append((tenant, endpoint))
@@ -178,11 +178,7 @@ def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
     env.pageserver.start()
     client = env.pageserver.http_client()
 
-    wait_until(
-        number_of_iterations=5,
-        interval=1,
-        func=lambda: assert_tenant_state(client, tenant_id, "Active"),
-    )
+    wait_until(lambda: assert_tenant_state(client, tenant_id, "Active"))
 
     restored_timelines = client.timeline_list(tenant_id)
     assert (
@@ -257,11 +253,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     env.pageserver.start()
     client = env.pageserver.http_client()
 
-    wait_until(
-        number_of_iterations=5,
-        interval=1,
-        func=lambda: assert_tenant_state(client, tenant_id, "Active"),
-    )
+    wait_until(lambda: assert_tenant_state(client, tenant_id, "Active"))
 
     restored_timelines = client.timeline_list(tenant_id)
     assert (

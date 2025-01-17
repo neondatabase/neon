@@ -20,6 +20,8 @@ from shutdown checkpoint, using the CLOG scanning mechanism, waiting for
 running-xacts record and for in-progress transactions to finish etc.
 """
 
+from __future__ import annotations
+
 import threading
 from contextlib import closing
 
@@ -28,7 +30,7 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, wait_for_last_flush_lsn, wait_replica_caughtup
 from fixtures.pg_version import PgVersion
-from fixtures.utils import query_scalar, wait_until
+from fixtures.utils import query_scalar, skip_on_postgres, wait_until
 
 CREATE_SUBXACTS_FUNC = """
 create or replace function create_subxacts(n integer) returns void as $$
@@ -103,6 +105,7 @@ def test_replica_start_scan_clog_crashed_xids(neon_simple_env: NeonEnv):
     # Initialize the primary, a test table, and a helper function to create lots
     # of subtransactions.
     env = neon_simple_env
+    timeline_id = env.initial_timeline
     primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
     primary_conn = primary.connect()
     primary_cur = primary_conn.cursor()
@@ -114,7 +117,7 @@ def test_replica_start_scan_clog_crashed_xids(neon_simple_env: NeonEnv):
     # chance to write abort records for them.
     primary_cur.execute("begin")
     primary_cur.execute("select create_subxacts(100000)")
-    primary.stop(mode="immediate")
+    primary.stop(mode="immediate", sks_wait_walreceiver_gone=(env.safekeepers, timeline_id))
 
     # Restart the primary. Do some light work, and shut it down cleanly
     primary.start()
@@ -134,6 +137,12 @@ def test_replica_start_scan_clog_crashed_xids(neon_simple_env: NeonEnv):
     assert secondary_cur.fetchone() == (1,)
 
 
+@skip_on_postgres(
+    PgVersion.V14, reason="pg_log_standby_snapshot() function is available since Postgres 16"
+)
+@skip_on_postgres(
+    PgVersion.V15, reason="pg_log_standby_snapshot() function is available since Postgres 16"
+)
 def test_replica_start_at_running_xacts(neon_simple_env: NeonEnv, pg_version):
     """
     Test that starting a replica works right after the primary has
@@ -145,9 +154,6 @@ def test_replica_start_at_running_xacts(neon_simple_env: NeonEnv, pg_version):
     See the module docstring for background.
     """
     env = neon_simple_env
-
-    if env.pg_version == PgVersion.V14 or env.pg_version == PgVersion.V15:
-        pytest.skip("pg_log_standby_snapshot() function is available only in PG16")
 
     primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
     primary_conn = primary.connect()
@@ -372,7 +378,7 @@ def test_replica_too_many_known_assigned_xids(neon_simple_env: NeonEnv):
             return None
         raise RuntimeError("connection succeeded")
 
-    wait_until(20, 0.5, check_replica_crashed)
+    wait_until(check_replica_crashed)
     assert secondary.log_contains("too many KnownAssignedXids")
 
     # Replica is crashed, so ignore stop result
@@ -659,6 +665,7 @@ def test_replica_start_with_too_many_unused_xids(neon_simple_env: NeonEnv):
 
     # Initialize the primary and a test table
     env = neon_simple_env
+    timeline_id = env.initial_timeline
     primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
     with primary.cursor() as primary_cur:
         primary_cur.execute("create table t(pk serial primary key, payload integer)")
@@ -667,7 +674,7 @@ def test_replica_start_with_too_many_unused_xids(neon_simple_env: NeonEnv):
         with primary.cursor() as primary_cur:
             primary_cur.execute("insert into t (payload) values (0)")
         # restart primary
-        primary.stop("immediate")
+        primary.stop("immediate", sks_wait_walreceiver_gone=(env.safekeepers, timeline_id))
         primary.start()
 
     # Wait for the WAL to be flushed

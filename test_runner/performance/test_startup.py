@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import requests
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.neon_fixtures import NeonEnvBuilder
@@ -27,7 +29,7 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_startup")
+    env.create_branch("test_startup")
 
     endpoint = None
 

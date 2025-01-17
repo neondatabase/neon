@@ -88,12 +88,6 @@ impl<'de> Deserialize<'de> for Id {
 }
 
 impl Id {
-    pub fn get_from_buf(buf: &mut impl bytes::Buf) -> Id {
-        let mut arr = [0u8; 16];
-        buf.copy_to_slice(&mut arr);
-        Id::from(arr)
-    }
-
     pub fn from_slice(src: &[u8]) -> Result<Id, IdError> {
         if src.len() != 16 {
             return Err(IdError::SliceParseError(src.len()));
@@ -179,10 +173,6 @@ impl fmt::Debug for Id {
 macro_rules! id_newtype {
     ($t:ident) => {
         impl $t {
-            pub fn get_from_buf(buf: &mut impl bytes::Buf) -> $t {
-                $t(Id::get_from_buf(buf))
-            }
-
             pub fn from_slice(src: &[u8]) -> Result<$t, IdError> {
                 Ok($t(Id::from_slice(src)?))
             }
@@ -249,8 +239,10 @@ macro_rules! id_newtype {
     };
 }
 
-/// Neon timeline IDs are different from PostgreSQL timeline
-/// IDs. They serve a similar purpose though: they differentiate
+/// Neon timeline ID.
+///
+/// They are different from PostgreSQL timeline
+/// IDs, but serve a similar purpose: they differentiate
 /// between different "histories" of the same cluster.  However,
 /// PostgreSQL timeline IDs are a bit cumbersome, because they are only
 /// 32-bits wide, and they must be in ascending order in any given

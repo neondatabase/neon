@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 
 from fixtures.neon_fixtures import NeonEnvBuilder
@@ -13,7 +15,7 @@ def test_truncate(neon_env_builder: NeonEnvBuilder, zenbenchmark):
 
     # Problems with FSM/VM forks truncation are most frequently detected during page reconstruction triggered
     # by image layer generation. So adjust default parameters to make it happen more frequently.
-    tenant, _ = env.neon_cli.create_tenant(
+    tenant, _ = env.create_tenant(
         conf={
             # disable automatic GC
             "gc_period": "0s",
@@ -26,8 +28,7 @@ def test_truncate(neon_env_builder: NeonEnvBuilder, zenbenchmark):
         }
     )
 
-    env.neon_cli.create_timeline("test_truncate", tenant_id=tenant)
-    endpoint = env.endpoints.create_start("test_truncate", tenant_id=tenant)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant)
     cur = endpoint.connect().cursor()
     cur.execute("create table t1(x integer)")
     cur.execute(f"insert into t1 values (generate_series(1,{n_records}))")

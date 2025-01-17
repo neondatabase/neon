@@ -1,14 +1,11 @@
-from fixtures.neon_fixtures import NeonEnvBuilder
+from __future__ import annotations
+
+from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
 
 
 def do_combocid_op(neon_env_builder: NeonEnvBuilder, op):
     env = neon_env_builder.init_start()
-    endpoint = env.endpoints.create_start(
-        "main",
-        config_lines=[
-            "shared_buffers='1MB'",
-        ],
-    )
+    endpoint = env.endpoints.create_start("main")
 
     conn = endpoint.connect()
     cur = conn.cursor()
@@ -34,7 +31,7 @@ def do_combocid_op(neon_env_builder: NeonEnvBuilder, op):
 
     # Clear the cache, so that we exercise reconstructing the pages
     # from WAL
-    cur.execute("SELECT clear_buffer_cache()")
+    endpoint.clear_buffers()
 
     # Check that the cursor opened earlier still works. If the
     # combocids are not restored correctly, it won't.
@@ -43,6 +40,10 @@ def do_combocid_op(neon_env_builder: NeonEnvBuilder, op):
     assert len(rows) == 500
 
     cur.execute("rollback")
+    flush_ep_to_pageserver(env, endpoint, env.initial_tenant, env.initial_timeline)
+    env.pageserver.http_client().timeline_checkpoint(
+        env.initial_tenant, env.initial_timeline, compact=False, wait_until_uploaded=True
+    )
 
 
 def test_combocid_delete(neon_env_builder: NeonEnvBuilder):
@@ -59,12 +60,7 @@ def test_combocid_lock(neon_env_builder: NeonEnvBuilder):
 
 def test_combocid_multi_insert(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
-    endpoint = env.endpoints.create_start(
-        "main",
-        config_lines=[
-            "shared_buffers='1MB'",
-        ],
-    )
+    endpoint = env.endpoints.create_start("main")
 
     conn = endpoint.connect()
     cur = conn.cursor()
@@ -92,7 +88,7 @@ def test_combocid_multi_insert(neon_env_builder: NeonEnvBuilder):
     cur.execute("delete from t")
     # Clear the cache, so that we exercise reconstructing the pages
     # from WAL
-    cur.execute("SELECT clear_buffer_cache()")
+    endpoint.clear_buffers()
 
     # Check that the cursor opened earlier still works. If the
     # combocids are not restored correctly, it won't.
@@ -101,6 +97,11 @@ def test_combocid_multi_insert(neon_env_builder: NeonEnvBuilder):
     assert len(rows) == 500
 
     cur.execute("rollback")
+
+    flush_ep_to_pageserver(env, endpoint, env.initial_tenant, env.initial_timeline)
+    env.pageserver.http_client().timeline_checkpoint(
+        env.initial_tenant, env.initial_timeline, compact=False, wait_until_uploaded=True
+    )
 
 
 def test_combocid(neon_env_builder: NeonEnvBuilder):
@@ -137,3 +138,8 @@ def test_combocid(neon_env_builder: NeonEnvBuilder):
     assert cur.rowcount == n_records
 
     cur.execute("rollback")
+
+    flush_ep_to_pageserver(env, endpoint, env.initial_tenant, env.initial_timeline)
+    env.pageserver.http_client().timeline_checkpoint(
+        env.initial_tenant, env.initial_timeline, compact=False, wait_until_uploaded=True
+    )

@@ -1,12 +1,13 @@
+from __future__ import annotations
+
 import random
 from contextlib import closing
-from typing import Optional
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.remote_storage import s3_storage
-from fixtures.utils import wait_until
+from fixtures.utils import skip_in_debug_build, wait_until
 
 
 # Test restarting page server, while safekeeper and compute node keep
@@ -102,7 +103,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
 
         raise AssertionError("No 'complete' metric yet")
 
-    wait_until(30, 1.0, assert_complete)
+    wait_until(assert_complete)
 
     # Expectation callbacks: arg t is sample value, arg p is the previous phase's sample value
     expectations = [
@@ -153,12 +154,8 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
 # safekeeper and compute node keep running.
 @pytest.mark.timeout(540)
 @pytest.mark.parametrize("shard_count", [None, 4])
-def test_pageserver_chaos(
-    neon_env_builder: NeonEnvBuilder, build_type: str, shard_count: Optional[int]
-):
-    if build_type == "debug":
-        pytest.skip("times out in debug builds")
-
+@skip_in_debug_build("times out in debug builds")
+def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     # same rationale as with the immediate stop; we might leave orphan layers behind.
     neon_env_builder.disable_scrub_on_exit()
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
@@ -169,13 +166,12 @@ def test_pageserver_chaos(
 
     # Use a tiny checkpoint distance, to create a lot of layers quickly.
     # That allows us to stress the compaction and layer flushing logic more.
-    tenant, _ = env.neon_cli.create_tenant(
+    tenant, _ = env.create_tenant(
         conf={
             "checkpoint_distance": "5000000",
         }
     )
-    env.neon_cli.create_timeline("test_pageserver_chaos", tenant_id=tenant)
-    endpoint = env.endpoints.create_start("test_pageserver_chaos", tenant_id=tenant)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant)
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers, otherwise the SELECT after restart will just return answer

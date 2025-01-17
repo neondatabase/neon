@@ -2,11 +2,17 @@
 //! to glue together SafeKeeper and all other background services.
 
 use anyhow::{anyhow, bail, Result};
-use camino::Utf8PathBuf;
-use serde::{Deserialize, Serialize};
+use camino::{Utf8Path, Utf8PathBuf};
+use remote_storage::RemotePath;
+use safekeeper_api::membership::Configuration;
+use safekeeper_api::models::{
+    PeerInfo, TimelineMembershipSwitchResponse, TimelineTermBumpResponse,
+};
+use safekeeper_api::Term;
 use tokio::fs::{self};
 use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
+use utils::sync::gate::Gate;
 
 use std::cmp::max;
 use std::ops::{Deref, DerefMut};
@@ -25,60 +31,34 @@ use utils::{
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 
+use crate::control_file;
 use crate::rate_limit::RateLimiter;
 use crate::receive_wal::WalReceivers;
-use crate::safekeeper::{
-    AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, ServerInfo, Term, TermLsn,
-    INVALID_TERM,
-};
-use crate::send_wal::WalSenders;
+use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, TermLsn};
+use crate::send_wal::{WalSenders, WalSendersTimelineMetricValues};
 use crate::state::{EvictionState, TimelineMemState, TimelinePersistentState, TimelineState};
 use crate::timeline_guard::ResidenceGuard;
 use crate::timeline_manager::{AtomicStatus, ManagerCtl};
 use crate::timelines_set::TimelinesSet;
-use crate::wal_backup::{self};
+use crate::wal_backup::{self, remote_timeline_path};
 use crate::wal_backup_partial::PartialRemoteSegment;
-use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
 use crate::metrics::{FullTimelineInfo, WalStorageMetrics, MISC_OPERATION_SECONDS};
 use crate::wal_storage::{Storage as wal_storage_iface, WalReader};
+use crate::SafeKeeperConf;
 use crate::{debug_dump, timeline_manager, wal_storage};
-use crate::{GlobalTimelines, SafeKeeperConf};
 
-/// Things safekeeper should know about timeline state on peers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PeerInfo {
-    pub sk_id: NodeId,
-    pub term: Term,
-    /// Term of the last entry.
-    pub last_log_term: Term,
-    /// LSN of the last record.
-    pub flush_lsn: Lsn,
-    pub commit_lsn: Lsn,
-    /// Since which LSN safekeeper has WAL.
-    pub local_start_lsn: Lsn,
-    /// When info was received. Serde annotations are not very useful but make
-    /// the code compile -- we don't rely on this field externally.
-    #[serde(skip)]
-    #[serde(default = "Instant::now")]
-    ts: Instant,
-    pub pg_connstr: String,
-    pub http_connstr: String,
-}
-
-impl PeerInfo {
-    fn from_sk_info(sk_info: &SafekeeperTimelineInfo, ts: Instant) -> PeerInfo {
-        PeerInfo {
-            sk_id: NodeId(sk_info.safekeeper_id),
-            term: sk_info.term,
-            last_log_term: sk_info.last_log_term,
-            flush_lsn: Lsn(sk_info.flush_lsn),
-            commit_lsn: Lsn(sk_info.commit_lsn),
-            local_start_lsn: Lsn(sk_info.local_start_lsn),
-            pg_connstr: sk_info.safekeeper_connstr.clone(),
-            http_connstr: sk_info.http_connstr.clone(),
-            ts,
-        }
+fn peer_info_from_sk_info(sk_info: &SafekeeperTimelineInfo, ts: Instant) -> PeerInfo {
+    PeerInfo {
+        sk_id: NodeId(sk_info.safekeeper_id),
+        term: sk_info.term,
+        last_log_term: sk_info.last_log_term,
+        flush_lsn: Lsn(sk_info.flush_lsn),
+        commit_lsn: Lsn(sk_info.commit_lsn),
+        local_start_lsn: Lsn(sk_info.local_start_lsn),
+        pg_connstr: sk_info.safekeeper_connstr.clone(),
+        http_connstr: sk_info.http_connstr.clone(),
+        ts,
     }
 }
 
@@ -107,20 +87,15 @@ pub type ReadGuardSharedState<'a> = RwLockReadGuard<'a, SharedState>;
 pub struct WriteGuardSharedState<'a> {
     tli: Arc<Timeline>,
     guard: RwLockWriteGuard<'a, SharedState>,
-    skip_update: bool,
 }
 
 impl<'a> WriteGuardSharedState<'a> {
     fn new(tli: Arc<Timeline>, guard: RwLockWriteGuard<'a, SharedState>) -> Self {
-        WriteGuardSharedState {
-            tli,
-            guard,
-            skip_update: false,
-        }
+        WriteGuardSharedState { tli, guard }
     }
 }
 
-impl<'a> Deref for WriteGuardSharedState<'a> {
+impl Deref for WriteGuardSharedState<'_> {
     type Target = SharedState;
 
     fn deref(&self) -> &Self::Target {
@@ -128,13 +103,13 @@ impl<'a> Deref for WriteGuardSharedState<'a> {
     }
 }
 
-impl<'a> DerefMut for WriteGuardSharedState<'a> {
+impl DerefMut for WriteGuardSharedState<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.guard
     }
 }
 
-impl<'a> Drop for WriteGuardSharedState<'a> {
+impl Drop for WriteGuardSharedState<'_> {
     fn drop(&mut self) {
         let term_flush_lsn =
             TermLsn::from((self.guard.sk.last_log_term(), self.guard.sk.flush_lsn()));
@@ -158,16 +133,15 @@ impl<'a> Drop for WriteGuardSharedState<'a> {
             }
         });
 
-        if !self.skip_update {
-            // send notification about shared state update
-            self.tli.shared_state_version_tx.send_modify(|old| {
-                *old += 1;
-            });
-        }
+        // send notification about shared state update
+        self.tli.shared_state_version_tx.send_modify(|old| {
+            *old += 1;
+        });
     }
 }
 
 /// This structure is stored in shared state and represents the state of the timeline.
+///
 /// Usually it holds SafeKeeper, but it also supports offloaded timeline state. In this
 /// case, SafeKeeper is not available (because WAL is not present on disk) and all
 /// operations can be done only with control file.
@@ -211,6 +185,17 @@ impl StateSK {
         self.state()
             .acceptor_state
             .get_last_log_term(self.flush_lsn())
+    }
+
+    pub async fn term_bump(&mut self, to: Option<Term>) -> Result<TimelineTermBumpResponse> {
+        self.state_mut().term_bump(to).await
+    }
+
+    pub async fn membership_switch(
+        &mut self,
+        to: Configuration,
+    ) -> Result<TimelineMembershipSwitchResponse> {
+        self.state_mut().membership_switch(to).await
     }
 
     /// Close open WAL files to release FDs.
@@ -319,56 +304,31 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    /// Initialize fresh timeline state without persisting anything to disk.
-    fn create_new(
-        conf: &SafeKeeperConf,
-        ttid: &TenantTimelineId,
-        state: TimelinePersistentState,
-    ) -> Result<Self> {
-        if state.server.wal_seg_size == 0 {
-            bail!(TimelineError::UninitializedWalSegSize(*ttid));
-        }
-
-        if state.server.pg_version == UNKNOWN_SERVER_VERSION {
-            bail!(TimelineError::UninitialinzedPgVersion(*ttid));
-        }
-
-        if state.commit_lsn < state.local_start_lsn {
-            bail!(
-                "commit_lsn {} is higher than local_start_lsn {}",
-                state.commit_lsn,
-                state.local_start_lsn
-            );
-        }
-
-        // We don't want to write anything to disk, because we may have existing timeline there.
-        // These functions should not change anything on disk.
-        let timeline_dir = get_timeline_dir(conf, ttid);
-        let control_store =
-            control_file::FileStorage::create_new(timeline_dir.clone(), conf, state)?;
-        let wal_store =
-            wal_storage::PhysicalStorage::new(ttid, timeline_dir, conf, &control_store)?;
-        let sk = SafeKeeper::new(TimelineState::new(control_store), wal_store, conf.my_id)?;
-
-        Ok(Self {
-            sk: StateSK::Loaded(sk),
+    /// Creates a new SharedState.
+    pub fn new(sk: StateSK) -> Self {
+        Self {
+            sk,
             peers_info: PeersInfo(vec![]),
             wal_removal_on_hold: false,
-        })
+        }
     }
 
     /// Restore SharedState from control file. If file doesn't exist, bails out.
-    fn restore(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Result<Self> {
+    pub fn restore(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Result<Self> {
         let timeline_dir = get_timeline_dir(conf, ttid);
-        let control_store = control_file::FileStorage::restore_new(ttid, conf)?;
+        let control_store = control_file::FileStorage::restore_new(&timeline_dir, conf.no_sync)?;
         if control_store.server.wal_seg_size == 0 {
             bail!(TimelineError::UninitializedWalSegSize(*ttid));
         }
 
         let sk = match control_store.eviction_state {
             EvictionState::Present => {
-                let wal_store =
-                    wal_storage::PhysicalStorage::new(ttid, timeline_dir, conf, &control_store)?;
+                let wal_store = wal_storage::PhysicalStorage::new(
+                    ttid,
+                    &timeline_dir,
+                    &control_store,
+                    conf.no_sync,
+                )?;
                 StateSK::Loaded(SafeKeeper::new(
                     TimelineState::new(control_store),
                     wal_store,
@@ -380,11 +340,7 @@ impl SharedState {
             }
         };
 
-        Ok(Self {
-            sk,
-            peers_info: PeersInfo(vec![]),
-            wal_removal_on_hold: false,
-        })
+        Ok(Self::new(sk))
     }
 
     pub(crate) fn get_wal_seg_size(&self) -> usize {
@@ -443,6 +399,8 @@ pub enum TimelineError {
     Cancelled(TenantTimelineId),
     #[error("Timeline {0} was not found in global map")]
     NotFound(TenantTimelineId),
+    #[error("Timeline {0} creation is in progress")]
+    CreationInProgress(TenantTimelineId),
     #[error("Timeline {0} exists on disk, but wasn't loaded on startup")]
     Invalid(TenantTimelineId),
     #[error("Timeline {0} is already exists")]
@@ -469,6 +427,7 @@ impl From<TimelineError> for ApiError {
 /// It also holds SharedState and provides mutually exclusive access to it.
 pub struct Timeline {
     pub ttid: TenantTimelineId,
+    pub remote_path: RemotePath,
 
     /// Used to broadcast commit_lsn updates to all background jobs.
     commit_lsn_watch_tx: watch::Sender<Lsn>,
@@ -493,6 +452,11 @@ pub struct Timeline {
     walreceivers: Arc<WalReceivers>,
     timeline_dir: Utf8PathBuf,
     manager_ctl: ManagerCtl,
+    conf: Arc<SafeKeeperConf>,
+
+    /// Hold this gate from code that depends on the Timeline's non-shut-down state.  While holding
+    /// this gate, you must respect [`Timeline::cancel`]
+    pub(crate) gate: Gate,
 
     /// Delete/cancel will trigger this, background tasks should drop out as soon as it fires
     pub(crate) cancel: CancellationToken,
@@ -505,11 +469,14 @@ pub struct Timeline {
 }
 
 impl Timeline {
-    /// Load existing timeline from disk.
-    pub fn load_timeline(conf: &SafeKeeperConf, ttid: TenantTimelineId) -> Result<Timeline> {
-        let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
-
-        let shared_state = SharedState::restore(conf, &ttid)?;
+    /// Constructs a new timeline.
+    pub fn new(
+        ttid: TenantTimelineId,
+        timeline_dir: &Utf8Path,
+        remote_path: &RemotePath,
+        shared_state: SharedState,
+        conf: Arc<SafeKeeperConf>,
+    ) -> Arc<Self> {
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
             watch::channel(shared_state.sk.state().commit_lsn);
         let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) = watch::channel(TermLsn::from((
@@ -519,8 +486,11 @@ impl Timeline {
         let (shared_state_version_tx, shared_state_version_rx) = watch::channel(0);
 
         let walreceivers = WalReceivers::new();
-        Ok(Timeline {
+
+        Arc::new(Self {
             ttid,
+            remote_path: remote_path.to_owned(),
+            timeline_dir: timeline_dir.to_owned(),
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
             term_flush_lsn_watch_tx,
@@ -530,9 +500,10 @@ impl Timeline {
             mutex: RwLock::new(shared_state),
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
+            gate: Default::default(),
             cancel: CancellationToken::default(),
-            timeline_dir: get_timeline_dir(conf, &ttid),
             manager_ctl: ManagerCtl::new(),
+            conf,
             broker_active: AtomicBool::new(false),
             wal_backup_active: AtomicBool::new(false),
             last_removed_segno: AtomicU64::new(0),
@@ -540,127 +511,92 @@ impl Timeline {
         })
     }
 
-    /// Create a new timeline, which is not yet persisted to disk.
-    pub fn create_empty(
-        conf: &SafeKeeperConf,
+    /// Load existing timeline from disk.
+    pub fn load_timeline(
+        conf: Arc<SafeKeeperConf>,
         ttid: TenantTimelineId,
-        server_info: ServerInfo,
-        commit_lsn: Lsn,
-        local_start_lsn: Lsn,
-    ) -> Result<Timeline> {
-        let (commit_lsn_watch_tx, commit_lsn_watch_rx) = watch::channel(Lsn::INVALID);
-        let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) =
-            watch::channel(TermLsn::from((INVALID_TERM, Lsn::INVALID)));
-        let (shared_state_version_tx, shared_state_version_rx) = watch::channel(0);
+    ) -> Result<Arc<Timeline>> {
+        let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
 
-        let state =
-            TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
+        let shared_state = SharedState::restore(conf.as_ref(), &ttid)?;
+        let timeline_dir = get_timeline_dir(conf.as_ref(), &ttid);
+        let remote_path = remote_timeline_path(&ttid)?;
 
-        let walreceivers = WalReceivers::new();
-        Ok(Timeline {
+        Ok(Timeline::new(
             ttid,
-            commit_lsn_watch_tx,
-            commit_lsn_watch_rx,
-            term_flush_lsn_watch_tx,
-            term_flush_lsn_watch_rx,
-            shared_state_version_tx,
-            shared_state_version_rx,
-            mutex: RwLock::new(SharedState::create_new(conf, &ttid, state)?),
-            walsenders: WalSenders::new(walreceivers.clone()),
-            walreceivers,
-            cancel: CancellationToken::default(),
-            timeline_dir: get_timeline_dir(conf, &ttid),
-            manager_ctl: ManagerCtl::new(),
-            broker_active: AtomicBool::new(false),
-            wal_backup_active: AtomicBool::new(false),
-            last_removed_segno: AtomicU64::new(0),
-            mgr_status: AtomicStatus::new(),
-        })
-    }
-
-    /// Initialize fresh timeline on disk and start background tasks. If init
-    /// fails, timeline is cancelled and cannot be used anymore.
-    ///
-    /// Init is transactional, so if it fails, created files will be deleted,
-    /// and state on disk should remain unchanged.
-    pub async fn init_new(
-        self: &Arc<Timeline>,
-        shared_state: &mut WriteGuardSharedState<'_>,
-        conf: &SafeKeeperConf,
-        broker_active_set: Arc<TimelinesSet>,
-        partial_backup_rate_limiter: RateLimiter,
-    ) -> Result<()> {
-        match fs::metadata(&self.timeline_dir).await {
-            Ok(_) => {
-                // Timeline directory exists on disk, we should leave state unchanged
-                // and return error.
-                bail!(TimelineError::Invalid(self.ttid));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e.into());
-            }
-        }
-
-        // Create timeline directory.
-        fs::create_dir_all(&self.timeline_dir).await?;
-
-        // Write timeline to disk and start background tasks.
-        if let Err(e) = shared_state.sk.state_mut().flush().await {
-            // Bootstrap failed, cancel timeline and remove timeline directory.
-            self.cancel(shared_state);
-
-            if let Err(fs_err) = fs::remove_dir_all(&self.timeline_dir).await {
-                warn!(
-                    "failed to remove timeline {} directory after bootstrap failure: {}",
-                    self.ttid, fs_err
-                );
-            }
-
-            return Err(e);
-        }
-        self.bootstrap(conf, broker_active_set, partial_backup_rate_limiter);
-        Ok(())
+            &timeline_dir,
+            &remote_path,
+            shared_state,
+            conf,
+        ))
     }
 
     /// Bootstrap new or existing timeline starting background tasks.
     pub fn bootstrap(
         self: &Arc<Timeline>,
+        _shared_state: &mut WriteGuardSharedState<'_>,
         conf: &SafeKeeperConf,
         broker_active_set: Arc<TimelinesSet>,
         partial_backup_rate_limiter: RateLimiter,
     ) {
         let (tx, rx) = self.manager_ctl.bootstrap_manager();
 
+        let Ok(gate_guard) = self.gate.enter() else {
+            // Init raced with shutdown
+            return;
+        };
+
         // Start manager task which will monitor timeline state and update
         // background tasks.
-        tokio::spawn(timeline_manager::main_task(
-            ManagerTimeline { tli: self.clone() },
-            conf.clone(),
-            broker_active_set,
-            tx,
-            rx,
-            partial_backup_rate_limiter,
-        ));
+        tokio::spawn({
+            let this = self.clone();
+            let conf = conf.clone();
+            async move {
+                let _gate_guard = gate_guard;
+                timeline_manager::main_task(
+                    ManagerTimeline { tli: this },
+                    conf,
+                    broker_active_set,
+                    tx,
+                    rx,
+                    partial_backup_rate_limiter,
+                )
+                .await
+            }
+        });
+    }
+
+    /// Background timeline activities (which hold Timeline::gate) will no
+    /// longer run once this function completes.
+    pub async fn shutdown(&self) {
+        info!("timeline {} shutting down", self.ttid);
+        self.cancel.cancel();
+
+        // Wait for any concurrent tasks to stop using this timeline, to avoid e.g. attempts
+        // to read deleted files.
+        self.gate.close().await;
     }
 
     /// Delete timeline from disk completely, by removing timeline directory.
-    /// Background timeline activities will stop eventually.
     ///
     /// Also deletes WAL in s3. Might fail if e.g. s3 is unavailable, but
     /// deletion API endpoint is retriable.
+    ///
+    /// Timeline must be in shut-down state (i.e. call [`Self::shutdown`] first)
     pub async fn delete(
         &self,
         shared_state: &mut WriteGuardSharedState<'_>,
         only_local: bool,
     ) -> Result<bool> {
-        self.cancel(shared_state);
+        // Assert that [`Self::shutdown`] was already called
+        assert!(self.cancel.is_cancelled());
+        assert!(self.gate.close_complete());
 
-        // TODO: It's better to wait for s3 offloader termination before
-        // removing data from s3. Though since s3 doesn't have transactions it
-        // still wouldn't guarantee absense of data after removal.
-        let conf = GlobalTimelines::get_global_config();
-        if !only_local && conf.is_wal_backup_enabled() {
+        // Close associated FDs. Nobody will be able to touch timeline data once
+        // it is cancelled, so WAL storage won't be opened again.
+        shared_state.sk.close_wal_store();
+
+        if !only_local && self.conf.is_wal_backup_enabled() {
             // Note: we concurrently delete remote storage data from multiple
             // safekeepers. That's ok, s3 replies 200 if object doesn't exist and we
             // do some retries anyway.
@@ -668,16 +604,6 @@ impl Timeline {
         }
         let dir_existed = delete_dir(&self.timeline_dir).await?;
         Ok(dir_existed)
-    }
-
-    /// Cancel timeline to prevent further usage. Background tasks will stop
-    /// eventually after receiving cancellation signal.
-    fn cancel(&self, shared_state: &mut WriteGuardSharedState<'_>) {
-        info!("timeline {} is cancelled", self.ttid);
-        self.cancel.cancel();
-        // Close associated FDs. Nobody will be able to touch timeline data once
-        // it is cancelled, so WAL storage won't be opened again.
-        shared_state.sk.close_wal_store();
     }
 
     /// Returns if timeline is cancelled.
@@ -756,7 +682,7 @@ impl Timeline {
         {
             let mut shared_state = self.write_shared_state().await;
             shared_state.sk.record_safekeeper_info(&sk_info).await?;
-            let peer_info = PeerInfo::from_sk_info(&sk_info, Instant::now());
+            let peer_info = peer_info_from_sk_info(&sk_info, Instant::now());
             shared_state.peers_info.upsert(&peer_info);
         }
         Ok(())
@@ -786,16 +712,22 @@ impl Timeline {
             return None;
         }
 
-        let (ps_feedback_count, last_ps_feedback) = self.walsenders.get_ps_feedback_stats();
+        let WalSendersTimelineMetricValues {
+            ps_feedback_counter,
+            last_ps_feedback,
+            interpreted_wal_reader_tasks,
+        } = self.walsenders.info_for_metrics();
+
         let state = self.read_shared_state().await;
         Some(FullTimelineInfo {
             ttid: self.ttid,
-            ps_feedback_count,
+            ps_feedback_count: ps_feedback_counter,
             last_ps_feedback,
             wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
             timeline_is_active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: self.last_removed_segno.load(Ordering::Relaxed),
+            interpreted_wal_reader_tasks,
             epoch_start_lsn: state.sk.term_start_lsn(),
             mem_state: state.sk.state().inmem.clone(),
             persisted_state: TimelinePersistentState::clone(state.sk.state()),
@@ -814,7 +746,7 @@ impl Timeline {
         debug_dump::Memory {
             is_cancelled: self.is_cancelled(),
             peers_info_len: state.peers_info.0.len(),
-            walsenders: self.walsenders.get_all(),
+            walsenders: self.walsenders.get_all_public(),
             wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
             active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
@@ -847,14 +779,30 @@ impl Timeline {
         Ok(res)
     }
 
-    /// Get the timeline guard for reading/writing WAL files.
-    /// If WAL files are not present on disk (evicted), they will be automatically
-    /// downloaded from remote storage. This is done in the manager task, which is
-    /// responsible for issuing all guards.
-    ///
-    /// NB: don't use this function from timeline_manager, it will deadlock.
-    /// NB: don't use this function while holding shared_state lock.
-    pub async fn wal_residence_guard(self: &Arc<Self>) -> Result<WalResidentTimeline> {
+    pub async fn term_bump(self: &Arc<Self>, to: Option<Term>) -> Result<TimelineTermBumpResponse> {
+        let mut state = self.write_shared_state().await;
+        state.sk.term_bump(to).await
+    }
+
+    pub async fn membership_switch(
+        self: &Arc<Self>,
+        to: Configuration,
+    ) -> Result<TimelineMembershipSwitchResponse> {
+        let mut state = self.write_shared_state().await;
+        state.sk.membership_switch(to).await
+    }
+
+    /// Guts of [`Self::wal_residence_guard`] and [`Self::try_wal_residence_guard`]
+    async fn do_wal_residence_guard(
+        self: &Arc<Self>,
+        block: bool,
+    ) -> Result<Option<WalResidentTimeline>> {
+        let op_label = if block {
+            "wal_residence_guard"
+        } else {
+            "try_wal_residence_guard"
+        };
+
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
@@ -866,10 +814,13 @@ impl Timeline {
         // Wait 30 seconds for the guard to be acquired. It can time out if someone is
         // holding the lock (e.g. during `SafeKeeper::process_msg()`) or manager task
         // is stuck.
-        let res = tokio::time::timeout_at(
-            started_at + Duration::from_secs(30),
-            self.manager_ctl.wal_residence_guard(),
-        )
+        let res = tokio::time::timeout_at(started_at + Duration::from_secs(30), async {
+            if block {
+                self.manager_ctl.wal_residence_guard().await.map(Some)
+            } else {
+                self.manager_ctl.try_wal_residence_guard().await
+            }
+        })
         .await;
 
         let guard = match res {
@@ -877,14 +828,14 @@ impl Timeline {
                 let finished_at = Instant::now();
                 let elapsed = finished_at - started_at;
                 MISC_OPERATION_SECONDS
-                    .with_label_values(&["wal_residence_guard"])
+                    .with_label_values(&[op_label])
                     .observe(elapsed.as_secs_f64());
 
                 guard
             }
             Ok(Err(e)) => {
                 warn!(
-                    "error while acquiring WalResidentTimeline guard, statuses {:?} => {:?}",
+                    "error acquiring in {op_label}, statuses {:?} => {:?}",
                     status_before,
                     self.mgr_status.get()
                 );
@@ -892,7 +843,7 @@ impl Timeline {
             }
             Err(_) => {
                 warn!(
-                    "timeout while acquiring WalResidentTimeline guard, statuses {:?} => {:?}",
+                    "timeout acquiring in {op_label} guard, statuses {:?} => {:?}",
                     status_before,
                     self.mgr_status.get()
                 );
@@ -900,7 +851,32 @@ impl Timeline {
             }
         };
 
-        Ok(WalResidentTimeline::new(self.clone(), guard))
+        Ok(guard.map(|g| WalResidentTimeline::new(self.clone(), g)))
+    }
+
+    /// Get the timeline guard for reading/writing WAL files.
+    /// If WAL files are not present on disk (evicted), they will be automatically
+    /// downloaded from remote storage. This is done in the manager task, which is
+    /// responsible for issuing all guards.
+    ///
+    /// NB: don't use this function from timeline_manager, it will deadlock.
+    /// NB: don't use this function while holding shared_state lock.
+    pub async fn wal_residence_guard(self: &Arc<Self>) -> Result<WalResidentTimeline> {
+        self.do_wal_residence_guard(true)
+            .await
+            .map(|m| m.expect("Always get Some in block=true mode"))
+    }
+
+    /// Get the timeline guard for reading/writing WAL files if the timeline is resident,
+    /// else return None
+    pub(crate) async fn try_wal_residence_guard(
+        self: &Arc<Self>,
+    ) -> Result<Option<WalResidentTimeline>> {
+        self.do_wal_residence_guard(false).await
+    }
+
+    pub async fn backup_partial_reset(self: &Arc<Self>) -> Result<Vec<String>> {
+        self.manager_ctl.backup_partial_reset().await
     }
 }
 
@@ -980,7 +956,7 @@ impl WalResidentTimeline {
 
     pub async fn get_walreader(&self, start_lsn: Lsn) -> Result<WalReader> {
         let (_, persisted_state) = self.get_state().await;
-        let enable_remote_read = GlobalTimelines::get_global_config().is_wal_backup_enabled();
+        let enable_remote_read = self.conf.is_wal_backup_enabled();
 
         WalReader::new(
             &self.ttid,
@@ -1090,15 +1066,14 @@ impl ManagerTimeline {
 
     /// Try to switch state Offloaded->Present.
     pub(crate) async fn switch_to_present(&self) -> anyhow::Result<()> {
-        let conf = GlobalTimelines::get_global_config();
         let mut shared = self.write_shared_state().await;
 
         // trying to restore WAL storage
         let wal_store = wal_storage::PhysicalStorage::new(
             &self.ttid,
-            self.timeline_dir.clone(),
-            &conf,
+            &self.timeline_dir,
             shared.sk.state(),
+            self.conf.no_sync,
         )?;
 
         // updating control file
@@ -1125,7 +1100,7 @@ impl ManagerTimeline {
         // now we can switch shared.sk to Present, shouldn't fail
         let prev_sk = std::mem::replace(&mut shared.sk, StateSK::Empty);
         let cfile_state = prev_sk.take_state();
-        shared.sk = StateSK::Loaded(SafeKeeper::new(cfile_state, wal_store, conf.my_id)?);
+        shared.sk = StateSK::Loaded(SafeKeeper::new(cfile_state, wal_store, self.conf.my_id)?);
 
         Ok(())
     }
@@ -1147,13 +1122,13 @@ async fn delete_dir(path: &Utf8PathBuf) -> Result<bool> {
 
 /// Get a path to the tenant directory. If you just need to get a timeline directory,
 /// use WalResidentTimeline::get_timeline_dir instead.
-pub(crate) fn get_tenant_dir(conf: &SafeKeeperConf, tenant_id: &TenantId) -> Utf8PathBuf {
+pub fn get_tenant_dir(conf: &SafeKeeperConf, tenant_id: &TenantId) -> Utf8PathBuf {
     conf.workdir.join(tenant_id.to_string())
 }
 
 /// Get a path to the timeline directory. If you need to read WAL files from disk,
 /// use WalResidentTimeline::get_timeline_dir instead. This function does not check
 /// timeline eviction status and WAL files might not be present on disk.
-pub(crate) fn get_timeline_dir(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Utf8PathBuf {
+pub fn get_timeline_dir(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Utf8PathBuf {
     get_tenant_dir(conf, &ttid.tenant_id).join(ttid.timeline_id.to_string())
 }

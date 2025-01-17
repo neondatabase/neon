@@ -5,6 +5,8 @@ pub enum DownloadError {
     BadInput(anyhow::Error),
     /// The file was not found in the remote storage.
     NotFound,
+    /// The caller provided an ETag, and the file was not modified.
+    Unmodified,
     /// A cancellation token aborted the download, typically during
     /// tenant detach or process shutdown.
     Cancelled,
@@ -13,6 +15,9 @@ pub enum DownloadError {
     ///
     /// Concurrency control is not timed within timeout.
     Timeout,
+    /// Some integrity/consistency check failed during download. This is used during
+    /// timeline loads to cancel the load of a tenant if some timeline detects fatal corruption.
+    Fatal(String),
     /// The file was found in the remote storage, but the download failed.
     Other(anyhow::Error),
 }
@@ -24,8 +29,10 @@ impl std::fmt::Display for DownloadError {
                 write!(f, "Failed to download a remote file due to user input: {e}")
             }
             DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
+            DownloadError::Unmodified => write!(f, "File was not modified"),
             DownloadError::Cancelled => write!(f, "Cancelled, shutting down"),
             DownloadError::Timeout => write!(f, "timeout"),
+            DownloadError::Fatal(why) => write!(f, "Fatal read error: {why}"),
             DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e:?}"),
         }
     }
@@ -38,7 +45,7 @@ impl DownloadError {
     pub fn is_permanent(&self) -> bool {
         use DownloadError::*;
         match self {
-            BadInput(_) | NotFound | Cancelled => true,
+            BadInput(_) | NotFound | Unmodified | Fatal(_) | Cancelled => true,
             Timeout | Other(_) => false,
         }
     }

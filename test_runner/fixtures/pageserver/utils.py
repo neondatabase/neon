@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING
 
 from mypy_boto3_s3.type_defs import (
     DeleteObjectOutputTypeDef,
@@ -11,15 +13,18 @@ from mypy_boto3_s3.type_defs import (
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
-from fixtures.remote_storage import RemoteStorage, RemoteStorageKind, S3Storage
+from fixtures.remote_storage import RemoteStorage, S3Storage
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 def assert_tenant_state(
     pageserver_http: PageserverHttpClient,
     tenant: TenantId,
     expected_state: str,
-    message: Optional[str] = None,
+    message: str | None = None,
 ) -> None:
     tenant_status = pageserver_http.tenant_status(tenant)
     log.info(f"tenant_status: {tenant_status}")
@@ -28,7 +33,7 @@ def assert_tenant_state(
 
 def remote_consistent_lsn(
     pageserver_http: PageserverHttpClient,
-    tenant: Union[TenantId, TenantShardId],
+    tenant: TenantId | TenantShardId,
     timeline: TimelineId,
 ) -> Lsn:
     detail = pageserver_http.timeline_detail(tenant, timeline)
@@ -46,27 +51,21 @@ def remote_consistent_lsn(
 
 def wait_for_upload(
     pageserver_http: PageserverHttpClient,
-    tenant: Union[TenantId, TenantShardId],
+    tenant: TenantId | TenantShardId,
     timeline: TimelineId,
     lsn: Lsn,
+    timeout=20,
 ):
-    """waits for local timeline upload up to specified lsn"""
-    for i in range(20):
-        current_lsn = remote_consistent_lsn(pageserver_http, tenant, timeline)
-        if current_lsn >= lsn:
-            log.info("wait finished")
-            return
-        lr_lsn = last_record_lsn(pageserver_http, tenant, timeline)
-        log.info(
-            f"waiting for remote_consistent_lsn to reach {lsn}, now {current_lsn}, last_record_lsn={lr_lsn}, iteration {i + 1}"
-        )
-        time.sleep(1)
-    raise Exception(
-        f"timed out while waiting for {tenant}/{timeline} remote_consistent_lsn to reach {lsn}, was {current_lsn}"
-    )
+    """Waits for local timeline upload up to specified LSN"""
+
+    def is_uploaded():
+        remote_lsn = remote_consistent_lsn(pageserver_http, tenant, timeline)
+        assert remote_lsn >= lsn, f"remote_consistent_lsn at {remote_lsn}"
+
+    wait_until(is_uploaded, name=f"upload to {lsn}", timeout=timeout)
 
 
-def _tenant_in_expected_state(tenant_info: Dict[str, Any], expected_state: str):
+def _tenant_in_expected_state(tenant_info: dict[str, Any], expected_state: str):
     if tenant_info["state"]["slug"] == expected_state:
         return True
     if tenant_info["state"]["slug"] == "Broken":
@@ -80,7 +79,7 @@ def wait_until_tenant_state(
     expected_state: str,
     iterations: int,
     period: float = 1.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Does not use `wait_until` for debugging purposes
     """
@@ -131,12 +130,12 @@ def wait_until_all_tenants_state(
 
 def wait_until_timeline_state(
     pageserver_http: PageserverHttpClient,
-    tenant_id: Union[TenantId, TenantShardId],
+    tenant_id: TenantId | TenantShardId,
     timeline_id: TimelineId,
     expected_state: str,
     iterations: int,
     period: float = 1.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Does not use `wait_until` for debugging purposes
     """
@@ -147,7 +146,7 @@ def wait_until_timeline_state(
             if isinstance(timeline["state"], str):
                 if timeline["state"] == expected_state:
                     return timeline
-            elif isinstance(timeline, Dict):
+            elif isinstance(timeline, dict):
                 if timeline["state"].get(expected_state):
                     return timeline
 
@@ -181,7 +180,7 @@ def wait_until_tenant_active(
 
 def last_record_lsn(
     pageserver_http_client: PageserverHttpClient,
-    tenant: Union[TenantId, TenantShardId],
+    tenant: TenantId | TenantShardId,
     timeline: TimelineId,
 ) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
@@ -193,11 +192,13 @@ def last_record_lsn(
 
 def wait_for_last_record_lsn(
     pageserver_http: PageserverHttpClient,
-    tenant: Union[TenantId, TenantShardId],
+    tenant: TenantId | TenantShardId,
     timeline: TimelineId,
     lsn: Lsn,
 ) -> Lsn:
     """waits for pageserver to catch up to a certain lsn, returns the last observed lsn."""
+
+    current_lsn = Lsn(0)
     for i in range(1000):
         current_lsn = last_record_lsn(pageserver_http, tenant, timeline)
         if current_lsn >= lsn:
@@ -235,7 +236,7 @@ def wait_for_upload_queue_empty(
 
         # this is `started left join finished`; if match, subtracting start from finished, resulting in queue depth
         remaining_labels = ["shard_id", "file_kind", "op_kind"]
-        tl: List[Tuple[Any, float]] = []
+        tl: list[tuple[Any, float]] = []
         for s in started:
             found = False
             for f in finished:
@@ -258,14 +259,9 @@ def wait_for_upload_queue_empty(
 
 def wait_timeline_detail_404(
     pageserver_http: PageserverHttpClient,
-    tenant_id: Union[TenantId, TenantShardId],
+    tenant_id: TenantId | TenantShardId,
     timeline_id: TimelineId,
-    iterations: int,
-    interval: Optional[float] = None,
 ):
-    if interval is None:
-        interval = 0.25
-
     def timeline_is_missing():
         data = {}
         try:
@@ -278,31 +274,30 @@ def wait_timeline_detail_404(
 
         raise RuntimeError(f"Timeline exists state {data.get('state')}")
 
-    wait_until(iterations, interval, func=timeline_is_missing)
+    wait_until(timeline_is_missing)
 
 
 def timeline_delete_wait_completed(
     pageserver_http: PageserverHttpClient,
-    tenant_id: Union[TenantId, TenantShardId],
+    tenant_id: TenantId | TenantShardId,
     timeline_id: TimelineId,
-    iterations: int = 20,
-    interval: Optional[float] = None,
     **delete_args,
 ) -> None:
     pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id, **delete_args)
-    wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id, iterations, interval)
+    wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id)
 
 
 # remote_storage must not be None, but that's easier for callers to make mypy happy
 def assert_prefix_empty(
-    remote_storage: Optional[RemoteStorage],
-    prefix: Optional[str] = None,
-    allowed_postfix: Optional[str] = None,
+    remote_storage: RemoteStorage | None,
+    prefix: str | None = None,
+    allowed_postfix: str | None = None,
+    delimiter: str = "/",
 ) -> None:
     assert remote_storage is not None
-    response = list_prefix(remote_storage, prefix)
+    response = list_prefix(remote_storage, prefix, delimiter)
     keys = response["KeyCount"]
-    objects: List[ObjectTypeDef] = response.get("Contents", [])
+    objects: list[ObjectTypeDef] = response.get("Contents", [])
     common_prefixes = response.get("CommonPrefixes", [])
 
     is_mock_s3 = isinstance(remote_storage, S3Storage) and not remote_storage.cleanup
@@ -333,20 +328,22 @@ def assert_prefix_empty(
             if not (allowed_postfix.endswith(key)):
                 filtered_count += 1
 
-    assert (
-        filtered_count == 0
-    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
+    assert filtered_count == 0, f"remote prefix {prefix} is not empty: {objects}"
 
 
 # remote_storage must not be None, but that's easier for callers to make mypy happy
-def assert_prefix_not_empty(remote_storage: Optional[RemoteStorage], prefix: Optional[str] = None):
+def assert_prefix_not_empty(
+    remote_storage: RemoteStorage | None,
+    prefix: str | None = None,
+    delimiter: str = "/",
+):
     assert remote_storage is not None
     response = list_prefix(remote_storage, prefix)
-    assert response["KeyCount"] != 0, f"remote dir with prefix {prefix} is empty: {response}"
+    assert response["KeyCount"] != 0, f"remote prefix {prefix} is empty: {response}"
 
 
 def list_prefix(
-    remote: RemoteStorage, prefix: Optional[str] = None, delimiter: str = "/"
+    remote: RemoteStorage, prefix: str | None = None, delimiter: str = "/"
 ) -> ListObjectsV2OutputTypeDef:
     """
     Note that this function takes into account prefix_in_bucket.
@@ -430,13 +427,14 @@ def enable_remote_storage_versioning(
     return response
 
 
-MANY_SMALL_LAYERS_TENANT_CONFIG = {
-    "gc_period": "0s",
-    "compaction_period": "0s",
-    "checkpoint_distance": 1024**2,
-    "image_creation_threshold": 100,
-}
-
-
-def poll_for_remote_storage_iterations(remote_storage_kind: RemoteStorageKind) -> int:
-    return 40 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 15
+def many_small_layers_tenant_config() -> dict[str, Any]:
+    """
+    Create a new dict to avoid issues with deleting from the global value.
+    In python, the global is mutable.
+    """
+    return {
+        "gc_period": "0s",
+        "compaction_period": "0s",
+        "checkpoint_distance": 1024**2,
+        "image_creation_threshold": 100,
+    }

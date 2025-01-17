@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import concurrent.futures
 import math
 import random
@@ -5,7 +7,6 @@ import time
 from collections import defaultdict
 from contextlib import closing
 from pathlib import Path
-from typing import Optional
 
 import psycopg2.errors
 import psycopg2.extras
@@ -36,7 +37,7 @@ from fixtures.utils import get_timeline_dir_size, wait_until
 
 def test_timeline_size(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    new_timeline_id = env.neon_cli.create_branch("test_timeline_size", "empty")
+    new_timeline_id = env.create_branch("test_timeline_size", ancestor_branch_name="main")
 
     client = env.pageserver.http_client()
     client.timeline_wait_logical_size(env.initial_tenant, new_timeline_id)
@@ -68,7 +69,9 @@ def test_timeline_size(neon_simple_env: NeonEnv):
 
 def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    new_timeline_id = env.neon_cli.create_branch("test_timeline_size_createdropdb", "empty")
+    new_timeline_id = env.create_branch(
+        "test_timeline_size_createdropdb", ancestor_branch_name="main"
+    )
 
     client = env.pageserver.http_client()
     client.timeline_wait_logical_size(env.initial_tenant, new_timeline_id)
@@ -148,7 +151,7 @@ def wait_for_pageserver_catchup(endpoint_main: Endpoint, polling_interval=1, tim
 def test_timeline_size_quota_on_startup(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
-    new_timeline_id = env.neon_cli.create_branch("test_timeline_size_quota_on_startup")
+    new_timeline_id = env.create_branch("test_timeline_size_quota_on_startup")
 
     client.timeline_wait_logical_size(env.initial_tenant, new_timeline_id)
 
@@ -236,7 +239,7 @@ def test_timeline_size_quota_on_startup(neon_env_builder: NeonEnvBuilder):
 def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
-    new_timeline_id = env.neon_cli.create_branch("test_timeline_size_quota")
+    new_timeline_id = env.create_branch("test_timeline_size_quota")
 
     client.timeline_wait_logical_size(env.initial_tenant, new_timeline_id)
 
@@ -373,7 +376,7 @@ def test_timeline_physical_size_init(neon_env_builder: NeonEnvBuilder):
 
     env = neon_env_builder.init_start()
 
-    new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_init")
+    new_timeline_id = env.create_branch("test_timeline_physical_size_init")
     endpoint = env.endpoints.create_start("test_timeline_physical_size_init")
 
     endpoint.safe_psql_many(
@@ -393,11 +396,7 @@ def test_timeline_physical_size_init(neon_env_builder: NeonEnvBuilder):
 
     # Wait for the tenant to be loaded
     client = env.pageserver.http_client()
-    wait_until(
-        number_of_iterations=5,
-        interval=1,
-        func=lambda: assert_tenant_state(client, env.initial_tenant, "Active"),
-    )
+    wait_until(lambda: assert_tenant_state(client, env.initial_tenant, "Active"))
 
     assert_physical_size_invariants(
         get_physical_size_values(env, env.initial_tenant, new_timeline_id),
@@ -410,7 +409,7 @@ def test_timeline_physical_size_post_checkpoint(neon_env_builder: NeonEnvBuilder
     env = neon_env_builder.init_start()
 
     pageserver_http = env.pageserver.http_client()
-    new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_post_checkpoint")
+    new_timeline_id = env.create_branch("test_timeline_physical_size_post_checkpoint")
     endpoint = env.endpoints.create_start("test_timeline_physical_size_post_checkpoint")
 
     endpoint.safe_psql_many(
@@ -430,7 +429,7 @@ def test_timeline_physical_size_post_checkpoint(neon_env_builder: NeonEnvBuilder
             get_physical_size_values(env, env.initial_tenant, new_timeline_id),
         )
 
-    wait_until(10, 1, check)
+    wait_until(check)
 
 
 def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder):
@@ -446,7 +445,7 @@ def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder
     )
     pageserver_http = env.pageserver.http_client()
 
-    new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_post_compaction")
+    new_timeline_id = env.create_branch("test_timeline_physical_size_post_compaction")
     endpoint = env.endpoints.create_start("test_timeline_physical_size_post_compaction")
 
     # We don't want autovacuum to run on the table, while we are calculating the
@@ -496,7 +495,7 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
     )
     pageserver_http = env.pageserver.http_client()
 
-    new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_post_gc")
+    new_timeline_id = env.create_branch("test_timeline_physical_size_post_gc")
     endpoint = env.endpoints.create_start("test_timeline_physical_size_post_gc")
 
     # Like in test_timeline_physical_size_post_compaction, disable autovacuum
@@ -543,7 +542,7 @@ def test_timeline_size_metrics(
     env = neon_simple_env
     pageserver_http = env.pageserver.http_client()
 
-    new_timeline_id = env.neon_cli.create_branch("test_timeline_size_metrics")
+    new_timeline_id = env.create_branch("test_timeline_size_metrics")
     endpoint = env.endpoints.create_start("test_timeline_size_metrics")
 
     endpoint.safe_psql_many(
@@ -620,7 +619,7 @@ def test_tenant_physical_size(neon_env_builder: NeonEnvBuilder):
     pageserver_http = env.pageserver.http_client()
     client = env.pageserver.http_client()
 
-    tenant, timeline = env.neon_cli.create_tenant()
+    tenant, timeline = env.create_tenant()
 
     def get_timeline_resident_physical_size(timeline: TimelineId):
         sizes = get_physical_size_values(env, tenant, timeline)
@@ -631,7 +630,7 @@ def test_tenant_physical_size(neon_env_builder: NeonEnvBuilder):
     for i in range(10):
         n_rows = random.randint(100, 1000)
 
-        timeline = env.neon_cli.create_branch(f"test_tenant_physical_size_{i}", tenant_id=tenant)
+        timeline = env.create_branch(f"test_tenant_physical_size_{i}", tenant_id=tenant)
         endpoint = env.endpoints.create_start(f"test_tenant_physical_size_{i}", tenant_id=tenant)
 
         endpoint.safe_psql_many(
@@ -664,7 +663,7 @@ def test_tenant_physical_size(neon_env_builder: NeonEnvBuilder):
 class TimelinePhysicalSizeValues:
     api_current_physical: int
     prometheus_resident_physical: float
-    prometheus_remote_physical: Optional[float] = None
+    prometheus_remote_physical: float | None = None
     python_timelinedir_layerfiles_physical: int
     layer_map_file_size_sum: int
 
@@ -718,7 +717,7 @@ def wait_for_tenant_startup_completions(client: PageserverHttpClient, count: int
     def condition():
         assert client.get_metric_value("pageserver_tenant_startup_complete_total") == count
 
-    wait_until(5, 1.0, condition)
+    wait_until(condition)
 
 
 def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
@@ -733,7 +732,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
 
     # We will run with the limit set to 1, so that once we have one tenant stuck
     # in a pausable failpoint, the rest are prevented from proceeding through warmup.
-    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = '1'"
+    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = 1"
 
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -743,7 +742,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     tenant_ids = {env.initial_tenant}
     for _i in range(0, n_tenants - 1):
         tenant_id = TenantId.generate()
-        env.neon_cli.create_tenant(tenant_id)
+        env.create_tenant(tenant_id)
         tenant_ids.add(tenant_id)
 
     # Restart pageserver with logical size calculations paused
@@ -765,7 +764,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         assert "Active" in set(get_tenant_states().values())
 
     # One tenant should activate, then get stuck in their logical size calculation
-    wait_until(10, 1, at_least_one_active)
+    wait_until(at_least_one_active)
 
     # Wait some walltime to gain confidence that other tenants really are stuck and not proceeding to activate
     time.sleep(5)
@@ -833,13 +832,13 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     def all_active():
         assert all(s == "Active" for s in get_tenant_states().values())
 
-    wait_until(10, 1, all_active)
+    wait_until(all_active)
 
     # Final control check: restarting with no failpoints at all results in all tenants coming active
     # without being prompted by client I/O
     env.pageserver.stop()
     env.pageserver.start()
-    wait_until(10, 1, all_active)
+    wait_until(all_active)
 
     assert (
         pageserver_http.get_metric_value("pageserver_tenant_startup_scheduled_total") == n_tenants
@@ -853,7 +852,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         extra_env_vars={"FAILPOINTS": "timeline-calculate-logical-size-pause=pause"}
     )
 
-    wait_until(10, 1, at_least_one_active)
+    wait_until(at_least_one_active)
 
     detach_tenant_id = list(
         [(tid, s) for (tid, s) in get_tenant_states().items() if s == "Attaching"]
@@ -878,7 +877,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
 
     # Check that all the stuck tenants proceed to active (apart from the one that deletes, and the one
     # we detached)
-    wait_until(10, 1, all_active)
+    wait_until(all_active)
     assert len(get_tenant_states()) == n_tenants - 2
 
 
@@ -905,7 +904,7 @@ def delete_lazy_activating(
         try:
             # Deletion will get to the point in shutdown where it's waiting for timeline shutdown, then
             # hang because of our failpoint blocking activation.
-            wait_until(10, 1, shutting_down)
+            wait_until(shutting_down)
         finally:
             log.info("Clearing failpoint")
             pageserver_http.configure_failpoints(("timeline-calculate-logical-size-pause", "off"))
@@ -984,14 +983,14 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
 
 
 def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = '1'"
+    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = 1"
 
     env = neon_env_builder.init_start()
 
     # the supporting_second does nothing except queue behind env.initial_tenant
     # for purposes of showing that eager_tenant breezes past the queue
-    supporting_second, _ = env.neon_cli.create_tenant()
-    eager_tenant, _ = env.neon_cli.create_tenant()
+    supporting_second, _ = env.create_tenant()
+    eager_tenant, _ = env.create_tenant()
 
     client = env.pageserver.http_client()
     client.tenant_location_conf(
@@ -1027,13 +1026,13 @@ def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
         log.info(f"{states}")
         assert len(states["Active"]) == 1
 
-    wait_until(10, 1, one_is_active)
+    wait_until(one_is_active)
 
     def other_is_attaching():
         states = get_tenant_states()
         assert len(states["Attaching"]) == 1
 
-    wait_until(10, 1, other_is_attaching)
+    wait_until(other_is_attaching)
 
     def eager_tenant_is_active():
         resp = client.tenant_status(eager_tenant)
@@ -1050,7 +1049,7 @@ def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
         },
         lazy=False,
     )
-    wait_until(10, 1, eager_tenant_is_active)
+    wait_until(eager_tenant_is_active)
 
     other_is_attaching()
 
@@ -1062,12 +1061,12 @@ def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
 @pytest.mark.parametrize("activation_method", ["endpoint", "branch", "delete"])
 def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_method: str):
     # env.initial_tenant will take up this permit when attaching with lazy because of a failpoint activated after restart
-    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = '1'"
+    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = 1"
 
     env = neon_env_builder.init_start()
 
     # because this returns (also elsewhere in this file), we know that SpawnMode::Create skips the queue
-    lazy_tenant, _ = env.neon_cli.create_tenant()
+    lazy_tenant, _ = env.create_tenant()
 
     client = env.pageserver.http_client()
     client.tenant_location_conf(
@@ -1093,7 +1092,7 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
         resp = client.tenant_status(env.initial_tenant)
         assert resp["state"]["slug"] == "Active"
 
-    wait_until(10, 1, initial_tenant_is_active)
+    wait_until(initial_tenant_is_active)
 
     # even though the initial tenant is now active, because it was startup time
     # attach, it will consume the only permit because logical size calculation
@@ -1116,7 +1115,7 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
         assert resp["state"]["slug"] == "Attaching"
 
     # paused logical size calculation of env.initial_tenant is keeping it attaching
-    wait_until(10, 1, lazy_tenant_is_attaching)
+    wait_until(lazy_tenant_is_attaching)
 
     for _ in range(5):
         lazy_tenant_is_attaching()
@@ -1129,10 +1128,10 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
     if activation_method == "endpoint":
         with env.endpoints.create_start("main", tenant_id=lazy_tenant):
             # starting up the endpoint should make it jump the queue
-            wait_until(10, 1, lazy_tenant_is_active)
+            wait_until(lazy_tenant_is_active)
     elif activation_method == "branch":
-        env.neon_cli.create_timeline("second_branch", lazy_tenant)
-        wait_until(10, 1, lazy_tenant_is_active)
+        env.create_timeline("second_branch", lazy_tenant)
+        wait_until(lazy_tenant_is_active)
     elif activation_method == "delete":
         delete_lazy_activating(lazy_tenant, env.pageserver, expect_attaching=True)
     else:

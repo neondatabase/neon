@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import enum
 import time
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Tuple
+from enum import StrEnum
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -19,6 +23,10 @@ from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import human_bytes, wait_until
 
+if TYPE_CHECKING:
+    from typing import Any
+
+
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
 
 # access times in the pageserver are stored at a very low resolution: to generate meaningfully different
@@ -31,50 +39,52 @@ def test_min_resident_size_override_handling(
     neon_env_builder: NeonEnvBuilder, config_level_override: int
 ):
     env = neon_env_builder.init_start()
+    vps_http = env.storage_controller.pageserver_api()
     ps_http = env.pageserver.http_client()
 
     def assert_config(tenant_id, expect_override, expect_effective):
+        # talk to actual pageserver to _get_ the config, workaround for
+        # https://github.com/neondatabase/neon/issues/9621
         config = ps_http.tenant_config(tenant_id)
         assert config.tenant_specific_overrides.get("min_resident_size_override") == expect_override
         assert config.effective_config.get("min_resident_size_override") == expect_effective
 
     def assert_overrides(tenant_id, default_tenant_conf_value):
-        ps_http.set_tenant_config(tenant_id, {"min_resident_size_override": 200})
+        vps_http.set_tenant_config(tenant_id, {"min_resident_size_override": 200})
         assert_config(tenant_id, 200, 200)
 
-        ps_http.set_tenant_config(tenant_id, {"min_resident_size_override": 0})
+        vps_http.set_tenant_config(tenant_id, {"min_resident_size_override": 0})
         assert_config(tenant_id, 0, 0)
 
-        ps_http.set_tenant_config(tenant_id, {})
+        vps_http.set_tenant_config(tenant_id, {})
         assert_config(tenant_id, None, default_tenant_conf_value)
 
     if config_level_override is not None:
 
         def set_min_resident_size(config):
-            tenant_config = config.get("tenant_config", {})
+            tenant_config = config.setdefault("tenant_config", {})
             tenant_config["min_resident_size_override"] = config_level_override
-            config["tenant_config"] = tenant_config
 
         env.pageserver.edit_config_toml(set_min_resident_size)
     env.pageserver.stop()
     env.pageserver.start()
 
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id, _ = env.create_tenant()
     assert_overrides(tenant_id, config_level_override)
 
     # Also ensure that specifying the paramter to create_tenant works, in addition to http-level recconfig.
-    tenant_id, _ = env.neon_cli.create_tenant(conf={"min_resident_size_override": "100"})
+    tenant_id, _ = env.create_tenant(conf={"min_resident_size_override": "100"})
     assert_config(tenant_id, 100, 100)
-    ps_http.set_tenant_config(tenant_id, {})
+    vps_http.set_tenant_config(tenant_id, {})
     assert_config(tenant_id, None, config_level_override)
 
 
 @enum.unique
-class EvictionOrder(str, enum.Enum):
+class EvictionOrder(StrEnum):
     RELATIVE_ORDER_EQUAL = "relative_equal"
     RELATIVE_ORDER_SPARE = "relative_spare"
 
-    def config(self) -> Dict[str, Any]:
+    def config(self) -> dict[str, Any]:
         if self == EvictionOrder.RELATIVE_ORDER_EQUAL:
             return {
                 "type": "RelativeAccessed",
@@ -91,12 +101,12 @@ class EvictionOrder(str, enum.Enum):
 
 @dataclass
 class EvictionEnv:
-    timelines: list[Tuple[TenantId, TimelineId]]
+    timelines: list[tuple[TenantId, TimelineId]]
     neon_env: NeonEnv
     pg_bin: PgBin
     pageserver_http: PageserverHttpClient
     layer_size: int
-    pgbench_init_lsns: Dict[TenantId, Lsn]
+    pgbench_init_lsns: dict[TenantId, Lsn]
 
     @property
     def pageserver(self):
@@ -105,7 +115,7 @@ class EvictionEnv:
         """
         return self.neon_env.pageserver
 
-    def timelines_du(self, pageserver: NeonPageserver) -> Tuple[int, int, int]:
+    def timelines_du(self, pageserver: NeonPageserver) -> tuple[int, int, int]:
         return poor_mans_du(
             self.neon_env,
             [(tid, tlid) for tid, tlid in self.timelines],
@@ -113,13 +123,13 @@ class EvictionEnv:
             verbose=False,
         )
 
-    def du_by_timeline(self, pageserver: NeonPageserver) -> Dict[Tuple[TenantId, TimelineId], int]:
+    def du_by_timeline(self, pageserver: NeonPageserver) -> dict[tuple[TenantId, TimelineId], int]:
         return {
             (tid, tlid): poor_mans_du(self.neon_env, [(tid, tlid)], pageserver, verbose=True)[0]
             for tid, tlid in self.timelines
         }
 
-    def count_layers_per_tenant(self, pageserver: NeonPageserver) -> Dict[TenantId, int]:
+    def count_layers_per_tenant(self, pageserver: NeonPageserver) -> dict[TenantId, int]:
         return count_layers_per_tenant(pageserver, self.timelines)
 
     def warm_up_tenant(self, tenant_id: TenantId):
@@ -200,12 +210,12 @@ class EvictionEnv:
             pageserver.assert_log_contains(".*running mocked statvfs.*")
 
         # we most likely have already completed multiple runs
-        wait_until(10, 1, statvfs_called)
+        wait_until(statvfs_called)
 
 
 def count_layers_per_tenant(
-    pageserver: NeonPageserver, timelines: Iterable[Tuple[TenantId, TimelineId]]
-) -> Dict[TenantId, int]:
+    pageserver: NeonPageserver, timelines: Iterable[tuple[TenantId, TimelineId]]
+) -> dict[TenantId, int]:
     ret: Counter[TenantId] = Counter()
 
     for tenant_id, timeline_id in timelines:
@@ -279,8 +289,8 @@ def _eviction_env(
 
 def pgbench_init_tenant(
     layer_size: int, scale: int, env: NeonEnv, pg_bin: PgBin
-) -> Tuple[TenantId, TimelineId]:
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+) -> tuple[TenantId, TimelineId]:
+    tenant_id, timeline_id = env.create_tenant(
         conf={
             "gc_period": "0s",
             "compaction_period": "0s",
@@ -291,7 +301,7 @@ def pgbench_init_tenant(
     )
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
-        pg_bin.run(["pgbench", "-i", f"-s{scale}", endpoint.connstr()])
+        pg_bin.run(["pgbench", "-i", "-I", "dtGvp", f"-s{scale}", endpoint.connstr()])
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     return (tenant_id, timeline_id)
@@ -450,10 +460,10 @@ def test_pageserver_respects_overridden_resident_size(
     assert (
         du_by_timeline[large_tenant] > min_resident_size
     ), "ensure the larger tenant will get a haircut"
-    ps_http.patch_tenant_config_client_side(
+    env.neon_env.storage_controller.pageserver_api().update_tenant_config(
         small_tenant[0], {"min_resident_size_override": min_resident_size}
     )
-    ps_http.patch_tenant_config_client_side(
+    env.neon_env.storage_controller.pageserver_api().update_tenant_config(
         large_tenant[0], {"min_resident_size_override": min_resident_size}
     )
 
@@ -672,10 +682,10 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
 
 def poor_mans_du(
     env: NeonEnv,
-    timelines: Iterable[Tuple[TenantId, TimelineId]],
+    timelines: Iterable[tuple[TenantId, TimelineId]],
     pageserver: NeonPageserver,
     verbose: bool = False,
-) -> Tuple[int, int, int]:
+) -> tuple[int, int, int]:
     """
     Disk usage, largest, smallest layer for layer files over the given (tenant, timeline) tuples;
     this could be done over layers endpoint just as well.
@@ -761,14 +771,14 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
     )
 
     wait_until(
-        10, 1, lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
+        lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
     )
 
     def less_than_max_usage_pct():
         post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
         assert post_eviction_total_size < 0.33 * total_size, "we requested max 33% usage"
 
-    wait_until(2, 2, less_than_max_usage_pct)
+    wait_until(less_than_max_usage_pct, timeout=5)
 
     # Disk usage candidate collection only takes into account active tenants.
     # However, the statvfs call takes into account the entire tenants directory,
@@ -814,7 +824,7 @@ def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
     )
 
     wait_until(
-        10, 1, lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
+        lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved"),
     )
 
     def more_than_min_avail_bytes_freed():
@@ -823,7 +833,7 @@ def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
             total_size - post_eviction_total_size >= min_avail_bytes
         ), f"we requested at least {min_avail_bytes} worth of free space"
 
-    wait_until(2, 2, more_than_min_avail_bytes_freed)
+    wait_until(more_than_min_avail_bytes_freed, timeout=5)
 
 
 def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):

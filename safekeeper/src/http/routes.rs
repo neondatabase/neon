@@ -1,7 +1,11 @@
-use hyper::{Body, Request, Response, StatusCode, Uri};
-use once_cell::sync::Lazy;
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use hyper::{Body, Request, Response, StatusCode};
+use safekeeper_api::models;
+use safekeeper_api::models::AcceptorStateStatus;
+use safekeeper_api::models::SafekeeperStatus;
+use safekeeper_api::models::TermSwitchApiEntry;
+use safekeeper_api::models::TimelineStatus;
+use safekeeper_api::ServerInfo;
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Write as _;
 use std::str::FromStr;
@@ -14,12 +18,15 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, Instrument};
 use utils::failpoint_support::failpoints_handler;
-use utils::http::endpoint::{prometheus_metrics_handler, request_span, ChannelWriter};
+use utils::http::endpoint::{
+    profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
+    ChannelWriter,
+};
 use utils::http::request::parse_query_param;
 
 use postgres_ffi::WAL_SEGMENT_SIZE;
-use safekeeper_api::models::TimelineCreateRequest;
 use safekeeper_api::models::{SkTimelineInfo, TimelineCopyRequest};
+use safekeeper_api::models::{TimelineCreateRequest, TimelineTermBumpRequest};
 use utils::{
     auth::SwappableJwtAuth,
     http::{
@@ -29,25 +36,16 @@ use utils::{
         request::{ensure_no_body, parse_request_param},
         RequestExt, RouterBuilder,
     },
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
+    id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
 };
 
 use crate::debug_dump::TimelineDigestRequest;
-use crate::receive_wal::WalReceiverState;
-use crate::safekeeper::Term;
-use crate::safekeeper::{ServerInfo, TermLsn};
-use crate::send_wal::WalSenderState;
-use crate::timeline::PeerInfo;
+use crate::safekeeper::TermLsn;
 use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 use crate::{copy_timeline, debug_dump, patch_control_file, pull_timeline};
-
-#[derive(Debug, Serialize)]
-struct SafekeeperStatus {
-    id: NodeId,
-}
 
 /// Healthcheck handler.
 async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -64,12 +62,82 @@ fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
         .as_ref()
 }
 
-/// Same as TermLsn, but serializes LSN using display serializer
-/// in Postgres format, i.e. 0/FFFFFFFF. Used only for the API response.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct TermSwitchApiEntry {
-    pub term: Term,
-    pub lsn: Lsn,
+fn get_global_timelines(request: &Request<Body>) -> Arc<GlobalTimelines> {
+    request
+        .data::<Arc<GlobalTimelines>>()
+        .expect("unknown state type")
+        .clone()
+}
+
+fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Result<(), ApiError> {
+    check_permission_with(request, |claims| {
+        crate::auth::check_permission(claims, tenant_id)
+    })
+}
+
+/// Deactivates all timelines for the tenant and removes its data directory.
+/// See `timeline_delete_handler`.
+async fn tenant_delete_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id = parse_request_param(&request, "tenant_id")?;
+    let only_local = parse_query_param(&request, "only_local")?.unwrap_or(false);
+    check_permission(&request, Some(tenant_id))?;
+    ensure_no_body(&mut request).await?;
+    let global_timelines = get_global_timelines(&request);
+    // FIXME: `delete_force_all_for_tenant` can return an error for multiple different reasons;
+    // Using an `InternalServerError` should be fixed when the types support it
+    let delete_info = global_timelines
+        .delete_force_all_for_tenant(&tenant_id, only_local)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    json_response(
+        StatusCode::OK,
+        delete_info
+            .iter()
+            .map(|(ttid, resp)| (format!("{}", ttid.timeline_id), *resp))
+            .collect::<HashMap<String, TimelineDeleteForceResult>>(),
+    )
+}
+
+async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let request_data: TimelineCreateRequest = json_request(&mut request).await?;
+
+    let ttid = TenantTimelineId {
+        tenant_id: request_data.tenant_id,
+        timeline_id: request_data.timeline_id,
+    };
+    check_permission(&request, Some(ttid.tenant_id))?;
+
+    let server_info = ServerInfo {
+        pg_version: request_data.pg_version,
+        system_id: request_data.system_id.unwrap_or(0),
+        wal_seg_size: request_data.wal_seg_size.unwrap_or(WAL_SEGMENT_SIZE as u32),
+    };
+    let global_timelines = get_global_timelines(&request);
+    global_timelines
+        .create(
+            ttid,
+            request_data.mconf,
+            server_info,
+            request_data.start_lsn,
+            request_data.commit_lsn.unwrap_or(request_data.start_lsn),
+        )
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
+/// List all (not deleted) timelines.
+/// Note: it is possible to do the same with debug_dump.
+async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    let global_timelines = get_global_timelines(&request);
+    let res: Vec<TenantTimelineId> = global_timelines
+        .get_all()
+        .iter()
+        .map(|tli| tli.ttid)
+        .collect();
+    json_response(StatusCode::OK, res)
 }
 
 impl From<TermSwitchApiEntry> for TermLsn {
@@ -81,39 +149,6 @@ impl From<TermSwitchApiEntry> for TermLsn {
     }
 }
 
-/// Augment AcceptorState with last_log_term for convenience
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AcceptorStateStatus {
-    pub term: Term,
-    pub epoch: Term, // aka last_log_term
-    pub term_history: Vec<TermSwitchApiEntry>,
-}
-
-/// Info about timeline on safekeeper ready for reporting.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TimelineStatus {
-    pub tenant_id: TenantId,
-    pub timeline_id: TimelineId,
-    pub acceptor_state: AcceptorStateStatus,
-    pub pg_info: ServerInfo,
-    pub flush_lsn: Lsn,
-    pub timeline_start_lsn: Lsn,
-    pub local_start_lsn: Lsn,
-    pub commit_lsn: Lsn,
-    pub backup_lsn: Lsn,
-    pub peer_horizon_lsn: Lsn,
-    pub remote_consistent_lsn: Lsn,
-    pub peers: Vec<PeerInfo>,
-    pub walsenders: Vec<WalSenderState>,
-    pub walreceivers: Vec<WalReceiverState>,
-}
-
-fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Result<(), ApiError> {
-    check_permission_with(request, |claims| {
-        crate::auth::check_permission(claims, tenant_id)
-    })
-}
-
 /// Report info about timeline.
 async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let ttid = TenantTimelineId::new(
@@ -122,7 +157,8 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     );
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
     let (inmem, state) = tli.get_state().await;
     let flush_lsn = tli.get_flush_lsn().await;
 
@@ -148,6 +184,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     let status = TimelineStatus {
         tenant_id: ttid.tenant_id,
         timeline_id: ttid.timeline_id,
+        mconf: state.mconf,
         acceptor_state: acc_state,
         pg_info: state.server,
         flush_lsn,
@@ -158,36 +195,29 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         peer_horizon_lsn: inmem.peer_horizon_lsn,
         remote_consistent_lsn: inmem.remote_consistent_lsn,
         peers: tli.get_peers(conf).await,
-        walsenders: tli.get_walsenders().get_all(),
+        walsenders: tli.get_walsenders().get_all_public(),
         walreceivers: tli.get_walreceivers().get_all(),
     };
     json_response(StatusCode::OK, status)
 }
 
-async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let request_data: TimelineCreateRequest = json_request(&mut request).await?;
-
-    let ttid = TenantTimelineId {
-        tenant_id: request_data.tenant_id,
-        timeline_id: request_data.timeline_id,
-    };
+/// Deactivates the timeline and removes its data directory.
+async fn timeline_delete_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    let only_local = parse_query_param(&request, "only_local")?.unwrap_or(false);
     check_permission(&request, Some(ttid.tenant_id))?;
-
-    let server_info = ServerInfo {
-        pg_version: request_data.pg_version,
-        system_id: request_data.system_id.unwrap_or(0),
-        wal_seg_size: request_data.wal_seg_size.unwrap_or(WAL_SEGMENT_SIZE as u32),
-    };
-    let local_start_lsn = request_data.local_start_lsn.unwrap_or_else(|| {
-        request_data
-            .commit_lsn
-            .segment_lsn(server_info.wal_seg_size as usize)
-    });
-    GlobalTimelines::create(ttid, server_info, request_data.commit_lsn, local_start_lsn)
+    ensure_no_body(&mut request).await?;
+    let global_timelines = get_global_timelines(&request);
+    // FIXME: `delete_force` can fail from both internal errors and bad requests. Add better
+    // error handling here when we're able to.
+    let resp = global_timelines
+        .delete(&ttid, only_local)
         .await
         .map_err(ApiError::InternalServerError)?;
-
-    json_response(StatusCode::OK, ())
+    json_response(StatusCode::OK, resp)
 }
 
 /// Pull timeline from peer safekeeper instances.
@@ -196,8 +226,9 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let data: pull_timeline::Request = json_request(&mut request).await?;
     let conf = get_conf(&request);
+    let global_timelines = get_global_timelines(&request);
 
-    let resp = pull_timeline::handle_request(data, conf.sk_auth_token.clone())
+    let resp = pull_timeline::handle_request(data, conf.sk_auth_token.clone(), global_timelines)
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, resp)
@@ -212,15 +243,8 @@ async fn timeline_snapshot_handler(request: Request<Body>) -> Result<Response<Bo
     );
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
-    // Note: with evicted timelines it should work better then de-evict them and
-    // stream; probably start_snapshot would copy partial s3 file to dest path
-    // and stream control file, or return WalResidentTimeline if timeline is not
-    // evicted.
-    let tli = tli
-        .wal_residence_guard()
-        .await
-        .map_err(ApiError::InternalServerError)?;
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
 
     // To stream the body use wrap_stream which wants Stream of Result<Bytes>,
     // so create the chan and write to it in another task.
@@ -246,57 +270,69 @@ async fn timeline_snapshot_handler(request: Request<Body>) -> Result<Response<Bo
     Ok(response)
 }
 
-async fn timeline_copy_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permission(&request, None)?;
-
-    let request_data: TimelineCopyRequest = json_request(&mut request).await?;
-    let ttid = TenantTimelineId::new(
-        parse_request_param(&request, "tenant_id")?,
-        parse_request_param(&request, "source_timeline_id")?,
-    );
-
-    let source = GlobalTimelines::get(ttid)?;
-
-    copy_timeline::handle_request(copy_timeline::Request{
-        source,
-        until_lsn: request_data.until_lsn,
-        destination_ttid: TenantTimelineId::new(ttid.tenant_id, request_data.target_timeline_id),
-    })
-        .instrument(info_span!("copy_timeline", from=%ttid, to=%request_data.target_timeline_id, until_lsn=%request_data.until_lsn))
-        .await
-        .map_err(ApiError::InternalServerError)?;
-
-    json_response(StatusCode::OK, ())
-}
-
-async fn timeline_digest_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+/// Consider switching timeline membership configuration to the provided one.
+async fn timeline_membership_handler(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let ttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    let from_lsn: Option<Lsn> = parse_query_param(&request, "from_lsn")?;
-    let until_lsn: Option<Lsn> = parse_query_param(&request, "until_lsn")?;
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
 
-    let request = TimelineDigestRequest {
-        from_lsn: from_lsn.ok_or(ApiError::BadRequest(anyhow::anyhow!(
-            "from_lsn is required"
-        )))?,
-        until_lsn: until_lsn.ok_or(ApiError::BadRequest(anyhow::anyhow!(
-            "until_lsn is required"
-        )))?,
-    };
-
-    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
-    let tli = tli
-        .wal_residence_guard()
+    let data: models::TimelineMembershipSwitchRequest = json_request(&mut request).await?;
+    let response = tli
+        .membership_switch(data.mconf)
         .await
         .map_err(ApiError::InternalServerError)?;
 
-    let response = debug_dump::calculate_digest(&tli, request)
+    json_response(StatusCode::OK, response)
+}
+
+async fn timeline_copy_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let request_data: TimelineCopyRequest = json_request(&mut request).await?;
+    let source_ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "source_timeline_id")?,
+    );
+
+    let global_timelines = get_global_timelines(&request);
+
+    copy_timeline::handle_request(copy_timeline::Request{
+        source_ttid,
+        until_lsn: request_data.until_lsn,
+        destination_ttid: TenantTimelineId::new(source_ttid.tenant_id, request_data.target_timeline_id),
+    }, global_timelines)
+        .instrument(info_span!("copy_timeline", from=%source_ttid, to=%request_data.target_timeline_id, until_lsn=%request_data.until_lsn))
         .await
         .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn patch_control_file_handler(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
+
+    let patch_request: patch_control_file::Request = json_request(&mut request).await?;
+    let response = patch_control_file::handle_request(tli, patch_request)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
     json_response(StatusCode::OK, response)
 }
 
@@ -309,7 +345,8 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
         parse_request_param(&request, "timeline_id")?,
     );
 
-    let tli = GlobalTimelines::get(ttid)?;
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid)?;
     tli.write_shared_state()
         .await
         .sk
@@ -320,42 +357,79 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     json_response(StatusCode::OK, ())
 }
 
-/// Deactivates the timeline and removes its data directory.
-async fn timeline_delete_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_digest_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let ttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
-    let only_local = parse_query_param(&request, "only_local")?.unwrap_or(false);
     check_permission(&request, Some(ttid.tenant_id))?;
-    ensure_no_body(&mut request).await?;
-    // FIXME: `delete_force` can fail from both internal errors and bad requests. Add better
-    // error handling here when we're able to.
-    let resp = GlobalTimelines::delete(&ttid, only_local)
+
+    let global_timelines = get_global_timelines(&request);
+    let from_lsn: Option<Lsn> = parse_query_param(&request, "from_lsn")?;
+    let until_lsn: Option<Lsn> = parse_query_param(&request, "until_lsn")?;
+
+    let request = TimelineDigestRequest {
+        from_lsn: from_lsn.ok_or(ApiError::BadRequest(anyhow::anyhow!(
+            "from_lsn is required"
+        )))?,
+        until_lsn: until_lsn.ok_or(ApiError::BadRequest(anyhow::anyhow!(
+            "until_lsn is required"
+        )))?,
+    };
+
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
+    let tli = tli
+        .wal_residence_guard()
         .await
         .map_err(ApiError::InternalServerError)?;
-    json_response(StatusCode::OK, resp)
+
+    let response = debug_dump::calculate_digest(&tli, request)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    json_response(StatusCode::OK, response)
 }
 
-/// Deactivates all timelines for the tenant and removes its data directory.
-/// See `timeline_delete_handler`.
-async fn tenant_delete_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id = parse_request_param(&request, "tenant_id")?;
-    let only_local = parse_query_param(&request, "only_local")?.unwrap_or(false);
-    check_permission(&request, Some(tenant_id))?;
-    ensure_no_body(&mut request).await?;
-    // FIXME: `delete_force_all_for_tenant` can return an error for multiple different reasons;
-    // Using an `InternalServerError` should be fixed when the types support it
-    let delete_info = GlobalTimelines::delete_force_all_for_tenant(&tenant_id, only_local)
+/// Unevict timeline and remove uploaded partial segment(s) from the remote storage.
+/// Successfull response returns list of segments existed before the deletion.
+/// Aimed for one-off usage not normally needed.
+async fn timeline_backup_partial_reset(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    check_permission(&request, Some(ttid.tenant_id))?;
+
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
+
+    let response = tli
+        .backup_partial_reset()
         .await
         .map_err(ApiError::InternalServerError)?;
-    json_response(
-        StatusCode::OK,
-        delete_info
-            .iter()
-            .map(|(ttid, resp)| (format!("{}", ttid.timeline_id), *resp))
-            .collect::<HashMap<String, TimelineDeleteForceResult>>(),
-    )
+    json_response(StatusCode::OK, response)
+}
+
+/// Make term at least as high as one in request. If one in request is None,
+/// increment current one.
+async fn timeline_term_bump_handler(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    check_permission(&request, Some(ttid.tenant_id))?;
+
+    let request_data: TimelineTermBumpRequest = json_request(&mut request).await?;
+
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
+    let response = tli
+        .term_bump(request_data.term)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, response)
 }
 
 /// Used only in tests to hand craft required data.
@@ -386,7 +460,8 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
         standby_horizon: sk_info.standby_horizon.0,
     };
 
-    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
     tli.record_safekeeper_info(proto_sk_info)
         .await
         .map_err(ApiError::InternalServerError)?;
@@ -409,6 +484,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
     let mut dump_memory: Option<bool> = None;
     let mut dump_disk_content: Option<bool> = None;
     let mut dump_term_history: Option<bool> = None;
+    let mut dump_wal_last_modified: Option<bool> = None;
     let mut tenant_id: Option<TenantId> = None;
     let mut timeline_id: Option<TimelineId> = None;
 
@@ -422,6 +498,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
             "dump_memory" => dump_memory = Some(parse_kv_str(&k, &v)?),
             "dump_disk_content" => dump_disk_content = Some(parse_kv_str(&k, &v)?),
             "dump_term_history" => dump_term_history = Some(parse_kv_str(&k, &v)?),
+            "dump_wal_last_modified" => dump_wal_last_modified = Some(parse_kv_str(&k, &v)?),
             "tenant_id" => tenant_id = Some(parse_kv_str(&k, &v)?),
             "timeline_id" => timeline_id = Some(parse_kv_str(&k, &v)?),
             _ => Err(ApiError::BadRequest(anyhow::anyhow!(
@@ -436,6 +513,9 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
     let dump_memory = dump_memory.unwrap_or(dump_all);
     let dump_disk_content = dump_disk_content.unwrap_or(dump_all);
     let dump_term_history = dump_term_history.unwrap_or(true);
+    let dump_wal_last_modified = dump_wal_last_modified.unwrap_or(dump_all);
+
+    let global_timelines = get_global_timelines(&request);
 
     let args = debug_dump::Args {
         dump_all,
@@ -443,11 +523,12 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
         dump_memory,
         dump_disk_content,
         dump_term_history,
+        dump_wal_last_modified,
         tenant_id,
         timeline_id,
     };
 
-    let resp = debug_dump::build(args)
+    let resp = debug_dump::build(args, global_timelines)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -499,39 +580,17 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
     Ok(response)
 }
 
-async fn patch_control_file_handler(
-    mut request: Request<Body>,
-) -> Result<Response<Body>, ApiError> {
-    check_permission(&request, None)?;
-
-    let ttid = TenantTimelineId::new(
-        parse_request_param(&request, "tenant_id")?,
-        parse_request_param(&request, "timeline_id")?,
-    );
-
-    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
-
-    let patch_request: patch_control_file::Request = json_request(&mut request).await?;
-    let response = patch_control_file::handle_request(tli, patch_request)
-        .await
-        .map_err(ApiError::InternalServerError)?;
-
-    json_response(StatusCode::OK, response)
-}
-
 /// Safekeeper http router.
-pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError> {
+pub fn make_router(
+    conf: Arc<SafeKeeperConf>,
+    global_timelines: Arc<GlobalTimelines>,
+) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router();
     if conf.http_auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
-            #[allow(clippy::mutable_key_type)]
-            static ALLOWLIST_ROUTES: Lazy<HashSet<Uri>> = Lazy::new(|| {
-                ["/v1/status", "/metrics"]
-                    .iter()
-                    .map(|v| v.parse().unwrap())
-                    .collect()
-            });
-            if ALLOWLIST_ROUTES.contains(request.uri()) {
+            const ALLOWLIST_ROUTES: &[&str] =
+                &["/v1/status", "/metrics", "/profile/cpu", "/profile/heap"];
+            if ALLOWLIST_ROUTES.contains(&request.uri().path()) {
                 None
             } else {
                 // Option<Arc<SwappableJwtAuth>> is always provided as data below, hence unwrap().
@@ -547,9 +606,12 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
     // located nearby (/safekeeper/src/http/openapi_spec.yaml).
     let auth = conf.http_auth.clone();
     router
-        .data(Arc::new(conf))
+        .data(conf)
+        .data(global_timelines)
         .data(auth)
         .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
+        .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
+        .get("/profile/heap", |r| request_span(r, profile_heap_handler))
         .get("/v1/status", |r| request_span(r, status_handler))
         .put("/v1/failpoints", |r| {
             request_span(r, move |r| async {
@@ -558,9 +620,15 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
                 failpoints_handler(r, cancel).await
             })
         })
+        .delete("/v1/tenant/:tenant_id", |r| {
+            request_span(r, tenant_delete_handler)
+        })
         // Will be used in the future instead of implicit timeline creation
         .post("/v1/tenant/timeline", |r| {
             request_span(r, timeline_create_handler)
+        })
+        .get("/v1/tenant/timeline", |r| {
+            request_span(r, timeline_list_handler)
         })
         .get("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
             request_span(r, timeline_status_handler)
@@ -568,16 +636,17 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
             request_span(r, timeline_delete_handler)
         })
-        .delete("/v1/tenant/:tenant_id", |r| {
-            request_span(r, tenant_delete_handler)
+        .post("/v1/pull_timeline", |r| {
+            request_span(r, timeline_pull_handler)
         })
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/snapshot/:destination_id",
             |r| request_span(r, timeline_snapshot_handler),
         )
-        .post("/v1/pull_timeline", |r| {
-            request_span(r, timeline_pull_handler)
-        })
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/membership",
+            |r| request_span(r, timeline_membership_handler),
+        )
         .post(
             "/v1/tenant/:tenant_id/timeline/:source_timeline_id/copy",
             |r| request_span(r, timeline_copy_handler),
@@ -590,14 +659,21 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             "/v1/tenant/:tenant_id/timeline/:timeline_id/checkpoint",
             |r| request_span(r, timeline_checkpoint_handler),
         )
-        // for tests
+        .get("/v1/tenant/:tenant_id/timeline/:timeline_id/digest", |r| {
+            request_span(r, timeline_digest_handler)
+        })
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/backup_partial_reset",
+            |r| request_span(r, timeline_backup_partial_reset),
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/term_bump",
+            |r| request_span(r, timeline_term_bump_handler),
+        )
         .post("/v1/record_safekeeper_info/:tenant_id/:timeline_id", |r| {
             request_span(r, record_safekeeper_info)
         })
         .get("/v1/debug_dump", |r| request_span(r, dump_debug_handler))
-        .get("/v1/tenant/:tenant_id/timeline/:timeline_id/digest", |r| {
-            request_span(r, timeline_digest_handler)
-        })
 }
 
 #[cfg(test)]

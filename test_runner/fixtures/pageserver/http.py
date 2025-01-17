@@ -1,20 +1,30 @@
 from __future__ import annotations
 
+import dataclasses
+import json
+import random
+import string
 import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
+from fixtures.common_types import (
+    Lsn,
+    TenantId,
+    TenantShardId,
+    TimelineArchivalState,
+    TimelineId,
+)
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
-from fixtures.utils import Fn
+from fixtures.utils import EnhancedJSONEncoder, Fn
 
 
 class PageserverApiException(Exception):
@@ -22,6 +32,61 @@ class PageserverApiException(Exception):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+
+
+@dataclass
+class ImportPgdataIdemptencyKey:
+    key: str
+
+    @staticmethod
+    def random() -> ImportPgdataIdemptencyKey:
+        return ImportPgdataIdemptencyKey(
+            "".join(random.choices(string.ascii_letters + string.digits, k=20))
+        )
+
+
+@dataclass
+class LocalFs:
+    path: str
+
+
+@dataclass
+class AwsS3:
+    region: str
+    bucket: str
+    key: str
+
+
+@dataclass
+class ImportPgdataLocation:
+    LocalFs: None | LocalFs = None
+    AwsS3: None | AwsS3 = None
+
+
+@dataclass
+class TimelineCreateRequestModeImportPgdata:
+    location: ImportPgdataLocation
+    idempotency_key: ImportPgdataIdemptencyKey
+
+
+@dataclass
+class TimelineCreateRequestMode:
+    Branch: None | dict[str, Any] = None
+    Bootstrap: None | dict[str, Any] = None
+    ImportPgdata: None | TimelineCreateRequestModeImportPgdata = None
+
+
+@dataclass
+class TimelineCreateRequest:
+    new_timeline_id: TimelineId
+    mode: TimelineCreateRequestMode
+
+    def to_json(self) -> str:
+        # mode is flattened
+        this = dataclasses.asdict(self)
+        mode = this.pop("mode")
+        this.update(mode)
+        return json.dumps(self, cls=EnhancedJSONEncoder)
 
 
 class TimelineCreate406(PageserverApiException):
@@ -40,10 +105,10 @@ class TimelineCreate409(PageserverApiException):
 class InMemoryLayerInfo:
     kind: str
     lsn_start: str
-    lsn_end: Optional[str]
+    lsn_end: str | None
 
     @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> InMemoryLayerInfo:
+    def from_json(cls, d: dict[str, Any]) -> InMemoryLayerInfo:
         return InMemoryLayerInfo(
             kind=d["kind"],
             lsn_start=d["lsn_start"],
@@ -57,14 +122,14 @@ class HistoricLayerInfo:
     layer_file_name: str
     layer_file_size: int
     lsn_start: str
-    lsn_end: Optional[str]
+    lsn_end: str | None
     remote: bool
     # None for image layers, true if pageserver thinks this is an L0 delta layer
-    l0: Optional[bool]
+    l0: bool | None
     visible: bool
 
     @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> HistoricLayerInfo:
+    def from_json(cls, d: dict[str, Any]) -> HistoricLayerInfo:
         # instead of parsing the key range lets keep the definition of "L0" in pageserver
         l0_ness = d.get("l0")
         assert l0_ness is None or isinstance(l0_ness, bool)
@@ -86,56 +151,89 @@ class HistoricLayerInfo:
 
 @dataclass
 class LayerMapInfo:
-    in_memory_layers: List[InMemoryLayerInfo]
-    historic_layers: List[HistoricLayerInfo]
+    in_memory_layers: list[InMemoryLayerInfo]
+    historic_layers: list[HistoricLayerInfo]
 
     @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> LayerMapInfo:
+    def from_json(cls, d: dict[str, Any]) -> LayerMapInfo:
         info = LayerMapInfo(in_memory_layers=[], historic_layers=[])
 
         json_in_memory_layers = d["in_memory_layers"]
-        assert isinstance(json_in_memory_layers, List)
+        assert isinstance(json_in_memory_layers, list)
         for json_in_memory_layer in json_in_memory_layers:
             info.in_memory_layers.append(InMemoryLayerInfo.from_json(json_in_memory_layer))
 
         json_historic_layers = d["historic_layers"]
-        assert isinstance(json_historic_layers, List)
+        assert isinstance(json_historic_layers, list)
         for json_historic_layer in json_historic_layers:
             info.historic_layers.append(HistoricLayerInfo.from_json(json_historic_layer))
 
         return info
 
-    def kind_count(self) -> Dict[str, int]:
-        counts: Dict[str, int] = defaultdict(int)
+    def kind_count(self) -> dict[str, int]:
+        counts: dict[str, int] = defaultdict(int)
         for inmem_layer in self.in_memory_layers:
             counts[inmem_layer.kind] += 1
         for hist_layer in self.historic_layers:
             counts[hist_layer.kind] += 1
         return counts
 
-    def delta_layers(self) -> List[HistoricLayerInfo]:
+    def delta_layers(self) -> list[HistoricLayerInfo]:
         return [x for x in self.historic_layers if x.kind == "Delta"]
 
-    def image_layers(self) -> List[HistoricLayerInfo]:
+    def image_layers(self) -> list[HistoricLayerInfo]:
         return [x for x in self.historic_layers if x.kind == "Image"]
 
-    def delta_l0_layers(self) -> List[HistoricLayerInfo]:
+    def delta_l0_layers(self) -> list[HistoricLayerInfo]:
         return [x for x in self.historic_layers if x.kind == "Delta" and x.l0]
 
-    def historic_by_name(self) -> Set[str]:
+    def historic_by_name(self) -> set[str]:
         return set(x.layer_file_name for x in self.historic_layers)
 
 
 @dataclass
-class TenantConfig:
-    tenant_specific_overrides: Dict[str, Any]
-    effective_config: Dict[str, Any]
+class ScanDisposableKeysResponse:
+    disposable_count: int
+    not_disposable_count: int
+
+    def __add__(self, b):
+        a = self
+        assert isinstance(a, ScanDisposableKeysResponse)
+        assert isinstance(b, ScanDisposableKeysResponse)
+        return ScanDisposableKeysResponse(
+            a.disposable_count + b.disposable_count, a.not_disposable_count + b.not_disposable_count
+        )
 
     @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> TenantConfig:
+    def from_json(cls, d: dict[str, Any]) -> ScanDisposableKeysResponse:
+        disposable_count = d["disposable_count"]
+        not_disposable_count = d["not_disposable_count"]
+        return ScanDisposableKeysResponse(disposable_count, not_disposable_count)
+
+
+@dataclass
+class TenantConfig:
+    tenant_specific_overrides: dict[str, Any]
+    effective_config: dict[str, Any]
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> TenantConfig:
         return TenantConfig(
             tenant_specific_overrides=d["tenant_specific_overrides"],
             effective_config=d["effective_config"],
+        )
+
+
+@dataclass
+class TimelinesInfoAndOffloaded:
+    timelines: list[dict[str, Any]]
+    offloaded: list[dict[str, Any]]
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> TimelinesInfoAndOffloaded:
+        return TimelinesInfoAndOffloaded(
+            timelines=d["timelines"],
+            offloaded=d["offloaded"],
         )
 
 
@@ -144,8 +242,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self,
         port: int,
         is_testing_enabled_or_skip: Fn,
-        auth_token: Optional[str] = None,
-        retries: Optional[Retry] = None,
+        auth_token: str | None = None,
+        retries: Retry | None = None,
     ):
         super().__init__()
         self.port = port
@@ -209,7 +307,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
-    def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
+    def configure_failpoints(self, config_strings: tuple[str, str] | list[tuple[str, str]]):
         self.is_testing_enabled_or_skip()
 
         if isinstance(config_strings, tuple):
@@ -233,7 +331,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.post(f"http://localhost:{self.port}/v1/reload_auth_validation_keys")
         self.verbose_error(res)
 
-    def tenant_list(self) -> List[Dict[Any, Any]]:
+    def tenant_list(self) -> list[dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
         self.verbose_error(res)
         res_json = res.json()
@@ -242,9 +340,9 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def tenant_attach(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         generation: int,
-        config: None | Dict[str, Any] = None,
+        config: None | dict[str, Any] = None,
     ):
         config = config or {}
 
@@ -269,7 +367,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             },
         )
 
-    def tenant_reset(self, tenant_id: Union[TenantId, TenantShardId], drop_cache: bool):
+    def tenant_reset(self, tenant_id: TenantId | TenantShardId, drop_cache: bool):
         params = {}
         if drop_cache:
             params["drop_cache"] = "true"
@@ -279,10 +377,10 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def tenant_location_conf(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
-        location_conf=dict[str, Any],
+        tenant_id: TenantId | TenantShardId,
+        location_conf: dict[str, Any],
         flush_ms=None,
-        lazy: Optional[bool] = None,
+        lazy: bool | None = None,
     ):
         body = location_conf.copy()
 
@@ -310,21 +408,21 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json["tenant_shards"], list)
         return res_json
 
-    def tenant_get_location(self, tenant_id: TenantShardId):
+    def tenant_get_location(self, tenant_id: TenantId | TenantShardId):
         res = self.get(
             f"http://localhost:{self.port}/v1/location_config/{tenant_id}",
         )
         self.verbose_error(res)
         return res.json()
 
-    def tenant_delete(self, tenant_id: Union[TenantId, TenantShardId]):
+    def tenant_delete(self, tenant_id: TenantId | TenantShardId):
         res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
         self.verbose_error(res)
         return res
 
     def tenant_status(
-        self, tenant_id: Union[TenantId, TenantShardId], activate: bool = False
-    ) -> Dict[Any, Any]:
+        self, tenant_id: TenantId | TenantShardId, activate: bool = False
+    ) -> dict[Any, Any]:
         """
         :activate: hint the server not to accelerate activation of this tenant in response
         to this query.  False by default for tests, because they generally want to observed the
@@ -342,17 +440,17 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json, dict)
         return res_json
 
-    def tenant_config(self, tenant_id: Union[TenantId, TenantShardId]) -> TenantConfig:
+    def tenant_config(self, tenant_id: TenantId | TenantShardId) -> TenantConfig:
         res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/config")
         self.verbose_error(res)
         return TenantConfig.from_json(res.json())
 
-    def tenant_heatmap_upload(self, tenant_id: Union[TenantId, TenantShardId]):
+    def tenant_heatmap_upload(self, tenant_id: TenantId | TenantShardId):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/heatmap_upload")
         self.verbose_error(res)
 
     def tenant_secondary_download(
-        self, tenant_id: Union[TenantId, TenantShardId], wait_ms: Optional[int] = None
+        self, tenant_id: TenantId | TenantShardId, wait_ms: int | None = None
     ) -> tuple[int, dict[Any, Any]]:
         url = f"http://localhost:{self.port}/v1/tenant/{tenant_id}/secondary/download"
         if wait_ms is not None:
@@ -361,13 +459,19 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self.verbose_error(res)
         return (res.status_code, res.json())
 
-    def tenant_secondary_status(self, tenant_id: Union[TenantId, TenantShardId]):
+    def tenant_secondary_status(self, tenant_id: TenantId | TenantShardId):
         url = f"http://localhost:{self.port}/v1/tenant/{tenant_id}/secondary/status"
         res = self.get(url)
         self.verbose_error(res)
         return res.json()
 
-    def set_tenant_config(self, tenant_id: Union[TenantId, TenantShardId], config: dict[str, Any]):
+    def set_tenant_config(self, tenant_id: TenantId | TenantShardId, config: dict[str, Any]):
+        """
+        Only use this via storage_controller.pageserver_api().
+
+        Storcon is the authority on tenant config - changes you make directly
+        against pageserver may be reconciled away at any time.
+        """
         assert "tenant_id" not in config.keys()
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/config",
@@ -375,26 +479,44 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
 
-    def patch_tenant_config_client_side(
+    def patch_tenant_config(self, tenant_id: TenantId | TenantShardId, updates: dict[str, Any]):
+        """
+        Only use this via storage_controller.pageserver_api().
+
+        See `set_tenant_config` for more information.
+        """
+        assert "tenant_id" not in updates.keys()
+        res = self.patch(
+            f"http://localhost:{self.port}/v1/tenant/config",
+            json={**updates, "tenant_id": str(tenant_id)},
+        )
+        self.verbose_error(res)
+
+    def update_tenant_config(
         self,
         tenant_id: TenantId,
-        inserts: Optional[Dict[str, Any]] = None,
-        removes: Optional[List[str]] = None,
+        inserts: dict[str, Any] | None = None,
+        removes: list[str] | None = None,
     ):
-        current = self.tenant_config(tenant_id).tenant_specific_overrides
-        if inserts is not None:
-            current.update(inserts)
-        if removes is not None:
-            for key in removes:
-                del current[key]
-        self.set_tenant_config(tenant_id, current)
+        """
+        Only use this via storage_controller.pageserver_api().
 
-    def tenant_size(self, tenant_id: Union[TenantId, TenantShardId]) -> int:
+        See `set_tenant_config` for more information.
+        """
+        if inserts is None:
+            inserts = {}
+        if removes is None:
+            removes = []
+
+        patch = inserts | {remove: None for remove in removes}
+        self.patch_tenant_config(tenant_id, patch)
+
+    def tenant_size(self, tenant_id: TenantId | TenantShardId) -> int:
         return self.tenant_size_and_modelinputs(tenant_id)[0]
 
     def tenant_size_and_modelinputs(
-        self, tenant_id: Union[TenantId, TenantShardId]
-    ) -> Tuple[int, Dict[str, Any]]:
+        self, tenant_id: TenantId | TenantShardId
+    ) -> tuple[int, dict[str, Any]]:
         """
         Returns the tenant size, together with the model inputs as the second tuple item.
         """
@@ -409,7 +531,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert isinstance(inputs, dict)
         return (size, inputs)
 
-    def tenant_size_debug(self, tenant_id: Union[TenantId, TenantShardId]) -> str:
+    def tenant_size_debug(self, tenant_id: TenantId | TenantShardId) -> str:
         """
         Returns the tenant size debug info, as an HTML string
         """
@@ -421,10 +543,10 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def tenant_time_travel_remote_storage(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timestamp: datetime,
         done_if_after: datetime,
-        shard_counts: Optional[List[int]] = None,
+        shard_counts: list[int] | None = None,
     ):
         """
         Issues a request to perform time travel operations on the remote storage
@@ -432,7 +554,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
         if shard_counts is None:
             shard_counts = []
-        body: Dict[str, Any] = {
+        body: dict[str, Any] = {
             "shard_counts": shard_counts,
         }
         res = self.put(
@@ -443,10 +565,10 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def timeline_list(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         include_non_incremental_logical_size: bool = False,
         include_timeline_dir_layer_file_size_sum: bool = False,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         params = {}
         if include_non_incremental_logical_size:
             params["include-non-incremental-logical-size"] = "true"
@@ -461,24 +583,37 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json, list)
         return res_json
 
+    def timeline_and_offloaded_list(
+        self,
+        tenant_id: TenantId | TenantShardId,
+    ) -> TimelinesInfoAndOffloaded:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline_and_offloaded",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return TimelinesInfoAndOffloaded.from_json(res_json)
+
     def timeline_create(
         self,
         pg_version: PgVersion,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         new_timeline_id: TimelineId,
-        ancestor_timeline_id: Optional[TimelineId] = None,
-        ancestor_start_lsn: Optional[Lsn] = None,
-        existing_initdb_timeline_id: Optional[TimelineId] = None,
+        ancestor_timeline_id: TimelineId | None = None,
+        ancestor_start_lsn: Lsn | None = None,
+        existing_initdb_timeline_id: TimelineId | None = None,
         **kwargs,
-    ) -> Dict[Any, Any]:
-        body: Dict[str, Any] = {
+    ) -> dict[Any, Any]:
+        body: dict[str, Any] = {
             "new_timeline_id": str(new_timeline_id),
-            "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
-            "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
-            "existing_initdb_timeline_id": str(existing_initdb_timeline_id)
-            if existing_initdb_timeline_id
-            else None,
         }
+        if ancestor_timeline_id:
+            body["ancestor_timeline_id"] = str(ancestor_timeline_id)
+        if ancestor_start_lsn:
+            body["ancestor_start_lsn"] = str(ancestor_start_lsn)
+        if existing_initdb_timeline_id:
+            body["existing_initdb_timeline_id"] = str(existing_initdb_timeline_id)
         if pg_version != PgVersion.NOT_SET:
             body["pg_version"] = int(pg_version)
 
@@ -498,13 +633,13 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def timeline_detail(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         include_non_incremental_logical_size: bool = False,
         include_timeline_dir_layer_file_size_sum: bool = False,
         force_await_initial_logical_size: bool = False,
         **kwargs,
-    ) -> Dict[Any, Any]:
+    ) -> dict[Any, Any]:
         params = {}
         if include_non_incremental_logical_size:
             params["include-non-incremental-logical-size"] = "true"
@@ -524,7 +659,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         return res_json
 
     def timeline_delete(
-        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, **kwargs
+        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, **kwargs
     ):
         """
         Note that deletion is not instant, it is scheduled and performed mostly in the background.
@@ -540,9 +675,9 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def timeline_gc(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
-        gc_horizon: Optional[int],
+        gc_horizon: int | None,
     ) -> dict[str, Any]:
         """
         Unlike most handlers, this will wait for the layers to be actually
@@ -564,37 +699,66 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json, dict)
         return res_json
 
-    def timeline_block_gc(self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId):
+    def timeline_block_gc(self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId):
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/block_gc",
         )
         log.info(f"Got GC request response code: {res.status_code}")
         self.verbose_error(res)
 
-    def timeline_unblock_gc(
-        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
-    ):
+    def timeline_unblock_gc(self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId):
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/unblock_gc",
         )
         log.info(f"Got GC request response code: {res.status_code}")
         self.verbose_error(res)
 
+    def timeline_offload(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+    ):
+        self.is_testing_enabled_or_skip()
+
+        log.info(f"Requesting offload: tenant {tenant_id}, timeline {timeline_id}")
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/offload",
+        )
+        log.info(f"Got offload request response code: {res.status_code}")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is None
+
+    def timeline_compact_info(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Any:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        return res_json
+
     def timeline_compact(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         force_repartition=False,
         force_image_layer_creation=False,
+        force_l0_compaction=False,
         wait_until_uploaded=False,
         enhanced_gc_bottom_most_compaction=False,
+        body: dict[str, Any] | None = None,
     ):
-        self.is_testing_enabled_or_skip()
         query = {}
         if force_repartition:
             query["force_repartition"] = "true"
         if force_image_layer_creation:
             query["force_image_layer_creation"] = "true"
+        if force_l0_compaction:
+            query["force_l0_compaction"] = "true"
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
         if enhanced_gc_bottom_most_compaction:
@@ -604,6 +768,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact",
             params=query,
+            json=body,
         )
         log.info(f"Got compact request response code: {res.status_code}")
         self.verbose_error(res)
@@ -611,7 +776,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert res_json is None
 
     def timeline_preserve_initdb_archive(
-        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId
     ):
         log.info(
             f"Requesting initdb archive preservation for tenant {tenant_id} and timeline {timeline_id}"
@@ -621,9 +786,25 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
 
+    def timeline_archival_config(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+        state: TimelineArchivalState,
+    ):
+        config = {"state": state.value}
+        log.info(
+            f"requesting timeline archival config {config} for tenant {tenant_id} and timeline {timeline_id}"
+        )
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/archival_config",
+            json=config,
+        )
+        self.verbose_error(res)
+
     def timeline_get_lsn_by_timestamp(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         timestamp: datetime,
         with_lease: bool = False,
@@ -642,7 +823,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         return res_json
 
     def timeline_lsn_lease(
-        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, lsn: Lsn
+        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, lsn: Lsn
     ):
         data = {
             "lsn": str(lsn),
@@ -658,7 +839,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         return res_json
 
     def timeline_get_timestamp_of_lsn(
-        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, lsn: Lsn
+        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, lsn: Lsn
     ):
         log.info(f"Requesting time range of lsn {lsn}, tenant {tenant_id}, timeline {timeline_id}")
         res = self.get(
@@ -668,9 +849,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         return res_json
 
-    def timeline_layer_map_info(
-        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
-    ):
+    def timeline_layer_map_info(self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId):
         log.info(f"Requesting layer map info of tenant {tenant_id}, timeline {timeline_id}")
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer",
@@ -681,12 +860,14 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def timeline_checkpoint(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         force_repartition=False,
         force_image_layer_creation=False,
+        force_l0_compaction=False,
+        wait_until_flushed=True,
         wait_until_uploaded=False,
-        compact: Optional[bool] = None,
+        compact: bool | None = None,
         **kwargs,
     ):
         self.is_testing_enabled_or_skip()
@@ -695,13 +876,19 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_repartition"] = "true"
         if force_image_layer_creation:
             query["force_image_layer_creation"] = "true"
+        if force_l0_compaction:
+            query["force_l0_compaction"] = "true"
+        if not wait_until_flushed:
+            query["wait_until_flushed"] = "false"
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
 
         if compact is not None:
             query["compact"] = "true" if compact else "false"
 
-        log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
+        log.info(
+            f"Requesting checkpoint: tenant={tenant_id} timeline={timeline_id} wait_until_flushed={wait_until_flushed} wait_until_uploaded={wait_until_uploaded} compact={compact}"
+        )
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint",
             params=query,
@@ -714,7 +901,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def timeline_spawn_download_remote_layers(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         max_concurrent_downloads: int,
     ) -> dict[str, Any]:
@@ -733,7 +920,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def timeline_poll_download_remote_layers_status(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         spawn_response: dict[str, Any],
         poll_state=None,
@@ -755,7 +942,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def timeline_download_remote_layers(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         max_concurrent_downloads: int,
         errors_ok=False,
@@ -805,7 +992,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         file_kind: str,
         op_kind: str,
-    ) -> Optional[int]:
+    ) -> int | None:
         metrics = [
             "pageserver_remote_timeline_client_calls_started_total",
             "pageserver_remote_timeline_client_calls_finished_total",
@@ -822,14 +1009,14 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         if len(res) != 2:
             return None
-        inc, dec = [res[metric] for metric in metrics]
+        inc, dec = (res[metric] for metric in metrics)
         queue_count = int(inc) - int(dec)
         assert queue_count >= 0
         return queue_count
 
     def layer_map_info(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
     ) -> LayerMapInfo:
         res = self.get(
@@ -838,8 +1025,18 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self.verbose_error(res)
         return LayerMapInfo.from_json(res.json())
 
+    def timeline_layer_scan_disposable_keys(
+        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, layer_name: str
+    ) -> ScanDisposableKeysResponse:
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/{layer_name}/scan_disposable_keys",
+        )
+        self.verbose_error(res)
+        assert res.status_code == 200
+        return ScanDisposableKeysResponse.from_json(res.json())
+
     def download_layer(
-        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str
+        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, layer_name: str
     ):
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/{layer_name}",
@@ -848,9 +1045,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
         assert res.status_code == 200
 
-    def download_all_layers(
-        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
-    ):
+    def download_all_layers(self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId):
         info = self.layer_map_info(tenant_id, timeline_id)
         for layer in info.historic_layers:
             if not layer.remote:
@@ -859,11 +1054,11 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def detach_ancestor(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         batch_size: int | None = None,
         **kwargs,
-    ) -> Set[TimelineId]:
+    ) -> set[TimelineId]:
         params = {}
         if batch_size is not None:
             params["batch_size"] = batch_size
@@ -877,7 +1072,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         return set(map(TimelineId, json["reparented_timelines"]))
 
     def evict_layer(
-        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str
+        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, layer_name: str
     ):
         res = self.delete(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/{layer_name}",
@@ -886,7 +1081,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
         assert res.status_code in (200, 304)
 
-    def evict_all_layers(self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId):
+    def evict_all_layers(self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId):
         info = self.layer_map_info(tenant_id, timeline_id)
         for layer in info.historic_layers:
             self.evict_layer(tenant_id, timeline_id, layer.layer_file_name)
@@ -899,7 +1094,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self.verbose_error(res)
         return res.json()
 
-    def tenant_break(self, tenant_id: Union[TenantId, TenantShardId]):
+    def tenant_break(self, tenant_id: TenantId | TenantShardId):
         res = self.put(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/break")
         self.verbose_error(res)
 
@@ -948,7 +1143,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def perf_info(
         self,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
     ):
         self.is_testing_enabled_or_skip()

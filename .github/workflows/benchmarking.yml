@@ -12,7 +12,6 @@ on:
     #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
     - cron:   '0 3 * * *' # run once a day, timezone is utc
-
   workflow_dispatch: # adds ability to run this manually
     inputs:
       region_id:
@@ -59,7 +58,7 @@ jobs:
     permissions:
       contents: write
       statuses: write
-      id-token: write # Required for OIDC authentication in azure runners
+      id-token: write # aws-actions/configure-aws-credentials
     strategy:
       fail-fast: false
       matrix:
@@ -68,12 +67,10 @@ jobs:
             PLATFORM: "neon-staging"
             region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
             RUNNER: [ self-hosted, us-east-2, x64 ]
-            IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
           - DEFAULT_PG_VERSION: 16
             PLATFORM: "azure-staging"
             region_id: 'azure-eastus2'
             RUNNER: [ self-hosted, eastus2, x64 ]
-            IMAGE: neondatabase/build-tools:pinned
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "300"
       TEST_PG_BENCH_SCALES_MATRIX: "10,100"
@@ -86,7 +83,10 @@ jobs:
 
     runs-on: ${{ matrix.RUNNER }}
     container:
-      image: ${{ matrix.IMAGE }}
+      image: neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
@@ -105,6 +105,7 @@ jobs:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
         path: /tmp/neon/
         prefix: latest
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Create Neon Project
       id: create-neon-project
@@ -122,6 +123,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         # Set --sparse-ordering option of pytest-order plugin
         # to ensure tests are running in order of appears in the file.
         # It's important for test_perf_pgbench.py::test_pgbench_remote_* tests
@@ -133,6 +135,7 @@ jobs:
           --ignore test_runner/performance/test_perf_pgvector_queries.py
           --ignore test_runner/performance/test_logical_replication.py
           --ignore test_runner/performance/test_physical_replication.py
+          --ignore test_runner/performance/test_perf_ingest_using_pgcopydb.py
       env:
         BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -149,12 +152,14 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic perf testing: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -164,6 +169,10 @@ jobs:
 
   replication-tests:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # aws-actions/configure-aws-credentials
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 16
@@ -174,12 +183,21 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
     - uses: actions/checkout@v4
 
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours
 
     - name: Download Neon artifact
       uses: ./.github/actions/download
@@ -187,6 +205,7 @@ jobs:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
         path: /tmp/neon/
         prefix: latest
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Run Logical Replication benchmarks
       uses: ./.github/actions/run-python-test-set
@@ -197,6 +216,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 5400
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -213,6 +233,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 5400
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -224,11 +245,13 @@ jobs:
       uses: ./.github/actions/allure-report-generate
       with:
         store-test-results-into-db: true
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
+    # Post both success and failure to the Slack channel
     - name: Post to a Slack channel
-      if: ${{ github.event.schedule && failure() }}
+      if: ${{ github.event.schedule && !cancelled() }}
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C06T9AMNDQQ" # on-call-compute-staging-stream
@@ -267,7 +290,7 @@ jobs:
         region_id_default=${{ env.DEFAULT_REGION_ID }}
         runner_default='["self-hosted", "us-east-2", "x64"]'
         runner_azure='["self-hosted", "eastus2", "x64"]'
-        image_default="369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned"
+        image_default="neondatabase/build-tools:pinned-bookworm"
         matrix='{
           "pg_version" : [
             16
@@ -285,10 +308,11 @@ jobs:
           "image": [ "'"$image_default"'" ],
           "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb" ,"runner": '"$runner_default"', "image": "'"$image_default"'" },
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new-many-tables","db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb" ,"runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "50gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb" ,"runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned-bookworm" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned-bookworm" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "50gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned-bookworm" },
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]
         }'
 
@@ -344,7 +368,7 @@ jobs:
     permissions:
       contents: write
       statuses: write
-      id-token: write # Required for OIDC authentication in azure runners
+      id-token: write # aws-actions/configure-aws-credentials
 
     strategy:
       fail-fast: false
@@ -371,7 +395,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Configure AWS credentials # necessary on Azure runners
+    - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-region: eu-central-1
@@ -384,9 +408,10 @@ jobs:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
         path: /tmp/neon/
         prefix: latest
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Create Neon Project
-      if: contains(fromJson('["neonvm-captest-new", "neonvm-captest-freetier", "neonvm-azure-captest-freetier", "neonvm-azure-captest-new"]'), matrix.platform)
+      if: contains(fromJson('["neonvm-captest-new", "neonvm-captest-new-many-tables", "neonvm-captest-freetier", "neonvm-azure-captest-freetier", "neonvm-azure-captest-new"]'), matrix.platform)
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
@@ -405,7 +430,7 @@ jobs:
           neonvm-captest-sharding-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_SHARDING_CONNSTR }}
             ;;
-          neonvm-captest-new | neonvm-captest-freetier | neonvm-azure-captest-new | neonvm-azure-captest-freetier)
+          neonvm-captest-new | neonvm-captest-new-many-tables | neonvm-captest-freetier | neonvm-azure-captest-new | neonvm-azure-captest-freetier)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
             ;;
           rds-aurora)
@@ -422,6 +447,26 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
+    # we want to compare Neon project OLTP throughput and latency at scale factor 10 GB 
+    # without (neonvm-captest-new)
+    # and with (neonvm-captest-new-many-tables) many relations in the database
+    - name: Create many relations before the run
+      if: contains(fromJson('["neonvm-captest-new-many-tables"]'), matrix.platform)
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_perf_many_relations
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+        TEST_NUM_RELATIONS: 10000
+
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
       with:
@@ -431,6 +476,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_init
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -445,6 +491,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_simple_update
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -459,6 +506,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_select_only
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -475,12 +523,14 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic perf testing on ${{ matrix.platform }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -492,17 +542,15 @@ jobs:
     permissions:
       contents: write
       statuses: write
-      id-token: write # Required for OIDC authentication in azure runners
+      id-token: write # aws-actions/configure-aws-credentials
     strategy:
       fail-fast: false
       matrix:
         include:
           - PLATFORM: "neonvm-captest-pgvector"
             RUNNER: [ self-hosted, us-east-2, x64 ]
-            IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
           - PLATFORM: "azure-captest-pgvector"
             RUNNER: [ self-hosted, eastus2, x64 ]
-            IMAGE: neondatabase/build-tools:pinned
 
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "15m"
@@ -511,13 +559,16 @@ jobs:
       DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      LD_LIBRARY_PATH: /home/nonroot/pg/usr/lib/x86_64-linux-gnu
+
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.PLATFORM }}
 
     runs-on: ${{ matrix.RUNNER }}
     container:
-      image: ${{ matrix.IMAGE }}
+      image: neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
@@ -527,17 +578,26 @@ jobs:
     # instead of using Neon artifacts containing pgbench
     - name: Install postgresql-16 where pytest expects it
       run: |
+        # Just to make it easier to test things locally on macOS (with arm64)
+        arch=$(uname -m | sed 's/x86_64/amd64/g' | sed 's/aarch64/arm64/g')
+
         cd /home/nonroot
-        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/libpq5_16.4-1.pgdg110%2B1_amd64.deb
-        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.4-1.pgdg110%2B1_amd64.deb
-        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.4-1.pgdg110%2B1_amd64.deb 
-        dpkg -x libpq5_16.4-1.pgdg110+1_amd64.deb pg
-        dpkg -x postgresql-client-16_16.4-1.pgdg110+1_amd64.deb pg
-        dpkg -x postgresql-16_16.4-1.pgdg110+1_amd64.deb pg
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-17/libpq5_17.2-1.pgdg120+1_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.6-1.pgdg120+1_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.6-1.pgdg120+1_${arch}.deb"
+        dpkg -x libpq5_17.2-1.pgdg120+1_${arch}.deb pg
+        dpkg -x postgresql-16_16.6-1.pgdg120+1_${arch}.deb pg
+        dpkg -x postgresql-client-16_16.6-1.pgdg120+1_${arch}.deb pg
+
         mkdir -p /tmp/neon/pg_install/v16/bin
-        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench  
-        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/psql /tmp/neon/pg_install/v16/bin/psql  
-        ln -s /home/nonroot/pg/usr/lib/x86_64-linux-gnu /tmp/neon/pg_install/v16/lib 
+        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench
+        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/psql    /tmp/neon/pg_install/v16/bin/psql
+        ln -s /home/nonroot/pg/usr/lib/$(uname -m)-linux-gnu     /tmp/neon/pg_install/v16/lib
+
+        LD_LIBRARY_PATH="/home/nonroot/pg/usr/lib/$(uname -m)-linux-gnu:${LD_LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH
+        echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> ${GITHUB_ENV}
+
         /tmp/neon/pg_install/v16/bin/pgbench --version
         /tmp/neon/pg_install/v16/bin/psql --version
 
@@ -559,7 +619,7 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-    - name: Configure AWS credentials # necessary on Azure runners to read/write from/to S3
+    - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-region: eu-central-1
@@ -575,6 +635,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgvector_indexing
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -589,6 +650,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -598,12 +660,14 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic perf testing on ${{ env.PLATFORM }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -620,6 +684,10 @@ jobs:
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # aws-actions/configure-aws-credentials
     needs: [ generate-matrices, pgbench-compare, prepare_AWS_RDS_databases ]
 
     strategy:
@@ -638,11 +706,25 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
+
+    # Increase timeout to 12h, default timeout is 6h
+    # we have regression in clickbench causing it to run 2-3x longer
+    timeout-minutes: 720
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours
 
     - name: Download Neon artifact
       uses: ./.github/actions/download
@@ -650,6 +732,7 @@ jobs:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
         path: /tmp/neon/
         prefix: latest
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Set up Connection String
       id: set-up-connstr
@@ -679,8 +762,9 @@ jobs:
         test_selection: performance/test_perf_olap.py
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_clickbench
+        extra_params: -m remote_cluster --timeout 43200 -k test_clickbench
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -693,12 +777,14 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic OLAP perf testing on ${{ matrix.platform }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -714,6 +800,10 @@ jobs:
     #
     # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # aws-actions/configure-aws-credentials
     needs: [ generate-matrices, clickbench-compare, prepare_AWS_RDS_databases ]
 
     strategy:
@@ -731,11 +821,21 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours
 
     - name: Download Neon artifact
       uses: ./.github/actions/download
@@ -743,6 +843,7 @@ jobs:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
         path: /tmp/neon/
         prefix: latest
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Get Connstring Secret Name
       run: |
@@ -781,6 +882,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_tpch
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -791,12 +893,14 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic TPC-H perf testing on ${{ matrix.platform }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
@@ -806,6 +910,10 @@ jobs:
 
   user-examples-compare:
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # aws-actions/configure-aws-credentials
     needs: [ generate-matrices, tpch-compare, prepare_AWS_RDS_databases ]
 
     strategy:
@@ -822,11 +930,21 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours
 
     - name: Download Neon artifact
       uses: ./.github/actions/download
@@ -834,6 +952,7 @@ jobs:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
         path: /tmp/neon/
         prefix: latest
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Set up Connection String
       id: set-up-connstr
@@ -865,6 +984,7 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_user_examples
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -874,12 +994,14 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |
           Periodic TPC-H perf testing on ${{ matrix.platform }}: ${{ job.status }}
           <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>

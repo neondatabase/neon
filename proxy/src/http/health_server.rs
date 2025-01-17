@@ -1,27 +1,27 @@
-use anyhow::{anyhow, bail};
-use hyper::{header::CONTENT_TYPE, Body, Request, Response, StatusCode};
-use measured::{text::BufferedTextEncoder, MetricGroup};
-use metrics::NeonMetrics;
-use std::{
-    convert::Infallible,
-    net::TcpListener,
-    sync::{Arc, Mutex},
-};
-use tracing::{info, info_span};
-use utils::http::{
-    endpoint::{self, request_span},
-    error::ApiError,
-    json::json_response,
-    RouterBuilder, RouterService,
-};
+use std::convert::Infallible;
+use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
 
+use anyhow::{anyhow, bail};
+use hyper0::header::CONTENT_TYPE;
+use hyper0::{Body, Request, Response, StatusCode};
+use measured::text::BufferedTextEncoder;
+use measured::MetricGroup;
+use metrics::NeonMetrics;
+use tracing::{info, info_span};
+use utils::http::endpoint::{self, request_span};
+use utils::http::error::ApiError;
+use utils::http::json::json_response;
+use utils::http::{RouterBuilder, RouterService};
+
+use crate::ext::{LockExt, TaskExt};
 use crate::jemalloc;
 
 async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(StatusCode::OK, "")
 }
 
-fn make_router(metrics: AppMetrics) -> RouterBuilder<hyper::Body, ApiError> {
+fn make_router(metrics: AppMetrics) -> RouterBuilder<hyper0::Body, ApiError> {
     let state = Arc::new(Mutex::new(PrometheusHandler {
         encoder: BufferedTextEncoder::new(),
         metrics,
@@ -45,7 +45,7 @@ pub async fn task_main(
 
     let service = || RouterService::new(make_router(metrics).build()?);
 
-    hyper::Server::from_tcp(http_listener)?
+    hyper0::Server::from_tcp(http_listener)?
         .serve(service().map_err(|e| anyhow!(e))?)
         .await?;
 
@@ -77,7 +77,7 @@ async fn prometheus_metrics_handler(
     let body = tokio::task::spawn_blocking(move || {
         let _span = span.entered();
 
-        let mut state = state.lock().unwrap();
+        let mut state = state.lock_propagate_poison();
         let PrometheusHandler { encoder, metrics } = &mut *state;
 
         metrics
@@ -95,13 +95,13 @@ async fn prometheus_metrics_handler(
         body
     })
     .await
-    .unwrap();
+    .propagate_task_panic();
 
     let response = Response::builder()
         .status(200)
         .header(CONTENT_TYPE, "text/plain; version=0.0.4")
         .body(Body::from(body))
-        .unwrap();
+        .expect("response headers should be valid");
 
     Ok(response)
 }

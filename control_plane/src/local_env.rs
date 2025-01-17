@@ -27,7 +27,7 @@ use crate::pageserver::PageServerNode;
 use crate::pageserver::PAGESERVER_REMOTE_STORAGE_DIR;
 use crate::safekeeper::SafekeeperNode;
 
-pub const DEFAULT_PG_VERSION: u32 = 15;
+pub const DEFAULT_PG_VERSION: u32 = 16;
 
 //
 // This data structures represents neon_local CLI config
@@ -76,7 +76,7 @@ pub struct LocalEnv {
 
     // Control plane upcall API for pageserver: if None, we will not run storage_controller  If set, this will
     // be propagated into each pageserver's configuration.
-    pub control_plane_api: Option<Url>,
+    pub control_plane_api: Url,
 
     // Control plane upcall API for storage controller.  If set, this will be propagated into the
     // storage controller's configuration.
@@ -133,7 +133,7 @@ pub struct NeonLocalInitConf {
     pub storage_controller: Option<NeonStorageControllerConf>,
     pub pageservers: Vec<NeonLocalInitPageserverConf>,
     pub safekeepers: Vec<SafekeeperConf>,
-    pub control_plane_api: Option<Option<Url>>,
+    pub control_plane_api: Option<Url>,
     pub control_plane_compute_hook_api: Option<Option<Url>>,
 }
 
@@ -165,6 +165,12 @@ pub struct NeonStorageControllerConf {
     pub split_threshold: Option<u64>,
 
     pub max_secondary_lag_bytes: Option<u64>,
+
+    #[serde(with = "humantime_serde")]
+    pub heartbeat_interval: Duration,
+
+    #[serde(with = "humantime_serde")]
+    pub long_reconcile_threshold: Option<Duration>,
 }
 
 impl NeonStorageControllerConf {
@@ -172,6 +178,9 @@ impl NeonStorageControllerConf {
     const DEFAULT_MAX_OFFLINE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
     const DEFAULT_MAX_WARMING_UP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+    // Very tight heartbeat interval to speed up tests
+    const DEFAULT_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
 }
 
 impl Default for NeonStorageControllerConf {
@@ -183,6 +192,8 @@ impl Default for NeonStorageControllerConf {
             database_url: None,
             split_threshold: None,
             max_secondary_lag_bytes: None,
+            heartbeat_interval: Self::DEFAULT_HEARTBEAT_INTERVAL,
+            long_reconcile_threshold: None,
         }
     }
 }
@@ -214,6 +225,7 @@ pub struct PageServerConf {
     pub listen_http_addr: String,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
+    pub no_sync: bool,
 }
 
 impl Default for PageServerConf {
@@ -224,6 +236,7 @@ impl Default for PageServerConf {
             listen_http_addr: String::new(),
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
+            no_sync: false,
         }
     }
 }
@@ -238,6 +251,8 @@ pub struct NeonLocalInitPageserverConf {
     pub listen_http_addr: String,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_sync: bool,
     #[serde(flatten)]
     pub other: HashMap<String, toml::Value>,
 }
@@ -250,6 +265,7 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             listen_http_addr,
             pg_auth_type,
             http_auth_type,
+            no_sync,
             other: _,
         } = conf;
         Self {
@@ -258,6 +274,7 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             listen_http_addr: listen_http_addr.clone(),
             pg_auth_type: *pg_auth_type,
             http_auth_type: *http_auth_type,
+            no_sync: *no_sync,
         }
     }
 }
@@ -335,7 +352,7 @@ impl LocalEnv {
 
         #[allow(clippy::manual_range_patterns)]
         match pg_version {
-            14 | 15 | 16 => Ok(path.join(format!("v{pg_version}"))),
+            14 | 15 | 16 | 17 => Ok(path.join(format!("v{pg_version}"))),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
@@ -466,7 +483,6 @@ impl LocalEnv {
             .iter()
             .find(|(mapped_tenant_id, _)| mapped_tenant_id == &tenant_id)
             .map(|&(_, timeline_id)| timeline_id)
-            .map(TimelineId::from)
     }
 
     pub fn timeline_name_mappings(&self) -> HashMap<TenantTimelineId, String> {
@@ -518,7 +534,7 @@ impl LocalEnv {
                 storage_controller,
                 pageservers,
                 safekeepers,
-                control_plane_api,
+                control_plane_api: control_plane_api.unwrap(),
                 control_plane_compute_hook_api,
                 branch_name_mappings,
             }
@@ -558,6 +574,8 @@ impl LocalEnv {
                     listen_http_addr: String,
                     pg_auth_type: AuthType,
                     http_auth_type: AuthType,
+                    #[serde(default)]
+                    no_sync: bool,
                 }
                 let config_toml_path = dentry.path().join("pageserver.toml");
                 let config_toml: PageserverConfigTomlSubset = toml_edit::de::from_str(
@@ -580,6 +598,7 @@ impl LocalEnv {
                     listen_http_addr,
                     pg_auth_type,
                     http_auth_type,
+                    no_sync,
                 } = config_toml;
                 let IdentityTomlSubset {
                     id: identity_toml_id,
@@ -596,6 +615,7 @@ impl LocalEnv {
                     listen_http_addr,
                     pg_auth_type,
                     http_auth_type,
+                    no_sync,
                 };
                 pageservers.push(conf);
             }
@@ -617,7 +637,7 @@ impl LocalEnv {
                 storage_controller: self.storage_controller.clone(),
                 pageservers: vec![], // it's skip_serializing anyway
                 safekeepers: self.safekeepers.clone(),
-                control_plane_api: self.control_plane_api.clone(),
+                control_plane_api: Some(self.control_plane_api.clone()),
                 control_plane_compute_hook_api: self.control_plane_compute_hook_api.clone(),
                 branch_name_mappings: self.branch_name_mappings.clone(),
             },
@@ -747,7 +767,7 @@ impl LocalEnv {
             storage_controller: storage_controller.unwrap_or_default(),
             pageservers: pageservers.iter().map(Into::into).collect(),
             safekeepers,
-            control_plane_api: control_plane_api.unwrap_or_default(),
+            control_plane_api: control_plane_api.unwrap(),
             control_plane_compute_hook_api: control_plane_compute_hook_api.unwrap_or_default(),
             branch_name_mappings: Default::default(),
         };

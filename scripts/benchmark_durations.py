@@ -1,9 +1,10 @@
 #! /usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging
-from typing import Dict
 
 import psycopg2
 import psycopg2.extras
@@ -110,7 +111,7 @@ def main(args: argparse.Namespace):
     output = args.output
     percentile = args.percentile
 
-    res: Dict[str, float] = {}
+    res: dict[str, float] = {}
 
     try:
         logging.info("connecting to the database...")

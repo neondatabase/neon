@@ -1,20 +1,21 @@
-import enum
+from __future__ import annotations
+
 import json
-import os
 import time
-from typing import Optional
+from enum import StrEnum
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
+    PageserverWalReceiverProtocol,
     generate_uploads_and_deletions,
 )
 from fixtures.pageserver.http import PageserverApiException
-from fixtures.utils import wait_until
+from fixtures.utils import skip_in_debug_build, wait_until
 from fixtures.workload import Workload
 
-AGGRESIVE_COMPACTION_TENANT_CONF = {
+AGGRESSIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.
     "gc_period": "0s",
     "compaction_period": "0s",
@@ -23,11 +24,18 @@ AGGRESIVE_COMPACTION_TENANT_CONF = {
     # Compact small layers
     "compaction_target_size": 1024**2,
     "image_creation_threshold": 2,
+    # "lsn_lease_length": "0s", -- TODO: would cause branch creation errors, should fix later
 }
 
 
-@pytest.mark.skipif(os.environ.get("BUILD_TYPE") == "debug", reason="only run with release build")
-def test_pageserver_compaction_smoke(neon_env_builder: NeonEnvBuilder):
+@skip_in_debug_build("only run with release build")
+@pytest.mark.parametrize(
+    "wal_receiver_protocol",
+    [PageserverWalReceiverProtocol.VANILLA, PageserverWalReceiverProtocol.INTERPRETED],
+)
+def test_pageserver_compaction_smoke(
+    neon_env_builder: NeonEnvBuilder, wal_receiver_protocol: PageserverWalReceiverProtocol
+):
     """
     This is a smoke test that compaction kicks in. The workload repeatedly churns
     a small number of rows and manually instructs the pageserver to run compaction
@@ -36,13 +44,15 @@ def test_pageserver_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     observed bounds.
     """
 
+    neon_env_builder.pageserver_wal_receiver_protocol = wal_receiver_protocol
+
     # Effectively disable the page cache to rely only on image layers
     # to shorten reads.
     neon_env_builder.pageserver_config_override = """
 page_cache_size=10
 """
 
-    env = neon_env_builder.init_start(initial_tenant_conf=AGGRESIVE_COMPACTION_TENANT_CONF)
+    env = neon_env_builder.init_start(initial_tenant_conf=AGGRESSIVE_COMPACTION_TENANT_CONF)
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
@@ -63,7 +73,10 @@ page_cache_size=10
             log.info(f"Running churn round {i}/{churn_rounds} ...")
 
         workload.churn_rows(row_count, env.pageserver.id)
-        ps_http.timeline_compact(tenant_id, timeline_id)
+        # Force L0 compaction to ensure the number of layers is within bounds; we don't want to count L0 layers
+        # in this benchmark. In other words, this smoke test ensures number of L1 layers are bound.
+        ps_http.timeline_compact(tenant_id, timeline_id, force_l0_compaction=True)
+        assert ps_http.perf_info(tenant_id, timeline_id)[0]["num_of_l0"] <= 1
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
@@ -71,9 +84,6 @@ page_cache_size=10
     log.info("Checking layer access metrics ...")
 
     layer_access_metric_names = [
-        "pageserver_layers_visited_per_read_global_sum",
-        "pageserver_layers_visited_per_read_global_count",
-        "pageserver_layers_visited_per_read_global_bucket",
         "pageserver_layers_visited_per_vectored_read_global_sum",
         "pageserver_layers_visited_per_vectored_read_global_count",
         "pageserver_layers_visited_per_vectored_read_global_bucket",
@@ -84,12 +94,6 @@ page_cache_size=10
         layer_access_metrics = metrics.query_all(name)
         log.info(f"Got metrics: {layer_access_metrics}")
 
-    non_vectored_sum = metrics.query_one("pageserver_layers_visited_per_read_global_sum")
-    non_vectored_count = metrics.query_one("pageserver_layers_visited_per_read_global_count")
-    if non_vectored_count.value != 0:
-        non_vectored_average = non_vectored_sum.value / non_vectored_count.value
-    else:
-        non_vectored_average = 0
     vectored_sum = metrics.query_one("pageserver_layers_visited_per_vectored_read_global_sum")
     vectored_count = metrics.query_one("pageserver_layers_visited_per_vectored_read_global_count")
     if vectored_count.value > 0:
@@ -100,12 +104,97 @@ page_cache_size=10
         assert vectored_sum.value == 0
         vectored_average = 0
 
-    log.info(f"{non_vectored_average=} {vectored_average=}")
+    log.info(f"{vectored_average=}")
 
     # The upper bound for average number of layer visits below (8)
     # was chosen empirically for this workload.
-    assert non_vectored_average < 8
     assert vectored_average < 8
+
+
+@skip_in_debug_build("only run with release build")
+@pytest.mark.parametrize(
+    "with_branches",
+    ["with_branches", "no_branches"],
+)
+def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder, with_branches: str):
+    SMOKE_CONF = {
+        # Run both gc and gc-compaction.
+        "gc_period": "5s",
+        "compaction_period": "5s",
+        # No PiTR interval and small GC horizon
+        "pitr_interval": "0s",
+        "gc_horizon": f"{1024 ** 2}",
+        "lsn_lease_length": "0s",
+    }
+
+    env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
+    env.pageserver.allowed_errors.append(
+        r".*failed to acquire partition lock during gc-compaction.*"
+    )
+    env.pageserver.allowed_errors.append(r".*repartition() called concurrently.*")
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    row_count = 10000
+    churn_rounds = 50
+
+    ps_http = env.pageserver.http_client()
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init(env.pageserver.id)
+
+    log.info("Writing initial data ...")
+    workload.write_rows(row_count, env.pageserver.id)
+
+    child_workloads: list[Workload] = []
+
+    for i in range(1, churn_rounds + 1):
+        if i % 10 == 0:
+            log.info(f"Running churn round {i}/{churn_rounds} ...")
+        if i % 10 == 5 and with_branches == "with_branches":
+            branch_name = f"child-{i}"
+            branch_timeline_id = env.create_branch(branch_name)
+            child_workloads.append(workload.branch(branch_timeline_id, branch_name))
+        if (i - 1) % 10 == 0 or (i - 1) % 10 == 1:
+            # Run gc-compaction twice every 10 rounds to ensure the test doesn't take too long time.
+            ps_http.timeline_compact(
+                tenant_id,
+                timeline_id,
+                enhanced_gc_bottom_most_compaction=True,
+                body={
+                    "scheduled": True,
+                    "sub_compaction": True,
+                    "compact_key_range": {
+                        "start": "000000000000000000000000000000000000",
+                        "end": "030000000000000000000000000000000000",
+                    },
+                    "sub_compaction_max_job_size_mb": 16,
+                },
+            )
+
+        workload.churn_rows(row_count, env.pageserver.id)
+
+    def compaction_finished():
+        queue_depth = len(ps_http.timeline_compact_info(tenant_id, timeline_id))
+        assert queue_depth == 0
+
+    wait_until(compaction_finished, timeout=60)
+
+    # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
+    env.pageserver.assert_log_contains(
+        "scheduled_compact_timeline.*picked .* layers for compaction"
+    )
+
+    log.info("Validating at workload end ...")
+    workload.validate(env.pageserver.id)
+    for child_workload in child_workloads:
+        log.info(f"Validating at branch {child_workload.branch_name}")
+        child_workload.validate(env.pageserver.id)
+
+    # Run a legacy compaction+gc to ensure gc-compaction can coexist with legacy compaction.
+    ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+    ps_http.timeline_gc(tenant_id, timeline_id, None)
 
 
 # Stripe sizes in number of pages.
@@ -114,10 +203,19 @@ LARGE_STRIPES = 32768
 
 
 @pytest.mark.parametrize(
-    "shard_count,stripe_size", [(None, None), (4, TINY_STRIPES), (4, LARGE_STRIPES)]
+    "shard_count,stripe_size,gc_compaction",
+    [
+        (None, None, False),
+        (4, TINY_STRIPES, False),
+        (4, LARGE_STRIPES, False),
+        (4, LARGE_STRIPES, True),
+    ],
 )
 def test_sharding_compaction(
-    neon_env_builder: NeonEnvBuilder, stripe_size: int, shard_count: Optional[int]
+    neon_env_builder: NeonEnvBuilder,
+    stripe_size: int,
+    shard_count: int | None,
+    gc_compaction: bool,
 ):
     """
     Use small stripes, small layers, and small compaction thresholds to exercise how compaction
@@ -209,8 +307,19 @@ def test_sharding_compaction(
     # Assert that everything is still readable
     workload.validate()
 
+    if gc_compaction:
+        # trigger gc compaction to get more coverage for that, piggyback on the existing workload
+        for shard in env.storage_controller.locate(tenant_id):
+            pageserver = env.get_pageserver(shard["node_id"])
+            tenant_shard_id = shard["shard_id"]
+            pageserver.http_client().timeline_compact(
+                tenant_shard_id,
+                timeline_id,
+                enhanced_gc_bottom_most_compaction=True,
+            )
 
-class CompactionAlgorithm(str, enum.Enum):
+
+class CompactionAlgorithm(StrEnum):
     LEGACY = "legacy"
     TIERED = "tiered"
 
@@ -240,6 +349,7 @@ def test_uploads_and_deletions(
         "image_creation_threshold": "1",
         "image_layer_creation_check_threshold": "0",
         "compaction_algorithm": json.dumps({"kind": compaction_algorithm.value}),
+        "lsn_lease_length": "0s",
     }
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
 
@@ -313,7 +423,7 @@ def test_pageserver_compaction_circuit_breaker(neon_env_builder: NeonEnvBuilder)
 
     # Wait for enough failures to break the circuit breaker
     # This wait is fairly long because we back off on compaction failures, so 5 retries takes ~30s
-    wait_until(60, 1, assert_broken)
+    wait_until(assert_broken, timeout=60)
 
     # Sleep for a while, during which time we expect that compaction will _not_ be retried
     time.sleep(10)

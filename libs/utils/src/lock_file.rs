@@ -100,7 +100,9 @@ pub enum LockFileRead {
 }
 
 /// Open & try to lock the lock file at the given `path`, returning a [handle][`LockFileRead`] to
-/// inspect its content. It is not an `Err(...)` if the file does not exist or is already locked.
+/// inspect its content.
+///
+/// It is not an `Err(...)` if the file does not exist or is already locked.
 /// Check the [`LockFileRead`] variants for details.
 pub fn read_and_hold_lock_file(path: &Utf8Path) -> anyhow::Result<LockFileRead> {
     let res = fs::OpenOptions::new().read(true).open(path);

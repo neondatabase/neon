@@ -7,6 +7,8 @@ use std::{fmt, pin::pin};
 use anyhow::{bail, Context};
 use futures::StreamExt;
 use postgres_protocol::message::backend::ReplicationMessage;
+use safekeeper_api::models::{PeerInfo, TimelineStatus};
+use safekeeper_api::Term;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::time::timeout;
 use tokio::{
@@ -17,25 +19,24 @@ use tokio::{
 use tokio_postgres::replication::ReplicationStream;
 use tokio_postgres::types::PgLsn;
 use tracing::*;
+use utils::postgres_client::{ConnectionConfigArgs, PostgresClientProtocol};
 use utils::{id::NodeId, lsn::Lsn, postgres_client::wal_stream_connection_config};
 
 use crate::receive_wal::{WalAcceptor, REPLY_QUEUE_SIZE};
 use crate::safekeeper::{AppendRequest, AppendRequestHeader};
 use crate::timeline::WalResidentTimeline;
 use crate::{
-    http::routes::TimelineStatus,
     receive_wal::MSG_QUEUE_SIZE,
     safekeeper::{
-        AcceptorProposerMessage, ProposerAcceptorMessage, ProposerElected, Term, TermHistory,
-        TermLsn, VoteRequest,
+        AcceptorProposerMessage, ProposerAcceptorMessage, ProposerElected, TermHistory, TermLsn,
+        VoteRequest,
     },
-    timeline::PeerInfo,
     SafeKeeperConf,
 };
 
 /// Entrypoint for per timeline task which always runs, checking whether
 /// recovery for this safekeeper is needed and starting it if so.
-#[instrument(name = "recovery task", skip_all, fields(ttid = %tli.ttid))]
+#[instrument(name = "recovery", skip_all, fields(ttid = %tli.ttid))]
 pub async fn recovery_main(tli: WalResidentTimeline, conf: SafeKeeperConf) {
     info!("started");
 
@@ -325,7 +326,17 @@ async fn recovery_stream(
     conf: &SafeKeeperConf,
 ) -> anyhow::Result<String> {
     // TODO: pass auth token
-    let cfg = wal_stream_connection_config(tli.ttid, &donor.pg_connstr, None, None)?;
+    let connection_conf_args = ConnectionConfigArgs {
+        protocol: PostgresClientProtocol::Vanilla,
+        ttid: tli.ttid,
+        shard_number: None,
+        shard_count: None,
+        shard_stripe_size: None,
+        listen_pg_addr_str: &donor.pg_connstr,
+        auth_token: None,
+        availability_zone: None,
+    };
+    let cfg = wal_stream_connection_config(connection_conf_args)?;
     let mut cfg = cfg.to_tokio_postgres_config();
     // It will make safekeeper give out not committed WAL (up to flush_lsn).
     cfg.application_name(&format!("safekeeper_{}", conf.my_id));

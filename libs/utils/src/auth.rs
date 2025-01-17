@@ -31,12 +31,20 @@ pub enum Scope {
     /// The scope used by pageservers in upcalls to storage controller and cloud control plane
     #[serde(rename = "generations_api")]
     GenerationsApi,
-    /// Allows access to control plane managment API and some storage controller endpoints.
+    /// Allows access to control plane managment API and all storage controller endpoints.
     Admin,
+
+    /// Allows access to control plane & storage controller endpoints used in infrastructure automation (e.g. node registration)
+    Infra,
 
     /// Allows access to storage controller APIs used by the scrubber, to interrogate the state
     /// of a tenant & post scrub results.
     Scrubber,
+
+    /// This scope is used for communication with other storage controller instances.
+    /// At the time of writing, this is only used for the step down request.
+    #[serde(rename = "controller_peer")]
+    ControllerPeer,
 }
 
 /// JWT payload. See docs/authentication.md for the format

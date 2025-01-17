@@ -1,7 +1,8 @@
+from __future__ import annotations
+
 import re
 import socket
 from contextlib import closing
-from typing import Dict, Union
 
 from fixtures.log_helper import log
 
@@ -24,7 +25,7 @@ def can_bind(host: str, port: int) -> bool:
             sock.bind((host, port))
             sock.listen()
             return True
-        except socket.error:
+        except OSError:
             log.info(f"Port {port} is in use, skipping")
             return False
         finally:
@@ -34,7 +35,7 @@ def can_bind(host: str, port: int) -> bool:
 class PortDistributor:
     def __init__(self, base_port: int, port_number: int):
         self.iterator = iter(range(base_port, base_port + port_number))
-        self.port_map: Dict[int, int] = {}
+        self.port_map: dict[int, int] = {}
 
     def get_port(self) -> int:
         for port in self.iterator:
@@ -44,20 +45,19 @@ class PortDistributor:
             "port range configured for test is exhausted, consider enlarging the range"
         )
 
-    def replace_with_new_port(self, value: Union[int, str]) -> Union[int, str]:
+    def replace_with_new_port(self, value: int | str) -> int | str:
         """
         Returns a new port for a port number in a string (like "localhost:1234") or int.
         Replacements are memorised, so a substitution for the same port is always the same.
         """
 
-        # TODO: replace with structural pattern matching for Python >= 3.10
-        if isinstance(value, int):
-            return self._replace_port_int(value)
-
-        if isinstance(value, str):
-            return self._replace_port_str(value)
-
-        raise TypeError(f"unsupported type {type(value)} of {value=}")
+        match value:
+            case int():
+                return self._replace_port_int(value)
+            case str():
+                return self._replace_port_str(value)
+            case _:
+                raise TypeError(f"Unsupported type {type(value)}, should be int | str")
 
     def _replace_port_int(self, value: int) -> int:
         known_port = self.port_map.get(value)
@@ -70,7 +70,7 @@ class PortDistributor:
         # Use regex to find port in a string
         # urllib.parse.urlparse produces inconvenient results for cases without scheme like "localhost:5432"
         # See https://bugs.python.org/issue27657
-        ports = re.findall(r":(\d+)(?:/|$)", value)
+        ports: list[str] = re.findall(r":(\d+)(?:/|$)", value)
         assert len(ports) == 1, f"can't find port in {value}"
         port_int = int(ports[0])
 

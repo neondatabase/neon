@@ -7,6 +7,7 @@ pub enum VecMapOrdering {
 }
 
 /// Ordered map datastructure implemented in a Vec.
+///
 /// Append only - can only add keys that are larger than the
 /// current max key.
 /// Ordering can be adjusted using [`VecMapOrdering`]
@@ -117,32 +118,6 @@ impl<K: Ord, V> VecMap<K, V> {
 
         let delta_size = self.instrument_vec_op(|vec| vec.push((key, value)));
         Ok((None, delta_size))
-    }
-
-    /// Split the map into two.
-    ///
-    /// The left map contains everything before `cutoff` (exclusive).
-    /// Right map contains `cutoff` and everything after (inclusive).
-    pub fn split_at(&self, cutoff: &K) -> (Self, Self)
-    where
-        K: Clone,
-        V: Clone,
-    {
-        let split_idx = self
-            .data
-            .binary_search_by_key(&cutoff, extract_key)
-            .unwrap_or_else(std::convert::identity);
-
-        (
-            VecMap {
-                data: self.data[..split_idx].to_vec(),
-                ordering: self.ordering,
-            },
-            VecMap {
-                data: self.data[split_idx..].to_vec(),
-                ordering: self.ordering,
-            },
-        )
     }
 
     /// Move items from `other` to the end of `self`, leaving `other` empty.

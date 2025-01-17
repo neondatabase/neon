@@ -1,8 +1,8 @@
 use anyhow::{bail, Result};
 use byteorder::{ByteOrder, BE};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi::Oid;
 use postgres_ffi::RepOriginId;
-use postgres_ffi::{Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::{fmt, ops::Range};
 
@@ -24,7 +24,9 @@ pub struct Key {
 
 /// When working with large numbers of Keys in-memory, it is more efficient to handle them as i128 than as
 /// a struct of fields.
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Default, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize, Debug,
+)]
 pub struct CompactKey(i128);
 
 /// The storage key size.
@@ -108,14 +110,41 @@ impl Key {
         }
     }
 
+    /// This function checks more extensively what keys we can take on the write path.
+    /// If a key beginning with 00 does not have a global/default tablespace OID, it
+    /// will be rejected on the write path.
+    #[allow(dead_code)]
+    pub fn is_valid_key_on_write_path_strong(&self) -> bool {
+        use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
+        if !self.is_i128_representable() {
+            return false;
+        }
+        if self.field1 == 0
+            && !(self.field2 == GLOBALTABLESPACE_OID
+                || self.field2 == DEFAULTTABLESPACE_OID
+                || self.field2 == 0)
+        {
+            return false; // User defined tablespaces are not supported
+        }
+        true
+    }
+
+    /// This is a weaker version of `is_valid_key_on_write_path_strong` that simply
+    /// checks if the key is i128 representable. Note that some keys can be successfully
+    /// ingested into the pageserver, but will cause errors on generating basebackup.
+    pub fn is_valid_key_on_write_path(&self) -> bool {
+        self.is_i128_representable()
+    }
+
+    pub fn is_i128_representable(&self) -> bool {
+        self.field2 <= 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222
+    }
+
     /// 'field2' is used to store tablespaceid for relations and small enum numbers for other relish.
     /// As long as Neon does not support tablespace (because of lack of access to local file system),
     /// we can assume that only some predefined namespace OIDs are used which can fit in u16
     pub fn to_i128(&self) -> i128 {
-        assert!(
-            self.field2 <= 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222,
-            "invalid key: {self}",
-        );
+        assert!(self.is_i128_representable(), "invalid key: {self}");
         (((self.field1 & 0x7F) as i128) << 120)
             | (((self.field2 & 0xFFFF) as i128) << 104)
             | ((self.field3 as i128) << 72)
@@ -199,6 +228,18 @@ impl Key {
         BE::write_u32(&mut buf[9..13], self.field4);
         buf[13] = self.field5;
         BE::write_u32(&mut buf[14..18], self.field6);
+    }
+}
+
+impl CompactKey {
+    pub fn raw(&self) -> i128 {
+        self.0
+    }
+}
+
+impl From<i128> for CompactKey {
+    fn from(value: i128) -> Self {
+        Self(value)
     }
 }
 
@@ -323,7 +364,17 @@ impl Key {
 // 02 00000000 00000000 00000000 00   00000000
 //
 // TwoPhaseFile:
-// 02 00000000 00000000 00000000 00   XID
+//
+// 02 00000000 00000000 00XXXXXX XX   XXXXXXXX
+//
+//                        \______XID_________/
+//
+// The 64-bit XID is stored a little awkwardly in field6, field5 and
+// field4. PostgreSQL v16 and below only stored a 32-bit XID, which
+// fit completely in field6, but starting with PostgreSQL v17, a full
+// 64-bit XID is used. Most pageserver code that accesses
+// TwoPhaseFiles now deals with 64-bit XIDs even on v16, the high bits
+// are just unused.
 //
 // ControlFile:
 // 03 00000000 00000000 00000000 00   00000000
@@ -516,6 +567,10 @@ impl Key {
             && self.field5 == 0
             && self.field6 == u32::MAX
     }
+
+    pub fn is_slru_dir_key(&self) -> bool {
+        slru_dir_kind(self).is_some()
+    }
 }
 
 #[inline(always)]
@@ -555,35 +610,36 @@ pub const TWOPHASEDIR_KEY: Key = Key {
 };
 
 #[inline(always)]
-pub fn twophase_file_key(xid: TransactionId) -> Key {
+pub fn twophase_file_key(xid: u64) -> Key {
     Key {
         field1: 0x02,
         field2: 0,
         field3: 0,
-        field4: 0,
-        field5: 0,
-        field6: xid,
+        field4: ((xid & 0xFFFFFF0000000000) >> 40) as u32,
+        field5: ((xid & 0x000000FF00000000) >> 32) as u8,
+        field6: (xid & 0x00000000FFFFFFFF) as u32,
     }
 }
 
 #[inline(always)]
-pub fn twophase_key_range(xid: TransactionId) -> Range<Key> {
+pub fn twophase_key_range(xid: u64) -> Range<Key> {
+    // 64-bit XIDs really should not overflow
     let (next_xid, overflowed) = xid.overflowing_add(1);
 
     Key {
         field1: 0x02,
         field2: 0,
         field3: 0,
-        field4: 0,
-        field5: 0,
-        field6: xid,
+        field4: ((xid & 0xFFFFFF0000000000) >> 40) as u32,
+        field5: ((xid & 0x000000FF00000000) >> 32) as u8,
+        field6: (xid & 0x00000000FFFFFFFF) as u32,
     }..Key {
         field1: 0x02,
         field2: 0,
-        field3: 0,
-        field4: 0,
-        field5: u8::from(overflowed),
-        field6: next_xid,
+        field3: u32::from(overflowed),
+        field4: ((next_xid & 0xFFFFFF0000000000) >> 40) as u32,
+        field5: ((next_xid & 0x000000FF00000000) >> 32) as u8,
+        field6: (next_xid & 0x00000000FFFFFFFF) as u32,
     }
 }
 
@@ -652,7 +708,7 @@ pub fn repl_origin_key_range() -> Range<Key> {
 /// Non inherited range for vectored get.
 pub const NON_INHERITED_RANGE: Range<Key> = AUX_FILES_KEY..AUX_FILES_KEY.next();
 /// Sparse keyspace range for vectored get. Missing key error will be ignored for this range.
-pub const NON_INHERITED_SPARSE_RANGE: Range<Key> = Key::metadata_key_range();
+pub const SPARSE_RANGE: Range<Key> = Key::metadata_key_range();
 
 impl Key {
     // AUX_FILES currently stores only data for logical replication (slots etc), and
@@ -660,7 +716,42 @@ impl Key {
     // switch (and generally it likely should be optional), so ignore these.
     #[inline(always)]
     pub fn is_inherited_key(self) -> bool {
-        !NON_INHERITED_RANGE.contains(&self) && !NON_INHERITED_SPARSE_RANGE.contains(&self)
+        if self.is_sparse() {
+            self.is_inherited_sparse_key()
+        } else {
+            !NON_INHERITED_RANGE.contains(&self)
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_sparse(self) -> bool {
+        self.field1 >= METADATA_KEY_BEGIN_PREFIX && self.field1 < METADATA_KEY_END_PREFIX
+    }
+
+    /// Check if the key belongs to the inherited keyspace.
+    fn is_inherited_sparse_key(self) -> bool {
+        debug_assert!(self.is_sparse());
+        self.field1 == RELATION_SIZE_PREFIX
+    }
+
+    pub fn sparse_non_inherited_keyspace() -> Range<Key> {
+        // The two keys are adjacent; if we will have non-adjancent keys in the future, we should return a keyspace
+        debug_assert_eq!(AUX_KEY_PREFIX + 1, REPL_ORIGIN_KEY_PREFIX);
+        Key {
+            field1: AUX_KEY_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }..Key {
+            field1: REPL_ORIGIN_KEY_PREFIX + 1,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }
     }
 
     #[inline(always)]
@@ -708,6 +799,21 @@ impl Key {
     #[inline(always)]
     pub fn is_rel_block_key(&self) -> bool {
         self.field1 == 0x00 && self.field4 != 0 && self.field6 != 0xffffffff
+    }
+
+    #[inline(always)]
+    pub fn is_rel_dir_key(&self) -> bool {
+        self.field1 == 0x00
+            && self.field2 != 0
+            && self.field3 != 0
+            && self.field4 == 0
+            && self.field5 == 0
+            && self.field6 == 1
+    }
+
+    #[inline(always)]
+    pub fn is_aux_file_key(&self) -> bool {
+        self.field1 == AUX_KEY_PREFIX
     }
 
     /// Guaranteed to return `Ok()` if [`Self::is_rel_block_key`] returns `true` for `key`.

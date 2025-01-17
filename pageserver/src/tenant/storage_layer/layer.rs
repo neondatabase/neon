@@ -13,14 +13,13 @@ use utils::lsn::Lsn;
 use utils::sync::{gate, heavier_once_cell};
 
 use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext};
-use crate::repository::Key;
+use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::task_mgr::TaskKind;
 use crate::tenant::timeline::{CompactionError, GetVectoredError};
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
-use super::delta_layer::{self, DeltaEntry};
+use super::delta_layer::{self};
 use super::image_layer::{self};
 use super::{
     AsLayerDesc, ImageLayerWriter, LayerAccessStats, LayerAccessStatsReset, LayerName,
@@ -34,6 +33,8 @@ mod tests;
 
 #[cfg(test)]
 mod failpoints;
+
+pub const S3_UPLOAD_LIMIT: u64 = 4_500_000_000;
 
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
@@ -332,29 +333,16 @@ impl Layer {
             })
     }
 
-    /// Get all key/values in the layer. Should be replaced with an iterator-based API in the future.
-    #[allow(dead_code)]
-    pub(crate) async fn load_key_values(
-        &self,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<(Key, Lsn, crate::repository::Value)>> {
-        let layer = self
-            .0
-            .get_or_maybe_download(true, Some(ctx))
-            .await
-            .map_err(|err| match err {
-                DownloadError::DownloadCancelled => GetVectoredError::Cancelled,
-                other => GetVectoredError::Other(anyhow::anyhow!(other)),
-            })?;
-        layer.load_key_values(&self.0, ctx).await
-    }
-
     /// Download the layer if evicted.
     ///
     /// Will not error when the layer is already downloaded.
     pub(crate) async fn download(&self) -> anyhow::Result<()> {
         self.0.get_or_maybe_download(true, None).await?;
         Ok(())
+    }
+
+    pub(crate) async fn needs_download(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
+        self.0.needs_download().await
     }
 
     /// Assuming the layer is already downloaded, returns a guard which will prohibit eviction
@@ -455,11 +443,32 @@ impl Layer {
 
     fn record_access(&self, ctx: &RequestContext) {
         if self.0.access_stats.record_access(ctx) {
-            // Visibility was modified to Visible
-            tracing::info!(
-                "Layer {} became visible as a result of access",
-                self.0.desc.key()
-            );
+            // Visibility was modified to Visible: maybe log about this
+            match ctx.task_kind() {
+                TaskKind::CalculateSyntheticSize
+                | TaskKind::OndemandLogicalSizeCalculation
+                | TaskKind::GarbageCollector
+                | TaskKind::MgmtRequest => {
+                    // This situation is expected in code paths do binary searches of the LSN space to resolve
+                    // an LSN to a timestamp, which happens during GC, during GC cutoff calculations in synthetic size,
+                    // and on-demand for certain HTTP API requests. On-demand logical size calculation is also included
+                    // because it is run as a sub-task of synthetic size.
+                }
+                _ => {
+                    // In all other contexts, it is unusual to do I/O involving layers which are not visible at
+                    // some branch tip, so we log the fact that we are accessing something that the visibility
+                    // calculation thought should not be visible.
+                    //
+                    // This case is legal in brief time windows: for example an in-flight getpage request can hold on to a layer object
+                    // which was covered by a concurrent compaction.
+                    tracing::info!(
+                        layer=%self,
+                        "became visible as a result of access",
+                    );
+                }
+            }
+
+            // Update the timeline's visible bytes count
             if let Some(tl) = self.0.timeline.upgrade() {
                 tl.metrics
                     .visible_physical_size_gauge
@@ -683,7 +692,9 @@ impl Drop for LayerInner {
             // and we could be delaying shutdown for nothing.
         }
 
-        if let Some(timeline) = self.timeline.upgrade() {
+        let timeline = self.timeline.upgrade();
+
+        if let Some(timeline) = timeline.as_ref() {
             // Only need to decrement metrics if the timeline still exists: otherwise
             // it will have already de-registered these metrics via TimelineMetrics::shutdown
             if self.desc.is_delta() {
@@ -714,7 +725,6 @@ impl Drop for LayerInner {
         let path = std::mem::take(&mut self.path);
         let file_name = self.layer_desc().layer_name();
         let file_size = self.layer_desc().file_size;
-        let timeline = self.timeline.clone();
         let meta = self.metadata();
         let status = self.status.take();
 
@@ -724,7 +734,7 @@ impl Drop for LayerInner {
             // carry this until we are finished for [`Layer::wait_drop`] support
             let _status = status;
 
-            let Some(timeline) = timeline.upgrade() else {
+            let Some(timeline) = timeline else {
                 // no need to nag that timeline is gone: under normal situation on
                 // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
                 LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
@@ -968,7 +978,7 @@ impl LayerInner {
         let timeline = self
             .timeline
             .upgrade()
-            .ok_or_else(|| DownloadError::TimelineShutdown)?;
+            .ok_or(DownloadError::TimelineShutdown)?;
 
         // count cancellations, which currently remain largely unexpected
         let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
@@ -1139,6 +1149,7 @@ impl LayerInner {
                 &self.desc.layer_name(),
                 &self.metadata(),
                 &self.path,
+                &timeline.gate,
                 &timeline.cancel,
                 ctx,
             )
@@ -1296,7 +1307,10 @@ impl LayerInner {
                 lsn_end: lsn_range.end,
                 remote: !resident,
                 access_stats,
-                l0: crate::tenant::layer_map::LayerMap::is_l0(&self.layer_desc().key_range),
+                l0: crate::tenant::layer_map::LayerMap::is_l0(
+                    &self.layer_desc().key_range,
+                    self.layer_desc().is_delta,
+                ),
             }
         } else {
             let lsn = self.desc.image_layer_lsn();
@@ -1489,8 +1503,9 @@ impl LayerInner {
                 let duration = SystemTime::now().duration_since(local_layer_mtime);
                 match duration {
                     Ok(elapsed) => {
-                        let accessed = self.access_stats.accessed();
-                        if accessed {
+                        let accessed_and_visible = self.access_stats.accessed()
+                            && self.access_stats.visibility() == LayerVisibilityHint::Visible;
+                        if accessed_and_visible {
                             // Only layers used for reads contribute to our "low residence" metric that is used
                             // to detect thrashing.  Layers promoted for other reasons (e.g. compaction) are allowed
                             // to be rapidly evicted without contributing to this metric.
@@ -1504,7 +1519,7 @@ impl LayerInner {
 
                         tracing::info!(
                             residence_millis = elapsed.as_millis(),
-                            accessed,
+                            accessed_and_visible,
                             "evicted layer after known residence period"
                         );
                     }
@@ -1690,6 +1705,9 @@ impl DownloadedLayer {
             );
 
             let res = if owner.desc.is_delta {
+                let ctx = RequestContextBuilder::extend(ctx)
+                    .page_content_kind(crate::context::PageContentKind::DeltaLayerSummary)
+                    .build();
                 let summary = Some(delta_layer::Summary::expected(
                     owner.desc.tenant_shard_id.tenant_id,
                     owner.desc.timeline_id,
@@ -1700,11 +1718,14 @@ impl DownloadedLayer {
                     &owner.path,
                     summary,
                     Some(owner.conf.max_vectored_read_bytes),
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map(LayerKind::Delta)
             } else {
+                let ctx = RequestContextBuilder::extend(ctx)
+                    .page_content_kind(crate::context::PageContentKind::ImageLayerSummary)
+                    .build();
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
                     owner.desc.tenant_shard_id.tenant_id,
@@ -1717,7 +1738,7 @@ impl DownloadedLayer {
                     lsn,
                     summary,
                     Some(owner.conf.max_vectored_read_bytes),
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map(LayerKind::Image)
@@ -1771,19 +1792,6 @@ impl DownloadedLayer {
         }
     }
 
-    async fn load_key_values(
-        &self,
-        owner: &Arc<LayerInner>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<(Key, Lsn, crate::repository::Value)>> {
-        use LayerKind::*;
-
-        match self.get(owner, ctx).await? {
-            Delta(d) => d.load_key_values(ctx).await,
-            Image(i) => i.load_key_values(ctx).await,
-        }
-    }
-
     async fn dump(&self, owner: &Arc<LayerInner>, ctx: &RequestContext) -> anyhow::Result<()> {
         use LayerKind::*;
         match self.get(owner, ctx).await? {
@@ -1804,7 +1812,7 @@ enum LayerKind {
 
 /// Guard for forcing a layer be resident while it exists.
 #[derive(Clone)]
-pub(crate) struct ResidentLayer {
+pub struct ResidentLayer {
     owner: Layer,
     downloaded: Arc<DownloadedLayer>,
 }
@@ -1834,23 +1842,22 @@ impl ResidentLayer {
     pub(crate) async fn load_keys<'a>(
         &'a self,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<DeltaEntry<'a>>> {
+    ) -> anyhow::Result<Vec<pageserver_api::key::Key>> {
         use LayerKind::*;
 
         let owner = &self.owner.0;
-        match self.downloaded.get(owner, ctx).await? {
-            Delta(ref d) => {
-                // this is valid because the DownloadedLayer::kind is a OnceCell, not a
-                // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
-                // while it's being held.
-                self.owner.record_access(ctx);
+        let inner = self.downloaded.get(owner, ctx).await?;
 
-                delta_layer::DeltaLayerInner::load_keys(d, ctx)
-                    .await
-                    .with_context(|| format!("Layer index is corrupted for {self}"))
-            }
-            Image(_) => anyhow::bail!(format!("cannot load_keys on a image layer {self}")),
-        }
+        // this is valid because the DownloadedLayer::kind is a OnceCell, not a
+        // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
+        // while it's being held.
+        self.owner.record_access(ctx);
+
+        let res = match inner {
+            Delta(ref d) => delta_layer::DeltaLayerInner::load_keys(d, ctx).await,
+            Image(ref i) => image_layer::ImageLayerInner::load_keys(i, ctx).await,
+        };
+        res.with_context(|| format!("Layer index is corrupted for {self}"))
     }
 
     /// Read all they keys in this layer which match the ShardIdentity, and write them all to

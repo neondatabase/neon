@@ -2,7 +2,7 @@ use anyhow::Context;
 use camino::Utf8PathBuf;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpaceAccum;
-use pageserver_api::models::PagestreamGetPageRequest;
+use pageserver_api::models::{PagestreamGetPageRequest, PagestreamRequest};
 
 use pageserver_api::shard::TenantShardId;
 use tokio_util::sync::CancellationToken;
@@ -58,6 +58,11 @@ pub(crate) struct Args {
     /// [`pageserver_api::models::virtual_file::IoEngineKind`].
     #[clap(long)]
     set_io_engine: Option<pageserver_api::models::virtual_file::IoEngineKind>,
+
+    /// Before starting the benchmark, live-reconfigure the pageserver to use specified io mode (buffered vs. direct).
+    #[clap(long)]
+    set_io_mode: Option<pageserver_api::models::virtual_file::IoMode>,
+
     targets: Option<Vec<TenantTimelineId>>,
 }
 
@@ -122,6 +127,10 @@ async fn main_impl(
 
     if let Some(engine_str) = &args.set_io_engine {
         mgmt_api_client.put_io_engine(engine_str).await?;
+    }
+
+    if let Some(mode) = &args.set_io_mode {
+        mgmt_api_client.put_io_mode(mode).await?;
     }
 
     // discover targets
@@ -313,12 +322,15 @@ async fn main_impl(
                         .to_rel_block()
                         .expect("we filter non-rel-block keys out above");
                     PagestreamGetPageRequest {
-                        request_lsn: if rng.gen_bool(args.req_latest_probability) {
-                            Lsn::MAX
-                        } else {
-                            r.timeline_lsn
+                        hdr: PagestreamRequest {
+                            reqid: 0,
+                            request_lsn: if rng.gen_bool(args.req_latest_probability) {
+                                Lsn::MAX
+                            } else {
+                                r.timeline_lsn
+                            },
+                            not_modified_since: r.timeline_lsn,
                         },
-                        not_modified_since: r.timeline_lsn,
                         rel: rel_tag,
                         blkno: block_no,
                     }

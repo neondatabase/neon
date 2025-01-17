@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import gzip
 import json
 import os
@@ -5,7 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from queue import SimpleQueue
-from typing import Any, Dict, Set
+from typing import TYPE_CHECKING
 
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
@@ -22,13 +24,19 @@ from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
+if TYPE_CHECKING:
+    from typing import Any
+
+    from fixtures.httpserver import ListenAddress
+
+
 # TODO: collect all of the env setup *AFTER* removal of RemoteStorageKind.NOOP
 
 
 def test_metric_collection(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
-    httpserver_listen_address,
+    httpserver_listen_address: ListenAddress,
 ):
     (host, port) = httpserver_listen_address
     metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
@@ -74,7 +82,7 @@ def test_metric_collection(
     env.pageserver.allowed_errors.extend(
         [
             ".*metrics endpoint refused the sent metrics*",
-            ".*metrics_collection: failed to upload to S3: Failed to upload data of length .* to storage path.*",
+            ".*metrics_collection: failed to upload to remote storage: Failed to upload data of length .* to storage path.*",
         ]
     )
 
@@ -189,7 +197,7 @@ def test_metric_collection(
 def test_metric_collection_cleans_up_tempfile(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
-    httpserver_listen_address,
+    httpserver_listen_address: ListenAddress,
 ):
     (host, port) = httpserver_listen_address
     metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
@@ -308,8 +316,8 @@ def test_metric_collection_cleans_up_tempfile(
 
 @dataclass
 class PrefixPartitionedFiles:
-    matching: Set[str]
-    other: Set[str]
+    matching: set[str]
+    other: set[str]
 
 
 def iterate_pageserver_workdir(path: Path, prefix: str) -> PrefixPartitionedFiles:
@@ -340,7 +348,7 @@ class MetricsVerifier:
     """
 
     def __init__(self):
-        self.tenants: Dict[TenantId, TenantMetricsVerifier] = {}
+        self.tenants: dict[TenantId, TenantMetricsVerifier] = {}
         pass
 
     def ingest(self, events, is_last):
@@ -357,8 +365,8 @@ class MetricsVerifier:
             for t in self.tenants.values():
                 t.post_batch()
 
-    def accepted_event_names(self) -> Set[str]:
-        names: Set[str] = set()
+    def accepted_event_names(self) -> set[str]:
+        names: set[str] = set()
         for t in self.tenants.values():
             names = names.union(t.accepted_event_names())
         return names
@@ -367,8 +375,8 @@ class MetricsVerifier:
 class TenantMetricsVerifier:
     def __init__(self, id: TenantId):
         self.id = id
-        self.timelines: Dict[TimelineId, TimelineMetricsVerifier] = {}
-        self.state: Dict[str, Any] = {}
+        self.timelines: dict[TimelineId, TimelineMetricsVerifier] = {}
+        self.state: dict[str, Any] = {}
 
     def ingest(self, event):
         assert TenantId(event["tenant_id"]) == self.id
@@ -392,7 +400,7 @@ class TenantMetricsVerifier:
         for tl in self.timelines.values():
             tl.post_batch(self)
 
-    def accepted_event_names(self) -> Set[str]:
+    def accepted_event_names(self) -> set[str]:
         names = set(self.state.keys())
         for t in self.timelines.values():
             names = names.union(t.accepted_event_names())
@@ -402,7 +410,7 @@ class TenantMetricsVerifier:
 class TimelineMetricsVerifier:
     def __init__(self, tenant_id: TenantId, timeline_id: TimelineId):
         self.id = timeline_id
-        self.state: Dict[str, Any] = {}
+        self.state: dict[str, Any] = {}
 
     def ingest(self, event):
         name = event["metric"]
@@ -414,7 +422,7 @@ class TimelineMetricsVerifier:
         for v in self.state.values():
             v.post_batch(self)
 
-    def accepted_event_names(self) -> Set[str]:
+    def accepted_event_names(self) -> set[str]:
         return set(self.state.keys())
 
 

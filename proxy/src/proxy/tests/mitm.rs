@@ -6,13 +6,14 @@
 
 use std::fmt::Debug;
 
-use super::*;
 use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
+use postgres_client::tls::TlsConnect;
 use postgres_protocol::message::frontend;
 use tokio::io::{AsyncReadExt, DuplexStream};
-use tokio_postgres::tls::TlsConnect;
 use tokio_util::codec::{Decoder, Encoder};
+
+use super::*;
 
 enum Intercept {
     None,
@@ -35,7 +36,7 @@ async fn proxy_mitm(
         // begin handshake with end_server
         let end_server = connect_tls(server2, client_config2.make_tls_connect().unwrap()).await;
         let (end_client, startup) = match handshake(
-            &RequestMonitoring::test(),
+            &RequestContext::test(),
             client1,
             Some(&server_config1),
             false,
@@ -54,7 +55,13 @@ async fn proxy_mitm(
 
         // give the end_server the startup parameters
         let mut buf = BytesMut::new();
-        frontend::startup_message(startup.iter(), &mut buf).unwrap();
+        frontend::startup_message(
+            &postgres_protocol::message::frontend::StartupMessageParams {
+                params: startup.params.into(),
+            },
+            &mut buf,
+        )
+        .unwrap();
         end_server.send(buf.freeze()).await.unwrap();
 
         // proxy messages between end_client and end_server
@@ -102,7 +109,7 @@ async fn proxy_mitm(
 }
 
 /// taken from tokio-postgres
-pub async fn connect_tls<S, T>(mut stream: S, tls: T) -> T::Stream
+pub(crate) async fn connect_tls<S, T>(mut stream: S, tls: T) -> T::Stream
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
@@ -115,9 +122,7 @@ where
     let mut buf = [0];
     stream.read_exact(&mut buf).await.unwrap();
 
-    if buf[0] != b'S' {
-        panic!("ssl not supported by server");
-    }
+    assert!(buf[0] == b'S', "ssl not supported by server");
 
     tls.connect(stream).await.unwrap()
 }
@@ -159,8 +164,8 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
         Scram::new("password").await?,
     ));
 
-    let _client_err = tokio_postgres::Config::new()
-        .channel_binding(tokio_postgres::config::ChannelBinding::Disable)
+    let _client_err = postgres_client::Config::new("test".to_owned(), 5432)
+        .channel_binding(postgres_client::config::ChannelBinding::Disable)
         .user("user")
         .dbname("db")
         .password("password")
@@ -176,7 +181,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
 async fn scram_auth_prefer_channel_binding() -> anyhow::Result<()> {
     connect_failure(
         Intercept::None,
-        tokio_postgres::config::ChannelBinding::Prefer,
+        postgres_client::config::ChannelBinding::Prefer,
     )
     .await
 }
@@ -186,7 +191,7 @@ async fn scram_auth_prefer_channel_binding() -> anyhow::Result<()> {
 async fn scram_auth_prefer_channel_binding_intercept() -> anyhow::Result<()> {
     connect_failure(
         Intercept::Methods,
-        tokio_postgres::config::ChannelBinding::Prefer,
+        postgres_client::config::ChannelBinding::Prefer,
     )
     .await
 }
@@ -196,7 +201,7 @@ async fn scram_auth_prefer_channel_binding_intercept() -> anyhow::Result<()> {
 async fn scram_auth_prefer_channel_binding_intercept_response() -> anyhow::Result<()> {
     connect_failure(
         Intercept::SASLResponse,
-        tokio_postgres::config::ChannelBinding::Prefer,
+        postgres_client::config::ChannelBinding::Prefer,
     )
     .await
 }
@@ -206,7 +211,7 @@ async fn scram_auth_prefer_channel_binding_intercept_response() -> anyhow::Resul
 async fn scram_auth_require_channel_binding() -> anyhow::Result<()> {
     connect_failure(
         Intercept::None,
-        tokio_postgres::config::ChannelBinding::Require,
+        postgres_client::config::ChannelBinding::Require,
     )
     .await
 }
@@ -216,7 +221,7 @@ async fn scram_auth_require_channel_binding() -> anyhow::Result<()> {
 async fn scram_auth_require_channel_binding_intercept() -> anyhow::Result<()> {
     connect_failure(
         Intercept::Methods,
-        tokio_postgres::config::ChannelBinding::Require,
+        postgres_client::config::ChannelBinding::Require,
     )
     .await
 }
@@ -226,14 +231,14 @@ async fn scram_auth_require_channel_binding_intercept() -> anyhow::Result<()> {
 async fn scram_auth_require_channel_binding_intercept_response() -> anyhow::Result<()> {
     connect_failure(
         Intercept::SASLResponse,
-        tokio_postgres::config::ChannelBinding::Require,
+        postgres_client::config::ChannelBinding::Require,
     )
     .await
 }
 
 async fn connect_failure(
     intercept: Intercept,
-    channel_binding: tokio_postgres::config::ChannelBinding,
+    channel_binding: postgres_client::config::ChannelBinding,
 ) -> anyhow::Result<()> {
     let (server, client, client_config, server_config) = proxy_mitm(intercept).await;
     let proxy = tokio::spawn(dummy_proxy(
@@ -242,7 +247,7 @@ async fn connect_failure(
         Scram::new("password").await?,
     ));
 
-    let _client_err = tokio_postgres::Config::new()
+    let _client_err = postgres_client::Config::new("test".to_owned(), 5432)
         .channel_binding(channel_binding)
         .user("user")
         .dbname("db")

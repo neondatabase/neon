@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, final
 
 import requests
 
+from fixtures.log_helper import log
+
 if TYPE_CHECKING:
-    from typing import Any, Dict, Literal, Optional, Union
+    from typing import Any, Literal
 
     from fixtures.pg_version import PgVersion
 
 
-def connection_parameters_to_env(params: Dict[str, str]) -> Dict[str, str]:
+def connection_parameters_to_env(params: dict[str, str]) -> dict[str, str]:
     return {
         "PGHOST": params["host"],
         "PGDATABASE": params["database"],
@@ -25,24 +27,26 @@ class NeonAPI:
         self.__neon_api_key = neon_api_key
         self.__neon_api_base_url = neon_api_base_url.strip("/")
 
-    def __request(
-        self, method: Union[str, bytes], endpoint: str, **kwargs: Any
-    ) -> requests.Response:
+    def __request(self, method: str | bytes, endpoint: str, **kwargs: Any) -> requests.Response:
         if "headers" not in kwargs:
             kwargs["headers"] = {}
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
 
-        return requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
+        resp = requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
+        log.debug("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
+        resp.raise_for_status()
+
+        return resp
 
     def create_project(
         self,
-        pg_version: Optional[PgVersion] = None,
-        name: Optional[str] = None,
-        branch_name: Optional[str] = None,
-        branch_role_name: Optional[str] = None,
-        branch_database_name: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
+        pg_version: PgVersion | None = None,
+        name: str | None = None,
+        branch_name: str | None = None,
+        branch_role_name: str | None = None,
+        branch_database_name: str | None = None,
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "project": {
                 "branch": {},
             },
@@ -68,11 +72,9 @@ class NeonAPI:
             json=data,
         )
 
-        assert resp.status_code == 201
+        return cast("dict[str, Any]", resp.json())
 
-        return cast("Dict[str, Any]", resp.json())
-
-    def get_project_details(self, project_id: str) -> Dict[str, Any]:
+    def get_project_details(self, project_id: str) -> dict[str, Any]:
         resp = self.__request(
             "GET",
             f"/projects/{project_id}",
@@ -81,13 +83,13 @@ class NeonAPI:
                 "Content-Type": "application/json",
             },
         )
-        assert resp.status_code == 200
-        return cast("Dict[str, Any]", resp.json())
+
+        return cast("dict[str, Any]", resp.json())
 
     def delete_project(
         self,
         project_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         resp = self.__request(
             "DELETE",
             f"/projects/{project_id}",
@@ -97,15 +99,13 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
-        return cast("Dict[str, Any]", resp.json())
+        return cast("dict[str, Any]", resp.json())
 
     def start_endpoint(
         self,
         project_id: str,
         endpoint_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         resp = self.__request(
             "POST",
             f"/projects/{project_id}/endpoints/{endpoint_id}/start",
@@ -114,15 +114,13 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
-        return cast("Dict[str, Any]", resp.json())
+        return cast("dict[str, Any]", resp.json())
 
     def suspend_endpoint(
         self,
         project_id: str,
         endpoint_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         resp = self.__request(
             "POST",
             f"/projects/{project_id}/endpoints/{endpoint_id}/suspend",
@@ -131,15 +129,13 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
-        return cast("Dict[str, Any]", resp.json())
+        return cast("dict[str, Any]", resp.json())
 
     def restart_endpoint(
         self,
         project_id: str,
         endpoint_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         resp = self.__request(
             "POST",
             f"/projects/{project_id}/endpoints/{endpoint_id}/restart",
@@ -148,18 +144,16 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
-        return cast("Dict[str, Any]", resp.json())
+        return cast("dict[str, Any]", resp.json())
 
     def create_endpoint(
         self,
         project_id: str,
         branch_id: str,
         endpoint_type: Literal["read_write", "read_only"],
-        settings: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "endpoint": {
                 "branch_id": branch_id,
             },
@@ -180,19 +174,17 @@ class NeonAPI:
             json=data,
         )
 
-        assert resp.status_code == 201
-
-        return cast("Dict[str, Any]", resp.json())
+        return cast("dict[str, Any]", resp.json())
 
     def get_connection_uri(
         self,
         project_id: str,
-        branch_id: Optional[str] = None,
-        endpoint_id: Optional[str] = None,
+        branch_id: str | None = None,
+        endpoint_id: str | None = None,
         database_name: str = "neondb",
         role_name: str = "neondb_owner",
         pooled: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         resp = self.__request(
             "GET",
             f"/projects/{project_id}/connection_uri",
@@ -208,11 +200,9 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
+        return cast("dict[str, Any]", resp.json())
 
-        return cast("Dict[str, Any]", resp.json())
-
-    def get_branches(self, project_id: str) -> Dict[str, Any]:
+    def get_branches(self, project_id: str) -> dict[str, Any]:
         resp = self.__request(
             "GET",
             f"/projects/{project_id}/branches",
@@ -221,11 +211,9 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
+        return cast("dict[str, Any]", resp.json())
 
-        return cast("Dict[str, Any]", resp.json())
-
-    def get_endpoints(self, project_id: str) -> Dict[str, Any]:
+    def get_endpoints(self, project_id: str) -> dict[str, Any]:
         resp = self.__request(
             "GET",
             f"/projects/{project_id}/endpoints",
@@ -234,11 +222,9 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
+        return cast("dict[str, Any]", resp.json())
 
-        return cast("Dict[str, Any]", resp.json())
-
-    def get_operations(self, project_id: str) -> Dict[str, Any]:
+    def get_operations(self, project_id: str) -> dict[str, Any]:
         resp = self.__request(
             "GET",
             f"/projects/{project_id}/operations",
@@ -248,9 +234,7 @@ class NeonAPI:
             },
         )
 
-        assert resp.status_code == 200
-
-        return cast("Dict[str, Any]", resp.json())
+        return cast("dict[str, Any]", resp.json())
 
     def wait_for_operation_to_finish(self, project_id: str):
         has_running = True
@@ -263,17 +247,22 @@ class NeonAPI:
             time.sleep(0.5)
 
 
+@final
 class NeonApiEndpoint:
-    def __init__(self, neon_api: NeonAPI, pg_version: PgVersion, project_id: Optional[str]):
+    def __init__(self, neon_api: NeonAPI, pg_version: PgVersion, project_id: str | None):
         self.neon_api = neon_api
+        self.project_id: str
+        self.endpoint_id: str
+        self.connstr: str
+
         if project_id is None:
             project = neon_api.create_project(pg_version)
-            neon_api.wait_for_operation_to_finish(project["project"]["id"])
+            neon_api.wait_for_operation_to_finish(cast("str", project["project"]["id"]))
             self.project_id = project["project"]["id"]
             self.endpoint_id = project["endpoints"][0]["id"]
             self.connstr = project["connection_uris"][0]["connection_uri"]
             self.pgbench_env = connection_parameters_to_env(
-                project["connection_uris"][0]["connection_parameters"]
+                cast("dict[str, str]", project["connection_uris"][0]["connection_parameters"])
             )
             self.is_new = True
         else:

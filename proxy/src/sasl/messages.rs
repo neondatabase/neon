@@ -1,24 +1,25 @@
 //! Definitions for SASL messages.
 
-use crate::parse::{split_at_const, split_cstr};
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage};
+
+use crate::parse::split_cstr;
 
 /// SASL-specific payload of [`PasswordMessage`](pq_proto::FeMessage::PasswordMessage).
 #[derive(Debug)]
-pub struct FirstMessage<'a> {
+pub(crate) struct FirstMessage<'a> {
     /// Authentication method, e.g. `"SCRAM-SHA-256"`.
-    pub method: &'a str,
+    pub(crate) method: &'a str,
     /// Initial client message.
-    pub message: &'a str,
+    pub(crate) message: &'a str,
 }
 
 impl<'a> FirstMessage<'a> {
     // NB: FromStr doesn't work with lifetimes
-    pub fn parse(bytes: &'a [u8]) -> Option<Self> {
+    pub(crate) fn parse(bytes: &'a [u8]) -> Option<Self> {
         let (method_cstr, tail) = split_cstr(bytes)?;
         let method = method_cstr.to_str().ok()?;
 
-        let (len_bytes, bytes) = split_at_const(tail)?;
+        let (len_bytes, bytes) = tail.split_first_chunk()?;
         let len = u32::from_be_bytes(*len_bytes) as usize;
         if len != bytes.len() {
             return None;
@@ -50,6 +51,7 @@ impl<'a> ServerMessage<&'a str> {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

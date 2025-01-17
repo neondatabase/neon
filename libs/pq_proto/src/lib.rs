@@ -44,7 +44,7 @@ pub struct ProtocolVersion(u32);
 
 impl ProtocolVersion {
     pub const fn new(major: u16, minor: u16) -> Self {
-        Self((major as u32) << 16 | minor as u32)
+        Self(((major as u32) << 16) | minor as u32)
     }
     pub const fn minor(self) -> u16 {
         self.0 as u16
@@ -100,7 +100,7 @@ impl StartupMessageParamsBuilder {
 
 #[derive(Debug, Clone, Default)]
 pub struct StartupMessageParams {
-    params: Bytes,
+    pub params: Bytes,
 }
 
 impl StartupMessageParams {
@@ -185,7 +185,7 @@ pub struct CancelKeyData {
 impl fmt::Display for CancelKeyData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let hi = (self.backend_pid as u64) << 32;
-        let lo = self.cancel_key as u64;
+        let lo = (self.cancel_key as u64) & 0xffffffff;
         let id = hi | lo;
 
         // This format is more compact and might work better for logs.
@@ -562,6 +562,11 @@ pub enum BeMessage<'a> {
         options: &'a [&'a str],
     },
     KeepAlive(WalSndKeepAlive),
+    /// Batch of interpreted, shard filtered WAL records,
+    /// ready for the pageserver to ingest
+    InterpretedWalRecords(InterpretedWalRecordsBody<'a>),
+
+    Raw(u8, &'a [u8]),
 }
 
 /// Common shorthands.
@@ -672,6 +677,22 @@ pub struct WalSndKeepAlive {
     pub request_reply: bool,
 }
 
+/// Batch of interpreted WAL records used in the interpreted
+/// safekeeper to pageserver protocol.
+///
+/// Note that the pageserver uses the RawInterpretedWalRecordsBody
+/// counterpart of this from the neondatabase/rust-postgres repo.
+/// If you're changing this struct, you likely need to change its
+/// twin as well.
+#[derive(Debug)]
+pub struct InterpretedWalRecordsBody<'a> {
+    /// End of raw WAL in [`Self::data`]
+    pub streaming_lsn: u64,
+    /// Current end of WAL on the server
+    pub commit_lsn: u64,
+    pub data: &'a [u8],
+}
+
 pub static HELLO_WORLD_ROW: BeMessage = BeMessage::DataRow(&[Some(b"hello world")]);
 
 // single text column
@@ -727,7 +748,7 @@ pub const SQLSTATE_INTERNAL_ERROR: &[u8; 5] = b"XX000";
 pub const SQLSTATE_ADMIN_SHUTDOWN: &[u8; 5] = b"57P01";
 pub const SQLSTATE_SUCCESSFUL_COMPLETION: &[u8; 5] = b"00000";
 
-impl<'a> BeMessage<'a> {
+impl BeMessage<'_> {
     /// Serialize `message` to the given `buf`.
     /// Apart from smart memory managemet, BytesMut is good here as msg len
     /// precedes its body and it is handy to write it down first and then fill
@@ -735,6 +756,10 @@ impl<'a> BeMessage<'a> {
     /// one more buffer.
     pub fn write(buf: &mut BytesMut, message: &BeMessage) -> Result<(), ProtocolError> {
         match message {
+            BeMessage::Raw(code, data) => {
+                buf.put_u8(*code);
+                write_body(buf, |b| b.put_slice(data))
+            }
             BeMessage::AuthenticationOk => {
                 buf.put_u8(b'R');
                 write_body(buf, |buf| {
@@ -996,6 +1021,19 @@ impl<'a> BeMessage<'a> {
                     Ok(())
                 })?
             }
+
+            BeMessage::InterpretedWalRecords(rec) => {
+                // We use the COPY_DATA_TAG for our custom message
+                // since this tag is interpreted as raw bytes.
+                buf.put_u8(b'd');
+                write_body(buf, |buf| {
+                    buf.put_u8(b'0'); // matches INTERPRETED_WAL_RECORD_TAG in postgres-protocol
+                                      // dependency
+                    buf.put_u64(rec.streaming_lsn);
+                    buf.put_u64(rec.commit_lsn);
+                    buf.put_slice(rec.data);
+                });
+            }
         }
         Ok(())
     }
@@ -1045,5 +1083,14 @@ mod tests {
     fn parse_fe_startup_packet_regression() {
         let data = [0, 0, 0, 7, 0, 0, 0, 0];
         FeStartupPacket::parse(&mut BytesMut::from_iter(data)).unwrap_err();
+    }
+
+    #[test]
+    fn cancel_key_data() {
+        let key = CancelKeyData {
+            backend_pid: -1817212860,
+            cancel_key: -1183897012,
+        };
+        assert_eq!(format!("{key}"), "CancelKeyData(93af8844b96f2a4c)");
     }
 }

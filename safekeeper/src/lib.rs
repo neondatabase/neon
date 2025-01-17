@@ -1,4 +1,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
+
+extern crate hyper0 as hyper;
+
 use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;
@@ -26,6 +29,7 @@ pub mod receive_wal;
 pub mod recovery;
 pub mod remove_wal;
 pub mod safekeeper;
+pub mod send_interpreted_wal;
 pub mod send_wal;
 pub mod state;
 pub mod timeline;
@@ -35,8 +39,12 @@ pub mod timeline_manager;
 pub mod timelines_set;
 pub mod wal_backup;
 pub mod wal_backup_partial;
+pub mod wal_reader_stream;
 pub mod wal_service;
 pub mod wal_storage;
+
+#[cfg(any(test, feature = "benchmarking"))]
+pub mod test_utils;
 
 mod timelines_global_map;
 use std::sync::Arc;
@@ -100,6 +108,8 @@ pub struct SafeKeeperConf {
     pub control_file_save_interval: Duration,
     pub partial_backup_concurrency: usize,
     pub eviction_min_resident: Duration,
+    pub wal_reader_fanout: bool,
+    pub max_delta_for_fanout: Option<u64>,
 }
 
 impl SafeKeeperConf {
@@ -109,8 +119,7 @@ impl SafeKeeperConf {
 }
 
 impl SafeKeeperConf {
-    #[cfg(test)]
-    fn dummy() -> Self {
+    pub fn dummy() -> Self {
         SafeKeeperConf {
             workdir: Utf8PathBuf::from("./"),
             no_sync: false,
@@ -143,6 +152,8 @@ impl SafeKeeperConf {
             control_file_save_interval: Duration::from_secs(1),
             partial_backup_concurrency: 1,
             eviction_min_resident: Duration::ZERO,
+            wal_reader_fanout: false,
+            max_delta_for_fanout: None,
         }
     }
 }
@@ -161,7 +172,7 @@ pub static HTTP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .thread_name("HTTP worker")
         .enable_all()
         .build()
-        .expect("Failed to create WAL service runtime")
+        .expect("Failed to create HTTP runtime")
 });
 
 pub static BROKER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {

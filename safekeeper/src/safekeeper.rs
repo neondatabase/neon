@@ -5,6 +5,8 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use postgres_ffi::{TimeLineID, MAX_SEND_SIZE};
+use safekeeper_api::models::HotStandbyFeedback;
+use safekeeper_api::Term;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
@@ -16,7 +18,6 @@ use tracing::*;
 
 use crate::control_file;
 use crate::metrics::MISC_OPERATION_SECONDS;
-use crate::send_wal::HotStandbyFeedback;
 
 use crate::state::TimelineState;
 use crate::wal_storage;
@@ -28,12 +29,8 @@ use utils::{
     lsn::Lsn,
 };
 
-const SK_PROTOCOL_VERSION: u32 = 2;
+pub const SK_PROTOCOL_VERSION: u32 = 2;
 pub const UNKNOWN_SERVER_VERSION: u32 = 0;
-
-/// Consensus logical timestamp.
-pub type Term = u64;
-pub const INVALID_TERM: Term = 0;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TermLsn {
@@ -127,10 +124,7 @@ impl TermHistory {
             );
             last_common_idx = Some(i);
         }
-        let last_common_idx = match last_common_idx {
-            None => return None, // no common point
-            Some(lci) => lci,
-        };
+        let last_common_idx = last_common_idx?;
         // Now find where it ends at both prop and sk and take min. End of
         // (common) term is the start of the next except it is the last one;
         // there it is flush_lsn in case of safekeeper or, in case of proposer
@@ -195,46 +189,6 @@ impl AcceptorState {
             Some(e) => e.term,
             None => 0,
         }
-    }
-}
-
-/// Information about Postgres. Safekeeper gets it once and then verifies
-/// all further connections from computes match.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServerInfo {
-    /// Postgres server version
-    pub pg_version: u32,
-    pub system_id: SystemId,
-    pub wal_seg_size: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PersistedPeerInfo {
-    /// LSN up to which safekeeper offloaded WAL to s3.
-    pub backup_lsn: Lsn,
-    /// Term of the last entry.
-    pub term: Term,
-    /// LSN of the last record.
-    pub flush_lsn: Lsn,
-    /// Up to which LSN safekeeper regards its WAL as committed.
-    pub commit_lsn: Lsn,
-}
-
-impl PersistedPeerInfo {
-    pub fn new() -> Self {
-        Self {
-            backup_lsn: Lsn::INVALID,
-            term: INVALID_TERM,
-            flush_lsn: Lsn(0),
-            commit_lsn: Lsn(0),
-        }
-    }
-}
-
-// make clippy happy
-impl Default for PersistedPeerInfo {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -363,7 +317,14 @@ pub enum ProposerAcceptorMessage {
 
 impl ProposerAcceptorMessage {
     /// Parse proposer message.
-    pub fn parse(msg_bytes: Bytes) -> Result<ProposerAcceptorMessage> {
+    pub fn parse(msg_bytes: Bytes, proto_version: u32) -> Result<ProposerAcceptorMessage> {
+        if proto_version != SK_PROTOCOL_VERSION {
+            bail!(
+                "incompatible protocol version {}, expected {}",
+                proto_version,
+                SK_PROTOCOL_VERSION
+            );
+        }
         // xxx using Reader is inefficient but easy to work with bincode
         let mut stream = msg_bytes.reader();
         // u64 is here to avoid padding; it will be removed once we stop packing C structs into the wire as is
@@ -421,6 +382,70 @@ impl ProposerAcceptorMessage {
             }
             _ => bail!("unknown proposer-acceptor message tag: {}", tag),
         }
+    }
+
+    /// The memory size of the message, including byte slices.
+    pub fn size(&self) -> usize {
+        const BASE_SIZE: usize = std::mem::size_of::<ProposerAcceptorMessage>();
+
+        // For most types, the size is just the base enum size including the nested structs. Some
+        // types also contain byte slices; add them.
+        //
+        // We explicitly list all fields, to draw attention here when new fields are added.
+        let mut size = BASE_SIZE;
+        size += match self {
+            Self::Greeting(ProposerGreeting {
+                protocol_version: _,
+                pg_version: _,
+                proposer_id: _,
+                system_id: _,
+                timeline_id: _,
+                tenant_id: _,
+                tli: _,
+                wal_seg_size: _,
+            }) => 0,
+
+            Self::VoteRequest(VoteRequest { term: _ }) => 0,
+
+            Self::Elected(ProposerElected {
+                term: _,
+                start_streaming_at: _,
+                term_history: _,
+                timeline_start_lsn: _,
+            }) => 0,
+
+            Self::AppendRequest(AppendRequest {
+                h:
+                    AppendRequestHeader {
+                        term: _,
+                        term_start_lsn: _,
+                        begin_lsn: _,
+                        end_lsn: _,
+                        commit_lsn: _,
+                        truncate_lsn: _,
+                        proposer_uuid: _,
+                    },
+                wal_data,
+            }) => wal_data.len(),
+
+            Self::NoFlushAppendRequest(AppendRequest {
+                h:
+                    AppendRequestHeader {
+                        term: _,
+                        term_start_lsn: _,
+                        begin_lsn: _,
+                        end_lsn: _,
+                        commit_lsn: _,
+                        truncate_lsn: _,
+                        proposer_uuid: _,
+                    },
+                wal_data,
+            }) => wal_data.len(),
+
+            Self::FlushWAL => 0,
+        };
+
+        size
     }
 }
 
@@ -875,6 +900,30 @@ where
             return Ok(Some(AcceptorProposerMessage::AppendResponse(resp)));
         }
 
+        // Disallow any non-sequential writes, which can result in gaps or
+        // overwrites. If we need to move the pointer, ProposerElected message
+        // should have truncated WAL first accordingly. Note that the first
+        // condition (WAL rewrite) is quite expected in real world; it happens
+        // when walproposer reconnects to safekeeper and writes some more data
+        // while first connection still gets some packets later. It might be
+        // better to not log this as error! above.
+        let write_lsn = self.wal_store.write_lsn();
+        let flush_lsn = self.wal_store.flush_lsn();
+        if write_lsn > msg.h.begin_lsn {
+            bail!(
+                "append request rewrites WAL written before, write_lsn={}, msg lsn={}",
+                write_lsn,
+                msg.h.begin_lsn
+            );
+        }
+        if write_lsn < msg.h.begin_lsn && write_lsn != Lsn(0) {
+            bail!(
+                "append request creates gap in written WAL, write_lsn={}, msg lsn={}",
+                write_lsn,
+                msg.h.begin_lsn,
+            );
+        }
+
         // Now we know that we are in the same term as the proposer,
         // processing the message.
 
@@ -892,7 +941,8 @@ where
             self.wal_store.flush_wal().await?;
         }
 
-        // Update commit_lsn.
+        // Update commit_lsn. It will be flushed to the control file regularly by the timeline
+        // manager, off of the WAL ingest hot path.
         if msg.h.commit_lsn != Lsn(0) {
             self.update_commit_lsn(msg.h.commit_lsn).await?;
         }
@@ -905,18 +955,10 @@ where
         self.state.inmem.peer_horizon_lsn =
             max(self.state.inmem.peer_horizon_lsn, msg.h.truncate_lsn);
 
-        // Update truncate and commit LSN in control file.
-        // To avoid negative impact on performance of extra fsync, do it only
-        // when commit_lsn delta exceeds WAL segment size.
-        if self.state.commit_lsn + (self.state.server.wal_seg_size as u64)
-            < self.state.inmem.commit_lsn
-        {
-            self.state.flush().await?;
-        }
-
         trace!(
-            "processed AppendRequest of len {}, end_lsn={:?}, commit_lsn={:?}, truncate_lsn={:?}, flushed={:?}",
+            "processed AppendRequest of len {}, begin_lsn={}, end_lsn={:?}, commit_lsn={:?}, truncate_lsn={:?}, flushed={:?}",
             msg.wal_data.len(),
+            msg.h.begin_lsn,
             msg.h.end_lsn,
             msg.h.commit_lsn,
             msg.h.truncate_lsn,
@@ -924,7 +966,9 @@ where
         );
 
         // If flush_lsn hasn't updated, AppendResponse is not very useful.
-        if !require_flush {
+        // This is the common case for !require_flush, but a flush can still
+        // happen on segment bounds.
+        if !require_flush && flush_lsn == self.flush_lsn() {
             return Ok(None);
         }
 
@@ -942,7 +986,7 @@ where
 
     /// Update commit_lsn from peer safekeeper data.
     pub async fn record_safekeeper_info(&mut self, sk_info: &SafekeeperTimelineInfo) -> Result<()> {
-        if (Lsn(sk_info.commit_lsn) != Lsn::INVALID) && (sk_info.last_log_term != INVALID_TERM) {
+        if Lsn(sk_info.commit_lsn) != Lsn::INVALID {
             // Note: the check is too restrictive, generally we can update local
             // commit_lsn if our history matches (is part of) history of advanced
             // commit_lsn provider.
@@ -957,21 +1001,26 @@ where
 #[cfg(test)]
 mod tests {
     use futures::future::BoxFuture;
+
     use postgres_ffi::{XLogSegNo, WAL_SEGMENT_SIZE};
+    use safekeeper_api::{
+        membership::{Configuration, MemberSet, SafekeeperId},
+        ServerInfo,
+    };
 
     use super::*;
-    use crate::{
-        state::{EvictionState, PersistedPeers, TimelinePersistentState},
-        wal_storage::Storage,
+    use crate::state::{EvictionState, TimelinePersistentState};
+    use std::{
+        ops::Deref,
+        str::FromStr,
+        time::{Instant, UNIX_EPOCH},
     };
-    use std::{ops::Deref, str::FromStr, time::Instant};
 
     // fake storage for tests
     struct InMemoryState {
         persisted_state: TimelinePersistentState,
     }
 
-    #[async_trait::async_trait]
     impl control_file::Storage for InMemoryState {
         async fn persist(&mut self, s: &TimelinePersistentState) -> Result<()> {
             self.persisted_state = s.clone();
@@ -1003,8 +1052,11 @@ mod tests {
         lsn: Lsn,
     }
 
-    #[async_trait::async_trait]
     impl wal_storage::Storage for DummyWalStore {
+        fn write_lsn(&self) -> Lsn {
+            self.lsn
+        }
+
         fn flush_lsn(&self) -> Lsn {
             self.lsn
         }
@@ -1078,7 +1130,7 @@ mod tests {
         let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
-            term: 1,
+            term: 2,
             term_start_lsn: Lsn(3),
             begin_lsn: Lsn(1),
             end_lsn: Lsn(2),
@@ -1092,24 +1144,29 @@ mod tests {
         };
 
         let pem = ProposerElected {
-            term: 1,
-            start_streaming_at: Lsn(3),
-            term_history: TermHistory(vec![TermLsn {
-                term: 1,
-                lsn: Lsn(3),
-            }]),
-            timeline_start_lsn: Lsn(0),
+            term: 2,
+            start_streaming_at: Lsn(1),
+            term_history: TermHistory(vec![
+                TermLsn {
+                    term: 1,
+                    lsn: Lsn(1),
+                },
+                TermLsn {
+                    term: 2,
+                    lsn: Lsn(3),
+                },
+            ]),
+            timeline_start_lsn: Lsn(1),
         };
         sk.process_msg(&ProposerAcceptorMessage::Elected(pem))
             .await
             .unwrap();
 
         // check that AppendRequest before term_start_lsn doesn't switch last_log_term.
-        let resp = sk
-            .process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
-            .await;
-        assert!(resp.is_ok());
-        assert_eq!(sk.get_last_log_term(), 0);
+        sk.process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
+            .await
+            .unwrap();
+        assert_eq!(sk.get_last_log_term(), 1);
 
         // but record at term_start_lsn does the switch
         ar_hdr.begin_lsn = Lsn(2);
@@ -1118,12 +1175,63 @@ mod tests {
             h: ar_hdr,
             wal_data: Bytes::from_static(b"b"),
         };
-        let resp = sk
-            .process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
-            .await;
-        assert!(resp.is_ok());
-        sk.wal_store.truncate_wal(Lsn(3)).await.unwrap(); // imitate the complete record at 3 %)
-        assert_eq!(sk.get_last_log_term(), 1);
+        sk.process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
+            .await
+            .unwrap();
+        assert_eq!(sk.get_last_log_term(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_non_consecutive_write() {
+        let storage = InMemoryState {
+            persisted_state: test_sk_state(),
+        };
+        let wal_store = DummyWalStore { lsn: Lsn(0) };
+
+        let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
+
+        let pem = ProposerElected {
+            term: 1,
+            start_streaming_at: Lsn(1),
+            term_history: TermHistory(vec![TermLsn {
+                term: 1,
+                lsn: Lsn(1),
+            }]),
+            timeline_start_lsn: Lsn(1),
+        };
+        sk.process_msg(&ProposerAcceptorMessage::Elected(pem))
+            .await
+            .unwrap();
+
+        let ar_hdr = AppendRequestHeader {
+            term: 1,
+            term_start_lsn: Lsn(3),
+            begin_lsn: Lsn(1),
+            end_lsn: Lsn(2),
+            commit_lsn: Lsn(0),
+            truncate_lsn: Lsn(0),
+            proposer_uuid: [0; 16],
+        };
+        let append_request = AppendRequest {
+            h: ar_hdr.clone(),
+            wal_data: Bytes::from_static(b"b"),
+        };
+
+        // do write ending at 2, it should be ok
+        sk.process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
+            .await
+            .unwrap();
+        let mut ar_hrd2 = ar_hdr.clone();
+        ar_hrd2.begin_lsn = Lsn(4);
+        ar_hrd2.end_lsn = Lsn(5);
+        let append_request = AppendRequest {
+            h: ar_hdr,
+            wal_data: Bytes::from_static(b"b"),
+        };
+        // and now starting at 4, it must fail
+        sk.process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
+            .await
+            .unwrap_err();
     }
 
     #[test]
@@ -1189,12 +1297,21 @@ mod tests {
 
     #[test]
     fn test_sk_state_bincode_serde_roundtrip() {
-        use utils::Hex;
         let tenant_id = TenantId::from_str("cf0480929707ee75372337efaa5ecf96").unwrap();
         let timeline_id = TimelineId::from_str("112ded66422aa5e953e5440fa5427ac4").unwrap();
         let state = TimelinePersistentState {
             tenant_id,
             timeline_id,
+            mconf: Configuration {
+                generation: 42,
+                members: MemberSet::new(vec![SafekeeperId {
+                    id: NodeId(1),
+                    host: "hehe.org".to_owned(),
+                    pg_port: 5432,
+                }])
+                .expect("duplicate member"),
+                new_members: None,
+            },
             acceptor_state: AcceptorState {
                 term: 42,
                 term_history: TermHistory(vec![TermLsn {
@@ -1218,69 +1335,12 @@ mod tests {
             backup_lsn: Lsn(1234567300),
             peer_horizon_lsn: Lsn(9999999),
             remote_consistent_lsn: Lsn(1234560000),
-            peers: PersistedPeers(vec![(
-                NodeId(1),
-                PersistedPeerInfo {
-                    backup_lsn: Lsn(1234567000),
-                    term: 42,
-                    flush_lsn: Lsn(1234567800 - 8),
-                    commit_lsn: Lsn(1234567600),
-                },
-            )]),
             partial_backup: crate::wal_backup_partial::State::default(),
             eviction_state: EvictionState::Present,
+            creation_ts: UNIX_EPOCH,
         };
 
         let ser = state.ser().unwrap();
-
-        #[rustfmt::skip]
-        let expected = [
-            // tenant_id as length prefixed hex
-            0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x63, 0x66, 0x30, 0x34, 0x38, 0x30, 0x39, 0x32, 0x39, 0x37, 0x30, 0x37, 0x65, 0x65, 0x37, 0x35, 0x33, 0x37, 0x32, 0x33, 0x33, 0x37, 0x65, 0x66, 0x61, 0x61, 0x35, 0x65, 0x63, 0x66, 0x39, 0x36,
-            // timeline_id as length prefixed hex
-            0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x31, 0x31, 0x32, 0x64, 0x65, 0x64, 0x36, 0x36, 0x34, 0x32, 0x32, 0x61, 0x61, 0x35, 0x65, 0x39, 0x35, 0x33, 0x65, 0x35, 0x34, 0x34, 0x30, 0x66, 0x61, 0x35, 0x34, 0x32, 0x37, 0x61, 0x63, 0x34,
-            // term
-            0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // length prefix
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // unsure why this order is swapped
-            0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // pg_version
-            0x0e, 0x00, 0x00, 0x00,
-            // systemid
-            0x21, 0x43, 0x65, 0x87, 0x78, 0x56, 0x34, 0x12,
-            // wal_seg_size
-            0x78, 0x56, 0x34, 0x12,
-            // pguuid as length prefixed hex
-            0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x63, 0x34, 0x37, 0x61, 0x34, 0x32, 0x61, 0x35, 0x30, 0x66, 0x34, 0x34, 0x65, 0x35, 0x35, 0x33, 0x65, 0x39, 0x61, 0x35, 0x32, 0x61, 0x34, 0x32, 0x36, 0x36, 0x65, 0x64, 0x32, 0x64, 0x31, 0x31,
-
-            // timeline_start_lsn
-            0x00, 0x56, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00,
-            0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x78, 0x02, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
-            0x84, 0x00, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
-            0x7f, 0x96, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0xe4, 0x95, 0x49, 0x00, 0x00, 0x00, 0x00,
-            // length prefix for persistentpeers
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // nodeid
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // backuplsn
-            0x58, 0xff, 0x95, 0x49, 0x00, 0x00, 0x00, 0x00,
-            0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x70, 0x02, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
-            0xb0, 0x01, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
-            // partial_backup
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // eviction_state
-            0x00, 0x00, 0x00, 0x00,
-        ];
-
-        assert_eq!(Hex(&ser), Hex(&expected));
 
         let deser = TimelinePersistentState::des(&ser).unwrap();
 

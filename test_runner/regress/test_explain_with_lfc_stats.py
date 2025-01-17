@@ -1,23 +1,24 @@
+from __future__ import annotations
+
 from pathlib import Path
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
+from fixtures.utils import USE_LFC
 
 
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
     cache_dir = Path(env.repo_dir) / "file_cache"
     cache_dir.mkdir(exist_ok=True)
 
-    branchname = "test_explain_with_lfc_stats"
-    env.neon_cli.create_branch(branchname, "empty")
-    log.info(f"Creating endopint with 1MB shared_buffers and 64 MB LFC for branch {branchname}")
+    log.info("Creating endpoint with 1MB shared_buffers and 64 MB LFC")
     endpoint = env.endpoints.create_start(
-        branchname,
+        "main",
         config_lines=[
-            "shared_buffers='1MB'",
-            f"neon.file_cache_path='{cache_dir}/file.cache'",
             "neon.max_file_cache_size='128MB'",
             "neon.file_cache_size_limit='64MB'",
         ],

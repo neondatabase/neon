@@ -22,21 +22,24 @@ use tokio::{select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn, Instrument};
+use wal_decoder::{
+    models::{FlushUncommittedRecords, InterpretedWalRecord, InterpretedWalRecords},
+    wire_format::FromWireFormat,
+};
 
 use super::TaskStateUpdate;
 use crate::{
     context::RequestContext,
     metrics::{LIVE_CONNECTIONS, WALRECEIVER_STARTED_CONNECTIONS, WAL_INGEST},
-    task_mgr::TaskKind,
-    task_mgr::WALRECEIVER_RUNTIME,
+    pgdatadir_mapping::DatadirModification,
+    task_mgr::{TaskKind, WALRECEIVER_RUNTIME},
     tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
     walingest::WalIngest,
-    walrecord::DecodedWALRecord,
 };
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use utils::{id::NodeId, lsn::Lsn};
+use utils::{id::NodeId, lsn::Lsn, postgres_client::PostgresClientProtocol};
 use utils::{pageserver_feedback::PageserverFeedback, sync::gate::GateError};
 
 /// Status of the connection.
@@ -109,6 +112,7 @@ impl From<WalDecodeError> for WalReceiverError {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_walreceiver_connection(
     timeline: Arc<Timeline>,
+    protocol: PostgresClientProtocol,
     wal_source_connconf: PgConnectionConfig,
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
     cancellation: CancellationToken,
@@ -136,7 +140,7 @@ pub(super) async fn handle_walreceiver_connection(
 
     let (replication_client, connection) = {
         let mut config = wal_source_connconf.to_tokio_postgres_config();
-        config.application_name("pageserver");
+        config.application_name(format!("pageserver-{}", node.0).as_str());
         config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
         match time::timeout(connect_timeout, config.connect(postgres::NoTls)).await {
             Ok(client_and_conn) => client_and_conn?,
@@ -260,6 +264,16 @@ pub(super) async fn handle_walreceiver_connection(
 
     let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx).await?;
 
+    let shard = vec![*timeline.get_shard_identity()];
+
+    let interpreted_proto_config = match protocol {
+        PostgresClientProtocol::Vanilla => None,
+        PostgresClientProtocol::Interpreted {
+            format,
+            compression,
+        } => Some((format, compression)),
+    };
+
     while let Some(replication_message) = {
         select! {
             _ = cancellation.cancelled() => {
@@ -291,6 +305,15 @@ pub(super) async fn handle_walreceiver_connection(
                 connection_status.latest_connection_update = now;
                 connection_status.commit_lsn = Some(Lsn::from(keepalive.wal_end()));
             }
+            ReplicationMessage::RawInterpretedWalRecords(raw) => {
+                connection_status.latest_connection_update = now;
+                if !raw.data().is_empty() {
+                    connection_status.latest_wal_update = now;
+                }
+
+                connection_status.commit_lsn = Some(Lsn::from(raw.commit_lsn()));
+                connection_status.streaming_lsn = Some(Lsn::from(raw.streaming_lsn()));
+            }
             &_ => {}
         };
         if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
@@ -299,7 +322,135 @@ pub(super) async fn handle_walreceiver_connection(
         }
 
         let status_update = match replication_message {
+            ReplicationMessage::RawInterpretedWalRecords(raw) => {
+                WAL_INGEST.bytes_received.inc_by(raw.data().len() as u64);
+
+                let mut uncommitted_records = 0;
+
+                // This is the end LSN of the raw WAL from which the records
+                // were interpreted.
+                let streaming_lsn = Lsn::from(raw.streaming_lsn());
+
+                let (format, compression) = interpreted_proto_config.unwrap();
+                let batch = InterpretedWalRecords::from_wire(raw.data(), format, compression)
+                    .await
+                    .with_context(|| {
+                        anyhow::anyhow!(
+                        "Failed to deserialize interpreted records ending at LSN {streaming_lsn}"
+                    )
+                    })?;
+
+                let InterpretedWalRecords {
+                    records,
+                    next_record_lsn,
+                } = batch;
+
+                tracing::debug!(
+                    "Received WAL up to {} with next_record_lsn={:?}",
+                    streaming_lsn,
+                    next_record_lsn
+                );
+
+                // We start the modification at 0 because each interpreted record
+                // advances it to its end LSN. 0 is just an initialization placeholder.
+                let mut modification = timeline.begin_modification(Lsn(0));
+
+                if !records.is_empty() {
+                    timeline
+                        .metrics
+                        .wal_records_received
+                        .inc_by(records.len() as u64);
+                }
+
+                for interpreted in records {
+                    if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes)
+                        && uncommitted_records > 0
+                    {
+                        modification.commit(&ctx).await?;
+                        uncommitted_records = 0;
+                    }
+
+                    let local_next_record_lsn = interpreted.next_record_lsn;
+
+                    if interpreted.is_observed() {
+                        WAL_INGEST.records_observed.inc();
+                    }
+
+                    walingest
+                        .ingest_record(interpreted, &mut modification, &ctx)
+                        .await
+                        .with_context(|| {
+                            format!("could not ingest record at {local_next_record_lsn}")
+                        })?;
+
+                    uncommitted_records += 1;
+
+                    // FIXME: this cannot be made pausable_failpoint without fixing the
+                    // failpoint library; in tests, the added amount of debugging will cause us
+                    // to timeout the tests.
+                    fail_point!("walreceiver-after-ingest");
+
+                    // Commit every ingest_batch_size records. Even if we filtered out
+                    // all records, we still need to call commit to advance the LSN.
+                    if uncommitted_records >= ingest_batch_size
+                        || modification.approx_pending_bytes()
+                            > DatadirModification::MAX_PENDING_BYTES
+                    {
+                        modification.commit(&ctx).await?;
+                        uncommitted_records = 0;
+                    }
+                }
+
+                // Records might have been filtered out on the safekeeper side, but we still
+                // need to advance last record LSN on all shards. If we've not ingested the latest
+                // record, then set the LSN of the modification past it. This way all shards
+                // advance their last record LSN at the same time.
+                let needs_last_record_lsn_advance = match next_record_lsn {
+                    Some(lsn) if lsn > modification.get_lsn() => {
+                        modification.set_lsn(lsn).unwrap();
+                        true
+                    }
+                    _ => false,
+                };
+
+                if uncommitted_records > 0 || needs_last_record_lsn_advance {
+                    // Commit any uncommitted records
+                    modification.commit(&ctx).await?;
+                }
+
+                if !caught_up && streaming_lsn >= end_of_wal {
+                    info!("caught up at LSN {streaming_lsn}");
+                    caught_up = true;
+                }
+
+                tracing::debug!(
+                    "Ingested WAL up to {streaming_lsn}. Last record LSN is {}",
+                    timeline.get_last_record_lsn()
+                );
+
+                if let Some(lsn) = next_record_lsn {
+                    last_rec_lsn = lsn;
+                }
+
+                Some(streaming_lsn)
+            }
+
             ReplicationMessage::XLogData(xlog_data) => {
+                async fn commit(
+                    modification: &mut DatadirModification<'_>,
+                    uncommitted: &mut u64,
+                    filtered: &mut u64,
+                    ctx: &RequestContext,
+                ) -> anyhow::Result<()> {
+                    WAL_INGEST
+                        .records_committed
+                        .inc_by(*uncommitted - *filtered);
+                    modification.commit(ctx).await?;
+                    *uncommitted = 0;
+                    *filtered = 0;
+                    Ok(())
+                }
+
                 // Pass the WAL data to the decoder, and see if we can decode
                 // more records as a result.
                 let data = xlog_data.data();
@@ -312,25 +463,53 @@ pub(super) async fn handle_walreceiver_connection(
                 waldecoder.feed_bytes(data);
 
                 {
-                    let mut decoded = DecodedWALRecord::default();
                     let mut modification = timeline.begin_modification(startlsn);
                     let mut uncommitted_records = 0;
                     let mut filtered_records = 0;
-                    while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+
+                    while let Some((next_record_lsn, recdata)) = waldecoder.poll_decode()? {
                         // It is important to deal with the aligned records as lsn in getPage@LSN is
                         // aligned and can be several bytes bigger. Without this alignment we are
                         // at risk of hitting a deadlock.
-                        if !lsn.is_aligned() {
+                        if !next_record_lsn.is_aligned() {
                             return Err(WalReceiverError::Other(anyhow!("LSN not aligned")));
                         }
 
+                        // Deserialize and interpret WAL record
+                        let interpreted = InterpretedWalRecord::from_bytes_filtered(
+                            recdata,
+                            &shard,
+                            next_record_lsn,
+                            modification.tline.pg_version,
+                        )?
+                        .remove(timeline.get_shard_identity())
+                        .unwrap();
+
+                        if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes)
+                            && uncommitted_records > 0
+                        {
+                            // Special case: legacy PG database creations operate by reading pages from a 'template' database:
+                            // these are the only kinds of WAL record that require reading data blocks while ingesting.  Ensure
+                            // all earlier writes of data blocks are visible by committing any modification in flight.
+                            commit(
+                                &mut modification,
+                                &mut uncommitted_records,
+                                &mut filtered_records,
+                                &ctx,
+                            )
+                            .await?;
+                        }
+
                         // Ingest the records without immediately committing them.
+                        timeline.metrics.wal_records_received.inc();
                         let ingested = walingest
-                            .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                            .ingest_record(interpreted, &mut modification, &ctx)
                             .await
-                            .with_context(|| format!("could not ingest record at {lsn}"))?;
+                            .with_context(|| {
+                                format!("could not ingest record at {next_record_lsn}")
+                            })?;
                         if !ingested {
-                            tracing::debug!("ingest: filtered out record @ LSN {lsn}");
+                            tracing::debug!("ingest: filtered out record @ LSN {next_record_lsn}");
                             WAL_INGEST.records_filtered.inc();
                             filtered_records += 1;
                         }
@@ -340,27 +519,34 @@ pub(super) async fn handle_walreceiver_connection(
                         // to timeout the tests.
                         fail_point!("walreceiver-after-ingest");
 
-                        last_rec_lsn = lsn;
+                        last_rec_lsn = next_record_lsn;
 
                         // Commit every ingest_batch_size records. Even if we filtered out
                         // all records, we still need to call commit to advance the LSN.
                         uncommitted_records += 1;
-                        if uncommitted_records >= ingest_batch_size {
-                            WAL_INGEST
-                                .records_committed
-                                .inc_by(uncommitted_records - filtered_records);
-                            modification.commit(&ctx).await?;
-                            uncommitted_records = 0;
-                            filtered_records = 0;
+                        if uncommitted_records >= ingest_batch_size
+                            || modification.approx_pending_bytes()
+                                > DatadirModification::MAX_PENDING_BYTES
+                        {
+                            commit(
+                                &mut modification,
+                                &mut uncommitted_records,
+                                &mut filtered_records,
+                                &ctx,
+                            )
+                            .await?;
                         }
                     }
 
                     // Commit the remaining records.
                     if uncommitted_records > 0 {
-                        WAL_INGEST
-                            .records_committed
-                            .inc_by(uncommitted_records - filtered_records);
-                        modification.commit(&ctx).await?;
+                        commit(
+                            &mut modification,
+                            &mut uncommitted_records,
+                            &mut filtered_records,
+                            &ctx,
+                        )
+                        .await?;
                     }
                 }
 

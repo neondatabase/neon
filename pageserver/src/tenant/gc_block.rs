@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use utils::id::TimelineId;
 
@@ -6,6 +6,7 @@ use super::remote_timeline_client::index::GcBlockingReason;
 
 type Storage = HashMap<TimelineId, enumset::EnumSet<GcBlockingReason>>;
 
+/// GcBlock provides persistent (per-timeline) gc blocking.
 #[derive(Default)]
 pub(crate) struct GcBlock {
     /// The timelines which have current reasons to block gc.
@@ -13,7 +14,13 @@ pub(crate) struct GcBlock {
     /// LOCK ORDER: this is held locked while scheduling the next index_part update. This is done
     /// to keep the this field up to date with RemoteTimelineClient `upload_queue.dirty`.
     reasons: std::sync::Mutex<Storage>,
-    blocking: tokio::sync::Mutex<()>,
+
+    /// GC background task or manually run `Tenant::gc_iteration` holds a lock on this.
+    ///
+    /// Do not add any more features taking and forbidding taking this lock. It should be
+    /// `tokio::sync::Notify`, but that is rarely used. On the other side, [`GcBlock::insert`]
+    /// synchronizes with gc attempts by locking and unlocking this mutex.
+    blocking: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl GcBlock {
@@ -23,7 +30,7 @@ impl GcBlock {
     /// it's ending, or if not currently possible, a value describing the reasons why not.
     ///
     /// Cancellation safe.
-    pub(super) async fn start(&self) -> Result<Guard<'_>, BlockingReasons> {
+    pub(super) async fn start(&self) -> Result<Guard, BlockingReasons> {
         let reasons = {
             let g = self.reasons.lock().unwrap();
 
@@ -37,11 +44,14 @@ impl GcBlock {
             Err(reasons)
         } else {
             Ok(Guard {
-                _inner: self.blocking.lock().await,
+                _inner: self.blocking.clone().lock_owned().await,
             })
         }
     }
 
+    /// Describe the current gc blocking reasons.
+    ///
+    /// TODO: make this json serializable.
     pub(crate) fn summary(&self) -> Option<BlockingReasons> {
         let g = self.reasons.lock().unwrap();
 
@@ -131,14 +141,14 @@ impl GcBlock {
         Ok(())
     }
 
-    pub(crate) fn before_delete(&self, timeline: &super::Timeline) {
+    pub(crate) fn before_delete(&self, timeline_id: &super::TimelineId) {
         let unblocked = {
             let mut g = self.reasons.lock().unwrap();
             if g.is_empty() {
                 return;
             }
 
-            g.remove(&timeline.timeline_id);
+            g.remove(timeline_id);
 
             BlockingReasons::clean_and_summarize(g).is_none()
         };
@@ -160,8 +170,8 @@ impl GcBlock {
     }
 }
 
-pub(super) struct Guard<'a> {
-    _inner: tokio::sync::MutexGuard<'a, ()>,
+pub(crate) struct Guard {
+    _inner: tokio::sync::OwnedMutexGuard<()>,
 }
 
 #[derive(Debug)]

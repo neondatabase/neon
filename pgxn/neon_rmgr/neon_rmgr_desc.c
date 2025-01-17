@@ -44,27 +44,6 @@ infobits_desc(StringInfo buf, uint8 infobits, const char *keyname)
 	appendStringInfoString(buf, "]");
 }
 
-static void
-truncate_flags_desc(StringInfo buf, uint8 flags)
-{
-	appendStringInfoString(buf, "flags: [");
-
-	if (flags & XLH_TRUNCATE_CASCADE)
-		appendStringInfoString(buf, "CASCADE, ");
-	if (flags & XLH_TRUNCATE_RESTART_SEQS)
-		appendStringInfoString(buf, "RESTART_SEQS, ");
-
-	if (buf->data[buf->len - 1] == ' ')
-	{
-		/* Truncate-away final unneeded ", "  */
-		Assert(buf->data[buf->len - 2] == ',');
-		buf->len -= 2;
-		buf->data[buf->len] = '\0';
-	}
-
-	appendStringInfoString(buf, "]");
-}
-
 void
 neon_rm_desc(StringInfo buf, XLogReaderState *record)
 {

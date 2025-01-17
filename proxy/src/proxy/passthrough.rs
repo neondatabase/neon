@@ -1,20 +1,19 @@
-use crate::{
-    cancellation,
-    compute::PostgresConnection,
-    console::messages::MetricsAuxInfo,
-    metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard},
-    stream::Stream,
-    usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS},
-};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::info;
+use tracing::debug;
 use utils::measured_stream::MeasuredStream;
 
 use super::copy_bidirectional::ErrorSource;
+use crate::cancellation;
+use crate::compute::PostgresConnection;
+use crate::config::ComputeConfig;
+use crate::control_plane::messages::MetricsAuxInfo;
+use crate::metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard};
+use crate::stream::Stream;
+use crate::usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS};
 
 /// Forward bytes in both directions (client <-> compute).
 #[tracing::instrument(skip_all)]
-pub async fn proxy_pass(
+pub(crate) async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: MetricsAuxInfo,
@@ -47,7 +46,7 @@ pub async fn proxy_pass(
     );
 
     // Starting from here we only proxy the client's traffic.
-    info!("performing the proxy pass...");
+    debug!("performing the proxy pass...");
     let _ = crate::proxy::copy_bidirectional::copy_bidirectional_client_compute(
         &mut client,
         &mut compute,
@@ -57,21 +56,30 @@ pub async fn proxy_pass(
     Ok(())
 }
 
-pub struct ProxyPassthrough<P, S> {
-    pub client: Stream<S>,
-    pub compute: PostgresConnection,
-    pub aux: MetricsAuxInfo,
+pub(crate) struct ProxyPassthrough<P, S> {
+    pub(crate) client: Stream<S>,
+    pub(crate) compute: PostgresConnection,
+    pub(crate) aux: MetricsAuxInfo,
+    pub(crate) session_id: uuid::Uuid,
 
-    pub req: NumConnectionRequestsGuard<'static>,
-    pub conn: NumClientConnectionsGuard<'static>,
-    pub cancel: cancellation::Session<P>,
+    pub(crate) _req: NumConnectionRequestsGuard<'static>,
+    pub(crate) _conn: NumClientConnectionsGuard<'static>,
+    pub(crate) _cancel: cancellation::Session<P>,
 }
 
 impl<P, S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<P, S> {
-    pub async fn proxy_pass(self) -> Result<(), ErrorSource> {
+    pub(crate) async fn proxy_pass(
+        self,
+        compute_config: &ComputeConfig,
+    ) -> Result<(), ErrorSource> {
         let res = proxy_pass(self.client, self.compute.stream, self.aux).await;
-        if let Err(err) = self.compute.cancel_closure.try_cancel_query().await {
-            tracing::error!(?err, "could not cancel the query in the database");
+        if let Err(err) = self
+            .compute
+            .cancel_closure
+            .try_cancel_query(compute_config)
+            .await
+        {
+            tracing::warn!(session_id = ?self.session_id, ?err, "could not cancel the query in the database");
         }
         res
     }

@@ -3,7 +3,7 @@ use std::ops::{Deref, DerefMut};
 /// A generic trait which exposes types of cache's key and value,
 /// as well as the notion of cache entry invalidation.
 /// This is useful for [`Cached`].
-pub trait Cache {
+pub(crate) trait Cache {
     /// Entry's key.
     type Key;
 
@@ -29,21 +29,21 @@ impl<C: Cache> Cache for &C {
 }
 
 /// Wrapper for convenient entry invalidation.
-pub struct Cached<C: Cache, V = <C as Cache>::Value> {
+pub(crate) struct Cached<C: Cache, V = <C as Cache>::Value> {
     /// Cache + lookup info.
-    pub token: Option<(C, C::LookupInfo<C::Key>)>,
+    pub(crate) token: Option<(C, C::LookupInfo<C::Key>)>,
 
     /// The value itself.
-    pub value: V,
+    pub(crate) value: V,
 }
 
 impl<C: Cache, V> Cached<C, V> {
     /// Place any entry into this wrapper; invalidation will be a no-op.
-    pub fn new_uncached(value: V) -> Self {
+    pub(crate) fn new_uncached(value: V) -> Self {
         Self { token: None, value }
     }
 
-    pub fn take_value(self) -> (Cached<C, ()>, V) {
+    pub(crate) fn take_value(self) -> (Cached<C, ()>, V) {
         (
             Cached {
                 token: self.token,
@@ -53,7 +53,7 @@ impl<C: Cache, V> Cached<C, V> {
         )
     }
 
-    pub fn map<U>(self, f: impl FnOnce(V) -> U) -> Cached<C, U> {
+    pub(crate) fn map<U>(self, f: impl FnOnce(V) -> U) -> Cached<C, U> {
         Cached {
             token: self.token,
             value: f(self.value),
@@ -61,7 +61,7 @@ impl<C: Cache, V> Cached<C, V> {
     }
 
     /// Drop this entry from a cache if it's still there.
-    pub fn invalidate(self) -> V {
+    pub(crate) fn invalidate(self) -> V {
         if let Some((cache, info)) = &self.token {
             cache.invalidate(info);
         }
@@ -69,7 +69,7 @@ impl<C: Cache, V> Cached<C, V> {
     }
 
     /// Tell if this entry is actually cached.
-    pub fn cached(&self) -> bool {
+    pub(crate) fn cached(&self) -> bool {
         self.token.is_some()
     }
 }

@@ -1,0 +1,161 @@
+name: benchmarking ingest
+
+on:
+  # uncomment to run on push for debugging your PR
+  # push:
+  #   branches: [ your branch ]
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    #          ┌───────────── minute (0 - 59)
+    #          │ ┌───────────── hour (0 - 23)
+    #          │ │ ┌───────────── day of the month (1 - 31)
+    #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron:   '0 9 * * *' # run once a day, timezone is utc
+  workflow_dispatch: # adds ability to run this manually
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+concurrency:
+  # Allow only one workflow globally because we need dedicated resources which only exist once
+  group: ingest-bench-workflow
+  cancel-in-progress: true
+
+jobs:
+  ingest:
+    strategy:
+      fail-fast: false # allow other variants to continue even if one fails
+      matrix:
+        target_project: [new_empty_project, large_existing_project]
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # aws-actions/configure-aws-credentials
+    env:
+      PG_CONFIG: /tmp/neon/pg_install/v16/bin/pg_config
+      PSQL: /tmp/neon/pg_install/v16/bin/psql
+      PG_16_LIB_PATH: /tmp/neon/pg_install/v16/lib
+      PGCOPYDB: /pgcopydb/bin/pgcopydb
+      PGCOPYDB_LIB_PATH: /pgcopydb/lib
+    runs-on: [ self-hosted, us-east-2, x64 ]
+    container:
+      image: neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      options: --init
+    timeout-minutes: 1440
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials # necessary to download artefacts
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours is currently max associated with IAM role
+
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+    - name: Create Neon Project
+      if: ${{ matrix.target_project == 'new_empty_project' }}
+      id: create-neon-project-ingest-target
+      uses: ./.github/actions/neon-project-create
+      with:
+        region_id: aws-us-east-2
+        postgres_version: 16
+        compute_units: '[7, 7]' # we want to test large compute here to avoid compute-side bottleneck
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Initialize Neon project
+      if: ${{ matrix.target_project == 'new_empty_project' }}
+      env:
+          BENCHMARK_INGEST_TARGET_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
+          NEW_PROJECT_ID: ${{ steps.create-neon-project-ingest-target.outputs.project_id }}
+      run: |
+        echo "Initializing Neon project with project_id: ${NEW_PROJECT_ID}"
+        export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
+        ${PSQL} "${BENCHMARK_INGEST_TARGET_CONNSTR}" -c "CREATE EXTENSION IF NOT EXISTS neon; CREATE EXTENSION IF NOT EXISTS neon_utils;"
+        echo "BENCHMARK_INGEST_TARGET_CONNSTR=${BENCHMARK_INGEST_TARGET_CONNSTR}" >> $GITHUB_ENV
+
+    - name: Create Neon Branch for large tenant
+      if: ${{ matrix.target_project == 'large_existing_project' }}
+      id: create-neon-branch-ingest-target
+      uses: ./.github/actions/neon-branch-create
+      with:
+        project_id: ${{ vars.BENCHMARK_INGEST_TARGET_PROJECTID }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Initialize Neon project
+      if: ${{ matrix.target_project == 'large_existing_project' }}
+      env:
+          BENCHMARK_INGEST_TARGET_CONNSTR: ${{ steps.create-neon-branch-ingest-target.outputs.dsn }}
+          NEW_BRANCH_ID: ${{ steps.create-neon-branch-ingest-target.outputs.branch_id }}
+      run: |
+        echo "Initializing Neon branch with branch_id: ${NEW_BRANCH_ID}"
+        export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
+        # Extract the part before the database name
+        base_connstr="${BENCHMARK_INGEST_TARGET_CONNSTR%/*}"
+        # Extract the query parameters (if any) after the database name
+        query_params="${BENCHMARK_INGEST_TARGET_CONNSTR#*\?}"
+        # Reconstruct the new connection string
+        if [ "$query_params" != "$BENCHMARK_INGEST_TARGET_CONNSTR" ]; then
+          new_connstr="${base_connstr}/neondb?${query_params}"
+        else
+          new_connstr="${base_connstr}/neondb"
+        fi
+        ${PSQL} "${new_connstr}" -c "drop database ludicrous;"
+        ${PSQL} "${new_connstr}" -c "CREATE DATABASE ludicrous;"
+        if [ "$query_params" != "$BENCHMARK_INGEST_TARGET_CONNSTR" ]; then
+          BENCHMARK_INGEST_TARGET_CONNSTR="${base_connstr}/ludicrous?${query_params}"
+        else
+          BENCHMARK_INGEST_TARGET_CONNSTR="${base_connstr}/ludicrous"
+        fi
+        ${PSQL} "${BENCHMARK_INGEST_TARGET_CONNSTR}" -c "CREATE EXTENSION IF NOT EXISTS neon; CREATE EXTENSION IF NOT EXISTS neon_utils;"
+        echo "BENCHMARK_INGEST_TARGET_CONNSTR=${BENCHMARK_INGEST_TARGET_CONNSTR}" >> $GITHUB_ENV
+
+    - name: Invoke pgcopydb
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: remote
+        test_selection: performance/test_perf_ingest_using_pgcopydb.py
+        run_in_parallel: false
+        extra_params: -s -m remote_cluster --timeout 86400 -k test_ingest_performance_using_pgcopydb
+        pg_version: v16
+        save_perf_report: true
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+      env:
+        BENCHMARK_INGEST_SOURCE_CONNSTR: ${{ secrets.BENCHMARK_INGEST_SOURCE_CONNSTR }}
+        TARGET_PROJECT_TYPE: ${{ matrix.target_project }}
+        # we report PLATFORM in zenbenchmark NeonBenchmarker perf database and want to distinguish between new project and large tenant
+        PLATFORM: "${{ matrix.target_project }}-us-east-2-staging"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+
+    - name: show tables sizes after ingest
+      run: |
+        export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
+        ${PSQL} "${BENCHMARK_INGEST_TARGET_CONNSTR}" -c "\dt+"
+
+    - name: Delete Neon Project
+      if: ${{ always() && matrix.target_project == 'new_empty_project' }}
+      uses: ./.github/actions/neon-project-delete
+      with:
+        project_id: ${{ steps.create-neon-project-ingest-target.outputs.project_id }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Delete Neon Branch for large tenant
+      if: ${{ always() && matrix.target_project == 'large_existing_project' }}
+      uses: ./.github/actions/neon-branch-delete
+      with:
+        project_id: ${{ vars.BENCHMARK_INGEST_TARGET_PROJECTID }}
+        branch_id: ${{ steps.create-neon-branch-ingest-target.outputs.branch_id }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}

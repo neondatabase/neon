@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from contextlib import closing
 
 import pytest
@@ -17,7 +19,7 @@ def test_compaction(neon_compare: NeonCompare):
     env = neon_compare.env
     pageserver_http = env.pageserver.http_client()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         conf={
             # Disable background GC and compaction, we'll run compaction manually.
             "gc_period": "0s",
@@ -68,7 +70,7 @@ def test_compaction_l0_memory(neon_compare: NeonCompare):
     env = neon_compare.env
     pageserver_http = env.pageserver.http_client()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         conf={
             # Initially disable compaction so that we will build up a stack of L0s
             "compaction_period": "0s",
@@ -101,6 +103,9 @@ def test_compaction_l0_memory(neon_compare: NeonCompare):
                     cur.execute(f"update tbl{i} set j = {j};")
 
     wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+    pageserver_http.timeline_checkpoint(
+        tenant_id, timeline_id, compact=False
+    )  # ^1: flush all in-memory layers
     endpoint.stop()
 
     # Check we have generated the L0 stack we expected
@@ -116,7 +121,9 @@ def test_compaction_l0_memory(neon_compare: NeonCompare):
         return v * 1024
 
     before = rss_hwm()
-    pageserver_http.timeline_compact(tenant_id, timeline_id)
+    pageserver_http.timeline_compact(
+        tenant_id, timeline_id
+    )  # ^1: we must ensure during this process no new L0 layers are flushed
     after = rss_hwm()
 
     log.info(f"RSS across compaction: {before} -> {after} (grew {after - before})")
@@ -135,7 +142,7 @@ def test_compaction_l0_memory(neon_compare: NeonCompare):
     # To be fixed in https://github.com/neondatabase/neon/issues/8184, after which
     # this memory estimate can be revised far downwards to something that doesn't scale
     # linearly with the layer sizes.
-    MEMORY_ESTIMATE = (initial_l0s_size - final_l0s_size) * 1.5
+    MEMORY_ESTIMATE = (initial_l0s_size - final_l0s_size) * 1.25
 
     # If we find that compaction is using more memory, this may indicate a regression
     assert compaction_mapped_rss < MEMORY_ESTIMATE

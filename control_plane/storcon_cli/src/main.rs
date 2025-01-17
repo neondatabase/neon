@@ -1,16 +1,22 @@
 use futures::StreamExt;
-use std::{str::FromStr, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+    time::Duration,
+};
 
 use clap::{Parser, Subcommand};
 use pageserver_api::{
     controller_api::{
-        NodeAvailabilityWrapper, NodeDescribeResponse, ShardSchedulingPolicy, TenantCreateRequest,
-        TenantDescribeResponse, TenantPolicyRequest,
+        AvailabilityZone, NodeAvailabilityWrapper, NodeDescribeResponse, NodeShardResponse,
+        SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest, ShardSchedulingPolicy,
+        ShardsPreferredAzsRequest, SkSchedulingPolicy, TenantCreateRequest, TenantDescribeResponse,
+        TenantPolicyRequest,
     },
     models::{
         EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
-        ShardParameters, TenantConfig, TenantConfigRequest, TenantShardSplitRequest,
-        TenantShardSplitResponse,
+        ShardParameters, TenantConfig, TenantConfigPatchRequest, TenantConfigRequest,
+        TenantShardSplitRequest, TenantShardSplitResponse,
     },
     shard::{ShardStripeSize, TenantShardId},
 };
@@ -41,6 +47,8 @@ enum Command {
         listen_http_addr: String,
         #[arg(long)]
         listen_http_port: u16,
+        #[arg(long)]
+        availability_zone_id: String,
     },
 
     /// Modify a node's configuration in the storage controller
@@ -78,7 +86,10 @@ enum Command {
     /// List nodes known to the storage controller
     Nodes {},
     /// List tenants known to the storage controller
-    Tenants {},
+    Tenants {
+        /// If this field is set, it will list the tenants on a specific node
+        node_id: Option<NodeId>,
+    },
     /// Create a new tenant in the storage controller, and by extension on pageservers.
     TenantCreate {
         #[arg(long)]
@@ -106,9 +117,31 @@ enum Command {
         #[arg(long)]
         node: NodeId,
     },
-    /// Modify the pageserver tenant configuration of a tenant: this is the configuration structure
+    /// Migrate the secondary location for a tenant shard to a specific pageserver.
+    TenantShardMigrateSecondary {
+        #[arg(long)]
+        tenant_shard_id: TenantShardId,
+        #[arg(long)]
+        node: NodeId,
+    },
+    /// Cancel any ongoing reconciliation for this shard
+    TenantShardCancelReconcile {
+        #[arg(long)]
+        tenant_shard_id: TenantShardId,
+    },
+    /// Set the pageserver tenant configuration of a tenant: this is the configuration structure
     /// that is passed through to pageservers, and does not affect storage controller behavior.
-    TenantConfig {
+    /// Any previous tenant configs are overwritten.
+    SetTenantConfig {
+        #[arg(long)]
+        tenant_id: TenantId,
+        #[arg(long)]
+        config: String,
+    },
+    /// Patch the pageserver tenant configuration of a tenant. Any fields with null values in the
+    /// provided JSON are unset from the tenant config and all fields with non-null values are set.
+    /// Unspecified fields are not changed.
+    PatchTenantConfig {
         #[arg(long)]
         tenant_id: TenantId,
         #[arg(long)]
@@ -124,6 +157,12 @@ enum Command {
     TenantWarmup {
         #[arg(long)]
         tenant_id: TenantId,
+    },
+    TenantSetPreferredAz {
+        #[arg(long)]
+        tenant_id: TenantId,
+        #[arg(long)]
+        preferred_az: Option<String>,
     },
     /// Uncleanly drop a tenant from the storage controller: this doesn't delete anything from pageservers. Appropriate
     /// if you e.g. used `tenant-warmup` by mistake on a tenant ID that doesn't really exist, or is in some other region.
@@ -147,9 +186,9 @@ enum Command {
         #[arg(long)]
         threshold: humantime::Duration,
     },
-    // Drain a set of specified pageservers by moving the primary attachments to pageservers
+    // Migrate away from a set of specified pageservers by moving the primary attachments to pageservers
     // outside of the specified set.
-    Drain {
+    BulkMigrate {
         // Set of pageserver node ids to drain.
         #[arg(long)]
         nodes: Vec<NodeId>,
@@ -162,6 +201,43 @@ enum Command {
         // Optional: when set to true, nothing is migrated, but the plan is printed to stdout
         #[arg(long)]
         dry_run: Option<bool>,
+    },
+    /// Start draining the specified pageserver.
+    /// The drain is complete when the schedulling policy returns to active.
+    StartDrain {
+        #[arg(long)]
+        node_id: NodeId,
+    },
+    /// Cancel draining the specified pageserver and wait for `timeout`
+    /// for the operation to be canceled. May be retried.
+    CancelDrain {
+        #[arg(long)]
+        node_id: NodeId,
+        #[arg(long)]
+        timeout: humantime::Duration,
+    },
+    /// Start filling the specified pageserver.
+    /// The drain is complete when the schedulling policy returns to active.
+    StartFill {
+        #[arg(long)]
+        node_id: NodeId,
+    },
+    /// Cancel filling the specified pageserver and wait for `timeout`
+    /// for the operation to be canceled. May be retried.
+    CancelFill {
+        #[arg(long)]
+        node_id: NodeId,
+        #[arg(long)]
+        timeout: humantime::Duration,
+    },
+    /// List safekeepers known to the storage controller
+    Safekeepers {},
+    /// Set the scheduling policy of the specified safekeeper
+    SafekeeperScheduling {
+        #[arg(long)]
+        node_id: NodeId,
+        #[arg(long)]
+        scheduling_policy: SkSchedulingPolicyArg,
     },
 }
 
@@ -216,6 +292,17 @@ impl FromStr for PlacementPolicyArg {
 }
 
 #[derive(Debug, Clone)]
+struct SkSchedulingPolicyArg(SkSchedulingPolicy);
+
+impl FromStr for SkSchedulingPolicyArg {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        SkSchedulingPolicy::from_str(s).map(Self)
+    }
+}
+
+#[derive(Debug, Clone)]
 struct ShardSchedulingPolicyArg(ShardSchedulingPolicy);
 
 impl FromStr for ShardSchedulingPolicyArg {
@@ -249,6 +336,34 @@ impl FromStr for NodeAvailabilityArg {
     }
 }
 
+async fn wait_for_scheduling_policy<F>(
+    client: Client,
+    node_id: NodeId,
+    timeout: Duration,
+    f: F,
+) -> anyhow::Result<NodeSchedulingPolicy>
+where
+    F: Fn(NodeSchedulingPolicy) -> bool,
+{
+    let waiter = tokio::time::timeout(timeout, async move {
+        loop {
+            let node = client
+                .dispatch::<(), NodeDescribeResponse>(
+                    Method::GET,
+                    format!("control/v1/node/{node_id}"),
+                    None,
+                )
+                .await?;
+
+            if f(node.scheduling) {
+                return Ok::<NodeSchedulingPolicy, mgmt_api::Error>(node.scheduling);
+            }
+        }
+    });
+
+    Ok(waiter.await??)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -266,6 +381,7 @@ async fn main() -> anyhow::Result<()> {
             listen_pg_port,
             listen_http_addr,
             listen_http_port,
+            availability_zone_id,
         } => {
             storcon_client
                 .dispatch::<_, ()>(
@@ -277,6 +393,7 @@ async fn main() -> anyhow::Result<()> {
                         listen_pg_port,
                         listen_http_addr,
                         listen_http_port,
+                        availability_zone_id: AvailabilityZone(availability_zone_id),
                     }),
                 )
                 .await?;
@@ -314,11 +431,12 @@ async fn main() -> anyhow::Result<()> {
             resp.sort_by(|a, b| a.listen_http_addr.cmp(&b.listen_http_addr));
 
             let mut table = comfy_table::Table::new();
-            table.set_header(["Id", "Hostname", "Scheduling", "Availability"]);
+            table.set_header(["Id", "Hostname", "AZ", "Scheduling", "Availability"]);
             for node in resp {
                 table.add_row([
                     format!("{}", node.id),
                     node.listen_http_addr,
+                    node.availability_zone_id,
                     format!("{:?}", node.scheduling),
                     format!("{:?}", node.availability),
                 ]);
@@ -343,34 +461,100 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
         }
-        Command::Tenants {} => {
-            let mut resp = storcon_client
-                .dispatch::<(), Vec<TenantDescribeResponse>>(
+        Command::Tenants {
+            node_id: Some(node_id),
+        } => {
+            let describe_response = storcon_client
+                .dispatch::<(), NodeShardResponse>(
                     Method::GET,
-                    "control/v1/tenant".to_string(),
+                    format!("control/v1/node/{node_id}/shards"),
                     None,
                 )
                 .await?;
-
-            resp.sort_by(|a, b| a.tenant_id.cmp(&b.tenant_id));
-
+            let shards = describe_response.shards;
+            let mut table = comfy_table::Table::new();
+            table.set_header([
+                "Shard",
+                "Intended Primary/Secondary",
+                "Observed Primary/Secondary",
+            ]);
+            for shard in shards {
+                table.add_row([
+                    format!("{}", shard.tenant_shard_id),
+                    match shard.is_intended_secondary {
+                        None => "".to_string(),
+                        Some(true) => "Secondary".to_string(),
+                        Some(false) => "Primary".to_string(),
+                    },
+                    match shard.is_observed_secondary {
+                        None => "".to_string(),
+                        Some(true) => "Secondary".to_string(),
+                        Some(false) => "Primary".to_string(),
+                    },
+                ]);
+            }
+            println!("{table}");
+        }
+        Command::Tenants { node_id: None } => {
+            // Set up output formatting
             let mut table = comfy_table::Table::new();
             table.set_header([
                 "TenantId",
+                "Preferred AZ",
                 "ShardCount",
                 "StripeSize",
                 "Placement",
                 "Scheduling",
             ]);
-            for tenant in resp {
-                let shard_zero = tenant.shards.into_iter().next().unwrap();
-                table.add_row([
-                    format!("{}", tenant.tenant_id),
-                    format!("{}", shard_zero.tenant_shard_id.shard_count.literal()),
-                    format!("{:?}", tenant.stripe_size),
-                    format!("{:?}", tenant.policy),
-                    format!("{:?}", shard_zero.scheduling_policy),
-                ]);
+
+            // Pagination loop over listing API
+            let mut start_after = None;
+            const LIMIT: usize = 1000;
+            loop {
+                let path = match start_after {
+                    None => format!("control/v1/tenant?limit={LIMIT}"),
+                    Some(start_after) => {
+                        format!("control/v1/tenant?limit={LIMIT}&start_after={start_after}")
+                    }
+                };
+
+                let resp = storcon_client
+                    .dispatch::<(), Vec<TenantDescribeResponse>>(Method::GET, path, None)
+                    .await?;
+
+                if resp.is_empty() {
+                    // End of data reached
+                    break;
+                }
+
+                // Give some visual feedback while we're building up the table (comfy_table doesn't have
+                // streaming output)
+                if resp.len() >= LIMIT {
+                    eprint!(".");
+                }
+
+                start_after = Some(resp.last().unwrap().tenant_id);
+
+                for tenant in resp {
+                    let shard_zero = tenant.shards.into_iter().next().unwrap();
+                    table.add_row([
+                        format!("{}", tenant.tenant_id),
+                        shard_zero
+                            .preferred_az_id
+                            .as_ref()
+                            .cloned()
+                            .unwrap_or("".to_string()),
+                        format!("{}", shard_zero.tenant_shard_id.shard_count.literal()),
+                        format!("{:?}", tenant.stripe_size),
+                        format!("{:?}", tenant.policy),
+                        format!("{:?}", shard_zero.scheduling_policy),
+                    ]);
+                }
+            }
+
+            // Terminate progress dots
+            if table.row_count() > LIMIT {
+                eprint!("");
             }
 
             println!("{table}");
@@ -425,10 +609,7 @@ async fn main() -> anyhow::Result<()> {
             tenant_shard_id,
             node,
         } => {
-            let req = TenantShardMigrateRequest {
-                tenant_shard_id,
-                node_id: node,
-            };
+            let req = TenantShardMigrateRequest { node_id: node };
 
             storcon_client
                 .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
@@ -438,27 +619,92 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
         }
-        Command::TenantConfig { tenant_id, config } => {
+        Command::TenantShardMigrateSecondary {
+            tenant_shard_id,
+            node,
+        } => {
+            let req = TenantShardMigrateRequest { node_id: node };
+
+            storcon_client
+                .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
+                    Method::PUT,
+                    format!("control/v1/tenant/{tenant_shard_id}/migrate_secondary"),
+                    Some(req),
+                )
+                .await?;
+        }
+        Command::TenantShardCancelReconcile { tenant_shard_id } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::PUT,
+                    format!("control/v1/tenant/{tenant_shard_id}/cancel_reconcile"),
+                    None,
+                )
+                .await?;
+        }
+        Command::SetTenantConfig { tenant_id, config } => {
             let tenant_conf = serde_json::from_str(&config)?;
 
             vps_client
-                .tenant_config(&TenantConfigRequest {
+                .set_tenant_config(&TenantConfigRequest {
+                    tenant_id,
+                    config: tenant_conf,
+                })
+                .await?;
+        }
+        Command::PatchTenantConfig { tenant_id, config } => {
+            let tenant_conf = serde_json::from_str(&config)?;
+
+            vps_client
+                .patch_tenant_config(&TenantConfigPatchRequest {
                     tenant_id,
                     config: tenant_conf,
                 })
                 .await?;
         }
         Command::TenantDescribe { tenant_id } => {
-            let describe_response = storcon_client
+            let TenantDescribeResponse {
+                tenant_id,
+                shards,
+                stripe_size,
+                policy,
+                config,
+            } = storcon_client
                 .dispatch::<(), TenantDescribeResponse>(
                     Method::GET,
                     format!("control/v1/tenant/{tenant_id}"),
                     None,
                 )
                 .await?;
-            let shards = describe_response.shards;
+
+            let nodes = storcon_client
+                .dispatch::<(), Vec<NodeDescribeResponse>>(
+                    Method::GET,
+                    "control/v1/node".to_string(),
+                    None,
+                )
+                .await?;
+            let nodes = nodes
+                .into_iter()
+                .map(|n| (n.id, n))
+                .collect::<HashMap<_, _>>();
+
+            println!("Tenant {tenant_id}");
             let mut table = comfy_table::Table::new();
-            table.set_header(["Shard", "Attached", "Secondary", "Last error", "status"]);
+            table.add_row(["Policy", &format!("{:?}", policy)]);
+            table.add_row(["Stripe size", &format!("{:?}", stripe_size)]);
+            table.add_row(["Config", &serde_json::to_string_pretty(&config).unwrap()]);
+            println!("{table}");
+            println!("Shards:");
+            let mut table = comfy_table::Table::new();
+            table.set_header([
+                "Shard",
+                "Attached",
+                "Attached AZ",
+                "Secondary",
+                "Last error",
+                "status",
+            ]);
             for shard in shards {
                 let secondary = shard
                     .node_secondary
@@ -481,11 +727,18 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let status = status_parts.join(",");
 
+                let attached_node = shard
+                    .node_attached
+                    .as_ref()
+                    .map(|id| nodes.get(id).expect("Shard references nonexistent node"));
+
                 table.add_row([
                     format!("{}", shard.tenant_shard_id),
-                    shard
-                        .node_attached
-                        .map(|n| format!("{}", n))
+                    attached_node
+                        .map(|n| format!("{} ({})", n.listen_http_addr, n.id))
+                        .unwrap_or(String::new()),
+                    attached_node
+                        .map(|n| n.availability_zone_id.clone())
                         .unwrap_or(String::new()),
                     secondary,
                     shard.last_error,
@@ -493,6 +746,66 @@ async fn main() -> anyhow::Result<()> {
                 ]);
             }
             println!("{table}");
+        }
+        Command::TenantSetPreferredAz {
+            tenant_id,
+            preferred_az,
+        } => {
+            // First learn about the tenant's shards
+            let describe_response = storcon_client
+                .dispatch::<(), TenantDescribeResponse>(
+                    Method::GET,
+                    format!("control/v1/tenant/{tenant_id}"),
+                    None,
+                )
+                .await?;
+
+            // Learn about nodes to validate the AZ ID
+            let nodes = storcon_client
+                .dispatch::<(), Vec<NodeDescribeResponse>>(
+                    Method::GET,
+                    "control/v1/node".to_string(),
+                    None,
+                )
+                .await?;
+
+            if let Some(preferred_az) = &preferred_az {
+                let azs = nodes
+                    .into_iter()
+                    .map(|n| (n.availability_zone_id))
+                    .collect::<HashSet<_>>();
+                if !azs.contains(preferred_az) {
+                    anyhow::bail!(
+                        "AZ {} not found on any node: known AZs are: {:?}",
+                        preferred_az,
+                        azs
+                    );
+                }
+            } else {
+                // Make it obvious to the user that since they've omitted an AZ, we're clearing it
+                eprintln!("Clearing preferred AZ for tenant {}", tenant_id);
+            }
+
+            // Construct a request that modifies all the tenant's shards
+            let req = ShardsPreferredAzsRequest {
+                preferred_az_ids: describe_response
+                    .shards
+                    .into_iter()
+                    .map(|s| {
+                        (
+                            s.tenant_shard_id,
+                            preferred_az.clone().map(AvailabilityZone),
+                        )
+                    })
+                    .collect(),
+            };
+            storcon_client
+                .dispatch::<ShardsPreferredAzsRequest, ()>(
+                    Method::PUT,
+                    "control/v1/preferred_azs".to_string(),
+                    Some(req),
+                )
+                .await?;
         }
         Command::TenantWarmup { tenant_id } => {
             let describe_response = storcon_client
@@ -613,7 +926,7 @@ async fn main() -> anyhow::Result<()> {
             threshold,
         } => {
             vps_client
-                .tenant_config(&TenantConfigRequest {
+                .set_tenant_config(&TenantConfigRequest {
                     tenant_id,
                     config: TenantConfig {
                         eviction_policy: Some(EvictionPolicy::LayerAccessThreshold(
@@ -628,7 +941,7 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .await?;
         }
-        Command::Drain {
+        Command::BulkMigrate {
             nodes,
             concurrency,
             max_shards,
@@ -657,7 +970,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             if nodes.len() != node_to_drain_descs.len() {
-                anyhow::bail!("Drain requested for node which doesn't exist.")
+                anyhow::bail!("Bulk migration requested away from node which doesn't exist.")
             }
 
             node_to_fill_descs.retain(|desc| {
@@ -669,7 +982,7 @@ async fn main() -> anyhow::Result<()> {
             });
 
             if node_to_fill_descs.is_empty() {
-                anyhow::bail!("There are no nodes to drain to")
+                anyhow::bail!("There are no nodes to migrate to")
             }
 
             // Set the node scheduling policy to draining for the nodes which
@@ -690,7 +1003,7 @@ async fn main() -> anyhow::Result<()> {
                     .await?;
             }
 
-            // Perform the drain: move each tenant shard scheduled on a node to
+            // Perform the migration: move each tenant shard scheduled on a node to
             // be drained to a node which is being filled. A simple round robin
             // strategy is used to pick the new node.
             let tenants = storcon_client
@@ -703,13 +1016,13 @@ async fn main() -> anyhow::Result<()> {
 
             let mut selected_node_idx = 0;
 
-            struct DrainMove {
+            struct MigrationMove {
                 tenant_shard_id: TenantShardId,
                 from: NodeId,
                 to: NodeId,
             }
 
-            let mut moves: Vec<DrainMove> = Vec::new();
+            let mut moves: Vec<MigrationMove> = Vec::new();
 
             let shards = tenants
                 .into_iter()
@@ -739,7 +1052,7 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                moves.push(DrainMove {
+                moves.push(MigrationMove {
                     tenant_shard_id: shard.tenant_shard_id,
                     from: shard
                         .node_attached
@@ -769,10 +1082,7 @@ async fn main() -> anyhow::Result<()> {
                             .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
                                 Method::PUT,
                                 format!("control/v1/tenant/{}/migrate", mv.tenant_shard_id),
-                                Some(TenantShardMigrateRequest {
-                                    tenant_shard_id: mv.tenant_shard_id,
-                                    node_id: mv.to,
-                                }),
+                                Some(TenantShardMigrateRequest { node_id: mv.to }),
                             )
                             .await
                             .map_err(|e| (mv.tenant_shard_id, mv.from, mv.to, e))
@@ -814,6 +1124,118 @@ async fn main() -> anyhow::Result<()> {
                 total_moves,
                 success,
                 failure
+            );
+        }
+        Command::StartDrain { node_id } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::PUT,
+                    format!("control/v1/node/{node_id}/drain"),
+                    None,
+                )
+                .await?;
+            println!("Drain started for {node_id}");
+        }
+        Command::CancelDrain { node_id, timeout } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::DELETE,
+                    format!("control/v1/node/{node_id}/drain"),
+                    None,
+                )
+                .await?;
+
+            println!("Waiting for node {node_id} to quiesce on scheduling policy ...");
+
+            let final_policy =
+                wait_for_scheduling_policy(storcon_client, node_id, *timeout, |sched| {
+                    use NodeSchedulingPolicy::*;
+                    matches!(sched, Active | PauseForRestart)
+                })
+                .await?;
+
+            println!(
+                "Drain was cancelled for node {node_id}. Schedulling policy is now {final_policy:?}"
+            );
+        }
+        Command::StartFill { node_id } => {
+            storcon_client
+                .dispatch::<(), ()>(Method::PUT, format!("control/v1/node/{node_id}/fill"), None)
+                .await?;
+
+            println!("Fill started for {node_id}");
+        }
+        Command::CancelFill { node_id, timeout } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::DELETE,
+                    format!("control/v1/node/{node_id}/fill"),
+                    None,
+                )
+                .await?;
+
+            println!("Waiting for node {node_id} to quiesce on scheduling policy ...");
+
+            let final_policy =
+                wait_for_scheduling_policy(storcon_client, node_id, *timeout, |sched| {
+                    use NodeSchedulingPolicy::*;
+                    matches!(sched, Active)
+                })
+                .await?;
+
+            println!(
+                "Fill was cancelled for node {node_id}. Schedulling policy is now {final_policy:?}"
+            );
+        }
+        Command::Safekeepers {} => {
+            let mut resp = storcon_client
+                .dispatch::<(), Vec<SafekeeperDescribeResponse>>(
+                    Method::GET,
+                    "control/v1/safekeeper".to_string(),
+                    None,
+                )
+                .await?;
+
+            resp.sort_by(|a, b| a.id.cmp(&b.id));
+
+            let mut table = comfy_table::Table::new();
+            table.set_header([
+                "Id",
+                "Version",
+                "Host",
+                "Port",
+                "Http Port",
+                "AZ Id",
+                "Scheduling",
+            ]);
+            for sk in resp {
+                table.add_row([
+                    format!("{}", sk.id),
+                    format!("{}", sk.version),
+                    sk.host,
+                    format!("{}", sk.port),
+                    format!("{}", sk.http_port),
+                    sk.availability_zone_id.clone(),
+                    String::from(sk.scheduling_policy),
+                ]);
+            }
+            println!("{table}");
+        }
+        Command::SafekeeperScheduling {
+            node_id,
+            scheduling_policy,
+        } => {
+            let scheduling_policy = scheduling_policy.0;
+            storcon_client
+                .dispatch::<SafekeeperSchedulingPolicyRequest, ()>(
+                    Method::POST,
+                    format!("control/v1/safekeeper/{node_id}/scheduling_policy"),
+                    Some(SafekeeperSchedulingPolicyRequest { scheduling_policy }),
+                )
+                .await?;
+            println!(
+                "Scheduling policy of {node_id} set to {}",
+                String::from(scheduling_policy)
             );
         }
     }

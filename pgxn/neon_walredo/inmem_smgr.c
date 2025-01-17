@@ -68,8 +68,13 @@ static void inmem_close(SMgrRelation reln, ForkNumber forknum);
 static void inmem_create(SMgrRelation reln, ForkNumber forknum, bool isRedo);
 static bool inmem_exists(SMgrRelation reln, ForkNumber forknum);
 static void inmem_unlink(NRelFileInfoBackend rinfo, ForkNumber forknum, bool isRedo);
+#if PG_MAJORVERSION_NUM >= 17
+static bool inmem_prefetch(SMgrRelation reln, ForkNumber forknum,
+						   BlockNumber blocknum, int nblocks);
+#else
 static bool inmem_prefetch(SMgrRelation reln, ForkNumber forknum,
 						   BlockNumber blocknum);
+#endif
 #if PG_MAJORVERSION_NUM < 16
 static void inmem_extend(SMgrRelation reln, ForkNumber forknum,
 						 BlockNumber blocknum, char *buffer, bool skipFsync);
@@ -93,7 +98,9 @@ static BlockNumber inmem_nblocks(SMgrRelation reln, ForkNumber forknum);
 static void inmem_truncate(SMgrRelation reln, ForkNumber forknum,
 						   BlockNumber nblocks);
 static void inmem_immedsync(SMgrRelation reln, ForkNumber forknum);
-
+#if PG_MAJORVERSION_NUM >= 17
+static void inmem_registersync(SMgrRelation reln, ForkNumber forknum);
+#endif
 
 /*
  *	inmem_init() -- Initialize private state
@@ -190,6 +197,14 @@ inmem_close(SMgrRelation reln, ForkNumber forknum)
 {
 }
 
+#if PG_MAJORVERSION_NUM >= 17
+static bool
+inmem_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+			   int nblocks)
+{
+	return true;
+}
+#else
 /*
  *	inmem_prefetch() -- Initiate asynchronous read of the specified block of a relation
  */
@@ -198,6 +213,7 @@ inmem_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 {
 	return true;
 }
+#endif
 
 /*
  * inmem_writeback() -- Tell the kernel to write pages back to storage.
@@ -211,11 +227,13 @@ inmem_writeback(SMgrRelation reln, ForkNumber forknum,
 /*
  *	inmem_read() -- Read the specified block from a relation.
  */
+#if PG_MAJORVERSION_NUM < 16
 static void
 inmem_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
-#if PG_MAJORVERSION_NUM < 16
 		   char *buffer)
 #else
+static void
+inmem_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 		   void *buffer)
 #endif
 {
@@ -227,6 +245,18 @@ inmem_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 	else
 		memcpy(buffer, page_body[pg], BLCKSZ);
 }
+
+#if PG_MAJORVERSION_NUM >= 17
+static void
+inmem_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
+			void **buffers, BlockNumber nblocks)
+{
+	for (int i = 0; i < nblocks; i++)
+	{
+		inmem_read(reln, forknum, blkno, buffers[i]);
+	}
+}
+#endif
 
 /*
  *	inmem_write() -- Write the supplied block at the appropriate location.
@@ -280,6 +310,18 @@ inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	memcpy(page_body[pg], buffer, BLCKSZ);
 }
 
+#if PG_MAJORVERSION_NUM >= 17
+static void
+inmem_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
+			 const void **buffers, BlockNumber nblocks, bool skipFsync)
+{
+	for (int i = 0; i < nblocks; i++)
+	{
+		inmem_write(reln, forknum, blkno, buffers[i], skipFsync);
+	}
+}
+#endif
+
 /*
  *	inmem_nblocks() -- Get the number of blocks stored in a relation.
  */
@@ -315,6 +357,13 @@ inmem_immedsync(SMgrRelation reln, ForkNumber forknum)
 {
 }
 
+#if PG_MAJORVERSION_NUM >= 17
+static void
+inmem_registersync(SMgrRelation reln, ForkNumber forknum)
+{
+}
+#endif
+
 static const struct f_smgr inmem_smgr =
 {
 	.smgr_init = inmem_init,
@@ -328,23 +377,39 @@ static const struct f_smgr inmem_smgr =
 #if PG_MAJORVERSION_NUM >= 16
 	.smgr_zeroextend = inmem_zeroextend,
 #endif
+#if PG_MAJORVERSION_NUM >= 17
+	.smgr_prefetch = inmem_prefetch,
+	.smgr_readv = inmem_readv,
+	.smgr_writev = inmem_writev,
+#else
 	.smgr_prefetch = inmem_prefetch,
 	.smgr_read = inmem_read,
 	.smgr_write = inmem_write,
+#endif
 	.smgr_writeback = inmem_writeback,
 	.smgr_nblocks = inmem_nblocks,
 	.smgr_truncate = inmem_truncate,
 	.smgr_immedsync = inmem_immedsync,
+
+#if PG_MAJORVERSION_NUM >= 17
+	.smgr_registersync = inmem_registersync,
+#endif
+
+	.smgr_start_unlogged_build = NULL,
+	.smgr_finish_unlogged_build_phase_1 = NULL,
+	.smgr_end_unlogged_build = NULL,
+	.smgr_read_slru_segment = NULL,
 };
 
 const f_smgr *
-smgr_inmem(BackendId backend, NRelFileInfo rinfo)
+smgr_inmem(ProcNumber backend, NRelFileInfo rinfo)
 {
 	Assert(InRecovery);
-	if (backend != InvalidBackendId)
-		return smgr_standard(backend, rinfo);
-	else
-		return &inmem_smgr;
+	// // What does this code do?
+	// if (backend != INVALID_PROC_NUMBER)
+	// 	return smgr_standard(backend, rinfo);
+	// else
+	return &inmem_smgr;
 }
 
 void

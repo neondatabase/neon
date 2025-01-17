@@ -1,5 +1,7 @@
+from __future__ import annotations
+
+from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Generator, Optional
 
 import pytest
 from fixtures.common_types import TenantId
@@ -41,7 +43,7 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     ps_http = env.pageserver.http_client()
-    (tenant_id, _) = env.neon_cli.create_tenant()
+    (tenant_id, _) = env.create_tenant()
     assert ps_http.tenant_config(tenant_id).tenant_specific_overrides == {}
     config_pre_detach = ps_http.tenant_config(tenant_id)
     assert tenant_id in [TenantId(t["id"]) for t in ps_http.tenant_list()]
@@ -62,8 +64,6 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
     )
 
     wait_until(
-        50,
-        0.1,
         lambda: env.pageserver.assert_log_contains(".*Error processing HTTP request: Bad request"),
     )
 
@@ -102,14 +102,14 @@ def test_null_config(negative_env: NegativeTests):
 
 
 @pytest.mark.parametrize("content_type", [None, "application/json"])
-def test_empty_config(positive_env: NeonEnv, content_type: Optional[str]):
+def test_empty_config(positive_env: NeonEnv, content_type: str | None):
     """
     When the 'config' body attribute is omitted, the request should be accepted
     and the tenant should use the default configuration
     """
     env = positive_env
     ps_http = env.pageserver.http_client()
-    (tenant_id, _) = env.neon_cli.create_tenant()
+    (tenant_id, _) = env.create_tenant()
     assert ps_http.tenant_config(tenant_id).tenant_specific_overrides == {}
     config_pre_detach = ps_http.tenant_config(tenant_id)
     assert tenant_id in [TenantId(t["id"]) for t in ps_http.tenant_list()]
@@ -162,7 +162,6 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "min_resident_size_override": 23,
         "timeline_get_throttle": {
             "task_kinds": ["PageRequestHandler"],
-            "fair": True,
             "initial": 0,
             "refill_interval": "1s",
             "refill_amount": 1000,
@@ -170,22 +169,30 @@ def test_fully_custom_config(positive_env: NeonEnv):
         },
         "walreceiver_connect_timeout": "13m",
         "image_layer_creation_check_threshold": 1,
-        "switch_aux_file_policy": "cross-validation",
         "lsn_lease_length": "1m",
         "lsn_lease_length_for_ts": "5s",
+        "timeline_offloading": True,
+        "wal_receiver_protocol_override": {
+            "type": "interpreted",
+            "args": {"format": "bincode", "compression": {"zstd": {"level": 1}}},
+        },
     }
 
-    ps_http = env.pageserver.http_client()
+    vps_http = env.storage_controller.pageserver_api()
 
-    initial_tenant_config = ps_http.tenant_config(env.initial_tenant)
-    assert initial_tenant_config.tenant_specific_overrides == {}
+    initial_tenant_config = vps_http.tenant_config(env.initial_tenant)
+    assert [
+        (key, val)
+        for key, val in initial_tenant_config.tenant_specific_overrides.items()
+        if val is not None
+    ] == []
     assert set(initial_tenant_config.effective_config.keys()) == set(
         fully_custom_config.keys()
     ), "ensure we cover all config options"
 
-    (tenant_id, _) = env.neon_cli.create_tenant()
-    ps_http.set_tenant_config(tenant_id, fully_custom_config)
-    our_tenant_config = ps_http.tenant_config(tenant_id)
+    (tenant_id, _) = env.create_tenant()
+    vps_http.set_tenant_config(tenant_id, fully_custom_config)
+    our_tenant_config = vps_http.tenant_config(tenant_id)
     assert our_tenant_config.tenant_specific_overrides == fully_custom_config
     assert set(our_tenant_config.effective_config.keys()) == set(
         fully_custom_config.keys()
@@ -198,10 +205,10 @@ def test_fully_custom_config(positive_env: NeonEnv):
         == {k: True for k in fully_custom_config.keys()}
     ), "ensure our custom config has different values than the default config for all config options, so we know we overrode everything"
 
-    ps_http.tenant_detach(tenant_id)
+    env.pageserver.tenant_detach(tenant_id)
     env.pageserver.tenant_attach(tenant_id, config=fully_custom_config)
 
-    assert ps_http.tenant_config(tenant_id).tenant_specific_overrides == fully_custom_config
-    assert set(ps_http.tenant_config(tenant_id).effective_config.keys()) == set(
+    assert vps_http.tenant_config(tenant_id).tenant_specific_overrides == fully_custom_config
+    assert set(vps_http.tenant_config(tenant_id).effective_config.keys()) == set(
         fully_custom_config.keys()
     ), "ensure we cover all config options"

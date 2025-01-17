@@ -1,4 +1,5 @@
-import os
+from __future__ import annotations
+
 import subprocess
 from pathlib import Path
 from typing import cast
@@ -13,7 +14,7 @@ from fixtures.neon_fixtures import (
     parse_project_git_version_output,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pg_version import PgVersion, skip_on_postgres
+from fixtures.utils import run_only_on_default_postgres, skip_in_debug_build
 
 
 def helper_compare_timeline_list(
@@ -31,9 +32,7 @@ def helper_compare_timeline_list(
         )
     )
 
-    timelines_cli = env.neon_cli.list_timelines()
-    assert timelines_cli == env.neon_cli.list_timelines(initial_tenant)
-
+    timelines_cli = env.neon_cli.timeline_list(initial_tenant)
     cli_timeline_ids = sorted([timeline_id for (_, timeline_id) in timelines_cli])
     assert timelines_api == cli_timeline_ids
 
@@ -46,17 +45,19 @@ def test_cli_timeline_list(neon_simple_env: NeonEnv):
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Create a branch for us
-    main_timeline_id = env.neon_cli.create_branch("test_cli_branch_list_main")
+    main_timeline_id = env.create_branch("test_cli_branch_list_main")
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Create a nested branch
-    nested_timeline_id = env.neon_cli.create_branch(
-        "test_cli_branch_list_nested", "test_cli_branch_list_main"
+    nested_timeline_id = env.create_branch(
+        "test_cli_branch_list_nested", ancestor_branch_name="test_cli_branch_list_main"
     )
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Check that all new branches are visible via CLI
-    timelines_cli = [timeline_id for (_, timeline_id) in env.neon_cli.list_timelines()]
+    timelines_cli = [
+        timeline_id for (_, timeline_id) in env.neon_cli.timeline_list(env.initial_tenant)
+    ]
 
     assert main_timeline_id in timelines_cli
     assert nested_timeline_id in timelines_cli
@@ -66,7 +67,7 @@ def helper_compare_tenant_list(pageserver_http_client: PageserverHttpClient, env
     tenants = pageserver_http_client.tenant_list()
     tenants_api = sorted(map(lambda t: cast(str, t["id"]), tenants))
 
-    res = env.neon_cli.list_tenants()
+    res = env.neon_cli.tenant_list()
     tenants_cli = sorted(map(lambda t: t.split()[0], res.stdout.splitlines()))
 
     assert tenants_api == tenants_cli
@@ -79,18 +80,18 @@ def test_cli_tenant_list(neon_simple_env: NeonEnv):
     helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
-    tenant1, _ = env.neon_cli.create_tenant()
+    tenant1, _ = env.create_tenant()
 
     # check tenant1 appeared
     helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
-    tenant2, _ = env.neon_cli.create_tenant()
+    tenant2, _ = env.create_tenant()
 
     # check tenant2 appeared
     helper_compare_tenant_list(pageserver_http_client, env)
 
-    res = env.neon_cli.list_tenants()
+    res = env.neon_cli.tenant_list()
     tenants = sorted(map(lambda t: TenantId(t.split()[0]), res.stdout.splitlines()))
 
     assert env.initial_tenant in tenants
@@ -100,8 +101,8 @@ def test_cli_tenant_list(neon_simple_env: NeonEnv):
 
 def test_cli_tenant_create(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    tenant_id, _ = env.neon_cli.create_tenant()
-    timelines = env.neon_cli.list_timelines(tenant_id)
+    tenant_id, _ = env.create_tenant()
+    timelines = env.neon_cli.timeline_list(tenant_id)
 
     # an initial timeline should be created upon tenant creation
     assert len(timelines) == 1
@@ -134,6 +135,7 @@ def test_cli_start_stop(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.pageserver_stop(env.pageserver.id)
     env.neon_cli.safekeeper_stop()
     env.neon_cli.storage_controller_stop(False)
+    env.neon_cli.storage_broker_stop()
 
     # Keep NeonEnv state up to date, it usually owns starting/stopping services
     env.pageserver.running = False
@@ -159,6 +161,11 @@ def test_cli_start_stop_multi(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.pageserver_stop(env.BASE_PAGESERVER_ID)
     env.neon_cli.pageserver_stop(env.BASE_PAGESERVER_ID + 1)
 
+    # We will stop the storage controller while it may have requests in
+    # flight, and the pageserver complains when requests are abandoned.
+    for ps in env.pageservers:
+        ps.allowed_errors.append(".*request was dropped before completing.*")
+
     # Keep NeonEnv state up to date, it usually owns starting/stopping services
     env.pageservers[0].running = False
     env.pageservers[1].running = False
@@ -176,6 +183,7 @@ def test_cli_start_stop_multi(neon_env_builder: NeonEnvBuilder):
 
     # Stop this to get out of the way of the following `start`
     env.neon_cli.storage_controller_stop(False)
+    env.neon_cli.storage_broker_stop()
 
     # Default start
     res = env.neon_cli.raw_cli(["start"])
@@ -186,10 +194,8 @@ def test_cli_start_stop_multi(neon_env_builder: NeonEnvBuilder):
     res.check_returncode()
 
 
-@skip_on_postgres(PgVersion.V14, reason="does not use postgres")
-@pytest.mark.skipif(
-    os.environ.get("BUILD_TYPE") == "debug", reason="unit test for test support, either build works"
-)
+@run_only_on_default_postgres(reason="does not use postgres")
+@skip_in_debug_build("unit test for test support, either build works")
 def test_parse_project_git_version_output_positive():
     commit = "b6f77b5816cf1dba12a3bc8747941182ce220846"
 
@@ -208,10 +214,8 @@ def test_parse_project_git_version_output_positive():
         assert parse_project_git_version_output(example) == commit
 
 
-@skip_on_postgres(PgVersion.V14, reason="does not use postgres")
-@pytest.mark.skipif(
-    os.environ.get("BUILD_TYPE") == "debug", reason="unit test for test support, either build works"
-)
+@run_only_on_default_postgres(reason="does not use postgres")
+@skip_in_debug_build("unit test for test support, either build works")
 def test_parse_project_git_version_output_local_docker():
     """
     Makes sure the tests don't accept the default version in Dockerfile one gets without providing
@@ -225,10 +229,8 @@ def test_parse_project_git_version_output_local_docker():
     assert input in str(e)
 
 
-@skip_on_postgres(PgVersion.V14, reason="does not use postgres")
-@pytest.mark.skipif(
-    os.environ.get("BUILD_TYPE") == "debug", reason="cli api sanity, either build works"
-)
+@run_only_on_default_postgres(reason="does not use postgres")
+@skip_in_debug_build("unit test for test support, either build works")
 def test_binaries_version_parses(neon_binpath: Path):
     """
     Ensures that we can parse the actual outputs of --version from a set of binaries.

@@ -1,0 +1,20 @@
+[package]
+name = "postgres-protocol2"
+version = "0.1.0"
+edition = "2021"
+license = "MIT/Apache-2.0"
+
+[dependencies]
+base64 = "0.20"
+byteorder.workspace = true
+bytes.workspace = true
+fallible-iterator.workspace = true
+hmac.workspace = true
+memchr = "2.0"
+rand.workspace = true
+sha2.workspace = true
+stringprep = "0.1"
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

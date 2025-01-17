@@ -218,8 +218,10 @@ async fn create_azure_client(
             prefix_in_container: Some(format!("test_{millis}_{random:08x}/")),
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
             max_keys_per_list_response,
+            conn_pool_size: 8,
         }),
-        timeout: Duration::from_secs(120),
+        timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+        small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT,
     };
     Ok(Arc::new(
         GenericRemoteStorage::from_config(&remote_storage_config)

@@ -36,6 +36,7 @@ macro_rules! postgres_ffi {
             pub mod controlfile_utils;
             pub mod nonrelfile_utils;
             pub mod wal_craft_test_export;
+            pub mod wal_generator;
             pub mod waldecoder_handler;
             pub mod xlog_utils;
 
@@ -44,6 +45,9 @@ macro_rules! postgres_ffi {
             // Re-export some symbols from bindings
             pub use bindings::DBState_DB_SHUTDOWNED;
             pub use bindings::{CheckPoint, ControlFileData, XLogRecord};
+
+            pub const ZERO_CHECKPOINT: bytes::Bytes =
+                bytes::Bytes::from_static(&[0u8; xlog_utils::SIZEOF_CHECKPOINT]);
         }
     };
 }
@@ -54,6 +58,7 @@ macro_rules! for_all_postgres_versions {
         $macro!(v14);
         $macro!(v15);
         $macro!(v16);
+        $macro!(v17);
     };
 }
 
@@ -88,6 +93,7 @@ macro_rules! dispatch_pgversion {
                 14 : v14,
                 15 : v15,
                 16 : v16,
+                17 : v17,
             ]
         )
     };
@@ -106,8 +112,113 @@ macro_rules! dispatch_pgversion {
     };
 }
 
+#[macro_export]
+macro_rules! enum_pgversion_dispatch {
+    ($name:expr, $typ:ident, $bind:ident, $code:block) => {
+        enum_pgversion_dispatch!(
+            name = $name,
+            bind = $bind,
+            typ = $typ,
+            code = $code,
+            pgversions = [
+                V14 : v14,
+                V15 : v15,
+                V16 : v16,
+                V17 : v17,
+            ]
+        )
+    };
+    (name = $name:expr,
+     bind = $bind:ident,
+     typ = $typ:ident,
+     code = $code:block,
+     pgversions = [$($variant:ident : $md:ident),+ $(,)?]) => {
+        match $name {
+            $(
+            self::$typ::$variant($bind) => {
+                use $crate::$md as pgv;
+                $code
+            }
+            ),+,
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! enum_pgversion {
+    {$name:ident, pgv :: $t:ident} => {
+        enum_pgversion!{
+            name = $name,
+            typ = $t,
+            pgversions = [
+                V14 : v14,
+                V15 : v15,
+                V16 : v16,
+                V17 : v17,
+            ]
+        }
+    };
+    {$name:ident, pgv :: $p:ident :: $t:ident} => {
+        enum_pgversion!{
+            name = $name,
+            path = $p,
+            typ = $t,
+            pgversions = [
+                V14 : v14,
+                V15 : v15,
+                V16 : v16,
+                V17 : v17,
+            ]
+        }
+    };
+    {name = $name:ident,
+     typ = $t:ident,
+     pgversions = [$($variant:ident : $md:ident),+ $(,)?]} => {
+        pub enum $name {
+            $($variant ( $crate::$md::$t )),+
+        }
+        impl self::$name {
+            pub fn pg_version(&self) -> u32 {
+                enum_pgversion_dispatch!(self, $name, _ign, {
+                    pgv::bindings::PG_MAJORVERSION_NUM
+                })
+            }
+        }
+        $(
+        impl Into<self::$name> for $crate::$md::$t {
+            fn into(self) -> self::$name {
+                self::$name::$variant (self)
+            }
+        }
+        )+
+    };
+    {name = $name:ident,
+     path = $p:ident,
+     typ = $t:ident,
+     pgversions = [$($variant:ident : $md:ident),+ $(,)?]} => {
+        pub enum $name {
+            $($variant ($crate::$md::$p::$t)),+
+        }
+        impl $name {
+            pub fn pg_version(&self) -> u32 {
+                enum_pgversion_dispatch!(self, $name, _ign, {
+                    pgv::bindings::PG_MAJORVERSION_NUM
+                })
+            }
+        }
+        $(
+        impl Into<$name> for $crate::$md::$p::$t {
+            fn into(self) -> $name {
+                $name::$variant (self)
+            }
+        }
+        )+
+    };
+}
+
 pub mod pg_constants;
 pub mod relfile_utils;
+pub mod walrecord;
 
 // Export some widely used datatypes that are unlikely to change across Postgres versions
 pub use v14::bindings::RepOriginId;
@@ -136,9 +247,9 @@ pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 
 // Export some version independent functions that are used outside of this mod
 pub use v14::xlog_utils::encode_logical_message;
-pub use v14::xlog_utils::from_pg_timestamp;
 pub use v14::xlog_utils::get_current_timestamp;
 pub use v14::xlog_utils::to_pg_timestamp;
+pub use v14::xlog_utils::try_from_pg_timestamp;
 pub use v14::xlog_utils::XLogFileName;
 
 pub use v14::bindings::DBState_DB_SHUTDOWNED;

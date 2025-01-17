@@ -8,8 +8,12 @@ use self::split_state::SplitState;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::Connection;
+use itertools::Itertools;
+use pageserver_api::controller_api::AvailabilityZone;
 use pageserver_api::controller_api::MetadataHealthRecord;
+use pageserver_api::controller_api::SafekeeperDescribeResponse;
 use pageserver_api::controller_api::ShardSchedulingPolicy;
+use pageserver_api::controller_api::SkSchedulingPolicy;
 use pageserver_api::controller_api::{NodeSchedulingPolicy, PlacementPolicy};
 use pageserver_api::models::TenantConfig;
 use pageserver_api::shard::ShardConfigError;
@@ -24,6 +28,9 @@ use crate::metrics::{
     DatabaseQueryErrorLabelGroup, DatabaseQueryLatencyLabelGroup, METRICS_REGISTRY,
 };
 use crate::node::Node;
+
+use diesel_migrations::{embed_migrations, EmbeddedMigrations};
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 
 /// ## What do we store?
 ///
@@ -72,6 +79,8 @@ pub(crate) enum DatabaseError {
     ConnectionPool(#[from] r2d2::Error),
     #[error("Logical error: {0}")]
     Logical(String),
+    #[error("Migration error: {0}")]
+    Migration(String),
 }
 
 #[derive(measured::FixedCardinalityLabel, Copy, Clone)]
@@ -86,7 +95,10 @@ pub(crate) enum DatabaseOperation {
     Detach,
     ReAttach,
     IncrementGeneration,
+    TenantGenerations,
+    ShardGenerations,
     ListTenantShards,
+    LoadTenant,
     InsertTenantShards,
     UpdateTenantShard,
     DeleteTenant,
@@ -95,8 +107,10 @@ pub(crate) enum DatabaseOperation {
     ListMetadataHealth,
     ListMetadataHealthUnhealthy,
     ListMetadataHealthOutdated,
+    ListSafekeepers,
     GetLeader,
     UpdateLeader,
+    SetPreferredAzs,
 }
 
 #[must_use]
@@ -113,6 +127,13 @@ pub(crate) type DatabaseResult<T> = Result<T, DatabaseError>;
 pub(crate) enum TenantFilter {
     Tenant(TenantId),
     Shard(TenantShardId),
+}
+
+/// Represents the results of looking up generation+pageserver for the shards of a tenant
+pub(crate) struct ShardGenerationState {
+    pub(crate) tenant_shard_id: TenantShardId,
+    pub(crate) generation: Option<Generation>,
+    pub(crate) generation_pageserver: Option<NodeId>,
 }
 
 impl Persistence {
@@ -165,6 +186,19 @@ impl Persistence {
                 }
             }
         }
+    }
+
+    /// Execute the diesel migrations that are built into this binary
+    pub(crate) async fn migration_run(&self) -> DatabaseResult<()> {
+        use diesel_migrations::{HarnessWithOutput, MigrationHarness};
+
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            HarnessWithOutput::write_to_stdout(conn)
+                .run_pending_migrations(MIGRATIONS)
+                .map(|_| ())
+                .map_err(|e| DatabaseError::Migration(e.to_string()))
+        })
+        .await
     }
 
     /// Wraps `with_conn` in order to collect latency and error metrics
@@ -298,11 +332,40 @@ impl Persistence {
 
     /// At startup, load the high level state for shards, such as their config + policy.  This will
     /// be enriched at runtime with state discovered on pageservers.
-    pub(crate) async fn list_tenant_shards(&self) -> DatabaseResult<Vec<TenantShardPersistence>> {
+    ///
+    /// We exclude shards configured to be detached.  During startup, if we see any attached locations
+    /// for such shards, they will automatically be detached as 'orphans'.
+    pub(crate) async fn load_active_tenant_shards(
+        &self,
+    ) -> DatabaseResult<Vec<TenantShardPersistence>> {
+        use crate::schema::tenant_shards::dsl::*;
         self.with_measured_conn(
             DatabaseOperation::ListTenantShards,
             move |conn| -> DatabaseResult<_> {
-                Ok(crate::schema::tenant_shards::table.load::<TenantShardPersistence>(conn)?)
+                let query = tenant_shards.filter(
+                    placement_policy.ne(serde_json::to_string(&PlacementPolicy::Detached).unwrap()),
+                );
+                let result = query.load::<TenantShardPersistence>(conn)?;
+
+                Ok(result)
+            },
+        )
+        .await
+    }
+
+    /// When restoring a previously detached tenant into memory, load it from the database
+    pub(crate) async fn load_tenant(
+        &self,
+        filter_tenant_id: TenantId,
+    ) -> DatabaseResult<Vec<TenantShardPersistence>> {
+        use crate::schema::tenant_shards::dsl::*;
+        self.with_measured_conn(
+            DatabaseOperation::LoadTenant,
+            move |conn| -> DatabaseResult<_> {
+                let query = tenant_shards.filter(tenant_id.eq(filter_tenant_id.to_string()));
+                let result = query.load::<TenantShardPersistence>(conn)?;
+
+                Ok(result)
             },
         )
         .await
@@ -484,6 +547,100 @@ impl Persistence {
         Ok(Generation::new(g as u32))
     }
 
+    /// When we want to call out to the running shards for a tenant, e.g. during timeline CRUD operations,
+    /// we need to know where the shard is attached, _and_ the generation, so that we can re-check the generation
+    /// afterwards to confirm that our timeline CRUD operation is truly persistent (it must have happened in the
+    /// latest generation)
+    ///
+    /// If the tenant doesn't exist, an empty vector is returned.
+    ///
+    /// Output is sorted by shard number
+    pub(crate) async fn tenant_generations(
+        &self,
+        filter_tenant_id: TenantId,
+    ) -> Result<Vec<ShardGenerationState>, DatabaseError> {
+        use crate::schema::tenant_shards::dsl::*;
+        let rows = self
+            .with_measured_conn(DatabaseOperation::TenantGenerations, move |conn| {
+                let result = tenant_shards
+                    .filter(tenant_id.eq(filter_tenant_id.to_string()))
+                    .select(TenantShardPersistence::as_select())
+                    .order(shard_number)
+                    .load(conn)?;
+                Ok(result)
+            })
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|p| ShardGenerationState {
+                tenant_shard_id: p
+                    .get_tenant_shard_id()
+                    .expect("Corrupt tenant shard id in database"),
+                generation: p.generation.map(|g| Generation::new(g as u32)),
+                generation_pageserver: p.generation_pageserver.map(|n| NodeId(n as u64)),
+            })
+            .collect())
+    }
+
+    /// Read the generation number of specific tenant shards
+    ///
+    /// Output is unsorted.  Output may not include values for all inputs, if they are missing in the database.
+    pub(crate) async fn shard_generations(
+        &self,
+        mut tenant_shard_ids: impl Iterator<Item = &TenantShardId>,
+    ) -> Result<Vec<(TenantShardId, Option<Generation>)>, DatabaseError> {
+        let mut rows = Vec::with_capacity(tenant_shard_ids.size_hint().0);
+
+        // We will chunk our input to avoid composing arbitrarily long `IN` clauses.  Typically we are
+        // called with a single digit number of IDs, but in principle we could be called with tens
+        // of thousands (all the shards on one pageserver) from the generation validation API.
+        loop {
+            // A modest hardcoded chunk size to handle typical cases in a single query but never generate particularly
+            // large query strings.
+            let chunk_ids = tenant_shard_ids.by_ref().take(32);
+
+            // Compose a comma separated list of tuples for matching on (tenant_id, shard_number, shard_count)
+            let in_clause = chunk_ids
+                .map(|tsid| {
+                    format!(
+                        "('{}', {}, {})",
+                        tsid.tenant_id, tsid.shard_number.0, tsid.shard_count.0
+                    )
+                })
+                .join(",");
+
+            // We are done when our iterator gives us nothing to filter on
+            if in_clause.is_empty() {
+                break;
+            }
+
+            let chunk_rows = self
+                .with_measured_conn(DatabaseOperation::ShardGenerations, move |conn| {
+                    // diesel doesn't support multi-column IN queries, so we compose raw SQL.  No escaping is required because
+                    // the inputs are strongly typed and cannot carry any user-supplied raw string content.
+                    let result : Vec<TenantShardPersistence> = diesel::sql_query(
+                        format!("SELECT * from tenant_shards where (tenant_id, shard_number, shard_count) in ({in_clause});").as_str()
+                    ).load(conn)?;
+
+                    Ok(result)
+                })
+                .await?;
+            rows.extend(chunk_rows.into_iter())
+        }
+
+        Ok(rows
+            .into_iter()
+            .map(|tsp| {
+                (
+                    tsp.get_tenant_shard_id()
+                        .expect("Bad tenant ID in database"),
+                    tsp.generation.map(|g| Generation::new(g as u32)),
+                )
+            })
+            .collect())
+    }
+
     #[allow(non_local_definitions)]
     /// For use when updating a persistent property of a tenant, such as its config or placement_policy.
     ///
@@ -512,6 +669,13 @@ impl Persistence {
                     .into_boxed(),
             };
 
+            // Clear generation_pageserver if we are moving into a state where we won't have
+            // any attached pageservers.
+            let input_generation_pageserver = match input_placement_policy {
+                None | Some(PlacementPolicy::Attached(_)) => None,
+                Some(PlacementPolicy::Detached | PlacementPolicy::Secondary) => Some(None),
+            };
+
             #[derive(AsChangeset)]
             #[diesel(table_name = crate::schema::tenant_shards)]
             struct ShardUpdate {
@@ -519,6 +683,7 @@ impl Persistence {
                 placement_policy: Option<String>,
                 config: Option<String>,
                 scheduling_policy: Option<String>,
+                generation_pageserver: Option<Option<i64>>,
             }
 
             let update = ShardUpdate {
@@ -531,6 +696,7 @@ impl Persistence {
                     .map(|c| serde_json::to_string(&c).unwrap()),
                 scheduling_policy: input_scheduling_policy
                     .map(|p| serde_json::to_string(&p).unwrap()),
+                generation_pageserver: input_generation_pageserver,
             };
 
             query.set(update).execute(conn)?;
@@ -540,6 +706,34 @@ impl Persistence {
         .await?;
 
         Ok(())
+    }
+
+    /// Note that passing None for a shard clears the preferred AZ (rather than leaving it unmodified)
+    pub(crate) async fn set_tenant_shard_preferred_azs(
+        &self,
+        preferred_azs: Vec<(TenantShardId, Option<AvailabilityZone>)>,
+    ) -> DatabaseResult<Vec<(TenantShardId, Option<AvailabilityZone>)>> {
+        use crate::schema::tenant_shards::dsl::*;
+
+        self.with_measured_conn(DatabaseOperation::SetPreferredAzs, move |conn| {
+            let mut shards_updated = Vec::default();
+
+            for (tenant_shard_id, preferred_az) in preferred_azs.iter() {
+                let updated = diesel::update(tenant_shards)
+                    .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
+                    .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
+                    .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
+                    .set(preferred_az_id.eq(preferred_az.as_ref().map(|az| az.0.clone())))
+                    .execute(conn)?;
+
+                if updated == 1 {
+                    shards_updated.push((*tenant_shard_id, preferred_az.clone()));
+                }
+            }
+
+            Ok(shards_updated)
+        })
+        .await
     }
 
     pub(crate) async fn detach(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
@@ -850,10 +1044,103 @@ impl Persistence {
 
         Ok(())
     }
+
+    /// At startup, populate the list of nodes which our shards may be placed on
+    pub(crate) async fn list_safekeepers(&self) -> DatabaseResult<Vec<SafekeeperPersistence>> {
+        let safekeepers: Vec<SafekeeperPersistence> = self
+            .with_measured_conn(
+                DatabaseOperation::ListNodes,
+                move |conn| -> DatabaseResult<_> {
+                    Ok(crate::schema::safekeepers::table.load::<SafekeeperPersistence>(conn)?)
+                },
+            )
+            .await?;
+
+        tracing::info!("list_safekeepers: loaded {} nodes", safekeepers.len());
+
+        Ok(safekeepers)
+    }
+
+    pub(crate) async fn safekeeper_get(
+        &self,
+        id: i64,
+    ) -> Result<SafekeeperPersistence, DatabaseError> {
+        use crate::schema::safekeepers::dsl::{id as id_column, safekeepers};
+        self.with_conn(move |conn| -> DatabaseResult<SafekeeperPersistence> {
+            Ok(safekeepers
+                .filter(id_column.eq(&id))
+                .select(SafekeeperPersistence::as_select())
+                .get_result(conn)?)
+        })
+        .await
+    }
+
+    pub(crate) async fn safekeeper_upsert(
+        &self,
+        record: SafekeeperUpsert,
+    ) -> Result<(), DatabaseError> {
+        use crate::schema::safekeepers::dsl::*;
+
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            let bind = record
+                .as_insert_or_update()
+                .map_err(|e| DatabaseError::Logical(format!("{e}")))?;
+
+            let inserted_updated = diesel::insert_into(safekeepers)
+                .values(&bind)
+                .on_conflict(id)
+                .do_update()
+                .set(&bind)
+                .execute(conn)?;
+
+            if inserted_updated != 1 {
+                return Err(DatabaseError::Logical(format!(
+                    "unexpected number of rows ({})",
+                    inserted_updated
+                )));
+            }
+
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn set_safekeeper_scheduling_policy(
+        &self,
+        id_: i64,
+        scheduling_policy_: SkSchedulingPolicy,
+    ) -> Result<(), DatabaseError> {
+        use crate::schema::safekeepers::dsl::*;
+
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            #[derive(Insertable, AsChangeset)]
+            #[diesel(table_name = crate::schema::safekeepers)]
+            struct UpdateSkSchedulingPolicy<'a> {
+                id: i64,
+                scheduling_policy: &'a str,
+            }
+            let scheduling_policy_ = String::from(scheduling_policy_);
+
+            let rows_affected = diesel::update(safekeepers.filter(id.eq(id_)))
+                .set(scheduling_policy.eq(scheduling_policy_))
+                .execute(conn)?;
+
+            if rows_affected != 1 {
+                return Err(DatabaseError::Logical(format!(
+                    "unexpected number of rows ({rows_affected})",
+                )));
+            }
+
+            Ok(())
+        })
+        .await
+    }
 }
 
 /// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
-#[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Clone, Eq, PartialEq)]
+#[derive(
+    QueryableByName, Queryable, Selectable, Insertable, Serialize, Deserialize, Clone, Eq, PartialEq,
+)]
 #[diesel(table_name = crate::schema::tenant_shards)]
 pub(crate) struct TenantShardPersistence {
     #[serde(default)]
@@ -884,6 +1171,11 @@ pub(crate) struct TenantShardPersistence {
     pub(crate) config: String,
     #[serde(default)]
     pub(crate) scheduling_policy: String,
+
+    // Hint that we should attempt to schedule this tenant shard the given
+    // availability zone in order to minimise the chances of cross-AZ communication
+    // with compute.
+    pub(crate) preferred_az_id: Option<String>,
 }
 
 impl TenantShardPersistence {
@@ -918,6 +1210,7 @@ pub(crate) struct NodePersistence {
     pub(crate) listen_http_port: i32,
     pub(crate) listen_pg_addr: String,
     pub(crate) listen_pg_port: i32,
+    pub(crate) availability_zone_id: String,
 }
 
 /// Tenant metadata health status that are stored durably.
@@ -983,4 +1276,89 @@ impl From<MetadataHealthPersistence> for MetadataHealthRecord {
 pub(crate) struct ControllerPersistence {
     pub(crate) address: String,
     pub(crate) started_at: chrono::DateTime<chrono::Utc>,
+}
+
+// What we store in the database
+#[derive(Serialize, Deserialize, Queryable, Selectable, Eq, PartialEq, Debug, Clone)]
+#[diesel(table_name = crate::schema::safekeepers)]
+pub(crate) struct SafekeeperPersistence {
+    pub(crate) id: i64,
+    pub(crate) region_id: String,
+    /// 1 is special, it means just created (not currently posted to storcon).
+    /// Zero or negative is not really expected.
+    /// Otherwise the number from `release-$(number_of_commits_on_branch)` tag.
+    pub(crate) version: i64,
+    pub(crate) host: String,
+    pub(crate) port: i32,
+    pub(crate) http_port: i32,
+    pub(crate) availability_zone_id: String,
+    pub(crate) scheduling_policy: String,
+}
+
+impl SafekeeperPersistence {
+    pub(crate) fn as_describe_response(&self) -> Result<SafekeeperDescribeResponse, DatabaseError> {
+        let scheduling_policy =
+            SkSchedulingPolicy::from_str(&self.scheduling_policy).map_err(|e| {
+                DatabaseError::Logical(format!("can't construct SkSchedulingPolicy: {e:?}"))
+            })?;
+        Ok(SafekeeperDescribeResponse {
+            id: NodeId(self.id as u64),
+            region_id: self.region_id.clone(),
+            version: self.version,
+            host: self.host.clone(),
+            port: self.port,
+            http_port: self.http_port,
+            availability_zone_id: self.availability_zone_id.clone(),
+            scheduling_policy,
+        })
+    }
+}
+
+/// What we expect from the upsert http api
+#[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone)]
+pub(crate) struct SafekeeperUpsert {
+    pub(crate) id: i64,
+    pub(crate) region_id: String,
+    /// 1 is special, it means just created (not currently posted to storcon).
+    /// Zero or negative is not really expected.
+    /// Otherwise the number from `release-$(number_of_commits_on_branch)` tag.
+    pub(crate) version: i64,
+    pub(crate) host: String,
+    pub(crate) port: i32,
+    /// The active flag will not be stored in the database and will be ignored.
+    pub(crate) active: Option<bool>,
+    pub(crate) http_port: i32,
+    pub(crate) availability_zone_id: String,
+}
+
+impl SafekeeperUpsert {
+    fn as_insert_or_update(&self) -> anyhow::Result<InsertUpdateSafekeeper<'_>> {
+        if self.version < 0 {
+            anyhow::bail!("negative version: {}", self.version);
+        }
+        Ok(InsertUpdateSafekeeper {
+            id: self.id,
+            region_id: &self.region_id,
+            version: self.version,
+            host: &self.host,
+            port: self.port,
+            http_port: self.http_port,
+            availability_zone_id: &self.availability_zone_id,
+            // None means a wish to not update this column. We expose abilities to update it via other means.
+            scheduling_policy: None,
+        })
+    }
+}
+
+#[derive(Insertable, AsChangeset)]
+#[diesel(table_name = crate::schema::safekeepers)]
+struct InsertUpdateSafekeeper<'a> {
+    id: i64,
+    region_id: &'a str,
+    version: i64,
+    host: &'a str,
+    port: i32,
+    http_port: i32,
+    availability_zone_id: &'a str,
+    scheduling_policy: Option<&'a str>,
 }

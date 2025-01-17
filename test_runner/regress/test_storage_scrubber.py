@@ -1,10 +1,11 @@
+from __future__ import annotations
+
 import os
 import pprint
 import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
@@ -20,7 +21,7 @@ from fixtures.workload import Workload
 
 
 @pytest.mark.parametrize("shard_count", [None, 4])
-def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]):
+def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     """
     Test the `tenant-snapshot` subcommand, which grabs data from remote storage
 
@@ -126,7 +127,7 @@ def drop_local_state(env: NeonEnv, tenant_id: TenantId):
 
 
 @pytest.mark.parametrize("shard_count", [None, 4])
-def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]):
+def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.num_pageservers = 2
 
@@ -135,7 +136,7 @@ def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Opt
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(tenant_id, timeline_id, shard_count=shard_count)
+    env.create_tenant(tenant_id, timeline_id, shard_count=shard_count)
 
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
@@ -151,6 +152,9 @@ def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Opt
 
         # This write includes remote upload, will generate an index in this generation
         workload.write_rows(1)
+
+    # We will use a min_age_secs=1 threshold for deletion, let it pass
+    time.sleep(2)
 
     # With a high min_age, the scrubber should decline to delete anything
     gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=3600)
@@ -171,9 +175,7 @@ def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Opt
 
 
 @pytest.mark.parametrize("shard_count", [None, 2])
-def test_scrubber_physical_gc_ancestors(
-    neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]
-):
+def test_scrubber_physical_gc_ancestors(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.num_pageservers = 2
 
@@ -182,7 +184,7 @@ def test_scrubber_physical_gc_ancestors(
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id,
         timeline_id,
         shard_count=shard_count,
@@ -201,6 +203,7 @@ def test_scrubber_physical_gc_ancestors(
             # No PITR, so that as soon as child shards generate an image layer, it covers ancestor deltas
             # and makes them GC'able
             "pitr_interval": "0s",
+            "lsn_lease_length": "0s",
         },
     )
 
@@ -213,6 +216,13 @@ def test_scrubber_physical_gc_ancestors(
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
     workload.write_rows(100)
+
+    # Issue a deletion queue flush so that the parent shard can't leave behind layers
+    # that will look like unexpected garbage to the scrubber
+    for pre_split_shard in env.storage_controller.locate(tenant_id):
+        env.get_pageserver(pre_split_shard["node_id"]).http_client().deletion_queue_flush(
+            execute=True
+        )
 
     new_shard_count = 4
     assert shard_count is None or new_shard_count > shard_count
@@ -229,6 +239,7 @@ def test_scrubber_physical_gc_ancestors(
     workload.write_rows(100, upload=False)
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
+        assert ps is not None
         log.info(f"Waiting for shard {shard} on pageserver {ps.id}")
         ps.http_client().timeline_checkpoint(
             shard, timeline_id, compact=False, wait_until_uploaded=True
@@ -254,7 +265,10 @@ def test_scrubber_physical_gc_ancestors(
     workload.churn_rows(100)
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
-        ps.http_client().timeline_compact(shard, timeline_id, force_image_layer_creation=True)
+        assert ps is not None
+        ps.http_client().timeline_compact(
+            shard, timeline_id, force_image_layer_creation=True, wait_until_uploaded=True
+        )
         ps.http_client().timeline_gc(shard, timeline_id, 0)
 
     # We will use a min_age_secs=1 threshold for deletion, let it pass
@@ -292,7 +306,7 @@ def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id,
         timeline_id,
         shard_count=None,
@@ -318,10 +332,17 @@ def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder
     workload.write_rows(100, upload=False)
     workload.stop()
 
+    # Issue a deletion queue flush so that the parent shard can't leave behind layers
+    # that will look like unexpected garbage to the scrubber
+    ps = env.get_tenant_pageserver(tenant_id)
+    assert ps is not None
+    ps.http_client().deletion_queue_flush(execute=True)
+
     new_shard_count = 4
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
+        assert ps is not None
         log.info(f"Waiting for shard {shard} on pageserver {ps.id}")
         ps.http_client().timeline_checkpoint(
             shard, timeline_id, compact=False, wait_until_uploaded=True
@@ -370,7 +391,7 @@ def test_scrubber_physical_gc_ancestors_split(neon_env_builder: NeonEnvBuilder):
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
     initial_shard_count = 2
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id,
         timeline_id,
         shard_count=initial_shard_count,
@@ -412,8 +433,6 @@ def test_scrubber_physical_gc_ancestors_split(neon_env_builder: NeonEnvBuilder):
 
         # Let the controller reach the failpoint
         wait_until(
-            10,
-            1,
             lambda: env.storage_controller.assert_log_contains(
                 'failpoint "shard-split-post-remote-sleep": sleeping'
             ),
@@ -474,7 +493,7 @@ def test_scrubber_physical_gc_ancestors_split(neon_env_builder: NeonEnvBuilder):
 
 @pytest.mark.parametrize("shard_count", [None, 4])
 def test_scrubber_scan_pageserver_metadata(
-    neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]
+    neon_env_builder: NeonEnvBuilder, shard_count: int | None
 ):
     """
     Create some layers. Delete an object listed in index. Run scrubber and see if it detects the defect.
@@ -555,4 +574,10 @@ def test_scrubber_scan_pageserver_metadata(
     unhealthy = env.storage_controller.metadata_health_list_unhealthy()["unhealthy_tenant_shards"]
     assert len(unhealthy) == 1 and unhealthy[0] == str(tenant_shard_id)
 
-    neon_env_builder.disable_scrub_on_exit()
+    healthy, _ = env.storage_scrubber.scan_metadata()
+    assert not healthy
+    env.storage_scrubber.allowed_errors.append(".*not present in remote storage.*")
+    healthy, _ = env.storage_scrubber.scan_metadata()
+    assert healthy
+
+    neon_env_builder.disable_scrub_on_exit()  # We already ran scrubber, no need to do an extra run

@@ -1,0 +1,21 @@
+[package]
+name = "tokio-postgres2"
+version = "0.1.0"
+edition = "2021"
+license = "MIT/Apache-2.0"
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+byteorder.workspace = true
+fallible-iterator.workspace = true
+futures-util = { workspace = true, features = ["sink"] }
+log = "0.4"
+parking_lot.workspace = true
+percent-encoding = "2.0"
+pin-project-lite.workspace = true
+phf = "0.11"
+postgres-protocol2 = { path = "../postgres-protocol2" }
+postgres-types2 = { path = "../postgres-types2" }
+tokio = { workspace = true, features = ["io-util", "time", "net"] }
+tokio-util = { workspace = true, features = ["codec"] }

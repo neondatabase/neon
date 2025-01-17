@@ -1,8 +1,8 @@
 use anyhow::Context;
 use camino::Utf8Path;
 use futures::StreamExt;
-use remote_storage::ListingMode;
-use remote_storage::RemotePath;
+use remote_storage::{DownloadError, DownloadOpts, ListingMode, ListingObject, RemotePath};
+use std::ops::Bound;
 use std::sync::Arc;
 use std::{collections::HashSet, num::NonZeroU32};
 use test_context::test_context;
@@ -199,6 +199,138 @@ async fn list_no_delimiter_works(
     Ok(())
 }
 
+/// Tests that giving a partial prefix returns all matches (e.g. "/foo" yields "/foobar/baz"),
+/// but only with NoDelimiter.
+#[test_context(MaybeEnabledStorageWithSimpleTestBlobs)]
+#[tokio::test]
+async fn list_partial_prefix(
+    ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs,
+) -> anyhow::Result<()> {
+    let ctx = match ctx {
+        MaybeEnabledStorageWithSimpleTestBlobs::Enabled(ctx) => ctx,
+        MaybeEnabledStorageWithSimpleTestBlobs::Disabled => return Ok(()),
+        MaybeEnabledStorageWithSimpleTestBlobs::UploadsFailed(e, _) => {
+            anyhow::bail!("S3 init failed: {e:?}")
+        }
+    };
+
+    let cancel = CancellationToken::new();
+    let test_client = Arc::clone(&ctx.enabled.client);
+
+    // Prefix "fold" should match all "folder{i}" directories with NoDelimiter.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("fold")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert_eq!(&objects, &ctx.remote_blobs);
+
+    // Prefix "fold" matches nothing with WithDelimiter.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("fold")?),
+            ListingMode::WithDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert!(objects.is_empty());
+
+    // Prefix "" matches everything.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert_eq!(&objects, &ctx.remote_blobs);
+
+    // Prefix "" matches nothing with WithDelimiter.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("")?),
+            ListingMode::WithDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert!(objects.is_empty());
+
+    // Prefix "foo" matches nothing.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("foo")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert!(objects.is_empty());
+
+    // Prefix "folder2/blob" matches.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("folder2/blob")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    let expect: HashSet<_> = ctx
+        .remote_blobs
+        .iter()
+        .filter(|o| o.get_path().starts_with("folder2"))
+        .cloned()
+        .collect();
+    assert_eq!(&objects, &expect);
+
+    // Prefix "folder2/foo" matches nothing.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("folder2/foo")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert!(objects.is_empty());
+
+    Ok(())
+}
+
 #[test_context(MaybeEnabledStorage)]
 #[tokio::test]
 async fn delete_non_exising_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
@@ -265,6 +397,80 @@ async fn delete_objects_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<(
     Ok(())
 }
 
+/// Tests that delete_prefix() will delete all objects matching a prefix, including
+/// partial prefixes (i.e. "/foo" matches "/foobar").
+#[test_context(MaybeEnabledStorageWithSimpleTestBlobs)]
+#[tokio::test]
+async fn delete_prefix(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> anyhow::Result<()> {
+    let ctx = match ctx {
+        MaybeEnabledStorageWithSimpleTestBlobs::Enabled(ctx) => ctx,
+        MaybeEnabledStorageWithSimpleTestBlobs::Disabled => return Ok(()),
+        MaybeEnabledStorageWithSimpleTestBlobs::UploadsFailed(e, _) => {
+            anyhow::bail!("S3 init failed: {e:?}")
+        }
+    };
+
+    let cancel = CancellationToken::new();
+    let test_client = Arc::clone(&ctx.enabled.client);
+
+    /// Asserts that the S3 listing matches the given paths.
+    macro_rules! assert_list {
+        ($expect:expr) => {{
+            let listing = test_client
+                .list(None, ListingMode::NoDelimiter, None, &cancel)
+                .await?
+                .keys
+                .into_iter()
+                .map(|o| o.key)
+                .collect();
+            assert_eq!($expect, listing);
+        }};
+    }
+
+    // We start with the full set of uploaded files.
+    let mut expect = ctx.remote_blobs.clone();
+
+    // Deleting a non-existing prefix should do nothing.
+    test_client
+        .delete_prefix(&RemotePath::from_string("xyz")?, &cancel)
+        .await?;
+    assert_list!(expect);
+
+    // Prefixes are case-sensitive.
+    test_client
+        .delete_prefix(&RemotePath::from_string("Folder")?, &cancel)
+        .await?;
+    assert_list!(expect);
+
+    // Deleting a path which overlaps with an existing object should do nothing. We pick the first
+    // path in the set as our common prefix.
+    let path = expect.iter().next().expect("empty set").clone().join("xyz");
+    test_client.delete_prefix(&path, &cancel).await?;
+    assert_list!(expect);
+
+    // Deleting an exact path should work. We pick the first path in the set.
+    let path = expect.iter().next().expect("empty set").clone();
+    test_client.delete_prefix(&path, &cancel).await?;
+    expect.remove(&path);
+    assert_list!(expect);
+
+    // Deleting a prefix should delete all matching objects.
+    test_client
+        .delete_prefix(&RemotePath::from_string("folder0/blob_")?, &cancel)
+        .await?;
+    expect.retain(|p| !p.get_path().as_str().starts_with("folder0/"));
+    assert_list!(expect);
+
+    // Deleting a common prefix should delete all objects.
+    test_client
+        .delete_prefix(&RemotePath::from_string("fold")?, &cancel)
+        .await?;
+    expect.clear();
+    assert_list!(expect);
+
+    Ok(())
+}
+
 #[test_context(MaybeEnabledStorage)]
 #[tokio::test]
 async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
@@ -284,14 +490,25 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     ctx.client.upload(data, len, &path, None, &cancel).await?;
 
     // Normal download request
-    let dl = ctx.client.download(&path, &cancel).await?;
+    let dl = ctx
+        .client
+        .download(&path, &DownloadOpts::default(), &cancel)
+        .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
     // Full range (end specified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 0, Some(len as u64), &cancel)
+        .download(
+            &path,
+            &DownloadOpts {
+                byte_start: Bound::Included(0),
+                byte_end: Bound::Excluded(len as u64),
+                ..Default::default()
+            },
+            &cancel,
+        )
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
@@ -299,7 +516,15 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     // partial range (end specified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 4, Some(10), &cancel)
+        .download(
+            &path,
+            &DownloadOpts {
+                byte_start: Bound::Included(4),
+                byte_end: Bound::Excluded(10),
+                ..Default::default()
+            },
+            &cancel,
+        )
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[4..10]);
@@ -307,7 +532,15 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     // partial range (end beyond real end)
     let dl = ctx
         .client
-        .download_byte_range(&path, 8, Some(len as u64 * 100), &cancel)
+        .download(
+            &path,
+            &DownloadOpts {
+                byte_start: Bound::Included(8),
+                byte_end: Bound::Excluded(len as u64 * 100),
+                ..Default::default()
+            },
+            &cancel,
+        )
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[8..]);
@@ -315,7 +548,14 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     // Partial range (end unspecified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 4, None, &cancel)
+        .download(
+            &path,
+            &DownloadOpts {
+                byte_start: Bound::Included(4),
+                ..Default::default()
+            },
+            &cancel,
+        )
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[4..]);
@@ -323,7 +563,14 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     // Full range (end unspecified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 0, None, &cancel)
+        .download(
+            &path,
+            &DownloadOpts {
+                byte_start: Bound::Included(0),
+                ..Default::default()
+            },
+            &cancel,
+        )
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
@@ -333,6 +580,54 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
         .delete(&path, &cancel)
         .await
         .with_context(|| format!("{path:?} removal"))?;
+
+    Ok(())
+}
+
+/// Tests that conditional downloads work properly, by returning
+/// DownloadError::Unmodified when the object ETag matches the given ETag.
+#[test_context(MaybeEnabledStorage)]
+#[tokio::test]
+async fn download_conditional(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
+    let MaybeEnabledStorage::Enabled(ctx) = ctx else {
+        return Ok(());
+    };
+    let cancel = CancellationToken::new();
+
+    // Create a file.
+    let path = RemotePath::new(Utf8Path::new(format!("{}/file", ctx.base_prefix).as_str()))?;
+    let data = bytes::Bytes::from_static("foo".as_bytes());
+    let (stream, len) = wrap_stream(data);
+    ctx.client.upload(stream, len, &path, None, &cancel).await?;
+
+    // Download it to obtain its etag.
+    let mut opts = DownloadOpts::default();
+    let download = ctx.client.download(&path, &opts, &cancel).await?;
+
+    // Download with the etag yields DownloadError::Unmodified.
+    opts.etag = Some(download.etag);
+    let result = ctx.client.download(&path, &opts, &cancel).await;
+    assert!(
+        matches!(result, Err(DownloadError::Unmodified)),
+        "expected DownloadError::Unmodified, got {result:?}"
+    );
+
+    // Replace the file contents.
+    let data = bytes::Bytes::from_static("bar".as_bytes());
+    let (stream, len) = wrap_stream(data);
+    ctx.client.upload(stream, len, &path, None, &cancel).await?;
+
+    // A download with the old etag should yield the new file.
+    let download = ctx.client.download(&path, &opts, &cancel).await?;
+    assert_ne!(download.etag, opts.etag.unwrap(), "ETag did not change");
+
+    // A download with the new etag should yield Unmodified again.
+    opts.etag = Some(download.etag);
+    let result = ctx.client.download(&path, &opts, &cancel).await;
+    assert!(
+        matches!(result, Err(DownloadError::Unmodified)),
+        "expected DownloadError::Unmodified, got {result:?}"
+    );
 
     Ok(())
 }
@@ -364,7 +659,10 @@ async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
     // Normal download request
     ctx.client.copy_object(&path, &path_dest, &cancel).await?;
 
-    let dl = ctx.client.download(&path_dest, &cancel).await?;
+    let dl = ctx
+        .client
+        .download(&path_dest, &DownloadOpts::default(), &cancel)
+        .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
@@ -373,6 +671,59 @@ async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
         .delete_objects(&[path.clone(), path_dest.clone()], &cancel)
         .await
         .with_context(|| format!("{path:?} removal"))?;
+
+    Ok(())
+}
+
+/// Tests that head_object works properly.
+#[test_context(MaybeEnabledStorage)]
+#[tokio::test]
+async fn head_object(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
+    let MaybeEnabledStorage::Enabled(ctx) = ctx else {
+        return Ok(());
+    };
+    let cancel = CancellationToken::new();
+
+    let path = RemotePath::new(Utf8Path::new(format!("{}/file", ctx.base_prefix).as_str()))?;
+
+    // Errors on missing file.
+    let result = ctx.client.head_object(&path, &cancel).await;
+    assert!(
+        matches!(result, Err(DownloadError::NotFound)),
+        "expected NotFound, got {result:?}"
+    );
+
+    // Create the file.
+    let data = bytes::Bytes::from_static("foo".as_bytes());
+    let (stream, len) = wrap_stream(data);
+    ctx.client.upload(stream, len, &path, None, &cancel).await?;
+
+    // Fetch the head metadata.
+    let object = ctx.client.head_object(&path, &cancel).await?;
+    assert_eq!(
+        object,
+        ListingObject {
+            key: path.clone(),
+            last_modified: object.last_modified, // ignore
+            size: 3
+        }
+    );
+
+    // Wait for a couple of seconds, and then update the file to check the last
+    // modified timestamp.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let data = bytes::Bytes::from_static("bar".as_bytes());
+    let (stream, len) = wrap_stream(data);
+    ctx.client.upload(stream, len, &path, None, &cancel).await?;
+    let new = ctx.client.head_object(&path, &cancel).await?;
+
+    assert!(
+        !new.last_modified
+            .duration_since(object.last_modified)?
+            .is_zero(),
+        "last_modified did not advance"
+    );
 
     Ok(())
 }

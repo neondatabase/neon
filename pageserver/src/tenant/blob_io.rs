@@ -35,7 +35,7 @@ pub struct CompressionInfo {
     pub compressed_size: Option<usize>,
 }
 
-impl<'a> BlockCursor<'a> {
+impl BlockCursor<'_> {
     /// Read a blob into a new buffer.
     pub async fn read_blob(
         &self,
@@ -148,7 +148,7 @@ pub(super) const LEN_COMPRESSION_BIT_MASK: u8 = 0xf0;
 
 /// The maximum size of blobs we support. The highest few bits
 /// are reserved for compression and other further uses.
-const MAX_SUPPORTED_LEN: usize = 0x0fff_ffff;
+pub(crate) const MAX_SUPPORTED_BLOB_LEN: usize = 0x0fff_ffff;
 
 pub(super) const BYTE_UNCOMPRESSED: u8 = 0x80;
 pub(super) const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
@@ -326,7 +326,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                 (self.write_all(io_buf.slice_len(), ctx).await, srcbuf)
             } else {
                 // Write a 4-byte length header
-                if len > MAX_SUPPORTED_LEN {
+                if len > MAX_SUPPORTED_BLOB_LEN {
                     return (
                         (
                             io_buf.slice_len(),

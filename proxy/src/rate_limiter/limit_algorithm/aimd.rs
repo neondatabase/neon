@@ -10,17 +10,17 @@ use super::{LimitAlgorithm, Outcome, Sample};
 ///
 /// Reduces available concurrency by a factor when load-based errors are detected.
 #[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq)]
-pub struct Aimd {
+pub(crate) struct Aimd {
     /// Minimum limit for AIMD algorithm.
-    pub min: usize,
+    pub(crate) min: usize,
     /// Maximum limit for AIMD algorithm.
-    pub max: usize,
+    pub(crate) max: usize,
     /// Decrease AIMD decrease by value in case of error.
-    pub dec: f32,
+    pub(crate) dec: f32,
     /// Increase AIMD increase by value in case of success.
-    pub inc: usize,
+    pub(crate) inc: usize,
     /// A threshold below which the limit won't be increased.
-    pub utilisation: f32,
+    pub(crate) utilisation: f32,
 }
 
 impl LimitAlgorithm for Aimd {
@@ -31,40 +31,46 @@ impl LimitAlgorithm for Aimd {
 
                 if utilisation > self.utilisation {
                     let limit = old_limit + self.inc;
-                    let increased_limit = limit.clamp(self.min, self.max);
-                    if increased_limit > old_limit {
-                        tracing::info!(increased_limit, "limit increased");
+                    let new_limit = limit.clamp(self.min, self.max);
+                    if new_limit > old_limit {
+                        tracing::info!(old_limit, new_limit, "limit increased");
+                    } else {
+                        tracing::debug!(old_limit, new_limit, "limit clamped at max");
                     }
 
-                    increased_limit
+                    new_limit
                 } else {
                     old_limit
                 }
             }
             Outcome::Overload => {
-                let limit = old_limit as f32 * self.dec;
+                let new_limit = old_limit as f32 * self.dec;
 
                 // Floor instead of round, so the limit reduces even with small numbers.
                 // E.g. round(2 * 0.9) = 2, but floor(2 * 0.9) = 1
-                let limit = limit.floor() as usize;
+                let new_limit = new_limit.floor() as usize;
 
-                let limit = limit.clamp(self.min, self.max);
-                tracing::info!(limit, "limit decreased");
-                limit
+                let new_limit = new_limit.clamp(self.min, self.max);
+                if new_limit < old_limit {
+                    tracing::info!(old_limit, new_limit, "limit decreased");
+                } else {
+                    tracing::debug!(old_limit, new_limit, "limit clamped at min");
+                }
+                new_limit
             }
         }
     }
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use std::time::Duration;
 
+    use super::*;
     use crate::rate_limiter::limit_algorithm::{
         DynamicLimiter, RateLimitAlgorithm, RateLimiterConfig,
     };
-
-    use super::*;
 
     #[tokio::test(start_paused = true)]
     async fn increase_decrease() {

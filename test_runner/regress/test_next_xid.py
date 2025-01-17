@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import time
 from pathlib import Path
@@ -189,7 +191,7 @@ def test_import_at_2bil(
 # calculate the SLRU segments that a particular multixid or multixid-offsets falls into.
 BLCKSZ = 8192
 MULTIXACT_OFFSETS_PER_PAGE = int(BLCKSZ / 4)
-SLRU_PAGES_PER_SEGMENT = int(32)
+SLRU_PAGES_PER_SEGMENT = 32
 MXACT_MEMBER_BITS_PER_XACT = 8
 MXACT_MEMBER_FLAGS_PER_BYTE = 1
 MULTIXACT_FLAGBYTES_PER_GROUP = 4
@@ -252,13 +254,13 @@ def advance_multixid_to(
     # missing. That's OK for our purposes. Autovacuum will print some warnings about the
     # missing segments, but will clean it up by truncating the SLRUs up to the new value,
     # closing the gap.
-    segname = "%04X" % MultiXactIdToOffsetSegment(next_multi_xid)
+    segname = f"{MultiXactIdToOffsetSegment(next_multi_xid):04X}"
     log.info(f"Creating dummy segment pg_multixact/offsets/{segname}")
     with open(vanilla_pg.pgdatadir / "pg_multixact" / "offsets" / segname, "w") as of:
         of.write("\0" * SLRU_PAGES_PER_SEGMENT * BLCKSZ)
         of.flush()
 
-    segname = "%04X" % MXOffsetToMemberSegment(next_multi_offset)
+    segname = f"{MXOffsetToMemberSegment(next_multi_offset):04X}"
     log.info(f"Creating dummy segment pg_multixact/members/{segname}")
     with open(vanilla_pg.pgdatadir / "pg_multixact" / "members" / segname, "w") as of:
         of.write("\0" * SLRU_PAGES_PER_SEGMENT * BLCKSZ)
@@ -435,7 +437,9 @@ $$;
 
     # Wait until pageserver has received all the data, and restart the endpoint
     wait_for_wal_insert_lsn(env, endpoint, tenant_id, timeline_id)
-    endpoint.stop(mode="immediate")  # 'immediate' to avoid writing shutdown checkpoint
+    endpoint.stop(
+        mode="immediate", sks_wait_walreceiver_gone=(env.safekeepers, timeline_id)
+    )  # 'immediate' to avoid writing shutdown checkpoint
     endpoint.start()
 
     # Check that the next-multixid value wrapped around correctly

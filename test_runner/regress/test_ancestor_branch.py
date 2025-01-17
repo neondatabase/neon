@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fixtures.common_types import TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
@@ -12,7 +14,7 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     pageserver_http = env.pageserver.http_client()
 
     # Override defaults: 4M checkpoint_distance, disable background compaction and gc.
-    tenant, _ = env.neon_cli.create_tenant(
+    tenant, _ = env.create_tenant(
         conf={
             "checkpoint_distance": "4194304",
             "gc_period": "0s",
@@ -45,7 +47,9 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     log.info(f"LSN after 100k rows: {lsn_100}")
 
     # Create branch1.
-    env.neon_cli.create_branch("branch1", "main", tenant_id=tenant, ancestor_start_lsn=lsn_100)
+    env.create_branch(
+        "branch1", ancestor_branch_name="main", ancestor_start_lsn=lsn_100, tenant_id=tenant
+    )
     endpoint_branch1 = env.endpoints.create_start("branch1", tenant_id=tenant)
 
     branch1_cur = endpoint_branch1.connect().cursor()
@@ -67,7 +71,9 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     log.info(f"LSN after 200k rows: {lsn_200}")
 
     # Create branch2.
-    env.neon_cli.create_branch("branch2", "branch1", tenant_id=tenant, ancestor_start_lsn=lsn_200)
+    env.create_branch(
+        "branch2", ancestor_branch_name="branch1", ancestor_start_lsn=lsn_200, tenant_id=tenant
+    )
     endpoint_branch2 = env.endpoints.create_start("branch2", tenant_id=tenant)
     branch2_cur = endpoint_branch2.connect().cursor()
 

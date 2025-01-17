@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import threading
 import time
 
@@ -9,11 +11,11 @@ from fixtures.utils import wait_until
 # It requires tracking information about replication origins at page server side
 def test_subscriber_restart(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("publisher")
+    env.create_branch("publisher")
     pub = env.endpoints.create("publisher")
     pub.start()
 
-    env.neon_cli.create_branch("subscriber")
+    sub_timeline_id = env.create_branch("subscriber")
     sub = env.endpoints.create("subscriber")
     sub.start()
 
@@ -37,9 +39,7 @@ def test_subscriber_restart(neon_simple_env: NeonEnv):
             scur.execute("CREATE TABLE t (pk integer primary key, sk integer)")
             # scur.execute("CREATE INDEX on t(sk)") # slowdown applying WAL at replica
             pub_conn = f"host=localhost port={pub.pg_port} dbname=postgres user=cloud_admin"
-            # synchronous_commit=on to test a hypothesis for why this test has been flaky.
-            # XXX: Add link to the issue
-            query = f"CREATE SUBSCRIPTION sub CONNECTION '{pub_conn}' PUBLICATION pub with (synchronous_commit=on)"
+            query = f"CREATE SUBSCRIPTION sub CONNECTION '{pub_conn}' PUBLICATION pub"
             scur.execute(query)
             time.sleep(2)  # let initial table sync complete
 
@@ -49,11 +49,11 @@ def test_subscriber_restart(neon_simple_env: NeonEnv):
         for _ in range(n_restarts):
             # restart subscriber
             # time.sleep(2)
-            sub.stop("immediate")
+            sub.stop("immediate", sks_wait_walreceiver_gone=(env.safekeepers, sub_timeline_id))
             sub.start()
 
         thread.join()
         pcur.execute(f"INSERT into t values ({n_records}, 0)")
         n_records += 1
         with sub.cursor() as scur:
-            wait_until(60, 0.5, check_that_changes_propagated)
+            wait_until(check_that_changes_propagated)

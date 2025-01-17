@@ -13,6 +13,7 @@ pub(crate) enum RequestKind {
     List = 3,
     Copy = 4,
     TimeTravel = 5,
+    Head = 6,
 }
 
 use scopeguard::ScopeGuard;
@@ -27,6 +28,7 @@ impl RequestKind {
             List => "list_objects",
             Copy => "copy_object",
             TimeTravel => "time_travel_recover",
+            Head => "head_object",
         }
     }
     const fn as_index(&self) -> usize {
@@ -34,7 +36,8 @@ impl RequestKind {
     }
 }
 
-pub(crate) struct RequestTyped<C>([C; 6]);
+const REQUEST_KIND_COUNT: usize = 7;
+pub(crate) struct RequestTyped<C>([C; REQUEST_KIND_COUNT]);
 
 impl<C> RequestTyped<C> {
     pub(crate) fn get(&self, kind: RequestKind) -> &C {
@@ -43,8 +46,8 @@ impl<C> RequestTyped<C> {
 
     fn build_with(mut f: impl FnMut(RequestKind) -> C) -> Self {
         use RequestKind::*;
-        let mut it = [Get, Put, Delete, List, Copy, TimeTravel].into_iter();
-        let arr = std::array::from_fn::<C, 6, _>(|index| {
+        let mut it = [Get, Put, Delete, List, Copy, TimeTravel, Head].into_iter();
+        let arr = std::array::from_fn::<C, REQUEST_KIND_COUNT, _>(|index| {
             let next = it.next().unwrap();
             assert_eq!(index, next.as_index());
             f(next)
@@ -173,7 +176,9 @@ pub(crate) struct BucketMetrics {
 
 impl Default for BucketMetrics {
     fn default() -> Self {
-        let buckets = [0.01, 0.10, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0];
+        // first bucket 100 microseconds to count requests that do not need to wait at all
+        // and get a permit immediately
+        let buckets = [0.0001, 0.01, 0.10, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0];
 
         let req_seconds = register_histogram_vec!(
             "remote_storage_s3_request_seconds",

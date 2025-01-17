@@ -8,16 +8,16 @@ use pageserver::{
     context::{DownloadBehavior, RequestContext},
     l0_flush::{L0FlushConfig, L0FlushGlobalState},
     page_cache,
-    repository::Value,
     task_mgr::TaskKind,
     tenant::storage_layer::InMemoryLayer,
     virtual_file,
 };
-use pageserver_api::{key::Key, shard::TenantShardId};
+use pageserver_api::{key::Key, shard::TenantShardId, value::Value};
 use utils::{
     bin_ser::BeSer,
     id::{TenantId, TimelineId},
 };
+use wal_decoder::serialized_batch::SerializedValueBatch;
 
 // A very cheap hash for generating non-sequential keys.
 fn murmurhash32(mut h: u32) -> u32 {
@@ -62,16 +62,18 @@ async fn ingest(
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
     let gate = utils::sync::gate::Gate::default();
-    let entered = gate.enter().unwrap();
 
-    let layer =
-        InMemoryLayer::create(conf, timeline_id, tenant_shard_id, lsn, entered, &ctx).await?;
+    let layer = InMemoryLayer::create(conf, timeline_id, tenant_shard_id, lsn, &gate, &ctx).await?;
 
-    let data = Value::Image(Bytes::from(vec![0u8; put_size])).ser()?;
+    let data = Value::Image(Bytes::from(vec![0u8; put_size]));
+    let data_ser_size = data.serialized_size().unwrap() as usize;
     let ctx = RequestContext::new(
         pageserver::task_mgr::TaskKind::WalReceiverConnectionHandler,
         pageserver::context::DownloadBehavior::Download,
     );
+
+    const BATCH_SIZE: usize = 16;
+    let mut batch = Vec::new();
 
     for i in 0..put_count {
         lsn += put_size as u64;
@@ -95,7 +97,17 @@ async fn ingest(
             }
         }
 
-        layer.put_value(key.to_compact(), lsn, &data, &ctx).await?;
+        batch.push((key.to_compact(), lsn, data_ser_size, data.clone()));
+        if batch.len() >= BATCH_SIZE {
+            let this_batch = std::mem::take(&mut batch);
+            let serialized = SerializedValueBatch::from_values(this_batch);
+            layer.put_batch(serialized, &ctx).await?;
+        }
+    }
+    if !batch.is_empty() {
+        let this_batch = std::mem::take(&mut batch);
+        let serialized = SerializedValueBatch::from_values(this_batch);
+        layer.put_batch(serialized, &ctx).await?;
     }
     layer.freeze(lsn + 1).await;
 
@@ -149,7 +161,12 @@ fn criterion_benchmark(c: &mut Criterion) {
     let conf: &'static PageServerConf = Box::leak(Box::new(
         pageserver::config::PageServerConf::dummy_conf(temp_dir.path().to_path_buf()),
     ));
-    virtual_file::init(16384, virtual_file::io_engine_for_bench());
+    virtual_file::init(
+        16384,
+        virtual_file::io_engine_for_bench(),
+        conf.virtual_file_io_mode,
+        virtual_file::SyncMode::Sync,
+    );
     page_cache::init(conf.page_cache_size);
 
     {

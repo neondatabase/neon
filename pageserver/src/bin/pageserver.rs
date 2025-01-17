@@ -5,6 +5,7 @@
 use std::env;
 use std::env::{var, VarError};
 use std::io::Read;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use clap::{Arg, ArgAction, Command};
 
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
 use pageserver::config::PageserverIdentity;
-use pageserver::control_plane_client::ControlPlaneClient;
+use pageserver::controller_upcall_client::ControllerUpcallClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::{COMPUTE_REQUEST_RUNTIME, WALRECEIVER_RUNTIME};
@@ -36,6 +37,7 @@ use pageserver::{
     virtual_file,
 };
 use postgres_backend::AuthType;
+use utils::crashsafe::syncfs;
 use utils::failpoint_support;
 use utils::logging::TracingErrorLayerEnablement;
 use utils::{
@@ -50,6 +52,13 @@ project_build_tag!(BUILD_TAG);
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// Configure jemalloc to profile heap allocations by sampling stack traces every 2 MB (1 << 21).
+/// This adds roughly 3% overhead for allocations on average, which is acceptable considering
+/// performance-sensitive code will avoid allocations as far as possible anyway.
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 const PID_FILE_NAME: &str = "pageserver.pid";
 
@@ -123,20 +132,66 @@ fn main() -> anyhow::Result<()> {
 
     // after setting up logging, log the effective IO engine choice and read path implementations
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
-    info!(?conf.virtual_file_direct_io, "starting with virtual_file Direct IO settings");
-    info!(?conf.compact_level0_phase1_value_access, "starting with setting for compact_level0_phase1_value_access");
+    info!(?conf.virtual_file_io_mode, "starting with virtual_file IO mode");
+    info!(?conf.wal_receiver_protocol, "starting with WAL receiver protocol");
+    info!(?conf.page_service_pipelining, "starting with page service pipelining config");
 
+    // The tenants directory contains all the pageserver local disk state.
+    // Create if not exists and make sure all the contents are durable before proceeding.
+    // Ensuring durability eliminates a whole bug class where we come up after an unclean shutdown.
+    // After unclea shutdown, we don't know if all the filesystem content we can read via syscalls is actually durable or not.
+    // Examples for that: OOM kill, systemd killing us during shutdown, self abort due to unrecoverable IO error.
     let tenants_path = conf.tenants_path();
-    if !tenants_path.exists() {
-        utils::crashsafe::create_dir_all(conf.tenants_path())
-            .with_context(|| format!("Failed to create tenants root dir at '{tenants_path}'"))?;
+    {
+        let open = || {
+            nix::dir::Dir::open(
+                tenants_path.as_std_path(),
+                nix::fcntl::OFlag::O_DIRECTORY | nix::fcntl::OFlag::O_RDONLY,
+                nix::sys::stat::Mode::empty(),
+            )
+        };
+        let dirfd = match open() {
+            Ok(dirfd) => dirfd,
+            Err(e) => match e {
+                nix::errno::Errno::ENOENT => {
+                    utils::crashsafe::create_dir_all(&tenants_path).with_context(|| {
+                        format!("Failed to create tenants root dir at '{tenants_path}'")
+                    })?;
+                    open().context("open tenants dir after creating it")?
+                }
+                e => anyhow::bail!(e),
+            },
+        };
+
+        if conf.no_sync {
+            info!("Skipping syncfs on startup");
+        } else {
+            let started = Instant::now();
+            syncfs(dirfd)?;
+            let elapsed = started.elapsed();
+            info!(
+                elapsed_ms = elapsed.as_millis(),
+                "made tenant directory contents durable"
+            );
+        }
     }
 
     // Initialize up failpoints support
     let scenario = failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
-    virtual_file::init(conf.max_file_descriptors, conf.virtual_file_io_engine);
+    tracing::info!("Initializing virtual_file...");
+    virtual_file::init(
+        conf.max_file_descriptors,
+        conf.virtual_file_io_engine,
+        conf.virtual_file_io_mode,
+        if conf.no_sync {
+            virtual_file::SyncMode::UnsafeNoSync
+        } else {
+            virtual_file::SyncMode::Sync
+        },
+    );
+    tracing::info!("Initializing page_cache...");
     page_cache::init(conf.page_cache_size);
 
     start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
@@ -172,27 +227,15 @@ fn initialize_config(
         }
     };
 
-    let config: toml_edit::Document = match std::fs::File::open(cfg_file_path) {
-        Ok(mut f) => {
-            let md = f.metadata().context("stat config file")?;
-            if md.is_file() {
-                let mut s = String::new();
-                f.read_to_string(&mut s).context("read config file")?;
-                s.parse().context("parse config file toml")?
-            } else {
-                anyhow::bail!("directory entry exists but is not a file: {cfg_file_path}");
-            }
-        }
-        Err(e) => {
-            anyhow::bail!("open pageserver config: {e}: {cfg_file_path}");
-        }
-    };
-
-    debug!("Using pageserver toml: {config}");
-
-    // Construct the runtime representation
-    let conf = PageServerConf::parse_and_validate(identity.id, &config, workdir)
-        .context("Failed to parse pageserver configuration")?;
+    let config_file_contents =
+        std::fs::read_to_string(cfg_file_path).context("read config file from filesystem")?;
+    let config_toml = serde_path_to_error::deserialize(
+        toml_edit::de::Deserializer::from_str(&config_file_contents)
+            .context("build toml deserializer")?,
+    )
+    .context("deserialize config toml")?;
+    let conf = PageServerConf::parse_and_validate(identity.id, config_toml, workdir)
+        .context("runtime-validation of config toml")?;
 
     Ok(Box::leak(Box::new(conf)))
 }
@@ -267,7 +310,7 @@ fn start_pageserver(
         pageserver::metrics::tokio_epoll_uring::Collector::new(),
     ))
     .unwrap();
-    pageserver::preinitialize_metrics();
+    pageserver::preinitialize_metrics(conf);
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes
@@ -372,12 +415,10 @@ fn start_pageserver(
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
         remote_storage.clone(),
-        ControlPlaneClient::new(conf, &shutdown_pageserver),
+        ControllerUpcallClient::new(conf, &shutdown_pageserver),
         conf,
     );
-    if let Some(deletion_workers) = deletion_workers {
-        deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
-    }
+    deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.
@@ -551,7 +592,7 @@ fn start_pageserver(
             .build()
             .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
-        let server = hyper::Server::from_tcp(http_listener)?
+        let server = hyper0::Server::from_tcp(http_listener)?
             .serve(service)
             .with_graceful_shutdown({
                 let cancel = cancel.clone();
@@ -597,45 +638,59 @@ fn start_pageserver(
         tokio::net::TcpListener::from_std(pageserver_listener).context("create tokio listener")?
     });
 
-    let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
-
     // All started up! Now just sit and wait for shutdown signal.
+    BACKGROUND_RUNTIME.block_on(async move {
+        let signal_token = CancellationToken::new();
+        let signal_cancel = signal_token.child_token();
 
-    {
-        BACKGROUND_RUNTIME.block_on(async move {
+        // Spawn signal handlers. Runs in a loop since we want to be responsive to multiple signals
+        // even after triggering shutdown (e.g. a SIGQUIT after a slow SIGTERM shutdown). See:
+        // https://github.com/neondatabase/neon/issues/9740.
+        tokio::spawn(async move {
             let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt()).unwrap();
             let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate()).unwrap();
             let mut sigquit = tokio::signal::unix::signal(SignalKind::quit()).unwrap();
-            let signal = tokio::select! {
-                _ = sigquit.recv() => {
-                    info!("Got signal SIGQUIT. Terminating in immediate shutdown mode",);
-                    std::process::exit(111);
+
+            loop {
+                let signal = tokio::select! {
+                    _ = sigquit.recv() => {
+                        info!("Got signal SIGQUIT. Terminating in immediate shutdown mode.");
+                        std::process::exit(111);
+                    }
+                    _ = sigint.recv() => "SIGINT",
+                    _ = sigterm.recv() => "SIGTERM",
+                };
+
+                if !signal_token.is_cancelled() {
+                    info!("Got signal {signal}. Terminating gracefully in fast shutdown mode.");
+                    signal_token.cancel();
+                } else {
+                    info!("Got signal {signal}. Already shutting down.");
                 }
-                _ = sigint.recv() => { "SIGINT" },
-                _ = sigterm.recv() => { "SIGTERM" },
-            };
+            }
+        });
 
-            info!("Got signal {signal}. Terminating gracefully in fast shutdown mode",);
+        // Wait for cancellation signal and shut down the pageserver.
+        //
+        // This cancels the `shutdown_pageserver` cancellation tree. Right now that tree doesn't
+        // reach very far, and `task_mgr` is used instead. The plan is to change that over time.
+        signal_cancel.cancelled().await;
 
-            // This cancels the `shutdown_pageserver` cancellation tree.
-            // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
-            // The plan is to change that over time.
-            shutdown_pageserver.take();
-            pageserver::shutdown_pageserver(
-                http_endpoint_listener,
-                page_service,
-                consumption_metrics_tasks,
-                disk_usage_eviction_task,
-                &tenant_manager,
-                background_purges,
-                deletion_queue.clone(),
-                secondary_controller_tasks,
-                0,
-            )
-            .await;
-            unreachable!()
-        })
-    }
+        shutdown_pageserver.cancel();
+        pageserver::shutdown_pageserver(
+            http_endpoint_listener,
+            page_service,
+            consumption_metrics_tasks,
+            disk_usage_eviction_task,
+            &tenant_manager,
+            background_purges,
+            deletion_queue.clone(),
+            secondary_controller_tasks,
+            0,
+        )
+        .await;
+        unreachable!();
+    })
 }
 
 async fn create_remote_storage_client(

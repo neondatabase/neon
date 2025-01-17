@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonProxy
 

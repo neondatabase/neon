@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::process::exit;
+use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::{thread, time::Duration};
@@ -44,6 +45,8 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
+use compute_tools::disk_quota::set_disk_quota;
+use compute_tools::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use tracing::{error, info, warn};
@@ -56,20 +59,23 @@ use compute_tools::compute::{
     forward_termination_signal, ComputeNode, ComputeState, ParsedSpec, PG_PID,
 };
 use compute_tools::configurator::launch_configurator;
-use compute_tools::extension_server::get_pg_version;
-use compute_tools::http::api::launch_http_server;
+use compute_tools::extension_server::get_pg_version_string;
+use compute_tools::http::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 use compute_tools::swap::resize_swap;
 use rlimit::{setrlimit, Resource};
+use utils::failpoint_support;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
 const BUILD_TAG_DEFAULT: &str = "latest";
 
 fn main() -> Result<()> {
+    let scenario = failpoint_support::init();
+
     let (build_tag, clap_args) = init()?;
 
     // enable core dumping for all child processes
@@ -96,6 +102,8 @@ fn main() -> Result<()> {
     let delay_exit = cleanup_after_postgres_exit(start_pg_result)?;
 
     maybe_delay_exit(delay_exit);
+
+    scenario.teardown();
 
     deinit_and_exit(wait_pg_result);
 }
@@ -150,6 +158,7 @@ fn process_cli(matches: &clap::ArgMatches) -> Result<ProcessCliResult> {
     let spec_json = matches.get_one::<String>("spec");
     let spec_path = matches.get_one::<String>("spec-path");
     let resize_swap_on_bind = matches.get_flag("resize-swap-on-bind");
+    let set_disk_quota_for_fs = matches.get_one::<String>("set-disk-quota-for-fs");
 
     Ok(ProcessCliResult {
         connstr,
@@ -160,6 +169,7 @@ fn process_cli(matches: &clap::ArgMatches) -> Result<ProcessCliResult> {
         spec_json,
         spec_path,
         resize_swap_on_bind,
+        set_disk_quota_for_fs,
     })
 }
 
@@ -172,6 +182,7 @@ struct ProcessCliResult<'clap> {
     spec_json: Option<&'clap String>,
     spec_path: Option<&'clap String>,
     resize_swap_on_bind: bool,
+    set_disk_quota_for_fs: Option<&'clap String>,
 }
 
 fn startup_context_from_env() -> Option<opentelemetry::ContextGuard> {
@@ -213,7 +224,7 @@ fn startup_context_from_env() -> Option<opentelemetry::ContextGuard> {
     }
     if !startup_tracing_carrier.is_empty() {
         use opentelemetry::propagation::TextMapPropagator;
-        use opentelemetry::sdk::propagation::TraceContextPropagator;
+        use opentelemetry_sdk::propagation::TraceContextPropagator;
         let guard = TraceContextPropagator::new()
             .extract(&startup_tracing_carrier)
             .attach();
@@ -235,47 +246,48 @@ fn try_spec_from_cli(
     let compute_id = matches.get_one::<String>("compute-id");
     let control_plane_uri = matches.get_one::<String>("control-plane-uri");
 
-    let spec;
-    let mut live_config_allowed = false;
-    match spec_json {
-        // First, try to get cluster spec from the cli argument
-        Some(json) => {
-            info!("got spec from cli argument {}", json);
-            spec = Some(serde_json::from_str(json)?);
-        }
-        None => {
-            // Second, try to read it from the file if path is provided
-            if let Some(sp) = spec_path {
-                let path = Path::new(sp);
-                let file = File::open(path)?;
-                spec = Some(serde_json::from_reader(file)?);
-                live_config_allowed = true;
-            } else if let Some(id) = compute_id {
-                if let Some(cp_base) = control_plane_uri {
-                    live_config_allowed = true;
-                    spec = match get_spec_from_control_plane(cp_base, id) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!("cannot get response from control plane: {}", e);
-                            panic!("neither spec nor confirmation that compute is in the Empty state was received");
-                        }
-                    };
-                } else {
-                    panic!("must specify both --control-plane-uri and --compute-id or none");
-                }
-            } else {
-                panic!(
-                    "compute spec should be provided by one of the following ways: \
-                    --spec OR --spec-path OR --control-plane-uri and --compute-id"
-                );
-            }
-        }
+    // First, try to get cluster spec from the cli argument
+    if let Some(spec_json) = spec_json {
+        info!("got spec from cli argument {}", spec_json);
+        return Ok(CliSpecParams {
+            spec: Some(serde_json::from_str(spec_json)?),
+            live_config_allowed: false,
+        });
+    }
+
+    // Second, try to read it from the file if path is provided
+    if let Some(spec_path) = spec_path {
+        let file = File::open(Path::new(spec_path))?;
+        return Ok(CliSpecParams {
+            spec: Some(serde_json::from_reader(file)?),
+            live_config_allowed: true,
+        });
+    }
+
+    let Some(compute_id) = compute_id else {
+        panic!(
+            "compute spec should be provided by one of the following ways: \
+                --spec OR --spec-path OR --control-plane-uri and --compute-id"
+        );
+    };
+    let Some(control_plane_uri) = control_plane_uri else {
+        panic!("must specify both --control-plane-uri and --compute-id or none");
     };
 
-    Ok(CliSpecParams {
-        spec,
-        live_config_allowed,
-    })
+    match get_spec_from_control_plane(control_plane_uri, compute_id) {
+        Ok(spec) => Ok(CliSpecParams {
+            spec,
+            live_config_allowed: true,
+        }),
+        Err(e) => {
+            error!(
+                "cannot get response from control plane: {}\n\
+                neither spec nor confirmation that compute is in the Empty state was received",
+                e
+            );
+            Err(e)
+        }
+    }
 }
 
 struct CliSpecParams {
@@ -292,6 +304,7 @@ fn wait_spec(
         pgbin,
         ext_remote_storage,
         resize_swap_on_bind,
+        set_disk_quota_for_fs,
         http_port,
         ..
     }: ProcessCliResult,
@@ -311,11 +324,19 @@ fn wait_spec(
     } else {
         spec_set = false;
     }
+    let connstr = Url::parse(connstr).context("cannot parse connstr as a URL")?;
+    let conn_conf = postgres::config::Config::from_str(connstr.as_str())
+        .context("cannot build postgres config from connstr")?;
+    let tokio_conn_conf = tokio_postgres::config::Config::from_str(connstr.as_str())
+        .context("cannot build tokio postgres config from connstr")?;
     let compute_node = ComputeNode {
-        connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
+        connstr,
+        conn_conf,
+        tokio_conn_conf,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
-        pgversion: get_pg_version(pgbin),
+        pgversion: get_pg_version_string(pgbin),
+        http_port,
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
@@ -366,18 +387,19 @@ fn wait_spec(
         state.start_time = now;
     }
 
+    launch_lsn_lease_bg_task_for_static(&compute);
+
     Ok(WaitSpecResult {
         compute,
-        http_port,
         resize_swap_on_bind,
+        set_disk_quota_for_fs: set_disk_quota_for_fs.cloned(),
     })
 }
 
 struct WaitSpecResult {
     compute: Arc<ComputeNode>,
-    // passed through from ProcessCliResult
-    http_port: u16,
     resize_swap_on_bind: bool,
+    set_disk_quota_for_fs: Option<String>,
 }
 
 fn start_postgres(
@@ -385,21 +407,26 @@ fn start_postgres(
     #[allow(unused_variables)] matches: &clap::ArgMatches,
     WaitSpecResult {
         compute,
-        http_port,
         resize_swap_on_bind,
+        set_disk_quota_for_fs,
     }: WaitSpecResult,
 ) -> Result<(Option<PostgresHandle>, StartPostgresResult)> {
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
-    state.status = ComputeStatus::Init;
-    compute.state_changed.notify_all();
+    state.set_status(ComputeStatus::Init, &compute.state_changed);
 
     info!(
         "running compute with features: {:?}",
         state.pspec.as_ref().unwrap().spec.features
     );
-    // before we release the mutex, fetch the swap size (if any) for later.
-    let swap_size_bytes = state.pspec.as_ref().unwrap().spec.swap_size_bytes;
+    // before we release the mutex, fetch some parameters for later.
+    let &ComputeSpec {
+        swap_size_bytes,
+        disk_quota_bytes,
+        #[cfg(target_os = "linux")]
+        disable_lfc_resizing,
+        ..
+    } = &state.pspec.as_ref().unwrap().spec;
     drop(state);
 
     // Launch remaining service threads
@@ -419,8 +446,8 @@ fn start_postgres(
         // OOM-killed during startup because swap wasn't available yet.
         match resize_swap(size_bytes) {
             Ok(()) => {
-                let size_gib = size_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
-                info!(%size_bytes, %size_gib, "resized swap");
+                let size_mib = size_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
+                info!(%size_bytes, %size_mib, "resized swap");
             }
             Err(err) => {
                 let err = err.context("failed to resize swap");
@@ -429,34 +456,45 @@ fn start_postgres(
                 // Mark compute startup as failed; don't try to start postgres, and report this
                 // error to the control plane when it next asks.
                 prestartup_failed = true;
-                let mut state = compute.state.lock().unwrap();
-                state.error = Some(format!("{err:?}"));
-                state.status = ComputeStatus::Failed;
-                compute.state_changed.notify_all();
+                compute.set_failed_status(err);
                 delay_exit = true;
             }
         }
     }
 
-    let extension_server_port: u16 = http_port;
+    // Set disk quota if the compute spec says so
+    if let (Some(disk_quota_bytes), Some(disk_quota_fs_mountpoint)) =
+        (disk_quota_bytes, set_disk_quota_for_fs)
+    {
+        match set_disk_quota(disk_quota_bytes, &disk_quota_fs_mountpoint) {
+            Ok(()) => {
+                let size_mib = disk_quota_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
+                info!(%disk_quota_bytes, %size_mib, "set disk quota");
+            }
+            Err(err) => {
+                let err = err.context("failed to set disk quota");
+                error!("{err:#}");
+
+                // Mark compute startup as failed; don't try to start postgres, and report this
+                // error to the control plane when it next asks.
+                prestartup_failed = true;
+                compute.set_failed_status(err);
+                delay_exit = true;
+            }
+        }
+    }
 
     // Start Postgres
     let mut pg = None;
     if !prestartup_failed {
-        pg = match compute.start_compute(extension_server_port) {
-            Ok(pg) => Some(pg),
+        pg = match compute.start_compute() {
+            Ok(pg) => {
+                info!(postmaster_pid = %pg.0.id(), "Postgres was started");
+                Some(pg)
+            }
             Err(err) => {
                 error!("could not start the compute node: {:#}", err);
-                let mut state = compute.state.lock().unwrap();
-                state.error = Some(format!("{:?}", err));
-                state.status = ComputeStatus::Failed;
-                // Notify others that Postgres failed to start. In case of configuring the
-                // empty compute, it's likely that API handler is still waiting for compute
-                // state change. With this we will notify it that compute is in Failed state,
-                // so control plane will know about it earlier and record proper error instead
-                // of timeout.
-                compute.state_changed.notify_all();
-                drop(state); // unlock
+                compute.set_failed_status(err);
                 delay_exit = true;
                 None
             }
@@ -496,11 +534,18 @@ fn start_postgres(
             // This token is used internally by the monitor to clean up all threads
             let token = CancellationToken::new();
 
+            // don't pass postgres connection string to vm-monitor if we don't want it to resize LFC
+            let pgconnstr = if disable_lfc_resizing.unwrap_or(false) {
+                None
+            } else {
+                file_cache_connstr.cloned()
+            };
+
             let vm_monitor = rt.as_ref().map(|rt| {
                 rt.spawn(vm_monitor::start(
                     Box::leak(Box::new(vm_monitor::Args {
                         cgroup: cgroup.cloned(),
-                        pgconnstr: file_cache_connstr.cloned(),
+                        pgconnstr,
                         addr: vm_monitor_addr.clone(),
                     })),
                     token.clone(),
@@ -544,6 +589,8 @@ fn wait_postgres(pg: Option<PostgresHandle>) -> Result<WaitPostgresResult> {
     // propagate to Postgres and it will be shut down as well.
     let mut exit_code = None;
     if let Some((mut pg, logs_handle)) = pg {
+        info!(postmaster_pid = %pg.id(), "Waiting for Postgres to exit");
+
         let ecode = pg
             .wait()
             .expect("failed to start waiting on Postgres process");
@@ -746,6 +793,11 @@ fn cli() -> clap::Command {
             Arg::new("resize-swap-on-bind")
                 .long("resize-swap-on-bind")
                 .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("set-disk-quota-for-fs")
+                .long("set-disk-quota-for-fs")
+                .value_name("SET_DISK_QUOTA_FOR_FS")
         )
 }
 

@@ -45,11 +45,14 @@ impl LayerManager {
     pub(crate) fn get_from_key(&self, key: &PersistentLayerKey) -> Layer {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
-        self.layers()
-            .get(key)
+        self.try_get_from_key(key)
             .with_context(|| format!("get layer from key: {key}"))
             .expect("not found")
             .clone()
+    }
+
+    pub(crate) fn try_get_from_key(&self, key: &PersistentLayerKey) -> Option<&Layer> {
+        self.layers().get(key)
     }
 
     pub(crate) fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Layer {
@@ -179,7 +182,7 @@ impl OpenLayerManager {
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
-        gate_guard: utils::sync::gate::GateGuard,
+        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
@@ -209,15 +212,9 @@ impl OpenLayerManager {
                 lsn
             );
 
-            let new_layer = InMemoryLayer::create(
-                conf,
-                timeline_id,
-                tenant_shard_id,
-                start_lsn,
-                gate_guard,
-                ctx,
-            )
-            .await?;
+            let new_layer =
+                InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn, gate, ctx)
+                    .await?;
             let layer = Arc::new(new_layer);
 
             self.layer_map.open_layer = Some(layer.clone());

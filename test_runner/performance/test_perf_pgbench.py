@@ -1,10 +1,11 @@
+from __future__ import annotations
+
 import calendar
 import enum
 import os
 import timeit
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, PgBenchInitResult, PgBenchRunResult
@@ -26,7 +27,7 @@ def utc_now_timestamp() -> int:
 
 
 def init_pgbench(env: PgCompare, cmdline, password: None):
-    environ: Dict[str, str] = {}
+    environ: dict[str, str] = {}
     if password is not None:
         environ["PGPASSWORD"] = password
 
@@ -54,7 +55,7 @@ def init_pgbench(env: PgCompare, cmdline, password: None):
 
 
 def run_pgbench(env: PgCompare, prefix: str, cmdline, password: None):
-    environ: Dict[str, str] = {}
+    environ: dict[str, str] = {}
     if password is not None:
         environ["PGPASSWORD"] = password
 
@@ -177,7 +178,7 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: P
     env.report_size()
 
 
-def get_durations_matrix(default: int = 45) -> List[int]:
+def get_durations_matrix(default: int = 45) -> list[int]:
     durations = os.getenv("TEST_PG_BENCH_DURATIONS_MATRIX", default=str(default))
     rv = []
     for d in durations.split(","):
@@ -193,7 +194,7 @@ def get_durations_matrix(default: int = 45) -> List[int]:
     return rv
 
 
-def get_scales_matrix(default: int = 10) -> List[int]:
+def get_scales_matrix(default: int = 10) -> list[int]:
     scales = os.getenv("TEST_PG_BENCH_SCALES_MATRIX", default=str(default))
     rv = []
     for s in scales.split(","):

@@ -1,33 +1,29 @@
-use crate::proxy::ErrorSource;
-use crate::{
-    cancellation::CancellationHandlerMain,
-    config::ProxyConfig,
-    context::RequestMonitoring,
-    error::{io_error, ReportableError},
-    metrics::Metrics,
-    proxy::{handle_client, ClientMode},
-    rate_limiter::EndpointRateLimiter,
-};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{ready, Context, Poll};
+
 use anyhow::Context as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use framed_websockets::{Frame, OpCode, WebSocketServer};
 use futures::{Sink, Stream};
-use hyper1::upgrade::OnUpgrade;
+use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
 use pin_project_lite::pin_project;
-
-use std::{
-    pin::Pin,
-    sync::Arc,
-    task::{ready, Context, Poll},
-};
 use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use tracing::warn;
+
+use crate::cancellation::CancellationHandlerMain;
+use crate::config::ProxyConfig;
+use crate::context::RequestContext;
+use crate::error::{io_error, ReportableError};
+use crate::metrics::Metrics;
+use crate::proxy::{handle_client, ClientMode, ErrorSource};
+use crate::rate_limiter::EndpointRateLimiter;
 
 pin_project! {
     /// This is a wrapper around a [`WebSocketStream`] that
     /// implements [`AsyncRead`] and [`AsyncWrite`].
-    pub struct WebSocketRw<S> {
+    pub(crate) struct WebSocketRw<S> {
         #[pin]
         stream: WebSocketServer<S>,
         recv: Bytes,
@@ -36,7 +32,7 @@ pin_project! {
 }
 
 impl<S> WebSocketRw<S> {
-    pub fn new(stream: WebSocketServer<S>) -> Self {
+    pub(crate) fn new(stream: WebSocketServer<S>) -> Self {
         Self {
             stream,
             recv: Bytes::new(),
@@ -127,13 +123,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
     }
 }
 
-pub async fn serve_websocket(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn serve_websocket(
     config: &'static ProxyConfig,
-    ctx: RequestMonitoring,
+    auth_backend: &'static crate::auth::Backend<'static, ()>,
+    ctx: RequestContext,
     websocket: OnUpgrade,
     cancellation_handler: Arc<CancellationHandlerMain>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     hostname: Option<String>,
+    cancellations: tokio_util::task::task_tracker::TaskTracker,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
     let websocket = WebSocketServer::after_handshake(TokioIo::new(websocket));
@@ -145,12 +144,14 @@ pub async fn serve_websocket(
 
     let res = Box::pin(handle_client(
         config,
+        auth_backend,
         &ctx,
         cancellation_handler,
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },
         endpoint_rate_limiter,
         conn_gauge,
+        cancellations,
     ))
     .await;
 
@@ -167,7 +168,7 @@ pub async fn serve_websocket(
         Ok(Some(p)) => {
             ctx.set_success();
             ctx.log_connect();
-            match p.proxy_pass().await {
+            match p.proxy_pass(&config.connect_to_compute).await {
                 Ok(()) => Ok(()),
                 Err(ErrorSource::Client(err)) => Err(err).context("client"),
                 Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
@@ -177,19 +178,17 @@ pub async fn serve_websocket(
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use std::pin::pin;
 
     use framed_websockets::WebSocketServer;
     use futures::{SinkExt, StreamExt};
-    use tokio::{
-        io::{duplex, AsyncReadExt, AsyncWriteExt},
-        task::JoinSet,
-    };
-    use tokio_tungstenite::{
-        tungstenite::{protocol::Role, Message},
-        WebSocketStream,
-    };
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+    use tokio::task::JoinSet;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::WebSocketStream;
 
     use super::WebSocketRw;
 

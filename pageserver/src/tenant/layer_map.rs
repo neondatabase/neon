@@ -48,9 +48,9 @@ mod layer_coverage;
 
 use crate::context::RequestContext;
 use crate::keyspace::KeyPartitioning;
-use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use anyhow::Result;
+use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceAccum};
 use range_set_blaze::{CheckSortedDisjoint, RangeSetBlaze};
 use std::collections::{HashMap, VecDeque};
@@ -392,8 +392,8 @@ impl LayerMap {
         image_layer: Option<Arc<PersistentLayerDesc>>,
         end_lsn: Lsn,
     ) -> Option<SearchResult> {
-        assert!(delta_layer.as_ref().map_or(true, |l| l.is_delta()));
-        assert!(image_layer.as_ref().map_or(true, |l| !l.is_delta()));
+        assert!(delta_layer.as_ref().is_none_or(|l| l.is_delta()));
+        assert!(image_layer.as_ref().is_none_or(|l| !l.is_delta()));
 
         match (delta_layer, image_layer) {
             (None, None) => None,
@@ -464,7 +464,7 @@ impl LayerMap {
     pub(self) fn insert_historic_noflush(&mut self, layer_desc: PersistentLayerDesc) {
         // TODO: See #3869, resulting #4088, attempted fix and repro #4094
 
-        if Self::is_l0(&layer_desc.key_range) {
+        if Self::is_l0(&layer_desc.key_range, layer_desc.is_delta) {
             self.l0_delta_layers.push(layer_desc.clone().into());
         }
 
@@ -483,7 +483,7 @@ impl LayerMap {
         self.historic
             .remove(historic_layer_coverage::LayerKey::from(layer_desc));
         let layer_key = layer_desc.key();
-        if Self::is_l0(&layer_desc.key_range) {
+        if Self::is_l0(&layer_desc.key_range, layer_desc.is_delta) {
             let len_before = self.l0_delta_layers.len();
             let mut l0_delta_layers = std::mem::take(&mut self.l0_delta_layers);
             l0_delta_layers.retain(|other| other.key() != layer_key);
@@ -600,8 +600,8 @@ impl LayerMap {
     }
 
     /// Check if the key range resembles that of an L0 layer.
-    pub fn is_l0(key_range: &Range<Key>) -> bool {
-        key_range == &(Key::MIN..Key::MAX)
+    pub fn is_l0(key_range: &Range<Key>, is_delta_layer: bool) -> bool {
+        is_delta_layer && key_range == &(Key::MIN..Key::MAX)
     }
 
     /// This function determines which layers are counted in `count_deltas`:
@@ -628,7 +628,7 @@ impl LayerMap {
     ///      than just the current partition_range.
     pub fn is_reimage_worthy(layer: &PersistentLayerDesc, partition_range: &Range<Key>) -> bool {
         // Case 1
-        if !Self::is_l0(&layer.key_range) {
+        if !Self::is_l0(&layer.key_range, layer.is_delta) {
             return true;
         }
 

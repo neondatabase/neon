@@ -1,21 +1,20 @@
-from dataclasses import dataclass
-from typing import Iterable, List, Union
+from __future__ import annotations
 
-import pytest
+from collections.abc import Iterable
+from dataclasses import dataclass
+
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.pageserver.http import HistoricLayerInfo, LayerMapInfo
-from fixtures.utils import human_bytes
+from fixtures.utils import human_bytes, skip_in_debug_build
 
 
-def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder, build_type: str):
+@skip_in_debug_build("debug run is unnecessarily slow")
+def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder):
     """
     Build a non-small GIN index which includes similarly batched up images in WAL stream as does pgvector
     to show that we no longer create oversized layers.
     """
-
-    if build_type == "debug":
-        pytest.skip("debug run is unnecessarily slow")
 
     minimum_initdb_size = 20 * 1024**2
     checkpoint_distance = 32 * 1024**2
@@ -75,7 +74,7 @@ def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder, bui
     print_layer_size_histogram(post_ingest)
 
     # since all we have are L0s, we should be getting nice L1s and images out of them now
-    ps_http.patch_tenant_config_client_side(
+    env.storage_controller.pageserver_api().update_tenant_config(
         env.initial_tenant,
         {
             "compaction_threshold": 1,
@@ -106,14 +105,12 @@ def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder, bui
 
 @dataclass
 class Histogram:
-    buckets: List[Union[int, float]]
-    counts: List[int]
-    sums: List[int]
+    buckets: list[int | float]
+    counts: list[int]
+    sums: list[int]
 
 
-def histogram_historic_layers(
-    infos: LayerMapInfo, minimum_sizes: List[Union[int, float]]
-) -> Histogram:
+def histogram_historic_layers(infos: LayerMapInfo, minimum_sizes: list[int | float]) -> Histogram:
     def log_layer(layer: HistoricLayerInfo) -> HistoricLayerInfo:
         log.info(
             f"{layer.layer_file_name} {human_bytes(layer.layer_file_size)} ({layer.layer_file_size} bytes)"
@@ -125,7 +122,7 @@ def histogram_historic_layers(
     return histogram(sizes, minimum_sizes)
 
 
-def histogram(sizes: Iterable[int], minimum_sizes: List[Union[int, float]]) -> Histogram:
+def histogram(sizes: Iterable[int], minimum_sizes: list[int | float]) -> Histogram:
     assert all(minimum_sizes[i] < minimum_sizes[i + 1] for i in range(len(minimum_sizes) - 1))
     buckets = list(enumerate(minimum_sizes))
     counts = [0 for _ in buckets]

@@ -1,20 +1,18 @@
-use std::{
-    borrow::Cow,
-    collections::hash_map::RandomState,
-    hash::{BuildHasher, Hash},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Mutex,
-    },
-};
+use std::borrow::Cow;
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use anyhow::bail;
 use dashmap::DashMap;
 use itertools::Itertools;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use tokio::time::{Duration, Instant};
 use tracing::info;
 
+use crate::ext::LockExt;
 use crate::intern::EndpointIdInt;
 
 pub struct GlobalRateLimiter {
@@ -96,9 +94,9 @@ impl RateBucket {
 
 #[derive(Clone, Copy, PartialEq)]
 pub struct RateBucketInfo {
-    pub interval: Duration,
+    pub(crate) interval: Duration,
     // requests per interval
-    pub max_rpi: u32,
+    pub(crate) max_rpi: u32,
 }
 
 impl std::fmt::Display for RateBucketInfo {
@@ -138,6 +136,19 @@ impl RateBucketInfo {
         Self::new(500, Duration::from_secs(1)),
         Self::new(300, Duration::from_secs(60)),
         Self::new(200, Duration::from_secs(600)),
+    ];
+
+    /// All of these are per endpoint-maskedip pair.
+    /// Context: 4096 rounds of pbkdf2 take about 1ms of cpu time to execute (1 milli-cpu-second or 1mcpus).
+    ///
+    /// First bucket: 1000mcpus total per endpoint-ip pair
+    /// * 4096000 requests per second with 1 hash rounds.
+    /// * 1000 requests per second with 4096 hash rounds.
+    /// * 6.8 requests per second with 600000 hash rounds.
+    pub const DEFAULT_AUTH_SET: [Self; 3] = [
+        Self::new(1000 * 4096, Duration::from_secs(1)),
+        Self::new(600 * 4096, Duration::from_secs(60)),
+        Self::new(300 * 4096, Duration::from_secs(600)),
     ];
 
     pub fn rps(&self) -> f64 {
@@ -192,7 +203,7 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
     }
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
-    pub fn check(&self, key: K, n: u32) -> bool {
+    pub(crate) fn check(&self, key: K, n: u32) -> bool {
         // do a partial GC every 2k requests. This cleans up ~ 1/64th of the map.
         // worst case memory usage is about:
         //    = 2 * 2048 * 64 * (48B + 72B)
@@ -228,7 +239,7 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
     /// Clean the map. Simple strategy: remove all entries in a random shard.
     /// At worst, we'll double the effective max_rps during the cleanup.
     /// But that way deletion does not aquire mutex on each entry access.
-    pub fn do_gc(&self) {
+    pub(crate) fn do_gc(&self) {
         info!(
             "cleaning up bucket rate limiter, current size = {}",
             self.map.len()
@@ -236,21 +247,25 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         let n = self.map.shards().len();
         // this lock is ok as the periodic cycle of do_gc makes this very unlikely to collide
         // (impossible, infact, unless we have 2048 threads)
-        let shard = self.rand.lock().unwrap().gen_range(0..n);
+        let shard = self.rand.lock_propagate_poison().gen_range(0..n);
         self.map.shards()[shard].write().clear();
     }
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
-    use std::{hash::BuildHasherDefault, time::Duration};
+    use std::hash::BuildHasherDefault;
+    use std::time::Duration;
 
     use rand::SeedableRng;
     use rustc_hash::FxHasher;
     use tokio::time;
 
     use super::{BucketRateLimiter, WakeComputeRateLimiter};
-    use crate::{intern::EndpointIdInt, rate_limiter::RateBucketInfo, EndpointId};
+    use crate::intern::EndpointIdInt;
+    use crate::rate_limiter::RateBucketInfo;
+    use crate::types::EndpointId;
 
     #[test]
     fn rate_bucket_rpi() {

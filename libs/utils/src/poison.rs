@@ -65,13 +65,15 @@ impl<T> Poison<T> {
     }
 }
 
+/// Armed pointer to a [`Poison`].
+///
 /// Use [`Self::data`] and [`Self::data_mut`] to access the wrapped state.
 /// Once modifications are done, use [`Self::disarm`].
 /// If [`Guard`] gets dropped instead of calling [`Self::disarm`], the state is poisoned
 /// and subsequent calls to [`Poison::check_and_arm`] will fail with an error.
 pub struct Guard<'a, T>(&'a mut Poison<T>);
 
-impl<'a, T> Guard<'a, T> {
+impl<T> Guard<'_, T> {
     pub fn data(&self) -> &T {
         &self.0.data
     }
@@ -92,7 +94,7 @@ impl<'a, T> Guard<'a, T> {
     }
 }
 
-impl<'a, T> Drop for Guard<'a, T> {
+impl<T> Drop for Guard<'_, T> {
     fn drop(&mut self) {
         match self.0.state {
             State::Clean => {

@@ -1,7 +1,7 @@
 //! Tracing wrapper for Hyper HTTP server
 
-use hyper::HeaderMap;
-use hyper::{Body, Request, Response};
+use hyper0::HeaderMap;
+use hyper0::{Body, Request, Response};
 use std::future::Future;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -82,7 +82,7 @@ where
 fn extract_remote_context(headers: &HeaderMap) -> opentelemetry::Context {
     struct HeaderExtractor<'a>(&'a HeaderMap);
 
-    impl<'a> opentelemetry::propagation::Extractor for HeaderExtractor<'a> {
+    impl opentelemetry::propagation::Extractor for HeaderExtractor<'_> {
         fn get(&self, key: &str) -> Option<&str> {
             self.0.get(key).and_then(|value| value.to_str().ok())
         }

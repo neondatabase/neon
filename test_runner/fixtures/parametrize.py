@@ -1,12 +1,18 @@
-import os
-from typing import Any, Dict, Optional
+from __future__ import annotations
 
+import os
+from typing import TYPE_CHECKING
+
+import allure
 import pytest
 import toml
 from _pytest.python import Metafunc
 
 from fixtures.pg_version import PgVersion
-from fixtures.utils import AuxFileStore
+
+if TYPE_CHECKING:
+    from typing import Any
+
 
 """
 Dynamically parametrize tests by different parameters
@@ -14,31 +20,31 @@ Dynamically parametrize tests by different parameters
 
 
 @pytest.fixture(scope="function", autouse=True)
-def pg_version() -> Optional[PgVersion]:
+def pg_version() -> PgVersion | None:
     return None
 
 
 @pytest.fixture(scope="function", autouse=True)
-def build_type() -> Optional[str]:
+def build_type() -> str | None:
+    return None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def platform() -> str | None:
     return None
 
 
 @pytest.fixture(scope="function", autouse=True)
-def platform() -> Optional[str]:
-    return None
-
-
-@pytest.fixture(scope="function", autouse=True)
-def pageserver_virtual_file_io_engine() -> Optional[str]:
+def pageserver_virtual_file_io_engine() -> str | None:
     return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE")
 
 
 @pytest.fixture(scope="function", autouse=True)
-def pageserver_aux_file_policy() -> Optional[AuxFileStore]:
-    return None
+def pageserver_virtual_file_io_mode() -> str | None:
+    return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_MODE")
 
 
-def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[Dict[str, Any]]:
+def get_pageserver_default_tenant_config_compaction_algorithm() -> dict[str, Any] | None:
     toml_table = os.getenv("PAGESERVER_DEFAULT_TENANT_CONFIG_COMPACTION_ALGORITHM")
     if toml_table is None:
         return None
@@ -48,7 +54,7 @@ def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[Dict
 
 
 @pytest.fixture(scope="function", autouse=True)
-def pageserver_default_tenant_config_compaction_algorithm() -> Optional[Dict[str, Any]]:
+def pageserver_default_tenant_config_compaction_algorithm() -> dict[str, Any] | None:
     return get_pageserver_default_tenant_config_compaction_algorithm()
 
 
@@ -60,6 +66,7 @@ def pytest_generate_tests(metafunc: Metafunc):
 
     metafunc.parametrize("build_type", build_types)
 
+    pg_versions: list[PgVersion]
     if (v := os.getenv("DEFAULT_PG_VERSION")) is None:
         pg_versions = [version for version in PgVersion if version != PgVersion.NOT_SET]
     else:
@@ -91,3 +98,24 @@ def pytest_generate_tests(metafunc: Metafunc):
         and (platform := os.getenv("PLATFORM")) is not None
     ):
         metafunc.parametrize("platform", [platform.lower()])
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_makereport(*args, **kwargs):
+    # Add test parameters to Allue report to distinguish the same tests with different parameters.
+    # Names has `__` prefix to avoid conflicts with `pytest.mark.parametrize` parameters
+
+    # A mapping between `uname -m` and `RUNNER_ARCH` values.
+    # `RUNNER_ARCH` environment variable is set on GitHub Runners,
+    # possible values are X86, X64, ARM, or ARM64.
+    # See https://docs.github.com/en/actions/learn-github-actions/variables#default-environment-variables
+    uname_m = {
+        "aarch64": "ARM64",
+        "arm64": "ARM64",
+        "x86_64": "X64",
+    }.get(os.uname().machine, "UNKNOWN")
+    arch = os.getenv("RUNNER_ARCH", uname_m)
+    allure.dynamic.parameter("__arch", arch)
+    allure.dynamic.parameter("__lfc", os.getenv("USE_LFC") != "false")
+
+    yield

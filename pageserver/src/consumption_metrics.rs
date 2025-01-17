@@ -1,6 +1,8 @@
 //! Periodically collect consumption metrics for all active tenants
 //! and push them to a HTTP endpoint.
 use crate::config::PageServerConf;
+use crate::consumption_metrics::metrics::MetricsKey;
+use crate::consumption_metrics::upload::KeyGen as _;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::size::CalculateSyntheticSizeError;
@@ -8,9 +10,11 @@ use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::{mgr::TenantManager, LogicalSizeCalculationCause, Tenant};
 use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
+use itertools::Itertools as _;
 use pageserver_api::models::TenantState;
 use remote_storage::{GenericRemoteStorage, RemoteStorageConfig};
 use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -19,9 +23,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::NodeId;
 
-mod metrics;
-use crate::consumption_metrics::metrics::MetricsKey;
 mod disk_cache;
+mod metrics;
 mod upload;
 
 const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
@@ -33,12 +36,62 @@ const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// upload attempts.
 type RawMetric = (MetricsKey, (EventType, u64));
 
+/// The new serializable metrics format
+#[derive(Serialize, Deserialize)]
+struct NewMetricsRoot {
+    version: usize,
+    metrics: Vec<NewRawMetric>,
+}
+
+impl NewMetricsRoot {
+    pub fn is_v2_metrics(json_value: &serde_json::Value) -> bool {
+        if let Some(ver) = json_value.get("version") {
+            if let Some(2) = ver.as_u64() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// The new serializable metrics format
+#[derive(Serialize)]
+struct NewMetricsRefRoot<'a> {
+    version: usize,
+    metrics: &'a [NewRawMetric],
+}
+
+impl<'a> NewMetricsRefRoot<'a> {
+    fn new(metrics: &'a [NewRawMetric]) -> Self {
+        Self {
+            version: 2,
+            metrics,
+        }
+    }
+}
+
+/// The new serializable metrics format
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct NewRawMetric {
+    key: MetricsKey,
+    kind: EventType,
+    value: u64,
+    // TODO: add generation field and check against generations
+}
+
+impl NewRawMetric {
+    #[cfg(test)]
+    fn to_kv_pair(&self) -> (MetricsKey, NewRawMetric) {
+        (self.key, self.clone())
+    }
+}
+
 /// Caches the [`RawMetric`]s
 ///
 /// In practice, during startup, last sent values are stored here to be used in calculating new
 /// ones. After successful uploading, the cached values are updated to cache. This used to be used
 /// for deduplication, but that is no longer needed.
-type Cache = HashMap<MetricsKey, (EventType, u64)>;
+type Cache = HashMap<MetricsKey, NewRawMetric>;
 
 pub async fn run(
     conf: &'static PageServerConf,
@@ -143,6 +196,12 @@ async fn collect_metrics(
         // these are point in time, with variable "now"
         let metrics = metrics::collect_all_metrics(&tenant_manager, &cached_metrics, &ctx).await;
 
+        // Pre-generate event idempotency keys, to reuse them across the bucket
+        // and HTTP sinks.
+        let idempotency_keys = std::iter::repeat_with(|| node_id.as_str().generate())
+            .take(metrics.len())
+            .collect_vec();
+
         let metrics = Arc::new(metrics);
 
         // why not race cancellation here? because we are one of the last tasks, and if we are
@@ -161,10 +220,16 @@ async fn collect_metrics(
             }
 
             if let Some(bucket_client) = &bucket_client {
-                let res =
-                    upload::upload_metrics_bucket(bucket_client, &cancel, &node_id, &metrics).await;
+                let res = upload::upload_metrics_bucket(
+                    bucket_client,
+                    &cancel,
+                    &node_id,
+                    &metrics,
+                    &idempotency_keys,
+                )
+                .await;
                 if let Err(e) = res {
-                    tracing::error!("failed to upload to S3: {e:#}");
+                    tracing::error!("failed to upload to remote storage: {e:#}");
                 }
             }
         };
@@ -174,9 +239,9 @@ async fn collect_metrics(
                 &client,
                 metric_collection_endpoint,
                 &cancel,
-                &node_id,
                 &metrics,
                 &mut cached_metrics,
+                &idempotency_keys,
             )
             .await;
             if let Err(e) = res {
@@ -217,11 +282,14 @@ async fn restore_and_reschedule(
             // collect_all_metrics
             let earlier_metric_at = found_some
                 .iter()
-                .map(|(_, (et, _))| et.recorded_at())
+                .map(|item| item.kind.recorded_at())
                 .copied()
                 .next();
 
-            let cached = found_some.into_iter().collect::<Cache>();
+            let cached = found_some
+                .into_iter()
+                .map(|item| (item.key, item))
+                .collect::<Cache>();
 
             (cached, earlier_metric_at)
         }

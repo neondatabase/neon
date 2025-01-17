@@ -116,8 +116,6 @@ addSHLL(HyperLogLogState *cState, uint32 hash)
 {
 	uint8		count;
 	uint32		index;
-	size_t		i;
-	size_t		j;
 
 	TimestampTz	now = GetCurrentTimestamp();
 	/* Use the first "k" (registerWidth) bits as a zero based index */

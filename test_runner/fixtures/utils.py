@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import contextlib
-import enum
+import dataclasses
 import json
 import os
 import re
@@ -7,58 +9,74 @@ import subprocess
 import tarfile
 import threading
 import time
+from collections.abc import Callable, Iterable
+from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from typing import (
-    IO,
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Dict,
-    Iterable,
-    List,
-    Optional,
-    Set,
-    Tuple,
-    TypeVar,
-    Union,
-)
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlencode
 
 import allure
+import pytest
 import zstandard
 from psycopg2.extensions import cursor
+from typing_extensions import override
 
+from fixtures.common_types import Id, Lsn
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import (
     parse_delta_layer,
     parse_image_layer,
 )
+from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from typing import IO
+
+    from fixtures.common_types import TimelineId
     from fixtures.neon_fixtures import PgBin
-from fixtures.common_types import TimelineId
+
+    WaitUntilRet = TypeVar("WaitUntilRet")
+
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 
+COMPONENT_BINARIES = {
+    "storage_controller": ("storage_controller",),
+    "storage_broker": ("storage_broker",),
+    "compute": ("compute_ctl",),
+    "safekeeper": ("safekeeper",),
+    "pageserver": ("pageserver", "pagectl"),
+}
+# Disable auto-formatting for better readability
+# fmt: off
+VERSIONS_COMBINATIONS = (
+    {"storage_controller": "new", "storage_broker": "new", "compute": "new", "safekeeper": "new", "pageserver": "new"},
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "old"},
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "new"},
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "new", "pageserver": "new"},
+    {"storage_controller": "old", "storage_broker": "old", "compute": "new", "safekeeper": "new", "pageserver": "new"},
+)
+# fmt: on
 
-def get_self_dir() -> Path:
-    """Get the path to the directory where this script lives."""
-    return Path(__file__).resolve().parent
+# If the environment variable USE_LFC is set and its value is "false", then LFC is disabled for tests.
+# If it is not set or set to a value not equal to "false", LFC is enabled by default.
+USE_LFC = os.environ.get("USE_LFC") != "false"
 
 
 def subprocess_capture(
     capture_dir: Path,
-    cmd: List[str],
+    cmd: list[str],
     *,
-    check=False,
-    echo_stderr=False,
-    echo_stdout=False,
-    capture_stdout=False,
-    timeout=None,
-    with_command_header=True,
+    check: bool = False,
+    echo_stderr: bool = False,
+    echo_stdout: bool = False,
+    capture_stdout: bool = False,
+    timeout: float | None = None,
+    with_command_header: bool = True,
     **popen_kwargs: Any,
-) -> Tuple[str, Optional[str], int]:
+) -> tuple[str, str | None, int]:
     """Run a process and bifurcate its output to files and the `log` logger
 
     stderr and stdout are always captured in files.  They are also optionally
@@ -93,6 +111,7 @@ def subprocess_capture(
             self.capture = capture
             self.captured = ""
 
+        @override
         def run(self):
             first = with_command_header
             for line in self.in_file:
@@ -103,7 +122,7 @@ def subprocess_capture(
                     first = False
                     # prefix the files with the command line so that we can
                     # later understand which file is for what command
-                    self.out_file.write((f"# {' '.join(cmd)}\n\n").encode("utf-8"))
+                    self.out_file.write((f"# {' '.join(cmd)}\n\n").encode())
 
                 # Only bother decoding if we are going to do something more than stream to a file
                 if self.echo or self.capture:
@@ -171,13 +190,13 @@ def global_counter() -> int:
         return _global_counter
 
 
-def print_gc_result(row: Dict[str, Any]):
+def print_gc_result(row: dict[str, Any]):
     log.info("GC duration {elapsed} ms".format_map(row))
     log.info(
-        "  total: {layers_total}, needed_by_cutoff {layers_needed_by_cutoff}, needed_by_pitr {layers_needed_by_pitr}"
-        " needed_by_branches: {layers_needed_by_branches}, not_updated: {layers_not_updated}, removed: {layers_removed}".format_map(
-            row
-        )
+        (
+            "  total: {layers_total}, needed_by_cutoff {layers_needed_by_cutoff}, needed_by_pitr {layers_needed_by_pitr}"
+            " needed_by_branches: {layers_needed_by_branches}, not_updated: {layers_not_updated}, removed: {layers_removed}"
+        ).format_map(row)
     )
 
 
@@ -235,8 +254,8 @@ def get_scale_for_db(size_mb: int) -> int:
     return round(0.06689 * size_mb - 0.5)
 
 
-ATTACHMENT_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html|walredo)"
+ATTACHMENT_NAME_REGEX: re.Pattern[str] = re.compile(
+    r"regression\.(diffs|out)|.+\.(?:log|stderr|stdout|filediff|metrics|html|walredo)"
 )
 
 
@@ -298,7 +317,7 @@ LOGS_STAGING_DATASOURCE_ID = "xHHYY0dVz"
 
 def allure_add_grafana_links(host: str, timeline_id: TimelineId, start_ms: int, end_ms: int):
     """Add links to server logs in Grafana to Allure report"""
-    links = {}
+    links: dict[str, str] = {}
     # We expect host to be in format like ep-divine-night-159320.us-east-2.aws.neon.build
     endpoint_id, region_id, _ = host.split(".", 2)
 
@@ -309,7 +328,7 @@ def allure_add_grafana_links(host: str, timeline_id: TimelineId, start_ms: int, 
         "proxy logs": f'{{neon_service="proxy-scram", neon_region="{region_id}"}}',
     }
 
-    params: Dict[str, Any] = {
+    params: dict[str, Any] = {
         "datasource": LOGS_STAGING_DATASOURCE_ID,
         "queries": [
             {
@@ -350,7 +369,7 @@ def allure_add_grafana_links(host: str, timeline_id: TimelineId, start_ms: int, 
 
 
 def start_in_background(
-    command: list[str], cwd: Path, log_file_name: str, is_started: Fn
+    command: list[str], cwd: Path, log_file_name: str, is_started: Callable[[], WaitUntilRet]
 ) -> subprocess.Popen[bytes]:
     """Starts a process, creates the logfile and redirects stderr and stdout there. Runs the start checks before the process is started, or errors."""
 
@@ -364,15 +383,10 @@ def start_in_background(
             if return_code is not None:
                 error = f"expected subprocess to run but it exited with code {return_code}"
             else:
-                attempts = 10
                 try:
-                    wait_until(
-                        number_of_iterations=attempts,
-                        interval=1,
-                        func=is_started,
-                    )
+                    wait_until(is_started, timeout=10)
                 except Exception:
-                    error = f"Failed to get correct status from subprocess in {attempts} attempts"
+                    error = "Failed to get correct status from subprocess"
         except Exception as e:
             error = f"expected subprocess to start but it failed with exception: {e}"
 
@@ -385,32 +399,32 @@ def start_in_background(
         return spawned_process
 
 
-WaitUntilRet = TypeVar("WaitUntilRet")
-
-
 def wait_until(
-    number_of_iterations: int,
-    interval: float,
     func: Callable[[], WaitUntilRet],
-    show_intermediate_error=False,
+    name: str | None = None,
+    timeout: float = 20.0,  # seconds
+    interval: float = 0.5,  # seconds
+    status_interval: float = 1.0,  # seconds
 ) -> WaitUntilRet:
     """
     Wait until 'func' returns successfully, without exception. Returns the
     last return value from the function.
     """
+    if name is None:
+        name = getattr(func, "__name__", repr(func))
+    deadline = datetime.now() + timedelta(seconds=timeout)
+    next_status = datetime.now()
     last_exception = None
-    for i in range(number_of_iterations):
+    while datetime.now() <= deadline:
         try:
-            res = func()
+            return func()
         except Exception as e:
-            log.info("waiting for %s iteration %s failed: %s", func, i + 1, e)
+            if datetime.now() >= next_status:
+                log.info("waiting for %s: %s", name, e)
+                next_status = datetime.now() + timedelta(seconds=status_interval)
             last_exception = e
-            if show_intermediate_error:
-                log.info(e)
             time.sleep(interval)
-            continue
-        return res
-    raise Exception("timed out while waiting for %s" % func) from last_exception
+    raise Exception(f"timed out while waiting for {name}") from last_exception
 
 
 def assert_eq(a, b) -> None:
@@ -425,7 +439,7 @@ def assert_ge(a, b) -> None:
     assert a >= b
 
 
-def run_pg_bench_small(pg_bin: "PgBin", connstr: str):
+def run_pg_bench_small(pg_bin: PgBin, connstr: str):
     """
     Fast way to populate data.
     For more layers consider combining with these tenant settings:
@@ -470,10 +484,10 @@ def humantime_to_ms(humantime: str) -> float:
     return round(total_ms, 3)
 
 
-def scan_log_for_errors(input: Iterable[str], allowed_errors: List[str]) -> List[Tuple[int, str]]:
+def scan_log_for_errors(input: Iterable[str], allowed_errors: list[str]) -> list[tuple[int, str]]:
     # FIXME: this duplicates test_runner/fixtures/pageserver/allowed_errors.py
     error_or_warn = re.compile(r"\s(ERROR|WARN)")
-    errors = []
+    errors: list[tuple[int, str]] = []
     for lineno, line in enumerate(input, start=1):
         if len(line) == 0:
             continue
@@ -486,14 +500,20 @@ def scan_log_for_errors(input: Iterable[str], allowed_errors: List[str]) -> List
 
             # It's an ERROR or WARN. Is it in the allow-list?
             for a in allowed_errors:
-                if re.match(a, line):
-                    break
+                try:
+                    if re.match(a, line):
+                        break
+                # We can switch `re.error` with `re.PatternError` after 3.13
+                # https://docs.python.org/3/library/re.html#re.PatternError
+                except re.error:
+                    log.error(f"Invalid regex: '{a}'")
+                    raise
             else:
                 errors.append((lineno, line))
     return errors
 
 
-def assert_no_errors(log_file, service, allowed_errors):
+def assert_no_errors(log_file: Path, service: str, allowed_errors: list[str]):
     if not log_file.exists():
         log.warning(f"Skipping {service} log check: {log_file} does not exist")
         return
@@ -507,25 +527,12 @@ def assert_no_errors(log_file, service, allowed_errors):
     assert not errors, f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
 
 
-@enum.unique
-class AuxFileStore(str, enum.Enum):
-    V1 = "v1"
-    V2 = "v2"
-    CrossValidation = "cross-validation"
-
-    def __repr__(self) -> str:
-        return f"'aux-{self.value}'"
-
-    def __str__(self) -> str:
-        return f"'aux-{self.value}'"
-
-
-def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: Set[str]):
+def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str]):
     """
     This is essentially:
 
     lines=$(comm -3 \
-        <(mkdir left && cd left && tar xf "$left" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        <(mkdir left  && cd left  && tar xf "$left"  && find . -type f -print0 | xargs sha256sum | sort -k2) \
         <(mkdir right && cd right && tar xf "$right" && find . -type f -print0 | xargs sha256sum | sort -k2) \
         | wc -l)
     [ "$lines" = "0" ]
@@ -534,7 +541,7 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: Set[str
     """
     started_at = time.time()
 
-    def hash_extracted(reader: Union[IO[bytes], None]) -> bytes:
+    def hash_extracted(reader: IO[bytes] | None) -> bytes:
         assert reader is not None
         digest = sha256(usedforsecurity=False)
         while True:
@@ -544,7 +551,7 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: Set[str
             digest.update(buf)
         return digest.digest()
 
-    def build_hash_list(p: Path) -> List[Tuple[str, bytes]]:
+    def build_hash_list(p: Path) -> list[tuple[str, bytes]]:
         with tarfile.open(p) as f:
             matching_files = (info for info in f if info.isreg() and info.name not in skip_files)
             ret = list(
@@ -559,9 +566,9 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: Set[str
         right_list
     ), f"unexpected number of files on tar files, {len(left_list)} != {len(right_list)}"
 
-    mismatching = set()
+    mismatching: set[str] = set()
 
-    for left_tuple, right_tuple in zip(left_list, right_list):
+    for left_tuple, right_tuple in zip(left_list, right_list, strict=False):
         left_path, left_hash = left_tuple
         right_path, right_hash = right_tuple
         assert (
@@ -584,6 +591,7 @@ class PropagatingThread(threading.Thread):
     Simple Thread wrapper with join() propagating the possible exception in the thread.
     """
 
+    @override
     def run(self):
         self.exc = None
         try:
@@ -591,11 +599,28 @@ class PropagatingThread(threading.Thread):
         except BaseException as e:
             self.exc = e
 
-    def join(self, timeout=None):
-        super(PropagatingThread, self).join(timeout)
+    @override
+    def join(self, timeout: float | None = None) -> Any:
+        super().join(timeout)
         if self.exc:
             raise self.exc
         return self.ret
+
+
+class EnhancedJSONEncoder(json.JSONEncoder):
+    """
+    Default json.JSONEncoder works only on primitive builtins. Extend it to any
+    dataclass plus our custom types.
+    """
+
+    def default(self, o):
+        if dataclasses.is_dataclass(o) and not isinstance(o, type):
+            return dataclasses.asdict(o)
+        elif isinstance(o, Id):
+            return o.id.hex()
+        elif isinstance(o, Lsn):
+            return str(o)  # standard hex notation
+        return super().default(o)
 
 
 def human_bytes(amt: float) -> str:
@@ -613,3 +638,98 @@ def human_bytes(amt: float) -> str:
         amt = amt / 1024
 
     raise RuntimeError("unreachable")
+
+
+def allpairs_versions():
+    """
+    Returns a dictionary with arguments for pytest parametrize
+    to test the compatibility with the previous version of Neon components
+    combinations were pre-computed to test all the pairs of the components with
+    the different versions.
+    """
+    ids = []
+    argvalues = []
+    compat_not_defined = (
+        os.getenv("COMPATIBILITY_POSTGRES_DISTRIB_DIR") is None
+        or os.getenv("COMPATIBILITY_NEON_BIN") is None
+    )
+    for pair in VERSIONS_COMBINATIONS:
+        cur_id = []
+        all_new = all(v == "new" for v in pair.values())
+        for component in sorted(pair.keys()):
+            cur_id.append(pair[component][0])
+        # Adding None if all versions are new, sof no need to mix at all
+        # If COMPATIBILITY_NEON_BIN or COMPATIBILITY_POSTGRES_DISTRIB_DIR are not defined,
+        # we will skip all the tests which include the versions mix.
+        argvalues.append(
+            pytest.param(
+                None if all_new else pair,
+                marks=pytest.mark.skipif(
+                    compat_not_defined and not all_new,
+                    reason="COMPATIBILITY_NEON_BIN or COMPATIBILITY_POSTGRES_DISTRIB_DIR is not set",
+                ),
+            )
+        )
+        ids.append(f"combination_{''.join(cur_id)}")
+    return {"argnames": "combination", "argvalues": tuple(argvalues), "ids": ids}
+
+
+def size_to_bytes(hr_size: str) -> int:
+    """
+    Gets human-readable size from postgresql.conf (e.g. 512kB, 10MB)
+    returns size in bytes
+    """
+    units = {"B": 1, "kB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4, "PB": 1024**5}
+    match = re.search(r"^\'?(\d+)\s*([kMGTP]?B)?\'?$", hr_size)
+    assert match is not None, f'"{hr_size}" is not a well-formatted human-readable size'
+    number, unit = match.groups()
+
+    if unit:
+        amp = units[unit]
+    else:
+        amp = 8192
+    return int(number) * amp
+
+
+def skip_on_postgres(version: PgVersion, reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is version,
+        reason=reason,
+    )
+
+
+def xfail_on_postgres(version: PgVersion, reason: str):
+    return pytest.mark.xfail(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is version,
+        reason=reason,
+    )
+
+
+def run_only_on_default_postgres(reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is not PgVersion.DEFAULT,
+        reason=reason,
+    )
+
+
+def run_only_on_postgres(versions: Iterable[PgVersion], reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.getenv("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) not in versions,
+        reason=reason,
+    )
+
+
+def skip_in_debug_build(reason: str):
+    return pytest.mark.skipif(
+        os.getenv("BUILD_TYPE", "debug") == "debug",
+        reason=reason,
+    )
+
+
+def skip_on_ci(reason: str):
+    # `CI` variable is always set to `true` on GitHub
+    # Ref: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/store-information-in-variables#default-environment-variables
+    return pytest.mark.skipif(
+        os.getenv("CI", "false") == "true",
+        reason=reason,
+    )

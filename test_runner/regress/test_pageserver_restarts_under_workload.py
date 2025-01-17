@@ -1,6 +1,9 @@
 # This test spawns pgbench in a thread in the background and concurrently restarts pageserver,
 # checking how client is able to transparently restore connection to pageserver
 #
+
+from __future__ import annotations
+
 import threading
 import time
 
@@ -12,14 +15,14 @@ from fixtures.neon_fixtures import NeonEnv, PgBin
 # running.
 def test_pageserver_restarts_under_worload(neon_simple_env: NeonEnv, pg_bin: PgBin):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_pageserver_restarts")
+    env.create_branch("test_pageserver_restarts")
     endpoint = env.endpoints.create_start("test_pageserver_restarts")
     n_restarts = 10
     scale = 10
 
     def run_pgbench(connstr: str):
         log.info(f"Start a pgbench workload on pg {connstr}")
-        pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", connstr])
+        pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", f"-s{scale}", connstr])
         pg_bin.run_capture(["pgbench", f"-T{n_restarts}", connstr])
 
     thread = threading.Thread(target=run_pgbench, args=(endpoint.connstr(),), daemon=True)

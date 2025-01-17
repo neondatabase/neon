@@ -25,8 +25,8 @@ use tracing::info;
 use tracing::warn;
 
 use crate::config::PageServerConf;
-use crate::control_plane_client::ControlPlaneGenerationsApi;
-use crate::control_plane_client::RetryForeverError;
+use crate::controller_upcall_client::ControlPlaneGenerationsApi;
+use crate::controller_upcall_client::RetryForeverError;
 use crate::metrics;
 use crate::virtual_file::MaybeFatalIo;
 
@@ -61,7 +61,7 @@ where
     tx: tokio::sync::mpsc::Sender<DeleterMessage>,
 
     // Client for calling into control plane API for validation of deletes
-    control_plane_client: Option<C>,
+    controller_upcall_client: Option<C>,
 
     // DeletionLists which are waiting generation validation.  Not safe to
     // execute until [`validate`] has processed them.
@@ -94,7 +94,7 @@ where
         conf: &'static PageServerConf,
         rx: tokio::sync::mpsc::Receiver<ValidatorQueueMessage>,
         tx: tokio::sync::mpsc::Sender<DeleterMessage>,
-        control_plane_client: Option<C>,
+        controller_upcall_client: Option<C>,
         lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
         cancel: CancellationToken,
     ) -> Self {
@@ -102,7 +102,7 @@ where
             conf,
             rx,
             tx,
-            control_plane_client,
+            controller_upcall_client,
             lsn_table,
             pending_lists: Vec::new(),
             validated_lists: Vec::new(),
@@ -145,8 +145,8 @@ where
             return Ok(());
         }
 
-        let tenants_valid = if let Some(control_plane_client) = &self.control_plane_client {
-            match control_plane_client
+        let tenants_valid = if let Some(controller_upcall_client) = &self.controller_upcall_client {
+            match controller_upcall_client
                 .validate(tenant_generations.iter().map(|(k, v)| (*k, *v)).collect())
                 .await
             {

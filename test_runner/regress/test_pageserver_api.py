@@ -1,4 +1,4 @@
-from typing import Optional
+from __future__ import annotations
 
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.neon_fixtures import (
@@ -59,7 +59,7 @@ def check_client(env: NeonEnv, client: PageserverHttpClient):
 def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):
     env = neon_simple_env
     with env.pageserver.http_client() as client:
-        tenant_id, timeline_id = env.neon_cli.create_tenant()
+        tenant_id, timeline_id = env.create_tenant()
 
         timeline_details = client.timeline_detail(
             tenant_id=tenant_id, timeline_id=timeline_id, include_non_incremental_logical_size=True
@@ -80,7 +80,7 @@ def expect_updated_msg_lsn(
     client: PageserverHttpClient,
     tenant_id: TenantId,
     timeline_id: TimelineId,
-    prev_msg_lsn: Optional[Lsn],
+    prev_msg_lsn: Lsn | None,
 ) -> Lsn:
     timeline_details = client.timeline_detail(tenant_id, timeline_id=timeline_id)
 
@@ -108,7 +108,7 @@ def expect_updated_msg_lsn(
 def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
     env = neon_simple_env
     with env.pageserver.http_client() as client:
-        tenant_id, timeline_id = env.neon_cli.create_tenant()
+        tenant_id, timeline_id = env.create_tenant()
         endpoint = env.endpoints.create_start(DEFAULT_BRANCH_NAME, tenant_id=tenant_id)
 
         # insert something to force sk -> ps message
@@ -117,19 +117,11 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
         # We need to wait here because it's possible that we don't have access to
         # the latest WAL yet, when the `timeline_detail` API is first called.
         # See: https://github.com/neondatabase/neon/issues/1768.
-        lsn = wait_until(
-            number_of_iterations=5,
-            interval=1,
-            func=lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, None),
-        )
+        lsn = wait_until(lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, None))
 
         # Make a DB modification then expect getting a new WAL receiver's data.
         endpoint.safe_psql("INSERT INTO t VALUES (1, 'hey')")
-        wait_until(
-            number_of_iterations=5,
-            interval=1,
-            func=lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, lsn),
-        )
+        wait_until(lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, lsn))
 
 
 def test_pageserver_http_api_client(neon_simple_env: NeonEnv):

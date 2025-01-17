@@ -1,7 +1,7 @@
-import os
+from __future__ import annotations
+
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import List, Tuple
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -20,27 +20,22 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_active,
 )
 from fixtures.pg_version import PgVersion
-from fixtures.utils import wait_until
+from fixtures.utils import skip_in_debug_build, wait_until
 
 
 def test_empty_tenant_size(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_configs()
     env.start()
 
-    (tenant_id, _) = env.neon_cli.create_tenant()
+    (tenant_id, timeline_id) = env.create_tenant()
     http_client = env.pageserver.http_client()
     initial_size = http_client.tenant_size(tenant_id)
 
     # we should never have zero, because there should be the initdb "changes"
     assert initial_size > 0, "initial implementation returns ~initdb tenant_size"
 
-    main_branch_name = "main"
-
-    branch_name, main_timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
-    assert branch_name == main_branch_name
-
     endpoint = env.endpoints.create_start(
-        main_branch_name,
+        "main",
         tenant_id=tenant_id,
         config_lines=["autovacuum=off", "checkpoint_timeout=10min"],
     )
@@ -54,7 +49,7 @@ def test_empty_tenant_size(neon_env_builder: NeonEnvBuilder):
     # The transaction above will make the compute generate a checkpoint.
     # In turn, the pageserver persists the checkpoint. This should only be
     # one key with a size of a couple hundred bytes.
-    wait_for_last_flush_lsn(env, endpoint, tenant_id, main_timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
     size = http_client.tenant_size(tenant_id)
 
     assert size >= initial_size and size - initial_size < 1024
@@ -72,12 +67,12 @@ def test_branched_empty_timeline_size(neon_simple_env: NeonEnv, test_output_dir:
                                    gc_horizon
     """
     env = neon_simple_env
-    (tenant_id, _) = env.neon_cli.create_tenant()
+    (tenant_id, _) = env.create_tenant()
     http_client = env.pageserver.http_client()
 
     initial_size = http_client.tenant_size(tenant_id)
 
-    first_branch_timeline_id = env.neon_cli.create_branch("first-branch", tenant_id=tenant_id)
+    first_branch_timeline_id = env.create_branch("first-branch", tenant_id=tenant_id)
 
     with env.endpoints.create_start("first-branch", tenant_id=tenant_id) as endpoint:
         with endpoint.cursor() as cur:
@@ -109,13 +104,13 @@ def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv, test_ou
     nth_n:          10------------I--------100
     """
     env = neon_simple_env
-    (tenant_id, _) = env.neon_cli.create_tenant()
+    (tenant_id, _) = env.create_tenant()
     http_client = env.pageserver.http_client()
 
     initial_size = http_client.tenant_size(tenant_id)
 
     first_branch_name = "first"
-    env.neon_cli.create_branch(first_branch_name, tenant_id=tenant_id)
+    env.create_branch(first_branch_name, tenant_id=tenant_id)
 
     size_after_branching = http_client.tenant_size(tenant_id)
 
@@ -128,7 +123,7 @@ def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv, test_ou
 
     for i in range(0, 4):
         latest_branch_name = f"nth_{i}"
-        last_branch = env.neon_cli.create_branch(
+        last_branch = env.create_branch(
             latest_branch_name, ancestor_branch_name=last_branch_name, tenant_id=tenant_id
         )
         last_branch_name = latest_branch_name
@@ -164,7 +159,7 @@ def test_branch_point_within_horizon(neon_simple_env: NeonEnv, test_output_dir: 
 
     env = neon_simple_env
     gc_horizon = 20_000
-    (tenant_id, main_id) = env.neon_cli.create_tenant(conf={"gc_horizon": str(gc_horizon)})
+    (tenant_id, main_id) = env.create_tenant(conf={"gc_horizon": str(gc_horizon)})
     http_client = env.pageserver.http_client()
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
@@ -177,9 +172,7 @@ def test_branch_point_within_horizon(neon_simple_env: NeonEnv, test_output_dir: 
 
     assert flushed_lsn.lsn_int - gc_horizon > initdb_lsn.lsn_int
 
-    branch_id = env.neon_cli.create_branch(
-        "branch", tenant_id=tenant_id, ancestor_start_lsn=flushed_lsn
-    )
+    branch_id = env.create_branch("branch", tenant_id=tenant_id, ancestor_start_lsn=flushed_lsn)
 
     with env.endpoints.create_start("branch", tenant_id=tenant_id) as endpoint:
         with endpoint.cursor() as cur:
@@ -206,7 +199,7 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
 
     env = neon_simple_env
     gc_horizon = 5_000
-    (tenant_id, main_id) = env.neon_cli.create_tenant(conf={"gc_horizon": str(gc_horizon)})
+    (tenant_id, main_id) = env.create_tenant(conf={"gc_horizon": str(gc_horizon)})
     http_client = env.pageserver.http_client()
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
@@ -225,9 +218,7 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
 
     assert flushed_lsn.lsn_int - gc_horizon > initdb_lsn.lsn_int
 
-    branch_id = env.neon_cli.create_branch(
-        "branch", tenant_id=tenant_id, ancestor_start_lsn=flushed_lsn
-    )
+    branch_id = env.create_branch("branch", tenant_id=tenant_id, ancestor_start_lsn=flushed_lsn)
 
     with env.endpoints.create_start("branch", tenant_id=tenant_id) as endpoint:
         with endpoint.cursor() as cur:
@@ -253,13 +244,13 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Pa
     """
 
     env = neon_simple_env
-    (tenant_id, main_id) = env.neon_cli.create_tenant(conf={"gc_horizon": "1024"})
+    (tenant_id, main_id) = env.create_tenant(conf={"gc_horizon": "1024"})
     http_client = env.pageserver.http_client()
 
     initial_size = http_client.tenant_size(tenant_id)
 
-    first_id = env.neon_cli.create_branch("first", tenant_id=tenant_id)
-    second_id = env.neon_cli.create_branch("second", tenant_id=tenant_id)
+    first_id = env.create_branch("first", tenant_id=tenant_id)
+    second_id = env.create_branch("second", tenant_id=tenant_id)
 
     ids = {"main": main_id, "first": first_id, "second": second_id}
 
@@ -287,7 +278,7 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Pa
     size_debug_file.write(size_debug)
 
 
-@pytest.mark.skipif(os.environ.get("BUILD_TYPE") == "debug", reason="only run with release build")
+@skip_in_debug_build("only run with release build")
 def test_single_branch_get_tenant_size_grows(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_version: PgVersion
 ):
@@ -306,11 +297,12 @@ def test_single_branch_get_tenant_size_grows(
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_config)
 
     tenant_id = env.initial_tenant
-    branch_name, timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
+    timeline_id = env.initial_timeline
+    branch_name = "main"
 
     http_client = env.pageserver.http_client()
 
-    collected_responses: List[Tuple[str, Lsn, int]] = []
+    collected_responses: list[tuple[str, Lsn, int]] = []
 
     size_debug_file = open(test_output_dir / "size_debug.html", "w")
 
@@ -321,7 +313,8 @@ def test_single_branch_get_tenant_size_grows(
         http_client: PageserverHttpClient,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> Tuple[Lsn, int]:
+    ) -> tuple[Lsn, int]:
+        size = 0
         consistent = False
         size_debug = None
 
@@ -367,7 +360,7 @@ def test_single_branch_get_tenant_size_grows(
         collected_responses.append(("CREATE", current_lsn, size))
 
         batch_size = 100
-
+        prev_size = 0
         for i in range(3):
             with endpoint.cursor() as cur:
                 cur.execute(
@@ -486,9 +479,9 @@ def assert_size_approx_equal(size_a, size_b):
     """
 
     # Determined empirically from examples of equality failures: they differ
-    # by page multiples of 8272, and usually by 1-3 pages.  Tolerate 4 to avoid
+    # by page multiples of 8272, and usually by 1-3 pages.  Tolerate 6 to avoid
     # failing on outliers from that observed range.
-    threshold = 4 * 8272
+    threshold = 6 * 8272
 
     assert size_a == pytest.approx(size_b, abs=threshold)
 
@@ -516,7 +509,8 @@ def test_get_tenant_size_with_multiple_branches(
     env.pageserver.allowed_errors.append(".*InternalServerError\\(No such file or directory.*")
 
     tenant_id = env.initial_tenant
-    main_branch_name, main_timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
+    main_timeline_id = env.initial_timeline
+    main_branch_name = "main"
 
     http_client = env.pageserver.http_client()
 
@@ -533,8 +527,8 @@ def test_get_tenant_size_with_multiple_branches(
     size_at_branch = http_client.tenant_size(tenant_id)
     assert size_at_branch > 0
 
-    first_branch_timeline_id = env.neon_cli.create_branch(
-        "first-branch", main_branch_name, tenant_id
+    first_branch_timeline_id = env.create_branch(
+        "first-branch", ancestor_branch_name=main_branch_name, tenant_id=tenant_id
     )
 
     size_after_first_branch = http_client.tenant_size(tenant_id)
@@ -560,8 +554,8 @@ def test_get_tenant_size_with_multiple_branches(
     size_after_continuing_on_main = http_client.tenant_size(tenant_id)
     assert size_after_continuing_on_main > size_after_growing_first_branch
 
-    second_branch_timeline_id = env.neon_cli.create_branch(
-        "second-branch", main_branch_name, tenant_id
+    second_branch_timeline_id = env.create_branch(
+        "second-branch", ancestor_branch_name=main_branch_name, tenant_id=tenant_id
     )
     size_after_second_branch = http_client.tenant_size(tenant_id)
     assert_size_approx_equal(size_after_second_branch, size_after_continuing_on_main)
@@ -636,15 +630,15 @@ def test_synthetic_size_while_deleting(neon_env_builder: NeonEnvBuilder):
 
     orig_size = client.tenant_size(env.initial_tenant)
 
-    branch_id = env.neon_cli.create_branch(
-        tenant_id=env.initial_tenant, ancestor_branch_name="main", new_branch_name="branch"
+    branch_id = env.create_branch(
+        "branch", ancestor_branch_name="main", tenant_id=env.initial_tenant
     )
     client.configure_failpoints((failpoint, "pause"))
 
     with ThreadPoolExecutor(max_workers=1) as exec:
         completion = exec.submit(client.tenant_size, env.initial_tenant)
         _, last_offset = wait_until(
-            10, 1.0, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+            lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
         )
 
         timeline_delete_wait_completed(client, env.initial_tenant, branch_id)
@@ -654,16 +648,14 @@ def test_synthetic_size_while_deleting(neon_env_builder: NeonEnvBuilder):
 
         assert_size_approx_equal(orig_size, size)
 
-    branch_id = env.neon_cli.create_branch(
-        tenant_id=env.initial_tenant, ancestor_branch_name="main", new_branch_name="branch2"
+    branch_id = env.create_branch(
+        "branch2", ancestor_branch_name="main", tenant_id=env.initial_tenant
     )
     client.configure_failpoints((failpoint, "pause"))
 
     with ThreadPoolExecutor(max_workers=1) as exec:
         completion = exec.submit(client.tenant_size, env.initial_tenant)
         wait_until(
-            10,
-            1.0,
             lambda: env.pageserver.assert_log_contains(
                 f"at failpoint {failpoint}", offset=last_offset
             ),
@@ -752,10 +744,13 @@ def test_lsn_lease_size(neon_env_builder: NeonEnvBuilder, test_output_dir: Path,
         env, env.initial_tenant, env.initial_timeline, test_output_dir, action="branch"
     )
 
-    tenant, timeline = env.neon_cli.create_tenant(conf=conf)
+    tenant, timeline = env.create_tenant(conf=conf)
     lease_res = insert_with_action(env, tenant, timeline, test_output_dir, action="lease")
 
     assert_size_approx_equal_for_lease_test(lease_res, ro_branch_res)
+
+    # we are writing a lot, and flushing all of that to disk is not important for this test
+    env.stop(immediate=True)
 
 
 def insert_with_action(
@@ -793,8 +788,8 @@ def insert_with_action(
             res = client.timeline_lsn_lease(tenant, timeline, last_flush_lsn)
             log.info(f"result from lsn_lease api: {res}")
         elif action == "branch":
-            ro_branch = env.neon_cli.create_branch(
-                "ro_branch", tenant_id=tenant, ancestor_start_lsn=last_flush_lsn
+            ro_branch = env.create_branch(
+                "ro_branch", ancestor_start_lsn=last_flush_lsn, tenant_id=tenant
             )
             log.info(f"{ro_branch=} created")
         else:

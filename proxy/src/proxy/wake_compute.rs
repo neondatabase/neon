@@ -1,50 +1,62 @@
-use crate::config::RetryConfig;
-use crate::console::messages::{ConsoleError, Reason};
-use crate::console::{errors::WakeComputeError, provider::CachedNodeInfo};
-use crate::context::RequestMonitoring;
-use crate::metrics::{
-    ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
-    WakeupFailureKind,
-};
-use crate::proxy::retry::{retry_after, should_retry};
-use hyper1::StatusCode;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use super::connect_compute::ComputeConnectBackend;
+use crate::config::RetryConfig;
+use crate::context::RequestContext;
+use crate::control_plane::errors::{ControlPlaneError, WakeComputeError};
+use crate::control_plane::CachedNodeInfo;
+use crate::error::ReportableError;
+use crate::metrics::{
+    ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
+};
+use crate::proxy::retry::{retry_after, should_retry};
 
-pub async fn wake_compute<B: ComputeConnectBackend>(
+// Use macro to retain original callsite.
+macro_rules! log_wake_compute_error {
+    (error = ?$error:expr, $num_retries:expr, retriable = $retriable:literal) => {
+        match $error {
+            WakeComputeError::ControlPlane(ControlPlaneError::Message(_)) => {
+                info!(error = ?$error, num_retries = $num_retries, retriable = $retriable, "couldn't wake compute node")
+            }
+            _ => error!(error = ?$error, num_retries = $num_retries, retriable = $retriable, "couldn't wake compute node"),
+        }
+    };
+}
+
+pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
     num_retries: &mut u32,
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     api: &B,
     config: RetryConfig,
 ) -> Result<CachedNodeInfo, WakeComputeError> {
-    let retry_type = RetryType::WakeCompute;
     loop {
         match api.wake_compute(ctx).await {
             Err(e) if !should_retry(&e, *num_retries, config) => {
-                error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
+                log_wake_compute_error!(error = ?e, num_retries, retriable = false);
                 report_error(&e, false);
                 Metrics::get().proxy.retries_metric.observe(
                     RetriesMetricGroup {
                         outcome: ConnectOutcome::Failed,
-                        retry_type,
+                        retry_type: RetryType::WakeCompute,
                     },
                     (*num_retries).into(),
                 );
                 return Err(e);
             }
             Err(e) => {
-                warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
+                log_wake_compute_error!(error = ?e, num_retries, retriable = true);
                 report_error(&e, true);
             }
             Ok(n) => {
                 Metrics::get().proxy.retries_metric.observe(
                     RetriesMetricGroup {
                         outcome: ConnectOutcome::Success,
-                        retry_type,
+                        retry_type: RetryType::WakeCompute,
                     },
                     (*num_retries).into(),
                 );
+                // TODO: is this necessary? We have a metric.
+                // TODO: this log line is misleading as "wake_compute" might return cached (and stale) info.
                 info!(?num_retries, "compute node woken up after");
                 return Ok(n);
             }
@@ -59,62 +71,8 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
 }
 
 fn report_error(e: &WakeComputeError, retry: bool) {
-    use crate::console::errors::ApiError;
-    let kind = match e {
-        WakeComputeError::BadComputeAddress(_) => WakeupFailureKind::BadComputeAddress,
-        WakeComputeError::ApiError(ApiError::Transport(_)) => WakeupFailureKind::ApiTransportError,
-        WakeComputeError::ApiError(ApiError::Console(e)) => match e.get_reason() {
-            Reason::RoleProtected => WakeupFailureKind::ApiConsoleBadRequest,
-            Reason::ResourceNotFound => WakeupFailureKind::ApiConsoleBadRequest,
-            Reason::ProjectNotFound => WakeupFailureKind::ApiConsoleBadRequest,
-            Reason::EndpointNotFound => WakeupFailureKind::ApiConsoleBadRequest,
-            Reason::BranchNotFound => WakeupFailureKind::ApiConsoleBadRequest,
-            Reason::RateLimitExceeded => WakeupFailureKind::ApiConsoleLocked,
-            Reason::NonDefaultBranchComputeTimeExceeded => WakeupFailureKind::QuotaExceeded,
-            Reason::ActiveTimeQuotaExceeded => WakeupFailureKind::QuotaExceeded,
-            Reason::ComputeTimeQuotaExceeded => WakeupFailureKind::QuotaExceeded,
-            Reason::WrittenDataQuotaExceeded => WakeupFailureKind::QuotaExceeded,
-            Reason::DataTransferQuotaExceeded => WakeupFailureKind::QuotaExceeded,
-            Reason::LogicalSizeQuotaExceeded => WakeupFailureKind::QuotaExceeded,
-            Reason::ConcurrencyLimitReached => WakeupFailureKind::ApiConsoleLocked,
-            Reason::LockAlreadyTaken => WakeupFailureKind::ApiConsoleLocked,
-            Reason::RunningOperations => WakeupFailureKind::ApiConsoleLocked,
-            Reason::Unknown => match e {
-                ConsoleError {
-                    http_status_code: StatusCode::LOCKED,
-                    ref error,
-                    ..
-                } if error.contains("written data quota exceeded")
-                    || error.contains("the limit for current plan reached") =>
-                {
-                    WakeupFailureKind::QuotaExceeded
-                }
-                ConsoleError {
-                    http_status_code: StatusCode::UNPROCESSABLE_ENTITY,
-                    ref error,
-                    ..
-                } if error.contains("compute time quota of non-primary branches is exceeded") => {
-                    WakeupFailureKind::QuotaExceeded
-                }
-                ConsoleError {
-                    http_status_code: StatusCode::LOCKED,
-                    ..
-                } => WakeupFailureKind::ApiConsoleLocked,
-                ConsoleError {
-                    http_status_code: StatusCode::BAD_REQUEST,
-                    ..
-                } => WakeupFailureKind::ApiConsoleBadRequest,
-                ConsoleError {
-                    http_status_code, ..
-                } if http_status_code.is_server_error() => {
-                    WakeupFailureKind::ApiConsoleOtherServerError
-                }
-                ConsoleError { .. } => WakeupFailureKind::ApiConsoleOtherError,
-            },
-        },
-        WakeComputeError::TooManyConnections => WakeupFailureKind::ApiConsoleLocked,
-        WakeComputeError::TooManyConnectionAttempts(_) => WakeupFailureKind::TimeoutError,
-    };
+    let kind = e.get_error_kind();
+
     Metrics::get()
         .proxy
         .connection_failures_breakdown

@@ -5,7 +5,9 @@ use std::sync::{
 use tokio::sync::Semaphore;
 
 /// Custom design like [`tokio::sync::OnceCell`] but using [`OwnedSemaphorePermit`] instead of
-/// `SemaphorePermit`, allowing use of `take` which does not require holding an outer mutex guard
+/// `SemaphorePermit`.
+///
+/// Allows use of `take` which does not require holding an outer mutex guard
 /// for the duration of initialization.
 ///
 /// Has no unsafe, builds upon [`tokio::sync::Semaphore`] and [`std::sync::Mutex`].
@@ -217,7 +219,7 @@ impl<'a, T> CountWaitingInitializers<'a, T> {
     }
 }
 
-impl<'a, T> Drop for CountWaitingInitializers<'a, T> {
+impl<T> Drop for CountWaitingInitializers<'_, T> {
     fn drop(&mut self) {
         self.0.initializers.fetch_sub(1, Ordering::Relaxed);
     }
@@ -248,7 +250,7 @@ impl<T> std::ops::DerefMut for Guard<'_, T> {
     }
 }
 
-impl<'a, T> Guard<'a, T> {
+impl<T> Guard<'_, T> {
     /// Take the current value, and a new permit for it's deinitialization.
     ///
     /// The permit will be on a semaphore part of the new internal value, and any following

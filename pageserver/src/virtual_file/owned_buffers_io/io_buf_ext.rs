@@ -1,8 +1,11 @@
 //! See [`FullSlice`].
 
+use crate::virtual_file::{IoBuffer, IoBufferMut};
 use bytes::{Bytes, BytesMut};
 use std::ops::{Deref, Range};
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
+
+use super::write::CheapCloneForRead;
 
 /// The true owned equivalent for Rust [`slice`]. Use this for the write path.
 ///
@@ -42,6 +45,18 @@ where
     }
 }
 
+impl<B> CheapCloneForRead for FullSlice<B>
+where
+    B: IoBuf + CheapCloneForRead,
+{
+    fn cheap_clone(&self) -> Self {
+        let bounds = self.slice.bounds();
+        let clone = self.slice.get_ref().cheap_clone();
+        let slice = clone.slice(bounds);
+        Self { slice }
+    }
+}
+
 pub(crate) trait IoBufExt {
     /// Get a [`FullSlice`] for the entire buffer, i.e., `self[..]` or `self[0..self.len()]`.
     fn slice_len(self) -> FullSlice<Self>
@@ -76,3 +91,5 @@ macro_rules! impl_io_buf_ext {
 impl_io_buf_ext!(Bytes);
 impl_io_buf_ext!(BytesMut);
 impl_io_buf_ext!(Vec<u8>);
+impl_io_buf_ext!(IoBufferMut);
+impl_io_buf_ext!(IoBuffer);

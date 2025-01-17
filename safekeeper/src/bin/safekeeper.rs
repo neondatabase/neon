@@ -19,7 +19,7 @@ use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use storage_broker::Uri;
 
 use tracing::*;
@@ -47,6 +47,16 @@ use utils::{
     sentry_init::init_sentry,
     tcp_listener,
 };
+
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// Configure jemalloc to profile heap allocations by sampling stack traces every 2 MB (1 << 21).
+/// This adds roughly 3% overhead for allocations on average, which is acceptable considering
+/// performance-sensitive code will avoid allocations as far as possible anyway.
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 const PID_FILE_NAME: &str = "safekeeper.pid";
 const ID_FILE_NAME: &str = "safekeeper.id";
@@ -193,8 +203,17 @@ struct Args {
     /// Usually, timeline eviction has to wait for `partial_backup_timeout` before being eligible for eviction,
     /// but if a timeline is un-evicted and then _not_ written to, it would immediately flap to evicting again,
     /// if it weren't for `eviction_min_resident` preventing that.
+    ///
+    /// Also defines interval for eviction retries.
     #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_EVICTION_MIN_RESIDENT)]
     eviction_min_resident: Duration,
+    /// Enable fanning out WAL to different shards from the same reader
+    #[arg(long)]
+    wal_reader_fanout: bool,
+    /// Only fan out the WAL reader if the absoulte delta between the new requested position
+    /// and the current position of the reader is smaller than this value.
+    #[arg(long)]
+    max_delta_for_fanout: Option<u64>,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -261,6 +280,15 @@ async fn main() -> anyhow::Result<()> {
     // Change into the data directory.
     std::env::set_current_dir(&workdir)?;
 
+    // Prevent running multiple safekeepers on the same directory
+    let lock_file_path = workdir.join(PID_FILE_NAME);
+    let lock_file =
+        pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
+    info!("claimed pid file at {lock_file_path:?}");
+    // ensure that the lock file is held even if the main thread of the process is panics
+    // we need to release the lock file only when the current process is gone
+    std::mem::forget(lock_file);
+
     // Set or read our ID.
     let id = set_id(&workdir, args.id.map(NodeId))?;
     if args.init {
@@ -319,7 +347,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let conf = SafeKeeperConf {
+    let conf = Arc::new(SafeKeeperConf {
         workdir,
         my_id: id,
         listen_pg_addr: args.listen_pg,
@@ -349,7 +377,9 @@ async fn main() -> anyhow::Result<()> {
         control_file_save_interval: args.control_file_save_interval,
         partial_backup_concurrency: args.partial_backup_concurrency,
         eviction_min_resident: args.eviction_min_resident,
-    };
+        wal_reader_fanout: args.wal_reader_fanout,
+        max_delta_for_fanout: args.max_delta_for_fanout,
+    });
 
     // initialize sentry if SENTRY_DSN is provided
     let _sentry_guard = init_sentry(
@@ -363,16 +393,18 @@ async fn main() -> anyhow::Result<()> {
 /// complete, e.g. panicked, inner is error produced by task itself.
 type JoinTaskRes = Result<anyhow::Result<()>, JoinError>;
 
-async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
-    // Prevent running multiple safekeepers on the same directory
-    let lock_file_path = conf.workdir.join(PID_FILE_NAME);
-    let lock_file =
-        pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
-    info!("claimed pid file at {lock_file_path:?}");
-
-    // ensure that the lock file is held even if the main thread of the process is panics
-    // we need to release the lock file only when the current process is gone
-    std::mem::forget(lock_file);
+async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
+    // fsync the datadir to make sure we have a consistent state on disk.
+    if !conf.no_sync {
+        let dfd = File::open(&conf.workdir).context("open datadir for syncfs")?;
+        let started = Instant::now();
+        utils::crashsafe::syncfs(dfd)?;
+        let elapsed = started.elapsed();
+        info!(
+            elapsed_ms = elapsed.as_millis(),
+            "syncfs data directory done"
+        );
+    }
 
     info!("starting safekeeper WAL service on {}", conf.listen_pg_addr);
     let pg_listener = tcp_listener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
@@ -407,9 +439,11 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         e
     })?;
 
+    let global_timelines = Arc::new(GlobalTimelines::new(conf.clone()));
+
     // Register metrics collector for active timelines. It's important to do this
     // after daemonizing, otherwise process collector will be upset.
-    let timeline_collector = safekeeper::metrics::TimelineCollector::new();
+    let timeline_collector = safekeeper::metrics::TimelineCollector::new(global_timelines.clone());
     metrics::register_internal(Box::new(timeline_collector))?;
 
     wal_backup::init_remote_storage(&conf).await;
@@ -426,9 +460,8 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         .then(|| Handle::try_current().expect("no runtime in main"));
 
     // Load all timelines from disk to memory.
-    GlobalTimelines::init(conf.clone()).await?;
+    global_timelines.init().await?;
 
-    let conf_ = conf.clone();
     // Run everything in current thread rt, if asked.
     if conf.current_thread_runtime {
         info!("running in current thread runtime");
@@ -438,14 +471,16 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         .as_ref()
         .unwrap_or_else(|| WAL_SERVICE_RUNTIME.handle())
         .spawn(wal_service::task_main(
-            conf_,
+            conf.clone(),
             pg_listener,
             Scope::SafekeeperData,
+            global_timelines.clone(),
         ))
         // wrap with task name for error reporting
         .map(|res| ("WAL service main".to_owned(), res));
     tasks_handles.push(Box::pin(wal_service_handle));
 
+    let global_timelines_ = global_timelines.clone();
     let timeline_housekeeping_handle = current_thread_rt
         .as_ref()
         .unwrap_or_else(|| WAL_SERVICE_RUNTIME.handle())
@@ -453,40 +488,45 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
             const TOMBSTONE_TTL: Duration = Duration::from_secs(3600 * 24);
             loop {
                 tokio::time::sleep(TOMBSTONE_TTL).await;
-                GlobalTimelines::housekeeping(&TOMBSTONE_TTL);
+                global_timelines_.housekeeping(&TOMBSTONE_TTL);
             }
         })
         .map(|res| ("Timeline map housekeeping".to_owned(), res));
     tasks_handles.push(Box::pin(timeline_housekeeping_handle));
 
     if let Some(pg_listener_tenant_only) = pg_listener_tenant_only {
-        let conf_ = conf.clone();
         let wal_service_handle = current_thread_rt
             .as_ref()
             .unwrap_or_else(|| WAL_SERVICE_RUNTIME.handle())
             .spawn(wal_service::task_main(
-                conf_,
+                conf.clone(),
                 pg_listener_tenant_only,
                 Scope::Tenant,
+                global_timelines.clone(),
             ))
             // wrap with task name for error reporting
             .map(|res| ("WAL service tenant only main".to_owned(), res));
         tasks_handles.push(Box::pin(wal_service_handle));
     }
 
-    let conf_ = conf.clone();
     let http_handle = current_thread_rt
         .as_ref()
         .unwrap_or_else(|| HTTP_RUNTIME.handle())
-        .spawn(http::task_main(conf_, http_listener))
+        .spawn(http::task_main(
+            conf.clone(),
+            http_listener,
+            global_timelines.clone(),
+        ))
         .map(|res| ("HTTP service main".to_owned(), res));
     tasks_handles.push(Box::pin(http_handle));
 
-    let conf_ = conf.clone();
     let broker_task_handle = current_thread_rt
         .as_ref()
         .unwrap_or_else(|| BROKER_RUNTIME.handle())
-        .spawn(broker::task_main(conf_).instrument(info_span!("broker")))
+        .spawn(
+            broker::task_main(conf.clone(), global_timelines.clone())
+                .instrument(info_span!("broker")),
+        )
         .map(|res| ("broker main".to_owned(), res));
     tasks_handles.push(Box::pin(broker_task_handle));
 

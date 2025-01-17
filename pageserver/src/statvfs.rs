@@ -53,6 +53,22 @@ impl Statvfs {
             Statvfs::Mock(stat) => stat.block_size,
         }
     }
+
+    /// Get the available and total bytes on the filesystem.
+    pub fn get_avail_total_bytes(&self) -> (u64, u64) {
+        // https://unix.stackexchange.com/a/703650
+        let blocksize = if self.fragment_size() > 0 {
+            self.fragment_size()
+        } else {
+            self.block_size()
+        };
+
+        // use blocks_available (b_avail) since, pageserver runs as unprivileged user
+        let avail_bytes = self.blocks_available() * blocksize;
+        let total_bytes = self.blocks() * blocksize;
+
+        (avail_bytes, total_bytes)
+    }
 }
 
 pub mod mock {
@@ -60,32 +76,7 @@ pub mod mock {
     use regex::Regex;
     use tracing::log::info;
 
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    #[serde(tag = "type")]
-    pub enum Behavior {
-        Success {
-            blocksize: u64,
-            total_blocks: u64,
-            name_filter: Option<utils::serde_regex::Regex>,
-        },
-        Failure {
-            mocked_error: MockedError,
-        },
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    #[allow(clippy::upper_case_acronyms)]
-    pub enum MockedError {
-        EIO,
-    }
-
-    impl From<MockedError> for nix::Error {
-        fn from(e: MockedError) -> Self {
-            match e {
-                MockedError::EIO => nix::Error::EIO,
-            }
-        }
-    }
+    pub use pageserver_api::config::statvfs::mock::Behavior;
 
     pub fn get(tenants_dir: &Utf8Path, behavior: &Behavior) -> nix::Result<Statvfs> {
         info!("running mocked statvfs");
@@ -99,7 +90,7 @@ pub mod mock {
                 let used_bytes = walk_dir_disk_usage(tenants_dir, name_filter.as_deref()).unwrap();
 
                 // round it up to the nearest block multiple
-                let used_blocks = (used_bytes + (blocksize - 1)) / blocksize;
+                let used_blocks = used_bytes.div_ceil(*blocksize);
 
                 if used_blocks > *total_blocks {
                     panic!(
@@ -116,6 +107,7 @@ pub mod mock {
                     block_size: *blocksize,
                 })
             }
+            #[cfg(feature = "testing")]
             Behavior::Failure { mocked_error } => Err((*mocked_error).into()),
         }
     }
