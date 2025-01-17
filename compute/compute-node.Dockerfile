@@ -1130,7 +1130,7 @@ ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN git clone --depth 1 --branch v0.2.0 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
     cd pg_duckdb-src && \
     git submodule update --init --recursive && \
-    cd thirdparty/duckdb && \
+    cd third_party/duckdb && \
     patch -p1 < /duckdb-v1-1-3.patch && \
     cd ../.. && \
     make install -j $(getconf _NPROCESSORS_ONLN) && \
