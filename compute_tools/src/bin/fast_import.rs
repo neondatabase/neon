@@ -110,6 +110,166 @@ async fn decode_connstring(
     String::from_utf8(plaintext.into_inner()).context("parse connection string as utf8")
 }
 
+struct PostgresProcess {
+    pgdata_dir: Utf8PathBuf,
+    pg_bin_dir: Utf8PathBuf,
+    pgbin: Utf8PathBuf,
+    pg_lib_dir: Utf8PathBuf,
+    postgres_proc: Option<tokio::process::Child>,
+}
+
+impl PostgresProcess {
+    fn new(pgdata_dir: Utf8PathBuf, pg_bin_dir: Utf8PathBuf, pg_lib_dir: Utf8PathBuf) -> Self {
+        Self {
+            pgdata_dir,
+            pgbin: pg_bin_dir.join("postgres"),
+            pg_bin_dir: pg_bin_dir,
+            pg_lib_dir,
+            postgres_proc: None,
+        }
+    }
+
+    async fn prepare(&self, initdb_user: &str) -> Result<(), anyhow::Error> {
+        tokio::fs::create_dir(&self.pgdata_dir)
+            .await
+            .context("create pgdata directory")?;
+
+        let pg_version = match get_pg_version(self.pgbin.as_ref()) {
+            PostgresMajorVersion::V14 => 14,
+            PostgresMajorVersion::V15 => 15,
+            PostgresMajorVersion::V16 => 16,
+            PostgresMajorVersion::V17 => 17,
+        };
+        postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
+            superuser: initdb_user,
+            locale: DEFAULT_LOCALE, // XXX: this shouldn't be hard-coded,
+            pg_version,
+            initdb_bin: self.pg_bin_dir.join("initdb").as_ref(),
+            library_search_path: &self.pg_lib_dir, // TODO: is this right? Prob works in compute image, not sure about neon_local.
+            pgdata: &self.pgdata_dir,
+        })
+        .await
+        .context("initdb")
+    }
+
+    async fn start(
+        &mut self,
+        initdb_user: &str,
+        port: u16,
+        nproc: usize,
+    ) -> Result<&tokio::process::Child, anyhow::Error> {
+        self.prepare(initdb_user).await?;
+
+        //
+        // Launch postgres process
+        //
+        let mut proc = tokio::process::Command::new(&self.pgbin)
+            .arg("-D")
+            .arg(&self.pgdata_dir)
+            .args(["-p", &format!("{port}")])
+            .args(["-c", "wal_level=minimal"])
+            .args(["-c", "shared_buffers=10GB"])
+            .args(["-c", "max_wal_senders=0"])
+            .args(["-c", "fsync=off"])
+            .args(["-c", "full_page_writes=off"])
+            .args(["-c", "synchronous_commit=off"])
+            .args(["-c", "maintenance_work_mem=8388608"])
+            .args(["-c", &format!("max_parallel_maintenance_workers={nproc}")])
+            .args(["-c", &format!("max_parallel_workers={nproc}")])
+            .args(["-c", &format!("max_parallel_workers_per_gather={nproc}")])
+            .args(["-c", &format!("max_worker_processes={nproc}")])
+            .args(["-c", "effective_io_concurrency=100"])
+            .env_clear()
+            .env("LD_LIBRARY_PATH", &self.pg_lib_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("spawn postgres")?;
+
+        info!("spawned postgres, waiting for it to become ready");
+        tokio::spawn(
+            child_stdio_to_log::relay_process_output(proc.stdout.take(), proc.stderr.take())
+                .instrument(info_span!("postgres")),
+        );
+
+        self.postgres_proc = Some(proc);
+        Ok(self.postgres_proc.as_ref().unwrap())
+    }
+
+    async fn shutdown(&mut self) -> Result<(), anyhow::Error> {
+        let proc: &mut tokio::process::Child = self.postgres_proc.as_mut().unwrap();
+        info!("shutdown postgres");
+        {
+            nix::sys::signal::kill(
+                Pid::from_raw(i32::try_from(proc.id().unwrap()).expect("convert child pid to i32")),
+                nix::sys::signal::SIGTERM,
+            )
+            .context("signal postgres to shut down")?;
+            proc.wait()
+                .await
+                .context("wait for postgres to shut down")?;
+        }
+        Ok(())
+    }
+}
+
+async fn wait_until_ready(connstring: String, create_dbname: String) {
+    // Create neondb database in the running postgres
+    let start_time = std::time::Instant::now();
+
+    loop {
+        if start_time.elapsed() > PG_WAIT_TIMEOUT {
+            error!(
+                "timeout exceeded: failed to poll postgres and create database within 10 minutes"
+            );
+            std::process::exit(1);
+        }
+
+        match tokio_postgres::connect(
+            &connstring.replace("dbname=neondb", "dbname=postgres"),
+            tokio_postgres::NoTls,
+        )
+        .await
+        {
+            Ok((client, connection)) => {
+                // Spawn the connection handling task to maintain the connection
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        warn!("connection error: {}", e);
+                    }
+                });
+
+                match client
+                    .simple_query(format!("CREATE DATABASE {create_dbname};").as_str())
+                    .await
+                {
+                    Ok(_) => {
+                        info!("created {} database", create_dbname);
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "failed to create database: {}, retying in {}s",
+                            e,
+                            PG_WAIT_RETRY_INTERVAL.as_secs_f32()
+                        );
+                        tokio::time::sleep(PG_WAIT_RETRY_INTERVAL).await;
+                        continue;
+                    }
+                }
+            }
+            Err(_) => {
+                info!(
+                    "postgres not ready yet, retrying in {}s",
+                    PG_WAIT_RETRY_INTERVAL.as_secs_f32()
+                );
+                tokio::time::sleep(PG_WAIT_RETRY_INTERVAL).await;
+                continue;
+            }
+        }
+    }
+}
+
 #[tokio::main]
 pub(crate) async fn main() -> anyhow::Result<()> {
     utils::logging::init(
@@ -201,20 +361,18 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     } else {
         (
             args.source_connection_string.unwrap(),
-            if args.restore_connection_string.is_none() {
+            if let Some(val) = args.restore_connection_string {
+                run_postgres = false;
+                val
+            } else {
                 format!(
                     "host=localhost port={} user={} dbname=neondb",
                     pg_port(),
                     superuser
                 )
-            } else {
-                run_postgres = false;
-                args.restore_connection_string.unwrap()
             },
         )
     };
-
-    let nproc = num_cpus::get();
 
     // unused if run_postgres is false, but needed for shutdown
     match tokio::fs::create_dir(&working_directory).await {
@@ -235,111 +393,12 @@ pub(crate) async fn main() -> anyhow::Result<()> {
 
     let postgres_proc = if run_postgres {
         assert!(restore_connstring.contains("host=localhost"));
-        tokio::fs::create_dir(&pgdata_dir)
-            .await
-            .context("create pgdata directory")?;
+        let mut proc =
+            PostgresProcess::new(pgdata_dir.clone(), pg_bin_dir.clone(), pg_lib_dir.clone());
+        let nproc = num_cpus::get();
+        proc.start(superuser, pg_port(), nproc).await?;
+        wait_until_ready(restore_connstring.clone(), "neondb".to_string()).await;
 
-        let pgbin = pg_bin_dir.join("postgres");
-        let pg_version = match get_pg_version(pgbin.as_ref()) {
-            PostgresMajorVersion::V14 => 14,
-            PostgresMajorVersion::V15 => 15,
-            PostgresMajorVersion::V16 => 16,
-            PostgresMajorVersion::V17 => 17,
-        };
-        postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
-            superuser,
-            locale: DEFAULT_LOCALE, // XXX: this shouldn't be hard-coded,
-            pg_version,
-            initdb_bin: pg_bin_dir.join("initdb").as_ref(),
-            library_search_path: &pg_lib_dir, // TODO: is this right? Prob works in compute image, not sure about neon_local.
-            pgdata: &pgdata_dir,
-        })
-        .await
-        .context("initdb")?;
-
-        //
-        // Launch postgres process
-        //
-        let mut proc = tokio::process::Command::new(pgbin)
-            .arg("-D")
-            .arg(&pgdata_dir)
-            .args(["-p", &format!("{}", pg_port())])
-            .args(["-c", "wal_level=minimal"])
-            .args(["-c", "shared_buffers=10GB"])
-            .args(["-c", "max_wal_senders=0"])
-            .args(["-c", "fsync=off"])
-            .args(["-c", "full_page_writes=off"])
-            .args(["-c", "synchronous_commit=off"])
-            .args(["-c", "maintenance_work_mem=8388608"])
-            .args(["-c", &format!("max_parallel_maintenance_workers={nproc}")])
-            .args(["-c", &format!("max_parallel_workers={nproc}")])
-            .args(["-c", &format!("max_parallel_workers_per_gather={nproc}")])
-            .args(["-c", &format!("max_worker_processes={nproc}")])
-            .args(["-c", "effective_io_concurrency=100"])
-            .env_clear()
-            .env("LD_LIBRARY_PATH", &pg_lib_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .context("spawn postgres")?;
-
-        info!("spawned postgres, waiting for it to become ready");
-        tokio::spawn(
-            child_stdio_to_log::relay_process_output(proc.stdout.take(), proc.stderr.take())
-                .instrument(info_span!("postgres")),
-        );
-
-        // Create neondb database in the running postgres
-        let start_time = std::time::Instant::now();
-
-        loop {
-            if start_time.elapsed() > PG_WAIT_TIMEOUT {
-                error!(
-                "timeout exceeded: failed to poll postgres and create database within 10 minutes"
-            );
-                std::process::exit(1);
-            }
-
-            match tokio_postgres::connect(
-                &restore_connstring.replace("dbname=neondb", "dbname=postgres"),
-                tokio_postgres::NoTls,
-            )
-            .await
-            {
-                Ok((client, connection)) => {
-                    // Spawn the connection handling task to maintain the connection
-                    tokio::spawn(async move {
-                        if let Err(e) = connection.await {
-                            warn!("connection error: {}", e);
-                        }
-                    });
-
-                    match client.simple_query("CREATE DATABASE neondb;").await {
-                        Ok(_) => {
-                            info!("created neondb database");
-                            break;
-                        }
-                        Err(e) => {
-                            warn!(
-                                "failed to create database: {}, retying in {}s",
-                                e,
-                                PG_WAIT_RETRY_INTERVAL.as_secs_f32()
-                            );
-                            tokio::time::sleep(PG_WAIT_RETRY_INTERVAL).await;
-                            continue;
-                        }
-                    }
-                }
-                Err(_) => {
-                    info!(
-                        "postgres not ready yet, retrying in {}s",
-                        PG_WAIT_RETRY_INTERVAL.as_secs_f32()
-                    );
-                    tokio::time::sleep(PG_WAIT_RETRY_INTERVAL).await;
-                    continue;
-                }
-            }
-        }
         Some(proc)
     } else {
         info!("restore_connection_string specified, not running postgres process");
@@ -439,17 +498,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             tokio::signal::ctrl_c().await.context("wait for ctrl-c")?;
         }
 
-        info!("shutdown postgres");
-        {
-            nix::sys::signal::kill(
-                Pid::from_raw(i32::try_from(proc.id().unwrap()).expect("convert child pid to i32")),
-                nix::sys::signal::SIGTERM,
-            )
-            .context("signal postgres to shut down")?;
-            proc.wait()
-                .await
-                .context("wait for postgres to shut down")?;
-        }
+        proc.shutdown().await?;
 
         // Only sync if s3_prefix was specified
         if let Some(s3_prefix) = args.s3_prefix {
