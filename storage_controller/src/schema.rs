@@ -66,6 +66,7 @@ diesel::table! {
         sk_set -> Array<Nullable<Int8>>,
         new_sk_set -> Array<Nullable<Int8>>,
         cplane_notified_generation -> Int4,
+        status_kind -> Varchar,
         status -> Varchar,
     }
 }
