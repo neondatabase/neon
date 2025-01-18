@@ -112,7 +112,7 @@ pub(super) async fn delete_local_timeline_directory(
 }
 
 /// It is important that this gets called when DeletionGuard is being held.
-/// For more context see comments in [`DeleteTimelineFlow::prepare`]
+/// For more context see comments in [`make_timeline_delete_guard`]
 async fn remove_maybe_offloaded_timeline_from_tenant(
     tenant: &Tenant,
     timeline: &TimelineOrOffloaded,
