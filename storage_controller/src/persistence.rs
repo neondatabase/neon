@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
 use utils::id::TimelineId;
 use utils::id::{NodeId, TenantId};
+use utils::lsn::Lsn;
 
 use crate::metrics::{
     DatabaseQueryErrorLabelGroup, DatabaseQueryLatencyLabelGroup, METRICS_REGISTRY,
@@ -1227,7 +1228,7 @@ impl Persistence {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        timeline_status: TimelineStatus,
+        timeline_status: TimelineStatusKind,
     ) -> DatabaseResult<()> {
         use crate::schema::timelines;
 
@@ -1295,8 +1296,8 @@ impl Persistence {
                     Ok(timelines::table
                         .filter(
                             timelines::status
-                                .eq(String::from(TimelineStatus::Creating))
-                                .or(timelines::status.eq(String::from(TimelineStatus::Deleting))),
+                                .eq(String::from(TimelineStatusKind::Creating))
+                                .or(timelines::status.eq(String::from(TimelineStatusKind::Deleting))),
                         )
                         .load::<TimelineFromDb>(conn)?)
                 },
@@ -1542,7 +1543,7 @@ struct InsertUpdateSafekeeper<'a> {
     scheduling_policy: Option<&'a str>,
 }
 
-#[derive(Insertable, AsChangeset, Queryable, Selectable)]
+#[derive(Insertable, AsChangeset, Queryable, Selectable, Clone)]
 #[diesel(table_name = crate::schema::timelines)]
 pub(crate) struct TimelinePersistence {
     pub(crate) tenant_id: String,
@@ -1551,6 +1552,7 @@ pub(crate) struct TimelinePersistence {
     pub(crate) sk_set: Vec<i64>,
     pub(crate) new_sk_set: Vec<i64>,
     pub(crate) cplane_notified_generation: i32,
+    pub(crate) status_kind: String,
     pub(crate) status: String,
 }
 
@@ -1563,6 +1565,7 @@ pub(crate) struct TimelineFromDb {
     pub(crate) sk_set: Vec<Option<i64>>,
     pub(crate) new_sk_set: Vec<Option<i64>>,
     pub(crate) cplane_notified_generation: i32,
+    pub(crate) status_kind: String,
     pub(crate) status: String,
 }
 
@@ -1575,40 +1578,47 @@ impl TimelineFromDb {
             sk_set: self.sk_set.into_iter().filter_map(|v| v).collect(),
             new_sk_set: self.new_sk_set.into_iter().filter_map(|v| v).collect(),
             cplane_notified_generation: self.cplane_notified_generation,
+            status_kind: self.status_kind,
             status: self.status,
         }
     }
 }
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
-pub(crate) enum TimelineStatus {
+pub(crate) enum TimelineStatusKind {
     Creating,
     Created,
     Deleting,
     Deleted,
 }
 
-impl FromStr for TimelineStatus {
+impl FromStr for TimelineStatusKind {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
-            "creating" => TimelineStatus::Creating,
-            "created" => TimelineStatus::Created,
-            "deleting" => TimelineStatus::Deleting,
-            "deleted" => TimelineStatus::Deleted,
+            "creating" => TimelineStatusKind::Creating,
+            "created" => TimelineStatusKind::Created,
+            "deleting" => TimelineStatusKind::Deleting,
+            "deleted" => TimelineStatusKind::Deleted,
             _ => return Err(anyhow::anyhow!("unexpected timeline status: {s}")),
         })
     }
 }
 
-impl From<TimelineStatus> for String {
-    fn from(value: TimelineStatus) -> Self {
+impl From<TimelineStatusKind> for String {
+    fn from(value: TimelineStatusKind) -> Self {
         match value {
-            TimelineStatus::Creating => "creating",
-            TimelineStatus::Created => "created",
-            TimelineStatus::Deleting => "deleting",
-            TimelineStatus::Deleted => "deleted",
+            TimelineStatusKind::Creating => "creating",
+            TimelineStatusKind::Created => "created",
+            TimelineStatusKind::Deleting => "deleting",
+            TimelineStatusKind::Deleted => "deleted",
         }
         .to_string()
     }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct TimelineStatusCreating {
+    pub(crate) pg_version: u32,
+    pub(crate) start_lsn: Lsn,
 }

@@ -28,7 +28,8 @@ use crate::{
     peer_client::GlobalObservedState,
     persistence::{
         AbortShardSplitStatus, ControllerPersistence, DatabaseResult, MetadataHealthPersistence,
-        ShardGenerationState, TenantFilter, TimelinePersistence, TimelineStatus,
+        SafekeeperPersistence, ShardGenerationState, TenantFilter, TimelinePersistence,
+        TimelineStatusCreating, TimelineStatusKind,
     },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
     safekeeper_client::SafekeeperClient,
@@ -3399,54 +3400,24 @@ impl Service {
         }).await??)
     }
 
-    async fn tenant_timeline_create_safekeepers(
+    /// reconcile: create timeline on safekeepers
+    ///
+    /// Assumes tenant lock is held while calling this function
+    async fn tenant_timeline_create_safekeepers_reconcile(
         &self,
         tenant_id: TenantId,
-        timeline_info: &TimelineInfo,
-        create_mode: models::TimelineCreateRequestMode,
-    ) -> Result<(u32, Vec<NodeId>), ApiError> {
-        let timeline_id = timeline_info.timeline_id;
-        let pg_version = timeline_info.pg_version;
-        let start_lsn = match create_mode {
-            models::TimelineCreateRequestMode::Bootstrap { .. } => timeline_info.last_record_lsn,
-            models::TimelineCreateRequestMode::Branch { .. } => timeline_info.last_record_lsn,
-            models::TimelineCreateRequestMode::ImportPgdata { .. } => {
-                // Can't do return Err because of async block, must do ? plus unreachable!()
-                return Err(ApiError::InternalServerError(anyhow!(
-                    "import pgdata doesn't specify the start lsn, aborting creation on safekeepers"
-                )))?;
-            }
-        };
-
-        // Choose initial set of safekeepers respecting affinity
-        let sks = self.safekeepers_for_new_timeline().await?;
-        let sks_persistence = sks.iter().map(|sk| sk.0 as i64).collect::<Vec<_>>();
-        // Add timeline to db
-        let timeline_persist = TimelinePersistence {
-            tenant_id: tenant_id.to_string(),
-            timeline_id: timeline_id.to_string(),
-            generation: 0,
-            sk_set: sks_persistence.clone(),
-            new_sk_set: sks_persistence.clone(),
-            cplane_notified_generation: 0,
-            status: String::from(TimelineStatus::Creating),
-        };
-        self.persistence.insert_timeline(timeline_persist).await?;
-        // reconcile: create timeline on safekeepers
+        timeline_id: TimelineId,
+        timeline_persistence: &TimelinePersistence,
+        status_creating: &TimelineStatusCreating,
+        sk_persistences: &HashMap<i64, SafekeeperPersistence>,
+    ) -> Result<(), ApiError> {
         // If quorum is reached, return if we are outside of a specified timeout
-        let sk_persistences = self
-            .persistence
-            .list_safekeepers()
-            .await?
-            .into_iter()
-            .map(|p| (p.id, p))
-            .collect::<HashMap<_, _>>();
         let jwt = self.config.jwt_token.clone().map(SecretString::from);
         let mut joinset = JoinSet::new();
 
         let mut members = Vec::new();
-        for sk in sks.iter() {
-            let Some(sk_p) = sk_persistences.get(&(sk.0 as i64)) else {
+        for sk in timeline_persistence.sk_set.iter() {
+            let Some(sk_p) = sk_persistences.get(&sk) else {
                 return Err(ApiError::InternalServerError(anyhow!(
                     "couldn't find persisted entry for safekeeper with id {sk}"
                 )))?;
@@ -3463,17 +3434,17 @@ impl Service {
         let req = safekeeper_api::models::TimelineCreateRequest {
             commit_lsn: None,
             mconf,
-            pg_version,
-            start_lsn,
+            pg_version: status_creating.pg_version,
+            start_lsn: status_creating.start_lsn,
             system_id: None,
             tenant_id,
             timeline_id,
             wal_seg_size: None,
         };
-        for sk in sks.iter() {
+        for sk in timeline_persistence.sk_set.iter() {
             // Unwrap is fine as we already would have returned error above
-            let sk_p = sk_persistences.get(&(sk.0 as i64)).unwrap();
-            let sk_clone = *sk;
+            let sk_p = sk_persistences.get(&sk).unwrap();
+            let sk_clone = NodeId(*sk as u64);
             let base_url = sk_p.base_url();
             let jwt = jwt.clone();
             let req = req.clone();
@@ -3556,7 +3527,7 @@ impl Service {
             "Got {} successful results from reconciliation",
             successful.len()
         );
-        if successful.len() < 2 {
+        let status_kind = if successful.len() < 2 {
             // Failure
             return Err(ApiError::InternalServerError(anyhow!(
                 "not enough successful reconciliations to reach quorum, please retry: {}",
@@ -3564,20 +3535,82 @@ impl Service {
             )));
         } else if successful.len() == 3 {
             // Success, state of timeline is Created
-            self.persistence
-                .update_timeline(tenant_id, timeline_id, TimelineStatus::Created)
-                .await?;
+            TimelineStatusKind::Created
         } else if successful.len() == 2 {
             // Success, state of timeline remains Creating
+            TimelineStatusKind::Creating
         } else {
             unreachable!(
                 "unexpected number of successful reconciliations {}",
                 successful.len()
             );
-        }
+        };
 
         // notify cplane about creation
-        // TODO (this should probably be in a function so that the reconciler can use it too)
+        // TODO
+
+        self.persistence
+            .update_timeline(tenant_id, timeline_id, status_kind)
+            .await?;
+        Ok(())
+    }
+
+    async fn tenant_timeline_create_safekeepers(
+        &self,
+        tenant_id: TenantId,
+        timeline_info: &TimelineInfo,
+        create_mode: models::TimelineCreateRequestMode,
+    ) -> Result<(u32, Vec<NodeId>), ApiError> {
+        let timeline_id = timeline_info.timeline_id;
+        let pg_version = timeline_info.pg_version;
+        let start_lsn = match create_mode {
+            models::TimelineCreateRequestMode::Bootstrap { .. } => timeline_info.last_record_lsn,
+            models::TimelineCreateRequestMode::Branch { .. } => timeline_info.last_record_lsn,
+            models::TimelineCreateRequestMode::ImportPgdata { .. } => {
+                // Can't do return Err because of async block, must do ? plus unreachable!()
+                return Err(ApiError::InternalServerError(anyhow!(
+                    "import pgdata doesn't specify the start lsn, aborting creation on safekeepers"
+                )))?;
+            }
+        };
+
+        // Choose initial set of safekeepers respecting affinity
+        let sks = self.safekeepers_for_new_timeline().await?;
+        let sks_persistence = sks.iter().map(|sk| sk.0 as i64).collect::<Vec<_>>();
+        let status_creating = TimelineStatusCreating {
+            pg_version,
+            start_lsn,
+        };
+        let status = serde_json::to_string(&status_creating).unwrap();
+        // Add timeline to db
+        let timeline_persist = TimelinePersistence {
+            tenant_id: tenant_id.to_string(),
+            timeline_id: timeline_id.to_string(),
+            generation: 0,
+            sk_set: sks_persistence.clone(),
+            new_sk_set: sks_persistence.clone(),
+            cplane_notified_generation: 0,
+            status_kind: String::from(TimelineStatusKind::Creating),
+            status,
+        };
+        self.persistence
+            .insert_timeline(timeline_persist.clone())
+            .await?;
+        let sk_persistences = self
+            .persistence
+            .list_safekeepers()
+            .await?
+            .into_iter()
+            .map(|p| (p.id, p))
+            .collect::<HashMap<_, _>>();
+        self.tenant_timeline_create_safekeepers_reconcile(
+            tenant_id,
+            timeline_id,
+            &timeline_persist,
+            &status_creating,
+            &sk_persistences,
+        )
+        .await?;
         Ok((0, sks))
     }
 

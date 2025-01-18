@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -9,7 +9,8 @@ use utils::{
 
 use crate::{
     id_lock_map::trace_shared_lock,
-    service::{TenantOperations, TimelineStatus},
+    persistence::SafekeeperPersistence,
+    service::{TenantOperations, TimelineStatusCreating, TimelineStatusKind},
 };
 
 use super::{Service, TimelinePersistence};
@@ -43,12 +44,25 @@ impl SafekeeperReconciler {
             .persistence
             .timelines_to_be_reconciled()
             .await?;
+        if work_list.is_empty() {
+            return Ok(());
+        }
+        let sk_persistences = self
+            .service
+            .persistence
+            .list_safekeepers()
+            .await?
+            .into_iter()
+            .map(|p| (p.id, p))
+            .collect::<HashMap<_, _>>();
         for tl in work_list {
-            let reconcile_fut = self.reconcile_timeline(&tl).instrument(tracing::info_span!(
-                "safekeeper_reconcile_timeline",
-                timeline_id = tl.timeline_id,
-                tenant_id = tl.tenant_id
-            ));
+            let reconcile_fut =
+                self.reconcile_timeline(&tl, &sk_persistences)
+                    .instrument(tracing::info_span!(
+                        "safekeeper_reconcile_timeline",
+                        timeline_id = tl.timeline_id,
+                        tenant_id = tl.tenant_id
+                    ));
 
             tokio::select! {
                 r = reconcile_fut => r?,
@@ -57,7 +71,11 @@ impl SafekeeperReconciler {
         }
         Ok(())
     }
-    async fn reconcile_timeline(&self, tl: &TimelinePersistence) -> Result<(), anyhow::Error> {
+    async fn reconcile_timeline(
+        &self,
+        tl: &TimelinePersistence,
+        sk_persistences: &HashMap<i64, SafekeeperPersistence>,
+    ) -> Result<(), anyhow::Error> {
         tracing::info!(
             "Reconciling timeline on safekeepers {}/{}",
             tl.tenant_id,
@@ -80,15 +98,25 @@ impl SafekeeperReconciler {
             .persistence
             .get_timeline(tenant_id, timeline_id)
             .await?;
-        let status = TimelineStatus::from_str(&tl.status)?;
+        let status = TimelineStatusKind::from_str(&tl.status)?;
         match status {
-            TimelineStatus::Created | TimelineStatus::Deleted => return Ok(()),
-            TimelineStatus::Creating => {
-                todo!()
+            TimelineStatusKind::Created | TimelineStatusKind::Deleted => (),
+            TimelineStatusKind::Creating => {
+                let status_creating: TimelineStatusCreating = serde_json::from_str(&tl.status)?;
+                self.service
+                    .tenant_timeline_create_safekeepers_reconcile(
+                        tenant_id,
+                        timeline_id,
+                        &tl,
+                        &status_creating,
+                        sk_persistences,
+                    )
+                    .await?;
             }
-            TimelineStatus::Deleting => {
+            TimelineStatusKind::Deleting => {
                 todo!()
             }
         }
+        Ok(())
     }
 }
