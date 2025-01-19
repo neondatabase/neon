@@ -1,0 +1,368 @@
+@!@!@STARTMSG 2262:0 @!@!@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+@!@!@ENDMSG 2262 @!@!@
+@!@!@STARTMSG 2187:0 @!@!@
+Running breadth-first search Model-Checking with fp 60 and seed 1436414801931403111 with 4 workers on 8 cores with 2428MB heap and 5460MB offheap memory [pid: 23214] (Mac OS X 10.16 x86_64, AdoptOpenJDK 14.0.1 x86_64, OffHeapDiskFPSet, DiskStateQueue).
+@!@!@ENDMSG 2187 @!@!@
+@!@!@STARTMSG 2220:0 @!@!@
+Starting SANY...
+@!@!@ENDMSG 2220 @!@!@
+Parsing file /Users/cs/src/neon/storage_broker/spec/replicated/replicated.toolbox/Model_1/MC.tla
+Parsing file /Users/cs/src/neon/storage_broker/spec/replicated/replicated.toolbox/Model_1/replicated.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/TLC.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/Integers.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/FiniteSets.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/Naturals.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Integers
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module replicated
+Semantic processing of module TLC
+Semantic processing of module MC
+@!@!@STARTMSG 2219:0 @!@!@
+SANY finished.
+@!@!@ENDMSG 2219 @!@!@
+@!@!@STARTMSG 2185:0 @!@!@
+Starting... (2025-01-19 23:02:19)
+@!@!@ENDMSG 2185 @!@!@
+@!@!@STARTMSG 2279:3 @!@!@
+Declaring symmetry during liveness checking is dangerous. It might cause TLC to miss violations of the stated liveness properties. Please check liveness without symmetry defined.
+@!@!@ENDMSG 2279 @!@!@
+@!@!@STARTMSG 2284:3 @!@!@
+Declaring state or action constraints during liveness checking is dangerous: Please read section 14.3.5 on page 247 of Specifying Systems (https://lamport.azurewebsites.net/tla/book.html) and optionally the discussion at https://discuss.tlapl.us/msg00994.html for more details.
+@!@!@ENDMSG 2284 @!@!@
+@!@!@STARTMSG 2212:0 @!@!@
+Implied-temporal checking--satisfiability problem has 1 branches.
+@!@!@ENDMSG 2212 @!@!@
+@!@!@STARTMSG 2189:0 @!@!@
+Computing initial states...
+@!@!@ENDMSG 2189 @!@!@
+@!@!@STARTMSG 2190:0 @!@!@
+Finished computing initial states: 1 distinct state generated at 2025-01-19 23:02:20.
+@!@!@ENDMSG 2190 @!@!@
+@!@!@STARTMSG 1000:1 @!@!@
+TLC threw an unexpected exception.
+This was probably caused by an error in the spec or model.
+See the User Output or TLC Console for clues to what happened.
+The exception was a java.lang.RuntimeException
+: Attempted to select field "sk" from a non-record value NULL
+line 111, col 36 to line 111, col 40 of module replicated
+@!@!@ENDMSG 1000 @!@!@
+@!@!@STARTMSG 2121:1 @!@!@
+The behavior up to this point is:
+@!@!@ENDMSG 2121 @!@!@
+@!@!@STARTMSG 2217:4 @!@!@
+1: <Initial predicate>
+/\ pageserver_state = (p1 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0]), last_record_lsn |-> 0, preferred_sk |-> NULL])
+/\ broker_state = (b1 :> [sk |-> (s1 :> [commit_lsn |-> 0, prune_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0, prune_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0, prune_lsn |-> 0])] @@ b2 :> [sk |-> (s1 :> [commit_lsn |-> 0, prune_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0, prune_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0, prune_lsn |-> 0])] @@ b3 :> [sk |-> (s1 :> [commit_lsn |-> 0, prune_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0, prune_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0, prune_lsn |-> 0])])
+/\ online = {b1, b2, b3, s1, s2, s3, p1}
+/\ safekeeper_state = (s1 :> [commit_lsn |-> 0, prune_lsn |-> 0, rx |-> (b1 :> NULL @@ b2 :> NULL @@ b3 :> NULL)] @@ s2 :> [commit_lsn |-> 0, prune_lsn |-> 0, rx |-> (b1 :> NULL @@ b2 :> NULL @@ b3 :> NULL)] @@ s3 :> [commit_lsn |-> 0, prune_lsn |-> 0, rx |-> (b1 :> NULL @@ b2 :> NULL @@ b3 :> NULL)])
+
+@!@!@ENDMSG 2217 @!@!@
+@!@!@STARTMSG 2217:4 @!@!@
+2: <NodeOnlineOffline line 52, col 5 to line 56, col 67 of module replicated>
+/\ pageserver_state = (p1 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0]), last_record_lsn |-> 0, preferred_sk |-> NULL])
+/\ broker_state = (b1 :> [sk |-> (s1 :> [commit_lsn |-> 0, prune_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0, prune_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0, prune_lsn |-> 0])] @@ b2 :> [sk |-> (s1 :> [commit_lsn |-> 0, prune_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0, prune_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0, prune_lsn |-> 0])] @@ b3 :> [sk |-> (s1 :> [commit_lsn |-> 0, prune_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0, prune_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0, prune_lsn |-> 0])])
+/\ online = {b1, b2, s1, s2, p1}
+/\ safekeeper_state = (s1 :> [commit_lsn |-> 0, prune_lsn |-> 0, rx |-> (b1 :> NULL @@ b2 :> NULL @@ b3 :> NULL)] @@ s2 :> [commit_lsn |-> 0, prune_lsn |-> 0, rx |-> (b1 :> NULL @@ b2 :> NULL @@ b3 :> NULL)] @@ s3 :> [commit_lsn |-> 0, prune_lsn |-> 0, rx |-> (b1 :> NULL @@ b2 :> NULL @@ b3 :> NULL)])
+
+@!@!@ENDMSG 2217 @!@!@
+@!@!@STARTMSG 2103:1 @!@!@
+The error occurred when TLC was evaluating the nested
+expressions at the following positions:
+0. Line 108, column 5 to line 124, column 57 in replicated
+1. Line 108, column 8 to line 108, column 27 in replicated
+2. Line 109, column 8 to line 123, column 80 in replicated
+3. Line 123, column 9 to line 123, column 80 in replicated
+4. Line 123, column 29 to line 123, column 80 in replicated
+5. Line 123, column 71 to line 123, column 79 in replicated
+6. Line 121, column 22 to line 121, column 42 in replicated
+7. Line 27, column 3 to line 27, column 36 in replicated
+8. Line 27, column 16 to line 27, column 16 in replicated
+9. Line 121, column 31 to line 121, column 41 in replicated
+10. Line 120, column 24 to line 120, column 49 in replicated
+11. Line 120, column 45 to line 120, column 48 in replicated
+12. Line 113, column 13 to line 119, column 18 in replicated
+13. Line 114, column 17 to line 116, column 32 in replicated
+14. Line 116, column 17 to line 116, column 32 in replicated
+15. Line 111, column 29 to line 111, column 62 in replicated
+16. Line 111, column 35 to line 111, column 62 in replicated
+17. Line 111, column 36 to line 111, column 40 in replicated
+
+
+@!@!@ENDMSG 2103 @!@!@
+@!@!@STARTMSG 2201:0 @!@!@
+The coverage statistics at 2025-01-19 23:02:20
+@!@!@ENDMSG 2201 @!@!@
+@!@!@STARTMSG 2773:0 @!@!@
+<Init line 45, col 1 to line 45, col 4 of module replicated>: 2:2
+@!@!@ENDMSG 2773 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 46, col 5 to line 49, col 26 of module replicated: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<NodeOnlineOffline line 51, col 1 to line 51, col 17 of module replicated>: 1:6
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 52, col 8 to line 55, col 44 of module replicated: 6
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 52, col 18 to line 55, col 44 of module replicated: 6
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 53, col 9 to line 55, col 44 of module replicated: 642
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 53, col 12 to line 53, col 48 of module replicated: 642
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 54, col 12 to line 54, col 44 of module replicated: 258
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 55, col 12 to line 55, col 44 of module replicated: 84
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 52, col 32 to line 52, col 48 of module replicated: 6
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 56, col 8 to line 56, col 67 of module replicated: 6
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkCommit line 58, col 1 to line 58, col 16 of module replicated>: 4:14
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 59, col 8 to line 59, col 32 of module replicated: 59
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2775:0 @!@!@
+  |line 59, col 8 to line 59, col 15 of module replicated: 45:105
+@!@!@ENDMSG 2775 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 59, col 27 to line 59, col 32 of module replicated: 45
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 60, col 8 to line 60, col 14 of module replicated: 44
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 60, col 8 to line 60, col 9 of module replicated: 30
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 60, col 13 to line 60, col 14 of module replicated: 30
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 61, col 8 to line 61, col 72 of module replicated: 32
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 61, col 8 to line 61, col 38 of module replicated: 18
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 61, col 42 to line 61, col 72 of module replicated: 18
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 65, col 13 to line 67, col 50 of module replicated: 14
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 68, col 8 to line 68, col 58 of module replicated: 14
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkPeerRecovery line 70, col 1 to line 70, col 21 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 71, col 8 to line 71, col 32 of module replicated: 45
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 72, col 8 to line 72, col 72 of module replicated: 30
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 73, col 8 to line 73, col 71 of module replicated: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 74, col 8 to line 74, col 102 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 75, col 8 to line 75, col 58 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkPushToBroker line 77, col 1 to line 77, col 19 of module replicated>: 2:30
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 78, col 8 to line 78, col 30 of module replicated: 75
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2775:0 @!@!@
+  |line 78, col 8 to line 78, col 13 of module replicated: 45:111
+@!@!@ENDMSG 2775 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 78, col 25 to line 78, col 30 of module replicated: 45
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 79, col 8 to line 86, col 52 of module replicated: 30
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 87, col 8 to line 87, col 62 of module replicated: 30
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<PsRecvBroker line 89, col 1 to line 89, col 19 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 96, col 13 to line 98, col 37 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 99, col 8 to line 99, col 58 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkRecvBroker line 102, col 1 to line 102, col 17 of module replicated>: 5:30
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 103, col 8 to line 103, col 29 of module replicated: 75
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2775:0 @!@!@
+  |line 103, col 8 to line 103, col 12 of module replicated: 45:111
+@!@!@ENDMSG 2775 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 103, col 24 to line 103, col 29 of module replicated: 45
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 104, col 8 to line 104, col 81 of module replicated: 30
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 105, col 8 to line 105, col 57 of module replicated: 30
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkPrune line 107, col 1 to line 107, col 10 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 108, col 8 to line 108, col 27 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 123, col 9 to line 123, col 80 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 123, col 29 to line 123, col 80 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 123, col 30 to line 123, col 45 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 123, col 54 to line 123, col 79 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 123, col 71 to line 123, col 79 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 121, col 22 to line 121, col 42 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||||line 27, col 3 to line 27, col 36 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||||line 121, col 31 to line 121, col 41 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||||line 120, col 24 to line 120, col 49 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||||||line 120, col 45 to line 120, col 48 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||||||line 113, col 13 to line 119, col 18 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||||||||line 114, col 17 to line 116, col 32 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||||||||line 114, col 17 to line 114, col 37 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||||||||line 116, col 17 to line 116, col 32 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||||||||||line 111, col 29 to line 111, col 62 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||||||||||line 111, col 35 to line 111, col 62 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||||||||||||line 111, col 36 to line 111, col 40 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||||||||||||line 111, col 50 to line 111, col 61 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2775:0 @!@!@
+  |||||||||||||line 110, col 25 to line 110, col 90 of module replicated: 5:10
+@!@!@ENDMSG 2775 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||||||||||||||line 110, col 26 to line 110, col 50 of module replicated: 15
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||||||||||||||line 110, col 60 to line 110, col 88 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 124, col 8 to line 124, col 57 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<PsChooseSk line 133, col 1 to line 133, col 13 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 136, col 8 to line 136, col 109 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 137, col 8 to line 137, col 58 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2774:0 @!@!@
+<PsLagsSk line 159, col 1 to line 159, col 8 of module replicated>
+@!@!@ENDMSG 2774 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 159, col 13 to line 160, col 81 of module replicated: 13
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 159, col 35 to line 160, col 81 of module replicated: 13
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 160, col 9 to line 160, col 81 of module replicated: 39
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 159, col 44 to line 159, col 72 of module replicated: 13
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 159, col 22 to line 159, col 32 of module replicated: 13
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2774:0 @!@!@
+<PeerRecoveryIsPossible line 162, col 1 to line 162, col 22 of module replicated>
+@!@!@ENDMSG 2774 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 163, col 5 to line 165, col 88 of module replicated: 13
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 163, col 47 to line 165, col 88 of module replicated: 33
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 164, col 9 to line 165, col 88 of module replicated: 33
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 164, col 12 to line 165, col 88 of module replicated: 33
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||||line 164, col 13 to line 164, col 85 of module replicated: 33
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||||line 165, col 16 to line 165, col 88 of module replicated: 5
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 163, col 61 to line 163, col 83 of module replicated: 33
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 163, col 21 to line 163, col 43 of module replicated: 13
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2202:0 @!@!@
+End of statistics.
+@!@!@ENDMSG 2202 @!@!@
+@!@!@STARTMSG 2200:0 @!@!@
+Progress(4) at 2025-01-19 23:02:20: 69 states generated (1.718 s/min), 13 distinct states found (323 ds/min), 9 states left on queue.
+@!@!@ENDMSG 2200 @!@!@
+@!@!@STARTMSG 2199:0 @!@!@
+69 states generated, 13 distinct states found, 9 states left on queue.
+@!@!@ENDMSG 2199 @!@!@
+@!@!@STARTMSG 2186:0 @!@!@
+Finished in 2426ms at (2025-01-19 23:02:20)
+@!@!@ENDMSG 2186 @!@!@

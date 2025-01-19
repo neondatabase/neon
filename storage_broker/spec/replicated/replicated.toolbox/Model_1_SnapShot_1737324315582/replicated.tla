@@ -25,10 +25,6 @@ Max(a,b) == IF a > b THEN a ELSE b
 (* The minimum of a non-empty set of integers *)
 MinOfSet(S) == 
   CHOOSE x \in S: \A y \in S: x <= y
-  
-(* The minimum of a non-empty set of integers *)
-MaxOfSet(S) == 
-  CHOOSE x \in S: \A y \in S: x >= y
 
 \* END HELPERS
 
@@ -112,10 +108,20 @@ SkPrune(s) ==
     /\ {s} \subseteq online
     /\ LET
         sk == safekeeper_state[s]
-        skis == {<<b,DOMAIN bi.sk>>: <<b,bi>> \in {<<b,bi>> \in { <<b,sk.rx[b]>>: b \in sk.rx }: bi # NULL} }
-        
+        broker_infos == {sk.rx[b]: b \in (DOMAIN s.rx)} \ {NULL}
+        broker_infos_sks == UNION {bi.sk: bi \in (broker_infos \ {NULL}) }
+        info ==
+            (
+                {safekeeper_state[s]}
+                \cup
+                broker_infos_sks
+            )
+            \
+            {NULL}
+        commit_lsns == {i.commit_lsn: i \in info}
+        prune_lsn == MinOfSet(commit_lsns)
        IN
-        safekeeper_state' = safekeeper_state   
+        safekeeper_state' = [safekeeper_state EXCEPT ![s].prune_lsn = prune_lsn] 
     /\ UNCHANGED <<pageserver_state,broker_state,online>>
     
 

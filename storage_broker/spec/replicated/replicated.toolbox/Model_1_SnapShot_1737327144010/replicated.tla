@@ -112,10 +112,9 @@ SkPrune(s) ==
     /\ {s} \subseteq online
     /\ LET
         sk == safekeeper_state[s]
-        skis == {<<b,DOMAIN bi.sk>>: <<b,bi>> \in {<<b,bi>> \in { <<b,sk.rx[b]>>: b \in sk.rx }: bi # NULL} }
-        
+        skis == {<<b,bi.sk>>: <<b,bi>> \in {<<b,bi>> \in { <<b,sk.rx[b]>>: b \in sk.rx }: bi # NULL} }
        IN
-        safekeeper_state' = safekeeper_state   
+        TRUE   
     /\ UNCHANGED <<pageserver_state,broker_state,online>>
     
 

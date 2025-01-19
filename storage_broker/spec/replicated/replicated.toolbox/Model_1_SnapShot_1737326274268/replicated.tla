@@ -112,10 +112,19 @@ SkPrune(s) ==
     /\ {s} \subseteq online
     /\ LET
         sk == safekeeper_state[s]
-        skis == {<<b,DOMAIN bi.sk>>: <<b,bi>> \in {<<b,bi>> \in { <<b,sk.rx[b]>>: b \in sk.rx }: bi # NULL} }
         
+        broker_infos == {sk.rx[b]: b \in (DOMAIN sk.rx)} \ {NULL}
+        known_sks == UNION ({DOMAIN bi.sk: bi \in broker_infos})
+        max_commit_lsns == {
+                MaxOfSet(
+                    {
+                        sk.rx[b].sk[s2].commit_lsn: b \in DOMAIN sk.rx
+                    }
+                ): s2 \in known_sks
+            }
+        prune_lsn == IF max_commit_lsns # {} THEN MinOfSet(max_commit_lsns) ELSE 0
        IN
-        safekeeper_state' = safekeeper_state   
+        safekeeper_state' = [safekeeper_state EXCEPT ![s].prune_lsn = prune_lsn] 
     /\ UNCHANGED <<pageserver_state,broker_state,online>>
     
 

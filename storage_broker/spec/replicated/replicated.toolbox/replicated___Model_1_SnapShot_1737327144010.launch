@@ -2,7 +2,7 @@
 <launchConfiguration type="org.lamport.tla.toolbox.tool.tlc.modelCheck">
     <stringAttribute key="TLCCmdLineParameters" value=""/>
     <intAttribute key="collectCoverage" value="1"/>
-    <stringAttribute key="configurationName" value="Model_1"/>
+    <stringAttribute key="configurationName" value="Model_1_SnapShot_1737327144010"/>
     <booleanAttribute key="deferLiveness" value="false"/>
     <intAttribute key="dfidDepth" value="100"/>
     <booleanAttribute key="dfidMode" value="false"/>
