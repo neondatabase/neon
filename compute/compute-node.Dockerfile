@@ -1133,7 +1133,7 @@ RUN git clone --depth 1 --branch v0.2.0 https://github.com/duckdb/pg_duckdb.git 
     cd third_party/duckdb && \
     patch -p1 < /duckdb-v1-1-3.patch && \
     cd ../.. && \
-    CORE_EXTENSIONS='autocomplete;httpfs;icu;json;tpch' make install -j $(getconf _NPROCESSORS_ONLN) && \
+    CORE_EXTENSIONS='autocomplete;httpfs;icu;json' make install -j $(getconf _NPROCESSORS_ONLN) && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control && \
     file=/usr/local/pgsql/share/extension/pg_duckdb--0.1.0--0.2.0.sql && \
     echo 'GRANT ALL ON FUNCTION duckdb.cache(TEXT, TEXT) TO neon_superuser;' >> $file && \
