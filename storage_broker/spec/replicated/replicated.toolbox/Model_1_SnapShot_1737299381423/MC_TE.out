@@ -1,0 +1,186 @@
+@!@!@STARTMSG 2262:0 @!@!@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+@!@!@ENDMSG 2262 @!@!@
+@!@!@STARTMSG 2187:0 @!@!@
+Running breadth-first search Model-Checking with fp 3 and seed -7432767478319300652 with 4 workers on 8 cores with 2428MB heap and 5460MB offheap memory [pid: 7681] (Mac OS X 10.16 x86_64, AdoptOpenJDK 14.0.1 x86_64, OffHeapDiskFPSet, DiskStateQueue).
+@!@!@ENDMSG 2187 @!@!@
+@!@!@STARTMSG 2220:0 @!@!@
+Starting SANY...
+@!@!@ENDMSG 2220 @!@!@
+Parsing file /Users/cs/Desktop/broker/fullmesh/fullmesh.toolbox/Model_1/MC.tla
+Parsing file /Users/cs/Desktop/broker/fullmesh/fullmesh.toolbox/Model_1/fullmesh.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/TLC.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/Integers.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/Naturals.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/Sequences.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/FiniteSets.tla
+Semantic processing of module Naturals
+Semantic processing of module Integers
+Semantic processing of module fullmesh
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module MC
+@!@!@STARTMSG 2219:0 @!@!@
+SANY finished.
+@!@!@ENDMSG 2219 @!@!@
+@!@!@STARTMSG 2185:0 @!@!@
+Starting... (2025-01-19 16:09:38)
+@!@!@ENDMSG 2185 @!@!@
+@!@!@STARTMSG 2279:3 @!@!@
+Declaring symmetry during liveness checking is dangerous. It might cause TLC to miss violations of the stated liveness properties. Please check liveness without symmetry defined.
+@!@!@ENDMSG 2279 @!@!@
+@!@!@STARTMSG 2284:3 @!@!@
+Declaring state or action constraints during liveness checking is dangerous: Please read section 14.3.5 on page 247 of Specifying Systems (https://lamport.azurewebsites.net/tla/book.html) and optionally the discussion at https://discuss.tlapl.us/msg00994.html for more details.
+@!@!@ENDMSG 2284 @!@!@
+@!@!@STARTMSG 2212:0 @!@!@
+Implied-temporal checking--satisfiability problem has 1 branches.
+@!@!@ENDMSG 2212 @!@!@
+@!@!@STARTMSG 2189:0 @!@!@
+Computing initial states...
+@!@!@ENDMSG 2189 @!@!@
+@!@!@STARTMSG 2190:0 @!@!@
+Finished computing initial states: 1 distinct state generated at 2025-01-19 16:09:40.
+@!@!@ENDMSG 2190 @!@!@
+@!@!@STARTMSG 2109:1 @!@!@
+Successor state is not completely specified by action SkPeerRecovery of the next-state relation. The following variables are not assigned: broker_state, pageserver_state.
+
+@!@!@ENDMSG 2109 @!@!@
+@!@!@STARTMSG 2121:1 @!@!@
+The behavior up to this point is:
+@!@!@ENDMSG 2121 @!@!@
+@!@!@STARTMSG 2217:4 @!@!@
+1: <Initial predicate>
+/\ pageserver_state = (p1 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0]), last_record_lsn |-> 0, preferred_sk |-> NULL] @@ p2 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0]), last_record_lsn |-> 0, preferred_sk |-> NULL])
+/\ broker_state = (b1 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])] @@ b2 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])] @@ b3 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])])
+/\ safekeeper_state = (s1 :> [commit_lsn |-> 0, pruned_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0, pruned_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0, pruned_lsn |-> 0])
+
+@!@!@ENDMSG 2217 @!@!@
+@!@!@STARTMSG 2217:4 @!@!@
+2: <SkCommit line 40, col 5 to line 47, col 51 of module fullmesh>
+/\ pageserver_state = (p1 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0]), last_record_lsn |-> 0, preferred_sk |-> NULL] @@ p2 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0]), last_record_lsn |-> 0, preferred_sk |-> NULL])
+/\ broker_state = (b1 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])] @@ b2 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])] @@ b3 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])])
+/\ safekeeper_state = (s1 :> [commit_lsn |-> 1, pruned_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0, pruned_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0, pruned_lsn |-> 0])
+
+@!@!@ENDMSG 2217 @!@!@
+@!@!@STARTMSG 2217:4 @!@!@
+3: <SkPeerRecovery line 50, col 5 to line 51, col 102 of module fullmesh>
+/\ pageserver_state = null
+/\ broker_state = null
+/\ safekeeper_state = (s1 :> [commit_lsn |-> 1, pruned_lsn |-> 0] @@ s2 :> [commit_lsn |-> 1, pruned_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0, pruned_lsn |-> 0])
+
+@!@!@ENDMSG 2217 @!@!@
+@!@!@STARTMSG 2201:0 @!@!@
+The coverage statistics at 2025-01-19 16:09:40
+@!@!@ENDMSG 2201 @!@!@
+@!@!@STARTMSG 2773:0 @!@!@
+<Init line 33, col 1 to line 33, col 4 of module fullmesh>: 2:2
+@!@!@ENDMSG 2773 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 34, col 5 to line 36, col 64 of module fullmesh: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkCommit line 39, col 1 to line 39, col 16 of module fullmesh>: 5:17
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 40, col 8 to line 40, col 72 of module fullmesh: 46
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 40, col 8 to line 40, col 38 of module fullmesh: 29
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 40, col 42 to line 40, col 72 of module fullmesh: 29
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 44, col 13 to line 46, col 50 of module fullmesh: 17
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 47, col 8 to line 47, col 51 of module fullmesh: 17
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkPeerRecovery line 49, col 1 to line 49, col 21 of module fullmesh>: 0:4
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 50, col 8 to line 50, col 72 of module fullmesh: 1
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 50, col 8 to line 50, col 38 of module fullmesh: 28
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 50, col 42 to line 50, col 72 of module fullmesh: 28
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 51, col 8 to line 51, col 102 of module fullmesh: 1
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 51, col 28 to line 51, col 102 of module fullmesh: 4
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkPushToBroker line 53, col 1 to line 53, col 19 of module fullmesh>: 0:9
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 54, col 8 to line 61, col 29 of module fullmesh: 9
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 62, col 8 to line 62, col 55 of module fullmesh: 9
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<PsRecvBroker line 64, col 1 to line 64, col 19 of module fullmesh>: 0:18
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 70, col 13 to line 72, col 37 of module fullmesh: 18
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 73, col 8 to line 73, col 51 of module fullmesh: 18
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<PsChooseSk line 82, col 1 to line 82, col 13 of module fullmesh>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 83, col 8 to line 83, col 30 of module fullmesh: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 83, col 8 to line 83, col 25 of module fullmesh: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 78, col 15 to line 78, col 33 of module fullmesh: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 80, col 5 to line 80, col 66 of module fullmesh: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 80, col 26 to line 80, col 65 of module fullmesh: 6
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 80, col 12 to line 80, col 23 of module fullmesh: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 83, col 24 to line 83, col 24 of module fullmesh: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 83, col 29 to line 83, col 30 of module fullmesh: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 84, col 8 to line 84, col 109 of module fullmesh: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 85, col 8 to line 85, col 51 of module fullmesh: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2202:0 @!@!@
+End of statistics.
+@!@!@ENDMSG 2202 @!@!@
+@!@!@STARTMSG 2200:0 @!@!@
+Progress(3) at 2025-01-19 16:09:40: 46 states generated (1.044 s/min), 6 distinct states found (136 ds/min), 2 states left on queue.
+@!@!@ENDMSG 2200 @!@!@
+@!@!@STARTMSG 2199:0 @!@!@
+46 states generated, 6 distinct states found, 2 states left on queue.
+@!@!@ENDMSG 2199 @!@!@
+@!@!@STARTMSG 2194:0 @!@!@
+The depth of the complete state graph search is 3.
+@!@!@ENDMSG 2194 @!@!@
+@!@!@STARTMSG 2268:0 @!@!@
+The average outdegree of the complete state graph is 2 (minimum is 2, the maximum 2 and the 95th percentile is 2).
+@!@!@ENDMSG 2268 @!@!@
+@!@!@STARTMSG 2186:0 @!@!@
+Finished in 2658ms at (2025-01-19 16:09:40)
+@!@!@ENDMSG 2186 @!@!@
