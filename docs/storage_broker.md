@@ -1,6 +1,6 @@
 # Storage broker
 
-Storage broker targets two issues:
+Storage broker targets two issues
 - Allowing safekeepers and pageservers learn which nodes also hold their
   timelines, and timeline statuses there.
 - Avoiding O(n^2) connections between storage nodes while doing so.
@@ -19,7 +19,7 @@ Currently, the only message is `SafekeeperTimelineInfo`. Each safekeeper, for
 each active timeline, once in a while pushes timeline status to the broker.
 Other nodes subscribe and receive this info, using it per above.
 
-Broker serves /metrics on the same port as grpc service. 
+Broker serves /metrics on the same port as grpc service.
 
 grpcurl can be used to check which values are currently being pushed:
 ```

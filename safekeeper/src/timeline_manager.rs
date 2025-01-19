@@ -495,6 +495,7 @@ impl Manager {
     }
 
     /// Update is_active flag and returns its value.
+    // Timelines marked active are pushed to the broker by the `push_loop` task.
     fn update_is_active(
         &mut self,
         is_wal_backup_required: bool,

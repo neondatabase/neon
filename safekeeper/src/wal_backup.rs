@@ -61,7 +61,9 @@ pub(crate) fn is_wal_backup_required(
     state: &StateSnapshot,
 ) -> bool {
     num_computes > 0 ||
-    // Currently only the whole segment is offloaded, so compare segment numbers.
+    // This task backups completed segments only.
+    // The current partial segment is backed up by a separate task/code module (wal_backup_partial).
+    // So, need for completed segment backup <=> last backup was at at older segment.
     (state.commit_lsn.segment_number(wal_seg_size) > state.backup_lsn.segment_number(wal_seg_size))
 }
 
@@ -69,6 +71,11 @@ pub(crate) fn is_wal_backup_required(
 /// is me, run (per timeline) task, if not yet. OTOH, if it is not me and task
 /// is running, kill it.
 pub(crate) async fn update_task(mgr: &mut Manager, need_backup: bool, state: &StateSnapshot) {
+    // Based on the peer information received from broker, each safekeeper figures out
+    // whether it, or one of the peers, is the offloader.
+    // The algorithm is deterministic, so, if all peers have the same information,
+    // the system converges. In unconverged state, multiple peers upload the same
+    // segments, which is inefficient but safe.
     let (offloader, election_dbg_str) =
         determine_offloader(&state.peers, state.backup_lsn, mgr.tli.ttid, &mgr.conf);
     let elected_me = Some(mgr.conf.my_id) == offloader;
