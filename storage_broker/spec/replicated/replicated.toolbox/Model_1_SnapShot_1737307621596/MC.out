@@ -1,0 +1,174 @@
+@!@!@STARTMSG 2262:0 @!@!@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+@!@!@ENDMSG 2262 @!@!@
+@!@!@STARTMSG 2187:0 @!@!@
+Running breadth-first search Model-Checking with fp 92 and seed -7531418498003009516 with 4 workers on 8 cores with 2428MB heap and 5460MB offheap memory [pid: 11444] (Mac OS X 10.16 x86_64, AdoptOpenJDK 14.0.1 x86_64, OffHeapDiskFPSet, DiskStateQueue).
+@!@!@ENDMSG 2187 @!@!@
+@!@!@STARTMSG 2220:0 @!@!@
+Starting SANY...
+@!@!@ENDMSG 2220 @!@!@
+Parsing file /Users/cs/src/neon/storage_broker/spec/replicated/replicated.toolbox/Model_1/MC.tla
+Parsing file /Users/cs/src/neon/storage_broker/spec/replicated/replicated.toolbox/Model_1/replicated.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/TLC.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/Integers.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/FiniteSets.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/Naturals.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Integers
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module replicated
+Semantic processing of module TLC
+Semantic processing of module MC
+@!@!@STARTMSG 2219:0 @!@!@
+SANY finished.
+@!@!@ENDMSG 2219 @!@!@
+@!@!@STARTMSG 2185:0 @!@!@
+Starting... (2025-01-19 18:26:58)
+@!@!@ENDMSG 2185 @!@!@
+@!@!@STARTMSG 2140:3 @!@!@
+The subscript of the next-state relation specified by the specification
+does not seem to contain the state variable online
+@!@!@ENDMSG 2140 @!@!@
+@!@!@STARTMSG 2279:3 @!@!@
+Declaring symmetry during liveness checking is dangerous. It might cause TLC to miss violations of the stated liveness properties. Please check liveness without symmetry defined.
+@!@!@ENDMSG 2279 @!@!@
+@!@!@STARTMSG 2284:3 @!@!@
+Declaring state or action constraints during liveness checking is dangerous: Please read section 14.3.5 on page 247 of Specifying Systems (https://lamport.azurewebsites.net/tla/book.html) and optionally the discussion at https://discuss.tlapl.us/msg00994.html for more details.
+@!@!@ENDMSG 2284 @!@!@
+@!@!@STARTMSG 2212:0 @!@!@
+Implied-temporal checking--satisfiability problem has 1 branches.
+@!@!@ENDMSG 2212 @!@!@
+@!@!@STARTMSG 2189:0 @!@!@
+Computing initial states...
+@!@!@ENDMSG 2189 @!@!@
+@!@!@STARTMSG 2190:0 @!@!@
+Finished computing initial states: 1 distinct state generated at 2025-01-19 18:27:00.
+@!@!@ENDMSG 2190 @!@!@
+@!@!@STARTMSG 1000:1 @!@!@
+TLC threw an unexpected exception.
+This was probably caused by an error in the spec or model.
+See the User Output or TLC Console for clues to what happened.
+The exception was a java.lang.RuntimeException
+: @!@!@STARTMSG 2280:0 @!@!@
+In evaluation, the identifier safekeeper_state is either undefined or not an operator.
+line 44, col 24 to line 44, col 39 of module replicated
+@!@!@ENDMSG 2280 @!@!@
+@!@!@ENDMSG 1000 @!@!@
+@!@!@STARTMSG 2121:1 @!@!@
+The behavior up to this point is:
+@!@!@ENDMSG 2121 @!@!@
+@!@!@STARTMSG 2217:4 @!@!@
+1: <Initial predicate>
+/\ pageserver_state = (p1 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0]), last_record_lsn |-> 0, preferred_sk |-> NULL] @@ p2 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0]), last_record_lsn |-> 0, preferred_sk |-> NULL])
+/\ broker_state = (b1 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])] @@ b2 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])] @@ b3 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])])
+/\ online = {b1, b2, b3, s1, s2, s3, p1, p2}
+/\ safekeeper_state = (s1 :> [commit_lsn |-> 0, pruned_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0, pruned_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0, pruned_lsn |-> 0])
+
+@!@!@ENDMSG 2217 @!@!@
+@!@!@STARTMSG 2103:1 @!@!@
+The error occurred when TLC was evaluating the nested
+expressions at the following positions:
+0. Line 40, column 22 to line 44, column 71 in replicated
+1. Line 40, column 32 to line 44, column 71 in replicated
+2. Line 41, column 9 to line 44, column 71 in replicated
+3. Line 44, column 12 to line 44, column 71 in replicated
+4. Line 44, column 22 to line 44, column 71 in replicated
+5. Line 44, column 24 to line 44, column 39 in replicated
+
+
+@!@!@ENDMSG 2103 @!@!@
+@!@!@STARTMSG 2201:0 @!@!@
+The coverage statistics at 2025-01-19 18:27:00
+@!@!@ENDMSG 2201 @!@!@
+@!@!@STARTMSG 2773:0 @!@!@
+<Init line 34, col 1 to line 34, col 4 of module replicated>: 1:1
+@!@!@ENDMSG 2773 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 35, col 5 to line 38, col 26 of module replicated: 1
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<NodeOnlineOffline line 40, col 1 to line 40, col 17 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 40, col 22 to line 44, col 71 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 40, col 32 to line 44, col 71 of module replicated: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 41, col 9 to line 44, col 71 of module replicated: 464
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 41, col 12 to line 41, col 48 of module replicated: 464
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 42, col 12 to line 42, col 44 of module replicated: 208
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 43, col 12 to line 43, col 44 of module replicated: 86
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 44, col 12 to line 44, col 71 of module replicated: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 40, col 46 to line 40, col 62 of module replicated: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkCommit line 46, col 1 to line 46, col 16 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 53, col 13 to line 55, col 50 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 56, col 8 to line 56, col 51 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkPeerRecovery line 58, col 1 to line 58, col 21 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 61, col 8 to line 61, col 102 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 62, col 8 to line 62, col 51 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkPushToBroker line 64, col 1 to line 64, col 19 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 66, col 8 to line 73, col 29 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 74, col 8 to line 74, col 55 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<PsRecvBroker line 76, col 1 to line 76, col 19 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 83, col 13 to line 85, col 37 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 86, col 8 to line 86, col 51 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<PsChooseSk line 97, col 1 to line 97, col 13 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 99, col 8 to line 99, col 109 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 100, col 8 to line 100, col 51 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2202:0 @!@!@
+End of statistics.
+@!@!@ENDMSG 2202 @!@!@
+@!@!@STARTMSG 2200:0 @!@!@
+Progress(1) at 2025-01-19 18:27:00: 1 states generated (24 s/min), 1 distinct states found (24 ds/min), 0 states left on queue.
+@!@!@ENDMSG 2200 @!@!@
+@!@!@STARTMSG 2199:0 @!@!@
+1 states generated, 1 distinct states found, 0 states left on queue.
+@!@!@ENDMSG 2199 @!@!@
+@!@!@STARTMSG 2186:0 @!@!@
+Finished in 2483ms at (2025-01-19 18:27:00)
+@!@!@ENDMSG 2186 @!@!@

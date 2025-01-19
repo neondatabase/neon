@@ -37,12 +37,10 @@ Init ==
     /\ pageserver_state = [p \in pageservers |-> InitPageserver]
     /\ online = InitOnline
   
-NodeOnlineOffline ==
-    /\ online' = CHOOSE ss \in SUBSET InitOnline: 
+NodeOnlineOffline == online' = CHOOSE ss \in SUBSET InitOnline: 
         /\ Cardinality(ss \cap safekeepers) >= 2
         /\ Cardinality(ss \cap brokers) >= 2
         /\ ss \cap pageservers = pageservers \* assume no PS failures for now
-    /\ UNCHANGED <<safekeeper_state,broker_state,pageserver_state>>
    
 SkCommit(s1, s2) ==
     /\ {s1, s2} \subseteq online 
@@ -54,13 +52,13 @@ SkCommit(s1, s2) ==
             safekeeper_state' = [safekeeper_state EXCEPT
                 ![s1].commit_lsn = new_commit_lsn,
                 ![s2].commit_lsn = new_commit_lsn]
-    /\ UNCHANGED <<broker_state, pageserver_state,online>>
+    /\ UNCHANGED <<broker_state, pageserver_state>>
 
 SkPeerRecovery(s1,s2) ==
     /\ {s1, s2} \subseteq online 
     /\ safekeeper_state[s1].commit_lsn < safekeeper_state[s2].commit_lsn
     /\ safekeeper_state' = [safekeeper_state EXCEPT![s1].commit_lsn = safekeeper_state[s2].commit_lsn]
-    /\ UNCHANGED <<broker_state, pageserver_state,online>>
+    /\ UNCHANGED <<broker_state, pageserver_state>>
 
 SkPushToBroker(s,b) ==
     /\ {s, b} \subseteq online 
@@ -72,7 +70,7 @@ SkPushToBroker(s,b) ==
                 IN
                 [broker_state EXCEPT ![b].sk = updbsk]
             ELSE broker_state
-    /\ UNCHANGED <<safekeeper_state, pageserver_state,online>> 
+    /\ UNCHANGED <<safekeeper_state, pageserver_state>> 
 
 PsRecvBroker(b,p,s) ==
     /\ {b,p,s} \subseteq online
@@ -84,20 +82,21 @@ PsRecvBroker(b,p,s) ==
             pageserver_state' = IF bsk.commit_lsn > psk.commit_lsn
                 THEN [pageserver_state EXCEPT ![p].sk[s] = updpsk]
                 ELSE pageserver_state
-    /\ UNCHANGED <<safekeeper_state, broker_state,online>>
+    /\ UNCHANGED <<safekeeper_state, broker_state>>
     
 
 SksWithNewerWal(p) ==
-    LET
-        ps == pageserver_state[p]
-    IN
-    {s \in DOMAIN ps.sk: ps.sk[s].commit_lsn > ps.last_record_lsn}
+    /\ {p} \subseteq online
+    /\
+        LET
+            ps == pageserver_state[p]
+        IN
+        {s \in DOMAIN ps.sk: ps.sk[s].commit_lsn > ps.last_record_lsn}
 
 PsChooseSk(p) ==
-    /\ {p} \subseteq online
     /\ SksWithNewerWal(p) # {}
     /\ pageserver_state' = [pageserver_state EXCEPT![p].preferred_sk = CHOOSE s \in SksWithNewerWal(p): TRUE]
-    /\ UNCHANGED <<safekeeper_state, broker_state,online>>    
+    /\ UNCHANGED <<safekeeper_state, broker_state>>    
                  
     
 Next ==
@@ -110,14 +109,10 @@ Next ==
     \/ \E p \in pageservers: PsChooseSk(p)
     
 
-Spec == Init /\ [][Next]_<< broker_state, safekeeper_state, pageserver_state,online>>
+Spec == Init /\ [][Next]_<< broker_state, safekeeper_state, pageserver_state >>
 
 
 \* invariants
-
-PsLagsSk == \A p \in pageservers: \A s \in DOMAIN pageserver_state[p].sk: 
-        /\ pageserver_state[p].sk[s].commit_lsn <= safekeeper_state[s].commit_lsn
-    
 
 EventuallyLaggingSkIsNotPreferredSk == <>(
         LET

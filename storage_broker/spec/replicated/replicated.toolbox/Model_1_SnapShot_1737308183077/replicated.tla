@@ -116,7 +116,7 @@ Spec == Init /\ [][Next]_<< broker_state, safekeeper_state, pageserver_state,onl
 \* invariants
 
 PsLagsSk == \A p \in pageservers: \A s \in DOMAIN pageserver_state[p].sk: 
-        /\ pageserver_state[p].sk[s].commit_lsn <= safekeeper_state[s].commit_lsn
+        /\ pageserver_state[p].sk[s].commit_lsn < safekeeper_state[s].commit_lsn
     
 
 EventuallyLaggingSkIsNotPreferredSk == <>(

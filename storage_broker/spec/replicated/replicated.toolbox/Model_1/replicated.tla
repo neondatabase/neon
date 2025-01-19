@@ -1,8 +1,8 @@
 ---- MODULE replicated ----
 
-EXTENDS Integers
+EXTENDS Integers, FiniteSets
 
-VARIABLES broker_state, safekeeper_state, pageserver_state
+VARIABLES broker_state, safekeeper_state, pageserver_state, online
 
 
 CONSTANT
@@ -29,14 +29,23 @@ StateConstraint ==
 InitSafekeeper == [pruned_lsn |-> 0, commit_lsn |-> 0]
 InitBroker == [sk |-> [s \in safekeepers |-> [commit_lsn |-> 0]]]
 InitPageserver == [last_record_lsn |-> 0, preferred_sk |-> NULL, sk |-> [s \in safekeepers |-> [commit_lsn |-> 0]]]
+InitOnline == safekeepers \cup brokers \cup pageservers
 
 Init ==
     /\ broker_state = [b \in brokers |-> InitBroker]
     /\ safekeeper_state = [s \in safekeepers |-> InitSafekeeper]
     /\ pageserver_state = [p \in pageservers |-> InitPageserver]
+    /\ online = InitOnline
   
+NodeOnlineOffline ==
+    /\ online' = CHOOSE ss \in SUBSET InitOnline: 
+        /\ Cardinality(ss \cap safekeepers) >= 2
+        /\ Cardinality(ss \cap brokers) >= 2
+        /\ ss \cap pageservers = pageservers \* assume no PS failures for now
+    /\ UNCHANGED <<safekeeper_state,broker_state,pageserver_state>>
    
 SkCommit(s1, s2) ==
+    /\ {s1, s2} \subseteq online 
     /\ s1 # s2
     /\ safekeeper_state[s1].commit_lsn = safekeeper_state[s2].commit_lsn
     /\ LET
@@ -45,14 +54,16 @@ SkCommit(s1, s2) ==
             safekeeper_state' = [safekeeper_state EXCEPT
                 ![s1].commit_lsn = new_commit_lsn,
                 ![s2].commit_lsn = new_commit_lsn]
-    /\ UNCHANGED <<broker_state, pageserver_state>>
+    /\ UNCHANGED <<broker_state, pageserver_state,online>>
 
 SkPeerRecovery(s1,s2) ==
+    /\ {s1, s2} \subseteq online 
     /\ safekeeper_state[s1].commit_lsn < safekeeper_state[s2].commit_lsn
     /\ safekeeper_state' = [safekeeper_state EXCEPT![s1].commit_lsn = safekeeper_state[s2].commit_lsn]
-    /\ UNCHANGED <<broker_state, pageserver_state>>
+    /\ UNCHANGED <<broker_state, pageserver_state,online>>
 
 SkPushToBroker(s,b) ==
+    /\ {s, b} \subseteq online 
     /\ broker_state' = IF broker_state[b].sk[s].commit_lsn < safekeeper_state[s].commit_lsn 
             THEN
                 LET
@@ -61,9 +72,10 @@ SkPushToBroker(s,b) ==
                 IN
                 [broker_state EXCEPT ![b].sk = updbsk]
             ELSE broker_state
-    /\ UNCHANGED <<safekeeper_state, pageserver_state>> 
+    /\ UNCHANGED <<safekeeper_state, pageserver_state,online>> 
 
 PsRecvBroker(b,p,s) ==
+    /\ {b,p,s} \subseteq online
     /\ LET
             bsk == broker_state[b].sk[s]
             psk == pageserver_state[p].sk[s]
@@ -72,7 +84,7 @@ PsRecvBroker(b,p,s) ==
             pageserver_state' = IF bsk.commit_lsn > psk.commit_lsn
                 THEN [pageserver_state EXCEPT ![p].sk[s] = updpsk]
                 ELSE pageserver_state
-    /\ UNCHANGED <<safekeeper_state, broker_state>>
+    /\ UNCHANGED <<safekeeper_state, broker_state,online>>
     
 
 SksWithNewerWal(p) ==
@@ -82,13 +94,14 @@ SksWithNewerWal(p) ==
     {s \in DOMAIN ps.sk: ps.sk[s].commit_lsn > ps.last_record_lsn}
 
 PsChooseSk(p) ==
+    /\ {p} \subseteq online
     /\ SksWithNewerWal(p) # {}
     /\ pageserver_state' = [pageserver_state EXCEPT![p].preferred_sk = CHOOSE s \in SksWithNewerWal(p): TRUE]
-    /\ UNCHANGED <<safekeeper_state, broker_state>>    
+    /\ UNCHANGED <<safekeeper_state, broker_state,online>>    
                  
     
 Next ==
-
+    \/ NodeOnlineOffline
     \/ \E s1 \in safekeepers: \E s2 \in safekeepers:
         \/ SkCommit(s1, s2)
         \/ SkPeerRecovery(s1, s2)
@@ -97,10 +110,14 @@ Next ==
     \/ \E p \in pageservers: PsChooseSk(p)
     
 
-Spec == Init /\ [][Next]_<< broker_state, safekeeper_state, pageserver_state >>
+Spec == Init /\ [][Next]_<< broker_state, safekeeper_state, pageserver_state,online>>
 
 
 \* invariants
+
+PsLagsSk == \A p \in pageservers: \A s \in DOMAIN pageserver_state[p].sk: 
+        /\ pageserver_state[p].sk[s].commit_lsn <= safekeeper_state[s].commit_lsn
+    
 
 EventuallyLaggingSkIsNotPreferredSk == <>(
         LET

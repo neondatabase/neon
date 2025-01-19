@@ -13,7 +13,7 @@ s1, s2, s3
 
 \* MV CONSTANT declarations@modelParameterConstants
 CONSTANTS
-p1
+p1, p2
 ----
 
 \* MV CONSTANT declarations@modelParameterConstants
@@ -22,44 +22,44 @@ az1, az2, az3
 ----
 
 \* MV CONSTANT definitions brokers
-const_1737309054555163000 == 
+const_173730770045629000 == 
 {b1, b2, b3}
 ----
 
 \* MV CONSTANT definitions safekeepers
-const_1737309054555164000 == 
+const_173730770045630000 == 
 {s1, s2, s3}
 ----
 
 \* MV CONSTANT definitions pageservers
-const_1737309054555165000 == 
-{p1}
+const_173730770045731000 == 
+{p1, p2}
 ----
 
 \* MV CONSTANT definitions azs
-const_1737309054555166000 == 
+const_173730770045732000 == 
 {az1, az2, az3}
 ----
 
 \* SYMMETRY definition
-symm_1737309054555167000 == 
-Permutations(const_1737309054555163000) \union Permutations(const_1737309054555164000) \union Permutations(const_1737309054555165000) \union Permutations(const_1737309054555166000)
+symm_173730770045733000 == 
+Permutations(const_173730770045629000) \union Permutations(const_173730770045630000) \union Permutations(const_173730770045731000) \union Permutations(const_173730770045732000)
 ----
 
 \* CONSTANT definitions @modelParameterConstants:4max_commit_lsn
-const_1737309054555168000 == 
+const_173730770045734000 == 
 2
 ----
 
 \* CONSTANT definitions @modelParameterConstants:5az_mapping
-const_1737309054555169000 == 
-[ az1 |-> {b1,s1,p1} , az2 |-> {b2,s2} , az3 |-> {b3,s3}]
+const_173730770045735000 == 
+[ az1 |-> {b1,s1,p1} , az2 |-> {b2,s2,p2} , az3 |-> {b3,s3}]
 ----
 
 \* CONSTRAINT definition @modelParameterContraint:0
-constr_1737309054555170000 ==
+constr_173730770045736000 ==
 StateConstraint
 ----
 =============================================================================
 \* Modification History
-\* Created Sun Jan 19 18:50:54 CET 2025 by cs
+\* Created Sun Jan 19 18:28:20 CET 2025 by cs

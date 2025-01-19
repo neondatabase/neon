@@ -1,0 +1,203 @@
+@!@!@STARTMSG 2262:0 @!@!@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+@!@!@ENDMSG 2262 @!@!@
+@!@!@STARTMSG 2187:0 @!@!@
+Running breadth-first search Model-Checking with fp 70 and seed -383534902230932382 with 4 workers on 8 cores with 2428MB heap and 5460MB offheap memory [pid: 11483] (Mac OS X 10.16 x86_64, AdoptOpenJDK 14.0.1 x86_64, OffHeapDiskFPSet, DiskStateQueue).
+@!@!@ENDMSG 2187 @!@!@
+@!@!@STARTMSG 2220:0 @!@!@
+Starting SANY...
+@!@!@ENDMSG 2220 @!@!@
+Parsing file /Users/cs/src/neon/storage_broker/spec/replicated/replicated.toolbox/Model_1/MC.tla
+Parsing file /Users/cs/src/neon/storage_broker/spec/replicated/replicated.toolbox/Model_1/replicated.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/TLC.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/Integers.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/FiniteSets.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/Naturals.tla
+Parsing file /Applications/TLA+ Toolbox.app/Contents/Eclipse/plugins/org.lamport.tlatools_1.0.0.202408081326/tla2sany/StandardModules/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Integers
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module replicated
+Semantic processing of module TLC
+Semantic processing of module MC
+@!@!@STARTMSG 2219:0 @!@!@
+SANY finished.
+@!@!@ENDMSG 2219 @!@!@
+@!@!@STARTMSG 2185:0 @!@!@
+Starting... (2025-01-19 18:27:37)
+@!@!@ENDMSG 2185 @!@!@
+@!@!@STARTMSG 2140:3 @!@!@
+The subscript of the next-state relation specified by the specification
+does not seem to contain the state variable online
+@!@!@ENDMSG 2140 @!@!@
+@!@!@STARTMSG 2279:3 @!@!@
+Declaring symmetry during liveness checking is dangerous. It might cause TLC to miss violations of the stated liveness properties. Please check liveness without symmetry defined.
+@!@!@ENDMSG 2279 @!@!@
+@!@!@STARTMSG 2284:3 @!@!@
+Declaring state or action constraints during liveness checking is dangerous: Please read section 14.3.5 on page 247 of Specifying Systems (https://lamport.azurewebsites.net/tla/book.html) and optionally the discussion at https://discuss.tlapl.us/msg00994.html for more details.
+@!@!@ENDMSG 2284 @!@!@
+@!@!@STARTMSG 2212:0 @!@!@
+Implied-temporal checking--satisfiability problem has 1 branches.
+@!@!@ENDMSG 2212 @!@!@
+@!@!@STARTMSG 2189:0 @!@!@
+Computing initial states...
+@!@!@ENDMSG 2189 @!@!@
+@!@!@STARTMSG 2190:0 @!@!@
+Finished computing initial states: 1 distinct state generated at 2025-01-19 18:27:38.
+@!@!@ENDMSG 2190 @!@!@
+@!@!@STARTMSG 2109:1 @!@!@
+Successor state is not completely specified by action SkCommit of the next-state relation. The following variable is not assigned: online.
+
+@!@!@ENDMSG 2109 @!@!@
+@!@!@STARTMSG 2121:1 @!@!@
+The behavior up to this point is:
+@!@!@ENDMSG 2121 @!@!@
+@!@!@STARTMSG 2217:4 @!@!@
+1: <Initial predicate>
+/\ pageserver_state = (p1 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0]), last_record_lsn |-> 0, preferred_sk |-> NULL] @@ p2 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0]), last_record_lsn |-> 0, preferred_sk |-> NULL])
+/\ broker_state = (b1 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])] @@ b2 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])] @@ b3 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])])
+/\ online = {b1, b2, b3, s1, s2, s3, p1, p2}
+/\ safekeeper_state = (s1 :> [commit_lsn |-> 0, pruned_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0, pruned_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0, pruned_lsn |-> 0])
+
+@!@!@ENDMSG 2217 @!@!@
+@!@!@STARTMSG 2217:4 @!@!@
+2: <SkCommit line 48, col 5 to line 57, col 51 of module replicated>
+/\ pageserver_state = (p1 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0]), last_record_lsn |-> 0, preferred_sk |-> NULL] @@ p2 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0]), last_record_lsn |-> 0, preferred_sk |-> NULL])
+/\ broker_state = (b1 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])] @@ b2 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])] @@ b3 :> [sk |-> (s1 :> [commit_lsn |-> 0] @@ s2 :> [commit_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0])])
+/\ online = null
+/\ safekeeper_state = (s1 :> [commit_lsn |-> 1, pruned_lsn |-> 0] @@ s2 :> [commit_lsn |-> 1, pruned_lsn |-> 0] @@ s3 :> [commit_lsn |-> 0, pruned_lsn |-> 0])
+
+@!@!@ENDMSG 2217 @!@!@
+@!@!@STARTMSG 2201:0 @!@!@
+The coverage statistics at 2025-01-19 18:27:38
+@!@!@ENDMSG 2201 @!@!@
+@!@!@STARTMSG 2773:0 @!@!@
+<Init line 34, col 1 to line 34, col 4 of module replicated>: 1:1
+@!@!@ENDMSG 2773 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 35, col 5 to line 38, col 26 of module replicated: 1
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<NodeOnlineOffline line 40, col 1 to line 40, col 17 of module replicated>: 1:3
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 41, col 8 to line 44, col 44 of module replicated: 3
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 41, col 18 to line 44, col 44 of module replicated: 3
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 42, col 9 to line 44, col 44 of module replicated: 696
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 42, col 12 to line 42, col 48 of module replicated: 696
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 43, col 12 to line 43, col 44 of module replicated: 312
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |||line 44, col 12 to line 44, col 44 of module replicated: 129
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  ||line 41, col 32 to line 41, col 48 of module replicated: 3
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 45, col 8 to line 45, col 67 of module replicated: 3
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkCommit line 47, col 1 to line 47, col 16 of module replicated>: 0:3
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 48, col 8 to line 48, col 32 of module replicated: 7
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2775:0 @!@!@
+  |line 48, col 8 to line 48, col 15 of module replicated: 6:15
+@!@!@ENDMSG 2775 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 48, col 27 to line 48, col 32 of module replicated: 6
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 49, col 8 to line 49, col 14 of module replicated: 7
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 49, col 8 to line 49, col 9 of module replicated: 6
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 49, col 13 to line 49, col 14 of module replicated: 6
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 50, col 8 to line 50, col 72 of module replicated: 4
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 50, col 8 to line 50, col 38 of module replicated: 3
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 50, col 42 to line 50, col 72 of module replicated: 3
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 54, col 13 to line 56, col 50 of module replicated: 1
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 54, col 33 to line 56, col 50 of module replicated: 3
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 57, col 8 to line 57, col 51 of module replicated: 1
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkPeerRecovery line 59, col 1 to line 59, col 21 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 60, col 8 to line 60, col 32 of module replicated: 3
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 61, col 8 to line 61, col 72 of module replicated: 3
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 62, col 8 to line 62, col 102 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 63, col 8 to line 63, col 51 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<SkPushToBroker line 65, col 1 to line 65, col 19 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 67, col 8 to line 74, col 29 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 75, col 8 to line 75, col 55 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<PsRecvBroker line 77, col 1 to line 77, col 19 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 84, col 13 to line 86, col 37 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 87, col 8 to line 87, col 51 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<PsChooseSk line 98, col 1 to line 98, col 13 of module replicated>: 0:0
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 100, col 8 to line 100, col 109 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 101, col 8 to line 101, col 51 of module replicated: 0
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2202:0 @!@!@
+End of statistics.
+@!@!@ENDMSG 2202 @!@!@
+@!@!@STARTMSG 2200:0 @!@!@
+Progress(2) at 2025-01-19 18:27:38: 5 states generated (121 s/min), 2 distinct states found (48 ds/min), 0 states left on queue.
+@!@!@ENDMSG 2200 @!@!@
+@!@!@STARTMSG 2199:0 @!@!@
+5 states generated, 2 distinct states found, 0 states left on queue.
+@!@!@ENDMSG 2199 @!@!@
+@!@!@STARTMSG 2194:0 @!@!@
+The depth of the complete state graph search is 2.
+@!@!@ENDMSG 2194 @!@!@
+@!@!@STARTMSG 2186:0 @!@!@
+Finished in 2493ms at (2025-01-19 18:27:38)
+@!@!@ENDMSG 2186 @!@!@

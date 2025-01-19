@@ -88,13 +88,14 @@ PsRecvBroker(b,p,s) ==
     
 
 SksWithNewerWal(p) ==
-    LET
-        ps == pageserver_state[p]
-    IN
-    {s \in DOMAIN ps.sk: ps.sk[s].commit_lsn > ps.last_record_lsn}
+    /\ {p} \subseteq online
+    /\
+        LET
+            ps == pageserver_state[p]
+        IN
+        {s \in DOMAIN ps.sk: ps.sk[s].commit_lsn > ps.last_record_lsn}
 
 PsChooseSk(p) ==
-    /\ {p} \subseteq online
     /\ SksWithNewerWal(p) # {}
     /\ pageserver_state' = [pageserver_state EXCEPT![p].preferred_sk = CHOOSE s \in SksWithNewerWal(p): TRUE]
     /\ UNCHANGED <<safekeeper_state, broker_state,online>>    
@@ -114,10 +115,6 @@ Spec == Init /\ [][Next]_<< broker_state, safekeeper_state, pageserver_state,onl
 
 
 \* invariants
-
-PsLagsSk == \A p \in pageservers: \A s \in DOMAIN pageserver_state[p].sk: 
-        /\ pageserver_state[p].sk[s].commit_lsn <= safekeeper_state[s].commit_lsn
-    
 
 EventuallyLaggingSkIsNotPreferredSk == <>(
         LET
