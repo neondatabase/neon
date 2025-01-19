@@ -65,7 +65,6 @@ typedef enum {
 	SLRU_MULTIXACT_OFFSETS
 } SlruKind;
 
-
 /*--
  * supertype of all the Neon*Request structs below.
  *
@@ -187,6 +186,7 @@ typedef struct
 {
 	/*
 	 * Send this request to the PageServer associated with this shard.
+	 * This function assigns request_id to the request which can be extracted by caller from request struct.
 	 */
 	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
 	/*
@@ -280,5 +280,6 @@ extern bool get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumb
 extern void set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
 extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
+
 
 #endif							/* PAGESTORE_CLIENT_H */
