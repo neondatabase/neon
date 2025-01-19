@@ -187,6 +187,7 @@ typedef struct
 {
 	/*
 	 * Send this request to the PageServer associated with this shard.
+	 * This function assigns request_id to the request which can be extracted by caller from request struct.
 	 */
 	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
 	/*
@@ -280,5 +281,12 @@ extern bool get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumb
 extern void set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
 extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
+
+extern uint64
+prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
+						  BlockNumber nblocks, const bits8 *mask,
+						  bool is_prefetch);
+extern bool
+prefetch_receive(BufferTag tag);
 
 #endif							/* PAGESTORE_CLIENT_H */
