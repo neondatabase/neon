@@ -20,7 +20,7 @@ for ingesting WAL back to scaling as O(1) with shard count, rather than O(N_shar
 with a few TB of storage, the next order of magnitude capacity increase will require tens of shards, such
 that sending all WAL to all shards is impractical in terms of bandwidth.
 2. For contemporary database sizes (~2TB), the pageserver is the bottleneck for ingest: since each
-   shard has to decode and process the whole WAL, sharding doesn't full relieve this bottleneck.  To achieve significantly higher ingest speeds, we need to filter the WAL earlier so that each pageserver
+   shard has to decode and process the whole WAL, sharding doesn't fully relieve this bottleneck.  To achieve significantly higher ingest speeds, we need to filter the WAL earlier so that each pageserver
    only has to process relevant parts.
 
 ## Non Goals (if relevant)
@@ -66,7 +66,7 @@ a `DatadirModification`, but does not require access to a Timeline.  Instead of 
 metadata updates as materialized writes to pages, it will accumulate these as abstract operations,
 for example rather than including a write to a relation size key, this structure will include
 an operation that indicates "Update relation _foo_'s size to the max of its current value and
-_bar_", such that these may be applied layer to a real Timeline.
+_bar_", such that these may be applied later to a real Timeline.
 
 The `DatadirModification` will be aware of the `EphemeralFile` format, so that as it accumulates
 simple page writes of relation blocks, it can write them directly into a buffer in the serialized
@@ -75,8 +75,7 @@ structure between safekeeper and pageserver.
 
 The new pipeline will be:
 1. `handle_walreceiver_connection` reads a stream of binary WAL records off a network
-2. A `InterpretedWalRecords` is generated from the incoming WAL records.  This may be done
-   in a pipelined way (to parallelize the work of this phase of ingest), and does not
+2. A `InterpretedWalRecords` is generated from the incoming WAL records.  This does not
    require a reference to a Timeline.
 3. The logic that is current spread between `WalIngest` and `DatadirModification` for updating
    metadata will be refactored to consume the metadata operations from the `InterpretedWalRecords`
@@ -88,8 +87,6 @@ Implemented in:
 1. https://github.com/neondatabase/neon/pull/9472
 2. https://github.com/neondatabase/neon/pull/9504
 3. https://github.com/neondatabase/neon/pull/9524
-
-(1), (2) and (3) are refactorings. (4) and (5) introduce the protocol change.
 
 ### Phase 2: Decode & filter on safekeeper
 
@@ -207,18 +204,6 @@ The first ingest phase is a stateless transformation of a binary WAL record into
 output per shard.  To put multiple CPUs to work, we may pipeline this processing up to some defined buffer
 depth.
 
-### Perhaps: Serve reads from the safekeeper/eliminate pageserver InMemoryLayer
-
-Now that we are doing some pre-processing of the WAL on the safekeeper and storing
-a buffer of some recent reads in Cursor, it would be possible to serve some reads
-from the safekeeper directly.  It's unclear whether this is a desirable change: it would
-only be a net benefit if it enabled us to avoid doing some work on the pageserver.
-
-Ultimately, if the safekeeper served recent reads, we could build entire L0 layers on the safekeeper
-and upload them to S3, saving the pageserver the disk bandwidth of writing ephemeral layers
-and then flushing them to L0s, since ephemeral layers are approximately just extents of WAL, post-processed
-into a readable form.
-
 ## Alternatives considered
 
 ### Give safekeepers enough state to fully decode WAL
@@ -251,6 +236,8 @@ than just the preprocessed WAL:
 - The safekeeper still needs to be able to serve raw WAL back to postgres for e.g. physical replication
 - It simplifies our paxos implementation to have the offset in the write log be literally
   the same as the LSN
+- Raw WAL must have a stable protocol since we might have to re-ingest it at arbitrary points in the future.
+  Storing raw WAL give us more flexibility to evolve the pageserver, safekeeper protocol.
 
 ### Do wal pre-processing on shard 0 or a separate service, send it to other shards from there
 
@@ -260,6 +247,7 @@ we could do the initial decode and shard-splitting in some other location:
 - A new intermediate service between the safekeeper and pageserver could do the splitting.
 
 So why not?
+- Extra network hop from shard 0 to the final destination shard
 - Clearly there is more infrastructure involved here compared with doing it inline on the safekeeper.
 - Safekeepers already have very light CPU load: typical cloud instances shapes with appropriate
   disks for the safekeepers effectively have "free" CPU resources.
