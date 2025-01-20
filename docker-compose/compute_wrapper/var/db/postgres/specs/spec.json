@@ -129,6 +129,11 @@
                 "vartype": "string"
             },
             {
+                "name": "compute_query_id",
+                "value": "off",
+                "vartype": "string"
+            },
+            {
                 "name": "cron.database",
                 "value": "postgres",
                 "vartype": "string"

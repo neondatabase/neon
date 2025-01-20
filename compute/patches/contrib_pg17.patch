@@ -73,3 +73,100 @@ index 1745bae..3b429c3 100644
  DROP TABLE test_partition;
  DROP TABLE test_partitioned;
  DROP OWNED BY regress_heaptest_role; -- permissions
+diff --git a/contrib/citext/expected/create_index_acl.out b/contrib/citext/expected/create_index_acl.out
+index 33be13a..70a406c 100644
+--- a/contrib/citext/expected/create_index_acl.out
++++ b/contrib/citext/expected/create_index_acl.out
+@@ -5,9 +5,6 @@
+ -- owner having as few applicable privileges as possible.  (The privileges.sql
+ -- regress_sro_user tests look for the opposite defect; they confirm that
+ -- DefineIndex() uses the table owner userid where necessary.)
+-SET allow_in_place_tablespaces = true;
+-CREATE TABLESPACE regress_create_idx_tblspace LOCATION '';
+-RESET allow_in_place_tablespaces;
+ BEGIN;
+ CREATE ROLE regress_minimal;
+ CREATE SCHEMA s;
+@@ -49,11 +46,9 @@ ALTER TABLE s.x OWNER TO regress_minimal;
+ -- Empty-table DefineIndex()
+ CREATE UNIQUE INDEX u0rows ON s.x USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE s.coll s.citext_pattern_ops)
+-  TABLESPACE regress_create_idx_tblspace
+   WHERE s.index_row_if(y);
+ ALTER TABLE s.x ADD CONSTRAINT e0rows EXCLUDE USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE s.coll WITH s.=)
+-  USING INDEX TABLESPACE regress_create_idx_tblspace
+   WHERE (s.index_row_if(y));
+ -- Make the table nonempty.
+ INSERT INTO s.x VALUES ('foo'), ('bar');
+@@ -66,11 +61,9 @@ RESET search_path;
+ GRANT EXECUTE ON FUNCTION s.index_this_expr TO regress_minimal;
+ CREATE UNIQUE INDEX u2rows ON s.x USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE s.coll s.citext_pattern_ops)
+-  TABLESPACE regress_create_idx_tblspace
+   WHERE s.index_row_if(y);
+ ALTER TABLE s.x ADD CONSTRAINT e2rows EXCLUDE USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE s.coll WITH s.=)
+-  USING INDEX TABLESPACE regress_create_idx_tblspace
+   WHERE (s.index_row_if(y));
+ -- Shall not find s.coll via search_path, despite the s.const->public.setter
+ -- call having set search_path=s during expression planning.  Suppress the
+@@ -78,9 +71,7 @@ ALTER TABLE s.x ADD CONSTRAINT e2rows EXCLUDE USING btree
+ \set VERBOSITY sqlstate
+ ALTER TABLE s.x ADD CONSTRAINT underqualified EXCLUDE USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE coll WITH s.=)
+-  USING INDEX TABLESPACE regress_create_idx_tblspace
+   WHERE (s.index_row_if(y));
+ ERROR:  42704
+ \set VERBOSITY default
+ ROLLBACK;
+-DROP TABLESPACE regress_create_idx_tblspace;
+diff --git a/contrib/citext/sql/create_index_acl.sql b/contrib/citext/sql/create_index_acl.sql
+index 10b5225..ae442e1 100644
+--- a/contrib/citext/sql/create_index_acl.sql
++++ b/contrib/citext/sql/create_index_acl.sql
+@@ -6,10 +6,6 @@
+ -- regress_sro_user tests look for the opposite defect; they confirm that
+ -- DefineIndex() uses the table owner userid where necessary.)
+ 
+-SET allow_in_place_tablespaces = true;
+-CREATE TABLESPACE regress_create_idx_tblspace LOCATION '';
+-RESET allow_in_place_tablespaces;
+-
+ BEGIN;
+ CREATE ROLE regress_minimal;
+ CREATE SCHEMA s;
+@@ -51,11 +47,9 @@ ALTER TABLE s.x OWNER TO regress_minimal;
+ -- Empty-table DefineIndex()
+ CREATE UNIQUE INDEX u0rows ON s.x USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE s.coll s.citext_pattern_ops)
+-  TABLESPACE regress_create_idx_tblspace
+   WHERE s.index_row_if(y);
+ ALTER TABLE s.x ADD CONSTRAINT e0rows EXCLUDE USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE s.coll WITH s.=)
+-  USING INDEX TABLESPACE regress_create_idx_tblspace
+   WHERE (s.index_row_if(y));
+ -- Make the table nonempty.
+ INSERT INTO s.x VALUES ('foo'), ('bar');
+@@ -68,11 +62,9 @@ RESET search_path;
+ GRANT EXECUTE ON FUNCTION s.index_this_expr TO regress_minimal;
+ CREATE UNIQUE INDEX u2rows ON s.x USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE s.coll s.citext_pattern_ops)
+-  TABLESPACE regress_create_idx_tblspace
+   WHERE s.index_row_if(y);
+ ALTER TABLE s.x ADD CONSTRAINT e2rows EXCLUDE USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE s.coll WITH s.=)
+-  USING INDEX TABLESPACE regress_create_idx_tblspace
+   WHERE (s.index_row_if(y));
+ -- Shall not find s.coll via search_path, despite the s.const->public.setter
+ -- call having set search_path=s during expression planning.  Suppress the
+@@ -80,9 +72,7 @@ ALTER TABLE s.x ADD CONSTRAINT e2rows EXCLUDE USING btree
+ \set VERBOSITY sqlstate
+ ALTER TABLE s.x ADD CONSTRAINT underqualified EXCLUDE USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE coll WITH s.=)
+-  USING INDEX TABLESPACE regress_create_idx_tblspace
+   WHERE (s.index_row_if(y));
+ \set VERBOSITY default
+ ROLLBACK;
+ 
+-DROP TABLESPACE regress_create_idx_tblspace;
