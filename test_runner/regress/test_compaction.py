@@ -451,6 +451,7 @@ def test_sharding_compaction(
         "pitr_interval": "0s",
         # disable background compaction and GC. We invoke it manually when we want it to happen.
         "gc_period": "0s",
+        "gc_horizon": f"{128 * 1024}",
         "compaction_period": "0s",
         # create image layers eagerly: we want to exercise image layer creation in this test.
         "image_creation_threshold": "1",
