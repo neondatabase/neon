@@ -903,6 +903,12 @@ impl From<GetReadyAncestorError> for PageReconstructError {
     }
 }
 
+pub(crate) enum WaitLsnTimeout {
+    Custom(Duration),
+    // Use the [`PageServerConf::wait_lsn_timeout`] default
+    Default,
+}
+
 pub(crate) enum WaitLsnWaiter<'a> {
     Timeline(&'a Timeline),
     Tenant,
@@ -1286,6 +1292,7 @@ impl Timeline {
         &self,
         lsn: Lsn,
         who_is_waiting: WaitLsnWaiter<'_>,
+        timeout: WaitLsnTimeout,
         ctx: &RequestContext, /* Prepare for use by cancellation */
     ) -> Result<(), WaitLsnError> {
         let state = self.current_state();
@@ -1318,13 +1325,14 @@ impl Timeline {
             }
         }
 
+        let timeout = match timeout {
+            WaitLsnTimeout::Custom(t) => t,
+            WaitLsnTimeout::Default => self.conf.wait_lsn_timeout,
+        };
+
         let _timer = crate::metrics::WAIT_LSN_TIME.start_timer();
 
-        match self
-            .last_record_lsn
-            .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
-            .await
-        {
+        match self.last_record_lsn.wait_for_timeout(lsn, timeout).await {
             Ok(()) => Ok(()),
             Err(e) => {
                 use utils::seqwait::SeqWaitError::*;
@@ -3473,7 +3481,12 @@ impl Timeline {
             }
         }
         ancestor
-            .wait_lsn(self.ancestor_lsn, WaitLsnWaiter::Timeline(self), ctx)
+            .wait_lsn(
+                self.ancestor_lsn,
+                WaitLsnWaiter::Timeline(self),
+                WaitLsnTimeout::Default,
+                ctx,
+            )
             .await
             .map_err(|e| match e {
                 e @ WaitLsnError::Timeout(_) => GetReadyAncestorError::AncestorLsnTimeout(e),

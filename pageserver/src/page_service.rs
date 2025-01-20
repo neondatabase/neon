@@ -1651,6 +1651,7 @@ impl PageServerHandler {
                 .wait_lsn(
                     not_modified_since,
                     crate::tenant::timeline::WaitLsnWaiter::PageService,
+                    timeline::WaitLsnTimeout::Default,
                     ctx,
                 )
                 .await?;
@@ -1985,6 +1986,7 @@ impl PageServerHandler {
                 .wait_lsn(
                     lsn,
                     crate::tenant::timeline::WaitLsnWaiter::PageService,
+                    crate::tenant::timeline::WaitLsnTimeout::Default,
                     ctx,
                 )
                 .await?;
