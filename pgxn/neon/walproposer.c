@@ -619,11 +619,14 @@ static void
 SendStartWALPush(Safekeeper *sk)
 {
 	WalProposer *wp = sk->wp;
+#define CMD_LEN 512
+	char		cmd[CMD_LEN];
 
-	if (!wp->api.conn_send_query(sk, "START_WAL_PUSH"))
+	snprintf(cmd, CMD_LEN, "START_WAL_PUSH (proto_version '%d')", wp->config->proto_version);
+	if (!wp->api.conn_send_query(sk, cmd))
 	{
-		wp_log(WARNING, "failed to send 'START_WAL_PUSH' query to safekeeper %s:%s: %s",
-			   sk->host, sk->port, wp->api.conn_error_message(sk));
+		wp_log(WARNING, "failed to send %s query to safekeeper %s:%s: %s",
+			   cmd, sk->host, sk->port, wp->api.conn_error_message(sk));
 		ShutdownConnection(sk);
 		return;
 	}
