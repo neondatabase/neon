@@ -302,6 +302,10 @@ pub struct TenantConfigToml {
 
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
 
+    /// Enable rel_size_v2 for this tenant. Once enabled, the tenant will persist this information into
+    /// `index_part.json`, and it cannot be reversed.
+    pub rel_size_v2_enabled: Option<bool>,
+
     // gc-compaction related configs
     /// Enable automatic gc-compaction trigger on this tenant.
     pub gc_compaction_enabled: bool,
@@ -551,6 +555,7 @@ impl Default for TenantConfigToml {
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
             timeline_offloading: false,
             wal_receiver_protocol_override: None,
+            rel_size_v2_enabled: None,
             gc_compaction_enabled: DEFAULT_GC_COMPACTION_ENABLED,
             gc_compaction_initial_threshold_mb: DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_MB,
             gc_compaction_ratio_percent: DEFAULT_GC_COMPACTION_RATIO_PERCENT,

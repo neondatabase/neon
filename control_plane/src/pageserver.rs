@@ -418,6 +418,11 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `wal_receiver_protocol_override` from json")?,
+            rel_size_v2_enabled: settings
+                .remove("rel_size_v2_enabled")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'rel_size_v2_enabled' as bool")?,
             gc_compaction_enabled: settings
                 .remove("gc_compaction_enabled")
                 .map(|x| x.parse::<bool>())

@@ -498,6 +498,8 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub wal_receiver_protocol_override: FieldPatch<PostgresClientProtocol>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub rel_size_v2_enabled: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_enabled: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_initial_threshold_mb: FieldPatch<u64>,
@@ -534,6 +536,7 @@ pub struct TenantConfig {
     pub lsn_lease_length_for_ts: Option<String>,
     pub timeline_offloading: Option<bool>,
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
+    pub rel_size_v2_enabled: Option<bool>,
     pub gc_compaction_enabled: Option<bool>,
     pub gc_compaction_initial_threshold_mb: Option<u64>,
     pub gc_compaction_ratio_percent: Option<u64>,
@@ -566,6 +569,7 @@ impl TenantConfig {
             mut lsn_lease_length_for_ts,
             mut timeline_offloading,
             mut wal_receiver_protocol_override,
+            mut rel_size_v2_enabled,
             mut gc_compaction_enabled,
             mut gc_compaction_initial_threshold_mb,
             mut gc_compaction_ratio_percent,
@@ -613,6 +617,7 @@ impl TenantConfig {
         patch
             .wal_receiver_protocol_override
             .apply(&mut wal_receiver_protocol_override);
+        patch.rel_size_v2_enabled.apply(&mut rel_size_v2_enabled);
         patch
             .gc_compaction_enabled
             .apply(&mut gc_compaction_enabled);
@@ -648,6 +653,7 @@ impl TenantConfig {
             lsn_lease_length_for_ts,
             timeline_offloading,
             wal_receiver_protocol_override,
+            rel_size_v2_enabled,
             gc_compaction_enabled,
             gc_compaction_initial_threshold_mb,
             gc_compaction_ratio_percent,

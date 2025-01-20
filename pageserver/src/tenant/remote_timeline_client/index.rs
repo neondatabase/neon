@@ -82,9 +82,27 @@ pub struct IndexPart {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) last_aux_file_policy: Option<AuxFilePolicy>,
 
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) rel_size_migration: Option<RelSizeMigration>,
+
     /// The LSN of gc-compaction horizon. Once gc-compaction is finished for all layer files below an LSN, this LSN will be updated.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) l2_lsn: Option<Lsn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RelSizeMigration {
+    /// The tenant is using the old rel_size format.
+    /// Note that this enum is persisted as `Option<RelSizeMigration>` in the index part, so
+    /// `None` is the same as `Some(RelSizeMigration::Legacy)`.
+    Legacy,
+    /// The tenant is migrating to the new rel_size format. Both old and new rel_size format are
+    /// persisted in the index part. The read path will read both formats and merge them.
+    Migrating,
+    /// The tenant has migrated to the new rel_size format. Only the new rel_size format is persisted
+    /// in the index part, and the read path will not read the old format.
+    Migrated,
 }
 
 impl IndexPart {
@@ -103,11 +121,12 @@ impl IndexPart {
     /// - 8: added `archived_at`
     /// - 9: +gc_blocking
     /// - 10: +import_pgdata
-    /// - 11: +l2_lsn
-    const LATEST_VERSION: usize = 11;
+    /// - 11: +rel_size_migration
+    /// - 12: +l2_lsn
+    const LATEST_VERSION: usize = 12;
 
     // Versions we may see when reading from a bucket.
-    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
     pub const FILE_NAME: &'static str = "index_part.json";
 
@@ -123,6 +142,7 @@ impl IndexPart {
             gc_blocking: None,
             last_aux_file_policy: None,
             import_pgdata: None,
+            rel_size_migration: None,
             l2_lsn: None,
         }
     }
@@ -424,6 +444,7 @@ mod tests {
             gc_blocking: None,
             last_aux_file_policy: None,
             import_pgdata: None,
+            rel_size_migration: None,
             l2_lsn: None,
         };
 
@@ -470,6 +491,7 @@ mod tests {
             gc_blocking: None,
             last_aux_file_policy: None,
             import_pgdata: None,
+            rel_size_migration: None,
             l2_lsn: None,
         };
 
@@ -517,6 +539,7 @@ mod tests {
             gc_blocking: None,
             last_aux_file_policy: None,
             import_pgdata: None,
+            rel_size_migration: None,
             l2_lsn: None,
         };
 
@@ -567,6 +590,7 @@ mod tests {
             gc_blocking: None,
             last_aux_file_policy: None,
             import_pgdata: None,
+            rel_size_migration: None,
             l2_lsn: None,
         };
 
@@ -612,6 +636,7 @@ mod tests {
             gc_blocking: None,
             last_aux_file_policy: None,
             import_pgdata: None,
+            rel_size_migration: None,
             l2_lsn: None,
         };
 
@@ -660,6 +685,7 @@ mod tests {
             gc_blocking: None,
             last_aux_file_policy: None,
             import_pgdata: None,
+            rel_size_migration: None,
             l2_lsn: None,
         };
 
@@ -713,6 +739,7 @@ mod tests {
             gc_blocking: None,
             last_aux_file_policy: Some(AuxFilePolicy::V2),
             import_pgdata: None,
+            rel_size_migration: None,
             l2_lsn: None,
         };
 
@@ -771,6 +798,7 @@ mod tests {
             gc_blocking: None,
             last_aux_file_policy: Default::default(),
             import_pgdata: None,
+            rel_size_migration: None,
             l2_lsn: None,
         };
 
@@ -830,6 +858,7 @@ mod tests {
             gc_blocking: None,
             last_aux_file_policy: Default::default(),
             import_pgdata: None,
+            rel_size_migration: None,
             l2_lsn: None,
         };
 
@@ -894,6 +923,7 @@ mod tests {
             last_aux_file_policy: Default::default(),
             archived_at: None,
             import_pgdata: None,
+            rel_size_migration: None,
             l2_lsn: None,
         };
 
@@ -971,6 +1001,7 @@ mod tests {
                 finished_at: parse_naive_datetime("2024-11-13T09:42:23.123000000"),
                 idempotency_key: import_pgdata::index_part_format::IdempotencyKey::new("specified-by-client-218a5213-5044-4562-a28d-d024c5f057f5".to_string()),
             }))),
+            rel_size_migration: None,
             l2_lsn: None,
         };
 
@@ -979,9 +1010,9 @@ mod tests {
     }
 
     #[test]
-    fn v11_importpgdata_is_parsed() {
+    fn v11_rel_size_migration_is_parsed() {
         let example = r#"{
-            "version": 10,
+            "version": 11,
             "layer_metadata":{
                 "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9": { "file_size": 25600000 },
                 "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51": { "file_size": 9007199254741001 }
@@ -1009,11 +1040,11 @@ mod tests {
                     }
                 }
             },
-            "l2_lsn": "0/1686070"
+            "rel_size_migration": "legacy"
         }"#;
 
         let expected = IndexPart {
-            version: 10,
+            version: 11,
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
                     file_size: 25600000,
@@ -1049,7 +1080,88 @@ mod tests {
                 finished_at: parse_naive_datetime("2024-11-13T09:42:23.123000000"),
                 idempotency_key: import_pgdata::index_part_format::IdempotencyKey::new("specified-by-client-218a5213-5044-4562-a28d-d024c5f057f5".to_string()),
             }))),
-            l2_lsn: Some("0/1686070".parse::<Lsn>().unwrap()),
+            rel_size_migration: Some(RelSizeMigration::Legacy),
+            l2_lsn: None,
+        };
+
+        let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
+        assert_eq!(part, expected);
+    }
+
+    #[test]
+    fn v12_l2_lsn_is_parsed() {
+        let example = r#"{
+            "version": 12,
+            "layer_metadata":{
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9": { "file_size": 25600000 },
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51": { "file_size": 9007199254741001 }
+            },
+            "disk_consistent_lsn":"0/16960E8",
+            "metadata": {
+                "disk_consistent_lsn": "0/16960E8",
+                "prev_record_lsn": "0/1696070",
+                "ancestor_timeline": "e45a7f37d3ee2ff17dc14bf4f4e3f52e",
+                "ancestor_lsn": "0/0",
+                "latest_gc_cutoff_lsn": "0/1696070",
+                "initdb_lsn": "0/1696070",
+                "pg_version": 14
+            },
+            "gc_blocking": {
+                "started_at": "2024-07-19T09:00:00.123",
+                "reasons": ["DetachAncestor"]
+            },
+            "import_pgdata": {
+                "V1": {
+                    "Done": {
+                        "idempotency_key": "specified-by-client-218a5213-5044-4562-a28d-d024c5f057f5",
+                        "started_at": "2024-11-13T09:23:42.123",
+                        "finished_at": "2024-11-13T09:42:23.123"
+                    }
+                }
+            },
+            "rel_size_migration": "legacy",
+            "l2_lsn": "0/16960E8"
+        }"#;
+
+        let expected = IndexPart {
+            version: 12,
+            layer_metadata: HashMap::from([
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
+                    file_size: 25600000,
+                    generation: Generation::none(),
+                    shard: ShardIndex::unsharded()
+                }),
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
+                    file_size: 9007199254741001,
+                    generation: Generation::none(),
+                    shard: ShardIndex::unsharded()
+                })
+            ]),
+            disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
+            metadata: TimelineMetadata::new(
+                Lsn::from_str("0/16960E8").unwrap(),
+                Some(Lsn::from_str("0/1696070").unwrap()),
+                Some(TimelineId::from_str("e45a7f37d3ee2ff17dc14bf4f4e3f52e").unwrap()),
+                Lsn::INVALID,
+                Lsn::from_str("0/1696070").unwrap(),
+                Lsn::from_str("0/1696070").unwrap(),
+                14,
+            ).with_recalculated_checksum().unwrap(),
+            deleted_at: None,
+            lineage: Default::default(),
+            gc_blocking: Some(GcBlocking {
+                started_at: parse_naive_datetime("2024-07-19T09:00:00.123000000"),
+                reasons: enumset::EnumSet::from_iter([GcBlockingReason::DetachAncestor]),
+            }),
+            last_aux_file_policy: Default::default(),
+            archived_at: None,
+            import_pgdata: Some(import_pgdata::index_part_format::Root::V1(import_pgdata::index_part_format::V1::Done(import_pgdata::index_part_format::Done{
+                started_at: parse_naive_datetime("2024-11-13T09:23:42.123000000"),
+                finished_at: parse_naive_datetime("2024-11-13T09:42:23.123000000"),
+                idempotency_key: import_pgdata::index_part_format::IdempotencyKey::new("specified-by-client-218a5213-5044-4562-a28d-d024c5f057f5".to_string()),
+            }))),
+            rel_size_migration: Some(RelSizeMigration::Legacy),
+            l2_lsn: Some("0/16960E8".parse::<Lsn>().unwrap()),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
