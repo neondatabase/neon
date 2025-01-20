@@ -15,6 +15,6 @@ RUN apt-get update &&       \
 #Faker is required for the pg_anon test
 RUN case $COMPUTE_IMAGE in compute-node-v17) OPT="--break-system-packages";; *) OPT= ;; esac && pip3 install $OPT Faker
 #This is required for the pg_hintplan test
-RUN mkdir -p /ext-src/pg_hint_plan-src && chown postgres /ext-src/pg_hint_plan-src 
+RUN mkdir -p /ext-src/pg_hint_plan-src /postgres/contrib/file_fdw && chown postgres /ext-src/pg_hint_plan-src /postgres/contrib/file_fdw
 
 USER postgres

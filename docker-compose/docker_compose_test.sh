@@ -87,20 +87,22 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/ext-src/pg_hint_plan-src/
         rm -rf $TMPDIR
         # We are running tests now
-        if docker exec -e SKIP=timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,pg_graphql-src,kq_imcx-src,wal2json_2_5-src \
-            $TEST_CONTAINER_NAME /run-tests.sh /ext-src | tee testout.txt
+        if docker exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,pg_graphql-src,kq_imcx-src,wal2json_2_5-src \
+            $TEST_CONTAINER_NAME /run-tests.sh /ext-src | tee testout.txt && \
+            docker exec -e SKIP=start-scripts,postgres_fdw,ltree_plpython,jsonb_plpython,jsonb_plperl,hstore_plpython,hstore_plperl,dblink,bool_plperl \
+            $TEST_CONTAINER_NAME /run-tests.sh /postgres/contrib | tee testout_contrib.txt
         then
             cleanup
         else
-            FAILED=$(tail -1 testout.txt)
-            for d in $FAILED
+            FAILED=$(tail -1 testout.txt | awk '{for (i=1; i<=NF; I++) {print "/ext-src/"$i} }')
+            CONTRIB_FAILED=$(tail -1 testout_contrib.txt | awk '{for (i=1; i<=NF; I++) {print "/postgres/contrib/"$i} }')
+            for d in $FAILED $CONTRIB_FAILED
             do
-                mkdir $d
-                docker cp $TEST_CONTAINER_NAME:/ext-src/$d/regression.diffs $d || true
-                docker cp $TEST_CONTAINER_NAME:/ext-src/$d/regression.out $d || true
-                cat $d/regression.out $d/regression.diffs || true
+                dn="$(basname $d)"
+                docker cp $TEST_CONTAINER_NAME:$d/regression.diffs $dn || true
+                docker cp $TEST_CONTAINER_NAME:$d/regression.out $dn || true
+                cat $dn/regression.out $dn/regression.diffs || true
             done
-        rm -rf $FAILED
         cleanup
         exit 1
         fi

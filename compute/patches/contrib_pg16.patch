@@ -121,3 +121,98 @@ index 33be13a..70a406c 100644
  \set VERBOSITY default
  ROLLBACK;
 -DROP TABLESPACE regress_create_idx_tblspace;
+diff --git a/contrib/citext/sql/create_index_acl.sql b/contrib/citext/sql/create_index_acl.sql
+index 10b5225..ae442e1 100644
+--- a/contrib/citext/sql/create_index_acl.sql
++++ b/contrib/citext/sql/create_index_acl.sql
+@@ -6,10 +6,6 @@
+ -- regress_sro_user tests look for the opposite defect; they confirm that
+ -- DefineIndex() uses the table owner userid where necessary.)
+ 
+-SET allow_in_place_tablespaces = true;
+-CREATE TABLESPACE regress_create_idx_tblspace LOCATION '';
+-RESET allow_in_place_tablespaces;
+-
+ BEGIN;
+ CREATE ROLE regress_minimal;
+ CREATE SCHEMA s;
+@@ -51,11 +47,9 @@ ALTER TABLE s.x OWNER TO regress_minimal;
+ -- Empty-table DefineIndex()
+ CREATE UNIQUE INDEX u0rows ON s.x USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE s.coll s.citext_pattern_ops)
+-  TABLESPACE regress_create_idx_tblspace
+   WHERE s.index_row_if(y);
+ ALTER TABLE s.x ADD CONSTRAINT e0rows EXCLUDE USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE s.coll WITH s.=)
+-  USING INDEX TABLESPACE regress_create_idx_tblspace
+   WHERE (s.index_row_if(y));
+ -- Make the table nonempty.
+ INSERT INTO s.x VALUES ('foo'), ('bar');
+@@ -68,11 +62,9 @@ RESET search_path;
+ GRANT EXECUTE ON FUNCTION s.index_this_expr TO regress_minimal;
+ CREATE UNIQUE INDEX u2rows ON s.x USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE s.coll s.citext_pattern_ops)
+-  TABLESPACE regress_create_idx_tblspace
+   WHERE s.index_row_if(y);
+ ALTER TABLE s.x ADD CONSTRAINT e2rows EXCLUDE USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE s.coll WITH s.=)
+-  USING INDEX TABLESPACE regress_create_idx_tblspace
+   WHERE (s.index_row_if(y));
+ -- Shall not find s.coll via search_path, despite the s.const->public.setter
+ -- call having set search_path=s during expression planning.  Suppress the
+@@ -80,9 +72,7 @@ ALTER TABLE s.x ADD CONSTRAINT e2rows EXCLUDE USING btree
+ \set VERBOSITY sqlstate
+ ALTER TABLE s.x ADD CONSTRAINT underqualified EXCLUDE USING btree
+   ((s.index_this_expr(y, s.const())) COLLATE coll WITH s.=)
+-  USING INDEX TABLESPACE regress_create_idx_tblspace
+   WHERE (s.index_row_if(y));
+ \set VERBOSITY default
+ ROLLBACK;
+ 
+-DROP TABLESPACE regress_create_idx_tblspace;
+diff --git a/contrib/pageinspect/expected/gist.out b/contrib/pageinspect/expected/gist.out
+index d1adbab..38b52ac 100644
+--- a/contrib/pageinspect/expected/gist.out
++++ b/contrib/pageinspect/expected/gist.out
+@@ -10,25 +10,6 @@ BEGIN;
+ CREATE TABLE test_gist AS SELECT point(i,i) p, i::text t FROM
+     generate_series(1,1000) i;
+ CREATE INDEX test_gist_idx ON test_gist USING gist (p);
+--- Page 0 is the root, the rest are leaf pages
+-SELECT * FROM gist_page_opaque_info(get_raw_page('test_gist_idx', 0));
+- lsn | nsn | rightlink  | flags 
+------+-----+------------+-------
+- 0/1 | 0/0 | 4294967295 | {}
+-(1 row)
+-
+-SELECT * FROM gist_page_opaque_info(get_raw_page('test_gist_idx', 1));
+- lsn | nsn | rightlink  | flags  
+------+-----+------------+--------
+- 0/1 | 0/0 | 4294967295 | {leaf}
+-(1 row)
+-
+-SELECT * FROM gist_page_opaque_info(get_raw_page('test_gist_idx', 2));
+- lsn | nsn | rightlink | flags  
+------+-----+-----------+--------
+- 0/1 | 0/0 |         1 | {leaf}
+-(1 row)
+-
+ COMMIT;
+ SELECT * FROM gist_page_items(get_raw_page('test_gist_idx', 0), 'test_gist_idx');
+  itemoffset |   ctid    | itemlen | dead |             keys              
+diff --git a/contrib/pageinspect/sql/gist.sql b/contrib/pageinspect/sql/gist.sql
+index d263542..607992f 100644
+--- a/contrib/pageinspect/sql/gist.sql
++++ b/contrib/pageinspect/sql/gist.sql
+@@ -12,11 +12,6 @@ CREATE TABLE test_gist AS SELECT point(i,i) p, i::text t FROM
+     generate_series(1,1000) i;
+ CREATE INDEX test_gist_idx ON test_gist USING gist (p);
+ 
+--- Page 0 is the root, the rest are leaf pages
+-SELECT * FROM gist_page_opaque_info(get_raw_page('test_gist_idx', 0));
+-SELECT * FROM gist_page_opaque_info(get_raw_page('test_gist_idx', 1));
+-SELECT * FROM gist_page_opaque_info(get_raw_page('test_gist_idx', 2));
+-
+ COMMIT;
+ 
+ SELECT * FROM gist_page_items(get_raw_page('test_gist_idx', 0), 'test_gist_idx');

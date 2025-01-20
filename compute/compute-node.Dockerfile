@@ -1370,10 +1370,12 @@ RUN cd /ext-src/rum-src && patch -p1 <../rum.patch
 RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
 RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan_${PG_VERSION}.patch
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
+COPY compute/patches/contrib_pg${PG_VERSION}.patch /
 RUN case "${PG_VERSION}" in "v17") \
     echo "postgresql_anonymizer does not yet support PG17" && exit 0;; \
     esac && patch -p1 </ext-src/pg_anon.patch
 RUN patch -p1 </ext-src/pg_cron.patch
+RUN patch -p1 </contrib_pg${PG_VERSION}.patch && rm -f /contrib_pg${PG_VERSION}.patch
 ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
 ENV PGPORT=55433
