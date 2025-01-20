@@ -913,6 +913,7 @@ pub(crate) enum WaitLsnWaiter<'a> {
     Timeline(&'a Timeline),
     Tenant,
     PageService,
+    HttpEndpoint,
 }
 
 /// Argument to [`Timeline::shutdown`].
@@ -1309,7 +1310,7 @@ impl Timeline {
                 | TaskKind::WalReceiverConnectionPoller => {
                     let is_myself = match who_is_waiting {
                         WaitLsnWaiter::Timeline(waiter) => Weak::ptr_eq(&waiter.myself, &self.myself),
-                        WaitLsnWaiter::Tenant | WaitLsnWaiter::PageService => unreachable!("tenant or page_service context are not expected to have task kind {:?}", ctx.task_kind()),
+                        WaitLsnWaiter::Tenant | WaitLsnWaiter::PageService | WaitLsnWaiter::HttpEndpoint => unreachable!("tenant or page_service context are not expected to have task kind {:?}", ctx.task_kind()),
                     };
                     if is_myself {
                         if let Err(current) = self.last_record_lsn.would_wait_for(lsn) {
