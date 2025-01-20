@@ -107,6 +107,8 @@ pub(super) async fn connection_manager_loop_step(
     let mut broker_subscription = subscribe_for_timeline_updates(broker_client, id, cancel).await?;
     debug!("Subscribed for broker timeline updates");
 
+    const WARN_ON_INACTIVE_AFTER: Duration = Duration::from_secs(60);
+
     loop {
         let time_until_next_retry = connection_manager_state.time_until_next_retry();
         let any_activity = connection_manager_state.wal_connection.is_some()
@@ -286,6 +288,15 @@ pub(super) async fn connection_manager_loop_step(
                 // This is a fire-and-forget request, we don't care about the response
                 let _ = broker_client.publish_one(msg).await;
                 debug!("Discovery request sent to the broker");
+                None
+            } => {},
+            // Observability arm: if there's no active connection and we've received no inputs
+            // for a long while, then the loop might be stuck.
+            Some(()) = async {
+                if !any_activity {
+                    tokio::time::sleep(WARN_ON_INACTIVE_AFTER).await;
+                    tracing::warn!("Connection is inactive and received no inputs for a long time");
+                }
                 None
             } => {}
         }
