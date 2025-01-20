@@ -470,7 +470,7 @@ impl InMemoryLayer {
                 }
             }
         }
-
+        drop(inner); // release the lock before we spawn the IO; if it's serial-mode IO we will deadlock on the read().await below
         let read_from = Arc::clone(self);
         let read_ctx = ctx.attached_child();
         reconstruct_state
