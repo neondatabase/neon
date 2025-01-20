@@ -5,7 +5,7 @@ extdir=${1}
 
 cd "${extdir}" || exit 2
 FAILED=
-LIST=$( (echo -e "${SKIP//","/"\n"}"; ls -d ) | sort | uniq -u)
+LIST=$( (echo -e "${SKIP//","/"\n"}"; ls) | sort | uniq -u)
 for d in ${LIST}
 do
        [ -d "${d}" ] || continue
