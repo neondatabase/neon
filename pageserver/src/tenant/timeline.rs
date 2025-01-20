@@ -1009,7 +1009,7 @@ impl Timeline {
             ranges: vec![key..key.next()],
         };
 
-        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::serial());
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
 
         let vectored_res = self
             .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
@@ -1143,7 +1143,7 @@ impl Timeline {
             .get_vectored_impl(
                 keyspace.clone(),
                 lsn,
-                &mut ValuesReconstructState::new(IoConcurrency::serial()),
+                &mut ValuesReconstructState::new(IoConcurrency::sequential()),
                 ctx,
             )
             .await;
@@ -4182,7 +4182,7 @@ impl Timeline {
                         .get_vectored(
                             key_request_accum.consume_keyspace(),
                             lsn,
-                            IoConcurrency::serial(),
+                            IoConcurrency::sequential(),
                             ctx,
                         )
                         .await?;
@@ -4265,7 +4265,7 @@ impl Timeline {
         start: Key,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         // Metadata keys image layer creation.
-        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::serial());
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
         let begin = Instant::now();
         let data = self
             .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
@@ -5785,7 +5785,7 @@ impl Timeline {
         for layer in guard.layer_map()?.iter_historic_layers() {
             if !layer.is_delta() && layer.image_layer_lsn() == lsn {
                 let layer = guard.get_from_desc(&layer);
-                let mut reconstruct_data = ValuesReconstructState::new(IoConcurrency::serial());
+                let mut reconstruct_data = ValuesReconstructState::new(IoConcurrency::sequential());
                 layer
                     .get_values_reconstruct_data(
                         KeySpace::single(Key::MIN..Key::MAX),

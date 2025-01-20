@@ -6651,7 +6651,7 @@ mod tests {
             .get_vectored_impl(
                 aux_keyspace.clone(),
                 read_lsn,
-                &mut ValuesReconstructState::new(IoConcurrency::serial()),
+                &mut ValuesReconstructState::new(IoConcurrency::sequential()),
                 &ctx,
             )
             .await;
@@ -6799,7 +6799,7 @@ mod tests {
             .get_vectored_impl(
                 read.clone(),
                 current_lsn,
-                &mut ValuesReconstructState::new(IoConcurrency::serial()),
+                &mut ValuesReconstructState::new(IoConcurrency::sequential()),
                 &ctx,
             )
             .await?;
@@ -6934,7 +6934,7 @@ mod tests {
                         ranges: vec![child_gap_at_key..child_gap_at_key.next()],
                     },
                     query_lsn,
-                    &mut ValuesReconstructState::new(IoConcurrency::serial()),
+                    &mut ValuesReconstructState::new(IoConcurrency::sequential()),
                     &ctx,
                 )
                 .await;
@@ -7433,7 +7433,7 @@ mod tests {
                 .get_vectored_impl(
                     keyspace.clone(),
                     lsn,
-                    &mut ValuesReconstructState::new(IoConcurrency::serial()),
+                    &mut ValuesReconstructState::new(IoConcurrency::sequential()),
                     &ctx,
                 )
                 .await?
@@ -7623,7 +7623,7 @@ mod tests {
             lsn: Lsn,
             ctx: &RequestContext,
         ) -> anyhow::Result<(BTreeMap<Key, Result<Bytes, PageReconstructError>>, usize)> {
-            let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::serial());
+            let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
             let res = tline
                 .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
                 .await?;
@@ -7912,7 +7912,7 @@ mod tests {
         );
 
         // test vectored scan on parent timeline
-        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::serial());
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
         let res = tline
             .get_vectored_impl(
                 KeySpace::single(Key::metadata_key_range()),
@@ -7938,7 +7938,7 @@ mod tests {
         );
 
         // test vectored scan on child timeline
-        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::serial());
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
         let res = child
             .get_vectored_impl(
                 KeySpace::single(Key::metadata_key_range()),
@@ -7976,7 +7976,7 @@ mod tests {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Option<Bytes>, GetVectoredError> {
-        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::serial());
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
         let mut res = tline
             .get_vectored_impl(
                 KeySpace::single(key..key.next()),
@@ -10068,7 +10068,12 @@ mod tests {
 
         let keyspace = KeySpace::single(get_key(0)..get_key(10));
         let results = tline
-            .get_vectored(keyspace, delta_layer_end_lsn, IoConcurrency::serial(), &ctx)
+            .get_vectored(
+                keyspace,
+                delta_layer_end_lsn,
+                IoConcurrency::sequential(),
+                &ctx,
+            )
             .await
             .expect("No vectored errors");
         for (key, res) in results {

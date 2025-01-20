@@ -240,7 +240,7 @@ impl IoConcurrency {
     /// TODO: over time, work towards removing this method.
     /// Requires finding a long-lived root for the IoConcurrency and funneling it through
     /// to the place that does the get_values_reconstruct_data call.
-    pub(crate) fn serial() -> Self {
+    pub(crate) fn sequential() -> Self {
         Self::spawn(SelectedIoConcurrency::Sequential)
     }
     pub(crate) fn spawn_from_conf(

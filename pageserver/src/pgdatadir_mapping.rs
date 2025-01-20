@@ -209,7 +209,7 @@ impl Timeline {
                     .get_rel_page_at_lsn_batched(
                         pages.iter().map(|(tag, blknum)| (tag, blknum)),
                         effective_lsn,
-                        IoConcurrency::serial(),
+                        IoConcurrency::sequential(),
                         ctx,
                     )
                     .await;
