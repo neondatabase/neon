@@ -16,13 +16,13 @@ index 979e5e8..2375b45 100644
  -- for a non-empty table
  SELECT * FROM verify_heapam(relation := 'heaptest', skip := 'none');
 @@ -118,14 +115,6 @@ SELECT pg_stat_force_next_flush();
-
+  
  (1 row)
-
+ 
 -SELECT sum(reads) AS stats_bulkreads_after
 -  FROM pg_stat_io WHERE context = 'bulkread' \gset
 -SELECT :stats_bulkreads_after > :stats_bulkreads_before;
-- ?column?
+- ?column? 
 -----------
 - t
 -(1 row)
@@ -62,11 +62,11 @@ index 1745bae..3b429c3 100644
 -SELECT sum(reads) AS stats_bulkreads_after
 -  FROM pg_stat_io WHERE context = 'bulkread' \gset
 -SELECT :stats_bulkreads_after > :stats_bulkreads_before;
-
+ 
  CREATE ROLE regress_heaptest_role;
-
+ 
 @@ -140,7 +134,6 @@ SELECT * FROM verify_heapam('test_foreign_table',
-
+ 
  -- cleanup
  DROP TABLE heaptest;
 -DROP TABLESPACE regress_test_stats_tblspc;
@@ -120,53 +120,4 @@ index 33be13a..70a406c 100644
  ERROR:  42704
  \set VERBOSITY default
  ROLLBACK;
--DROP TABLESPACE regress_create_idx_tblspace;
-diff --git a/contrib/citext/sql/create_index_acl.sql b/contrib/citext/sql/create_index_acl.sql
-index 10b5225..ae442e1 100644
---- a/contrib/citext/sql/create_index_acl.sql
-+++ b/contrib/citext/sql/create_index_acl.sql
-@@ -6,10 +6,6 @@
- -- regress_sro_user tests look for the opposite defect; they confirm that
- -- DefineIndex() uses the table owner userid where necessary.)
-
--SET allow_in_place_tablespaces = true;
--CREATE TABLESPACE regress_create_idx_tblspace LOCATION '';
--RESET allow_in_place_tablespaces;
--
- BEGIN;
- CREATE ROLE regress_minimal;
- CREATE SCHEMA s;
-@@ -51,11 +47,9 @@ ALTER TABLE s.x OWNER TO regress_minimal;
- -- Empty-table DefineIndex()
- CREATE UNIQUE INDEX u0rows ON s.x USING btree
-   ((s.index_this_expr(y, s.const())) COLLATE s.coll s.citext_pattern_ops)
--  TABLESPACE regress_create_idx_tblspace
-   WHERE s.index_row_if(y);
- ALTER TABLE s.x ADD CONSTRAINT e0rows EXCLUDE USING btree
-   ((s.index_this_expr(y, s.const())) COLLATE s.coll WITH s.=)
--  USING INDEX TABLESPACE regress_create_idx_tblspace
-   WHERE (s.index_row_if(y));
- -- Make the table nonempty.
- INSERT INTO s.x VALUES ('foo'), ('bar');
-@@ -68,11 +62,9 @@ RESET search_path;
- GRANT EXECUTE ON FUNCTION s.index_this_expr TO regress_minimal;
- CREATE UNIQUE INDEX u2rows ON s.x USING btree
-   ((s.index_this_expr(y, s.const())) COLLATE s.coll s.citext_pattern_ops)
--  TABLESPACE regress_create_idx_tblspace
-   WHERE s.index_row_if(y);
- ALTER TABLE s.x ADD CONSTRAINT e2rows EXCLUDE USING btree
-   ((s.index_this_expr(y, s.const())) COLLATE s.coll WITH s.=)
--  USING INDEX TABLESPACE regress_create_idx_tblspace
-   WHERE (s.index_row_if(y));
- -- Shall not find s.coll via search_path, despite the s.const->public.setter
- -- call having set search_path=s during expression planning.  Suppress the
-@@ -80,9 +72,7 @@ ALTER TABLE s.x ADD CONSTRAINT e2rows EXCLUDE USING btree
- \set VERBOSITY sqlstate
- ALTER TABLE s.x ADD CONSTRAINT underqualified EXCLUDE USING btree
-   ((s.index_this_expr(y, s.const())) COLLATE coll WITH s.=)
--  USING INDEX TABLESPACE regress_create_idx_tblspace
-   WHERE (s.index_row_if(y));
- \set VERBOSITY default
- ROLLBACK;
-
 -DROP TABLESPACE regress_create_idx_tblspace;
