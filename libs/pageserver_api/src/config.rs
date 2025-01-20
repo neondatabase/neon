@@ -302,6 +302,8 @@ pub struct TenantConfigToml {
 
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
 
+    /// Enable rel_size_v2 for this tenant. Once enabled, the tenant will persist this information into
+    /// `index_part.json`, and it cannot be reversed.
     pub rel_size_v2_enabled: Option<bool>,
 }
 
