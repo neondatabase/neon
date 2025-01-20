@@ -196,9 +196,29 @@ typedef uint16 shardno_t;
 
 typedef struct
 {
+	/*
+	 * Send this request to the PageServer associated with this shard.
+	 */
 	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
+	/*
+	 * Blocking read for the next response of this shard.
+	 *
+	 * When a CANCEL signal is handled, the connection state will be
+	 * unmodified.
+	 */
 	NeonResponse *(*receive) (shardno_t shard_no);
+	/*
+	 * Try get the next response from the TCP buffers, if any.
+	 * Returns NULL when the data is not yet available. 
+	 */
+	NeonResponse *(*try_receive) (shardno_t shard_no);
+	/*
+	 * Make sure all requests are sent to PageServer.
+	 */
 	bool		(*flush) (shardno_t shard_no);
+	/*
+	 * Disconnect from this pageserver shard.
+	 */
 	void        (*disconnect) (shardno_t shard_no);
 } page_server_api;
 

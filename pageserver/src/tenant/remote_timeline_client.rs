@@ -803,6 +803,12 @@ impl RemoteTimelineClient {
 
         upload_queue.dirty.metadata.apply(update);
 
+        // Defense in depth: if we somehow generated invalid metadata, do not persist it.
+        upload_queue
+            .dirty
+            .validate()
+            .map_err(|e| anyhow::anyhow!(e))?;
+
         self.schedule_index_upload(upload_queue);
 
         Ok(())

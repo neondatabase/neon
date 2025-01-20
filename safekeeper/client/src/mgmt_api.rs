@@ -102,6 +102,11 @@ impl Client {
         self.get(&uri).await
     }
 
+    pub async fn utilization(&self) -> Result<reqwest::Response> {
+        let uri = format!("{}/v1/utilization/", self.mgmt_api_endpoint);
+        self.get(&uri).await
+    }
+
     async fn get<U: IntoUrl>(&self, uri: U) -> Result<reqwest::Response> {
         self.request(Method::GET, uri, ()).await
     }

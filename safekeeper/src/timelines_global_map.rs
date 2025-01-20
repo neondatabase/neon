@@ -12,6 +12,8 @@ use crate::{control_file, wal_storage, SafeKeeperConf};
 use anyhow::{bail, Context, Result};
 use camino::Utf8PathBuf;
 use camino_tempfile::Utf8TempDir;
+use safekeeper_api::membership::Configuration;
+use safekeeper_api::models::SafekeeperUtilization;
 use safekeeper_api::ServerInfo;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -214,9 +216,10 @@ impl GlobalTimelines {
     pub(crate) async fn create(
         &self,
         ttid: TenantTimelineId,
+        mconf: Configuration,
         server_info: ServerInfo,
+        start_lsn: Lsn,
         commit_lsn: Lsn,
-        local_start_lsn: Lsn,
     ) -> Result<Arc<Timeline>> {
         let (conf, _, _) = {
             let state = self.state.lock().unwrap();
@@ -239,8 +242,7 @@ impl GlobalTimelines {
 
         // TODO: currently we create only cfile. It would be reasonable to
         // immediately initialize first WAL segment as well.
-        let state =
-            TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn)?;
+        let state = TimelinePersistentState::new(&ttid, mconf, server_info, start_lsn, commit_lsn)?;
         control_file::FileStorage::create_new(&tmp_dir_path, state, conf.no_sync).await?;
         let timeline = self.load_temp_timeline(ttid, &tmp_dir_path, true).await?;
         Ok(timeline)
@@ -413,6 +415,20 @@ impl GlobalTimelines {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Returns statistics about timeline counts
+    pub fn get_timeline_counts(&self) -> SafekeeperUtilization {
+        let global_lock = self.state.lock().unwrap();
+        let timeline_count = global_lock
+            .timelines
+            .values()
+            .filter(|t| match t {
+                GlobalMapTimeline::CreationInProgress => false,
+                GlobalMapTimeline::Timeline(t) => !t.is_cancelled(),
+            })
+            .count() as u64;
+        SafekeeperUtilization { timeline_count }
     }
 
     /// Returns all timelines belonging to a given tenant. Used for deleting all timelines of a tenant,

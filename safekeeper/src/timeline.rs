@@ -4,7 +4,10 @@
 use anyhow::{anyhow, bail, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use remote_storage::RemotePath;
-use safekeeper_api::models::{PeerInfo, TimelineTermBumpResponse};
+use safekeeper_api::membership::Configuration;
+use safekeeper_api::models::{
+    PeerInfo, TimelineMembershipSwitchResponse, TimelineTermBumpResponse,
+};
 use safekeeper_api::Term;
 use tokio::fs::{self};
 use tokio_util::sync::CancellationToken;
@@ -32,7 +35,7 @@ use crate::control_file;
 use crate::rate_limit::RateLimiter;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, TermLsn};
-use crate::send_wal::WalSenders;
+use crate::send_wal::{WalSenders, WalSendersTimelineMetricValues};
 use crate::state::{EvictionState, TimelineMemState, TimelinePersistentState, TimelineState};
 use crate::timeline_guard::ResidenceGuard;
 use crate::timeline_manager::{AtomicStatus, ManagerCtl};
@@ -186,6 +189,13 @@ impl StateSK {
 
     pub async fn term_bump(&mut self, to: Option<Term>) -> Result<TimelineTermBumpResponse> {
         self.state_mut().term_bump(to).await
+    }
+
+    pub async fn membership_switch(
+        &mut self,
+        to: Configuration,
+    ) -> Result<TimelineMembershipSwitchResponse> {
+        self.state_mut().membership_switch(to).await
     }
 
     /// Close open WAL files to release FDs.
@@ -702,16 +712,22 @@ impl Timeline {
             return None;
         }
 
-        let (ps_feedback_count, last_ps_feedback) = self.walsenders.get_ps_feedback_stats();
+        let WalSendersTimelineMetricValues {
+            ps_feedback_counter,
+            last_ps_feedback,
+            interpreted_wal_reader_tasks,
+        } = self.walsenders.info_for_metrics();
+
         let state = self.read_shared_state().await;
         Some(FullTimelineInfo {
             ttid: self.ttid,
-            ps_feedback_count,
+            ps_feedback_count: ps_feedback_counter,
             last_ps_feedback,
             wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
             timeline_is_active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: self.last_removed_segno.load(Ordering::Relaxed),
+            interpreted_wal_reader_tasks,
             epoch_start_lsn: state.sk.term_start_lsn(),
             mem_state: state.sk.state().inmem.clone(),
             persisted_state: TimelinePersistentState::clone(state.sk.state()),
@@ -730,7 +746,7 @@ impl Timeline {
         debug_dump::Memory {
             is_cancelled: self.is_cancelled(),
             peers_info_len: state.peers_info.0.len(),
-            walsenders: self.walsenders.get_all(),
+            walsenders: self.walsenders.get_all_public(),
             wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
             active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
@@ -766,6 +782,14 @@ impl Timeline {
     pub async fn term_bump(self: &Arc<Self>, to: Option<Term>) -> Result<TimelineTermBumpResponse> {
         let mut state = self.write_shared_state().await;
         state.sk.term_bump(to).await
+    }
+
+    pub async fn membership_switch(
+        self: &Arc<Self>,
+        to: Configuration,
+    ) -> Result<TimelineMembershipSwitchResponse> {
+        let mut state = self.write_shared_state().await;
+        state.sk.membership_switch(to).await
     }
 
     /// Guts of [`Self::wal_residence_guard`] and [`Self::try_wal_residence_guard`]

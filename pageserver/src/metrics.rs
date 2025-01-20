@@ -100,6 +100,32 @@ pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static CONCURRENT_INITDBS: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_concurrent_initdb",
+        "Number of initdb processes running"
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static INITDB_SEMAPHORE_ACQUISITION_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_initdb_semaphore_seconds_global",
+        "Time spent getting a permit from the global initdb semaphore",
+        STORAGE_OP_BUCKETS.into()
+    )
+    .expect("failed to define metric")
+});
+
+pub(crate) static INITDB_RUN_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_initdb_seconds_global",
+        "Time spent performing initdb",
+        STORAGE_OP_BUCKETS.into()
+    )
+    .expect("failed to define metric")
+});
+
 // Metrics collected on operations on the storage repository.
 #[derive(
     Clone, Copy, enum_map::Enum, strum_macros::EnumString, strum_macros::Display, IntoStaticStr,
