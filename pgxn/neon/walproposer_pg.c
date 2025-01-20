@@ -63,7 +63,7 @@
 char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
-int			safekeeper_protocol_version = 2;
+int			safekeeper_proto_version = 2;
 
 /* Set to true in the walproposer bgw. */
 static bool am_walproposer;
@@ -128,7 +128,7 @@ init_walprop_config(bool syncSafekeepers)
 	else
 		walprop_config.systemId = 0;
 	walprop_config.pgTimeline = walprop_pg_get_timeline_id();
-	walprop_config.proto_version = safekeeper_protocol_version;
+	walprop_config.proto_version = safekeeper_proto_version;
 }
 
 /*
@@ -224,10 +224,10 @@ nwp_register_gucs(void)
 							NULL, NULL, NULL);
 
 	DefineCustomIntVariable(
-							"neon.safekeeper_protocol_version",
+							"neon.safekeeper_proto_version",
 							"Version of compute <-> safekeeper protocol.",
 							"Used while migrating from 2 to 3.",
-							&safekeeper_protocol_version,
+							&safekeeper_proto_version,
 							2, 0, INT_MAX,
 							PGC_POSTMASTER,
 							0,
