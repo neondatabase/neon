@@ -1132,4 +1132,101 @@ mod tests {
         // There should be no strong references to the timeline object except the one on "stack".
         assert_eq!(Arc::strong_count(&shard0), refcount_start);
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_reference_cycle_broken_when_cache_is_dropped() {
+        crate::tenant::harness::setup_logging();
+        let timeline_id = TimelineId::generate();
+        let shard0 = Arc::new_cyclic(|myself| StubTimeline {
+            gate: Default::default(),
+            id: timeline_id,
+            shard: ShardIdentity::unsharded(),
+            per_timeline_state: PerTimelineState::default(),
+            myself: myself.clone(),
+        });
+        let mgr = StubManager {
+            shards: vec![shard0.clone()],
+        };
+        let key = DBDIR_KEY;
+
+        let mut cache = Cache::<TestTypes>::default();
+
+        // helper to check if a handle is referenced by per_timeline_state
+        let per_timeline_state_refs_handle = |handle_weak: &Weak<Mutex<HandleInner<_>>>| {
+            let per_timeline_state = shard0.per_timeline_state.handles.lock().unwrap();
+            let per_timeline_state = per_timeline_state.as_ref().unwrap();
+            per_timeline_state
+                .values()
+                .any(|v| Weak::ptr_eq(&Arc::downgrade(v), handle_weak))
+        };
+
+        // Fill the cache.
+        let handle = cache
+            .get(timeline_id, ShardSelector::Page(key), &mgr)
+            .await
+            .expect("we have the timeline");
+        assert!(Weak::ptr_eq(&handle.myself, &shard0.myself));
+        let handle_inner_weak = Arc::downgrade(&handle.inner);
+        assert!(
+            per_timeline_state_refs_handle(&handle_inner_weak),
+            "we still hold `handle` _and_ haven't dropped `cache` yet"
+        );
+
+        // Drop the cache.
+        drop(cache);
+
+        assert!(
+            !(per_timeline_state_refs_handle(&handle_inner_weak)),
+            "nothing should reference the handle allocation anymore"
+        );
+        assert!(
+            Weak::upgrade(&handle_inner_weak).is_some(),
+            "the local `handle` still keeps the allocation alive"
+        );
+        // but obviously the cache is gone so no new allocations can be handed out.
+
+        // Drop handle.
+        drop(handle);
+        assert!(
+            Weak::upgrade(&handle_inner_weak).is_none(),
+            "the local `handle` is dropped, so the allocation should be dropped by now"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_reference_cycle_broken_when_per_timeline_state_shutdown() {
+        crate::tenant::harness::setup_logging();
+        let timeline_id = TimelineId::generate();
+        let shard0 = Arc::new_cyclic(|myself| StubTimeline {
+            gate: Default::default(),
+            id: timeline_id,
+            shard: ShardIdentity::unsharded(),
+            per_timeline_state: PerTimelineState::default(),
+            myself: myself.clone(),
+        });
+        let mgr = StubManager {
+            shards: vec![shard0.clone()],
+        };
+        let key = DBDIR_KEY;
+
+        let mut cache = Cache::<TestTypes>::default();
+        let handle = cache
+            .get(timeline_id, ShardSelector::Page(key), &mgr)
+            .await
+            .expect("we have the timeline");
+        // grab a weak reference to the inner so can later try to Weak::upgrade it and assert that fails
+        let handle_inner_weak = Arc::downgrade(&handle.inner);
+
+        // drop the handle, obviously the lifetime of `inner` is at least as long as each strong reference to it
+        drop(handle);
+        assert!(Weak::upgrade(&handle_inner_weak).is_some(), "can still");
+
+        // Shutdown the per_timeline_state.
+        shard0.per_timeline_state.shutdown();
+        assert!(Weak::upgrade(&handle_inner_weak).is_none(), "can no longer");
+
+        // cache only contains Weak's, so, it can outlive the per_timeline_state without
+        // Drop explicitly solely to make this point.
+        drop(cache);
+    }
 }
