@@ -357,6 +357,9 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rel_size_v2_enabled: Option<bool>,
 }
 
 impl TenantConfOpt {
@@ -425,6 +428,7 @@ impl TenantConfOpt {
             wal_receiver_protocol_override: self
                 .wal_receiver_protocol_override
                 .or(global_conf.wal_receiver_protocol_override),
+            rel_size_v2_enabled: self.rel_size_v2_enabled.or(global_conf.rel_size_v2_enabled),
         }
     }
 
@@ -454,6 +458,7 @@ impl TenantConfOpt {
             mut lsn_lease_length_for_ts,
             mut timeline_offloading,
             mut wal_receiver_protocol_override,
+            mut rel_size_v2_enabled,
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
@@ -522,6 +527,7 @@ impl TenantConfOpt {
         patch
             .wal_receiver_protocol_override
             .apply(&mut wal_receiver_protocol_override);
+        patch.rel_size_v2_enabled.apply(&mut rel_size_v2_enabled);
 
         Ok(Self {
             checkpoint_distance,
@@ -548,6 +554,7 @@ impl TenantConfOpt {
             lsn_lease_length_for_ts,
             timeline_offloading,
             wal_receiver_protocol_override,
+            rel_size_v2_enabled,
         })
     }
 }
@@ -603,6 +610,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             lsn_lease_length_for_ts: value.lsn_lease_length_for_ts.map(humantime),
             timeline_offloading: value.timeline_offloading,
             wal_receiver_protocol_override: value.wal_receiver_protocol_override,
+            rel_size_v2_enabled: value.rel_size_v2_enabled,
         }
     }
 }

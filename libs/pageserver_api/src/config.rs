@@ -301,6 +301,10 @@ pub struct TenantConfigToml {
     pub timeline_offloading: bool,
 
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
+
+    /// Enable rel_size_v2 for this tenant. Once enabled, the tenant will persist this information into
+    /// `index_part.json`, and it cannot be reversed.
+    pub rel_size_v2_enabled: Option<bool>,
 }
 
 pub mod defaults {
@@ -538,6 +542,7 @@ impl Default for TenantConfigToml {
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
             timeline_offloading: false,
             wal_receiver_protocol_override: None,
+            rel_size_v2_enabled: None,
         }
     }
 }

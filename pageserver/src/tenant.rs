@@ -5475,6 +5475,7 @@ pub(crate) mod harness {
                 lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),
                 timeline_offloading: Some(tenant_conf.timeline_offloading),
                 wal_receiver_protocol_override: tenant_conf.wal_receiver_protocol_override,
+                rel_size_v2_enabled: tenant_conf.rel_size_v2_enabled,
             }
         }
     }
