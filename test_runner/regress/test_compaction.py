@@ -453,6 +453,7 @@ def test_sharding_compaction(
         "gc_period": "0s",
         "gc_horizon": f"{128 * 1024}",
         "compaction_period": "0s",
+        "lsn_lease_length": "0s",
         # create image layers eagerly: we want to exercise image layer creation in this test.
         "image_creation_threshold": "1",
         "image_layer_creation_check_threshold": 0,
