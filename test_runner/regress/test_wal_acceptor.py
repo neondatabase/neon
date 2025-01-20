@@ -48,7 +48,12 @@ from fixtures.remote_storage import (
     default_remote_storage,
     s3_storage,
 )
-from fixtures.safekeeper.http import SafekeeperHttpClient
+from fixtures.safekeeper.http import (
+    Configuration,
+    SafekeeperHttpClient,
+    SafekeeperId,
+    TimelineCreateRequest,
+)
 from fixtures.safekeeper.utils import wait_walreceivers_absent
 from fixtures.utils import (
     PropagatingThread,
@@ -658,7 +663,13 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
     for sk in env.safekeepers:
         sk.start()
         cli = sk.http_client()
-        cli.timeline_create(tenant_id, timeline_id, pg_version, last_lsn)
+        mconf = Configuration(generation=0, members=[], new_members=None)
+        # set start_lsn to the beginning of the first segment to allow reading
+        # WAL from there (could you intidb LSN as well).
+        r = TimelineCreateRequest(
+            tenant_id, timeline_id, mconf, pg_version, Lsn("0/1000000"), commit_lsn=last_lsn
+        )
+        cli.timeline_create(r)
         f_partial_path = (
             Path(sk.data_dir) / str(tenant_id) / str(timeline_id) / f_partial_saved.name
         )
@@ -1088,6 +1099,62 @@ def test_restart_endpoint_after_switch_wal(neon_env_builder: NeonEnvBuilder):
     endpoint.stop(mode="immediate", sks_wait_walreceiver_gone=(env.safekeepers, timeline_id))
     endpoint = env.endpoints.create_start("main")
     endpoint.safe_psql("SELECT 'works'")
+
+
+# Test restarting compute at WAL page boundary.
+def test_restart_endpoint_wal_page_boundary(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+
+    ep = env.endpoints.create_start("main")
+    ep.safe_psql("create table t (i int)")
+
+    with ep.cursor() as cur:
+        # measure how much space logical message takes. Sometimes first attempt
+        # creates huge message and then it stabilizes, have no idea why.
+        for _ in range(3):
+            lsn_before = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
+            log.info(f"current_lsn={lsn_before}")
+            # Non-transactional logical message doesn't write WAL, only XLogInsert's
+            # it, so use transactional. Which is a bit problematic as transactional
+            # necessitates commit record. Alternatively we can do smth like
+            #   select neon_xlogflush(pg_current_wal_insert_lsn());
+            # but isn't much better + that particular call complains on 'xlog flush
+            # request 0/282C018 is not satisfied' as pg_current_wal_insert_lsn skips
+            # page headers.
+            payload = "blahblah"
+            cur.execute(f"select pg_logical_emit_message(true, 'pref', '{payload}')")
+            lsn_after_by_curr_wal_lsn = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
+            lsn_diff = lsn_after_by_curr_wal_lsn - lsn_before
+            logical_message_base = lsn_after_by_curr_wal_lsn - lsn_before - len(payload)
+            log.info(
+                f"before {lsn_before}, after {lsn_after_by_curr_wal_lsn}, lsn diff is {lsn_diff}, base {logical_message_base}"
+            )
+
+        # and write logical message spanning exactly as we want
+        lsn_before = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
+        log.info(f"current_lsn={lsn_before}")
+        curr_lsn = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
+        offs = int(curr_lsn) % 8192
+        till_page = 8192 - offs
+        target_lsn = curr_lsn + till_page
+        payload_len = (
+            till_page - logical_message_base - 8
+        )  # not sure why 8 is here, it is deduced from experiments
+        log.info(
+            f"current_lsn={curr_lsn}, offs {offs}, till_page {till_page}, target_lsn {target_lsn}"
+        )
+
+        cur.execute(f"select pg_logical_emit_message(true, 'pref', 'f{'a' * payload_len}')")
+        supposedly_contrecord_end = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
+        log.info(f"supposedly_page_boundary={supposedly_contrecord_end}")
+        # The calculations to hit the page boundary are very fuzzy, so just
+        # ignore test if we fail to reach it.
+        if not (int(supposedly_contrecord_end) % 8192 == 0):
+            pytest.skip(f"missed page boundary, bad luck: lsn is {supposedly_contrecord_end}")
+
+    ep.stop(mode="immediate")
+    ep = env.endpoints.create_start("main")
+    ep.safe_psql("insert into t values (42)")  # should be ok
 
 
 # Context manager which logs passed time on exit.
@@ -2179,6 +2246,63 @@ def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
         assert n_evicted == 0
 
     wait_until(unevicted_on_dest, interval=0.1, timeout=1.0)
+
+
+# Basic test for http API membership related calls: create timeline and switch
+# configuration. Normally these are called by storage controller, but this
+# allows to test them separately.
+@run_only_on_default_postgres("tests only safekeeper API")
+def test_membership_api(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    sk = env.safekeepers[0]
+    http_cli = sk.http_client()
+
+    sk_id_1 = SafekeeperId(env.safekeepers[0].id, "localhost", sk.port.pg_tenant_only)
+    sk_id_2 = SafekeeperId(11, "localhost", 5434)  # just a mock
+
+    # Request to switch before timeline creation should fail.
+    init_conf = Configuration(generation=1, members=[sk_id_1], new_members=None)
+    with pytest.raises(requests.exceptions.HTTPError):
+        http_cli.membership_switch(tenant_id, timeline_id, init_conf)
+
+    # Create timeline.
+    create_r = TimelineCreateRequest(
+        tenant_id, timeline_id, init_conf, 150002, Lsn("0/1000000"), commit_lsn=None
+    )
+    log.info(f"sending {create_r.to_json()}")
+    http_cli.timeline_create(create_r)
+
+    # Switch into some conf.
+    joint_conf = Configuration(generation=4, members=[sk_id_1], new_members=[sk_id_2])
+    resp = http_cli.membership_switch(tenant_id, timeline_id, joint_conf)
+    log.info(f"joint switch resp: {resp}")
+    assert resp.previous_conf.generation == 1
+    assert resp.current_conf.generation == 4
+
+    # Restart sk, conf should be preserved.
+    sk.stop().start()
+    after_restart = http_cli.get_membership(tenant_id, timeline_id)
+    log.info(f"conf after restart: {after_restart}")
+    assert after_restart.generation == 4
+
+    # Switch into disjoint conf.
+    non_joint = Configuration(generation=5, members=[sk_id_2], new_members=None)
+    resp = http_cli.membership_switch(tenant_id, timeline_id, non_joint)
+    log.info(f"non joint switch resp: {resp}")
+    assert resp.previous_conf.generation == 4
+    assert resp.current_conf.generation == 5
+
+    # Switch request to lower conf should be ignored.
+    lower_conf = Configuration(generation=3, members=[], new_members=None)
+    resp = http_cli.membership_switch(tenant_id, timeline_id, lower_conf)
+    log.info(f"lower switch resp: {resp}")
+    assert resp.previous_conf.generation == 5
+    assert resp.current_conf.generation == 5
 
 
 # In this test we check for excessive START_REPLICATION and START_WAL_PUSH queries
