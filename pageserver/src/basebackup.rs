@@ -301,20 +301,16 @@ where
 
             let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
 
+            let io_concurrency = IoConcurrency::spawn_from_env(
+                self.timeline
+                    .gate
+                    .enter()
+                    .map_err(|e| BasebackupError::Server(e.into()))?,
+            );
             for part in slru_partitions.parts {
                 let blocks = self
                     .timeline
-                    .get_vectored(
-                        part,
-                        self.lsn,
-                        IoConcurrency::spawn_from_env(
-                            self.timeline
-                                .gate
-                                .enter()
-                                .map_err(|e| BasebackupError::Server(e.into()))?,
-                        ),
-                        self.ctx,
-                    )
+                    .get_vectored(part, self.lsn, io_concurrency.clone(), self.ctx)
                     .await
                     .map_err(|e| BasebackupError::Server(e.into()))?;
 
