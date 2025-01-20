@@ -216,6 +216,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             ),
         ])
         .env_clear()
+        .env("LD_LIBRARY_PATH", "/usr/local/lib/")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -314,6 +315,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             .arg(&source_connection_string)
             // how we run it
             .env_clear()
+            .env("LD_LIBRARY_PATH", "/usr/local/lib/")
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -347,6 +349,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             .arg(&dumpdir)
             // how we run it
             .env_clear()
+            .env("LD_LIBRARY_PATH", "/usr/local/lib/")
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
