@@ -5678,8 +5678,16 @@ impl Timeline {
         info!("force created image layer {}", image_layer.local_path());
         {
             let mut guard = self.layers.write().await;
-            guard.open_mut().unwrap().force_insert_layer(image_layer);
+            guard
+                .open_mut()
+                .unwrap()
+                .force_insert_layer(image_layer.clone());
         }
+
+        // Update remote_timeline_client state to reflect existence of this layer
+        self.remote_client
+            .schedule_layer_file_upload(image_layer)
+            .unwrap();
 
         Ok(())
     }
@@ -5731,8 +5739,16 @@ impl Timeline {
         info!("force created delta layer {}", delta_layer.local_path());
         {
             let mut guard = self.layers.write().await;
-            guard.open_mut().unwrap().force_insert_layer(delta_layer);
+            guard
+                .open_mut()
+                .unwrap()
+                .force_insert_layer(delta_layer.clone());
         }
+
+        // Update remote_timeline_client state to reflect existence of this layer
+        self.remote_client
+            .schedule_layer_file_upload(delta_layer)
+            .unwrap();
 
         Ok(())
     }
