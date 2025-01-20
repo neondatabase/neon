@@ -1192,4 +1192,41 @@ mod tests {
             "the local `handle` is dropped, so the allocation should be dropped by now"
         );
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_reference_cycle_broken_when_per_timeline_state_shutdown() {
+        crate::tenant::harness::setup_logging();
+        let timeline_id = TimelineId::generate();
+        let shard0 = Arc::new_cyclic(|myself| StubTimeline {
+            gate: Default::default(),
+            id: timeline_id,
+            shard: ShardIdentity::unsharded(),
+            per_timeline_state: PerTimelineState::default(),
+            myself: myself.clone(),
+        });
+        let mgr = StubManager {
+            shards: vec![shard0.clone()],
+        };
+        let key = DBDIR_KEY;
+
+        let mut cache = Cache::<TestTypes>::default();
+        let handle = cache
+            .get(timeline_id, ShardSelector::Page(key), &mgr)
+            .await
+            .expect("we have the timeline");
+        // grab a weak reference to the inner so can later try to Weak::upgrade it and assert that fails
+        let handle_inner_weak = Arc::downgrade(&handle.inner);
+
+        // drop the handle, obviously the lifetime of `inner` is at least as long as each strong reference to it
+        drop(handle);
+        assert!(Weak::upgrade(&handle_inner_weak).is_some(), "can still");
+
+        // Shutdown the per_timeline_state.
+        shard0.per_timeline_state.shutdown();
+        assert!(Weak::upgrade(&handle_inner_weak).is_none(), "can no longer");
+
+        // cache only contains Weak's, so, it can outlive the per_timeline_state without
+        // Drop explicitly solely to make this point.
+        drop(cache);
+    }
 }
