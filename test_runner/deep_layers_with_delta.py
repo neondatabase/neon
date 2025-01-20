@@ -17,20 +17,23 @@ Some commands from shell history used in combination with this script:
 
 ```
  export NEON_REPO_DIR=$PWD/.neon
- ./target/release/neon_local stop
+ export NEON_BIN_DIR=$PWD/target/release
+ $NEON_BIN_DIR/neon_local stop
  rm -rf $NEON_REPO_DIR
- ./target/release/neon_local init
+ $NEON_BIN_DIR/neon_local init
  cat >>  $NEON_REPO_DIR/pageserver_1/pageserver.toml <<"EOF"
  # customizations
  virtual_file_io_mode = "direct"
  page_service_pipelining={mode="pipelined", max_batch_size=32, execution="concurrent-futures"}
+ get_vectored_concurrent_io={mode="sidecar-task"}
 EOF
- ./target/release/neon_local start
+ $NEON_BIN_DIR/neon_local start
 
  psql 'postgresql://localhost:1235/storage_controller' -c 'DELETE FROM tenant_shards'
- NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY=futures-unordered ./target/release/neon_local pageserver restart
+ sed 's/.*get_vectored_concurrent_io.*/get_vectored_concurrent_io={mode="sidecar-task"}/' -i $NEON_REPO_DIR/pageserver_1/pageserver.toml
+ $NEON_BIN_DIR/neon_local pageserver restart
  sleep 2
- ./target/release/neon_local tenant create --set-default
+ $NEON_BIN_DIR/neon_local tenant create --set-default
  ./target/debug/neon_local endpoint stop foo
  rm -rf  $NEON_REPO_DIR/endpoints/foo
  ./target/debug/neon_local endpoint create foo

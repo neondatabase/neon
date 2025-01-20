@@ -301,7 +301,8 @@ where
 
             let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
 
-            let io_concurrency = IoConcurrency::spawn_from_env(
+            let io_concurrency = IoConcurrency::spawn_from_conf(
+                self.timeline.conf,
                 self.timeline
                     .gate
                     .enter()

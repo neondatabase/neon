@@ -6548,8 +6548,8 @@ mod tests {
 
         let gate = Gate::default();
         let io_concurrency_levels: Vec<Box<dyn Fn() -> SelectedIoConcurrency>> = vec![
-            Box::new(|| SelectedIoConcurrency::Serial),
-            Box::new(|| SelectedIoConcurrency::FuturesUnordered(gate.enter().unwrap())),
+            Box::new(|| SelectedIoConcurrency::Sequential),
+            Box::new(|| SelectedIoConcurrency::SidecarTask(gate.enter().unwrap())),
         ];
 
         for (io_concurrency_level_idx, io_concurrency_level) in

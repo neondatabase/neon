@@ -113,6 +113,7 @@ pub fn spawn(
     let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
         "libpq listener",
         libpq_listener_main(
+            conf,
             tenant_manager,
             pg_auth,
             tcp_listener,
@@ -166,7 +167,9 @@ impl Connections {
 /// Returns Ok(()) upon cancellation via `cancel`, returning the set of
 /// open connections.
 ///
+#[allow(clippy::too_many_arguments)]
 pub async fn libpq_listener_main(
+    conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
     listener: tokio::net::TcpListener,
@@ -204,6 +207,7 @@ pub async fn libpq_listener_main(
                 let connection_ctx = listener_ctx
                     .detached_child(TaskKind::PageRequestHandler, DownloadBehavior::Download);
                 connection_handler_tasks.spawn(page_service_conn_main(
+                    conf,
                     tenant_manager.clone(),
                     local_auth,
                     socket,
@@ -235,6 +239,7 @@ type ConnectionHandlerResult = anyhow::Result<()>;
 #[instrument(skip_all, fields(peer_addr))]
 #[allow(clippy::too_many_arguments)]
 async fn page_service_conn_main(
+    conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
@@ -292,6 +297,7 @@ async fn page_service_conn_main(
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
     let mut conn_handler = PageServerHandler::new(
+        conf,
         tenant_manager,
         auth,
         pipelining_config,
@@ -329,6 +335,7 @@ async fn page_service_conn_main(
 }
 
 struct PageServerHandler {
+    conf: &'static PageServerConf,
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
 
@@ -655,6 +662,7 @@ impl BatchedFeMessage {
 
 impl PageServerHandler {
     pub fn new(
+        conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
         pipelining_config: PageServicePipeliningConfig,
@@ -663,6 +671,7 @@ impl PageServerHandler {
         gate_guard: GateGuard,
     ) -> Self {
         PageServerHandler {
+            conf,
             auth,
             claims: None,
             connection_ctx,
@@ -1313,13 +1322,16 @@ impl PageServerHandler {
             }
         }
 
-        let io_concurrency = IoConcurrency::spawn_from_env(match self.gate_guard.try_clone() {
-            Ok(guard) => guard,
-            Err(_) => {
-                info!("shutdown request received in page handler");
-                return Err(QueryError::Shutdown);
-            }
-        });
+        let io_concurrency = IoConcurrency::spawn_from_conf(
+            self.conf,
+            match self.gate_guard.try_clone() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    info!("shutdown request received in page handler");
+                    return Err(QueryError::Shutdown);
+                }
+            },
+        );
 
         let pgb_reader = pgb
             .split()

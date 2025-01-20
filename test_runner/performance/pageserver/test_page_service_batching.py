@@ -32,7 +32,7 @@ class PageServicePipeliningConfigPipelined(PageServicePipeliningConfig):
 
 
 PS_DIRECT_IO = ["direct"]
-PS_IO_CONCURRENCY = ["serial", "futures-unordered"]
+PS_IO_CONCURRENCY = ["sequential", "sidecar-task"]
 EXECUTION = ["concurrent-futures"]
 
 NON_BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
@@ -256,12 +256,10 @@ def test_throughput(
         {
             "page_service_pipelining": dataclasses.asdict(pipelining_config),
             "virtual_file_io_mode": ps_direct_io_mode,
+            "get_vectored_concurrent_io": {"mode": ps_io_concurrency},
         }
     )
-    env.pageserver.stop()
-    env.pageserver.start(
-        extra_env_vars={"NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY": ps_io_concurrency}
-    )
+    env.pageserver.restart()
     metrics = workload()
 
     log.info("Results: %s", metrics)
@@ -327,6 +325,8 @@ def test_latency(
     def patch_ps_config(ps_config):
         if pipelining_config is not None:
             ps_config["page_service_pipelining"] = dataclasses.asdict(pipelining_config)
+            ps_config["get_vectored_concurrent_io"] = {"mode": ps_io_concurrency}
+            # FIXME: parametrize over direct IO mode
 
     neon_env_builder.pageserver_config_override = patch_ps_config
 
@@ -357,11 +357,6 @@ def test_latency(
 
     for sk in env.safekeepers:
         sk.stop()
-
-    env.pageserver.stop()
-    env.pageserver.start(
-        extra_env_vars={"NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY": ps_io_concurrency}
-    )
 
     #
     # Run single-threaded pagebench (TODO: dedup with other benchmark code)

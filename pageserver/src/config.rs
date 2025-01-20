@@ -191,6 +191,8 @@ pub struct PageServerConf {
     pub wal_receiver_protocol: PostgresClientProtocol,
 
     pub page_service_pipelining: pageserver_api::config::PageServicePipeliningConfig,
+
+    pub get_vectored_concurrent_io: pageserver_api::config::GetVectoredConcurrentIo,
 }
 
 /// Token for authentication to safekeepers
@@ -352,6 +354,7 @@ impl PageServerConf {
             no_sync,
             wal_receiver_protocol,
             page_service_pipelining,
+            get_vectored_concurrent_io,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -396,6 +399,7 @@ impl PageServerConf {
             import_pgdata_aws_endpoint_url,
             wal_receiver_protocol,
             page_service_pipelining,
+            get_vectored_concurrent_io,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling

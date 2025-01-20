@@ -391,6 +391,7 @@ class NeonEnvBuilder:
         storage_controller_port_override: int | None = None,
         pageserver_virtual_file_io_mode: str | None = None,
         pageserver_wal_receiver_protocol: PageserverWalReceiverProtocol | None = None,
+        pageserver_get_vectored_concurrent_io: str | None = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -430,6 +431,9 @@ class NeonEnvBuilder:
         self.storage_controller_config: dict[Any, Any] | None = None
 
         self.pageserver_virtual_file_io_engine: str | None = pageserver_virtual_file_io_engine
+        self.pageserver_get_vectored_concurrent_io: str | None = (
+            pageserver_get_vectored_concurrent_io
+        )
 
         self.pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None = (
             pageserver_default_tenant_config_compaction_algorithm
@@ -1066,6 +1070,7 @@ class NeonEnv:
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
         self.pageserver_wal_receiver_protocol = config.pageserver_wal_receiver_protocol
+        self.pageserver_get_vectored_concurrent_io = config.pageserver_get_vectored_concurrent_io
 
         # Create the neon_local's `NeonLocalInitConf`
         cfg: dict[str, Any] = {
@@ -1126,6 +1131,15 @@ class NeonEnv:
                     "execution": "concurrent-futures",
                     "max_batch_size": 32,
                 }
+
+            # Concurrent IO (https://github.com/neondatabase/neon/issues/9378):
+            # enable concurrent IO by default in tests and benchmarks.
+            # Compat tests are exempt because old versions fail to parse the new config.
+            if not config.compatibility_neon_binpath:
+                if self.pageserver_get_vectored_concurrent_io is not None:
+                    ps_cfg["get_vectored_concurrent_io"] = {
+                        "mode": self.pageserver_get_vectored_concurrent_io,
+                    }
 
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
@@ -1468,6 +1482,7 @@ def neon_simple_env(
     pageserver_virtual_file_io_engine: str,
     pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None,
     pageserver_virtual_file_io_mode: str | None,
+    pageserver_get_vectored_concurrent_io: str | None,
 ) -> Iterator[NeonEnv]:
     """
     Simple Neon environment, with 1 safekeeper and 1 pageserver. No authentication, no fsync.
@@ -1500,6 +1515,7 @@ def neon_simple_env(
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
+        pageserver_get_vectored_concurrent_io=pageserver_get_vectored_concurrent_io,
         combination=combination,
     ) as builder:
         env = builder.init_start()
@@ -1526,6 +1542,7 @@ def neon_env_builder(
     pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None,
     record_property: Callable[[str, object], None],
     pageserver_virtual_file_io_mode: str | None,
+    pageserver_get_vectored_concurrent_io: str | None,
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1568,6 +1585,7 @@ def neon_env_builder(
         test_overlay_dir=test_overlay_dir,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
+        pageserver_get_vectored_concurrent_io=pageserver_get_vectored_concurrent_io,
     ) as builder:
         yield builder
         # Propogate `preserve_database_files` to make it possible to use in other fixtures,

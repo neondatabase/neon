@@ -105,7 +105,7 @@ def setup_and_run_pagebench_benchmark(
     pgbench_scale: int,
     duration: int,
     n_clients: int,
-    io_concurrency: str = "serial",
+    io_concurrency: str = "sequential",
     ps_direct_io_mode: str = "buffered",
 ):
     def record(metric, **kwargs):
@@ -141,6 +141,7 @@ def setup_and_run_pagebench_benchmark(
         f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
     )
     neon_env_builder.pageserver_virtual_file_io_mode = ps_direct_io_mode
+    neon_env_builder.pageserver_get_vectored_concurrent_io = io_concurrency
     params.update(
         {
             "pageserver_config_override.page_cache_size": (
@@ -171,7 +172,6 @@ def setup_and_run_pagebench_benchmark(
         setup_wrapper,
         # https://github.com/neondatabase/neon/issues/8070
         timeout_in_seconds=60,
-        extra_ps_env_vars={"NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY": io_concurrency},
     )
 
     env.pageserver.allowed_errors.append(

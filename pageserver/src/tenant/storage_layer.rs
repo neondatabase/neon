@@ -10,6 +10,7 @@ mod layer_desc;
 mod layer_name;
 pub mod merge_iterator;
 
+use crate::config::PageServerConf;
 use crate::context::{AccessStatsBehavior, RequestContext};
 use bytes::Bytes;
 use futures::stream::FuturesUnordered;
@@ -204,8 +205,8 @@ pub(crate) struct ValuesReconstructState {
 /// This struct and the dispatching in the impl will be removed once
 /// we've built enough confidence.
 pub(crate) enum IoConcurrency {
-    Serial,
-    FuturesUnordered {
+    Sequential,
+    SidecarTask {
         ios_tx: tokio::sync::mpsc::UnboundedSender<IoFuture>,
     },
 }
@@ -213,15 +214,15 @@ pub(crate) enum IoConcurrency {
 type IoFuture = Pin<Box<dyn Send + Future<Output = ()>>>;
 
 pub(crate) enum SelectedIoConcurrency {
-    Serial,
-    FuturesUnordered(GateGuard),
+    Sequential,
+    SidecarTask(GateGuard),
 }
 
 impl std::fmt::Debug for IoConcurrency {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            IoConcurrency::Serial => write!(f, "Serial"),
-            IoConcurrency::FuturesUnordered { .. } => write!(f, "FuturesUnordered"),
+            IoConcurrency::Sequential => write!(f, "Sequential"),
+            IoConcurrency::SidecarTask { .. } => write!(f, "SidecarTask"),
         }
     }
 }
@@ -229,8 +230,8 @@ impl std::fmt::Debug for IoConcurrency {
 impl std::fmt::Debug for SelectedIoConcurrency {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SelectedIoConcurrency::Serial => write!(f, "Serial"),
-            SelectedIoConcurrency::FuturesUnordered(_) => write!(f, "FuturesUnordered"),
+            SelectedIoConcurrency::Sequential => write!(f, "Sequential"),
+            SelectedIoConcurrency::SidecarTask(_) => write!(f, "SidecarTask"),
         }
     }
 }
@@ -240,28 +241,24 @@ impl IoConcurrency {
     /// Requires finding a long-lived root for the IoConcurrency and funneling it through
     /// to the place that does the get_values_reconstruct_data call.
     pub(crate) fn serial() -> Self {
-        Self::spawn(SelectedIoConcurrency::Serial)
+        Self::spawn(SelectedIoConcurrency::Sequential)
     }
-    pub(crate) fn spawn_from_env(gate_guard: GateGuard) -> IoConcurrency {
-        static IO_CONCURRENCY: once_cell::sync::Lazy<String> = once_cell::sync::Lazy::new(|| {
-            std::env::var("NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY")
-                .unwrap_or_else(|_| "serial".to_string())
-        });
-        let selected = match IO_CONCURRENCY.as_str() {
-            "serial" => SelectedIoConcurrency::Serial,
-            "futures-unordered" => SelectedIoConcurrency::FuturesUnordered(gate_guard),
-            x => panic!(
-                "Invalid value for NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY: {}",
-                x
-            ),
+    pub(crate) fn spawn_from_conf(
+        conf: &'static PageServerConf,
+        gate_guard: GateGuard,
+    ) -> IoConcurrency {
+        use pageserver_api::config::GetVectoredConcurrentIo;
+        let selected = match conf.get_vectored_concurrent_io {
+            GetVectoredConcurrentIo::Sequential => SelectedIoConcurrency::Sequential,
+            GetVectoredConcurrentIo::SidecarTask => SelectedIoConcurrency::SidecarTask(gate_guard),
         };
         Self::spawn(selected)
     }
 
     pub(crate) fn spawn(io_concurrency: SelectedIoConcurrency) -> Self {
         match io_concurrency {
-            SelectedIoConcurrency::Serial => IoConcurrency::Serial,
-            SelectedIoConcurrency::FuturesUnordered(gate_guard) => {
+            SelectedIoConcurrency::Sequential => IoConcurrency::Sequential,
+            SelectedIoConcurrency::SidecarTask(gate_guard) => {
                 let (ios_tx, ios_rx) = tokio::sync::mpsc::unbounded_channel();
                 static TASK_ID: AtomicUsize = AtomicUsize::new(0);
                 let task_id = TASK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -362,15 +359,15 @@ impl IoConcurrency {
                     }
                     drop(gate_guard); // drop it right before we exitlast
                 }.instrument(span));
-                IoConcurrency::FuturesUnordered { ios_tx }
+                IoConcurrency::SidecarTask { ios_tx }
             }
         }
     }
 
     pub(crate) fn clone(&self) -> Self {
         match self {
-            IoConcurrency::Serial => IoConcurrency::Serial,
-            IoConcurrency::FuturesUnordered { ios_tx } => IoConcurrency::FuturesUnordered {
+            IoConcurrency::Sequential => IoConcurrency::Sequential,
+            IoConcurrency::SidecarTask { ios_tx } => IoConcurrency::SidecarTask {
                 ios_tx: ios_tx.clone(),
             },
         }
@@ -430,8 +427,8 @@ impl IoConcurrency {
         F: std::future::Future<Output = ()> + Send + 'static,
     {
         match self {
-            IoConcurrency::Serial => fut.await,
-            IoConcurrency::FuturesUnordered { ios_tx, .. } => {
+            IoConcurrency::Sequential => fut.await,
+            IoConcurrency::SidecarTask { ios_tx, .. } => {
                 let fut = Box::pin(fut);
                 // NB: experiments showed that doing an opportunistic poll of `fut` here was bad for throughput
                 // while insignificant for latency.
