@@ -123,7 +123,7 @@ impl PostgresProcess {
         Self {
             pgdata_dir,
             pgbin: pg_bin_dir.join("postgres"),
-            pg_bin_dir: pg_bin_dir,
+            pg_bin_dir,
             pg_lib_dir,
             postgres_proc: None,
         }
