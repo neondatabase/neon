@@ -913,27 +913,25 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		}
 		else
 		{
-			/*
-			 * We have two choices if all cache pages are pinned (i.e. used in IO
-			 * operations):
-			 *
-			 * 1) Wait until some of this operation is completed and pages is
-			 * unpinned.
-			 *
-			 * 2) Allocate one more chunk, so that specified cache size is more
-			 * recommendation than hard limit.
-			 *
-			 * As far as probability of such event (that all pages are pinned) is
-			 * considered to be very very small: there are should be very large
-			 * number of concurrent IO operations and them are limited by
-			 * max_connections, we prefer not to complicate code and use second
-			 * approach.
-			 */
-			if (lfc_ctl->used >= lfc_ctl->limit && !dlist_is_empty(&lfc_ctl->lru))
+			if (lfc_ctl->used >= lfc_ctl->limit)
 			{
 				/* Cache overflow: evict least recently used chunk */
-				FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->lru));
-	
+				FileCacheEntry *victim;
+
+				if (dlist_is_empty(&lfc_ctl->lru))
+				{
+					/*
+					 * No unpinned entries are available: it should very rarely happen in real life
+					 * because maximal number of backends should be smaller than LFC size.
+					 * So just refuse to update LFC in this case.
+					 */
+					neon_log(LOG, "LFC overflow: no unpinned entries available");
+					hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_REMOVE, NULL);
+					LWLockRelease(lfc_lock);
+					return;
+				}
+				victim = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->lru));
+
 				for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
 				{
 					lfc_ctl->used_pages -= (victim->bitmap[i >> 5] >> (i & 31)) & 1;
