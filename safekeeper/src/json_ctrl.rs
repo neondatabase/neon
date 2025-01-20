@@ -8,16 +8,18 @@
 
 use anyhow::Context;
 use postgres_backend::QueryError;
+use safekeeper_api::membership::Configuration;
+use safekeeper_api::{ServerInfo, Term};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::*;
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::safekeeper::{AcceptorProposerMessage, AppendResponse, ServerInfo};
+use crate::safekeeper::{AcceptorProposerMessage, AppendResponse};
 use crate::safekeeper::{
     AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerElected,
 };
-use crate::safekeeper::{Term, TermHistory, TermLsn};
+use crate::safekeeper::{TermHistory, TermLsn};
 use crate::state::TimelinePersistentState;
 use crate::timeline::WalResidentTimeline;
 use postgres_backend::PostgresBackend;
@@ -104,6 +106,7 @@ async fn prepare_safekeeper(
         .global_timelines
         .create(
             spg.ttid,
+            Configuration::empty(),
             ServerInfo {
                 pg_version,
                 wal_seg_size: WAL_SEGMENT_SIZE as u32,

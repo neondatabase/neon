@@ -43,6 +43,9 @@ pub mod wal_reader_stream;
 pub mod wal_service;
 pub mod wal_storage;
 
+#[cfg(any(test, feature = "benchmarking"))]
+pub mod test_utils;
+
 mod timelines_global_map;
 use std::sync::Arc;
 pub use timelines_global_map::GlobalTimelines;
@@ -105,6 +108,8 @@ pub struct SafeKeeperConf {
     pub control_file_save_interval: Duration,
     pub partial_backup_concurrency: usize,
     pub eviction_min_resident: Duration,
+    pub wal_reader_fanout: bool,
+    pub max_delta_for_fanout: Option<u64>,
 }
 
 impl SafeKeeperConf {
@@ -147,6 +152,8 @@ impl SafeKeeperConf {
             control_file_save_interval: Duration::from_secs(1),
             partial_backup_concurrency: 1,
             eviction_min_resident: Duration::ZERO,
+            wal_reader_fanout: false,
+            max_delta_for_fanout: None,
         }
     }
 }

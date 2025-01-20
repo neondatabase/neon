@@ -96,6 +96,10 @@ pub mod circuit_breaker;
 
 pub mod try_rcu;
 
+pub mod pprof;
+
+pub mod guard_arc_swap;
+
 // Re-export used in macro. Avoids adding git-version as dep in target crates.
 #[doc(hidden)]
 pub use git_version;
