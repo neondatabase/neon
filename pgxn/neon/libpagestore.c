@@ -373,8 +373,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	{
 	case PS_Disconnected:
 	{
-		const char *keywords[3];
-		const char *values[3];
+		const char *keywords[4];
+		const char *values[4];
 		int			n_pgsql_params;
 		TimestampTz	now;
 		int64		us_since_last_attempt;
@@ -421,12 +421,14 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		 */
 		keywords[0] = "dbname";
 		values[0] = connstr;
-		n_pgsql_params = 1;
+		keywords[1] = "keepalives";
+		values[1] = "1";
+		n_pgsql_params = 2;
 
 		if (neon_auth_token)
 		{
-			keywords[1] = "password";
-			values[1] = neon_auth_token;
+			keywords[2] = "password";
+			values[2] = neon_auth_token;
 			n_pgsql_params++;
 		}
 
