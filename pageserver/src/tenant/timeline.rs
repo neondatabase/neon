@@ -75,6 +75,7 @@ use std::{
     ops::{Deref, Range},
 };
 
+use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::{
     aux_file::AuxFileSizeEstimator,
     page_service::TenantManagerTypes,
@@ -105,10 +106,6 @@ use crate::{
 };
 use crate::{
     disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
-};
-use crate::{
-    l0_flush::{self, L0FlushGlobalState},
-    metrics::GetKind,
 };
 use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
@@ -1163,15 +1160,6 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let get_kind = if keyspace.total_raw_size() == 1 {
-            GetKind::Singular
-        } else {
-            GetKind::Vectored
-        };
-
-        let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
-            .for_get_kind(get_kind)
-            .start_timer();
         let traversal_res: Result<(), _> = self
             .get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
             .await;
@@ -1185,11 +1173,7 @@ impl Timeline {
             while collect_futs.next().await.is_some() {}
             return Err(err);
         };
-        get_data_timer.stop_and_record();
 
-        let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
-            .for_get_kind(get_kind)
-            .start_timer();
         let layers_visited = reconstruct_state.get_layers_visited();
 
         let futs = FuturesUnordered::new();
@@ -1226,8 +1210,6 @@ impl Timeline {
         let results = futs
             .collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>()
             .await;
-
-        reconstruct_timer.stop_and_record();
 
         // For aux file keys (v1 or v2) the vectored read path does not return an error
         // when they're missing. Instead they are omitted from the resulting btree
