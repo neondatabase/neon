@@ -2550,12 +2550,19 @@ impl StorageTimeMetricsTimer {
         }
     }
 
-    /// Record the time from creation to now.
-    pub fn stop_and_record(self) {
-        let duration = self.start.elapsed().as_secs_f64();
-        self.metrics.timeline_sum.inc_by(duration);
+    /// Returns the elapsed duration of the timer.
+    pub fn elapsed(&self) -> Duration {
+        self.start.elapsed()
+    }
+
+    /// Record the time from creation to now and return it.
+    pub fn stop_and_record(self) -> Duration {
+        let duration = self.elapsed();
+        let seconds = duration.as_secs_f64();
+        self.metrics.timeline_sum.inc_by(seconds);
         self.metrics.timeline_count.inc();
-        self.metrics.global_histogram.observe(duration);
+        self.metrics.global_histogram.observe(seconds);
+        duration
     }
 
     /// Turns this timer into a timer, which will always record -- usually this means recording
@@ -2572,6 +2579,14 @@ impl Drop for AlwaysRecordingStorageTimeMetricsTimer {
         if let Some(inner) = self.0.take() {
             inner.stop_and_record();
         }
+    }
+}
+
+impl AlwaysRecordingStorageTimeMetricsTimer {
+    /// Returns the elapsed duration of the timer.
+    #[allow(unused)]
+    pub fn elapsed(&self) -> Duration {
+        self.0.as_ref().expect("not dropped yet").elapsed()
     }
 }
 
