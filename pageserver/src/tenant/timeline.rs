@@ -2885,6 +2885,14 @@ impl Timeline {
                     crate::metrics::initial_logical_size::START_CALCULATION.retry(circumstances)
                 };
 
+                let io_concurrency = IoConcurrency::spawn_from_conf(
+                    self_ref.conf,
+                    self_ref
+                        .gate
+                        .enter()
+                        .map_err(|_| CalculateLogicalSizeError::Cancelled)?,
+                );
+
                 let calculated_size = self_ref
                     .logical_size_calculation_task(
                         initial_part_end,
@@ -2894,7 +2902,11 @@ impl Timeline {
                     .await?;
 
                 self_ref
-                    .trigger_aux_file_size_computation(initial_part_end, background_ctx)
+                    .trigger_aux_file_size_computation(
+                        initial_part_end,
+                        background_ctx,
+                        io_concurrency,
+                    )
                     .await?;
 
                 // TODO: add aux file size to logical size

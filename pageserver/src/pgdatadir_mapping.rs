@@ -927,9 +927,9 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<(), PageReconstructError> {
-        self.list_aux_files_v2(lsn, ctx, IoConcurrency::sequential())
-            .await?;
+        self.list_aux_files_v2(lsn, ctx, io_concurrency).await?;
         Ok(())
     }
 
