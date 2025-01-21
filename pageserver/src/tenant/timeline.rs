@@ -1172,8 +1172,19 @@ impl Timeline {
         let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
             .for_get_kind(get_kind)
             .start_timer();
-        self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
-            .await?;
+        let traversal_res: Result<(), _> = self
+            .get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
+            .await;
+        if let Err(err) = traversal_res {
+            // Wait for all the spawned IOs to complete.
+            // See comments on `spawn_io` inside `storage_layer` for more details.
+            let mut collect_futs = std::mem::take(&mut reconstruct_state.keys)
+                .into_values()
+                .map(|state| state.collect_pending_ios())
+                .collect::<FuturesUnordered<_>>();
+            while collect_futs.next().await.is_some() {}
+            return Err(err);
+        };
         get_data_timer.stop_and_record();
 
         let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
