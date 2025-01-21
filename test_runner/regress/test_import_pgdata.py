@@ -338,15 +338,16 @@ def test_fast_import_binary(
     vanilla_pg.stop()
 
     pgbin = PgBin(test_output_dir, fast_import.pg_distrib_dir, fast_import.pg_version)
-    new_pgdata_vanilla_pg = VanillaPostgres(fast_import.workdir / "pgdata", pgbin, pg_port, False)
-    new_pgdata_vanilla_pg.start()
+    with VanillaPostgres(
+        fast_import.workdir / "pgdata", pgbin, pg_port, False
+    ) as new_pgdata_vanilla_pg:
+        new_pgdata_vanilla_pg.start()
 
-    # database name and user are hardcoded in fast_import binary, and they are different from normal vanilla postgres
-    conn = PgProtocol(dsn=f"postgresql://cloud_admin@localhost:{pg_port}/neondb")
-    res = conn.safe_psql("SELECT count(*) FROM foo;")
-    log.info(f"Result: {res}")
-    assert res[0][0] == 10
-    new_pgdata_vanilla_pg.stop()
+        # database name and user are hardcoded in fast_import binary, and they are different from normal vanilla postgres
+        conn = PgProtocol(dsn=f"postgresql://cloud_admin@localhost:{pg_port}/neondb")
+        res = conn.safe_psql("SELECT count(*) FROM foo;")
+        log.info(f"Result: {res}")
+        assert res[0][0] == 10
 
 
 def test_fast_import_restore_to_connstring(
