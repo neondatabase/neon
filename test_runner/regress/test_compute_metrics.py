@@ -3,12 +3,11 @@ from __future__ import annotations
 import enum
 import os
 import shutil
+import sys
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-# Docs are available at https://jsonnet.org/ref/bindings.html#python_api
-import _jsonnet
 import pytest
 import requests
 import yaml
@@ -87,6 +86,10 @@ def jsonnet_evaluate_file(
     ext_vars: str | dict[str, str] | None = None,
     tla_vars: str | dict[str, str] | None = None,
 ) -> str:
+    # Jsonnet doesn't support Python 3.13 yet
+    # Docs are available at https://jsonnet.org/ref/bindings.html#python_api
+    import _jsonnet
+
     return cast(
         "str",
         _jsonnet.evaluate_file(
@@ -121,6 +124,7 @@ class SqlExporterProcess(StrEnum):
     AUTOSCALING = "autoscaling"
 
 
+@pytest.mark.xfail(sys.version_info >= (3, 13), reason="Jsonnet doesn't support Python 3.13 yet")
 @pytest.mark.parametrize(
     "collector_name",
     ["neon_collector", "neon_collector_autoscaling"],
@@ -215,7 +219,7 @@ if SQL_EXPORTER is None:
             #
             # The "host" network mode allows sql_exporter to talk to the
             # endpoint which is running on the host.
-            super().__init__("docker.io/burningalchemist/sql_exporter:0.16.0", network_mode="host")
+            super().__init__("docker.io/burningalchemist/sql_exporter:0.17.0", network_mode="host")
 
             self.__logs_dir = logs_dir
             self.__port = port
@@ -248,7 +252,7 @@ if SQL_EXPORTER is None:
             log.info("Waiting for sql_exporter to be ready")
             wait_for_logs(
                 self,
-                rf'level=info msg="Listening on" address=\[::\]:{self.__port}',
+                rf'msg="Listening on" address=\[::\]:{self.__port}',
                 timeout=5,
             )
 
@@ -340,10 +344,7 @@ else:
                         time.sleep(0.5)
                         continue
 
-                    if (
-                        f'level=info msg="Listening on" address=[::]:{self._sql_exporter_port}'
-                        in line
-                    ):
+                    if f'msg="Listening on" address=[::]:{self._sql_exporter_port}' in line:
                         break
 
         @override
@@ -352,6 +353,7 @@ else:
             self.__proc.wait()
 
 
+@pytest.mark.xfail(sys.version_info >= (3, 13), reason="Jsonnet doesn't support Python 3.13 yet")
 @pytest.mark.parametrize(
     "exporter",
     [SqlExporterProcess.COMPUTE, SqlExporterProcess.AUTOSCALING],

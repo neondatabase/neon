@@ -34,6 +34,8 @@ typedef enum
 	T_NeonGetPageRequest,
 	T_NeonDbSizeRequest,
 	T_NeonGetSlruSegmentRequest,
+	/* future tags above this line */
+	T_NeonTestRequest = 99, /* only in cfg(feature = "testing") */
 
 	/* pagestore -> pagestore_client */
 	T_NeonExistsResponse = 100,
@@ -42,12 +44,19 @@ typedef enum
 	T_NeonErrorResponse,
 	T_NeonDbSizeResponse,
 	T_NeonGetSlruSegmentResponse,
+	/* future tags above this line */
+	T_NeonTestResponse = 199, /* only in cfg(feature = "testing") */
 } NeonMessageTag;
+
+typedef uint64 NeonRequestId;
 
 /* base struct for c-style inheritance */
 typedef struct
 {
 	NeonMessageTag tag;
+	NeonRequestId reqid;
+	XLogRecPtr	lsn;
+	XLogRecPtr	not_modified_since;
 } NeonMessage;
 
 #define messageTag(m) (((const NeonMessage *)(m))->tag)
@@ -66,6 +75,7 @@ typedef enum {
 	SLRU_MULTIXACT_MEMBERS,
 	SLRU_MULTIXACT_OFFSETS
 } SlruKind;
+
 
 /*--
  * supertype of all the Neon*Request structs below.
@@ -87,37 +97,37 @@ typedef enum {
  *
  * These structs describe the V2 of these requests. (The old now-defunct V1
  * protocol contained just one LSN and a boolean 'latest' flag.)
+ *
+ * V3 version of protocol adds request ID to all requests. This request ID is also included in response
+ * as well as other fields from requests, which allows to verify that we receive response for our request.
+ * We copy fields from request to response to make checking more reliable: request ID is formed from process ID
+ * and local counter, so in principle there can be duplicated requests IDs if process PID is reused.
  */
-typedef struct
-{
-	NeonMessageTag tag;
-	XLogRecPtr	lsn;
-	XLogRecPtr	not_modified_since;
-} NeonRequest;
+typedef NeonMessage NeonRequest;
 
 typedef struct
 {
-	NeonRequest req;
+	NeonRequest hdr;
 	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 } NeonExistsRequest;
 
 typedef struct
 {
-	NeonRequest req;
+	NeonRequest hdr;
 	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 } NeonNblocksRequest;
 
 typedef struct
 {
-	NeonRequest req;
+	NeonRequest hdr;
 	Oid			dbNode;
 } NeonDbSizeRequest;
 
 typedef struct
 {
-	NeonRequest req;
+	NeonRequest hdr;
 	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 	BlockNumber blkno;
@@ -125,32 +135,29 @@ typedef struct
 
 typedef struct
 {
-	NeonRequest req;
-	SlruKind kind;
-	int      segno;
+	NeonRequest hdr;
+	SlruKind	kind;
+	int			segno;
 } NeonGetSlruSegmentRequest;
 
 /* supertype of all the Neon*Response structs below */
-typedef struct
-{
-	NeonMessageTag tag;
-} NeonResponse;
+typedef NeonMessage NeonResponse;
 
 typedef struct
 {
-	NeonMessageTag tag;
+	NeonExistsRequest req;
 	bool		exists;
 } NeonExistsResponse;
 
 typedef struct
 {
-	NeonMessageTag tag;
+	NeonNblocksRequest req;
 	uint32		n_blocks;
 } NeonNblocksResponse;
 
 typedef struct
 {
-	NeonMessageTag tag;
+	NeonGetPageRequest req;
 	char		page[FLEXIBLE_ARRAY_MEMBER];
 } NeonGetPageResponse;
 
@@ -158,21 +165,21 @@ typedef struct
 
 typedef struct
 {
-	NeonMessageTag tag;
+	NeonDbSizeRequest req;
 	int64		db_size;
 } NeonDbSizeResponse;
 
 typedef struct
 {
-	NeonMessageTag tag;
+	NeonResponse req;
 	char		message[FLEXIBLE_ARRAY_MEMBER]; /* null-terminated error
 												 * message */
 } NeonErrorResponse;
 
 typedef struct
 {
-	NeonMessageTag tag;
-	int         n_blocks;
+	NeonGetSlruSegmentRequest req;
+	int			n_blocks;
 	char		data[BLCKSZ * SLRU_PAGES_PER_SEGMENT];
 } NeonGetSlruSegmentResponse;
 
@@ -189,9 +196,29 @@ typedef uint16 shardno_t;
 
 typedef struct
 {
+	/*
+	 * Send this request to the PageServer associated with this shard.
+	 */
 	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
+	/*
+	 * Blocking read for the next response of this shard.
+	 *
+	 * When a CANCEL signal is handled, the connection state will be
+	 * unmodified.
+	 */
 	NeonResponse *(*receive) (shardno_t shard_no);
+	/*
+	 * Try get the next response from the TCP buffers, if any.
+	 * Returns NULL when the data is not yet available. 
+	 */
+	NeonResponse *(*try_receive) (shardno_t shard_no);
+	/*
+	 * Make sure all requests are sent to PageServer.
+	 */
 	bool		(*flush) (shardno_t shard_no);
+	/*
+	 * Disconnect from this pageserver shard.
+	 */
 	void        (*disconnect) (shardno_t shard_no);
 } page_server_api;
 

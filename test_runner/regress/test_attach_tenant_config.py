@@ -176,6 +176,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
             "type": "interpreted",
             "args": {"format": "bincode", "compression": {"zstd": {"level": 1}}},
         },
+        "rel_size_v2_enabled": True,
     }
 
     vps_http = env.storage_controller.pageserver_api()

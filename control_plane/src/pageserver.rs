@@ -95,21 +95,19 @@ impl PageServerNode {
 
         let mut overrides = vec![pg_distrib_dir_param, broker_endpoint_param];
 
-        if let Some(control_plane_api) = &self.env.control_plane_api {
-            overrides.push(format!(
-                "control_plane_api='{}'",
-                control_plane_api.as_str()
-            ));
+        overrides.push(format!(
+            "control_plane_api='{}'",
+            self.env.control_plane_api.as_str()
+        ));
 
-            // Storage controller uses the same auth as pageserver: if JWT is enabled
-            // for us, we will also need it to talk to them.
-            if matches!(conf.http_auth_type, AuthType::NeonJWT) {
-                let jwt_token = self
-                    .env
-                    .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
-                    .unwrap();
-                overrides.push(format!("control_plane_api_token='{}'", jwt_token));
-            }
+        // Storage controller uses the same auth as pageserver: if JWT is enabled
+        // for us, we will also need it to talk to them.
+        if matches!(conf.http_auth_type, AuthType::NeonJWT) {
+            let jwt_token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
+                .unwrap();
+            overrides.push(format!("control_plane_api_token='{}'", jwt_token));
         }
 
         if !conf.other.contains_key("remote_storage") {
@@ -420,6 +418,11 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `wal_receiver_protocol_override` from json")?,
+            rel_size_v2_enabled: settings
+                .remove("rel_size_v2_enabled")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'rel_size_v2_enabled' as bool")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
