@@ -1292,6 +1292,33 @@ impl Persistence {
         Ok(Some(tl))
     }
 
+    /// Marks all timelines referencing a tenant for deletion
+    pub(crate) async fn mark_timelines_for_deletion(
+        &self,
+        del_tenant_id: TenantId,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines::dsl::*;
+        let count = self
+            .with_measured_conn(
+                DatabaseOperation::DeleteTenant,
+                move |conn| -> DatabaseResult<usize> {
+                    Ok(diesel::update(timelines)
+                        .filter(tenant_id.eq(del_tenant_id.to_string()))
+                        .filter(status_kind.ne(String::from(TimelineStatusKind::Deleted)))
+                        .set((
+                            status.eq(String::from("")),
+                            status_kind.eq(String::from(TimelineStatusKind::Deleted)),
+                        ))
+                        .execute(conn)?)
+                },
+            )
+            .await?;
+
+        tracing::info!("marked {count} timelines for deletion in timelines table");
+
+        Ok(())
+    }
+
     pub(crate) async fn timelines_to_be_reconciled(
         &self,
     ) -> DatabaseResult<Vec<TimelinePersistence>> {

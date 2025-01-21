@@ -3104,6 +3104,10 @@ impl Service {
 
         self.maybe_load_tenant(tenant_id, &_tenant_lock).await?;
 
+        self.persistence
+            .mark_timelines_for_deletion(tenant_id)
+            .await?;
+
         // Detach all shards. This also deletes local pageserver shard data.
         let (detach_waiters, node) = {
             let mut detach_waiters = Vec::new();
