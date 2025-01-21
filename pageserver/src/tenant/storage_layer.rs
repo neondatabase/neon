@@ -466,9 +466,9 @@ impl IoConcurrency {
     ///
     /// We will move away from opaque IO futures towards well-defined IOs at some point in
     /// the future when we have shipped this first version of concurrent IO to production
-    /// and are ready to retire the Serial mode which runs the futures in place.
+    /// and are ready to retire the Sequential mode which runs the futures in place.
     /// Right now, while brittle, the opaque IO approach allows us to ship the feature
-    /// with minimal changes to the code and minimal changes to existing behavior in Serial mode.
+    /// with minimal changes to the code and minimal changes to existing behavior in Sequential mode.
     ///
     /// Also read the comment in `collect_pending_ios`.
     pub(crate) async fn spawn_io<F>(&mut self, fut: F)
