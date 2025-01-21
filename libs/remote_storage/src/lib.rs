@@ -341,9 +341,9 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// If the operation fails because of timeout or cancellation, the root cause of the error will be
     /// set to `TimeoutOrCancel`. In such situation it is unknown which deletions, if any, went
     /// through.
-    async fn delete_objects<'a>(
+    async fn delete_objects(
         &self,
-        paths: &'a [RemotePath],
+        paths: &[RemotePath],
         cancel: &CancellationToken,
     ) -> anyhow::Result<()>;
 

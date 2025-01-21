@@ -12,7 +12,7 @@ pub mod merge_iterator;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
 use bytes::Bytes;
-use pageserver_api::key::{Key, NON_INHERITED_SPARSE_RANGE};
+use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::value::Value;
@@ -209,7 +209,7 @@ impl ValuesReconstructState {
             .keys
             .entry(*key)
             .or_insert(Ok(VectoredValueReconstructState::default()));
-        let is_sparse_key = NON_INHERITED_SPARSE_RANGE.contains(key);
+        let is_sparse_key = key.is_sparse();
         if let Ok(state) = state {
             let key_done = match state.situation {
                 ValueReconstructSituation::Complete => {
@@ -345,10 +345,7 @@ impl LayerFringe {
     }
 
     pub(crate) fn next_layer(&mut self) -> Option<(ReadableLayer, KeySpace, Range<Lsn>)> {
-        let read_desc = match self.planned_visits_by_lsn.pop() {
-            Some(desc) => desc,
-            None => return None,
-        };
+        let read_desc = self.planned_visits_by_lsn.pop()?;
 
         let removed = self.visit_reads.remove_entry(&read_desc.layer_to_visit_id);
 
