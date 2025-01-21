@@ -1224,11 +1224,12 @@ impl Persistence {
         )
         .await
     }
-    pub(crate) async fn update_timeline(
+    pub(crate) async fn update_timeline_status(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        timeline_status: TimelineStatusKind,
+        status_kind: TimelineStatusKind,
+        status: String,
     ) -> DatabaseResult<()> {
         use crate::schema::timelines;
 
@@ -1238,7 +1239,10 @@ impl Persistence {
                 let inserted_updated = diesel::update(timelines::table)
                     .filter(timelines::tenant_id.eq(tenant_id.to_string()))
                     .filter(timelines::timeline_id.eq(timeline_id.to_string()))
-                    .set(timelines::status.eq(String::from(timeline_status)))
+                    .set((
+                        timelines::status_kind.eq(String::from(status_kind)),
+                        timelines::status.eq(status.clone()),
+                    ))
                     .execute(conn)?;
 
                 if inserted_updated != 1 {
@@ -1297,7 +1301,8 @@ impl Persistence {
                         .filter(
                             timelines::status
                                 .eq(String::from(TimelineStatusKind::Creating))
-                                .or(timelines::status.eq(String::from(TimelineStatusKind::Deleting))),
+                                .or(timelines::status
+                                    .eq(String::from(TimelineStatusKind::Deleting))),
                         )
                         .load::<TimelineFromDb>(conn)?)
                 },

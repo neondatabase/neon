@@ -1,6 +1,9 @@
 use safekeeper_api::models::{TimelineCreateRequest, TimelineStatus};
 use safekeeper_client::mgmt_api::{Client, Result};
-use utils::{id::NodeId, logging::SecretString};
+use utils::{
+    id::{NodeId, TenantId, TimelineId},
+    logging::SecretString,
+};
 
 /// Thin wrapper around [`safekeeper_client::mgmt_api::Client`]. It allows the storage
 /// controller to collect metrics in a non-intrusive manner.
@@ -72,6 +75,19 @@ impl SafekeeperClient {
             crate::metrics::Method::Post,
             &self.node_id_label,
             self.inner.create_timeline(&req).await
+        )
+    }
+
+    pub(crate) async fn delete_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<TimelineStatus> {
+        measured_request!(
+            "delete_timeline",
+            crate::metrics::Method::Delete,
+            &self.node_id_label,
+            self.inner.delete_timeline(tenant_id, timeline_id).await
         )
     }
 }

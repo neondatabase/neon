@@ -114,7 +114,14 @@ impl SafekeeperReconciler {
                     .await?;
             }
             TimelineStatusKind::Deleting => {
-                todo!()
+                self.service
+                    .tenant_timeline_delete_safekeepers_reconcile(
+                        tenant_id,
+                        timeline_id,
+                        &tl,
+                        sk_persistences,
+                    )
+                    .await?;
             }
         }
         Ok(())
