@@ -237,9 +237,13 @@ impl std::fmt::Debug for SelectedIoConcurrency {
 }
 
 impl IoConcurrency {
-    /// TODO: over time, work towards removing this method.
-    /// Requires finding a long-lived root for the IoConcurrency and funneling it through
-    /// to the place that does the get_values_reconstruct_data call.
+    /// Force sequential IO. This is a temporary workaround until we have
+    /// moved plumbing-through-the-call-stack
+    /// of IoConcurrency into `RequestContextq.
+    ///
+    /// DO NOT USE for new code.
+    ///
+    /// Tracking issue: <https://github.com/neondatabase/neon/issues/10460>.
     pub(crate) fn sequential() -> Self {
         Self::spawn(SelectedIoConcurrency::Sequential)
     }
