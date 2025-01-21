@@ -3617,6 +3617,12 @@ impl Timeline {
                     return;
                 }
 
+                // Break to notify potential waiters as soon as we've flushed the requested LSN. If
+                // more requests have arrived in the meanwhile, we'll resume flushing afterwards.
+                if flushed_to_lsn >= frozen_to_lsn {
+                    break Ok(());
+                }
+
                 let timer = self.metrics.flush_time_histo.start_timer();
 
                 let num_frozen_layers;
