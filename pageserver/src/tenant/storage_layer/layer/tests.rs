@@ -128,7 +128,7 @@ async fn smoke_test() {
 
     // on accesses when the layer is evicted, it will automatically be downloaded.
     let img_after = {
-        let mut data = ValuesReconstructState::new(IoConcurrency::sequential());
+        let mut data = ValuesReconstructState::new(io_concurrency.clone());
         layer
             .get_values_reconstruct_data(
                 controlfile_keyspace.clone(),
