@@ -309,9 +309,9 @@ pub struct TenantConfigToml {
     // gc-compaction related configs
     /// Enable automatic gc-compaction trigger on this tenant.
     pub gc_compaction_enabled: bool,
-    /// The initial threshold for gc-compaction in MB. Once the total size of layers below the gc-horizon is above this threshold,
+    /// The initial threshold for gc-compaction in KB. Once the total size of layers below the gc-horizon is above this threshold,
     /// gc-compaction will be triggered.
-    pub gc_compaction_initial_threshold_mb: u64,
+    pub gc_compaction_initial_threshold_kb: u64,
     /// The ratio that triggers the auto gc-compaction. If (the total size of layers between L2 LSN and gc-horizon) / (size below the L2 LSN)
     /// is above this ratio, gc-compaction will be triggered.
     pub gc_compaction_ratio_percent: u64,
@@ -509,7 +509,7 @@ pub mod tenant_conf_defaults {
     // image layers should be created.
     pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
     pub const DEFAULT_GC_COMPACTION_ENABLED: bool = false;
-    pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_MB: u64 = 10240;
+    pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 10240000;
     pub const DEFAULT_GC_COMPACTION_RATIO_PERCENT: u64 = 100;
 }
 
@@ -557,7 +557,7 @@ impl Default for TenantConfigToml {
             wal_receiver_protocol_override: None,
             rel_size_v2_enabled: None,
             gc_compaction_enabled: DEFAULT_GC_COMPACTION_ENABLED,
-            gc_compaction_initial_threshold_mb: DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_MB,
+            gc_compaction_initial_threshold_kb: DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB,
             gc_compaction_ratio_percent: DEFAULT_GC_COMPACTION_RATIO_PERCENT,
         }
     }

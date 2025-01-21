@@ -5477,8 +5477,8 @@ pub(crate) mod harness {
                 wal_receiver_protocol_override: tenant_conf.wal_receiver_protocol_override,
                 rel_size_v2_enabled: tenant_conf.rel_size_v2_enabled,
                 gc_compaction_enabled: Some(tenant_conf.gc_compaction_enabled),
-                gc_compaction_initial_threshold_mb: Some(
-                    tenant_conf.gc_compaction_initial_threshold_mb,
+                gc_compaction_initial_threshold_kb: Some(
+                    tenant_conf.gc_compaction_initial_threshold_kb,
                 ),
                 gc_compaction_ratio_percent: Some(tenant_conf.gc_compaction_ratio_percent),
             }

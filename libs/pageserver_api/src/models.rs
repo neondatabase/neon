@@ -502,7 +502,7 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_enabled: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
-    pub gc_compaction_initial_threshold_mb: FieldPatch<u64>,
+    pub gc_compaction_initial_threshold_kb: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_ratio_percent: FieldPatch<u64>,
 }
@@ -538,7 +538,7 @@ pub struct TenantConfig {
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
     pub rel_size_v2_enabled: Option<bool>,
     pub gc_compaction_enabled: Option<bool>,
-    pub gc_compaction_initial_threshold_mb: Option<u64>,
+    pub gc_compaction_initial_threshold_kb: Option<u64>,
     pub gc_compaction_ratio_percent: Option<u64>,
 }
 
@@ -571,7 +571,7 @@ impl TenantConfig {
             mut wal_receiver_protocol_override,
             mut rel_size_v2_enabled,
             mut gc_compaction_enabled,
-            mut gc_compaction_initial_threshold_mb,
+            mut gc_compaction_initial_threshold_kb,
             mut gc_compaction_ratio_percent,
         } = self;
 
@@ -622,8 +622,8 @@ impl TenantConfig {
             .gc_compaction_enabled
             .apply(&mut gc_compaction_enabled);
         patch
-            .gc_compaction_initial_threshold_mb
-            .apply(&mut gc_compaction_initial_threshold_mb);
+            .gc_compaction_initial_threshold_kb
+            .apply(&mut gc_compaction_initial_threshold_kb);
         patch
             .gc_compaction_ratio_percent
             .apply(&mut gc_compaction_ratio_percent);
@@ -655,7 +655,7 @@ impl TenantConfig {
             wal_receiver_protocol_override,
             rel_size_v2_enabled,
             gc_compaction_enabled,
-            gc_compaction_initial_threshold_mb,
+            gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
         }
     }

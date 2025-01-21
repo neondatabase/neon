@@ -178,7 +178,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         },
         "rel_size_v2_enabled": True,
         "gc_compaction_enabled": True,
-        "gc_compaction_initial_threshold_mb": 1024,
+        "gc_compaction_initial_threshold_kb": 1024000,
         "gc_compaction_ratio_percent": 200,
     }
 

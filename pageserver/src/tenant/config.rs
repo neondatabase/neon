@@ -365,7 +365,7 @@ pub struct TenantConfOpt {
     pub gc_compaction_enabled: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub gc_compaction_initial_threshold_mb: Option<u64>,
+    pub gc_compaction_initial_threshold_kb: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_compaction_ratio_percent: Option<u64>,
@@ -441,9 +441,9 @@ impl TenantConfOpt {
             gc_compaction_enabled: self
                 .gc_compaction_enabled
                 .unwrap_or(global_conf.gc_compaction_enabled),
-            gc_compaction_initial_threshold_mb: self
-                .gc_compaction_initial_threshold_mb
-                .unwrap_or(global_conf.gc_compaction_initial_threshold_mb),
+            gc_compaction_initial_threshold_kb: self
+                .gc_compaction_initial_threshold_kb
+                .unwrap_or(global_conf.gc_compaction_initial_threshold_kb),
             gc_compaction_ratio_percent: self
                 .gc_compaction_ratio_percent
                 .unwrap_or(global_conf.gc_compaction_ratio_percent),
@@ -478,7 +478,7 @@ impl TenantConfOpt {
             mut wal_receiver_protocol_override,
             mut rel_size_v2_enabled,
             mut gc_compaction_enabled,
-            mut gc_compaction_initial_threshold_mb,
+            mut gc_compaction_initial_threshold_kb,
             mut gc_compaction_ratio_percent,
         } = self;
 
@@ -553,8 +553,8 @@ impl TenantConfOpt {
             .gc_compaction_enabled
             .apply(&mut gc_compaction_enabled);
         patch
-            .gc_compaction_initial_threshold_mb
-            .apply(&mut gc_compaction_initial_threshold_mb);
+            .gc_compaction_initial_threshold_kb
+            .apply(&mut gc_compaction_initial_threshold_kb);
         patch
             .gc_compaction_ratio_percent
             .apply(&mut gc_compaction_ratio_percent);
@@ -586,7 +586,7 @@ impl TenantConfOpt {
             wal_receiver_protocol_override,
             rel_size_v2_enabled,
             gc_compaction_enabled,
-            gc_compaction_initial_threshold_mb,
+            gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
         })
     }
@@ -645,7 +645,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             wal_receiver_protocol_override: value.wal_receiver_protocol_override,
             rel_size_v2_enabled: value.rel_size_v2_enabled,
             gc_compaction_enabled: value.gc_compaction_enabled,
-            gc_compaction_initial_threshold_mb: value.gc_compaction_initial_threshold_mb,
+            gc_compaction_initial_threshold_kb: value.gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent: value.gc_compaction_ratio_percent,
         }
     }
