@@ -74,7 +74,7 @@ impl SafekeeperClient {
             "create_timeline",
             crate::metrics::Method::Post,
             &self.node_id_label,
-            self.inner.create_timeline(&req).await
+            self.inner.create_timeline(req).await
         )
     }
 

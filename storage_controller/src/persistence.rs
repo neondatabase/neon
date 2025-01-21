@@ -1276,7 +1276,7 @@ impl Persistence {
                 },
             )
             .await?;
-        if timelines.len() == 0 {
+        if timelines.is_empty() {
             return Ok(None);
         } else if timelines.len() > 1 {
             return Err(DatabaseError::Logical(format!(
@@ -1285,7 +1285,7 @@ impl Persistence {
             )));
         }
 
-        let tl = timelines.pop().unwrap().to_persistence();
+        let tl = timelines.pop().unwrap().into_persistence();
 
         tracing::info!("get_timeline: loaded timeline");
 
@@ -1340,7 +1340,7 @@ impl Persistence {
             .await?;
         let timelines = timelines
             .into_iter()
-            .map(|tl| tl.to_persistence())
+            .map(|tl| tl.into_persistence())
             .collect::<Vec<_>>();
 
         tracing::info!("list_timelines: loaded {} timelines", timelines.len());
@@ -1605,13 +1605,13 @@ pub(crate) struct TimelineFromDb {
 }
 
 impl TimelineFromDb {
-    fn to_persistence(self) -> TimelinePersistence {
+    fn into_persistence(self) -> TimelinePersistence {
         TimelinePersistence {
             tenant_id: self.tenant_id,
             timeline_id: self.timeline_id,
             generation: self.generation,
-            sk_set: self.sk_set.into_iter().filter_map(|v| v).collect(),
-            new_sk_set: self.new_sk_set.into_iter().filter_map(|v| v).collect(),
+            sk_set: self.sk_set.into_iter().flatten().collect(),
+            new_sk_set: self.new_sk_set.into_iter().flatten().collect(),
             cplane_notified_generation: self.cplane_notified_generation,
             status_kind: self.status_kind,
             status: self.status,

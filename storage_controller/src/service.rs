@@ -3285,7 +3285,7 @@ impl Service {
         tenant_id: TenantId,
         mut create_req: TimelineCreateRequest,
     ) -> Result<TimelineInfo, ApiError> {
-        Ok(self.tenant_remote_mutation(tenant_id, move |mut targets| async move {
+        self.tenant_remote_mutation(tenant_id, move |mut targets| async move {
             if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant not found").into(),
@@ -3401,7 +3401,7 @@ impl Service {
             }
 
             Ok(timeline_info)
-        }).await??)
+        }).await?
     }
 
     /// reconcile: create timeline on safekeepers
@@ -3421,7 +3421,7 @@ impl Service {
 
         let mut members = Vec::new();
         for sk in timeline_persistence.sk_set.iter() {
-            let Some(sk_p) = sk_persistences.get(&sk) else {
+            let Some(sk_p) = sk_persistences.get(sk) else {
                 return Err(ApiError::InternalServerError(anyhow!(
                     "couldn't find persisted entry for safekeeper with id {sk}"
                 )))?;
@@ -3447,7 +3447,7 @@ impl Service {
         };
         for sk in timeline_persistence.sk_set.iter() {
             // Unwrap is fine as we already would have returned error above
-            let sk_p = sk_persistences.get(&sk).unwrap();
+            let sk_p = sk_persistences.get(sk).unwrap();
             let sk_clone = NodeId(*sk as u64);
             let base_url = sk_p.base_url();
             let jwt = jwt.clone();
@@ -4135,7 +4135,7 @@ impl Service {
 
         let mut members = Vec::new();
         for sk in tl_p.sk_set.iter() {
-            let Some(sk_p) = sk_persistences.get(&sk) else {
+            let Some(sk_p) = sk_persistences.get(sk) else {
                 return Err(ApiError::InternalServerError(anyhow!(
                     "couldn't find persisted entry for safekeeper with id {sk}"
                 )))?;
@@ -4150,7 +4150,7 @@ impl Service {
         let sks_to_reconcile = &tl_p.sk_set;
         for sk in sks_to_reconcile.iter() {
             // Unwrap is fine as we already would have returned error above
-            let sk_p = sk_persistences.get(&sk).unwrap();
+            let sk_p = sk_persistences.get(sk).unwrap();
             let sk_clone = NodeId(*sk as u64);
             let base_url = sk_p.base_url();
             let jwt = jwt.clone();
@@ -4223,10 +4223,10 @@ impl Service {
                 }
             }
         });
-        if let Err(_) = timeout_or_last.await {
+        if let Err(e) = timeout_or_last.await {
             // No error if cancelled or timed out: we already have feedback from a quorum of safekeepers
             tracing::info!(
-                "timeout for last {} reconciliations",
+                "timeout for last {} reconciliations: {e}",
                 sks_to_reconcile.len() - 1
             );
         }
@@ -4239,7 +4239,7 @@ impl Service {
             "Got {} successful results from reconciliation",
             successful.len()
         );
-        let new_status_kind = if successful.len() < 1 {
+        let new_status_kind = if successful.is_empty() {
             // Failure
             return Err(ApiError::InternalServerError(anyhow!(
                 "not enough successful reconciliations to reach quorum, please retry: {}",
