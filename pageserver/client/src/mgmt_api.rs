@@ -774,7 +774,7 @@ impl Client {
             self.mgmt_api_endpoint,
         );
 
-        self.request(Method::POST, uri, request)
+        self.request_noerror(Method::POST, uri, request)
             .await
             .map(|resp| resp.status())
     }
