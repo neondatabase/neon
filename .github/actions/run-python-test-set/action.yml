@@ -122,6 +122,8 @@ runs:
         export LD_LIBRARY_PATH=${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/lib
         export BENCHMARK_CONNSTR=${BENCHMARK_CONNSTR:-}
 
+        echo PAGESERVER_GET_VECTORED_CONCURRENT_IO="$PAGESERVER_GET_VECTORED_CONCURRENT_IO"
+
         if [ "${BUILD_TYPE}" = "remote" ]; then
           export REMOTE_ENV=1
         fi
