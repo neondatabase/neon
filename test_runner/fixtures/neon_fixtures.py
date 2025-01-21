@@ -1124,22 +1124,19 @@ class NeonEnv:
 
             # Batching (https://github.com/neondatabase/neon/issues/9377):
             # enable batching by default in tests and benchmarks.
-            # Compat tests are exempt because old versions fail to parse the new config.
-            if not config.compatibility_neon_binpath:
-                ps_cfg["page_service_pipelining"] = {
-                    "mode": "pipelined",
-                    "execution": "concurrent-futures",
-                    "max_batch_size": 32,
-                }
+            ps_cfg["page_service_pipelining"] = {
+                "mode": "pipelined",
+                "execution": "concurrent-futures",
+                "max_batch_size": 32,
+            }
 
             # Concurrent IO (https://github.com/neondatabase/neon/issues/9378):
             # enable concurrent IO by default in tests and benchmarks.
             # Compat tests are exempt because old versions fail to parse the new config.
-            if not config.compatibility_neon_binpath:
-                if self.pageserver_get_vectored_concurrent_io is not None:
-                    ps_cfg["get_vectored_concurrent_io"] = {
-                        "mode": self.pageserver_get_vectored_concurrent_io,
-                    }
+            if self.pageserver_get_vectored_concurrent_io is not None:
+                ps_cfg["get_vectored_concurrent_io"] = {
+                    "mode": self.pageserver_get_vectored_concurrent_io,
+                }
 
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
