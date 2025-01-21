@@ -1258,11 +1258,12 @@ impl Persistence {
         .await
     }
 
+    /// Obtains the timeline, returns None if not present
     pub(crate) async fn get_timeline(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> DatabaseResult<TimelinePersistence> {
+    ) -> DatabaseResult<Option<TimelinePersistence>> {
         use crate::schema::timelines;
         let mut timelines: Vec<TimelineFromDb> = self
             .with_measured_conn(
@@ -1275,7 +1276,9 @@ impl Persistence {
                 },
             )
             .await?;
-        if timelines.len() != 1 {
+        if timelines.len() == 0 {
+            return Ok(None);
+        } else if timelines.len() > 1 {
             return Err(DatabaseError::Logical(format!(
                 "incorrect number of returned timelines: ({})",
                 timelines.len()
@@ -1286,7 +1289,7 @@ impl Persistence {
 
         tracing::info!("get_timeline: loaded timeline");
 
-        Ok(tl)
+        Ok(Some(tl))
     }
 
     pub(crate) async fn timelines_to_be_reconciled(

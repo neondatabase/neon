@@ -76,11 +76,7 @@ impl SafekeeperReconciler {
         tl: &TimelinePersistence,
         sk_persistences: &HashMap<i64, SafekeeperPersistence>,
     ) -> Result<(), anyhow::Error> {
-        tracing::info!(
-            "Reconciling timeline on safekeepers {}/{}",
-            tl.tenant_id,
-            tl.timeline_id,
-        );
+        tracing::info!("Reconciling timeline on safekeepers");
         let tenant_id = TenantId::from_slice(tl.tenant_id.as_bytes())?;
         let timeline_id = TimelineId::from_slice(tl.timeline_id.as_bytes())?;
 
@@ -98,6 +94,11 @@ impl SafekeeperReconciler {
             .persistence
             .get_timeline(tenant_id, timeline_id)
             .await?;
+        let Some(tl) = tl else {
+            // This can happen but is a bit unlikely, so print it on the warn level instead of info
+            tracing::warn!("timeline row in database disappeared");
+            return Ok(());
+        };
         let status = TimelineStatusKind::from_str(&tl.status)?;
         match status {
             TimelineStatusKind::Created | TimelineStatusKind::Deleted => (),

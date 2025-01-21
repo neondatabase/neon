@@ -4270,6 +4270,10 @@ impl Service {
             .persistence
             .get_timeline(tenant_id, timeline_id)
             .await?;
+        let Some(tl) = tl else {
+            tracing::info!("timeline {tenant_id}/{timeline_id} doesn't exist in timelines table, no deletions on safekeepers needed");
+            return Ok(());
+        };
         let status_kind =
             TimelineStatusKind::from_str(&tl.status_kind).map_err(ApiError::InternalServerError)?;
         if status_kind != TimelineStatusKind::Deleting {
