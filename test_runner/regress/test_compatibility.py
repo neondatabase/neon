@@ -251,6 +251,15 @@ def test_forward_compatibility(
         os.environ.get("ALLOW_FORWARD_COMPATIBILITY_BREAKAGE", "false").lower() == "true"
     )
 
+    # Concurrent I/O (https://github.com/neondatabase/neon/issues/9378):
+    # As of 2025-10-22, the compatibility snapshot (=last release) does not
+    # yet support the pageserver.toml config option that is set in the toml
+    # if pageserver_get_vectored_concurrent_io is not None. So, don't set it
+    # to make this test pass. We will not start using the new config option
+    # until we are certain that we will never roll back to a release that
+    # doesn't understand the config option.
+    neon_env_builder.pageserver_get_vectored_concurrent_io = None
+
     try:
         neon_env_builder.num_safekeepers = 3
 
