@@ -1004,8 +1004,6 @@ impl DeltaLayerInner {
             .into();
         let buf_size = Self::get_min_read_buffer_size(&reads, max_vectored_read_bytes);
 
-        let mut ignore_key_with_err = None;
-
         // Note that reads are processed in reverse order (from highest key+lsn).
         // This is the order that `ReconstructState` requires such that it can
         // track when a key is done.
@@ -1035,16 +1033,10 @@ impl DeltaLayerInner {
                             for meta in blobs_buf.blobs.iter().rev() {
                                 let io = ios.remove(&(meta.meta.key, meta.meta.lsn)).unwrap();
 
-                                if Some(meta.meta.key) == ignore_key_with_err {
-                                    continue;
-                                }
-
                                 let blob_read = meta.read(&view).await;
                                 let blob_read = match blob_read {
                                     Ok(buf) => buf,
                                     Err(e) => {
-                                        ignore_key_with_err = Some(meta.meta.key);
-
                                         io.complete(Err(e));
                                         continue;
                                     }
