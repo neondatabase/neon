@@ -436,12 +436,24 @@ impl KeyHistoryRetention {
         if dry_run {
             return true;
         }
-        let guard = tline.layers.read().await;
-        if !guard.contains_key(key) {
-            return false;
+        let layer_generation;
+        {
+            let guard = tline.layers.read().await;
+            if !guard.contains_key(key) {
+                return false;
+            }
+            layer_generation = guard.get_from_key(key).metadata().generation;
         }
-        info!(key=%key, "discard layer due to duplicated layer key");
-        true
+        if layer_generation == tline.generation {
+            info!(
+                key=%key,
+                ?layer_generation,
+                "discard layer due to duplicated layer key in the same generation",
+            );
+            true
+        } else {
+            false
+        }
     }
 
     /// Pipe a history of a single key to the writers.
@@ -2909,8 +2921,28 @@ impl Timeline {
         // be batched into `schedule_compaction_update`.
         let disk_consistent_lsn = self.disk_consistent_lsn.load();
         self.schedule_uploads(disk_consistent_lsn, None)?;
+        // If a layer gets rewritten throughout gc-compaction, we need to keep that layer only in `compact_to` instead
+        // of `compact_from`.
+        let compact_from = {
+            let mut compact_from = Vec::new();
+            let mut compact_to_set = HashMap::new();
+            for layer in &compact_to {
+                compact_to_set.insert(layer.layer_desc().key(), layer);
+            }
+            for layer in &layer_selection {
+                if let Some(to) = compact_to_set.get(&layer.layer_desc().key()) {
+                    tracing::info!(
+                        "skipping delete {} because found same layer key at different generation {}",
+                        layer, to
+                    );
+                } else {
+                    compact_from.push(layer.clone());
+                }
+            }
+            compact_from
+        };
         self.remote_client
-            .schedule_compaction_update(&layer_selection, &compact_to)?;
+            .schedule_compaction_update(&compact_from /* or &layer_selection */, &compact_to)?;
 
         drop(gc_lock);
 

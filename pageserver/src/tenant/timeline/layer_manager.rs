@@ -337,8 +337,23 @@ impl OpenLayerManager {
         compact_to: &[ResidentLayer],
         metrics: &TimelineMetrics,
     ) {
-        // We can simply reuse compact l0 logic. Use a different function name to indicate a different type of layer map modification.
-        self.finish_compact_l0(compact_from, compact_to, metrics)
+        // gc-compaction could contain layer rewrites. We need to delete the old layers and insert the new ones.
+        let mut updates = self.layer_map.batch_update();
+        let mut layers_to_remove = HashMap::new();
+        for l in compact_from {
+            layers_to_remove.insert(l.layer_desc().key(), l);
+        }
+        for l in compact_to {
+            if let Some(layer) = layers_to_remove.remove(&l.layer_desc().key()) {
+                Self::delete_historic_layer(layer, &mut updates, &mut self.layer_fmgr);
+            }
+            Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+            metrics.record_new_file_metrics(l.layer_desc().file_size);
+        }
+        for (_, l) in layers_to_remove {
+            Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
+        }
+        updates.flush();
     }
 
     /// Called post-compaction when some previous generation image layers were trimmed.

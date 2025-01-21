@@ -292,7 +292,7 @@ def test_pageserver_gc_compaction_idempotent(
 
     # ensure we hit the duplicated layer key warning at least once: we did two compactions consecutively,
     # and the second one should have hit the duplicated layer key warning.
-    env.pageserver.assert_log_contains("discard layer due to duplicated layer key")
+    env.pageserver.assert_log_contains("same layer key at different generation")
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
