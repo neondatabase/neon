@@ -195,7 +195,7 @@ const reportSummary = async (params) => {
                     const links = []
                     for (const test of tests) {
                         const allureLink = `${reportUrl}#suites/${test.parentUid}/${test.uid}/retries`
-                        links.push(`[${test.buildType}-${test.arch}](${allureLink})`)
+                        links.push(`[${test.buildType}-${test.arch}-${test.lfcState}](${allureLink})`)
                     }
                     summary += `- \`${testName}\`: ${links.join(", ")}\n`
                 }
