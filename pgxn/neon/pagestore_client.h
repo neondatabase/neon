@@ -310,8 +310,13 @@ extern bool lfc_cache_contains_prewarm(NRelFileInfo rinfo, ForkNumber forkNum,
 									   BlockNumber blkno);
 extern int lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum,
 							   BlockNumber blkno, int nblocks, bits8 *bitmap);
-extern void lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno);
 extern void lfc_init(void);
+/* sideload pages at LSNs into the LFC */
+extern void lfc_sideload_data(const Page *pages, const BufferTag *bufhdrs,
+							  const XLogRecPtr *lsns,
+							  bits8 *removable, int npages,
+							  int *n_added, int *n_discarded, int *n_expired);
+
 
 static inline bool
 lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,

@@ -222,13 +222,14 @@ typedef struct PrfHashEntry
 #define SH_DECLARE
 #include "lib/simplehash.h"
 #include "neon.h"
+#include "file_cache_internal.h"
 
 /*
  * PrefetchState maintains the state of (prefetch) getPage@LSN requests.
  * It maintains a (ring) buffer of in-flight requests and responses.
  *
  * We maintain several indexes into the ring buffer:
- * ring_unused >= ring_flush >= ring_receive >= ring_last >= 0
+ * ring_unused >= ring_flush >= ring_receive >= ring_sideloaded >= ring_last >= 0
  *
  * ring_unused points to the first unused slot of the buffer
  * ring_receive is the next request that is to be received
@@ -239,10 +240,11 @@ typedef struct PrfHashEntry
  */
 typedef struct PrefetchState
 {
-	MemoryContext bufctx;		/* context for prf_buffer[].response
-								 * allocations */
+	MemoryContext bufctx;		/* context for GetPageResponse allocations into
+								 * prf_buffer[].response */
 	MemoryContext errctx;		/* context for prf_buffer[].response
 								 * allocations */
+	MemoryContext tmpctx;		/* for temporary processes, like sideloading */
 	MemoryContext hashctx;		/* context for prf_buffer */
 
 	/* buffer indexes */
@@ -250,6 +252,7 @@ typedef struct PrefetchState
 	uint64		ring_flush;		/* next request to flush */
 	uint64		ring_receive;	/* next slot that is to receive a response */
 	uint64		ring_last;		/* min slot with a response value */
+	uint64		ring_sideloaded; /* next slot to sideload into LFC */
 
 	/* metrics / statistics  */
 	int			n_responses_buffered;	/* count of PS responses not yet in
@@ -290,6 +293,7 @@ static PrefetchState *MyPState;
 )
 
 static bool compact_prefetch_buffers(void);
+static void prefetch_pump_state(void);
 static void consume_prefetch_responses(void);
 static bool prefetch_read(PrefetchRequest *slot);
 static void prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns);
@@ -453,6 +457,72 @@ prefetch_pump_state(void)
 		slot->status = PRFS_RECEIVED;
 		slot->response = response;
 	}
+
+	if (MyPState->ring_sideloaded < MyPState->ring_receive)
+	{
+		Page	   *pageptrs;
+		BufferTag  *bufhdrs;
+		XLogRecPtr *lsns;
+		uint64	   *indexes;
+		bits8	   *removemap;
+		int			nbufs;
+		MemoryContext prev;
+
+		nbufs = (int) (MyPState->ring_receive - MyPState->ring_sideloaded);
+
+		prev = MemoryContextSwitchTo(MyPState->tmpctx);
+
+		pageptrs = palloc0(nbufs * sizeof(Page));
+		bufhdrs = palloc0(nbufs * sizeof(BufferTag));
+		lsns = palloc0(nbufs * sizeof(XLogRecPtr));
+		indexes = palloc0(nbufs * sizeof(uint64));
+		removemap = palloc0(sizeof(bits8) * ((nbufs + 7) / 8));
+
+		for (nbufs = 0;
+			 MyPState->ring_sideloaded < MyPState->ring_receive
+				&& nbufs < PG_IOV_MAX;
+			 MyPState->ring_sideloaded++)
+		{
+			NeonGetPageResponse *response;
+			PrefetchRequest *slot;
+
+			slot = GetPrfSlot(MyPState->ring_sideloaded);
+
+			if (slot->status != PRFS_RECEIVED)
+				continue;
+
+			if (slot->response->tag != T_NeonGetPageResponse)
+				continue;
+
+			response = (NeonGetPageResponse *) slot->response;
+
+			pageptrs[nbufs] = response->page;
+			bufhdrs[nbufs] = slot->buftag;
+			lsns[nbufs] = slot->request_lsns.effective_request_lsn;
+			indexes[nbufs] = slot->my_ring_index;
+
+			nbufs++;
+		}
+
+		if (nbufs > 0)
+		{
+			int		added = 0;
+			int		discarded = 0;
+			int		expired = 0;
+
+			lfc_sideload_data(pageptrs, bufhdrs, lsns, removemap, nbufs,
+							  &added, &discarded, &expired);
+
+			for (int i = 0; i < nbufs; i++)
+			{
+				if (BITMAP_ISSET(removemap, i))
+					prefetch_set_unused(indexes[i]);
+			}
+		}
+
+		MemoryContextSwitchTo(prev);
+		MemoryContextReset(MyPState->tmpctx);
+	}
 }
 
 void
@@ -530,10 +600,12 @@ readahead_buffer_resize(int newsize, void *extra)
 			case PRFS_REQUESTED:
 				newPState->n_requests_inflight += 1;
 				newPState->ring_receive -= 1;
+				newPState->ring_sideloaded -= 1;
 				newPState->ring_last -= 1;
 				break;
 			case PRFS_RECEIVED:
 				newPState->n_responses_buffered += 1;
+				newPState->ring_sideloaded -= 1;
 				newPState->ring_last -= 1;
 				break;
 			case PRFS_TAG_REMAINS:
@@ -585,15 +657,21 @@ prefetch_cleanup_trailing_unused(void)
 	uint64		ring_index;
 	PrefetchRequest *slot;
 
-	while (MyPState->ring_last < MyPState->ring_receive)
+	if (MyPState->ring_last < MyPState->ring_receive)
 	{
-		ring_index = MyPState->ring_last;
-		slot = GetPrfSlot(ring_index);
+		while (MyPState->ring_last < MyPState->ring_receive)
+		{
+			ring_index = MyPState->ring_last;
+			slot = GetPrfSlot(ring_index);
+	
+			if (slot->status == PRFS_UNUSED)
+				MyPState->ring_last += 1;
+			else
+				break;
+		}
 
-		if (slot->status == PRFS_UNUSED)
-			MyPState->ring_last += 1;
-		else
-			break;
+		MyPState->ring_sideloaded = Max(MyPState->ring_sideloaded,
+										MyPState->ring_last);
 	}
 }
 
@@ -1986,6 +2064,7 @@ static void
 neon_init(void)
 {
 	Size		prfs_size;
+	MemoryContext parent;
 
 	if (MyPState != NULL)
 		return;
@@ -2011,15 +2090,20 @@ neon_init(void)
 
 	MyPState->n_unused = readahead_buffer_size;
 
-	MyPState->bufctx = SlabContextCreate(TopMemoryContext,
+	parent = AllocSetContextCreate(TopMemoryContext, "NeonSMGR", ALLOCSET_SMALL_SIZES);
+
+	MyPState->bufctx = SlabContextCreate(parent,
 										 "NeonSMGR/prefetch",
 										 SLAB_DEFAULT_BLOCK_SIZE * 17,
 										 PS_GETPAGERESPONSE_SIZE);
-	MyPState->errctx = AllocSetContextCreate(TopMemoryContext,
+	MyPState->errctx = AllocSetContextCreate(parent,
 											 "NeonSMGR/errors",
 											 ALLOCSET_DEFAULT_SIZES);
-	MyPState->hashctx = AllocSetContextCreate(TopMemoryContext,
-											  "NeonSMGR/prefetch",
+	MyPState->tmpctx = AllocSetContextCreate(parent,
+											 "NeonSMGR/tmpctx",
+											 ALLOCSET_START_SMALL_SIZES);
+	MyPState->hashctx = AllocSetContextCreate(parent,
+											  "NeonSMGR/PrefetchHash",
 											  ALLOCSET_DEFAULT_SIZES);
 
 	MyPState->prf_hash = prfh_create(MyPState->hashctx,

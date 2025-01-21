@@ -257,10 +257,9 @@ extern bool lfc_ensure_opened(void);
 
 extern FileCacheEntry *lfc_entry_for_write(BufferTag *key, bool no_replace,
 										   bool *prewarm_active,
-										   const uint32 *bitmap);
+										   const uint32 *bitmap, bool nodelay);
 extern void release_entry(FileCacheEntry *entry, bool prewarm_was_active);
 
-extern void
-lfc_prewarm(FileCacheStateEntry *fs, size_t n_entries);
+extern void lfc_prewarm(FileCacheStateEntry *fs, size_t n_entries);
 
 #endif /* FILE_CACHE_INTERNAL_H */

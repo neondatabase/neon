@@ -11,12 +11,15 @@
 #include "portability/instr_time.h"
 #include "storage/ipc.h"
 
+#include "bitmap.h"
 #include "file_cache_internal.h"
 #include "neon.h"
 #include "pagestore_client.h"
+#include "access/xlog.h"
 
 static void lfcp_cleanup(int, Datum);
-static LFCPrewarmChunk *lfcp_preprocess_chunk(FileCacheStateEntry *entry);
+static LFCPrewarmChunk *lfcp_preprocess_chunk(FileCacheStateEntry *entry,
+											  bool nowait, bool *load_needed);
 static bool lfcp_pump_prefetch(LFCPrewarmWorkerState *state);
 static bool lfcp_pump_read(LFCPrewarmWorkerState *state);
 static void lfcp_pump_load(LFCPrewarmWorkerState *state);
@@ -143,7 +146,8 @@ lfcp_cleanup(int code, Datum arg)
 
 /* Takes care of steps 1 through 3 of the prewarm system */
 static LFCPrewarmChunk *
-lfcp_preprocess_chunk(FileCacheStateEntry *fcsentry)
+lfcp_preprocess_chunk(FileCacheStateEntry *fcsentry, bool nowait,
+					  bool *load_needed)
 {
 	uint32		bitmap[CHUNK_BITMAP_SIZE];
 	bool		prewarm_conflict;
@@ -152,8 +156,12 @@ lfcp_preprocess_chunk(FileCacheStateEntry *fcsentry)
 	LFCPrewarmChunk *pwchunk;
 	FileCacheEntry *fcentry;
 
+	if (load_needed)
+		*load_needed = true;
+
 	/* Prewarming step 1, enter step 2; 2.2 */
-	fcentry = lfc_entry_for_write(&fcsentry->key, true, &prewarm_conflict, fcsentry->bitmap);
+	fcentry = lfc_entry_for_write(&fcsentry->key, true, &prewarm_conflict,
+								  fcsentry->bitmap, nowait);
 
 	/* Chunk not found, and we're already at capacity */
 	if (!fcentry)
@@ -178,6 +186,8 @@ lfcp_preprocess_chunk(FileCacheStateEntry *fcsentry)
 	if (unlikely(npages == 0))
 	{
 		release_entry(fcentry, prewarm_conflict);
+		if (load_needed)
+			*load_needed = false;
 		return NULL;
 	}
 
@@ -236,7 +246,7 @@ lfcp_pump_prefetch(LFCPrewarmWorkerState *state)
 		while (chunk_prefetches_remaining == 0)
 		{
 			FileCacheStateEntry *fcentry = state->lpws_fcses;
-			chunk = lfcp_preprocess_chunk(fcentry);
+			chunk = lfcp_preprocess_chunk(fcentry, false, NULL);
 			state->lpws_fcses += 1;
 			state->lpws_numrestore -= 1;
 			if (!PointerIsValid(chunk))
@@ -383,7 +393,7 @@ lfcp_pump_read(LFCPrewarmWorkerState *state)
 
 /*
  * Load this chunk into LFC.
- * Handles prewarm 9..11
+ * Handles prewarm 6 and 9..11
  */
 static void
 lfcp_pump_load(LFCPrewarmWorkerState *state)
@@ -572,3 +582,191 @@ cleanup_and_return:
 	pfree(chunk->alloc);
 	pfree(chunk);
 }
+
+/*
+ * We assume we only get a small amount of buffers, where O(n^2) behaviour
+ * doesn't matter much.
+ *
+ * bits in *stored are set for pages we won't need anymore, for any of
+ * these reasons:
+ * - The page was written to LFC
+ * - The page was already present in the LFC
+ * - The page version (per parameter lsns) was too old
+ *
+ * Note that we may not always set "already present" when the page is actually
+ * present in the LFC.
+ */
+void
+lfc_sideload_data(const Page *pages, const BufferTag *bufhdrs,
+				  const XLogRecPtr *lsns, bits8 *removable, int npages,
+				  int *n_added, int *n_discarded, int *n_expired)
+{
+	LFCPrewarmWorkerState state;
+	FileCacheStateEntry stateEntry;
+	bits8		   *processed;
+
+	Assert(npages < INT16_MAX);
+
+	if (npages == 0)
+		return;
+
+	Assert(npages > 0);
+
+	memset(removable, 0, (npages + 7) / 8);
+	processed = palloc0((npages + 7) / 8);
+
+	/* we don't use these two fields */
+	state.lpws_numrestore = 0;
+	state.lpws_fcses = NULL;
+	/* ... but do use these fields over here; only we fill them in later */
+	state.lpws_pages_prefetched = 0;
+	state.lpws_pages_read = 0;
+	state.lpws_pages_loaded = 0;
+	state.lpws_pages_discarded = 0;
+	state.lpws_max_io_depth = INT_MAX;	/* not relevant in sideloading with
+										 * pre-allocated pages */
+	dlist_init(&state.lpws_work);
+
+	for (int16 i = 0; i < (int16) npages; i++)
+	{
+		int16		input_offsets[BLOCKS_PER_CHUNK];
+		int			nblocks = 0;
+		bool		load_needed;
+		LFCPrewarmChunk *chunk;
+
+		if (BITMAP_ISSET(processed, i))
+			continue;
+
+		for (int off = 0; off < BLOCKS_PER_CHUNK; off++)
+			input_offsets[off] = -1;
+		memset(&stateEntry, 0, sizeof(FileCacheStateEntry));
+
+		stateEntry.key = bufhdrs[i];
+		stateEntry.key.blockNum = stateEntry.key.blockNum -
+			(stateEntry.key.blockNum % BLOCKS_PER_CHUNK);
+
+		for (int16 j = i; j < (int16) npages; j++)
+		{
+			int chunk_offset;
+
+			if (memcmp(&BufTagGetNRelFileInfo(stateEntry.key),
+					   &BufTagGetNRelFileInfo(bufhdrs[j]),
+					   sizeof(NRelFileInfo)) != 0)
+				continue;
+
+			if (stateEntry.key.forkNum != bufhdrs[j].forkNum)
+				continue;
+
+			chunk_offset = (int) (bufhdrs[j].blockNum % BLOCKS_PER_CHUNK);
+
+			if (stateEntry.key.blockNum != (bufhdrs[j].blockNum - chunk_offset))
+				continue;
+
+			/* save offset mapping */
+			nblocks++;
+			input_offsets[chunk_offset] = j;
+			/* same chunk, no need for reprocessing */
+			BITMAP_SET(processed, j);
+			stateEntry.bitmap[chunk_offset / 32] |= 1 << chunk_offset % 32;
+		}
+
+		/*
+		 * We've now completely filled the state entry with prefetched pages,
+		 * allowing us to process the data as one (almost) normally would.
+		 */
+
+		Assert(nblocks > 0);
+
+		/* Takes care of steps 1 through 3 of the prewarm system */
+		chunk = lfcp_preprocess_chunk(&stateEntry, true, &load_needed);
+
+		if (!chunk)
+		{
+			/*
+			 * We didn't need to sideload data, so we can safely discard the
+			 * pages.
+			 */
+			if (!load_needed)
+			{
+				for (int chunk_off = 0; chunk_off < BLOCKS_PER_CHUNK; chunk_off++)
+				{
+					int16	offset = input_offsets[chunk_off];
+
+					if (offset != -1)
+						BITMAP_SET(removable, offset);
+				}
+			}
+
+			/*
+			 * We didn't find space for the prewarm operation, or no operations
+			 * were necessary for this chunk. Anyway, continue on with the
+			 * next, as there are no resources that need to be cleaned up.
+			 */
+			continue;
+		}
+
+		Assert(chunk->npages <= nblocks && chunk->npages != 0);
+
+		dlist_push_head(&state.lpws_work, &chunk->node);
+
+		/* prepare some suitably aligned memory for IO operations */
+#if PG_MAJORVERSION_NUM > 15
+		chunk->pages = chunk->alloc = 
+				MemoryContextAllocAligned(CurrentMemoryContext,
+										  chunk->npages * BLCKSZ,
+										  PG_IO_ALIGN_SIZE,
+										  0);
+#else
+		chunk->alloc = palloc((chunk->npages) * BLCKSZ + PG_IO_ALIGN_SIZE);
+		chunk->pages = (PGAlignedBlock *)
+			TYPEALIGN(PG_IO_ALIGN_SIZE, (Size) chunk->alloc);
+#endif
+
+		for (int chunk_off = 0, pno = 0; chunk_off < BLOCKS_PER_CHUNK; chunk_off++)
+		{
+			int	input_offset = input_offsets[chunk_off];
+
+			/* If we expected to process this page, do that now */
+			if (stateEntry.bitmap[chunk_off / 32] & (1 << (chunk_off % 32)))
+			{
+				XLogRecPtr	lwlsn;
+				Assert(input_offsets[chunk_off] != -1);
+
+				lwlsn = GetLastWrittenLSN(BufTagGetNRelFileInfo(stateEntry.key),
+										  bufhdrs[input_offset].forkNum,
+										  bufhdrs[input_offset].blockNum);
+				
+				if (lwlsn > lsns[input_offset])
+				{
+					/* clear references to this struct */
+					input_offsets[chunk_off] = -1;
+					stateEntry.bitmap[chunk_off / 32] &= ~(1 << (chunk_off % 32));
+				}
+
+				memcpy(chunk->pages[pno].data,
+					   pages[input_offset],
+					   BLCKSZ);
+
+				/* Step 4 and 5 are skipped */
+				chunk->prefetched++; 
+				chunk->received++;
+				pno++;
+				BITMAP_SET(removable, input_offset);
+			}
+			else if (chunk->cacheEntry->bitmap[chunk_off / 32] & (1 << (chunk_off % 32)))
+			{
+				BITMAP_SET(removable, input_offset);
+			}
+		}
+
+		/* chunk and chunk->alloc are free-ed by pump_load */
+		/* Steps 6 through 11 are handled in pump_load */
+		lfcp_pump_load(&state);
+	}
+
+	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
+	lfc_ctl->prewarmed_pages += state.lpws_pages_loaded;
+	lfc_ctl->skipped_pages += state.lpws_pages_discarded;
+	LWLockRelease(lfc_lock);
+}
+

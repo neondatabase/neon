@@ -522,7 +522,7 @@ release_entry(FileCacheEntry *entry, bool prewarm_was_active)
  */
 FileCacheEntry *
 lfc_entry_for_write(BufferTag *key, bool no_replace, bool *prewarm_active,
-					const uint32 *bitmap)
+					const uint32 *bitmap, bool nodelay)
 {
 	bool		found = false;
 	uint32		hash;
@@ -657,6 +657,9 @@ lfc_entry_for_write(BufferTag *key, bool no_replace, bool *prewarm_active,
 				break;
 			}
 		}
+
+		if (conflict && nodelay)
+			return NULL;
 
 		if (conflict)
 		{
@@ -847,87 +850,6 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 #endif
 
 	return found;
-}
-
-/*
- * Evict a page (if present) from the local file cache
- */
-void
-lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
-{
-	BufferTag	tag;
-	FileCacheEntry *entry;
-	bool		found;
-	int			chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
-	uint32		hash;
-
-	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
-		return;
-
-	CopyNRelFileInfoToBufTag(tag, rinfo);
-	tag.forkNum = forkNum;
-	tag.blockNum = (blkno & ~(BLOCKS_PER_CHUNK - 1));
-
-	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
-	hash = get_hash_value(lfc_hash, &tag);
-
-	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
-
-	if (!LFC_ENABLED())
-	{
-		LWLockRelease(lfc_lock);
-		return;
-	}
-
-	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, &found);
-
-	if (!found)
-	{
-		/* nothing to do */
-		LWLockRelease(lfc_lock);
-		return;
-	}
-
-	/* remove the page from the cache */
-	entry->bitmap[chunk_offs >> 5] &= ~(1 << (chunk_offs & (32 - 1)));
-
-	if (entry->access_count == 0)
-	{
-		/*
-		 * If the chunk has no live entries, we can position the chunk to be
-		 * recycled first.
-		 */
-		if (entry->bitmap[chunk_offs >> 5] == 0)
-		{
-			bool		has_remaining_pages = false;
-
-			for (int i = 0; i < CHUNK_BITMAP_SIZE; i++)
-			{
-				if (entry->bitmap[i] != 0)
-				{
-					has_remaining_pages = true;
-					break;
-				}
-			}
-
-			/*
-			 * Put the entry at the position that is first to be reclaimed when we
-			 * have no cached pages remaining in the chunk
-			 */
-			if (!has_remaining_pages)
-			{
-				dlist_delete(&entry->list_node);
-				dlist_push_head(&lfc_ctl->lru, &entry->list_node);
-			}
-		}
-	}
-
-	/*
-	 * Done: apart from empty chunks, we don't move chunks in the LRU when
-	 * they're empty because eviction isn't usage.
-	 */
-
-	LWLockRelease(lfc_lock);
 }
 
 /*
@@ -1164,7 +1086,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 		tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
 
-		entry = lfc_entry_for_write(&tag, false, &prewarm_active, bitmap);
+		entry = lfc_entry_for_write(&tag, false, &prewarm_active, bitmap, false);
 
 		if (!LFC_ENABLED() || !PointerIsValid(entry))
 		{
