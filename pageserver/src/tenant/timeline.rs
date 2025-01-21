@@ -1112,6 +1112,7 @@ impl Timeline {
         keyspace: KeySpace,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: super::storage_layer::IoConcurrency,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         if !lsn.is_valid() {
             return Err(GetVectoredError::InvalidLsn(lsn));
@@ -1143,7 +1144,7 @@ impl Timeline {
             .get_vectored_impl(
                 keyspace.clone(),
                 lsn,
-                &mut ValuesReconstructState::new(IoConcurrency::sequential()),
+                &mut ValuesReconstructState::new(io_concurrency),
                 ctx,
             )
             .await;

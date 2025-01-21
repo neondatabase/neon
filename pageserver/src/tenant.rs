@@ -6617,6 +6617,7 @@ mod tests {
         let harness = TenantHarness::create("test_get_vectored_aux_files").await?;
 
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -6651,7 +6652,7 @@ mod tests {
             .get_vectored_impl(
                 aux_keyspace.clone(),
                 read_lsn,
-                &mut ValuesReconstructState::new(IoConcurrency::sequential()),
+                &mut ValuesReconstructState::new(io_concurrency.clone()),
                 &ctx,
             )
             .await;
@@ -6699,6 +6700,7 @@ mod tests {
         )
         .await?;
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
 
         let mut current_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let gap_at_key = current_key.add(100);
@@ -6799,7 +6801,7 @@ mod tests {
             .get_vectored_impl(
                 read.clone(),
                 current_lsn,
-                &mut ValuesReconstructState::new(IoConcurrency::sequential()),
+                &mut ValuesReconstructState::new(io_concurrency.clone()),
                 &ctx,
             )
             .await?;
@@ -6842,6 +6844,7 @@ mod tests {
     async fn test_get_vectored_ancestor_descent() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_get_vectored_on_lsn_axis").await?;
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
 
         let start_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let end_key = start_key.add(1000);
@@ -6934,7 +6937,7 @@ mod tests {
                         ranges: vec![child_gap_at_key..child_gap_at_key.next()],
                     },
                     query_lsn,
-                    &mut ValuesReconstructState::new(IoConcurrency::sequential()),
+                    &mut ValuesReconstructState::new(io_concurrency.clone()),
                     &ctx,
                 )
                 .await;
@@ -7380,6 +7383,7 @@ mod tests {
     async fn test_metadata_scan() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_metadata_scan").await?;
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -7433,7 +7437,7 @@ mod tests {
                 .get_vectored_impl(
                     keyspace.clone(),
                     lsn,
-                    &mut ValuesReconstructState::new(IoConcurrency::sequential()),
+                    &mut ValuesReconstructState::new(io_concurrency.clone()),
                     &ctx,
                 )
                 .await?
@@ -7548,6 +7552,7 @@ mod tests {
         let harness = TenantHarness::create("test_aux_file_e2e").await.unwrap();
 
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
 
         let mut lsn = Lsn(0x08);
 
@@ -7567,7 +7572,10 @@ mod tests {
         }
 
         // we can read everything from the storage
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        let files = tline
+            .list_aux_files(lsn, &ctx, io_concurrency.clone())
+            .await
+            .unwrap();
         assert_eq!(
             files.get("pg_logical/mappings/test1"),
             Some(&bytes::Bytes::from_static(b"first"))
@@ -7583,7 +7591,10 @@ mod tests {
             modification.commit(&ctx).await.unwrap();
         }
 
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        let files = tline
+            .list_aux_files(lsn, &ctx, io_concurrency.clone())
+            .await
+            .unwrap();
         assert_eq!(
             files.get("pg_logical/mappings/test2"),
             Some(&bytes::Bytes::from_static(b"second"))
@@ -7594,7 +7605,10 @@ mod tests {
             .await
             .unwrap();
 
-        let files = child.list_aux_files(lsn, &ctx).await.unwrap();
+        let files = child
+            .list_aux_files(lsn, &ctx, io_concurrency.clone())
+            .await
+            .unwrap();
         assert_eq!(files.get("pg_logical/mappings/test1"), None);
         assert_eq!(files.get("pg_logical/mappings/test2"), None);
     }
@@ -7603,6 +7617,7 @@ mod tests {
     async fn test_metadata_image_creation() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_metadata_image_creation").await?;
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -7622,8 +7637,9 @@ mod tests {
             keyspace: &KeySpace,
             lsn: Lsn,
             ctx: &RequestContext,
+            io_concurrency: IoConcurrency,
         ) -> anyhow::Result<(BTreeMap<Key, Result<Bytes, PageReconstructError>>, usize)> {
-            let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
+            let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
             let res = tline
                 .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
                 .await?;
@@ -7671,7 +7687,8 @@ mod tests {
 
             if iter % 5 == 0 {
                 let (_, before_delta_file_accessed) =
-                    scan_with_statistics(&tline, &keyspace, lsn, &ctx).await?;
+                    scan_with_statistics(&tline, &keyspace, lsn, &ctx, io_concurrency.clone())
+                        .await?;
                 tline
                     .compact(
                         &cancel,
@@ -7685,7 +7702,8 @@ mod tests {
                     )
                     .await?;
                 let (_, after_delta_file_accessed) =
-                    scan_with_statistics(&tline, &keyspace, lsn, &ctx).await?;
+                    scan_with_statistics(&tline, &keyspace, lsn, &ctx, io_concurrency.clone())
+                        .await?;
                 assert!(after_delta_file_accessed < before_delta_file_accessed, "after_delta_file_accessed={after_delta_file_accessed}, before_delta_file_accessed={before_delta_file_accessed}");
                 // Given that we already produced an image layer, there should be no delta layer needed for the scan, but still setting a low threshold there for unforeseen circumstances.
                 assert!(
@@ -7774,6 +7792,7 @@ mod tests {
     async fn test_vectored_missing_metadata_key_reads() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_vectored_missing_metadata_key_reads").await?;
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
 
         let base_key = Key::from_hex("620000000033333333444444445500000000").unwrap();
         let base_key_child = Key::from_hex("620000000033333333444444445500000001").unwrap();
@@ -7912,7 +7931,7 @@ mod tests {
         );
 
         // test vectored scan on parent timeline
-        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
+        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency.clone());
         let res = tline
             .get_vectored_impl(
                 KeySpace::single(Key::metadata_key_range()),
@@ -7938,7 +7957,7 @@ mod tests {
         );
 
         // test vectored scan on child timeline
-        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
+        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency.clone());
         let res = child
             .get_vectored_impl(
                 KeySpace::single(Key::metadata_key_range()),
@@ -7976,7 +7995,9 @@ mod tests {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Option<Bytes>, GetVectoredError> {
-        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
+        let io_concurrency =
+            IoConcurrency::spawn_from_conf(tline.conf, tline.gate.enter().unwrap());
+        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
         let mut res = tline
             .get_vectored_impl(
                 KeySpace::single(key..key.next()),

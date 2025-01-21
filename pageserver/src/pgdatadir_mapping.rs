@@ -201,6 +201,7 @@ impl Timeline {
         blknum: BlockNumber,
         version: Version<'_>,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<Bytes, PageReconstructError> {
         match version {
             Version::Lsn(effective_lsn) => {
@@ -209,7 +210,7 @@ impl Timeline {
                     .get_rel_page_at_lsn_batched(
                         pages.iter().map(|(tag, blknum)| (tag, blknum)),
                         effective_lsn,
-                        IoConcurrency::sequential(),
+                        io_concurrency.clone(),
                         ctx,
                     )
                     .await;
@@ -895,9 +896,15 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         let kv = self
-            .scan(KeySpace::single(Key::metadata_aux_key_range()), lsn, ctx)
+            .scan(
+                KeySpace::single(Key::metadata_aux_key_range()),
+                lsn,
+                ctx,
+                io_concurrency,
+            )
             .await?;
         let mut result = HashMap::new();
         let mut sz = 0;
@@ -921,7 +928,8 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<(), PageReconstructError> {
-        self.list_aux_files_v2(lsn, ctx).await?;
+        self.list_aux_files_v2(lsn, ctx, IoConcurrency::sequential())
+            .await?;
         Ok(())
     }
 
@@ -929,17 +937,24 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        self.list_aux_files_v2(lsn, ctx).await
+        self.list_aux_files_v2(lsn, ctx, io_concurrency).await
     }
 
     pub(crate) async fn get_replorigins(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<HashMap<RepOriginId, Lsn>, PageReconstructError> {
         let kv = self
-            .scan(KeySpace::single(repl_origin_key_range()), lsn, ctx)
+            .scan(
+                KeySpace::single(repl_origin_key_range()),
+                lsn,
+                ctx,
+                io_concurrency,
+            )
             .await?;
         let mut result = HashMap::new();
         for (k, v) in kv {
@@ -2438,7 +2453,11 @@ mod tests {
             ("foo/bar2".to_string(), Bytes::from_static(b"content2")),
         ]);
 
-        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        let io_concurrency = IoConcurrency::spawn_for_test();
+
+        let readback = tline
+            .list_aux_files(Lsn(0x1008), &ctx, io_concurrency.clone())
+            .await?;
         assert_eq!(readback, expect_1008);
 
         // Second modification: update one key, remove the other
@@ -2450,11 +2469,15 @@ mod tests {
         let expect_2008 =
             HashMap::from([("foo/bar1".to_string(), Bytes::from_static(b"content3"))]);
 
-        let readback = tline.list_aux_files(Lsn(0x2008), &ctx).await?;
+        let readback = tline
+            .list_aux_files(Lsn(0x2008), &ctx, io_concurrency.clone())
+            .await?;
         assert_eq!(readback, expect_2008);
 
         // Reading back in time works
-        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        let readback = tline
+            .list_aux_files(Lsn(0x1008), &ctx, io_concurrency.clone())
+            .await?;
         assert_eq!(readback, expect_1008);
 
         Ok(())

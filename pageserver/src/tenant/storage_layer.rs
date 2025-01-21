@@ -243,6 +243,7 @@ impl IoConcurrency {
     pub(crate) fn sequential() -> Self {
         Self::spawn(SelectedIoConcurrency::Sequential)
     }
+
     pub(crate) fn spawn_from_conf(
         conf: &'static PageServerConf,
         gate_guard: GateGuard,
@@ -442,6 +443,38 @@ impl IoConcurrency {
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_for_test() -> impl std::ops::DerefMut<Target = Self> {
+        use std::ops::{Deref, DerefMut};
+        use utils::sync::gate::Gate;
+
+        // Spawn needs a Gate, give it one.
+        struct Wrapper {
+            inner: IoConcurrency,
+            #[allow(dead_code)]
+            gate: Box<Gate>,
+        }
+        impl Deref for Wrapper {
+            type Target = IoConcurrency;
+
+            fn deref(&self) -> &Self::Target {
+                &self.inner
+            }
+        }
+        impl DerefMut for Wrapper {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.inner
+            }
+        }
+        let gate = Box::new(Gate::default());
+        Wrapper {
+            inner: Self::spawn(SelectedIoConcurrency::SidecarTask(
+                gate.enter().expect("just created it"),
+            )),
+            gate,
         }
     }
 }

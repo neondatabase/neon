@@ -124,6 +124,13 @@ where
         full_backup,
         replica,
         ctx,
+        io_concurrency: IoConcurrency::spawn_from_conf(
+            timeline.conf,
+            timeline
+                .gate
+                .enter()
+                .map_err(|e| BasebackupError::Server(e.into()))?,
+        ),
     };
     basebackup
         .send_tarball()
@@ -145,6 +152,7 @@ where
     full_backup: bool,
     replica: bool,
     ctx: &'a RequestContext,
+    io_concurrency: IoConcurrency,
 }
 
 /// A sink that accepts SLRU blocks ordered by key and forwards
@@ -301,17 +309,10 @@ where
 
             let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
 
-            let io_concurrency = IoConcurrency::spawn_from_conf(
-                self.timeline.conf,
-                self.timeline
-                    .gate
-                    .enter()
-                    .map_err(|e| BasebackupError::Server(e.into()))?,
-            );
             for part in slru_partitions.parts {
                 let blocks = self
                     .timeline
-                    .get_vectored(part, self.lsn, io_concurrency.clone(), self.ctx)
+                    .get_vectored(part, self.lsn, self.io_concurrency.clone(), self.ctx)
                     .await
                     .map_err(|e| BasebackupError::Server(e.into()))?;
 
@@ -366,7 +367,7 @@ where
         let start_time = Instant::now();
         let aux_files = self
             .timeline
-            .list_aux_files(self.lsn, self.ctx)
+            .list_aux_files(self.lsn, self.ctx, self.io_concurrency.clone())
             .await
             .map_err(|e| BasebackupError::Server(e.into()))?;
         let aux_scan_time = start_time.elapsed();
@@ -430,7 +431,7 @@ where
         }
         let repl_origins = self
             .timeline
-            .get_replorigins(self.lsn, self.ctx)
+            .get_replorigins(self.lsn, self.ctx, self.io_concurrency.clone())
             .await
             .map_err(|e| BasebackupError::Server(e.into()))?;
         let n_origins = repl_origins.len();
@@ -497,7 +498,13 @@ where
             for blknum in startblk..endblk {
                 let img = self
                     .timeline
-                    .get_rel_page_at_lsn(src, blknum, Version::Lsn(self.lsn), self.ctx)
+                    .get_rel_page_at_lsn(
+                        src,
+                        blknum,
+                        Version::Lsn(self.lsn),
+                        self.ctx,
+                        self.io_concurrency.clone(),
+                    )
                     .await
                     .map_err(|e| BasebackupError::Server(e.into()))?;
                 segment_data.extend_from_slice(&img[..]);

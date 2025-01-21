@@ -34,6 +34,7 @@ async fn smoke_test() {
     let span = h.span();
     let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
     let (tenant, _) = h.load().await;
+    let io_concurrency = IoConcurrency::spawn_for_test();
 
     let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Download);
 
@@ -92,7 +93,7 @@ async fn smoke_test() {
     };
 
     let img_before = {
-        let mut data = ValuesReconstructState::new(IoConcurrency::sequential());
+        let mut data = ValuesReconstructState::new(io_concurrency.clone());
         layer
             .get_values_reconstruct_data(
                 controlfile_keyspace.clone(),
