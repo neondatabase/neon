@@ -2942,7 +2942,7 @@ impl Timeline {
             compact_from
         };
         self.remote_client
-            .schedule_compaction_update(&compact_from /* or &layer_selection */, &compact_to)?;
+            .schedule_compaction_update(&compact_from, &compact_to)?;
 
         drop(gc_lock);
 

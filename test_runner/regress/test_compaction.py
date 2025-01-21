@@ -225,6 +225,10 @@ def test_pageserver_gc_compaction_idempotent(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
+    # Only in testing mode: the warning is expected because we rewrite a layer file of different generations.
+    # We could potentially patch the sanity-check code to not emit the warning in the future.
+    env.pageserver.allowed_errors.append(".*was unlinked but was not dangling.*")
+
     row_count = 10000
 
     ps_http = env.pageserver.http_client()
@@ -292,7 +296,10 @@ def test_pageserver_gc_compaction_idempotent(
 
     # ensure we hit the duplicated layer key warning at least once: we did two compactions consecutively,
     # and the second one should have hit the duplicated layer key warning.
-    env.pageserver.assert_log_contains("same layer key at different generation")
+    if compaction_mode == "before_restart":
+        env.pageserver.assert_log_contains("duplicated layer key in the same generation")
+    else:
+        env.pageserver.assert_log_contains("same layer key at different generation")
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
@@ -323,6 +330,10 @@ def test_pageserver_gc_compaction_interrupt(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
+
+    # Only in testing mode: the warning is expected because we rewrite a layer file of different generations.
+    # We could potentially patch the sanity-check code to not emit the warning in the future.
+    env.pageserver.allowed_errors.append(".*was unlinked but was not dangling.*")
 
     row_count = 10000
     churn_rounds = 20
