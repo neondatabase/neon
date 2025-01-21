@@ -1215,11 +1215,7 @@ class NeonEnv:
             force=config.config_init_force,
         )
 
-    def start(
-        self,
-        timeout_in_seconds: int | None = None,
-        extra_ps_env_vars: dict[str, str] | None = None,
-    ):
+    def start(self, timeout_in_seconds: int | None = None):
         # Storage controller starts first, so that pageserver /re-attach calls don't
         # bounce through retries on startup
         self.storage_controller.start(timeout_in_seconds=timeout_in_seconds)
@@ -1238,10 +1234,7 @@ class NeonEnv:
             for pageserver in self.pageservers:
                 futs.append(
                     executor.submit(
-                        lambda ps=pageserver: ps.start(  # type: ignore[misc]
-                            extra_env_vars=extra_ps_env_vars or {},
-                            timeout_in_seconds=timeout_in_seconds,
-                        ),
+                        lambda ps=pageserver: ps.start(timeout_in_seconds=timeout_in_seconds)  # type: ignore[misc]
                     )
                 )
 
