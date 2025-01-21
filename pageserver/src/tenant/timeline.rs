@@ -1206,6 +1206,15 @@ impl Timeline {
                         }
                     };
 
+                    // The walredo module expects the records to be descending in terms of Lsn.
+                    // And we submit the IOs in that order, so, there shuold be no need to sort here.
+                    debug_assert!(
+                        converted
+                            .records
+                            .is_sorted_by_key(|(lsn, _)| std::cmp::Reverse(*lsn)),
+                        "{converted:?}"
+                    );
+
                     (
                         key,
                         walredo_self.reconstruct_value(key, lsn, converted).await,
