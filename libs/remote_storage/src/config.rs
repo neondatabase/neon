@@ -43,6 +43,17 @@ impl RemoteStorageKind {
     }
 }
 
+impl RemoteStorageConfig {
+    /// Helper to fetch the configured concurrency limit.
+    pub fn concurrency_limit(&self) -> Option<usize> {
+        match &self.storage {
+            RemoteStorageKind::LocalFs { .. } => None,
+            RemoteStorageKind::AwsS3(c) => Some(c.concurrency_limit.into()),
+            RemoteStorageKind::AzureContainer(c) => Some(c.concurrency_limit.into()),
+        }
+    }
+}
+
 fn default_timeout() -> Duration {
     RemoteStorageConfig::DEFAULT_TIMEOUT
 }
@@ -114,6 +125,18 @@ fn default_max_keys_per_list_response() -> Option<i32> {
     DEFAULT_MAX_KEYS_PER_LIST_RESPONSE
 }
 
+fn default_azure_conn_pool_size() -> usize {
+    // By default, the Azure SDK does no connection pooling, due to historic reports of hard-to-reproduce issues
+    // (https://github.com/hyperium/hyper/issues/2312)
+    //
+    // However, using connection pooling is important to avoid exhausting client ports when
+    // doing huge numbers of requests (https://github.com/neondatabase/cloud/issues/20971)
+    //
+    // We therefore enable a modest pool size by default: this may be configured to zero if
+    // issues like the alleged upstream hyper issue appear.
+    8
+}
+
 impl Debug for S3Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3Config")
@@ -146,6 +169,8 @@ pub struct AzureConfig {
     pub concurrency_limit: NonZeroUsize,
     #[serde(default = "default_max_keys_per_list_response")]
     pub max_keys_per_list_response: Option<i32>,
+    #[serde(default = "default_azure_conn_pool_size")]
+    pub conn_pool_size: usize,
 }
 
 fn default_remote_storage_azure_concurrency_limit() -> NonZeroUsize {
@@ -302,6 +327,7 @@ timeout = '5s'";
     container_region = 'westeurope'
     upload_storage_class = 'INTELLIGENT_TIERING'
     timeout = '7s'
+    conn_pool_size = 8
     ";
 
         let config = parse(toml).unwrap();
@@ -316,6 +342,7 @@ timeout = '5s'";
                     prefix_in_container: None,
                     concurrency_limit: default_remote_storage_azure_concurrency_limit(),
                     max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
+                    conn_pool_size: 8,
                 }),
                 timeout: Duration::from_secs(7),
                 small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT

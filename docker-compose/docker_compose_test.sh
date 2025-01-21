@@ -18,9 +18,6 @@ cd $(dirname $0)
 COMPUTE_CONTAINER_NAME=docker-compose-compute-1
 TEST_CONTAINER_NAME=docker-compose-neon-test-extensions-1
 PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
-: ${http_proxy:=}
-: ${https_proxy:=}
-export http_proxy https_proxy
 
 cleanup() {
     echo "show container information"
@@ -35,12 +32,6 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     echo "clean up containers if exists"
     cleanup
     PG_TEST_VERSION=$((pg_version < 16 ? 16 : pg_version))
-    # The support of pg_anon not yet added to PG17, so we have to add the corresponding option for other PG versions
-    if [ "${pg_version}" -ne 17 ]; then
-      SPEC_PATH="compute_wrapper/var/db/postgres/specs"
-      mv $SPEC_PATH/spec.json $SPEC_PATH/spec.bak
-      jq '.cluster.settings += [{"name": "session_preload_libraries","value": "anon","vartype": "string"}]' "${SPEC_PATH}/spec.bak" > "${SPEC_PATH}/spec.json"
-    fi
     PG_VERSION=$pg_version PG_TEST_VERSION=$PG_TEST_VERSION docker compose --profile test-extensions -f $COMPOSE_FILE up --build -d
 
     echo "wait until the compute is ready. timeout after 60s. "
@@ -62,27 +53,12 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     done
 
     if [ $pg_version -ge 16 ]; then
-        echo Enabling trust connection
-        docker exec $COMPUTE_CONTAINER_NAME bash -c "sed -i '\$d' /var/db/postgres/compute/pg_hba.conf && echo -e 'host\t all\t all\t all\t trust' >> /var/db/postgres/compute/pg_hba.conf && psql $PSQL_OPTION -c 'select pg_reload_conf()' "
-        echo Adding postgres role
-        docker exec $COMPUTE_CONTAINER_NAME psql $PSQL_OPTION -c "CREATE ROLE postgres SUPERUSER LOGIN"
         # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
         # It cannot be moved to Dockerfile now because the database directory is created after the start of the container
         echo Adding dummy config
         docker exec $COMPUTE_CONTAINER_NAME touch /var/db/postgres/compute/compute_ctl_temp_override.conf
-        # This block is required for the pg_anon extension test.
-        # The test assumes that it is running on the same host with the postgres engine.
-        # In our case it's not true, that's why we are copying files to the compute node
+        # The following block copies the files for the pg_hintplan test to the compute node for the extension test in an isolated docker-compose environment
         TMPDIR=$(mktemp -d)
-        # Add support for pg_anon for pg_v16
-        if [ $pg_version -ne 17 ]; then
-          docker cp $TEST_CONTAINER_NAME:/ext-src/pg_anon-src/data $TMPDIR/data
-          echo -e '1\t too \t many \t tabs' > $TMPDIR/data/bad.csv
-          docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/tmp/tmp_anon_alternate_data
-        rm -rf $TMPDIR
-        fi
-        TMPDIR=$(mktemp -d)
-        # The following block does the same for the pg_hintplan test
         docker cp $TEST_CONTAINER_NAME:/ext-src/pg_hint_plan-src/data $TMPDIR/data
         docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/ext-src/pg_hint_plan-src/
         rm -rf $TMPDIR
@@ -106,8 +82,4 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         fi
     fi
     cleanup
-    # Restore the original spec.json
-    if [ "$pg_version" -ne 17 ]; then
-      mv "$SPEC_PATH/spec.bak" "$SPEC_PATH/spec.json"
-    fi
 done

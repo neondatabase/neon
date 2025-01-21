@@ -308,7 +308,7 @@ impl WalIngest {
             epoch -= 1;
         }
 
-        Ok((epoch as u64) << 32 | xid as u64)
+        Ok(((epoch as u64) << 32) | xid as u64)
     }
 
     async fn ingest_clear_vm_bits(
@@ -2163,10 +2163,12 @@ mod tests {
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
                 let interpreted = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
-                    modification.tline.get_shard_identity(),
+                    &[*modification.tline.get_shard_identity()],
                     lsn,
                     modification.tline.pg_version,
                 )
+                .unwrap()
+                .remove(modification.tline.get_shard_identity())
                 .unwrap();
 
                 walingest

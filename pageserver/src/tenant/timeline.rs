@@ -14,7 +14,7 @@ pub mod uninit;
 mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
@@ -23,17 +23,18 @@ use fail::fail_point;
 use handle::ShardTimelineId;
 use offload::OffloadError;
 use once_cell::sync::Lazy;
+use pageserver_api::models::PageTraceEvent;
 use pageserver_api::{
     config::tenant_conf_defaults::DEFAULT_COMPACTION_THRESHOLD,
     key::{
         KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
-        NON_INHERITED_SPARSE_RANGE,
+        SPARSE_RANGE,
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
-        CompactionAlgorithm, CompactionAlgorithmSettings, DownloadRemoteLayersTaskInfo,
-        DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
-        LsnLease, TimelineState,
+        CompactKeyRange, CompactLsnRange, CompactionAlgorithm, CompactionAlgorithmSettings,
+        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
+        InMemoryLayerInfo, LayerMapInfo, LsnLease, TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
@@ -42,6 +43,7 @@ use rand::Rng;
 use remote_storage::DownloadError;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
+use tokio::sync::mpsc::Sender;
 use tokio::{
     runtime::Handle,
     sync::{oneshot, watch},
@@ -49,7 +51,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
-    fs_ext, pausable_failpoint,
+    fs_ext,
+    guard_arc_swap::GuardArcSwap,
+    pausable_failpoint,
     postgres_client::PostgresClientProtocol,
     sync::gate::{Gate, GateGuard},
 };
@@ -72,6 +76,7 @@ use std::{pin::pin, sync::OnceLock};
 
 use crate::{
     aux_file::AuxFileSizeEstimator,
+    page_service::TenantManagerTypes,
     tenant::{
         config::AttachmentMode,
         layer_map::{LayerMap, SearchResult},
@@ -144,15 +149,19 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
-use super::remote_timeline_client::index::IndexPart;
-use super::remote_timeline_client::RemoteTimelineClient;
-use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
-use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
-use super::upload_queue::NotInitialized;
-use super::GcError;
 use super::{
-    debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf, MaybeOffloaded,
+    config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
+    MaybeOffloaded,
+};
+use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
+use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
+use super::{
+    remote_timeline_client::RemoteTimelineClient, remote_timeline_client::WaitCompletionError,
+    storage_layer::ReadableLayer,
+};
+use super::{
+    secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
+    GcError,
 };
 
 #[cfg(test)]
@@ -204,8 +213,8 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
     pub remote_client: RemoteTimelineClient,
-    pub pagestream_throttle:
-        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::Pagestream>>,
+    pub pagestream_throttle: Arc<crate::tenant::throttle::Throttle>,
+    pub pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
@@ -347,8 +356,8 @@ pub struct Timeline {
     // though let's keep them both for better error visibility.
     pub initdb_lsn: Lsn,
 
-    /// When did we last calculate the partitioning? Make it pub to test cases.
-    pub(super) partitioning: tokio::sync::Mutex<((KeyPartitioning, SparseKeyPartitioning), Lsn)>,
+    /// The repartitioning result. Allows a single writer and multiple readers.
+    pub(crate) partitioning: GuardArcSwap<((KeyPartitioning, SparseKeyPartitioning), Lsn)>,
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
@@ -408,8 +417,7 @@ pub struct Timeline {
     gc_lock: tokio::sync::Mutex<()>,
 
     /// Cloned from [`super::Tenant::pagestream_throttle`] on construction.
-    pub(crate) pagestream_throttle:
-        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::Pagestream>>,
+    pub(crate) pagestream_throttle: Arc<crate::tenant::throttle::Throttle>,
 
     /// Size estimator for aux file v2
     pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
@@ -424,12 +432,15 @@ pub struct Timeline {
 
     pub(crate) l0_flush_global_state: L0FlushGlobalState,
 
-    pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
+    pub(crate) handles: handle::PerTimelineState<TenantManagerTypes>,
 
     pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
 
     /// Cf. [`crate::tenant::CreateTimelineIdempotency`].
     pub(crate) create_idempotency: crate::tenant::CreateTimelineIdempotency,
+
+    /// If Some, collects GetPage metadata for an ongoing PageTrace.
+    pub(crate) page_trace: ArcSwapOption<Sender<PageTraceEvent>>,
 }
 
 pub type TimelineDeleteProgress = Arc<tokio::sync::Mutex<DeleteTimelineFlow>>;
@@ -786,63 +797,6 @@ pub(crate) struct CompactRequest {
     pub sub_compaction: bool,
     /// Max job size for each subcompaction job.
     pub sub_compaction_max_job_size_mb: Option<u64>,
-}
-
-#[serde_with::serde_as]
-#[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct CompactLsnRange {
-    pub start: Lsn,
-    pub end: Lsn,
-}
-
-#[serde_with::serde_as]
-#[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct CompactKeyRange {
-    #[serde_as(as = "serde_with::DisplayFromStr")]
-    pub start: Key,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
-    pub end: Key,
-}
-
-impl From<Range<Lsn>> for CompactLsnRange {
-    fn from(range: Range<Lsn>) -> Self {
-        Self {
-            start: range.start,
-            end: range.end,
-        }
-    }
-}
-
-impl From<Range<Key>> for CompactKeyRange {
-    fn from(range: Range<Key>) -> Self {
-        Self {
-            start: range.start,
-            end: range.end,
-        }
-    }
-}
-
-impl From<CompactLsnRange> for Range<Lsn> {
-    fn from(range: CompactLsnRange) -> Self {
-        range.start..range.end
-    }
-}
-
-impl From<CompactKeyRange> for Range<Key> {
-    fn from(range: CompactKeyRange) -> Self {
-        range.start..range.end
-    }
-}
-
-impl CompactLsnRange {
-    #[cfg(test)]
-    #[cfg(feature = "testing")]
-    pub fn above(lsn: Lsn) -> Self {
-        Self {
-            start: lsn,
-            end: Lsn::MAX,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2363,6 +2317,7 @@ impl Timeline {
                 query_metrics: crate::metrics::SmgrQueryTimePerTimeline::new(
                     &tenant_shard_id,
                     &timeline_id,
+                    resources.pagestream_throttle_metrics,
                 ),
 
                 directory_metrics: array::from_fn(|_| AtomicU64::new(0)),
@@ -2388,7 +2343,8 @@ impl Timeline {
                     // initial logical size is 0.
                     LogicalSize::empty_initial()
                 },
-                partitioning: tokio::sync::Mutex::new((
+
+                partitioning: GuardArcSwap::new((
                     (KeyPartitioning::new(), KeyPartitioning::new().into_sparse()),
                     Lsn(0),
                 )),
@@ -2433,6 +2389,8 @@ impl Timeline {
                 attach_wal_lag_cooldown,
 
                 create_idempotency,
+
+                page_trace: Default::default(),
             };
 
             result.repartition_threshold =
@@ -3274,7 +3232,7 @@ impl Timeline {
             // We don't return a blanket [`GetVectoredError::MissingKey`] to avoid
             // stalling compaction.
             keyspace.remove_overlapping_with(&KeySpace {
-                ranges: vec![NON_INHERITED_RANGE, NON_INHERITED_SPARSE_RANGE],
+                ranges: vec![NON_INHERITED_RANGE, Key::sparse_non_inherited_keyspace()],
             });
 
             // Keyspace is fully retrieved
@@ -3295,7 +3253,11 @@ impl Timeline {
             // keys from `keyspace`, we expect there to be no overlap between it and the image covered key
             // space. If that's not the case, we had at least one key encounter a gap in the image layer
             // and stop the search as a result of that.
-            let removed = keyspace.remove_overlapping_with(&image_covered_keyspace);
+            let mut removed = keyspace.remove_overlapping_with(&image_covered_keyspace);
+            // Do not fire missing key error for sparse keys.
+            removed.remove_overlapping_with(&KeySpace {
+                ranges: vec![SPARSE_RANGE],
+            });
             if !removed.is_empty() {
                 break Some(removed);
             }
@@ -3308,6 +3270,21 @@ impl Timeline {
                 .get_ready_ancestor_timeline(ancestor_timeline, ctx)
                 .await?;
             timeline = &*timeline_owned;
+        };
+
+        // Remove sparse keys from the keyspace so that it doesn't fire errors.
+        let missing_keyspace = if let Some(missing_keyspace) = missing_keyspace {
+            let mut missing_keyspace = missing_keyspace;
+            missing_keyspace.remove_overlapping_with(&KeySpace {
+                ranges: vec![SPARSE_RANGE],
+            });
+            if missing_keyspace.is_empty() {
+                None
+            } else {
+                Some(missing_keyspace)
+            }
+        } else {
+            None
         };
 
         if let Some(missing_keyspace) = missing_keyspace {
@@ -3815,35 +3792,34 @@ impl Timeline {
                 return Err(FlushLayerError::Cancelled);
             }
 
-            let mut layers_to_upload = Vec::new();
-            layers_to_upload.extend(
-                self.create_image_layers(
-                    &rel_partition,
-                    self.initdb_lsn,
-                    ImageLayerCreationMode::Initial,
-                    ctx,
-                )
-                .await?,
-            );
+            // Ensure that we have a single call to `create_image_layers` with a combined dense keyspace.
+            // So that the key ranges don't overlap.
+            let mut partitions = KeyPartitioning::default();
+            partitions.parts.extend(rel_partition.parts);
             if !metadata_partition.parts.is_empty() {
                 assert_eq!(
                     metadata_partition.parts.len(),
                     1,
                     "currently sparse keyspace should only contain a single metadata keyspace"
                 );
-                layers_to_upload.extend(
-                    self.create_image_layers(
-                        // Safety: create_image_layers treat sparse keyspaces differently that it does not scan
-                        // every single key within the keyspace, and therefore, it's safe to force converting it
-                        // into a dense keyspace before calling this function.
-                        &metadata_partition.into_dense(),
-                        self.initdb_lsn,
-                        ImageLayerCreationMode::Initial,
-                        ctx,
-                    )
-                    .await?,
-                );
+                // Safety: create_image_layers treat sparse keyspaces differently that it does not scan
+                // every single key within the keyspace, and therefore, it's safe to force converting it
+                // into a dense keyspace before calling this function.
+                partitions
+                    .parts
+                    .extend(metadata_partition.into_dense().parts);
             }
+
+            let mut layers_to_upload = Vec::new();
+            layers_to_upload.extend(
+                self.create_image_layers(
+                    &partitions,
+                    self.initdb_lsn,
+                    ImageLayerCreationMode::Initial,
+                    ctx,
+                )
+                .await?,
+            );
 
             (layers_to_upload, None)
         } else {
@@ -3892,6 +3868,24 @@ impl Timeline {
             }
             // release lock on 'layers'
         };
+
+        // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
+        // This makes us refuse ingest until the new layers have been persisted to the remote
+        let start = Instant::now();
+        self.remote_client
+            .wait_completion()
+            .await
+            .map_err(|e| match e {
+                WaitCompletionError::UploadQueueShutDownOrStopped
+                | WaitCompletionError::NotInitialized(
+                    NotInitialized::ShuttingDown | NotInitialized::Stopped,
+                ) => FlushLayerError::Cancelled,
+                WaitCompletionError::NotInitialized(NotInitialized::Uninitialized) => {
+                    FlushLayerError::Other(anyhow!(e).into())
+                }
+            })?;
+        let duration = start.elapsed().as_secs_f64();
+        self.metrics.flush_wait_upload_time_gauge_add(duration);
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
@@ -4038,18 +4032,15 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<((KeyPartitioning, SparseKeyPartitioning), Lsn), CompactionError> {
-        let Ok(mut partitioning_guard) = self.partitioning.try_lock() else {
+        let Ok(mut guard) = self.partitioning.try_write_guard() else {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
-            // Note that there are a third "caller" that will take the `partitioning` lock. It is `gc_compaction_split_jobs` for
-            // gc-compaction where it uses the repartition data to determine the split jobs. In the future, it might use its own
-            // heuristics, but for now, we should allow concurrent access to it and let the caller retry compaction.
             return Err(CompactionError::Other(anyhow!(
-                "repartition() called concurrently, this is rare and a retry should be fine"
+                "repartition() called concurrently"
             )));
         };
-        let ((dense_partition, sparse_partition), partition_lsn) = &*partitioning_guard;
+        let ((dense_partition, sparse_partition), partition_lsn) = &*guard.read();
         if lsn < *partition_lsn {
             return Err(CompactionError::Other(anyhow!(
                 "repartition() called with LSN going backwards, this should not happen"
@@ -4077,9 +4068,9 @@ impl Timeline {
         let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
         }; // no partitioning for metadata keys for now
-        *partitioning_guard = ((dense_partitioning, sparse_partitioning), lsn);
-
-        Ok((partitioning_guard.0.clone(), partitioning_guard.1))
+        let result = ((dense_partitioning, sparse_partitioning), lsn);
+        guard.write(result.clone());
+        Ok(result)
     }
 
     // Is it time to create a new image layer for the given partition?
@@ -4635,6 +4626,10 @@ impl Drop for Timeline {
                 }
             }
         }
+        info!(
+            "Timeline {} for tenant {} is being dropped",
+            self.timeline_id, self.tenant_shard_id.tenant_id
+        );
     }
 }
 
@@ -4894,6 +4889,7 @@ impl Timeline {
 
     async fn find_gc_time_cutoff(
         &self,
+        now: SystemTime,
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
@@ -4901,7 +4897,6 @@ impl Timeline {
         debug_assert_current_span_has_tenant_and_timeline_id();
         if self.shard_identity.is_shard_zero() {
             // Shard Zero has SLRU data and can calculate the PITR time -> LSN mapping itself
-            let now = SystemTime::now();
             let time_range = if pitr == Duration::ZERO {
                 humantime::parse_duration(DEFAULT_PITR_INTERVAL).expect("constant is invalid")
             } else {
@@ -4987,6 +4982,7 @@ impl Timeline {
     #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
     pub(super) async fn find_gc_cutoffs(
         &self,
+        now: SystemTime,
         space_cutoff: Lsn,
         pitr: Duration,
         cancel: &CancellationToken,
@@ -5014,7 +5010,7 @@ impl Timeline {
         // - if PITR interval is set, then this is our cutoff.
         // - if PITR interval is not set, then we do a lookup
         //   based on DEFAULT_PITR_INTERVAL, so that size-based retention does not result in keeping history around permanently on idle databases.
-        let time_cutoff = self.find_gc_time_cutoff(pitr, cancel, ctx).await?;
+        let time_cutoff = self.find_gc_time_cutoff(now, pitr, cancel, ctx).await?;
 
         Ok(match (pitr, time_cutoff) {
             (Duration::ZERO, Some(time_cutoff)) => {
@@ -5682,8 +5678,16 @@ impl Timeline {
         info!("force created image layer {}", image_layer.local_path());
         {
             let mut guard = self.layers.write().await;
-            guard.open_mut().unwrap().force_insert_layer(image_layer);
+            guard
+                .open_mut()
+                .unwrap()
+                .force_insert_layer(image_layer.clone());
         }
+
+        // Update remote_timeline_client state to reflect existence of this layer
+        self.remote_client
+            .schedule_layer_file_upload(image_layer)
+            .unwrap();
 
         Ok(())
     }
@@ -5735,8 +5739,16 @@ impl Timeline {
         info!("force created delta layer {}", delta_layer.local_path());
         {
             let mut guard = self.layers.write().await;
-            guard.open_mut().unwrap().force_insert_layer(delta_layer);
+            guard
+                .open_mut()
+                .unwrap()
+                .force_insert_layer(delta_layer.clone());
         }
+
+        // Update remote_timeline_client state to reflect existence of this layer
+        self.remote_client
+            .schedule_layer_file_upload(delta_layer)
+            .unwrap();
 
         Ok(())
     }
