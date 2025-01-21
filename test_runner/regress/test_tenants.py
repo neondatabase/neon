@@ -194,7 +194,7 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
         io_metrics = query_all_safekeepers(
             "safekeeper_pg_io_bytes_total",
             {
-                "app_name": "pageserver",
+                "app_name": f"pageserver-{env.pageserver.id}",
                 "client_az": "test_ps_az",
                 "dir": io_direction,
                 "same_az": "false",
