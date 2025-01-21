@@ -3051,7 +3051,10 @@ impl Timeline {
             self.timeline_id, up_to_lsn
         );
 
-        pausable_failpoint!("timeline-calculate-logical-size-pause");
+        if let Err(()) = pausable_failpoint!("timeline-calculate-logical-size-pause", &self.cancel)
+        {
+            return Err(CalculateLogicalSizeError::Cancelled);
+        }
 
         // See if we've already done the work for initial size calculation.
         // This is a short-cut for timelines that are mostly unused.
