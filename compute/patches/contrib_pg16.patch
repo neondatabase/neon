@@ -170,6 +170,30 @@ index 10b5225..ae442e1 100644
  ROLLBACK;
  
 -DROP TABLESPACE regress_create_idx_tblspace;
+diff --git a/contrib/file_fdw/expected/file_fdw.out b/contrib/file_fdw/expected/file_fdw.out
+index 72304e0..ebe131b 100644
+--- a/contrib/file_fdw/expected/file_fdw.out
++++ b/contrib/file_fdw/expected/file_fdw.out
+@@ -4,6 +4,7 @@
+ -- directory paths are passed to us in environment variables
+ \getenv abs_srcdir PG_ABS_SRCDIR
+ -- Clean up in case a prior regression run failed
++SET compute_query_id TO 'off';
+ SET client_min_messages TO 'warning';
+ DROP ROLE IF EXISTS regress_file_fdw_superuser, regress_file_fdw_user, regress_no_priv_user;
+ RESET client_min_messages;
+diff --git a/contrib/file_fdw/sql/file_fdw.sql b/contrib/file_fdw/sql/file_fdw.sql
+index f0548e1..848a08c 100644
+--- a/contrib/file_fdw/sql/file_fdw.sql
++++ b/contrib/file_fdw/sql/file_fdw.sql
+@@ -6,6 +6,7 @@
+ \getenv abs_srcdir PG_ABS_SRCDIR
+ 
+ -- Clean up in case a prior regression run failed
++SET compute_query_id TO 'off';
+ SET client_min_messages TO 'warning';
+ DROP ROLE IF EXISTS regress_file_fdw_superuser, regress_file_fdw_user, regress_no_priv_user;
+ RESET client_min_messages;
 diff --git a/contrib/pageinspect/expected/gist.out b/contrib/pageinspect/expected/gist.out
 index d1adbab..38b52ac 100644
 --- a/contrib/pageinspect/expected/gist.out

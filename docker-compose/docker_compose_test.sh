@@ -25,7 +25,7 @@ export http_proxy https_proxy
 cleanup() {
     echo "show container information"
     docker ps
-    docker compose --profile test-extensions -f $COMPOSE_FILE logs
+    #docker compose --profile test-extensions -f $COMPOSE_FILE logs
     echo "stop containers..."
     docker compose --profile test-extensions -f $COMPOSE_FILE down
 }
@@ -81,27 +81,41 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
           docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/tmp/tmp_anon_alternate_data
         rm -rf $TMPDIR
         fi
-        TMPDIR=$(mktemp -d)
         # The following block does the same for the pg_hintplan test
+        TMPDIR=$(mktemp -d)
         docker cp $TEST_CONTAINER_NAME:/ext-src/pg_hint_plan-src/data $TMPDIR/data
         docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/ext-src/pg_hint_plan-src/
         rm -rf $TMPDIR
+        # The following block does the same for the contrib/file_fdw test
+        TMPDIR=$(mktemp -d)
+        docker cp $TEST_CONTAINER_NAME:/postgres/contrib/file_fdw/data $TMPDIR/data
+        docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/postgres/contrib/file_fdw/data
+        rm -rf $TMPDIR
+        # Apply patches
+        cat ../compute/patches/contrib_pg${pg_version}.patch | docker exec -i $TEST_CONTAINER_NAME bash -c "(cd /postgres && patch -p1)"
         # We are running tests now
-        if docker exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,pg_graphql-src,kq_imcx-src,wal2json_2_5-src \
-            $TEST_CONTAINER_NAME /run-tests.sh /ext-src | tee testout.txt && \
-            docker exec -e SKIP=start-scripts,postgres_fdw,ltree_plpython,jsonb_plpython,jsonb_plperl,hstore_plpython,hstore_plperl,dblink,bool_plperl \
-            $TEST_CONTAINER_NAME /run-tests.sh /postgres/contrib | tee testout_contrib.txt
+        rm -f testout.txt testout_contrib.txt
+        docker exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,pg_graphql-src,kq_imcx-src,wal2json_2_5-src \
+        $TEST_CONTAINER_NAME /run-tests.sh /ext-src | tee testout.txt && EXT_SUCCESS=1 || EXT_SUCCESS=0
+        docker exec -e SKIP=start-scripts,postgres_fdw,ltree_plpython,jsonb_plpython,jsonb_plperl,hstore_plpython,hstore_plperl,dblink,bool_plperl \
+        $TEST_CONTAINER_NAME /run-tests.sh /postgres/contrib | tee testout_contrib.txt && CONTRIB_SUCCESS=1 || CONTRIB_SUCCESS=0
+        if [ $EXT_SUCCESS -eq 1 ] && [ $CONTRIB_SUCCESS -eq 1 ]
         then
             cleanup
         else
-            FAILED=$(tail -1 testout.txt | awk '{for (i=1; i<=NF; I++) {print "/ext-src/"$i} }')
-            CONTRIB_FAILED=$(tail -1 testout_contrib.txt | awk '{for (i=1; i<=NF; I++) {print "/postgres/contrib/"$i} }')
+            CONTRIB_FAILED=
+            FAILED=
+            [ $EXT_SUCCESS -ne 1 ] && FAILED=$(tail -1 testout.txt | awk '{for (i=1; i<=NF; i++) {print "/ext-src/"$i} }')
+            [ 0$CONTRIB_SUCCESS -ne 1 ] && CONTRIB_FAILED=$(tail -1 testout_contrib.txt | awk '{for (i=1; i<=NF; i++) {print "/postgres/contrib/"$i} }')
             for d in $FAILED $CONTRIB_FAILED
             do
-                dn="$(basname $d)"
-                docker cp $TEST_CONTAINER_NAME:$d/regression.diffs $dn || true
-                docker cp $TEST_CONTAINER_NAME:$d/regression.out $dn || true
+                dn="$(basename $d)"
+                rm -rf $dn
+                mkdir $dn
+                docker cp $TEST_CONTAINER_NAME:$d/regression.diffs $dn || [ $? -eq 1 ]
+                docker cp $TEST_CONTAINER_NAME:$d/regression.out $dn || [ $? -eq 1 ]
                 cat $dn/regression.out $dn/regression.diffs || true
+                rm -rf $dn
             done
         cleanup
         exit 1
