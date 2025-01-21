@@ -113,6 +113,7 @@ pub(crate) struct OnDiskValueIoWaiter {
 pub(crate) enum OnDiskValueIo {
     /// Traversal identified this IO as required to complete the vectored get.
     Required {
+        num_active_ios: Arc<AtomicUsize>,
         tx: tokio::sync::oneshot::Sender<OnDiskValueIoResult>,
     },
     /// Sparse keyspace reads always read all the values for a given key,
@@ -134,7 +135,8 @@ type OnDiskValueIoResult = Result<OnDiskValue, std::io::Error>;
 impl OnDiskValueIo {
     pub(crate) fn complete(self, res: OnDiskValueIoResult) {
         match self {
-            OnDiskValueIo::Required { tx } => {
+            OnDiskValueIo::Required { num_active_ios, tx } => {
+                num_active_ios.fetch_sub(1, std::sync::atomic::Ordering::Release);
                 let _ = tx.send(res);
             }
             OnDiskValueIo::Unnecessary => {
@@ -248,6 +250,7 @@ pub(crate) struct ValuesReconstructState {
     delta_layers_visited: u32,
 
     pub(crate) io_concurrency: IoConcurrency,
+    num_active_ios: Arc<AtomicUsize>,
 }
 
 /// The level of IO concurrency to be used on the read path
@@ -259,7 +262,6 @@ pub(crate) enum IoConcurrency {
     Sequential,
     SidecarTask {
         task_id: usize,
-        num_active_ios: Arc<AtomicUsize>,
         ios_tx: tokio::sync::mpsc::UnboundedSender<IoFuture>,
     },
 }
@@ -356,6 +358,7 @@ impl IoConcurrency {
                                 tokio::select! {
                                     fut = ios_rx.recv() => {
                                         if let Some(fut) = fut {
+                                            trace!("received new io future");
                                             empty_futures.push(fut);
                                             state = State::Executing { futures: empty_futures, ios_rx };
                                         } else {
@@ -370,6 +373,7 @@ impl IoConcurrency {
                             } => {
                                 tokio::select! {
                                     res = futures.next() => {
+                                        trace!("io future completed");
                                         assert!(res.is_some());
                                         if futures.is_empty() {
                                             state = State::Waiting { empty_futures: futures, ios_rx};
@@ -379,6 +383,7 @@ impl IoConcurrency {
                                     }
                                     fut = ios_rx.recv() => {
                                         if let Some(fut) = fut {
+                                            trace!("received new io future");
                                             futures.push(fut);
                                             state =  State::Executing { futures, ios_rx};
                                         } else {
@@ -391,21 +396,18 @@ impl IoConcurrency {
                                 mut futures,
                             } => {
                                 trace!("shutting down");
-
                                 while let Some(()) = futures.next().await {
+                                    trace!("io future completed (shutdown)");
                                     // drain
                                 }
+                                trace!("shutdown complete");
                                 break;
                             }
                         }
                     }
-                    drop(gate_guard); // drop it right before we exitlast
+                    drop(gate_guard); // drop it right before we exit
                 }.instrument(span));
-                IoConcurrency::SidecarTask {
-                    task_id,
-                    ios_tx,
-                    num_active_ios: Arc::new(AtomicUsize::new(0)),
-                }
+                IoConcurrency::SidecarTask { task_id, ios_tx }
             }
         }
     }
@@ -413,14 +415,9 @@ impl IoConcurrency {
     pub(crate) fn clone(&self) -> Self {
         match self {
             IoConcurrency::Sequential => IoConcurrency::Sequential,
-            IoConcurrency::SidecarTask {
-                task_id,
-                ios_tx,
-                num_active_ios,
-            } => IoConcurrency::SidecarTask {
+            IoConcurrency::SidecarTask { task_id, ios_tx } => IoConcurrency::SidecarTask {
                 task_id: *task_id,
                 ios_tx: ios_tx.clone(),
-                num_active_ios: num_active_ios.clone(),
             },
         }
     }
@@ -480,21 +477,8 @@ impl IoConcurrency {
     {
         match self {
             IoConcurrency::Sequential => fut.await,
-            IoConcurrency::SidecarTask {
-                ios_tx,
-                num_active_ios,
-                ..
-            } => {
-                num_active_ios.fetch_add(1, std::sync::atomic::Ordering::Release);
-                let fut = Box::pin({
-                    let num_active_ios = Arc::clone(num_active_ios);
-                    async move {
-                        scopeguard::defer! {
-                            num_active_ios.fetch_sub(1, std::sync::atomic::Ordering::Release);
-                        }
-                        fut.await
-                    }
-                });
+            IoConcurrency::SidecarTask { ios_tx, .. } => {
+                let fut = Box::pin(fut);
                 // NB: experiments showed that doing an opportunistic poll of `fut` here was bad for throughput
                 // while insignificant for latency.
                 // It would make sense to revisit the tokio-epoll-uring API in the future such that we can try
@@ -503,7 +487,6 @@ impl IoConcurrency {
                 match ios_tx.send(fut) {
                     Ok(()) => {}
                     Err(_) => {
-                        num_active_ios.fetch_sub(1, std::sync::atomic::Ordering::Release);
                         unreachable!("the io task must have exited, likely it panicked")
                     }
                 }
@@ -544,43 +527,32 @@ impl IoConcurrency {
     }
 }
 
-// Make rate-limited noise in case the root IoConcurrency gets dropped while
-// there are still IOs queue; we'll be leaking the sidecar task in that case.
-// Sidecar tasks holds a gate, so, it's technically fine, but, hard to debug.
+/// Make noise in case the [`ValuesReconstructState`] gets dropped while
+/// there are still IOs in flight.
+/// Refer to `collect_pending_ios` for why we prefer not to do that.
 //
-// Refer to `collect_pending_ios` for why we shouldn't be doing that.
-impl Drop for IoConcurrency {
+/// We log from here instead of from the sidecar task because the [`ValuesReconstructState`]
+/// gets dropped in a tracing span with more context.
+/// We repeat the sidecar tasks's `task_id` so we can correlate what we emit here with
+/// the logs / panic handler logs from the sidecar task, which also logs the `task_id`.
+impl Drop for ValuesReconstructState {
     fn drop(&mut self) {
-        match self {
-            IoConcurrency::Sequential => (),
-            IoConcurrency::SidecarTask {
-                task_id,
-                ios_tx,
-                num_active_ios,
-            } => {
-                let _entered =
-                    tracing::info_span!("IoConcurrency_drop", task_id = *task_id).entered();
-                assert_eq!(ios_tx.weak_count(), 0, "we don't us downgrade()");
-                if ios_tx.strong_count() == 1 {
-                    trace!("dropping last IoConcurrency clone, this will trigger shutdown of sidecar task");
-                    let num_active_ios = num_active_ios.load(std::sync::atomic::Ordering::Acquire);
-                    if num_active_ios > 0 {
-                        use once_cell::sync::Lazy;
-                        use std::sync::Mutex;
-                        use utils::rate_limit::RateLimit;
-                        static LOGGED: Lazy<Mutex<RateLimit>> =
-                            Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(1))));
-                        let mut rate_limit = LOGGED.lock().unwrap();
-                        rate_limit.call(|| {
-                            tracing::warn!(
-                                num_active_ios,
-                                "IoConcurrency dropped while sidecar task was still processing IOs"
-                            );
-                        });
-                    }
-                }
-            }
+        let num_active_ios = self
+            .num_active_ios
+            .load(std::sync::atomic::Ordering::Acquire);
+        if num_active_ios == 0 {
+            return;
         }
+        let sidecar_task_id = match &self.io_concurrency {
+            IoConcurrency::Sequential => None,
+            IoConcurrency::SidecarTask { task_id, .. } => Some(*task_id),
+        };
+        tracing::warn!(
+            num_active_ios,
+            ?sidecar_task_id,
+            backtrace=%std::backtrace::Backtrace::force_capture(),
+            "dropping ValuesReconstructState while some IOs have not been completed",
+        );
     }
 }
 
@@ -593,6 +565,7 @@ impl ValuesReconstructState {
             layers_visited: 0,
             delta_layers_visited: 0,
             io_concurrency,
+            num_active_ios: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -655,9 +628,14 @@ impl ValuesReconstructState {
                 }
             }
             ValueReconstructSituation::Continue => {
+                self.num_active_ios
+                    .fetch_add(1, std::sync::atomic::Ordering::Release);
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 state.on_disk_values.push((lsn, OnDiskValueIoWaiter { rx }));
-                OnDiskValueIo::Required { tx }
+                OnDiskValueIo::Required {
+                    tx,
+                    num_active_ios: Arc::clone(&self.num_active_ios),
+                }
             }
         };
 
@@ -1123,8 +1101,10 @@ impl<T: std::fmt::Display> std::fmt::Debug for RangeDisplayDebug<'_, T> {
 
 #[cfg(test)]
 mod tests2 {
+    use pageserver_api::key::DBDIR_KEY;
     use tracing::info;
 
+    use super::*;
     use crate::tenant::storage_layer::IoConcurrency;
 
     /// TODO: currently this test relies on manual visual inspection of the --no-capture output.
@@ -1132,32 +1112,56 @@ mod tests2 {
     /// ```text
     /// RUST_LOG=trace cargo nextest run  --features testing  --no-capture test_io_concurrency_noise
     /// running 1 test
-    /// 2025-01-21T16:01:17.176826Z TRACE spawning sidecar task task_id=0
-    /// 2025-01-21T16:01:17.176950Z TRACE IoConcurrency_drop{task_id=0}: dropping last IoConcurrency clone, this will trigger shutdown of sidecar task
-    /// 2025-01-21T16:01:17.176983Z  WARN IoConcurrency_drop{task_id=0}: IoConcurrency dropped while sidecar task was still processing IOs num_active_ios=1
-    /// 2025-01-21T16:01:17.177086Z TRACE IoConcurrency_sidecar{task_id=0}: start
-    /// 2025-01-21T16:01:17.177121Z  INFO IoConcurrency_sidecar{task_id=0}: waiting for signal to complete IO
-    /// 2025-01-21T16:01:17.177130Z  INFO IoConcurrency_sidecar{task_id=0}: completing IO
-    /// 2025-01-21T16:01:17.177169Z TRACE IoConcurrency_sidecar{task_id=0}: shutting down
-    /// 2025-01-21T16:01:17.177184Z TRACE IoConcurrency_sidecar{task_id=0}: end
+    /// 2025-01-21T17:42:01.335680Z TRACE spawning sidecar task task_id=0
+    /// 2025-01-21T17:42:01.335937Z TRACE IoConcurrency_sidecar{task_id=0}: start
+    /// 2025-01-21T17:42:01.335972Z TRACE IoConcurrency_sidecar{task_id=0}: received new io future
+    /// 2025-01-21T17:42:01.335999Z  INFO IoConcurrency_sidecar{task_id=0}: waiting for signal to complete IO
+    /// 2025-01-21T17:42:01.336229Z  WARN dropping ValuesReconstructState while some IOs have not been completed num_active_ios=1 sidecar_task_id=Some(0) backtrace=   0: <pageserver::tenant::storage_layer::ValuesReconstructState as core::ops::drop::Drop>::drop
+    ///              at ./src/tenant/storage_layer.rs:553:24
+    ///    1: core::ptr::drop_in_place<pageserver::tenant::storage_layer::ValuesReconstructState>
+    ///              at /home/christian/.rustup/toolchains/1.84.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:521:1
+    ///    2: core::mem::drop
+    ///              at /home/christian/.rustup/toolchains/1.84.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/mod.rs:942:24
+    ///    3: pageserver::tenant::storage_layer::tests2::test_io_concurrency_noise::{{closure}}
+    ///              at ./src/tenant/storage_layer.rs:1159:9
+    ///   ...
+    ///   49: <unknown>
+    /// 2025-01-21T17:42:01.452293Z  INFO IoConcurrency_sidecar{task_id=0}: completing IO
+    /// 2025-01-21T17:42:01.452357Z TRACE IoConcurrency_sidecar{task_id=0}: io future completed
+    /// 2025-01-21T17:42:01.452473Z TRACE IoConcurrency_sidecar{task_id=0}: end
     /// test tenant::storage_layer::tests2::test_io_concurrency_noise ... ok
+    ///
     /// ```
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn test_io_concurrency_noise() {
         crate::tenant::harness::setup_logging();
-        let mut io_concurrency = IoConcurrency::spawn_for_test();
-        let (complete_io, should_complete_io) = tokio::sync::oneshot::channel();
-        let (io_completed, wait_for_io_completed) = tokio::sync::oneshot::channel();
-        io_concurrency
-            .spawn_io(async {
+
+        let io_concurrency = IoConcurrency::spawn_for_test();
+        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency.clone());
+
+        let (io_fut_is_waiting_tx, io_fut_is_waiting) = tokio::sync::oneshot::channel();
+        let (do_complete_io, should_complete_io) = tokio::sync::oneshot::channel();
+        let (io_fut_exiting_tx, io_fut_exiting) = tokio::sync::oneshot::channel();
+
+        let io = reconstruct_state.update_key(&DBDIR_KEY, Lsn(8), true);
+        reconstruct_state
+            .spawn_io(async move {
                 info!("waiting for signal to complete IO");
+                io_fut_is_waiting_tx.send(()).unwrap();
                 should_complete_io.await.unwrap();
                 info!("completing IO");
-                io_completed.send(()).unwrap();
+                io.complete(Ok(OnDiskValue::RawImage(Bytes::new())));
+                io_fut_exiting_tx.send(()).unwrap();
             })
             .await;
-        drop(io_concurrency);
-        complete_io.send(()).unwrap();
-        wait_for_io_completed.await.unwrap();
+
+        io_fut_is_waiting.await.unwrap();
+
+        // this is what makes the noise
+        drop(reconstruct_state);
+
+        do_complete_io.send(()).unwrap();
+
+        io_fut_exiting.await.unwrap();
     }
 }

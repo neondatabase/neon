@@ -5820,7 +5820,7 @@ impl Timeline {
                         ctx,
                     )
                     .await?;
-                for (k, v) in reconstruct_data.keys {
+                for (k, v) in std::mem::take(&mut reconstruct_data.keys) {
                     let v = v.collect_pending_ios().await?;
                     all_data.push((k, v.img.unwrap().1));
                 }
