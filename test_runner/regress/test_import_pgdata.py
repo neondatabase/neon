@@ -14,7 +14,6 @@ from fixtures.pageserver.http import (
     ImportPgdataIdemptencyKey,
     PageserverApiException,
 )
-from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind
 from pytest_httpserver import HTTPServer
@@ -112,13 +111,15 @@ def test_pgdata_import_smoke(
         # TODO: would be nicer to just compare pgdump
 
         # Enable IO concurrency for batching on large sequential scan, to avoid making
-        # this test unnecessarily onerous on CPU
+        # this test unnecessarily onerous on CPU. Especially on debug mode, it's still
+        # pretty onerous though, so increase statement_timeout to avoid timeouts.
         assert ep.safe_psql_many(
             [
                 "set effective_io_concurrency=32;",
+                "SET statement_timeout='300s';",
                 "select count(*), sum(data::bigint)::bigint from t",
             ]
-        ) == [[], [(expect_nrows, expect_sum)]]
+        ) == [[], [], [(expect_nrows, expect_sum)]]
 
     validate_vanilla_equivalence(vanilla_pg)
 
