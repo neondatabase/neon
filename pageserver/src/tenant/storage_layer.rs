@@ -98,12 +98,63 @@ pub(crate) enum OnDiskValue {
 /// Reconstruct data accumulated for a single key during a vectored get
 #[derive(Debug, Default)]
 pub(crate) struct VectoredValueReconstructState {
-    pub(crate) on_disk_values: Vec<(
-        Lsn,
-        tokio::sync::oneshot::Receiver<Result<OnDiskValue, std::io::Error>>,
-    )>,
+    pub(crate) on_disk_values: Vec<(Lsn, OnDiskValueIoWaiter)>,
 
     pub(crate) situation: ValueReconstructSituation,
+}
+
+#[derive(Debug)]
+pub(crate) struct OnDiskValueIoWaiter {
+    rx: tokio::sync::oneshot::Receiver<OnDiskValueIoResult>,
+}
+
+#[derive(Debug)]
+#[must_use]
+pub(crate) enum OnDiskValueIo {
+    /// Traversal identified this IO as required to complete the vectored get.
+    Required {
+        tx: tokio::sync::oneshot::Sender<OnDiskValueIoResult>,
+    },
+    /// Sparse keyspace reads always read all the values for a given key,
+    /// even though only the first value is needed.
+    ///
+    /// This variant represents the unnecessary IOs for those values at lower LSNs
+    /// that aren't needed, but are currently still being done.
+    ///
+    /// The execution of unnecessary IOs was a pre-existing behavior before concurrent IO.
+    /// We added this explicit representation here so that we can drop
+    /// unnecessary IO results immediately, instead of buffering them in
+    /// `oneshot` channels inside [`VectoredValueReconstructState`] until
+    /// [`VectoredValueReconstructState::collect_pending_ios`] gets called.
+    Unnecessary,
+}
+
+type OnDiskValueIoResult = Result<OnDiskValue, std::io::Error>;
+
+impl OnDiskValueIo {
+    pub(crate) fn complete(self, res: OnDiskValueIoResult) {
+        match self {
+            OnDiskValueIo::Required { tx } => {
+                let _ = tx.send(res);
+            }
+            OnDiskValueIo::Unnecessary => {
+                // Nobody cared, see variant doc comment.
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WaitCompletionError {
+    #[error("OnDiskValueIo was dropped without completing, likely the sidecar task panicked")]
+    IoDropped,
+}
+
+impl OnDiskValueIoWaiter {
+    pub(crate) async fn wait_completion(self) -> Result<OnDiskValueIoResult, WaitCompletionError> {
+        // NB: for Unnecessary IOs, this method never gets called because we don't add them to `on_disk_values`.
+        self.rx.await.map_err(|_| WaitCompletionError::IoDropped)
+    }
 }
 
 impl VectoredValueReconstructState {
@@ -129,8 +180,9 @@ impl VectoredValueReconstructState {
         // Revisit this when IO futures are replaced with a more sophisticated IO system
         // and an IO scheduler, where we know which IOs were submitted and which ones
         // just queued. Cf the comment on IoConcurrency::spawn_io.
-        for (lsn, fut) in self.on_disk_values {
-            let value_recv_res = fut
+        for (lsn, waiter) in self.on_disk_values {
+            let value_recv_res = waiter
+                .wait_completion()
                 // we rely on the caller to poll us to completion, so this is not a bail point
                 .await;
             // Force not bailing early by wrapping the code into a closure.
@@ -140,10 +192,9 @@ impl VectoredValueReconstructState {
                     (Err(_), _) => {
                         // We've already failed, no need to process more.
                     }
-                    (Ok(_), Err(recv_error)) => {
+                    (Ok(_), Err(wait_err)) => {
                         // This shouldn't happen - likely the sidecar task panicked.
-                        let recv_error: tokio::sync::oneshot::error::RecvError = recv_error;
-                        res = Err(PageReconstructError::Other(recv_error.into()));
+                        res = Err(PageReconstructError::Other(wait_err.into()));
                     }
                     (Ok(_), Ok(Err(err))) => {
                         let err: std::io::Error = err;
@@ -587,31 +638,28 @@ impl ValuesReconstructState {
     ///
     /// If the key is in the sparse keyspace (i.e., aux files), we do not track them in
     /// `key_done`.
-    pub(crate) fn update_key(
-        &mut self,
-        key: &Key,
-        lsn: Lsn,
-        completes: bool,
-        value: tokio::sync::oneshot::Receiver<Result<OnDiskValue, std::io::Error>>,
-    ) -> ValueReconstructSituation {
+    // TODO: rename this method & update description.
+    pub(crate) fn update_key(&mut self, key: &Key, lsn: Lsn, completes: bool) -> OnDiskValueIo {
         let state = self.keys.entry(*key).or_default();
 
         let is_sparse_key = key.is_sparse();
 
-        match state.situation {
+        let required_io = match state.situation {
             ValueReconstructSituation::Complete => {
                 if is_sparse_key {
                     // Sparse keyspace might be visited multiple times because
                     // we don't track unmapped keyspaces.
-                    return ValueReconstructSituation::Complete;
+                    return OnDiskValueIo::Unnecessary;
                 } else {
                     unreachable!()
                 }
             }
             ValueReconstructSituation::Continue => {
-                state.on_disk_values.push((lsn, value));
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                state.on_disk_values.push((lsn, OnDiskValueIoWaiter { rx }));
+                OnDiskValueIo::Required { tx }
             }
-        }
+        };
 
         if completes && state.situation == ValueReconstructSituation::Continue {
             state.situation = ValueReconstructSituation::Complete;
@@ -620,7 +668,7 @@ impl ValuesReconstructState {
             }
         }
 
-        state.situation
+        required_io
     }
 
     /// Returns the key space describing the keys that have

@@ -66,7 +66,7 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{self, OnceCell};
+use tokio::sync::OnceCell;
 use tokio_epoll_uring::IoBuf;
 use tracing::*;
 
@@ -77,7 +77,8 @@ use utils::{
 };
 
 use super::{
-    AsLayerDesc, LayerName, OnDiskValue, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
+    AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
+    ValuesReconstructState,
 };
 
 ///
@@ -1009,19 +1010,14 @@ impl DeltaLayerInner {
         // This is the order that `ReconstructState` requires such that it can
         // track when a key is done.
         for read in reads.into_iter().rev() {
-            let mut senders: HashMap<
-                (Key, Lsn),
-                sync::oneshot::Sender<Result<OnDiskValue, std::io::Error>>,
-            > = Default::default();
+            let mut ios: HashMap<(Key, Lsn), OnDiskValueIo> = Default::default();
             for (_, blob_meta) in read.blobs_at.as_slice().iter().rev() {
-                let (tx, rx) = sync::oneshot::channel();
-                senders.insert((blob_meta.key, blob_meta.lsn), tx);
-                reconstruct_state.update_key(
+                let io = reconstruct_state.update_key(
                     &blob_meta.key,
                     blob_meta.lsn,
                     blob_meta.will_init,
-                    rx,
                 );
+                ios.insert((blob_meta.key, blob_meta.lsn), io);
             }
 
             let read_extend_residency = this.clone();
@@ -1037,8 +1033,7 @@ impl DeltaLayerInner {
                         Ok(blobs_buf) => {
                             let view = BufView::new_slice(&blobs_buf.buf);
                             for meta in blobs_buf.blobs.iter().rev() {
-                                let sender =
-                                    senders.remove(&(meta.meta.key, meta.meta.lsn)).unwrap();
+                                let io = ios.remove(&(meta.meta.key, meta.meta.lsn)).unwrap();
 
                                 if Some(meta.meta.key) == ignore_key_with_err {
                                     continue;
@@ -1050,22 +1045,24 @@ impl DeltaLayerInner {
                                     Err(e) => {
                                         ignore_key_with_err = Some(meta.meta.key);
 
-                                        let _ = sender.send(Err(e));
+                                        io.complete(Err(e));
                                         continue;
                                     }
                                 };
 
-                                let _ = sender.send(Ok(OnDiskValue::WalRecordOrImage(
+                                io.complete(Ok(OnDiskValue::WalRecordOrImage(
                                     blob_read.into_bytes(),
                                 )));
                             }
 
-                            assert!(senders.is_empty());
+                            assert!(ios.is_empty());
                         }
                         Err(err) => {
-                            for (_, sender) in senders {
-                                let _ = sender
-                                    .send(Err(std::io::Error::new(err.kind(), "vec read failed")));
+                            for (_, sender) in ios {
+                                sender.complete(Err(std::io::Error::new(
+                                    err.kind(),
+                                    "vec read failed",
+                                )));
                             }
                         }
                     }

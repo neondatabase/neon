@@ -8,7 +8,7 @@ use crate::assert_u64_eq_usize::{u64_to_usize, U64IsUsize, UsizeIsU64};
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::tenant::ephemeral_file::EphemeralFile;
-use crate::tenant::storage_layer::OnDiskValue;
+use crate::tenant::storage_layer::{OnDiskValue, OnDiskValueIo};
 use crate::tenant::timeline::GetVectoredError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::{l0_flush, page_cache};
@@ -430,10 +430,7 @@ impl InMemoryLayer {
             read: vectored_dio_read::LogicalRead<Vec<u8>>,
         }
         let mut reads: HashMap<Key, Vec<ValueRead>> = HashMap::new();
-        let mut senders: HashMap<
-            (Key, Lsn),
-            tokio::sync::oneshot::Sender<Result<OnDiskValue, std::io::Error>>,
-        > = Default::default();
+        let mut ios: HashMap<(Key, Lsn), OnDiskValueIo> = Default::default();
 
         let lsn_range = self.start_lsn..end_lsn;
 
@@ -460,9 +457,8 @@ impl InMemoryLayer {
                         ),
                     });
 
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    senders.insert((key, *entry_lsn), tx);
-                    reconstruct_state.update_key(&key, *entry_lsn, will_init, rx);
+                    let io = reconstruct_state.update_key(&key, *entry_lsn, will_init);
+                    ios.insert((key, *entry_lsn), io);
 
                     if will_init {
                         break;
@@ -488,25 +484,22 @@ impl InMemoryLayer {
 
                 for (key, value_reads) in reads {
                     for ValueRead { entry_lsn, read } in value_reads {
-                        let sender = senders
-                            .remove(&(key, entry_lsn))
-                            .expect("sender must exist");
+                        let io = ios.remove(&(key, entry_lsn)).expect("sender must exist");
                         match read.into_result().expect("we run execute() above") {
                             Err(e) => {
-                                let _ = sender.send(Err(std::io::Error::new(
+                                io.complete(Err(std::io::Error::new(
                                     e.kind(),
                                     "dio vec read failed",
                                 )));
                             }
                             Ok(value_buf) => {
-                                let _ = sender
-                                    .send(Ok(OnDiskValue::WalRecordOrImage(value_buf.into())));
+                                io.complete(Ok(OnDiskValue::WalRecordOrImage(value_buf.into())));
                             }
                         }
                     }
                 }
 
-                assert!(senders.is_empty());
+                assert!(ios.is_empty());
 
                 // Keep layer existent until this IO is done;
                 // This is kinda forced for InMemoryLayer because we need to inner.read() anyway,

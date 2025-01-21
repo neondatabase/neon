@@ -62,7 +62,6 @@ use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::oneshot;
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 use tracing::*;
@@ -75,7 +74,8 @@ use utils::{
 
 use super::layer_name::ImageLayerName;
 use super::{
-    AsLayerDesc, LayerName, OnDiskValue, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
+    AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
+    ValuesReconstructState,
 };
 
 ///
@@ -588,15 +588,10 @@ impl ImageLayerInner {
             .into();
 
         for read in reads.into_iter() {
-            let mut senders: HashMap<
-                (Key, Lsn),
-                oneshot::Sender<Result<OnDiskValue, std::io::Error>>,
-            > = Default::default();
+            let mut ios: HashMap<(Key, Lsn), OnDiskValueIo> = Default::default();
             for (_, blob_meta) in read.blobs_at.as_slice() {
-                let (tx, rx) = oneshot::channel();
-                senders.insert((blob_meta.key, blob_meta.lsn), tx);
-
-                reconstruct_state.update_key(&blob_meta.key, blob_meta.lsn, true, rx);
+                let io = reconstruct_state.update_key(&blob_meta.key, blob_meta.lsn, true);
+                ios.insert((blob_meta.key, blob_meta.lsn), io);
             }
 
             let buf_size = read.size();
@@ -641,28 +636,29 @@ impl ImageLayerInner {
                         Ok(blobs_buf) => {
                             let view = BufView::new_slice(&blobs_buf.buf);
                             for meta in blobs_buf.blobs.iter() {
-                                let sender =
-                                    senders.remove(&(meta.meta.key, meta.meta.lsn)).unwrap();
+                                let io: OnDiskValueIo =
+                                    ios.remove(&(meta.meta.key, meta.meta.lsn)).unwrap();
                                 let img_buf = meta.read(&view).await;
 
                                 let img_buf = match img_buf {
                                     Ok(img_buf) => img_buf,
                                     Err(e) => {
-                                        let _ = sender.send(Err(e));
+                                        io.complete(Err(e));
                                         continue;
                                     }
                                 };
 
-                                let _ =
-                                    sender.send(Ok(OnDiskValue::RawImage(img_buf.into_bytes())));
+                                io.complete(Ok(OnDiskValue::RawImage(img_buf.into_bytes())));
                             }
 
-                            assert!(senders.is_empty());
+                            assert!(ios.is_empty());
                         }
                         Err(err) => {
-                            for (_, sender) in senders {
-                                let _ = sender
-                                    .send(Err(std::io::Error::new(err.kind(), "vec read failed")));
+                            for (_, io) in ios {
+                                io.complete(Err(std::io::Error::new(
+                                    err.kind(),
+                                    "vec read failed",
+                                )));
                             }
                         }
                     }
