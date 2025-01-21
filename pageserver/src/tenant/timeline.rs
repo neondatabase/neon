@@ -4143,6 +4143,7 @@ impl Timeline {
 
     /// Create image layers for Postgres data. Assumes the caller passes a partition that is not too large,
     /// so that at most one image layer will be produced from this function.
+    #[allow(clippy::too_many_arguments)]
     async fn create_image_layer_for_rel_blocks(
         self: &Arc<Self>,
         partition: &KeySpace,
@@ -4151,6 +4152,7 @@ impl Timeline {
         ctx: &RequestContext,
         img_range: Range<Key>,
         start: Key,
+        io_concurrency: IoConcurrency,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         let mut wrote_keys = false;
 
@@ -4182,7 +4184,7 @@ impl Timeline {
                         .get_vectored(
                             key_request_accum.consume_keyspace(),
                             lsn,
-                            IoConcurrency::sequential(),
+                            io_concurrency.clone(),
                             ctx,
                         )
                         .await?;
@@ -4263,9 +4265,10 @@ impl Timeline {
         img_range: Range<Key>,
         mode: ImageLayerCreationMode,
         start: Key,
+        io_concurrency: IoConcurrency,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         // Metadata keys image layer creation.
-        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
+        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
         let begin = Instant::now();
         let data = self
             .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
@@ -4482,6 +4485,13 @@ impl Timeline {
                 )))
             });
 
+            let io_concurrency = IoConcurrency::spawn_from_conf(
+                self.conf,
+                self.gate
+                    .enter()
+                    .map_err(|_| CreateImageLayersError::Cancelled)?,
+            );
+
             if !compact_metadata {
                 let ImageLayerCreationOutcome {
                     image,
@@ -4494,6 +4504,7 @@ impl Timeline {
                         ctx,
                         img_range,
                         start,
+                        io_concurrency,
                     )
                     .await?;
 
@@ -4512,6 +4523,7 @@ impl Timeline {
                         img_range,
                         mode,
                         start,
+                        io_concurrency,
                     )
                     .await?;
                 start = next_start_key;
