@@ -70,7 +70,7 @@ struct Spec {
     encryption_secret: EncryptionSecret,
     #[serde_as(as = "serde_with::base64::Base64")]
     source_connstring_ciphertext_base64: Vec<u8>,
-    #[serde_as(as = "serde_with::base64::Base64")]
+    #[serde_as(as = "Option<serde_with::base64::Base64>")]
     restore_connstring_ciphertext_base64: Option<Vec<u8>>,
 }
 
