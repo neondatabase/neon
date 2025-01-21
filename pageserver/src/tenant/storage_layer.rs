@@ -434,10 +434,10 @@ impl IoConcurrency {
                 num_active_ios,
                 ..
             } => {
+                num_active_ios.fetch_add(1, std::sync::atomic::Ordering::Release);
                 let fut = Box::pin({
                     let num_active_ios = Arc::clone(num_active_ios);
                     async move {
-                        num_active_ios.fetch_add(1, std::sync::atomic::Ordering::Release);
                         scopeguard::defer! {
                             num_active_ios.fetch_sub(1, std::sync::atomic::Ordering::Release);
                         }
@@ -452,6 +452,7 @@ impl IoConcurrency {
                 match ios_tx.send(fut) {
                     Ok(()) => {}
                     Err(_) => {
+                        num_active_ios.fetch_sub(1, std::sync::atomic::Ordering::Release);
                         unreachable!("the io task must have exited, likely it panicked")
                     }
                 }
@@ -1069,5 +1070,46 @@ struct RangeDisplayDebug<'a, T: std::fmt::Display>(&'a Range<T>);
 impl<T: std::fmt::Display> std::fmt::Debug for RangeDisplayDebug<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}..{}", self.0.start, self.0.end)
+    }
+}
+
+#[cfg(test)]
+mod tests2 {
+    use tracing::info;
+
+    use crate::tenant::storage_layer::IoConcurrency;
+
+    /// TODO: currently this test relies on manual visual inspection of the --no-capture output.
+    /// Should look like so:
+    /// ```text
+    /// RUST_LOG=trace cargo nextest run  --features testing  --no-capture test_io_concurrency_noise
+    /// running 1 test
+    /// 2025-01-21T16:01:17.176826Z TRACE spawning sidecar task task_id=0
+    /// 2025-01-21T16:01:17.176950Z TRACE IoConcurrency_drop{task_id=0}: dropping last IoConcurrency clone, this will trigger shutdown of sidecar task
+    /// 2025-01-21T16:01:17.176983Z  WARN IoConcurrency_drop{task_id=0}: IoConcurrency dropped while sidecar task was still processing IOs num_active_ios=1
+    /// 2025-01-21T16:01:17.177086Z TRACE IoConcurrency_sidecar{task_id=0}: start
+    /// 2025-01-21T16:01:17.177121Z  INFO IoConcurrency_sidecar{task_id=0}: waiting for signal to complete IO
+    /// 2025-01-21T16:01:17.177130Z  INFO IoConcurrency_sidecar{task_id=0}: completing IO
+    /// 2025-01-21T16:01:17.177169Z TRACE IoConcurrency_sidecar{task_id=0}: shutting down
+    /// 2025-01-21T16:01:17.177184Z TRACE IoConcurrency_sidecar{task_id=0}: end
+    /// test tenant::storage_layer::tests2::test_io_concurrency_noise ... ok
+    /// ```
+    #[tokio::test(start_paused = true)]
+    async fn test_io_concurrency_noise() {
+        crate::tenant::harness::setup_logging();
+        let mut io_concurrency = IoConcurrency::spawn_for_test();
+        let (complete_io, should_complete_io) = tokio::sync::oneshot::channel();
+        let (io_completed, wait_for_io_completed) = tokio::sync::oneshot::channel();
+        io_concurrency
+            .spawn_io(async {
+                info!("waiting for signal to complete IO");
+                should_complete_io.await.unwrap();
+                info!("completing IO");
+                io_completed.send(()).unwrap();
+            })
+            .await;
+        drop(io_concurrency);
+        complete_io.send(()).unwrap();
+        wait_for_io_completed.await.unwrap();
     }
 }
