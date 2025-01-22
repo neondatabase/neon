@@ -22,6 +22,7 @@ PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
 cleanup() {
     echo "show container information"
     docker ps
+    docker compose --profile test-extensions -f $COMPOSE_FILE logs
     echo "stop containers..."
     docker compose --profile test-extensions -f $COMPOSE_FILE down
 }
