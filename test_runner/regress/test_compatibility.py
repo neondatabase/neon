@@ -251,6 +251,8 @@ def test_forward_compatibility(
         os.environ.get("ALLOW_FORWARD_COMPATIBILITY_BREAKAGE", "false").lower() == "true"
     )
 
+    neon_env_builder.test_may_use_compatibility_snapshot_binaries = True
+
     try:
         neon_env_builder.num_safekeepers = 3
 

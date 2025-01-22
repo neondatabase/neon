@@ -17,6 +17,7 @@ use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
 };
+use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::GetVectoredError;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
@@ -200,6 +201,7 @@ impl Timeline {
         blknum: BlockNumber,
         version: Version<'_>,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<Bytes, PageReconstructError> {
         match version {
             Version::Lsn(effective_lsn) => {
@@ -208,6 +210,7 @@ impl Timeline {
                     .get_rel_page_at_lsn_batched(
                         pages.iter().map(|(tag, blknum)| (tag, blknum)),
                         effective_lsn,
+                        io_concurrency.clone(),
                         ctx,
                     )
                     .await;
@@ -246,6 +249,7 @@ impl Timeline {
         &self,
         pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber)>,
         effective_lsn: Lsn,
+        io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> Vec<Result<Bytes, PageReconstructError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
@@ -309,7 +313,10 @@ impl Timeline {
             acc.to_keyspace()
         };
 
-        match self.get_vectored(keyspace, effective_lsn, ctx).await {
+        match self
+            .get_vectored(keyspace, effective_lsn, io_concurrency, ctx)
+            .await
+        {
             Ok(results) => {
                 for (key, res) in results {
                     let mut key_slots = keys_slots.remove(&key).unwrap().into_iter();
@@ -889,9 +896,15 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         let kv = self
-            .scan(KeySpace::single(Key::metadata_aux_key_range()), lsn, ctx)
+            .scan(
+                KeySpace::single(Key::metadata_aux_key_range()),
+                lsn,
+                ctx,
+                io_concurrency,
+            )
             .await?;
         let mut result = HashMap::new();
         let mut sz = 0;
@@ -914,8 +927,9 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<(), PageReconstructError> {
-        self.list_aux_files_v2(lsn, ctx).await?;
+        self.list_aux_files_v2(lsn, ctx, io_concurrency).await?;
         Ok(())
     }
 
@@ -923,17 +937,24 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        self.list_aux_files_v2(lsn, ctx).await
+        self.list_aux_files_v2(lsn, ctx, io_concurrency).await
     }
 
     pub(crate) async fn get_replorigins(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<HashMap<RepOriginId, Lsn>, PageReconstructError> {
         let kv = self
-            .scan(KeySpace::single(repl_origin_key_range()), lsn, ctx)
+            .scan(
+                KeySpace::single(repl_origin_key_range()),
+                lsn,
+                ctx,
+                io_concurrency,
+            )
             .await?;
         let mut result = HashMap::new();
         for (k, v) in kv {
@@ -2432,7 +2453,11 @@ mod tests {
             ("foo/bar2".to_string(), Bytes::from_static(b"content2")),
         ]);
 
-        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        let io_concurrency = IoConcurrency::spawn_for_test();
+
+        let readback = tline
+            .list_aux_files(Lsn(0x1008), &ctx, io_concurrency.clone())
+            .await?;
         assert_eq!(readback, expect_1008);
 
         // Second modification: update one key, remove the other
@@ -2444,11 +2469,15 @@ mod tests {
         let expect_2008 =
             HashMap::from([("foo/bar1".to_string(), Bytes::from_static(b"content3"))]);
 
-        let readback = tline.list_aux_files(Lsn(0x2008), &ctx).await?;
+        let readback = tline
+            .list_aux_files(Lsn(0x2008), &ctx, io_concurrency.clone())
+            .await?;
         assert_eq!(readback, expect_2008);
 
         // Reading back in time works
-        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        let readback = tline
+            .list_aux_files(Lsn(0x1008), &ctx, io_concurrency.clone())
+            .await?;
         assert_eq!(readback, expect_1008);
 
         Ok(())

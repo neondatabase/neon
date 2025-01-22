@@ -20,6 +20,7 @@ use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
+use futures::{stream::FuturesUnordered, StreamExt};
 use handle::ShardTimelineId;
 use offload::OffloadError;
 use once_cell::sync::Lazy;
@@ -74,6 +75,7 @@ use std::{
     ops::{Deref, Range},
 };
 
+use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::{
     aux_file::AuxFileSizeEstimator,
     page_service::TenantManagerTypes,
@@ -81,7 +83,10 @@ use crate::{
         config::AttachmentMode,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
-        storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
+        storage_layer::{
+            inmemory_layer::IndexEntry, IoConcurrency, PersistentLayerDesc,
+            ValueReconstructSituation,
+        },
     },
     walingest::WalLagCooldown,
     walredo,
@@ -101,10 +106,6 @@ use crate::{
 };
 use crate::{
     disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
-};
-use crate::{
-    l0_flush::{self, L0FlushGlobalState},
-    metrics::GetKind,
 };
 use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
@@ -1005,9 +1006,7 @@ impl Timeline {
             ranges: vec![key..key.next()],
         };
 
-        // Initialise the reconstruct state for the key with the cache
-        // entry returned above.
-        let mut reconstruct_state = ValuesReconstructState::new();
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
 
         let vectored_res = self
             .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
@@ -1050,6 +1049,7 @@ impl Timeline {
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
+        io_concurrency: super::storage_layer::IoConcurrency,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         if !lsn.is_valid() {
@@ -1084,7 +1084,7 @@ impl Timeline {
             .get_vectored_impl(
                 keyspace.clone(),
                 lsn,
-                &mut ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(io_concurrency),
                 ctx,
             )
             .await;
@@ -1109,6 +1109,7 @@ impl Timeline {
         keyspace: KeySpace,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: super::storage_layer::IoConcurrency,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         if !lsn.is_valid() {
             return Err(GetVectoredError::InvalidLsn(lsn));
@@ -1140,7 +1141,7 @@ impl Timeline {
             .get_vectored_impl(
                 keyspace.clone(),
                 lsn,
-                &mut ValuesReconstructState::default(),
+                &mut ValuesReconstructState::new(io_concurrency),
                 ctx,
             )
             .await;
@@ -1159,39 +1160,56 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let get_kind = if keyspace.total_raw_size() == 1 {
-            GetKind::Singular
-        } else {
-            GetKind::Vectored
+        let traversal_res: Result<(), _> = self
+            .get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
+            .await;
+        if let Err(err) = traversal_res {
+            // Wait for all the spawned IOs to complete.
+            // See comments on `spawn_io` inside `storage_layer` for more details.
+            let mut collect_futs = std::mem::take(&mut reconstruct_state.keys)
+                .into_values()
+                .map(|state| state.collect_pending_ios())
+                .collect::<FuturesUnordered<_>>();
+            while collect_futs.next().await.is_some() {}
+            return Err(err);
         };
 
-        let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
-            .for_get_kind(get_kind)
-            .start_timer();
-        self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
-            .await?;
-        get_data_timer.stop_and_record();
-
-        let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
-            .for_get_kind(get_kind)
-            .start_timer();
-        let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
         let layers_visited = reconstruct_state.get_layers_visited();
 
-        for (key, res) in std::mem::take(&mut reconstruct_state.keys) {
-            match res {
-                Err(err) => {
-                    results.insert(key, Err(err));
-                }
-                Ok(state) => {
-                    let state = ValueReconstructState::from(state);
+        let futs = FuturesUnordered::new();
+        for (key, state) in std::mem::take(&mut reconstruct_state.keys) {
+            futs.push({
+                let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
+                async move {
+                    assert_eq!(state.situation, ValueReconstructSituation::Complete);
 
-                    let reconstruct_res = self.reconstruct_value(key, lsn, state).await;
-                    results.insert(key, reconstruct_res);
+                    let converted = match state.collect_pending_ios().await {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            return (key, Err(err));
+                        }
+                    };
+
+                    // The walredo module expects the records to be descending in terms of Lsn.
+                    // And we submit the IOs in that order, so, there shuold be no need to sort here.
+                    debug_assert!(
+                        converted
+                            .records
+                            .is_sorted_by_key(|(lsn, _)| std::cmp::Reverse(*lsn)),
+                        "{converted:?}"
+                    );
+
+                    (
+                        key,
+                        walredo_self.reconstruct_value(key, lsn, converted).await,
+                    )
                 }
-            }
+            });
         }
-        reconstruct_timer.stop_and_record();
+
+        let results = futs
+            .collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>()
+            .await;
 
         // For aux file keys (v1 or v2) the vectored read path does not return an error
         // when they're missing. Instead they are omitted from the resulting btree
@@ -2873,6 +2891,14 @@ impl Timeline {
                     crate::metrics::initial_logical_size::START_CALCULATION.retry(circumstances)
                 };
 
+                let io_concurrency = IoConcurrency::spawn_from_conf(
+                    self_ref.conf,
+                    self_ref
+                        .gate
+                        .enter()
+                        .map_err(|_| CalculateLogicalSizeError::Cancelled)?,
+                );
+
                 let calculated_size = self_ref
                     .logical_size_calculation_task(
                         initial_part_end,
@@ -2882,7 +2908,11 @@ impl Timeline {
                     .await?;
 
                 self_ref
-                    .trigger_aux_file_size_computation(initial_part_end, background_ctx)
+                    .trigger_aux_file_size_computation(
+                        initial_part_end,
+                        background_ctx,
+                        io_concurrency,
+                    )
                     .await?;
 
                 // TODO: add aux file size to logical size
@@ -4115,6 +4145,7 @@ impl Timeline {
 
     /// Create image layers for Postgres data. Assumes the caller passes a partition that is not too large,
     /// so that at most one image layer will be produced from this function.
+    #[allow(clippy::too_many_arguments)]
     async fn create_image_layer_for_rel_blocks(
         self: &Arc<Self>,
         partition: &KeySpace,
@@ -4123,6 +4154,7 @@ impl Timeline {
         ctx: &RequestContext,
         img_range: Range<Key>,
         start: Key,
+        io_concurrency: IoConcurrency,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         let mut wrote_keys = false;
 
@@ -4151,7 +4183,12 @@ impl Timeline {
                     || (last_key_in_range && key_request_accum.raw_size() > 0)
                 {
                     let results = self
-                        .get_vectored(key_request_accum.consume_keyspace(), lsn, ctx)
+                        .get_vectored(
+                            key_request_accum.consume_keyspace(),
+                            lsn,
+                            io_concurrency.clone(),
+                            ctx,
+                        )
                         .await?;
 
                     if self.cancel.is_cancelled() {
@@ -4230,9 +4267,10 @@ impl Timeline {
         img_range: Range<Key>,
         mode: ImageLayerCreationMode,
         start: Key,
+        io_concurrency: IoConcurrency,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         // Metadata keys image layer creation.
-        let mut reconstruct_state = ValuesReconstructState::default();
+        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
         let begin = Instant::now();
         let data = self
             .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
@@ -4449,6 +4487,13 @@ impl Timeline {
                 )))
             });
 
+            let io_concurrency = IoConcurrency::spawn_from_conf(
+                self.conf,
+                self.gate
+                    .enter()
+                    .map_err(|_| CreateImageLayersError::Cancelled)?,
+            );
+
             if !compact_metadata {
                 let ImageLayerCreationOutcome {
                     image,
@@ -4461,6 +4506,7 @@ impl Timeline {
                         ctx,
                         img_range,
                         start,
+                        io_concurrency,
                     )
                     .await?;
 
@@ -4479,6 +4525,7 @@ impl Timeline {
                         img_range,
                         mode,
                         start,
+                        io_concurrency,
                     )
                     .await?;
                 start = next_start_key;
@@ -5746,13 +5793,14 @@ impl Timeline {
         self: &Arc<Timeline>,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> anyhow::Result<Vec<(Key, Bytes)>> {
         let mut all_data = Vec::new();
         let guard = self.layers.read().await;
         for layer in guard.layer_map()?.iter_historic_layers() {
             if !layer.is_delta() && layer.image_layer_lsn() == lsn {
                 let layer = guard.get_from_desc(&layer);
-                let mut reconstruct_data = ValuesReconstructState::default();
+                let mut reconstruct_data = ValuesReconstructState::new(io_concurrency.clone());
                 layer
                     .get_values_reconstruct_data(
                         KeySpace::single(Key::MIN..Key::MAX),
@@ -5761,8 +5809,9 @@ impl Timeline {
                         ctx,
                     )
                     .await?;
-                for (k, v) in reconstruct_data.keys {
-                    all_data.push((k, v?.img.unwrap().1));
+                for (k, v) in std::mem::take(&mut reconstruct_data.keys) {
+                    let v = v.collect_pending_ios().await?;
+                    all_data.push((k, v.img.unwrap().1));
                 }
             }
         }
