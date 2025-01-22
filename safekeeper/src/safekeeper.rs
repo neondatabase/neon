@@ -5,6 +5,10 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use postgres_ffi::{TimeLineID, MAX_SEND_SIZE};
+use safekeeper_api::membership;
+use safekeeper_api::membership::MemberSet;
+use safekeeper_api::membership::SafekeeperId;
+use safekeeper_api::membership::INVALID_GENERATION;
 use safekeeper_api::models::HotStandbyFeedback;
 use safekeeper_api::Term;
 use serde::{Deserialize, Serialize};
@@ -12,6 +16,7 @@ use std::cmp::max;
 use std::cmp::min;
 use std::fmt;
 use std::io::Read;
+use std::str::FromStr;
 use storage_broker::proto::SafekeeperTimelineInfo;
 
 use tracing::*;
@@ -197,6 +202,18 @@ impl AcceptorState {
 /// Initial Proposer -> Acceptor message
 #[derive(Debug, Deserialize)]
 pub struct ProposerGreeting {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub mconf: membership::Configuration,
+    /// Postgres server version
+    pub pg_version: u32,
+    pub system_id: SystemId,
+    pub wal_seg_size: u32,
+}
+
+/// V2 of the message; exists as a struct because we (de)serialized it as is.
+#[derive(Debug, Deserialize)]
+pub struct ProposerGreetingV2 {
     /// proposer-acceptor protocol version
     pub protocol_version: u32,
     /// Postgres server version
@@ -315,29 +332,178 @@ pub enum ProposerAcceptorMessage {
     FlushWAL,
 }
 
+/// Augment Bytes with fallible get_uN where N is number of bytes methods.
+/// All reads are in network (big endian) order.
+trait BytesF {
+    fn get_u8_f(&mut self) -> Result<u8>;
+    fn get_u16_f(&mut self) -> Result<u16>;
+    fn get_u32_f(&mut self) -> Result<u32>;
+    fn get_u64_f(&mut self) -> Result<u64>;
+}
+
+impl BytesF for Bytes {
+    fn get_u8_f(&mut self) -> Result<u8> {
+        if self.is_empty() {
+            bail!("no bytes left, expected 1");
+        }
+        Ok(self.get_u8())
+    }
+    fn get_u16_f(&mut self) -> Result<u16> {
+        if self.is_empty() {
+            bail!("no bytes left, expected 2");
+        }
+        Ok(self.get_u16())
+    }
+    fn get_u32_f(&mut self) -> Result<u32> {
+        if self.remaining() < 4 {
+            bail!("only {} bytes left, expected 4", self.remaining());
+        }
+        Ok(self.get_u32())
+    }
+    fn get_u64_f(&mut self) -> Result<u64> {
+        if self.remaining() < 8 {
+            bail!("only {} bytes left, expected 8", self.remaining());
+        }
+        Ok(self.get_u64())
+    }
+}
+
 impl ProposerAcceptorMessage {
+    /// Read cstring from Bytes.
+    fn read_cstr(buf: &mut Bytes) -> Result<String> {
+        let pos = buf
+            .iter()
+            .position(|x| *x == 0)
+            .ok_or_else(|| anyhow::anyhow!("missing cstring terminator"))?;
+        let result = buf.split_to(pos);
+        buf.advance(1); // drop the null terminator
+        match std::str::from_utf8(&result) {
+            Ok(s) => Ok(s.to_string()),
+            Err(e) => bail!("invalid utf8 in cstring: {}", e),
+        }
+    }
+
+    /// Read membership::Configuration from Bytes.
+    fn read_mconf(buf: &mut Bytes) -> Result<membership::Configuration> {
+        let generation = buf.get_u32_f().with_context(|| "reading generation")?;
+        let members_len = buf.get_u32_f().with_context(|| "reading members_len")?;
+        // Main member set must have at least someone in valid configuration.
+        // Empty conf is allowed until we fully migrate.
+        if generation != INVALID_GENERATION && members_len == 0 {
+            bail!("empty members_len");
+        }
+        let mut members = MemberSet::empty();
+        for i in 0..members_len {
+            let id = buf
+                .get_u64_f()
+                .with_context(|| format!("reading member {} node_id", i))?;
+            let host =
+                Self::read_cstr(buf).with_context(|| format!("reading member {} host", i))?;
+            let pg_port = buf
+                .get_u16_f()
+                .with_context(|| format!("reading member {} port", i))?;
+            let sk = SafekeeperId {
+                id: NodeId(id),
+                host,
+                pg_port,
+            };
+            members.add(sk)?;
+        }
+        let new_members_len = buf.get_u32_f().with_context(|| "reading new_members_len")?;
+        // Non joint conf.
+        if new_members_len == 0 {
+            Ok(membership::Configuration {
+                generation,
+                members,
+                new_members: None,
+            })
+        } else {
+            let mut new_members = MemberSet::empty();
+            for i in 0..new_members_len {
+                let id = buf
+                    .get_u64_f()
+                    .with_context(|| format!("reading new member {} node_id", i))?;
+                let host = Self::read_cstr(buf)
+                    .with_context(|| format!("reading new member {} host", i))?;
+                let pg_port = buf
+                    .get_u16_f()
+                    .with_context(|| format!("reading new member {} port", i))?;
+                let sk = SafekeeperId {
+                    id: NodeId(id),
+                    host,
+                    pg_port,
+                };
+                new_members.add(sk)?;
+            }
+            Ok(membership::Configuration {
+                generation,
+                members,
+                new_members: Some(new_members),
+            })
+        }
+    }
+
     /// Parse proposer message.
     pub fn parse(mut msg_bytes: Bytes, proto_version: u32) -> Result<ProposerAcceptorMessage> {
-        if proto_version == 3 {
+        // TODO remove after converting all msgs
+        let t = msg_bytes[0] as char;
+        if proto_version == 3 && t == 'g' {
             if msg_bytes.is_empty() {
                 bail!("ProposerAcceptorMessage is not complete: missing tag");
             }
-            let tag = msg_bytes.get_u8() as char;
+            let tag = msg_bytes.get_u8_f().with_context(|| {
+                "ProposerAcceptorMessage is not complete: missing tag".to_string()
+            })? as char;
             match tag {
                 'g' => {
-                    bail!("not implemented");
+                    let tenant_id_str =
+                        Self::read_cstr(&mut msg_bytes).with_context(|| "reading tenant_id")?;
+                    let tenant_id = TenantId::from_str(&tenant_id_str)?;
+                    let timeline_id_str =
+                        Self::read_cstr(&mut msg_bytes).with_context(|| "reading timeline_id")?;
+                    let timeline_id = TimelineId::from_str(&timeline_id_str)?;
+                    let mconf = Self::read_mconf(&mut msg_bytes)?;
+                    let pg_version = msg_bytes
+                        .get_u32_f()
+                        .with_context(|| "reading pg_version")?;
+                    let system_id = msg_bytes.get_u64_f().with_context(|| "reading system_id")?;
+                    let wal_seg_size = msg_bytes
+                        .get_u32_f()
+                        .with_context(|| "reading wal_seg_size")?;
+                    let g = ProposerGreeting {
+                        tenant_id,
+                        timeline_id,
+                        mconf,
+                        pg_version,
+                        system_id,
+                        wal_seg_size,
+                    };
+                    Ok(ProposerAcceptorMessage::Greeting(g))
                 }
                 _ => bail!("unknown proposer-acceptor message tag: {}", tag),
             }
-        } else if proto_version == 2 {
+        // TODO remove proto_version == 3 after converting all msgs
+        } else if proto_version == 2 || proto_version == 3 {
             // xxx using Reader is inefficient but easy to work with bincode
             let mut stream = msg_bytes.reader();
             // u64 is here to avoid padding; it will be removed once we stop packing C structs into the wire as is
             let tag = stream.read_u64::<LittleEndian>()? as u8 as char;
             match tag {
                 'g' => {
-                    let msg = ProposerGreeting::des_from(&mut stream)?;
-                    Ok(ProposerAcceptorMessage::Greeting(msg))
+                    let msgv2 = ProposerGreetingV2::des_from(&mut stream)?;
+                    let g = ProposerGreeting {
+                        tenant_id: msgv2.tenant_id,
+                        timeline_id: msgv2.timeline_id,
+                        mconf: membership::Configuration {
+                            generation: INVALID_GENERATION,
+                            members: MemberSet::empty(),
+                            new_members: None,
+                        },
+                        pg_version: msgv2.pg_version,
+                        system_id: msgv2.system_id,
+                        wal_seg_size: msgv2.wal_seg_size,
+                    };
+                    Ok(ProposerAcceptorMessage::Greeting(g))
                 }
                 'v' => {
                     let msg = VoteRequest::des_from(&mut stream)?;
@@ -402,16 +568,7 @@ impl ProposerAcceptorMessage {
         // We explicitly list all fields, to draw attention here when new fields are added.
         let mut size = BASE_SIZE;
         size += match self {
-            Self::Greeting(ProposerGreeting {
-                protocol_version: _,
-                pg_version: _,
-                proposer_id: _,
-                system_id: _,
-                timeline_id: _,
-                tenant_id: _,
-                tli: _,
-                wal_seg_size: _,
-            }) => 0,
+            Self::Greeting(_) => 0,
 
             Self::VoteRequest(VoteRequest { term: _ }) => 0,
 
@@ -601,14 +758,6 @@ where
         &mut self,
         msg: &ProposerGreeting,
     ) -> Result<Option<AcceptorProposerMessage>> {
-        // Check protocol compatibility
-        if msg.protocol_version != SK_PROTOCOL_VERSION {
-            bail!(
-                "incompatible protocol version {}, expected {}",
-                msg.protocol_version,
-                SK_PROTOCOL_VERSION
-            );
-        }
         /* Postgres major version mismatch is treated as fatal error
          * because safekeepers parse WAL headers and the format
          * may change between versions.
@@ -664,9 +813,8 @@ where
         }
 
         info!(
-            "processed greeting from walproposer {}, sending term {:?}",
-            msg.proposer_id.map(|b| format!("{:X}", b)).join(""),
-            self.state.acceptor_state.term
+            "processed greeting {:?} from walproposer, sending term {:?}",
+            msg, self.state.acceptor_state.term
         );
         Ok(Some(AcceptorProposerMessage::Greeting(AcceptorGreeting {
             term: self.state.acceptor_state.term,
