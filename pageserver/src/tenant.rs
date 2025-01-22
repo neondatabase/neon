@@ -6489,6 +6489,7 @@ mod tests {
     async fn test_get_vectored() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_get_vectored").await?;
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -6546,65 +6547,48 @@ mod tests {
         // Pick a big LSN such that we query over all the changes.
         let reads_lsn = Lsn(u64::MAX - 1);
 
-        let gate = Gate::default();
-        let io_concurrency_levels: Vec<Box<dyn Fn() -> SelectedIoConcurrency>> = vec![
-            Box::new(|| SelectedIoConcurrency::Sequential),
-            Box::new(|| SelectedIoConcurrency::SidecarTask(gate.enter().unwrap())),
-        ];
+        for read in reads {
+            info!("Doing vectored read on {:?}", read);
 
-        for (io_concurrency_level_idx, io_concurrency_level) in
-            io_concurrency_levels.into_iter().enumerate()
-        {
-            for read in reads.clone() {
-                let io_concurrency_level = io_concurrency_level();
+            let vectored_res = tline
+                .get_vectored_impl(
+                    read.clone(),
+                    reads_lsn,
+                    &mut ValuesReconstructState::new(io_concurrency.clone()),
+                    &ctx,
+                )
+                .await;
 
-                info!(
-                    "Doing vectored read on {read:?} with IO concurrency {io_concurrency_level_idx:?}",
-                );
-
-                let vectored_res = tline
-                    .get_vectored_impl(
-                        read.clone(),
-                        reads_lsn,
-                        &mut ValuesReconstructState::new(IoConcurrency::spawn(
-                            io_concurrency_level,
-                        )),
-                        &ctx,
-                    )
-                    .await;
-
-                let mut expected_lsns: HashMap<Key, Lsn> = Default::default();
-                let mut expect_missing = false;
-                let mut key = read.start().unwrap();
-                while key != read.end().unwrap() {
-                    if let Some(lsns) = inserted.get(&key) {
-                        let expected_lsn = lsns.iter().rfind(|lsn| **lsn <= reads_lsn);
-                        match expected_lsn {
-                            Some(lsn) => {
-                                expected_lsns.insert(key, *lsn);
-                            }
-                            None => {
-                                expect_missing = true;
-                                break;
-                            }
+            let mut expected_lsns: HashMap<Key, Lsn> = Default::default();
+            let mut expect_missing = false;
+            let mut key = read.start().unwrap();
+            while key != read.end().unwrap() {
+                if let Some(lsns) = inserted.get(&key) {
+                    let expected_lsn = lsns.iter().rfind(|lsn| **lsn <= reads_lsn);
+                    match expected_lsn {
+                        Some(lsn) => {
+                            expected_lsns.insert(key, *lsn);
                         }
-                    } else {
-                        expect_missing = true;
-                        break;
+                        None => {
+                            expect_missing = true;
+                            break;
+                        }
                     }
-
-                    key = key.next();
+                } else {
+                    expect_missing = true;
+                    break;
                 }
 
-                if expect_missing {
-                    assert!(matches!(vectored_res, Err(GetVectoredError::MissingKey(_))));
-                } else {
-                    for (key, image) in vectored_res? {
-                        let expected_lsn = expected_lsns.get(&key).expect("determined above");
-                        let expected_image =
-                            test_img(&format!("{} at {}", key.field6, expected_lsn));
-                        assert_eq!(image?, expected_image);
-                    }
+                key = key.next();
+            }
+
+            if expect_missing {
+                assert!(matches!(vectored_res, Err(GetVectoredError::MissingKey(_))));
+            } else {
+                for (key, image) in vectored_res? {
+                    let expected_lsn = expected_lsns.get(&key).expect("determined above");
+                    let expected_image = test_img(&format!("{} at {}", key.field6, expected_lsn));
+                    assert_eq!(image?, expected_image);
                 }
             }
         }
