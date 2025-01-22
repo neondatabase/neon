@@ -3592,7 +3592,6 @@ impl Service {
             timeline_id: timeline_id.to_string(),
             generation: 0,
             sk_set: sks_persistence.clone(),
-            new_sk_set: sks_persistence.clone(),
             cplane_notified_generation: 0,
             status_kind: String::from(TimelineStatusKind::Creating),
             status,
@@ -4260,7 +4259,7 @@ impl Service {
 
         if new_status_kind == TimelineStatusKind::Deleted {
             self.persistence
-                .update_timeline_status(tenant_id, timeline_id, new_status_kind, "{}".to_owned())
+                .update_timeline_status_deleted(tenant_id, timeline_id)
                 .await?;
         }
         Ok(())

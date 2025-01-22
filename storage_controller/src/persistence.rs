@@ -1257,6 +1257,40 @@ impl Persistence {
         )
         .await
     }
+    pub(crate) async fn update_timeline_status_deleted(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines;
+
+        let now = chrono::offset::Utc::now();
+        self.with_measured_conn(
+            DatabaseOperation::InsertTimeline,
+            move |conn| -> DatabaseResult<()> {
+                let inserted_updated = diesel::update(timelines::table)
+                    .filter(timelines::tenant_id.eq(tenant_id.to_string()))
+                    .filter(timelines::timeline_id.eq(timeline_id.to_string()))
+                    .filter(timelines::status_kind.eq(String::from(TimelineStatusKind::Deleting)))
+                    .set((
+                        timelines::status_kind.eq(String::from(TimelineStatusKind::Deleted)),
+                        timelines::status.eq("{}"),
+                        timelines::deleted_at.eq(now),
+                    ))
+                    .execute(conn)?;
+
+                if inserted_updated != 1 {
+                    return Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({})",
+                        inserted_updated
+                    )));
+                }
+
+                Ok(())
+            },
+        )
+        .await
+    }
 
     /// Obtains the timeline, returns None if not present
     pub(crate) async fn get_timeline(
@@ -1585,7 +1619,6 @@ pub(crate) struct TimelinePersistence {
     pub(crate) timeline_id: String,
     pub(crate) generation: i32,
     pub(crate) sk_set: Vec<i64>,
-    pub(crate) new_sk_set: Vec<i64>,
     pub(crate) cplane_notified_generation: i32,
     pub(crate) status_kind: String,
     pub(crate) status: String,
@@ -1598,10 +1631,11 @@ pub(crate) struct TimelineFromDb {
     pub(crate) timeline_id: String,
     pub(crate) generation: i32,
     pub(crate) sk_set: Vec<Option<i64>>,
-    pub(crate) new_sk_set: Vec<Option<i64>>,
     pub(crate) cplane_notified_generation: i32,
     pub(crate) status_kind: String,
     pub(crate) status: String,
+    #[allow(unused)]
+    pub(crate) deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl TimelineFromDb {
@@ -1611,7 +1645,6 @@ impl TimelineFromDb {
             timeline_id: self.timeline_id,
             generation: self.generation,
             sk_set: self.sk_set.into_iter().flatten().collect(),
-            new_sk_set: self.new_sk_set.into_iter().flatten().collect(),
             cplane_notified_generation: self.cplane_notified_generation,
             status_kind: self.status_kind,
             status: self.status,
