@@ -18,8 +18,9 @@ def test_subscriber_branching(neon_simple_env: NeonEnv):
     pub = env.endpoints.create("publisher")
     pub.respec(
         skip_pg_catalog_updates=False,
+        create_test_user=True,
     )
-    pub.start()
+    pub.start(create_test_user=True)
 
     env.create_branch("subscriber")
     sub = env.endpoints.create("subscriber")
