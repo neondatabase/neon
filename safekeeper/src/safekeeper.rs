@@ -34,7 +34,8 @@ use utils::{
     lsn::Lsn,
 };
 
-pub const SK_PROTOCOL_VERSION: u32 = 2;
+pub const SK_PROTO_VERSION_2: u32 = 2;
+pub const SK_PROTO_VERSION_3: u32 = 3;
 pub const UNKNOWN_SERVER_VERSION: u32 = 0;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -447,7 +448,7 @@ impl ProposerAcceptorMessage {
     pub fn parse(mut msg_bytes: Bytes, proto_version: u32) -> Result<ProposerAcceptorMessage> {
         // TODO remove after converting all msgs
         let t = msg_bytes[0] as char;
-        if proto_version == 3 && t == 'g' {
+        if proto_version == SK_PROTO_VERSION_3 && t == 'g' {
             if msg_bytes.is_empty() {
                 bail!("ProposerAcceptorMessage is not complete: missing tag");
             }
@@ -483,7 +484,7 @@ impl ProposerAcceptorMessage {
                 _ => bail!("unknown proposer-acceptor message tag: {}", tag),
             }
         // TODO remove proto_version == 3 after converting all msgs
-        } else if proto_version == 2 || proto_version == 3 {
+        } else if proto_version == SK_PROTO_VERSION_2 || proto_version == SK_PROTO_VERSION_3 {
             // xxx using Reader is inefficient but easy to work with bincode
             let mut stream = msg_bytes.reader();
             // u64 is here to avoid padding; it will be removed once we stop packing C structs into the wire as is
@@ -624,44 +625,55 @@ pub enum AcceptorProposerMessage {
 
 impl AcceptorProposerMessage {
     /// Serialize acceptor -> proposer message.
-    pub fn serialize(&self, buf: &mut BytesMut) -> Result<()> {
-        match self {
-            AcceptorProposerMessage::Greeting(msg) => {
-                buf.put_u64_le('g' as u64);
-                buf.put_u64_le(msg.term);
-                buf.put_u64_le(msg.node_id.0);
+    pub fn serialize(&self, buf: &mut BytesMut, proto_version: u32) -> Result<()> {
+        // TODO remove after converting all msgs
+        if proto_version == SK_PROTO_VERSION_3
+            && (matches!(self, AcceptorProposerMessage::Greeting(_)))
+        {
+            match self {
+                _ => bail!("not implemented"),
             }
-            AcceptorProposerMessage::VoteResponse(msg) => {
-                buf.put_u64_le('v' as u64);
-                buf.put_u64_le(msg.term);
-                buf.put_u64_le(msg.vote_given);
-                buf.put_u64_le(msg.flush_lsn.into());
-                buf.put_u64_le(msg.truncate_lsn.into());
-                buf.put_u32_le(msg.term_history.0.len() as u32);
-                for e in &msg.term_history.0 {
-                    buf.put_u64_le(e.term);
-                    buf.put_u64_le(e.lsn.into());
+        // TODO remove 3 after converting all msgs
+        } else if proto_version == SK_PROTO_VERSION_2 || proto_version == SK_PROTO_VERSION_3 {
+            match self {
+                AcceptorProposerMessage::Greeting(msg) => {
+                    buf.put_u64_le('g' as u64);
+                    buf.put_u64_le(msg.term);
+                    buf.put_u64_le(msg.node_id.0);
                 }
-                buf.put_u64_le(msg.timeline_start_lsn.into());
-            }
-            AcceptorProposerMessage::AppendResponse(msg) => {
-                buf.put_u64_le('a' as u64);
-                buf.put_u64_le(msg.term);
-                buf.put_u64_le(msg.flush_lsn.into());
-                buf.put_u64_le(msg.commit_lsn.into());
-                buf.put_i64_le(msg.hs_feedback.ts);
-                buf.put_u64_le(msg.hs_feedback.xmin);
-                buf.put_u64_le(msg.hs_feedback.catalog_xmin);
+                AcceptorProposerMessage::VoteResponse(msg) => {
+                    buf.put_u64_le('v' as u64);
+                    buf.put_u64_le(msg.term);
+                    buf.put_u64_le(msg.vote_given);
+                    buf.put_u64_le(msg.flush_lsn.into());
+                    buf.put_u64_le(msg.truncate_lsn.into());
+                    buf.put_u32_le(msg.term_history.0.len() as u32);
+                    for e in &msg.term_history.0 {
+                        buf.put_u64_le(e.term);
+                        buf.put_u64_le(e.lsn.into());
+                    }
+                    buf.put_u64_le(msg.timeline_start_lsn.into());
+                }
+                AcceptorProposerMessage::AppendResponse(msg) => {
+                    buf.put_u64_le('a' as u64);
+                    buf.put_u64_le(msg.term);
+                    buf.put_u64_le(msg.flush_lsn.into());
+                    buf.put_u64_le(msg.commit_lsn.into());
+                    buf.put_i64_le(msg.hs_feedback.ts);
+                    buf.put_u64_le(msg.hs_feedback.xmin);
+                    buf.put_u64_le(msg.hs_feedback.catalog_xmin);
 
-                // AsyncReadMessage in walproposer.c will not try to decode pageserver_feedback
-                // if it is not present.
-                if let Some(ref msg) = msg.pageserver_feedback {
-                    msg.serialize(buf);
+                    // AsyncReadMessage in walproposer.c will not try to decode pageserver_feedback
+                    // if it is not present.
+                    if let Some(ref msg) = msg.pageserver_feedback {
+                        msg.serialize(buf);
+                    }
                 }
             }
+            Ok(())
+        } else {
+            bail!("unsupported protocol version {}", proto_version);
         }
-
-        Ok(())
     }
 }
 
