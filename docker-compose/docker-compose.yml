@@ -185,6 +185,8 @@ services:
   neon-test-extensions:
     profiles: ["test-extensions"]
     image: ${REPOSITORY:-neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-16}:${TAG:-latest}
+    environment:
+      - PGPASSWORD=cloud_admin
     entrypoint:
       - "/bin/bash"
       - "-c"
