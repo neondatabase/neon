@@ -14,19 +14,24 @@ use axum::{
     Router,
 };
 use http::StatusCode;
+use jsonwebtoken::jwk::JwkSet;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
-use tower_http::{request_id::PropagateRequestIdLayer, trace::TraceLayer};
+use tower_http::{
+    auth::AsyncRequireAuthorizationLayer, request_id::PropagateRequestIdLayer, trace::TraceLayer,
+};
 use tracing::{debug, error, info, Span};
 use uuid::Uuid;
 
-use super::routes::{
-    check_writability, configure, database_schema, dbs_and_roles, extension_server, extensions,
-    grants, insights, metrics, metrics_json, status, terminate,
+use super::{
+    headers::X_REQUEST_ID,
+    middleware::authorize::Authorize,
+    routes::{
+        check_writability, configure, database_schema, dbs_and_roles, extension_server, extensions,
+        grants, insights, metrics, metrics_json, status, terminate,
+    },
 };
 use crate::compute::ComputeNode;
-
-const X_REQUEST_ID: &str = "x-request-id";
 
 /// `compute_ctl` has two servers: internal and external. The internal server
 /// binds to the loopback interface and handles communication from clients on
@@ -34,57 +39,32 @@ const X_REQUEST_ID: &str = "x-request-id";
 /// control plane, the metrics scraper, etc. We make the distinction because
 /// certain routes in `compute_ctl` only need to be exposed to local processes
 /// like Postgres via the neon extension and local_proxy.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Server {
-    Internal(u16),
-    External(u16),
+    Internal {
+        port: u16,
+    },
+    External {
+        port: u16,
+        jwks: JwkSet,
+        compute_id: String,
+    },
 }
 
 impl Display for Server {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Server::Internal(_) => f.write_str("internal"),
-            Server::External(_) => f.write_str("external"),
+            Server::Internal { .. } => f.write_str("internal"),
+            Server::External { .. } => f.write_str("external"),
         }
     }
 }
 
-impl From<Server> for Router<Arc<ComputeNode>> {
-    fn from(server: Server) -> Self {
-        let mut router = Router::<Arc<ComputeNode>>::new();
-
-        router = match server {
-            Server::Internal(_) => {
-                router = router
-                    .route(
-                        "/extension_server/{*filename}",
-                        post(extension_server::download_extension),
-                    )
-                    .route("/extensions", post(extensions::install_extension))
-                    .route("/grants", post(grants::add_grant));
-
-                // Add in any testing support
-                if cfg!(feature = "testing") {
-                    use super::routes::failpoints;
-
-                    router = router.route("/failpoints", post(failpoints::configure_failpoints));
-                }
-
-                router
-            }
-            Server::External(_) => router
-                .route("/check_writability", post(check_writability::is_writable))
-                .route("/configure", post(configure::configure))
-                .route("/database_schema", get(database_schema::get_schema_dump))
-                .route("/dbs_and_roles", get(dbs_and_roles::get_catalog_objects))
-                .route("/insights", get(insights::get_insights))
-                .route("/metrics", get(metrics::get_metrics))
-                .route("/metrics.json", get(metrics_json::get_metrics))
-                .route("/status", get(status::get_status))
-                .route("/terminate", post(terminate::terminate)),
-        };
-
-        router.fallback(Server::handle_404).method_not_allowed_fallback(Server::handle_405).layer(
+impl From<&Server> for Router<Arc<ComputeNode>> {
+    fn from(server: &Server) -> Self {
+        let mut router = Router::<Arc<ComputeNode>>::new()
+            .fallback(Server::handle_404)
+            .method_not_allowed_fallback(Server::handle_405).layer(
             ServiceBuilder::new()
                 // Add this middleware since we assume the request ID exists
                 .layer(middleware::from_fn(maybe_add_request_id_header))
@@ -122,8 +102,45 @@ impl From<Server> for Router<Arc<ComputeNode>> {
                             },
                         ),
                 )
-                .layer(PropagateRequestIdLayer::x_request_id()),
-        )
+                .layer(PropagateRequestIdLayer::x_request_id())
+        );
+
+        match server {
+            Server::Internal { .. } => {
+                router = router
+                    .route(
+                        "/extension_server/{*filename}",
+                        post(extension_server::download_extension),
+                    )
+                    .route("/extensions", post(extensions::install_extension))
+                    .route("/grants", post(grants::add_grant));
+
+                // Add in any testing support
+                if cfg!(feature = "testing") {
+                    use super::routes::failpoints;
+
+                    router = router.route("/failpoints", post(failpoints::configure_failpoints));
+                }
+
+                router
+            }
+            Server::External {
+                jwks, compute_id, ..
+            } => router
+                .route("/check_writability", post(check_writability::is_writable))
+                .route("/configure", post(configure::configure))
+                .route("/database_schema", get(database_schema::get_schema_dump))
+                .route("/dbs_and_roles", get(dbs_and_roles::get_catalog_objects))
+                .route("/insights", get(insights::get_insights))
+                .route("/metrics", get(metrics::get_metrics))
+                .route("/metrics.json", get(metrics_json::get_metrics))
+                .route("/status", get(status::get_status))
+                .route("/terminate", post(terminate::terminate))
+                .layer(AsyncRequireAuthorizationLayer::new(Authorize::new(
+                    compute_id.clone(),
+                    jwks.clone(),
+                ))),
+        }
     }
 }
 
@@ -147,15 +164,15 @@ impl Server {
         match self {
             // TODO: Change this to Ipv6Addr::LOCALHOST when the GitHub runners
             // allow binding to localhost
-            Server::Internal(_) => IpAddr::from(Ipv6Addr::UNSPECIFIED),
-            Server::External(_) => IpAddr::from(Ipv6Addr::UNSPECIFIED),
+            Server::Internal { .. } => IpAddr::from(Ipv6Addr::UNSPECIFIED),
+            Server::External { .. } => IpAddr::from(Ipv6Addr::UNSPECIFIED),
         }
     }
 
-    fn port(self) -> u16 {
+    fn port(&self) -> u16 {
         match self {
-            Server::Internal(port) => port,
-            Server::External(port) => port,
+            Server::Internal { port, .. } => *port,
+            Server::External { port, .. } => *port,
         }
     }
 
@@ -182,7 +199,9 @@ impl Server {
             );
         }
 
-        let router = Router::from(self).with_state(compute);
+        let router = Router::from(&self)
+            .with_state(compute)
+            .into_make_service_with_connect_info::<SocketAddr>();
 
         if let Err(e) = axum::serve(listener, router).await {
             error!("compute_ctl {} HTTP server error: {}", self, e);
