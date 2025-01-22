@@ -82,6 +82,7 @@ static char *FormatSafekeeperState(Safekeeper *sk);
 static void AssertEventsOkForState(uint32 events, Safekeeper *sk);
 static char *FormatEvents(WalProposer *wp, uint32 events);
 static void UpdateDonorShmem(WalProposer *wp);
+static void MembershipConfigurationFree(MembershipConfiguration *mconf);
 
 WalProposer *
 WalProposerCreate(WalProposerConfig *config, walproposer_api api)
@@ -328,6 +329,7 @@ ShutdownConnection(Safekeeper *sk)
 	sk->state = SS_OFFLINE;
 	sk->streamingAt = InvalidXLogRecPtr;
 
+	MembershipConfigurationFree(&sk->greetResponse.mconf);
 	if (sk->voteResponse.termHistory.entries)
 		pfree(sk->voteResponse.termHistory.entries);
 	sk->voteResponse.termHistory.entries = NULL;
@@ -1840,7 +1842,7 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 	}
 
 	if (proto_version == 2 || proto_version == 3)
-		//TODO remove proto_version == 3 after converting all msgs
+		/* TODO remove proto_version == 3 after converting all msgs */
 		/* removeme tag check after converting all msgs */
 	{
 		switch (msg->tag)
@@ -1922,6 +1924,37 @@ AsyncRead(Safekeeper *sk, char **buf, int *buf_size)
 	return false;
 }
 
+/* Deserialize membership configuration from buf to mconf. */
+static void
+MembershipConfigurationDeserialize(MembershipConfiguration *mconf, StringInfo buf)
+{
+	uint32		i;
+
+	mconf->generation = pq_getmsgint32(buf);
+	mconf->members.len = pq_getmsgint32(buf);
+	mconf->members.m = palloc0(sizeof(SafekeeperId) * mconf->members.len);
+	for (i = 0; i < mconf->members.len; i++)
+	{
+		const char *buf_host;
+
+		mconf->members.m[i].node_id = pq_getmsgint64(buf);
+		buf_host = pq_getmsgrawstring(buf);
+		strlcpy(mconf->members.m[i].host, buf_host, sizeof(mconf->members.m[i].host));
+		mconf->members.m[i].port = pq_getmsgint16(buf);
+	}
+	mconf->new_members.len = pq_getmsgint32(buf);
+	mconf->new_members.m = palloc0(sizeof(SafekeeperId) * mconf->new_members.len);
+	for (i = 0; i < mconf->new_members.len; i++)
+	{
+		const char *buf_host;
+
+		mconf->new_members.m[i].node_id = pq_getmsgint64(buf);
+		buf_host = pq_getmsgrawstring(buf);
+		strlcpy(mconf->new_members.m[i].host, buf_host, sizeof(mconf->new_members.m[i].host));
+		mconf->new_members.m[i].port = pq_getmsgint16(buf);
+	}
+}
+
 /*
  * Read next message with known type into provided struct, by reading a CopyData
  * block from the safekeeper's postgres connection, returning whether the read
@@ -1955,13 +1988,31 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 	/* removeme tag check after converting all msgs */
 	if (wp->config->proto_version == 3 && anymsg->tag == 'g')
 	{
-		tag = pq_getmsgint(&s, 1);
+		tag = pq_getmsgbyte(&s);
 		if (tag != anymsg->tag)
 		{
 			wp_log(WARNING, "unexpected message tag %c from node %s:%s in state %s", (char) tag, sk->host,
 				   sk->port, FormatSafekeeperState(sk));
 			ResetConnection(sk);
 			return false;
+		}
+		switch (tag)
+		{
+			case 'g':
+				{
+					AcceptorGreeting *msg = (AcceptorGreeting *) anymsg;
+
+					msg->nodeId = pq_getmsgint64(&s);
+					MembershipConfigurationDeserialize(&msg->mconf, &s);
+					msg->term = pq_getmsgint64(&s);
+					pq_getmsgend(&s);
+					return true;
+				}
+			default:
+				{
+					wp_log(FATAL, "unexpected message tag %c to read", (char) tag);
+					return false;
+				}
 		}
 	}
 	/* removeme tag check after converting all msgs */
@@ -2027,7 +2078,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 
 			default:
 				{
-					wp_log(FATAL, "unexpected message tag %c", (char) tag);
+					wp_log(FATAL, "unexpected message tag %c to read", (char) tag);
 					return false;
 				}
 		}
@@ -2407,4 +2458,13 @@ FormatEvents(WalProposer *wp, uint32 events)
 		return_str[6] = '\0';
 
 	return (char *) &return_str;
+}
+
+static void
+MembershipConfigurationFree(MembershipConfiguration *mconf)
+{
+	if (mconf->members.m)
+		pfree(mconf->members.m);
+	if (mconf->new_members.m)
+		pfree(mconf->new_members.m);
 }
