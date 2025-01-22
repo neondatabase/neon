@@ -1078,12 +1078,6 @@ jobs:
               console.log(`Tag ${tag} created successfully.`);
             }
 
-            // TODO: check how GitHub releases looks for proxy/compute releases and enable them if they're ok
-            if (context.ref !== 'refs/heads/release') {
-              console.log(`GitHub release skipped for ${context.ref}.`);
-              return;
-            }
-
             try {
               const existingRelease = await github.rest.repos.getReleaseByTag({
                 owner: context.repo.owner,
@@ -1102,7 +1096,8 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 tag_name: tag,
-                generate_release_notes: true,
+                // TODO: Automate release notes properly
+                generate_release_notes: false,
               });
               console.log(`Release for tag ${tag} created successfully.`);
             }

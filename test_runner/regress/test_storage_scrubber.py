@@ -227,7 +227,9 @@ def test_scrubber_physical_gc_ancestors(neon_env_builder: NeonEnvBuilder, shard_
     new_shard_count = 4
     assert shard_count is None or new_shard_count > shard_count
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
-    env.storage_controller.reconcile_until_idle()  # Move shards to their final locations immediately
+    env.storage_controller.reconcile_until_idle(
+        timeout_secs=120
+    )  # Move shards to their final locations immediately
 
     # Create a timeline after split, to ensure scrubber can handle timelines that exist in child shards but not ancestors
     env.storage_controller.pageserver_api().timeline_create(
@@ -269,6 +271,8 @@ def test_scrubber_physical_gc_ancestors(neon_env_builder: NeonEnvBuilder, shard_
         ps.http_client().timeline_compact(
             shard, timeline_id, force_image_layer_creation=True, wait_until_uploaded=True
         )
+        # Add some WAL so that we don't gc at the latest remote consistent lsn
+        workload.churn_rows(1)
         ps.http_client().timeline_gc(shard, timeline_id, 0)
 
     # We will use a min_age_secs=1 threshold for deletion, let it pass

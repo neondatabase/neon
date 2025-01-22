@@ -2841,9 +2841,6 @@ impl Timeline {
     ///
     /// It is _not_ sensitive to task_mgr::shutdown_token().
     ///
-    /// The rationale is that we spawn initial logical size calculation
-    /// during activation, hence
-    ///
     /// # Cancel-Safety
     ///
     /// It does Timeline IO, hence this should be polled to completion because
@@ -3629,6 +3626,12 @@ impl Timeline {
                     // anyone waiting on that will respect self.cancel as well: they will stop
                     // waiting at the same time we as drop out of this loop.
                     return;
+                }
+
+                // Break to notify potential waiters as soon as we've flushed the requested LSN. If
+                // more requests have arrived in the meanwhile, we'll resume flushing afterwards.
+                if flushed_to_lsn >= frozen_to_lsn {
+                    break Ok(());
                 }
 
                 let timer = self.metrics.flush_time_histo.start_timer();
