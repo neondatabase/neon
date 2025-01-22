@@ -21,7 +21,7 @@ defaults:
     shell: bash -euo pipefail {0}
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   create-release-branch:
