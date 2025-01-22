@@ -76,7 +76,7 @@ impl Client {
         }
     }
 
-    pub async fn create_timeline(&self, req: TimelineCreateRequest) -> Result<TimelineStatus> {
+    pub async fn create_timeline(&self, req: &TimelineCreateRequest) -> Result<TimelineStatus> {
         let uri = format!(
             "{}/v1/tenant/{}/timeline/{}",
             self.mgmt_api_endpoint, req.tenant_id, req.timeline_id
