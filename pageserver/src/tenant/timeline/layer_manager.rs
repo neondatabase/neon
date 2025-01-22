@@ -339,19 +339,59 @@ impl OpenLayerManager {
     ) {
         // gc-compaction could contain layer rewrites. We need to delete the old layers and insert the new ones.
         let mut updates = self.layer_map.batch_update();
-        let mut layers_to_remove = HashMap::new();
-        for l in compact_from {
-            layers_to_remove.insert(l.layer_desc().key(), l);
+        // Match the old layers with the new layers
+        let mut add_layers = HashMap::new();
+        let mut rewrite_layers = HashMap::new();
+        let mut drop_layers = HashMap::new();
+        for layer in compact_from {
+            drop_layers.insert(layer.layer_desc().key(), layer);
         }
-        for l in compact_to {
-            if let Some(layer) = layers_to_remove.remove(&l.layer_desc().key()) {
-                Self::delete_historic_layer(layer, &mut updates, &mut self.layer_fmgr);
+        for layer in compact_to {
+            if let Some(old_layer) = drop_layers.remove(&layer.layer_desc().key()) {
+                rewrite_layers.insert(layer.layer_desc().key(), (old_layer, layer));
+            } else {
+                add_layers.insert(layer.layer_desc().key(), layer);
             }
+        }
+        // Process the updates, same as `rewrite_layers` but also adding some layers
+        for (_, (old_layer, new_layer)) in rewrite_layers {
+            debug_assert_eq!(
+                old_layer.layer_desc().key_range,
+                new_layer.layer_desc().key_range
+            );
+            debug_assert_eq!(
+                old_layer.layer_desc().lsn_range,
+                new_layer.layer_desc().lsn_range
+            );
+
+            // Transfer visibility hint from old to new layer, since the new layer covers the same key space.  This is not guaranteed to
+            // be accurate (as the new layer may cover a different subset of the key range), but is a sensible default, and prevents
+            // always marking rewritten layers as visible.
+            new_layer.as_ref().set_visibility(old_layer.visibility());
+
+            // Safety: we may never rewrite the same file in-place.  Callers are responsible
+            // for ensuring that they only rewrite layers after something changes the path,
+            // such as an increment in the generation number.
+            assert_ne!(old_layer.local_path(), new_layer.local_path());
+
+            Self::delete_historic_layer(old_layer, &mut updates, &mut self.layer_fmgr);
+
+            Self::insert_historic_layer(
+                new_layer.as_ref().clone(),
+                &mut updates,
+                &mut self.layer_fmgr,
+            );
+
+            metrics.record_new_file_metrics(new_layer.layer_desc().file_size);
+        }
+        // Delete the layers that are no longer needed
+        for (_, l) in drop_layers {
+            Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
+        }
+        // Add the new layers
+        for (_, l) in add_layers {
             Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
             metrics.record_new_file_metrics(l.layer_desc().file_size);
-        }
-        for (_, l) in layers_to_remove {
-            Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
         }
         updates.flush();
     }
