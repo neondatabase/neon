@@ -911,57 +911,85 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			if (entry->access_count++ == 0)
 				dlist_delete(&entry->list_node);
 		}
-		else
+		/*-----------
+		 * If the chunk wasn't already in the LFC then we have these
+		 * options, in order of preference:
+		 *
+		 * Unless there is no space available, we can:
+		 *  1. Use an entry from the `holes` list, and
+		 *  2. Create a new entry.
+		 * We can always, regardless of space in the LFC:
+		 *  3. evict an entry from LRU, and
+		 *  4. ignore the write operation (the least favorite option)
+		 */
+		else if (lfc_ctl->used < lfc_ctl->limit)
 		{
-			/*
-			 * We have two choices if all cache pages are pinned (i.e. used in IO
-			 * operations):
-			 *
-			 * 1) Wait until some of this operation is completed and pages is
-			 * unpinned.
-			 *
-			 * 2) Allocate one more chunk, so that specified cache size is more
-			 * recommendation than hard limit.
-			 *
-			 * As far as probability of such event (that all pages are pinned) is
-			 * considered to be very very small: there are should be very large
-			 * number of concurrent IO operations and them are limited by
-			 * max_connections, we prefer not to complicate code and use second
-			 * approach.
-			 */
-			if (lfc_ctl->used >= lfc_ctl->limit && !dlist_is_empty(&lfc_ctl->lru))
-			{
-				/* Cache overflow: evict least recently used chunk */
-				FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->lru));
-	
-				for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
-				{
-					lfc_ctl->used_pages -= (victim->bitmap[i >> 5] >> (i & 31)) & 1;
-				}
-				CriticalAssert(victim->access_count == 0);
-				entry->offset = victim->offset; /* grab victim's chunk */
-				hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
-				neon_log(DEBUG2, "Swap file cache page");
-			}
-			else if (!dlist_is_empty(&lfc_ctl->holes))
+			if (!dlist_is_empty(&lfc_ctl->holes))
 			{
 				/* We can reuse a hole that was left behind when the LFC was shrunk previously */
-				FileCacheEntry *hole = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->holes));
-				uint32		offset = hole->offset;
-				bool		hole_found;
-	
-				hash_search_with_hash_value(lfc_hash, &hole->key, hole->hash, HASH_REMOVE, &hole_found);
+				FileCacheEntry *hole = dlist_container(FileCacheEntry, list_node,
+													   dlist_pop_head_node(&lfc_ctl->holes));
+				uint32 offset = hole->offset;
+				bool hole_found;
+
+				hash_search_with_hash_value(lfc_hash, &hole->key,
+											hole->hash, HASH_REMOVE, &hole_found);
 				CriticalAssert(hole_found);
-	
+
 				lfc_ctl->used += 1;
-				entry->offset = offset;	/* reuse the hole */
+				entry->offset = offset;			/* reuse the hole */
 			}
 			else
 			{
 				lfc_ctl->used += 1;
-				entry->offset = lfc_ctl->size++;	/* allocate new chunk at end
-													 * of file */
+				entry->offset = lfc_ctl->size++;/* allocate new chunk at end
+												 * of file */
 			}
+		}
+		/*
+		 * We've already used up all allocated LFC entries.
+		 *
+		 * If we can clear an entry from the LRU, do that.
+		 * If we can't (e.g. because all other slots are being accessed)
+		 * then we will remove this entry from the hash and continue
+		 * on to the next chunk, as we may not exceed the limit.
+		 */
+		else if (!dlist_is_empty(&lfc_ctl->lru))
+		{
+			/* Cache overflow: evict least recently used chunk */
+			FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node,
+													 dlist_pop_head_node(&lfc_ctl->lru));
+
+			for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
+			{
+				lfc_ctl->used_pages -= (victim->bitmap[i >> 5] >> (i & 31)) & 1;
+			}
+
+			CriticalAssert(victim->access_count == 0);
+			entry->offset = victim->offset; /* grab victim's chunk */
+			hash_search_with_hash_value(lfc_hash, &victim->key,
+										victim->hash, HASH_REMOVE, NULL);
+			neon_log(DEBUG2, "Swap file cache page");
+		}
+		else
+		{
+			/* Can't add this chunk - we don't have the space for it */
+			hash_search_with_hash_value(lfc_hash, &entry->key, hash,
+										HASH_REMOVE, NULL);
+
+			/*
+			 * We can't process this chunk due to lack of space in LFC,
+			 * so skip to the next one
+			 */
+			LWLockRelease(lfc_lock);
+			blkno += blocks_in_chunk;
+			buf_offset += blocks_in_chunk;
+			nblocks -= blocks_in_chunk;
+			continue;
+		}
+
+		if (!found)
+		{
 			entry->access_count = 1;
 			entry->hash = hash;
 			memset(entry->bitmap, 0, sizeof entry->bitmap);

@@ -382,6 +382,12 @@ pub(crate) struct RemoteTimelineClient {
     cancel: CancellationToken,
 }
 
+impl Drop for RemoteTimelineClient {
+    fn drop(&mut self) {
+        debug!("dropping RemoteTimelineClient");
+    }
+}
+
 impl RemoteTimelineClient {
     ///
     /// Create a remote storage client for given timeline
@@ -796,6 +802,12 @@ impl RemoteTimelineClient {
         let upload_queue = guard.initialized_mut()?;
 
         upload_queue.dirty.metadata.apply(update);
+
+        // Defense in depth: if we somehow generated invalid metadata, do not persist it.
+        upload_queue
+            .dirty
+            .validate()
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         self.schedule_index_upload(upload_queue);
 

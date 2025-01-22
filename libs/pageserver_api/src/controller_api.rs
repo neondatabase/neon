@@ -324,7 +324,7 @@ impl From<NodeSchedulingPolicy> for String {
 #[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum SkSchedulingPolicy {
     Active,
-    Disabled,
+    Pause,
     Decomissioned,
 }
 
@@ -334,9 +334,13 @@ impl FromStr for SkSchedulingPolicy {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
             "active" => Self::Active,
-            "disabled" => Self::Disabled,
+            "pause" => Self::Pause,
             "decomissioned" => Self::Decomissioned,
-            _ => return Err(anyhow::anyhow!("Unknown scheduling state '{s}'")),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unknown scheduling policy '{s}', try active,pause,decomissioned"
+                ))
+            }
         })
     }
 }
@@ -346,7 +350,7 @@ impl From<SkSchedulingPolicy> for String {
         use SkSchedulingPolicy::*;
         match value {
             Active => "active",
-            Disabled => "disabled",
+            Pause => "pause",
             Decomissioned => "decomissioned",
         }
         .to_string()
@@ -416,8 +420,6 @@ pub struct MetadataHealthListOutdatedResponse {
 }
 
 /// Publicly exposed safekeeper description
-///
-/// The `active` flag which we have in the DB is not included on purpose: it is deprecated.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SafekeeperDescribeResponse {
     pub id: NodeId,
@@ -430,6 +432,11 @@ pub struct SafekeeperDescribeResponse {
     pub port: i32,
     pub http_port: i32,
     pub availability_zone_id: String,
+    pub scheduling_policy: SkSchedulingPolicy,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeeperSchedulingPolicyRequest {
     pub scheduling_policy: SkSchedulingPolicy,
 }
 

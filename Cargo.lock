@@ -1312,6 +1312,7 @@ dependencies = [
  "tracing-utils",
  "url",
  "utils",
+ "uuid",
  "vm_monitor",
  "workspace_hack",
  "zstd",
@@ -3981,9 +3982,11 @@ name = "pagectl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "camino",
  "clap",
  "humantime",
+ "itertools 0.10.5",
  "pageserver",
  "pageserver_api",
  "postgres_ffi",
@@ -4005,6 +4008,7 @@ dependencies = [
  "arc-swap",
  "async-compression",
  "async-stream",
+ "bincode",
  "bit_field",
  "byteorder",
  "bytes",
