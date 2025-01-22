@@ -1,11 +1,7 @@
 {
   "v17": [
     "17.2",
-<<<<<<< HEAD
-    "4276717f6e91023e504de355f4f21d4824074de8"
-=======
-    "53213c4948ea0edeb379c2fe5beaba7de53ea96e"
->>>>>>> 52df539e7 (Do not assign max(lsn) to maxLastWrittenLsn in SetLastWrittenLSNForBlockv)
+    "46f9b96555e084c35dd975da9485996db9e86181"
   ],
   "v16": [
     "16.6",
