@@ -11,7 +11,7 @@ use std::{env, fs};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
-use compute_api::responses::{ComputeMetrics, ComputeStatus};
+use compute_api::responses::{ComputeCtlConfig, ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent};
 use futures::StreamExt;
 use futures::future::join_all;
@@ -132,6 +132,8 @@ pub struct ComputeState {
     /// passed by the control plane with a /configure HTTP request.
     pub pspec: Option<ParsedSpec>,
 
+    pub compute_ctl_config: ComputeCtlConfig,
+
     /// If the spec is passed by a /configure request, 'startup_span' is the
     /// /configure request's tracing span. The main thread enters it when it
     /// processes the compute startup, so that the compute startup is considered
@@ -155,6 +157,7 @@ impl ComputeState {
             last_active: None,
             error: None,
             pspec: None,
+            compute_ctl_config: ComputeCtlConfig::default(),
             startup_span: None,
             metrics: ComputeMetrics::default(),
         }
@@ -365,7 +368,11 @@ pub(crate) fn construct_superuser_query(spec: &ComputeSpec) -> String {
 }
 
 impl ComputeNode {
-    pub fn new(params: ComputeNodeParams, cli_spec: Option<ComputeSpec>) -> Result<Self> {
+    pub fn new(
+        params: ComputeNodeParams,
+        cli_spec: Option<ComputeSpec>,
+        compute_ctl_config: ComputeCtlConfig,
+    ) -> Result<Self> {
         let connstr = params.connstr.as_str();
         let conn_conf = postgres::config::Config::from_str(connstr)
             .context("cannot build postgres config from connstr")?;
@@ -377,6 +384,7 @@ impl ComputeNode {
             let pspec = ParsedSpec::try_from(cli_spec).map_err(|msg| anyhow::anyhow!(msg))?;
             new_state.pspec = Some(pspec);
         }
+        new_state.compute_ctl_config = compute_ctl_config;
 
         Ok(ComputeNode {
             params,
@@ -405,11 +413,19 @@ impl ComputeNode {
 
         // Launch the external HTTP server first, so that we can serve control plane
         // requests while configuration is still in progress.
-        crate::http::server::Server::External(this.params.external_http_port).launch(&this);
+        crate::http::server::Server::External {
+            port: this.params.external_http_port,
+            jwks: this.state.lock().unwrap().compute_ctl_config.jwks.clone(),
+            compute_id: this.params.compute_id.clone(),
+        }
+        .launch(&this);
 
         // The internal HTTP server could be launched later, but there isn't much
         // sense in waiting.
-        crate::http::server::Server::Internal(this.params.internal_http_port).launch(&this);
+        crate::http::server::Server::Internal {
+            port: this.params.internal_http_port,
+        }
+        .launch(&this);
 
         // If we got a spec from the CLI already, use that. Otherwise wait for the
         // control plane to pass it to us with a /configure HTTP request

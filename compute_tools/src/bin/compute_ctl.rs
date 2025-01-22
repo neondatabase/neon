@@ -179,6 +179,7 @@ fn main() -> Result<()> {
             live_config_allowed: cli_spec.live_config_allowed,
         },
         cli_spec.spec,
+        cli_spec.compute_ctl_config,
     )?;
 
     let exit_code = compute_node.run()?;
