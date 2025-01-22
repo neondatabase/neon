@@ -1775,7 +1775,7 @@ HandleSafekeeperResponse(WalProposer *wp, Safekeeper *fromsk)
 static void
 MembershipConfigurationSerialize(MembershipConfiguration *mconf, StringInfo buf)
 {
-	int			i;
+	uint32		i;
 
 	pq_sendint32(buf, mconf->generation);
 
@@ -1809,8 +1809,8 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 
 	resetStringInfo(buf);
 
+	/* removeme tag check after converting all msgs */
 	if (proto_version == 3 && msg->tag == 'g')
-		//removeme tag check after converting all msgs
 	{
 		/*
 		 * v2 sends structs for some messages as is, so commonly send tag only
@@ -1839,8 +1839,9 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 		return;
 	}
 
-	if (proto_version == 2 || proto_version == 3) // TODO remove proto_version == 3 after converting all msgs
-		//removeme tag check after converting all msgs
+	if (proto_version == 2 || proto_version == 3)
+		//TODO remove proto_version == 3 after converting all msgs
+		/* removeme tag check after converting all msgs */
 	{
 		switch (msg->tag)
 		{
@@ -1939,82 +1940,99 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 
 	char	   *buf;
 	int			buf_size;
-	uint64		tag;
+	uint8		tag;
 	StringInfoData s;
 
 	if (!(AsyncRead(sk, &buf, &buf_size)))
 		return false;
+	sk->latestMsgReceivedAt = wp->api.get_current_timestamp(wp);
 
 	/* parse it */
 	s.data = buf;
 	s.len = buf_size;
 	s.cursor = 0;
 
-	tag = pq_getmsgint64_le(&s);
-	if (tag != anymsg->tag)
+	/* removeme tag check after converting all msgs */
+	if (wp->config->proto_version == 3 && anymsg->tag == 'g')
 	{
-		wp_log(WARNING, "unexpected message tag %c from node %s:%s in state %s", (char) tag, sk->host,
-			   sk->port, FormatSafekeeperState(sk));
-		ResetConnection(sk);
-		return false;
+		tag = pq_getmsgint(&s, 1);
+		if (tag != anymsg->tag)
+		{
+			wp_log(WARNING, "unexpected message tag %c from node %s:%s in state %s", (char) tag, sk->host,
+				   sk->port, FormatSafekeeperState(sk));
+			ResetConnection(sk);
+			return false;
+		}
 	}
-	sk->latestMsgReceivedAt = wp->api.get_current_timestamp(wp);
-	switch (tag)
+	/* removeme tag check after converting all msgs */
+	else if (wp->config->proto_version == 2 || wp->config->proto_version == 3)
 	{
-		case 'g':
-			{
-				AcceptorGreeting *msg = (AcceptorGreeting *) anymsg;
-
-				msg->term = pq_getmsgint64_le(&s);
-				msg->nodeId = pq_getmsgint64_le(&s);
-				pq_getmsgend(&s);
-				return true;
-			}
-
-		case 'v':
-			{
-				VoteResponse *msg = (VoteResponse *) anymsg;
-
-				msg->term = pq_getmsgint64_le(&s);
-				msg->voteGiven = pq_getmsgint64_le(&s);
-				msg->flushLsn = pq_getmsgint64_le(&s);
-				msg->truncateLsn = pq_getmsgint64_le(&s);
-				msg->termHistory.n_entries = pq_getmsgint32_le(&s);
-				msg->termHistory.entries = palloc(sizeof(TermSwitchEntry) * msg->termHistory.n_entries);
-				for (int i = 0; i < msg->termHistory.n_entries; i++)
+		tag = pq_getmsgint64_le(&s);
+		if (tag != anymsg->tag)
+		{
+			wp_log(WARNING, "unexpected message tag %c from node %s:%s in state %s", (char) tag, sk->host,
+				   sk->port, FormatSafekeeperState(sk));
+			ResetConnection(sk);
+			return false;
+		}
+		switch (tag)
+		{
+			case 'g':
 				{
-					msg->termHistory.entries[i].term = pq_getmsgint64_le(&s);
-					msg->termHistory.entries[i].lsn = pq_getmsgint64_le(&s);
+					AcceptorGreeting *msg = (AcceptorGreeting *) anymsg;
+
+					msg->term = pq_getmsgint64_le(&s);
+					msg->nodeId = pq_getmsgint64_le(&s);
+					pq_getmsgend(&s);
+					return true;
 				}
-				msg->timelineStartLsn = pq_getmsgint64_le(&s);
-				pq_getmsgend(&s);
-				return true;
-			}
 
-		case 'a':
-			{
-				AppendResponse *msg = (AppendResponse *) anymsg;
+			case 'v':
+				{
+					VoteResponse *msg = (VoteResponse *) anymsg;
 
-				msg->term = pq_getmsgint64_le(&s);
-				msg->flushLsn = pq_getmsgint64_le(&s);
-				msg->commitLsn = pq_getmsgint64_le(&s);
-				msg->hs.ts = pq_getmsgint64_le(&s);
-				msg->hs.xmin.value = pq_getmsgint64_le(&s);
-				msg->hs.catalog_xmin.value = pq_getmsgint64_le(&s);
-				if (s.len > s.cursor)
-					ParsePageserverFeedbackMessage(wp, &s, &msg->ps_feedback);
-				else
-					msg->ps_feedback.present = false;
-				pq_getmsgend(&s);
-				return true;
-			}
+					msg->term = pq_getmsgint64_le(&s);
+					msg->voteGiven = pq_getmsgint64_le(&s);
+					msg->flushLsn = pq_getmsgint64_le(&s);
+					msg->truncateLsn = pq_getmsgint64_le(&s);
+					msg->termHistory.n_entries = pq_getmsgint32_le(&s);
+					msg->termHistory.entries = palloc(sizeof(TermSwitchEntry) * msg->termHistory.n_entries);
+					for (int i = 0; i < msg->termHistory.n_entries; i++)
+					{
+						msg->termHistory.entries[i].term = pq_getmsgint64_le(&s);
+						msg->termHistory.entries[i].lsn = pq_getmsgint64_le(&s);
+					}
+					msg->timelineStartLsn = pq_getmsgint64_le(&s);
+					pq_getmsgend(&s);
+					return true;
+				}
 
-		default:
-			{
-				Assert(false);
-				return false;
-			}
+			case 'a':
+				{
+					AppendResponse *msg = (AppendResponse *) anymsg;
+
+					msg->term = pq_getmsgint64_le(&s);
+					msg->flushLsn = pq_getmsgint64_le(&s);
+					msg->commitLsn = pq_getmsgint64_le(&s);
+					msg->hs.ts = pq_getmsgint64_le(&s);
+					msg->hs.xmin.value = pq_getmsgint64_le(&s);
+					msg->hs.catalog_xmin.value = pq_getmsgint64_le(&s);
+					if (s.len > s.cursor)
+						ParsePageserverFeedbackMessage(wp, &s, &msg->ps_feedback);
+					else
+						msg->ps_feedback.present = false;
+					pq_getmsgend(&s);
+					return true;
+				}
+
+			default:
+				{
+					wp_log(FATAL, "unexpected message tag %c", (char) tag);
+					return false;
+				}
+		}
 	}
+	wp_log(FATAL, "unsupported proto_version %d", wp->config->proto_version);
 }
 
 /*

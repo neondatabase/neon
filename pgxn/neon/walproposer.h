@@ -219,7 +219,7 @@ typedef struct ProposerGreetingV2
 
 typedef struct AcceptorProposerMessage
 {
-	uint64		tag;
+	uint8		tag;
 } AcceptorProposerMessage;
 
 /*
