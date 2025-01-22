@@ -2823,9 +2823,6 @@ impl Timeline {
     ///
     /// It is _not_ sensitive to task_mgr::shutdown_token().
     ///
-    /// The rationale is that we spawn initial logical size calculation
-    /// during activation, hence
-    ///
     /// # Cancel-Safety
     ///
     /// It does Timeline IO, hence this should be polled to completion because
