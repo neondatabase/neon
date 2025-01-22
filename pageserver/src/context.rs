@@ -95,6 +95,7 @@ use crate::task_mgr::TaskKind;
 #[derive(Debug, Default)]
 pub struct RequestContext {
     latency_recording: Option<latency_recording::LatencyRecording>,
+    io_concurrency: Option<io_concurrency_propagation::IoConcurrencyPropagation>,
 }
 
 trait Propagatable: Default {
@@ -136,12 +137,26 @@ mod latency_recording {
     }
 
     impl Propagatable for LatencyRecording {
-        fn propagate(&self, other: &Self) {
+        fn propagate(&self, other: &mut Self) {
             let mut inner = self.inner.lock().unwrap();
-            let other_inner = other.inner.lock().unwrap();
+            let other_inner = other.get_mut();
             for (k, v) in other_inner.current.iter() {
                 inner.current.insert(*k, *v);
             }
         }
     }
+}
+
+mod io_concurrency_propagation {
+
+    struct IoConcurrencyPropagation {
+        inner: IoConcurrency,
+    }
+
+    impl Propagatable for IoConcurrencyPropagation {
+        fn propagate(&self, other: &mut Self) {
+            other.inner = self.inner.clone();
+        }
+    }
+
 }
