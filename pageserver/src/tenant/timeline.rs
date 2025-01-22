@@ -60,6 +60,7 @@ use utils::{
 use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use std::{
@@ -72,7 +73,6 @@ use std::{
     collections::btree_map::Entry,
     ops::{Deref, Range},
 };
-use std::{pin::pin, sync::OnceLock};
 
 use crate::{
     aux_file::AuxFileSizeEstimator,
@@ -2804,12 +2804,10 @@ impl Timeline {
             "initial size calculation",
             // NB: don't log errors here, task_mgr will do that.
             async move {
-                let cancel = task_mgr::shutdown_token();
                 self_clone
                     .initial_logical_size_calculation_task(
                         initial_part_end,
                         cancel_wait_for_background_loop_concurrency_limit_semaphore,
-                        cancel,
                         background_ctx,
                     )
                     .await;
@@ -2819,11 +2817,21 @@ impl Timeline {
         );
     }
 
+    /// # Cancellation
+    ///
+    /// This method is sensitive to `Timeline::cancel`.
+    ///
+    /// It is _not_ sensitive to task_mgr::shutdown_token().
+    ///
+    /// # Cancel-Safety
+    ///
+    /// It does Timeline IO, hence this should be polled to completion because
+    /// we could be leaving in-flight IOs behind, which is safe, but annoying
+    /// to reason about.
     async fn initial_logical_size_calculation_task(
         self: Arc<Self>,
         initial_part_end: Lsn,
         skip_concurrency_limiter: CancellationToken,
-        cancel: CancellationToken,
         background_ctx: RequestContext,
     ) {
         scopeguard::defer! {
@@ -2836,7 +2844,6 @@ impl Timeline {
             let self_ref = &self;
             let skip_concurrency_limiter = &skip_concurrency_limiter;
             async move {
-                let cancel = task_mgr::shutdown_token();
                 let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
                     BackgroundLoopKind::InitialLogicalSizeCalculation,
                     background_ctx,
@@ -2850,9 +2857,6 @@ impl Timeline {
                     _ = self_ref.cancel.cancelled() => {
                         return Err(CalculateLogicalSizeError::Cancelled);
                     }
-                    _ = cancel.cancelled() => {
-                        return Err(CalculateLogicalSizeError::Cancelled);
-                    },
                     () = skip_concurrency_limiter.cancelled() => {
                         // Some action that is part of a end user interaction requested logical size
                         // => break out of the rate limit
@@ -2911,22 +2915,18 @@ impl Timeline {
                             )
                             .expect("10min < 1hour"),
                         );
-                        tokio::time::sleep(sleep_duration).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(sleep_duration) => {}
+                            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
+                        }
                     }
                 }
             }
         };
 
-        let (calculated_size, metrics_guard) = tokio::select! {
-            res = retrying  => {
-                match res {
-                    ControlFlow::Continue(calculated_size) => calculated_size,
-                    ControlFlow::Break(()) => return,
-                }
-            }
-            _ = cancel.cancelled() => {
-                return;
-            }
+        let (calculated_size, metrics_guard) = match retrying.await {
+            ControlFlow::Continue(calculated_size) => calculated_size,
+            ControlFlow::Break(()) => return,
         };
 
         // we cannot query current_logical_size.current_size() to know the current
@@ -2982,9 +2982,6 @@ impl Timeline {
         receiver
     }
 
-    /// # Cancel-Safety
-    ///
-    /// This method is cancellation-safe.
     #[instrument(skip_all)]
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
@@ -3002,32 +2999,13 @@ impl Timeline {
             .enter()
             .map_err(|_| CalculateLogicalSizeError::Cancelled)?;
 
-        let self_calculation = Arc::clone(self);
-
-        let mut calculation = pin!(async {
-            let ctx = ctx.attached_child();
-            self_calculation
-                .calculate_logical_size(lsn, cause, &guard, &ctx)
-                .await
-        });
-
-        tokio::select! {
-            res = &mut calculation => { res }
-            _ = self.cancel.cancelled() => {
-                debug!("cancelling logical size calculation for timeline shutdown");
-                calculation.await
-            }
-        }
+        self.calculate_logical_size(lsn, cause, &guard, ctx).await
     }
 
     /// Calculate the logical size of the database at the latest LSN.
     ///
     /// NOTE: counted incrementally, includes ancestors. This can be a slow operation,
     /// especially if we need to download remote layers.
-    ///
-    /// # Cancel-Safety
-    ///
-    /// This method is cancellation-safe.
     async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
@@ -3040,7 +3018,10 @@ impl Timeline {
             self.timeline_id, up_to_lsn
         );
 
-        pausable_failpoint!("timeline-calculate-logical-size-pause");
+        if let Err(()) = pausable_failpoint!("timeline-calculate-logical-size-pause", &self.cancel)
+        {
+            return Err(CalculateLogicalSizeError::Cancelled);
+        }
 
         // See if we've already done the work for initial size calculation.
         // This is a short-cut for timelines that are mostly unused.
