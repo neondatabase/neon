@@ -460,6 +460,7 @@ class NeonEnvBuilder:
         self.test_name = test_name
         self.compatibility_neon_binpath = compatibility_neon_binpath
         self.compatibility_pg_distrib_dir = compatibility_pg_distrib_dir
+        self.test_may_use_compatibility_snapshot_binaries = False
         self.version_combination = combination
         self.mixdir = self.test_output_dir / "mixdir_neon"
         if self.version_combination is not None:
@@ -471,6 +472,7 @@ class NeonEnvBuilder:
             ), "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required when using mixed versions"
             self.mixdir.mkdir(mode=0o755, exist_ok=True)
             self._mix_versions()
+            self.test_may_use_compatibility_snapshot_binaries = True
 
     def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
         # Cannot create more than one environment from one builder
@@ -1133,7 +1135,13 @@ class NeonEnv:
             # Concurrent IO (https://github.com/neondatabase/neon/issues/9378):
             # enable concurrent IO by default in tests and benchmarks.
             # Compat tests are exempt because old versions fail to parse the new config.
-            if self.pageserver_get_vectored_concurrent_io is not None:
+            get_vectored_concurrent_io = self.pageserver_get_vectored_concurrent_io
+            if config.test_may_use_compatibility_snapshot_binaries:
+                log.info(
+                    "Forcing use of binary-built-in default to avoid forward-compatibility related test failures"
+                )
+                get_vectored_concurrent_io = None
+            if get_vectored_concurrent_io is not None:
                 ps_cfg["get_vectored_concurrent_io"] = {
                     "mode": self.pageserver_get_vectored_concurrent_io,
                 }
