@@ -126,73 +126,6 @@ pub(crate) static INITDB_RUN_TIME: Lazy<Histogram> = Lazy::new(|| {
     .expect("failed to define metric")
 });
 
-// Metrics collected on operations on the storage repository.
-#[derive(
-    Clone, Copy, enum_map::Enum, strum_macros::EnumString, strum_macros::Display, IntoStaticStr,
-)]
-pub(crate) enum GetKind {
-    Singular,
-    Vectored,
-}
-
-pub(crate) struct ReconstructTimeMetrics {
-    singular: Histogram,
-    vectored: Histogram,
-}
-
-pub(crate) static RECONSTRUCT_TIME: Lazy<ReconstructTimeMetrics> = Lazy::new(|| {
-    let inner = register_histogram_vec!(
-        "pageserver_getpage_reconstruct_seconds",
-        "Time spent in reconstruct_value (reconstruct a page from deltas)",
-        &["get_kind"],
-        CRITICAL_OP_BUCKETS.into(),
-    )
-    .expect("failed to define a metric");
-
-    ReconstructTimeMetrics {
-        singular: inner.with_label_values(&[GetKind::Singular.into()]),
-        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
-    }
-});
-
-impl ReconstructTimeMetrics {
-    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
-        match get_kind {
-            GetKind::Singular => &self.singular,
-            GetKind::Vectored => &self.vectored,
-        }
-    }
-}
-
-pub(crate) struct ReconstructDataTimeMetrics {
-    singular: Histogram,
-    vectored: Histogram,
-}
-
-impl ReconstructDataTimeMetrics {
-    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
-        match get_kind {
-            GetKind::Singular => &self.singular,
-            GetKind::Vectored => &self.vectored,
-        }
-    }
-}
-
-pub(crate) static GET_RECONSTRUCT_DATA_TIME: Lazy<ReconstructDataTimeMetrics> = Lazy::new(|| {
-    let inner = register_histogram_vec!(
-        "pageserver_getpage_get_reconstruct_data_seconds",
-        "Time spent in get_reconstruct_value_data",
-        &["get_kind"],
-        CRITICAL_OP_BUCKETS.into(),
-    )
-    .expect("failed to define a metric");
-
-    ReconstructDataTimeMetrics {
-        singular: inner.with_label_values(&[GetKind::Singular.into()]),
-        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
-    }
-});
-
 pub(crate) struct GetVectoredLatency {
     map: EnumMap<TaskKind, Option<Histogram>>,
 }
@@ -2550,12 +2483,19 @@ impl StorageTimeMetricsTimer {
         }
     }
 
-    /// Record the time from creation to now.
-    pub fn stop_and_record(self) {
-        let duration = self.start.elapsed().as_secs_f64();
-        self.metrics.timeline_sum.inc_by(duration);
+    /// Returns the elapsed duration of the timer.
+    pub fn elapsed(&self) -> Duration {
+        self.start.elapsed()
+    }
+
+    /// Record the time from creation to now and return it.
+    pub fn stop_and_record(self) -> Duration {
+        let duration = self.elapsed();
+        let seconds = duration.as_secs_f64();
+        self.metrics.timeline_sum.inc_by(seconds);
         self.metrics.timeline_count.inc();
-        self.metrics.global_histogram.observe(duration);
+        self.metrics.global_histogram.observe(seconds);
+        duration
     }
 
     /// Turns this timer into a timer, which will always record -- usually this means recording
@@ -2572,6 +2512,14 @@ impl Drop for AlwaysRecordingStorageTimeMetricsTimer {
         if let Some(inner) = self.0.take() {
             inner.stop_and_record();
         }
+    }
+}
+
+impl AlwaysRecordingStorageTimeMetricsTimer {
+    /// Returns the elapsed duration of the timer.
+    #[allow(unused)]
+    pub fn elapsed(&self) -> Duration {
+        self.0.as_ref().expect("not dropped yet").elapsed()
     }
 }
 
@@ -3919,7 +3867,6 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
     });
 
     // Custom
-    Lazy::force(&RECONSTRUCT_TIME);
     Lazy::force(&BASEBACKUP_QUERY_TIME);
     Lazy::force(&COMPUTE_COMMANDS_COUNTERS);
     Lazy::force(&tokio_epoll_uring::THREAD_LOCAL_METRICS_STORAGE);

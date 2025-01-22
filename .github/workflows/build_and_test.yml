@@ -892,14 +892,14 @@ jobs:
         run: |
           for repo in neondatabase 369495373322.dkr.ecr.eu-central-1.amazonaws.com; do
             docker buildx imagetools create -t $repo/neon:latest \
-                                               $repo/neon:${{ needs.tag.outputs.build-tag }}
+                                               neondatabase/neon:${{ needs.tag.outputs.build-tag }}
 
             for version in ${VERSIONS}; do
               docker buildx imagetools create -t $repo/compute-node-${version}:latest \
-                                                 $repo/compute-node-${version}:${{ needs.tag.outputs.build-tag }}
+                                                 neondatabase/compute-node-${version}:${{ needs.tag.outputs.build-tag }}
 
               docker buildx imagetools create -t $repo/vm-compute-node-${version}:latest \
-                                                 $repo/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
+                                                 neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
             done
           done
           docker buildx imagetools create -t neondatabase/neon-test-extensions-v16:latest \

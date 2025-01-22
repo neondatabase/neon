@@ -11,7 +11,10 @@ use super::failpoints::{Failpoint, FailpointKind};
 use super::*;
 use crate::{
     context::DownloadBehavior,
-    tenant::{harness::test_img, storage_layer::LayerVisibilityHint},
+    tenant::{
+        harness::test_img,
+        storage_layer::{IoConcurrency, LayerVisibilityHint},
+    },
 };
 use crate::{task_mgr::TaskKind, tenant::harness::TenantHarness};
 
@@ -31,6 +34,7 @@ async fn smoke_test() {
     let span = h.span();
     let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
     let (tenant, _) = h.load().await;
+    let io_concurrency = IoConcurrency::spawn_for_test();
 
     let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Download);
 
@@ -89,7 +93,7 @@ async fn smoke_test() {
     };
 
     let img_before = {
-        let mut data = ValuesReconstructState::default();
+        let mut data = ValuesReconstructState::new(io_concurrency.clone());
         layer
             .get_values_reconstruct_data(
                 controlfile_keyspace.clone(),
@@ -99,10 +103,13 @@ async fn smoke_test() {
             )
             .await
             .unwrap();
+
         data.keys
             .remove(&CONTROLFILE_KEY)
             .expect("must be present")
-            .expect("should not error")
+            .collect_pending_ios()
+            .await
+            .expect("must not error")
             .img
             .take()
             .expect("tenant harness writes the control file")
@@ -121,7 +128,7 @@ async fn smoke_test() {
 
     // on accesses when the layer is evicted, it will automatically be downloaded.
     let img_after = {
-        let mut data = ValuesReconstructState::default();
+        let mut data = ValuesReconstructState::new(io_concurrency.clone());
         layer
             .get_values_reconstruct_data(
                 controlfile_keyspace.clone(),
@@ -135,7 +142,9 @@ async fn smoke_test() {
         data.keys
             .remove(&CONTROLFILE_KEY)
             .expect("must be present")
-            .expect("should not error")
+            .collect_pending_ios()
+            .await
+            .expect("must not error")
             .img
             .take()
             .expect("tenant harness writes the control file")

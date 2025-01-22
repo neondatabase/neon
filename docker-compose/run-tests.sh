@@ -9,8 +9,11 @@ LIST=$( (echo -e "${SKIP//","/"\n"}"; ls) | sort | uniq -u)
 for d in ${LIST}
 do
        [ -d "${d}" ] || continue
-    psql -c "select 1" >/dev/null || break
-       make -C "${d}" installcheck || FAILED="${d} ${FAILED}"
+       if ! psql -w -c "select 1" >/dev/null; then
+          FAILED="${d} ${FAILED}"
+          break
+       fi
+       USE_PGXS=1 make -C "${d}" installcheck || FAILED="${d} ${FAILED}"
 done
 [ -z "${FAILED}" ] && exit 0
 echo "${FAILED}"

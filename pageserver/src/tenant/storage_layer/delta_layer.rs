@@ -41,13 +41,12 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
-use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
@@ -60,7 +59,7 @@ use pageserver_api::shard::TenantShardId;
 use pageserver_api::value::Value;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
@@ -77,7 +76,10 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{AsLayerDesc, LayerName, PersistentLayerDesc, ValuesReconstructState};
+use super::{
+    AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
+    ValuesReconstructState,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -226,7 +228,7 @@ pub struct DeltaLayerInner {
     index_start_blk: u32,
     index_root_blk: u32,
 
-    file: VirtualFile,
+    file: Arc<VirtualFile>,
     file_id: FileId,
 
     layer_key_range: Range<Key>,
@@ -795,9 +797,11 @@ impl DeltaLayerInner {
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
-        let file = VirtualFile::open_v2(path, ctx)
-            .await
-            .context("open layer file")?;
+        let file = Arc::new(
+            VirtualFile::open_v2(path, ctx)
+                .await
+                .context("open layer file")?,
+        );
 
         let file_id = page_cache::next_file_id();
 
@@ -842,12 +846,11 @@ impl DeltaLayerInner {
     // Look up the keys in the provided keyspace and update
     // the reconstruct state with whatever is found.
     //
-    // If the key is cached, go no further than the cached Lsn.
-    //
     // Currently, the index is visited for each range, but this
     // can be further optimised to visit the index only once.
     pub(super) async fn get_values_reconstruct_data(
         &self,
+        this: ResidentLayer,
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValuesReconstructState,
@@ -875,16 +878,13 @@ impl DeltaLayerInner {
             data_end_offset,
             index_reader,
             planner,
-            reconstruct_state,
             ctx,
         )
         .await
         .map_err(GetVectoredError::Other)?;
 
-        self.do_reads_and_update_state(reads, reconstruct_state, ctx)
+        self.do_reads_and_update_state(this, reads, reconstruct_state, ctx)
             .await;
-
-        reconstruct_state.on_lsn_advanced(&keyspace, lsn_range.start);
 
         Ok(())
     }
@@ -895,7 +895,6 @@ impl DeltaLayerInner {
         data_end_offset: u64,
         index_reader: DiskBtreeReader<Reader, DELTA_KEY_SIZE>,
         mut planner: VectoredReadPlanner,
-        reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<VectoredRead>>
     where
@@ -922,10 +921,9 @@ impl DeltaLayerInner {
                 assert!(key >= range.start);
 
                 let outside_lsn_range = !lsn_range.contains(&lsn);
-                let below_cached_lsn = reconstruct_state.get_cached_lsn(&key) >= Some(lsn);
 
                 let flag = {
-                    if outside_lsn_range || below_cached_lsn {
+                    if outside_lsn_range {
                         BlobFlag::Ignore
                     } else if blob_ref.will_init() {
                         BlobFlag::ReplaceAll
@@ -994,98 +992,78 @@ impl DeltaLayerInner {
 
     async fn do_reads_and_update_state(
         &self,
+        this: ResidentLayer,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) {
-        let vectored_blob_reader = VectoredBlobReader::new(&self.file);
-        let mut ignore_key_with_err = None;
-
         let max_vectored_read_bytes = self
             .max_vectored_read_bytes
             .expect("Layer is loaded with max vectored bytes config")
             .0
             .into();
         let buf_size = Self::get_min_read_buffer_size(&reads, max_vectored_read_bytes);
-        let mut buf = Some(IoBufferMut::with_capacity(buf_size));
 
         // Note that reads are processed in reverse order (from highest key+lsn).
         // This is the order that `ReconstructState` requires such that it can
         // track when a key is done.
         for read in reads.into_iter().rev() {
-            let res = vectored_blob_reader
-                .read_blobs(&read, buf.take().expect("Should have a buffer"), ctx)
-                .await;
-
-            let blobs_buf = match res {
-                Ok(blobs_buf) => blobs_buf,
-                Err(err) => {
-                    let kind = err.kind();
-                    for (_, blob_meta) in read.blobs_at.as_slice() {
-                        reconstruct_state.on_key_error(
-                            blob_meta.key,
-                            PageReconstructError::Other(anyhow!(
-                                "Failed to read blobs from virtual file {}: {}",
-                                self.file.path(),
-                                kind
-                            )),
-                        );
-                    }
-
-                    // We have "lost" the buffer since the lower level IO api
-                    // doesn't return the buffer on error. Allocate a new one.
-                    buf = Some(IoBufferMut::with_capacity(buf_size));
-
-                    continue;
-                }
-            };
-            let view = BufView::new_slice(&blobs_buf.buf);
-            for meta in blobs_buf.blobs.iter().rev() {
-                if Some(meta.meta.key) == ignore_key_with_err {
-                    continue;
-                }
-                let blob_read = meta.read(&view).await;
-                let blob_read = match blob_read {
-                    Ok(buf) => buf,
-                    Err(e) => {
-                        reconstruct_state.on_key_error(
-                            meta.meta.key,
-                            PageReconstructError::Other(anyhow!(e).context(format!(
-                                "Failed to decompress blob from virtual file {}",
-                                self.file.path(),
-                            ))),
-                        );
-
-                        ignore_key_with_err = Some(meta.meta.key);
-                        continue;
-                    }
-                };
-
-                let value = Value::des(&blob_read);
-
-                let value = match value {
-                    Ok(v) => v,
-                    Err(e) => {
-                        reconstruct_state.on_key_error(
-                            meta.meta.key,
-                            PageReconstructError::Other(anyhow!(e).context(format!(
-                                "Failed to deserialize blob from virtual file {}",
-                                self.file.path(),
-                            ))),
-                        );
-
-                        ignore_key_with_err = Some(meta.meta.key);
-                        continue;
-                    }
-                };
-
-                // Invariant: once a key reaches [`ValueReconstructSituation::Complete`]
-                // state, no further updates shall be made to it. The call below will
-                // panic if the invariant is violated.
-                reconstruct_state.update_key(&meta.meta.key, meta.meta.lsn, value);
+            let mut ios: HashMap<(Key, Lsn), OnDiskValueIo> = Default::default();
+            for (_, blob_meta) in read.blobs_at.as_slice().iter().rev() {
+                let io = reconstruct_state.update_key(
+                    &blob_meta.key,
+                    blob_meta.lsn,
+                    blob_meta.will_init,
+                );
+                ios.insert((blob_meta.key, blob_meta.lsn), io);
             }
 
-            buf = Some(blobs_buf.buf);
+            let read_extend_residency = this.clone();
+            let read_from = self.file.clone();
+            let read_ctx = ctx.attached_child();
+            reconstruct_state
+                .spawn_io(async move {
+                    let vectored_blob_reader = VectoredBlobReader::new(&read_from);
+                    let buf = IoBufferMut::with_capacity(buf_size);
+
+                    let res = vectored_blob_reader.read_blobs(&read, buf, &read_ctx).await;
+                    match res {
+                        Ok(blobs_buf) => {
+                            let view = BufView::new_slice(&blobs_buf.buf);
+                            for meta in blobs_buf.blobs.iter().rev() {
+                                let io = ios.remove(&(meta.meta.key, meta.meta.lsn)).unwrap();
+
+                                let blob_read = meta.read(&view).await;
+                                let blob_read = match blob_read {
+                                    Ok(buf) => buf,
+                                    Err(e) => {
+                                        io.complete(Err(e));
+                                        continue;
+                                    }
+                                };
+
+                                io.complete(Ok(OnDiskValue::WalRecordOrImage(
+                                    blob_read.into_bytes(),
+                                )));
+                            }
+
+                            assert!(ios.is_empty());
+                        }
+                        Err(err) => {
+                            for (_, sender) in ios {
+                                sender.complete(Err(std::io::Error::new(
+                                    err.kind(),
+                                    "vec read failed",
+                                )));
+                            }
+                        }
+                    }
+
+                    // keep layer resident until this IO is done; this spawned IO future generally outlives the
+                    // call to `self` / the `Arc<DownloadedLayer>` / the `ResidentLayer` that guarantees residency
+                    drop(read_extend_residency);
+                })
+                .await;
         }
     }
 
@@ -1224,7 +1202,14 @@ impl DeltaLayerInner {
             let actionable = if let Some((key, lsn, start_offset)) = prev.take() {
                 let end_offset = offset;
 
-                Some((BlobMeta { key, lsn }, start_offset..end_offset))
+                Some((
+                    BlobMeta {
+                        key,
+                        lsn,
+                        will_init: false,
+                    },
+                    start_offset..end_offset,
+                ))
             } else {
                 None
             };
@@ -1560,7 +1545,9 @@ impl DeltaLayerIterator<'_> {
                 let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
                 let blob_ref = BlobRef(value);
                 let offset = blob_ref.pos();
-                if let Some(batch_plan) = self.planner.handle(key, lsn, offset) {
+                if let Some(batch_plan) =
+                    self.planner.handle(key, lsn, offset, blob_ref.will_init())
+                {
                     break batch_plan;
                 }
             } else {
@@ -1673,7 +1660,6 @@ pub(crate) mod test {
             .expect("In memory disk finish should never fail");
         let reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(0, root_offset, disk);
         let planner = VectoredReadPlanner::new(100);
-        let mut reconstruct_state = ValuesReconstructState::new();
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
 
         let keyspace = KeySpace {
@@ -1691,7 +1677,6 @@ pub(crate) mod test {
             disk_offset,
             reader,
             planner,
-            &mut reconstruct_state,
             &ctx,
         )
         .await
@@ -1935,7 +1920,6 @@ pub(crate) mod test {
             );
 
             let planner = VectoredReadPlanner::new(constants::MAX_VECTORED_READ_BYTES);
-            let mut reconstruct_state = ValuesReconstructState::new();
             let keyspace = pick_random_keyspace(rng, &entries_meta.key_range);
             let data_end_offset = inner.index_start_blk as u64 * PAGE_SZ as u64;
 
@@ -1945,7 +1929,6 @@ pub(crate) mod test {
                 data_end_offset,
                 index_reader,
                 planner,
-                &mut reconstruct_state,
                 &ctx,
             )
             .await?;
