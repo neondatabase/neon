@@ -96,6 +96,7 @@ use crate::task_mgr::TaskKind;
 pub struct RequestContext {
     latency_recording: Option<latency_recording::LatencyRecording>,
     io_concurrency: Option<io_concurrency_propagation::IoConcurrencyPropagation>,
+    cancel: Option<cancellation::Cancellation>,
 }
 
 trait Propagatable: Default {
@@ -156,6 +157,28 @@ mod io_concurrency_propagation {
     impl Propagatable for IoConcurrencyPropagation {
         fn propagate(&self, other: &mut Self) {
             other.inner = self.inner.clone();
+        }
+    }
+
+}
+
+mod cancellation {
+
+    struct Cancellation {
+        sources: Vec<CancellationToken>,
+    }
+
+    impl Propagatable for Cancellation {
+        fn propagate(&self, other: &mut Self) {
+            other.sources.extend(self.sources.iter().map(|tok| tok.child_toke()));
+        }
+    }
+
+    impl Cancellation {
+        async fn cancelled(&self) {
+            // TODO: this one is quite inefficient, it allocates
+            // But it's clear something better can be built within this architecture.
+            futures::future::select_all(self.sources.iter().map(|tok| tok.cancelled()))
         }
     }
 
