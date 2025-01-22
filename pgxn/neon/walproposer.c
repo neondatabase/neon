@@ -144,13 +144,12 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 
 	/* Fill the greeting package */
 	wp->greetRequest.pam.tag = 'g';
-	wp->greetRequest.proto_version = wp->config->proto_version;
 	if (!wp->config->neon_tenant)
 		wp_log(FATAL, "neon.tenant_id is not provided");
 	wp->greetRequest.tenant_id = wp->config->neon_tenant;
 	if (!wp->config->neon_timeline)
 		wp_log(FATAL, "neon.timeline_id is not provided");
-	wp->greetRequest.timeline_id = wp->config->neon_tenant;
+	wp->greetRequest.timeline_id = wp->config->neon_timeline;
 	wp->greetRequest.pg_version = PG_VERSION_NUM;
 	wp->greetRequest.system_id = wp->config->systemId;
 	wp->greetRequest.wal_seg_size = wp->config->wal_segment_size;
@@ -1771,6 +1770,35 @@ HandleSafekeeperResponse(WalProposer *wp, Safekeeper *fromsk)
 	}
 }
 
+/* Serialize MembershipConfiguration into buf. */
+static void
+MembershipConfigurationSerialize(MembershipConfiguration *mconf, StringInfo buf)
+{
+	int			i;
+
+	pq_sendint32(buf, mconf->generation);
+
+	pq_sendint32(buf, mconf->members.len);
+	for (i = 0; i < mconf->members.len; i++)
+	{
+		pq_sendint64(buf, mconf->members.m[i].node_id);
+		pq_send_ascii_string(buf, mconf->members.m[i].host);
+		pq_sendint16(buf, mconf->members.m[i].port);
+	}
+
+	/*
+	 * There is no special mark for absent new_members; zero members in
+	 * invalid, so zero len means absent.
+	 */
+	pq_sendint32(buf, mconf->new_members.len);
+	for (i = 0; i < mconf->new_members.len; i++)
+	{
+		pq_sendint64(buf, mconf->new_members.m[i].node_id);
+		pq_send_ascii_string(buf, mconf->new_members.m[i].host);
+		pq_sendint16(buf, mconf->new_members.m[i].port);
+	}
+}
+
 /* Serialize proposer -> acceptor message into buf using specified version */
 static void
 PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf, int proto_version)
@@ -1780,58 +1808,54 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 
 	resetStringInfo(buf);
 
-	/*
-	 * v2 sends structs for some messages as is, so commonly send tag only for
-	 * v3
-	 */
-	if (proto_version == 3)
-		pq_sendint8(buf, msg->tag);
-
-	switch (msg->tag)
+	if (proto_version == 3 && msg->tag == 'g')
+		//removeme tag check after converting all msgs
 	{
-		case 'g':
-			{
-				if (proto_version == 3)
+		/*
+		 * v2 sends structs for some messages as is, so commonly send tag only
+		 * for v3
+		 */
+		if (proto_version == 3)
+			pq_sendint8(buf, msg->tag);
+
+		switch (msg->tag)
+		{
+			case 'g':
 				{
 					ProposerGreeting *m = (ProposerGreeting *) msg;
 
+					pq_send_ascii_string(buf, m->tenant_id);
+					pq_send_ascii_string(buf, m->timeline_id);
+					MembershipConfigurationSerialize(&m->mconf, buf);
+					pq_sendint32(buf, m->pg_version);
+					pq_sendint64(buf, m->system_id);
+					pq_sendint32(buf, m->wal_seg_size);
 					break;
 				}
-				else if (proto_version == 2)
+			default:
+				wp_log(FATAL, "unexpected message type %c to serialize", msg->tag);
+		}
+		return;
+	}
+
+	if (proto_version == 2 || proto_version == 3) // TODO remove proto_version == 3 after converting all msgs
+		//removeme tag check after converting all msgs
+	{
+		switch (msg->tag)
+		{
+			case 'g':
 				{
 					/* v2 sent struct as is */
 					pq_sendbytes(buf, (char *) &wp->greetRequestV2, sizeof(wp->greetRequestV2));
 					break;
 				}
-				wp_log(FATAL, "unexpected proto_version %d", proto_version);
-				break;			/* keep the compiler quiet */
-			}
-		case 'v':
-			{
-				if (proto_version == 3)
-				{
-					VoteRequest *m = (VoteRequest *) msg;
-
-					Assert(false);
-					break;
-				}
-				else if (proto_version == 2)
+			case 'v':
 				{
 					/* v2 sent struct as is */
 					pq_sendbytes(buf, (char *) &wp->voteRequest, sizeof(wp->voteRequest));
 					break;
 				}
-				wp_log(FATAL, "unexpected proto_version %d", proto_version);
-				break;			/* keep the compiler quiet */
-			}
-		case 'e':
-			{
-				if (proto_version == 3)
-				{
-					Assert(false);
-					break;
-				}
-				else if (proto_version == 2)
+			case 'e':
 				{
 					ProposerElected *m = (ProposerElected *) msg;
 
@@ -1847,33 +1871,24 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 					pq_sendint64_le(buf, m->timelineStartLsn);
 					break;
 				}
-				wp_log(FATAL, "unexpected proto_version %d", proto_version);
-				break;			/* keep the compiler quiet */
-			}
-		case 'a':
-			{
+			case 'a':
+
 				/*
 				 * Note: this serializes only AppendRequestHeader, caller is
 				 * expected to append WAL data later.
 				 */
-				if (proto_version == 3)
-				{
-					Assert(false);
-					break;
-				}
-				else if (proto_version == 2)
 				{
 					/* v2 sent struct as is */
 					pq_sendbytes(buf, (char *) msg, sizeof(AppendRequestHeader));
 					break;
 				}
-				wp_log(FATAL, "unexpected proto_version %d", proto_version);
-				break;			/* keep the compiler quiet */
-			}
 
-		default:
-			wp_log(FATAL, "unexpected message type %c to serialize", msg->tag);
+			default:
+				wp_log(FATAL, "unexpected message type %c to serialize", msg->tag);
+		}
+		return;
 	}
+	wp_log(FATAL, "unexpected proto_version %d", proto_version);
 }
 
 /*
@@ -1913,6 +1928,8 @@ AsyncRead(Safekeeper *sk, char **buf, int *buf_size)
  * If the read needs more polling, we return 'false' and keep the state
  * unmodified, waiting until it becomes read-ready to try again. If it fully
  * failed, a warning is emitted and the connection is reset.
+ *
+ * Note: it pallocs if needed, i.e. for AcceptorGreeting and VoteResponse fields.
  */
 static bool
 AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)

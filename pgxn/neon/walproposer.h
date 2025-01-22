@@ -156,8 +156,8 @@ typedef struct SafekeeperId
 /* Set of safekeepers. */
 typedef struct MemberSet
 {
-	uint32		n_members;
-	SafekeeperId *members;
+	uint32		len;			/* number of members */
+	SafekeeperId *m;			/* ids themselves */
 } MemberSet;
 
 /* Timeline safekeeper membership configuration. */
@@ -182,7 +182,6 @@ typedef struct ProposerAcceptorMessage
 typedef struct ProposerGreeting
 {
 	ProposerAcceptorMessage pam;	/* message tag */
-	uint32		proto_version;	/* proposer-safekeeper protocol version */
 
 	/*
 	 * tenant/timeline ids as C strings with standard hex notation for ease of
@@ -191,6 +190,7 @@ typedef struct ProposerGreeting
 	 */
 	char	   *tenant_id;
 	char	   *timeline_id;
+	/* Full conf is carried to allow safekeeper switch */
 	MembershipConfiguration mconf;
 
 	/*

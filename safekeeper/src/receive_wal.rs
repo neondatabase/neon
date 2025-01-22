@@ -342,8 +342,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'_, IO> {
         let tli = match next_msg {
             ProposerAcceptorMessage::Greeting(ref greeting) => {
                 info!(
-                    "start handshake with walproposer {} sysid {} timeline {}",
-                    self.peer_addr, greeting.system_id, greeting.tli,
+                    "start handshake with walproposer {} sysid {}",
+                    self.peer_addr, greeting.system_id,
                 );
                 let server_info = ServerInfo {
                     pg_version: greeting.pg_version,
