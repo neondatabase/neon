@@ -5708,7 +5708,7 @@ mod tests {
     use pageserver_api::value::Value;
     use pageserver_compaction::helpers::overlaps_with;
     use rand::{thread_rng, Rng};
-    use storage_layer::{IoConcurrency, PersistentLayerKey, SelectedIoConcurrency};
+    use storage_layer::{IoConcurrency, PersistentLayerKey};
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
     use timeline::{CompactOptions, DeltaLayerTestDesc};

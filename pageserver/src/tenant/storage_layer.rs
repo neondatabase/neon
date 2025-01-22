@@ -497,6 +497,7 @@ impl IoConcurrency {
     #[cfg(test)]
     pub(crate) fn spawn_for_test() -> impl std::ops::DerefMut<Target = Self> {
         use std::ops::{Deref, DerefMut};
+        use tracing::info;
         use utils::sync::gate::Gate;
 
         // Spawn needs a Gate, give it one.
@@ -518,10 +519,41 @@ impl IoConcurrency {
             }
         }
         let gate = Box::new(Gate::default());
+
+        // The default behavior when running Rust unit tests without any further
+        // flags is to use the new behavior.
+        // The CI uses the following environment variable to unit test both old
+        // and new behavior.
+        // NB: the Python regression & perf tests take the `else` branch
+        // below and have their own defaults management.
+        let selected = {
+            // The pageserver_api::config type is unsuitable because it's internally tagged.
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "kebab-case")]
+            enum TestOverride {
+                Sequential,
+                SidecarTask,
+            }
+            use once_cell::sync::Lazy;
+            static TEST_OVERRIDE: Lazy<TestOverride> = Lazy::new(|| {
+                utils::env::var_serde_json_string(
+                    "NEON_PAGESERVER_UNIT_TEST_GET_VECTORED_CONCURRENT_IO",
+                )
+                .unwrap_or(TestOverride::SidecarTask)
+            });
+
+            match *TEST_OVERRIDE {
+                TestOverride::Sequential => SelectedIoConcurrency::Sequential,
+                TestOverride::SidecarTask => {
+                    SelectedIoConcurrency::SidecarTask(gate.enter().expect("just created it"))
+                }
+            }
+        };
+
+        info!(?selected, "get_vectored_concurrent_io test");
+
         Wrapper {
-            inner: Self::spawn(SelectedIoConcurrency::SidecarTask(
-                gate.enter().expect("just created it"),
-            )),
+            inner: Self::spawn(selected),
             gate,
         }
     }
@@ -1112,6 +1144,7 @@ mod tests2 {
     /// ```text
     /// RUST_LOG=trace cargo nextest run  --features testing  --no-capture test_io_concurrency_noise
     /// running 1 test
+    /// 2025-01-21T17:42:01.335679Z  INFO get_vectored_concurrent_io test selected=SidecarTask
     /// 2025-01-21T17:42:01.335680Z TRACE spawning sidecar task task_id=0
     /// 2025-01-21T17:42:01.335937Z TRACE IoConcurrency_sidecar{task_id=0}: start
     /// 2025-01-21T17:42:01.335972Z TRACE IoConcurrency_sidecar{task_id=0}: received new io future
@@ -1137,6 +1170,13 @@ mod tests2 {
         crate::tenant::harness::setup_logging();
 
         let io_concurrency = IoConcurrency::spawn_for_test();
+        match *io_concurrency {
+            IoConcurrency::Sequential => {
+                // This test asserts behavior in sidecar mode, doesn't make sense in sequential mode.
+                return;
+            }
+            IoConcurrency::SidecarTask { .. } => {}
+        }
         let mut reconstruct_state = ValuesReconstructState::new(io_concurrency.clone());
 
         let (io_fut_is_waiting_tx, io_fut_is_waiting) = tokio::sync::oneshot::channel();
