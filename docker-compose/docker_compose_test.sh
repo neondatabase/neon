@@ -22,7 +22,6 @@ PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
 cleanup() {
     echo "show container information"
     docker ps
-    docker compose --profile test-extensions -f $COMPOSE_FILE logs
     echo "stop containers..."
     docker compose --profile test-extensions -f $COMPOSE_FILE down
 }
@@ -77,7 +76,6 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
                 cat $d/regression.out $d/regression.diffs || true
             done
         rm -rf $FAILED
-        cleanup
         exit 1
         fi
     fi

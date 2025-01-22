@@ -820,8 +820,8 @@ jobs:
       - name: Print logs and clean up
         if: always()
         run: |
-          docker compose -f ./docker-compose/docker-compose.yml logs || 0
-          docker compose -f ./docker-compose/docker-compose.yml down
+          docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml logs || true
+          docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml down
 
   promote-images-dev:
     needs: [ check-permissions, tag, vm-compute-node-image, neon-image ]
