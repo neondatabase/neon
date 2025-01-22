@@ -728,10 +728,11 @@ impl PageServerHandler {
             msg = pgb.read_message() => { msg }
         };
 
-        let mut recorder = SmgrOpLatencyRecorder {
-            start_time: Instant::now(),
-            ...
-        };
+        let ctx = ctx.enrich(
+            SmgrOpLatencyRecorder {
+                start_time: Instant::now(),
+                parse_request: ParseRequest::unset(),
+            });
 
         let received_at = Instant::now();
 
@@ -753,17 +754,15 @@ impl PageServerHandler {
 
         fail::fail_point!("ps::handle-pagerequest-message");
 
-        let parse_request_recorder = ParseREquest {
-            start_time: Instant::now(),
-            ...
-        };
+
+        {
+
+            let parse_request_recorder= ctx.get::<SmgrOpLatencyRecorder>().parse_request;
         // parse request
         let neon_fe_msg =
-            PagestreamFeMessage::parse(&mut copy_data_bytes.reader(), protocol_version)?;
+            PagestreamFeMessage::parse(&mut copy_data_bytes.reader(), protocol_version, &parse_request_recorder)?;
+        }
 
-        parse_request_recorder.end_time = Instant::now();
-
-        recorder.parse_request = parse_request_recorder;
 
         // TODO: turn in to async closure once available to avoid repeating received_at
         async fn record_op_start_and_throttle(
@@ -931,7 +930,11 @@ impl PageServerHandler {
                     shard: shard.downgrade(),
                     effective_request_lsn,
                     pages: smallvec::smallvec![BatchedGetPageRequest { req, timer }],
-                    recorder,
+                    downstairs: {
+                        let downstairs = Arc::new(Mutex::new(Downstairs::init()));
+                        *(&mut ctx.get::<SmgrOpLatencyRecorder>().downstairs) = Arc::clone(&downstairs);
+                        downstairs
+                    },
                 }
             }
             #[cfg(feature = "testing")]
@@ -1606,6 +1609,10 @@ impl PageServerHandler {
             async move {
                 let _cancel_batcher = cancel_batcher.drop_guard();
                 loop {
+                    let ctx = ctx.attached_child();
+
+                    let child = ctx.attached_child();
+
                     let maybe_batch = batch_rx.recv().await;
                     let batch = match maybe_batch {
                         Ok(batch) => batch,
@@ -1620,6 +1627,8 @@ impl PageServerHandler {
                             return Err(e);
                         }
                     };
+                    batch.downstairs.wait_for_execution.end_time = Instant::now();
+                    ctx.latency_recording.enrich(batch.downstairs);
                     self.pagesteam_handle_batched_message(
                         pgb_writer,
                         batch,

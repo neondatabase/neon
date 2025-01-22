@@ -92,203 +92,56 @@
 use crate::task_mgr::TaskKind;
 
 // The main structure of this module, see module-level comment.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RequestContext {
-    task_kind: TaskKind,
-    download_behavior: DownloadBehavior,
-    access_stats_behavior: AccessStatsBehavior,
-    page_content_kind: PageContentKind,
+    latency_recording: Option<latency_recording::LatencyRecording>,
 }
 
-/// The kind of access to the page cache.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, enum_map::Enum, strum_macros::IntoStaticStr)]
-pub enum PageContentKind {
-    Unknown,
-    DeltaLayerSummary,
-    DeltaLayerBtreeNode,
-    DeltaLayerValue,
-    ImageLayerSummary,
-    ImageLayerBtreeNode,
-    ImageLayerValue,
-    InMemoryLayer,
-}
-
-/// Desired behavior if the operation requires an on-demand download
-/// to proceed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum DownloadBehavior {
-    /// Download the layer file. It can take a while.
-    Download,
-
-    /// Download the layer file, but print a warning to the log. This should be used
-    /// in code where the layer file is expected to already exist locally.
-    Warn,
-
-    /// Return a PageReconstructError::NeedsDownload error
-    Error,
-}
-
-/// Whether this request should update access times used in LRU eviction
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum AccessStatsBehavior {
-    /// Update access times: this request's access to data should be taken
-    /// as a hint that the accessed layer is likely to be accessed again
-    Update,
-
-    /// Do not update access times: this request is accessing the layer
-    /// but does not want to indicate that the layer should be retained in cache,
-    /// perhaps because the requestor is a compaction routine that will soon cover
-    /// this layer with another.
-    Skip,
-}
-
-pub struct RequestContextBuilder {
-    inner: RequestContext,
-}
-
-impl RequestContextBuilder {
-    /// A new builder with default settings
-    pub fn new(task_kind: TaskKind) -> Self {
-        Self {
-            inner: RequestContext {
-                task_kind,
-                download_behavior: DownloadBehavior::Download,
-                access_stats_behavior: AccessStatsBehavior::Update,
-                page_content_kind: PageContentKind::Unknown,
-            },
-        }
-    }
-
-    pub fn extend(original: &RequestContext) -> Self {
-        Self {
-            // This is like a Copy, but avoid implementing Copy because ordinary users of
-            // RequestContext should always move or ref it.
-            inner: RequestContext {
-                task_kind: original.task_kind,
-                download_behavior: original.download_behavior,
-                access_stats_behavior: original.access_stats_behavior,
-                page_content_kind: original.page_content_kind,
-            },
-        }
-    }
-
-    /// Configure the DownloadBehavior of the context: whether to
-    /// download missing layers, and/or warn on the download.
-    pub fn download_behavior(mut self, b: DownloadBehavior) -> Self {
-        self.inner.download_behavior = b;
-        self
-    }
-
-    /// Configure the AccessStatsBehavior of the context: whether layer
-    /// accesses should update the access time of the layer.
-    pub(crate) fn access_stats_behavior(mut self, b: AccessStatsBehavior) -> Self {
-        self.inner.access_stats_behavior = b;
-        self
-    }
-
-    pub(crate) fn page_content_kind(mut self, k: PageContentKind) -> Self {
-        self.inner.page_content_kind = k;
-        self
-    }
-
-    pub fn build(self) -> RequestContext {
-        self.inner
-    }
+trait Propagatable: Default {
+    fn propagate(&self, child: &mut Self);
 }
 
 impl RequestContext {
-    /// Create a new RequestContext that has no parent.
-    ///
-    /// The function is called `new` because, once we add children
-    /// to it using `detached_child` or `attached_child`, the context
-    /// form a tree (not implemented yet since cancellation will be
-    /// the first feature that requires a tree).
-    ///
-    /// # Future: Cancellation
-    ///
-    /// The only reason why a context like this one can be canceled is
-    /// because someone explicitly canceled it.
-    /// It has no parent, so it cannot inherit cancellation from there.
-    pub fn new(task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        RequestContextBuilder::new(task_kind)
-            .download_behavior(download_behavior)
-            .build()
+    fn root() -> Self {
+        Self::default()
+    }
+    fn child(&self) -> RequestContext {
+        let mut child = RequestContext::default();
+        let Self {
+            latency_recording,
+        } = self;
+        if let Some(latency_recording) = latency_recording {
+            child.latency_recording = Some(latency_recording.child());
+        }
+    }
+}
+
+mod latency_recording {
+    struct LatencyRecording {
+        inner: Arc<Mutex<Inner>>,
     }
 
-    /// Create a detached child context for a task that may outlive `self`.
-    ///
-    /// Use this when spawning new background activity that should complete
-    /// even if the current request is canceled.
-    ///
-    /// # Future: Cancellation
-    ///
-    /// Cancellation of `self` will not propagate to the child context returned
-    /// by this method.
-    ///
-    /// # Future: Structured Concurrency
-    ///
-    /// We could add the Future as a parameter to this function, spawn it as a task,
-    /// and pass to the new task the child context as an argument.
-    /// That would be an ergonomic improvement.
-    ///
-    /// We could make new calls to this function fail if `self` is already canceled.
-    pub fn detached_child(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        self.child_impl(task_kind, download_behavior)
+    impl LatencyRecording {
+        fn new() -> Self {
+            Self {
+                current: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn on_request_recv(&self, now: Instant) -> {
+            let mut inner = self.inner.lock().unwrap();
+            inner.current.insert(now, now);
+        }
+
     }
 
-    /// Create a child of context `self` for a task that shall not outlive `self`.
-    ///
-    /// Use this when fanning-out work to other async tasks.
-    ///
-    /// # Future: Cancellation
-    ///
-    /// Cancelling a context will propagate to its attached children.
-    ///
-    /// # Future: Structured Concurrency
-    ///
-    /// We could add the Future as a parameter to this function, spawn it as a task,
-    /// and track its `JoinHandle` inside the `RequestContext`.
-    ///
-    /// We could then provide another method to allow waiting for all child tasks
-    /// to finish.
-    ///
-    /// We could make new calls to this function fail if `self` is already canceled.
-    /// Alternatively, we could allow the creation but not spawn the task.
-    /// The method to wait for child tasks would return an error, indicating
-    /// that the child task was not started because the context was canceled.
-    pub fn attached_child(&self) -> Self {
-        self.child_impl(self.task_kind(), self.download_behavior())
-    }
-
-    /// Use this function when you should be creating a child context using
-    /// [`attached_child`] or [`detached_child`], but your caller doesn't provide
-    /// a context and you are unwilling to change all callers to provide one.
-    ///
-    /// Before we add cancellation, we should get rid of this method.
-    ///
-    /// [`attached_child`]: Self::attached_child
-    /// [`detached_child`]: Self::detached_child
-    pub fn todo_child(task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        Self::new(task_kind, download_behavior)
-    }
-
-    fn child_impl(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        Self::new(task_kind, download_behavior)
-    }
-
-    pub fn task_kind(&self) -> TaskKind {
-        self.task_kind
-    }
-
-    pub fn download_behavior(&self) -> DownloadBehavior {
-        self.download_behavior
-    }
-
-    pub(crate) fn access_stats_behavior(&self) -> AccessStatsBehavior {
-        self.access_stats_behavior
-    }
-
-    pub(crate) fn page_content_kind(&self) -> PageContentKind {
-        self.page_content_kind
+    impl Propagatable for LatencyRecording {
+        fn propagate(&self, other: &Self) {
+            let mut inner = self.inner.lock().unwrap();
+            let other_inner = other.inner.lock().unwrap();
+            for (k, v) in other_inner.current.iter() {
+                inner.current.insert(*k, *v);
+            }
+        }
     }
 }
