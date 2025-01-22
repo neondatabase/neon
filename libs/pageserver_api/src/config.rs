@@ -120,6 +120,7 @@ pub struct ConfigToml {
     pub no_sync: Option<bool>,
     pub wal_receiver_protocol: PostgresClientProtocol,
     pub page_service_pipelining: PageServicePipeliningConfig,
+    pub get_vectored_concurrent_io: GetVectoredConcurrentIo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -156,6 +157,25 @@ pub struct PageServicePipeliningConfigPipelined {
 pub enum PageServiceProtocolPipelinedExecutionStrategy {
     ConcurrentFutures,
     Tasks,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
+#[serde(deny_unknown_fields)]
+pub enum GetVectoredConcurrentIo {
+    /// The read path is fully sequential: layers are visited
+    /// one after the other and IOs are issued and waited upon
+    /// from the same task that traverses the layers.
+    Sequential,
+    /// The read path still traverses layers sequentially, and
+    /// index blocks will be read into the PS PageCache from
+    /// that task, with waiting.
+    /// But data IOs are dispatched and waited upon from a sidecar
+    /// task so that the traversing task can continue to traverse
+    /// layers while the IOs are in flight.
+    /// If the PS PageCache miss rate is low, this improves
+    /// throughput dramatically.
+    SidecarTask,
 }
 
 pub mod statvfs {
@@ -463,6 +483,11 @@ impl Default for ConfigToml {
                     max_batch_size: NonZeroUsize::new(32).unwrap(),
                     execution: PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures,
                 })
+            },
+            get_vectored_concurrent_io: if !cfg!(test) {
+                GetVectoredConcurrentIo::Sequential
+            } else {
+                GetVectoredConcurrentIo::SidecarTask
             },
         }
     }

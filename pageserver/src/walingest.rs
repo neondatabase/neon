@@ -499,7 +499,13 @@ impl WalIngest {
 
                 let content = modification
                     .tline
-                    .get_rel_page_at_lsn(src_rel, blknum, Version::Modified(modification), ctx)
+                    .get_rel_page_at_lsn(
+                        src_rel,
+                        blknum,
+                        Version::Modified(modification),
+                        ctx,
+                        crate::tenant::storage_layer::IoConcurrency::sequential(),
+                    )
                     .await?;
                 modification.put_rel_page_image(dst_rel, blknum, content)?;
                 num_blocks_copied += 1;
@@ -1489,6 +1495,7 @@ mod tests {
     use super::*;
     use crate::tenant::harness::*;
     use crate::tenant::remote_timeline_client::{remote_initdb_archive_path, INITDB_PATH};
+    use crate::tenant::storage_layer::IoConcurrency;
     use postgres_ffi::RELSEG_SIZE;
 
     use crate::DEFAULT_PG_VERSION;
@@ -1532,6 +1539,7 @@ mod tests {
     #[tokio::test]
     async fn test_relsize() -> Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_relsize").await?.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -1599,7 +1607,13 @@ mod tests {
         // Check page contents at each LSN
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x20)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x20)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 2")
@@ -1607,7 +1621,13 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x30)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x30)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
@@ -1615,14 +1635,26 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x40)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x40)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x40)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x40)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
@@ -1630,21 +1662,39 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    2,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 2 at 5")
@@ -1667,14 +1717,26 @@ mod tests {
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x60)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x60)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x60)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x60)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
@@ -1689,7 +1751,13 @@ mod tests {
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    2,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 2 at 5")
@@ -1722,14 +1790,26 @@ mod tests {
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x70)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x70)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             ZERO_PAGE
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x70)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x70)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1")
@@ -1750,7 +1830,13 @@ mod tests {
         for blk in 2..1500 {
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blk, Version::Lsn(Lsn(0x80)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blk,
+                        Version::Lsn(Lsn(0x80)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 ZERO_PAGE
@@ -1758,7 +1844,13 @@ mod tests {
         }
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1500, Version::Lsn(Lsn(0x80)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1500,
+                    Version::Lsn(Lsn(0x80)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1500")
@@ -1851,6 +1943,7 @@ mod tests {
             .await?
             .load()
             .await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -1903,7 +1996,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(lsn), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(lsn),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -1931,7 +2030,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x60)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x60)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -1950,7 +2055,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x50)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x50)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -1987,7 +2098,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x80)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x80)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
