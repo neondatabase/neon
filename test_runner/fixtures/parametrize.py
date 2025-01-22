@@ -44,6 +44,11 @@ def pageserver_virtual_file_io_mode() -> str | None:
     return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_MODE")
 
 
+@pytest.fixture(scope="function", autouse=True)
+def pageserver_get_vectored_concurrent_io() -> str | None:
+    return os.getenv("PAGESERVER_GET_VECTORED_CONCURRENT_IO")
+
+
 def get_pageserver_default_tenant_config_compaction_algorithm() -> dict[str, Any] | None:
     toml_table = os.getenv("PAGESERVER_DEFAULT_TENANT_CONFIG_COMPACTION_ALGORITHM")
     if toml_table is None:
