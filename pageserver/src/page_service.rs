@@ -728,6 +728,11 @@ impl PageServerHandler {
             msg = pgb.read_message() => { msg }
         };
 
+        let mut recorder = SmgrOpLatencyRecorder {
+            start_time: Instant::now(),
+            ...
+        };
+
         let received_at = Instant::now();
 
         let copy_data_bytes = match msg? {
@@ -748,9 +753,17 @@ impl PageServerHandler {
 
         fail::fail_point!("ps::handle-pagerequest-message");
 
+        let parse_request_recorder = ParseREquest {
+            start_time: Instant::now(),
+            ...
+        };
         // parse request
         let neon_fe_msg =
             PagestreamFeMessage::parse(&mut copy_data_bytes.reader(), protocol_version)?;
+
+        parse_request_recorder.end_time = Instant::now();
+
+        recorder.parse_request = parse_request_recorder;
 
         // TODO: turn in to async closure once available to avoid repeating received_at
         async fn record_op_start_and_throttle(
@@ -918,6 +931,7 @@ impl PageServerHandler {
                     shard: shard.downgrade(),
                     effective_request_lsn,
                     pages: smallvec::smallvec![BatchedGetPageRequest { req, timer }],
+                    recorder,
                 }
             }
             #[cfg(feature = "testing")]
@@ -963,12 +977,14 @@ impl PageServerHandler {
                     shard: accum_shard,
                     pages: ref mut accum_pages,
                     effective_request_lsn: accum_lsn,
+                    recorder: accum_recorder,
                 }),
                 BatchedFeMessage::GetPage {
                     span: _,
                     shard: this_shard,
                     pages: this_pages,
                     effective_request_lsn: this_lsn,
+                    recorder: this_recorder,
                 },
             ) if (|| {
                 assert_eq!(this_pages.len(), 1);
@@ -994,6 +1010,7 @@ impl PageServerHandler {
             {
                 // ok to batch
                 accum_pages.extend(this_pages);
+                *this_recorder = accum_recorder;
                 Ok(())
             }
             #[cfg(feature = "testing")]
