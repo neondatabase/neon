@@ -231,8 +231,9 @@ pub struct ProposerGreetingV2 {
 /// (acceptor voted for).
 #[derive(Debug, Serialize)]
 pub struct AcceptorGreeting {
-    term: u64,
     node_id: NodeId,
+    mconf: membership::Configuration,
+    term: u64,
 }
 
 /// Vote request sent from proposer to safekeepers
@@ -371,7 +372,7 @@ impl BytesF for Bytes {
 
 impl ProposerAcceptorMessage {
     /// Read cstring from Bytes.
-    fn read_cstr(buf: &mut Bytes) -> Result<String> {
+    fn get_cstr(buf: &mut Bytes) -> Result<String> {
         let pos = buf
             .iter()
             .position(|x| *x == 0)
@@ -385,7 +386,7 @@ impl ProposerAcceptorMessage {
     }
 
     /// Read membership::Configuration from Bytes.
-    fn read_mconf(buf: &mut Bytes) -> Result<membership::Configuration> {
+    fn get_mconf(buf: &mut Bytes) -> Result<membership::Configuration> {
         let generation = buf.get_u32_f().with_context(|| "reading generation")?;
         let members_len = buf.get_u32_f().with_context(|| "reading members_len")?;
         // Main member set must have at least someone in valid configuration.
@@ -398,8 +399,7 @@ impl ProposerAcceptorMessage {
             let id = buf
                 .get_u64_f()
                 .with_context(|| format!("reading member {} node_id", i))?;
-            let host =
-                Self::read_cstr(buf).with_context(|| format!("reading member {} host", i))?;
+            let host = Self::get_cstr(buf).with_context(|| format!("reading member {} host", i))?;
             let pg_port = buf
                 .get_u16_f()
                 .with_context(|| format!("reading member {} port", i))?;
@@ -424,7 +424,7 @@ impl ProposerAcceptorMessage {
                 let id = buf
                     .get_u64_f()
                     .with_context(|| format!("reading new member {} node_id", i))?;
-                let host = Self::read_cstr(buf)
+                let host = Self::get_cstr(buf)
                     .with_context(|| format!("reading new member {} host", i))?;
                 let pg_port = buf
                     .get_u16_f()
@@ -458,12 +458,12 @@ impl ProposerAcceptorMessage {
             match tag {
                 'g' => {
                     let tenant_id_str =
-                        Self::read_cstr(&mut msg_bytes).with_context(|| "reading tenant_id")?;
+                        Self::get_cstr(&mut msg_bytes).with_context(|| "reading tenant_id")?;
                     let tenant_id = TenantId::from_str(&tenant_id_str)?;
                     let timeline_id_str =
-                        Self::read_cstr(&mut msg_bytes).with_context(|| "reading timeline_id")?;
+                        Self::get_cstr(&mut msg_bytes).with_context(|| "reading timeline_id")?;
                     let timeline_id = TimelineId::from_str(&timeline_id_str)?;
-                    let mconf = Self::read_mconf(&mut msg_bytes)?;
+                    let mconf = Self::get_mconf(&mut msg_bytes)?;
                     let pg_version = msg_bytes
                         .get_u32_f()
                         .with_context(|| "reading pg_version")?;
@@ -624,6 +624,32 @@ pub enum AcceptorProposerMessage {
 }
 
 impl AcceptorProposerMessage {
+    fn put_cstr(buf: &mut BytesMut, s: &str) {
+        buf.put_slice(s.as_bytes());
+        buf.put_u8(0); // null terminator
+    }
+
+    /// Serialize membership::Configuration into buf.
+    fn serialize_mconf(buf: &mut BytesMut, mconf: &membership::Configuration) {
+        buf.put_u32(mconf.generation);
+        buf.put_u32(mconf.members.m.len() as u32);
+        for sk in &mconf.members.m {
+            buf.put_u64(sk.id.0);
+            Self::put_cstr(buf, &sk.host);
+            buf.put_u16(sk.pg_port);
+        }
+        if let Some(ref new_members) = mconf.new_members {
+            buf.put_u32(new_members.m.len() as u32);
+            for sk in &new_members.m {
+                buf.put_u64(sk.id.0);
+                Self::put_cstr(buf, &sk.host);
+                buf.put_u16(sk.pg_port);
+            }
+        } else {
+            buf.put_u32(0);
+        }
+    }
+
     /// Serialize acceptor -> proposer message.
     pub fn serialize(&self, buf: &mut BytesMut, proto_version: u32) -> Result<()> {
         // TODO remove after converting all msgs
@@ -631,13 +657,21 @@ impl AcceptorProposerMessage {
             && (matches!(self, AcceptorProposerMessage::Greeting(_)))
         {
             match self {
-                _ => bail!("not implemented"),
+                AcceptorProposerMessage::Greeting(msg) => {
+                    buf.put_u8('g' as u8);
+                    buf.put_u64(msg.node_id.0);
+                    Self::serialize_mconf(buf, &msg.mconf);
+                    buf.put_u64(msg.term)
+                }
+                _ => bail!("not impl"),
             }
+            Ok(())
         // TODO remove 3 after converting all msgs
         } else if proto_version == SK_PROTO_VERSION_2 || proto_version == SK_PROTO_VERSION_3 {
             match self {
                 AcceptorProposerMessage::Greeting(msg) => {
                     buf.put_u64_le('g' as u64);
+                    // v2 didn't have mconf and fields were reordered
                     buf.put_u64_le(msg.term);
                     buf.put_u64_le(msg.node_id.0);
                 }
@@ -824,14 +858,16 @@ where
             self.state.finish_change(&state).await?;
         }
 
-        info!(
-            "processed greeting {:?} from walproposer, sending term {:?}",
-            msg, self.state.acceptor_state.term
-        );
-        Ok(Some(AcceptorProposerMessage::Greeting(AcceptorGreeting {
-            term: self.state.acceptor_state.term,
+        let apg = AcceptorGreeting {
             node_id: self.node_id,
-        })))
+            mconf: self.state.mconf.clone(),
+            term: self.state.acceptor_state.term,
+        };
+        info!(
+            "processed greeting {:?} from walproposer, sending {:?}",
+            msg, apg
+        );
+        Ok(Some(AcceptorProposerMessage::Greeting(apg)))
     }
 
     /// Give vote for the given term, if we haven't done that previously.

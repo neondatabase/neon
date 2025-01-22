@@ -169,6 +169,9 @@ typedef struct MembershipConfiguration
 	MemberSet	new_members;
 } MembershipConfiguration;
 
+/* Used only for debug printing */
+#define MaxMembershipConfLen 8192
+
 /*
  * Proposer <-> Acceptor messaging.
  */
@@ -223,13 +226,15 @@ typedef struct AcceptorProposerMessage
 } AcceptorProposerMessage;
 
 /*
- * Acceptor -> Proposer initial response: the highest term acceptor voted for.
+ * Acceptor -> Proposer initial response: the highest term acceptor voted for,
+ * its node id and configuration.
  */
 typedef struct AcceptorGreeting
 {
 	AcceptorProposerMessage apm;
-	term_t		term;
 	NNodeId		nodeId;
+	MembershipConfiguration mconf;
+	term_t		term;
 } AcceptorGreeting;
 
 /*
