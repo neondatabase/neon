@@ -2875,7 +2875,7 @@ impl Timeline {
             "produced {} delta layers and {} image layers, {} layers are kept",
             produced_delta_layers_len,
             produced_image_layers_len,
-            layer_selection.len()
+            keep_layers.len()
         );
 
         // Step 3: Place back to the layer map.

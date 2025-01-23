@@ -338,69 +338,43 @@ impl OpenLayerManager {
         metrics: &TimelineMetrics,
     ) {
         // gc-compaction could contain layer rewrites. We need to delete the old layers and insert the new ones.
-        let mut updates = self.layer_map.batch_update();
+
         // Match the old layers with the new layers
         let mut add_layers = HashMap::new();
         let mut rewrite_layers = HashMap::new();
         let mut drop_layers = HashMap::new();
         for layer in compact_from {
-            drop_layers.insert(layer.layer_desc().key(), layer);
+            drop_layers.insert(layer.layer_desc().key(), layer.clone());
         }
         for layer in compact_to {
             if let Some(old_layer) = drop_layers.remove(&layer.layer_desc().key()) {
-                rewrite_layers.insert(layer.layer_desc().key(), (old_layer, layer));
+                rewrite_layers.insert(layer.layer_desc().key(), (old_layer.clone(), layer.clone()));
             } else {
-                add_layers.insert(layer.layer_desc().key(), layer);
+                add_layers.insert(layer.layer_desc().key(), layer.clone());
             }
         }
-        // Process the updates, same as `rewrite_layers` but also adding some layers
-        for (_, (old_layer, new_layer)) in rewrite_layers {
-            debug_assert_eq!(
-                old_layer.layer_desc().key_range,
-                new_layer.layer_desc().key_range
-            );
-            debug_assert_eq!(
-                old_layer.layer_desc().lsn_range,
-                new_layer.layer_desc().lsn_range
-            );
+        let add_layers = add_layers.values().cloned().collect::<Vec<_>>();
+        let drop_layers = drop_layers.values().cloned().collect::<Vec<_>>();
+        let rewrite_layers = rewrite_layers.values().cloned().collect::<Vec<_>>();
 
-            // Transfer visibility hint from old to new layer, since the new layer covers the same key space.  This is not guaranteed to
-            // be accurate (as the new layer may cover a different subset of the key range), but is a sensible default, and prevents
-            // always marking rewritten layers as visible.
-            new_layer.as_ref().set_visibility(old_layer.visibility());
-
-            // Safety: we may never rewrite the same file in-place.  Callers are responsible
-            // for ensuring that they only rewrite layers after something changes the path,
-            // such as an increment in the generation number.
-            assert_ne!(old_layer.local_path(), new_layer.local_path());
-
-            Self::delete_historic_layer(old_layer, &mut updates, &mut self.layer_fmgr);
-
-            Self::insert_historic_layer(
-                new_layer.as_ref().clone(),
-                &mut updates,
-                &mut self.layer_fmgr,
-            );
-
-            metrics.record_new_file_metrics(new_layer.layer_desc().file_size);
-        }
-        // Delete the layers that are no longer needed
-        for (_, l) in drop_layers {
-            Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
-        }
-        // Add the new layers
-        for (_, l) in add_layers {
-            Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
-            metrics.record_new_file_metrics(l.layer_desc().file_size);
-        }
-        updates.flush();
+        self.rewrite_layers_inner(&rewrite_layers, &drop_layers, &add_layers, metrics);
     }
 
     /// Called post-compaction when some previous generation image layers were trimmed.
-    pub(crate) fn rewrite_layers(
+    pub fn rewrite_layers(
         &mut self,
         rewrite_layers: &[(Layer, ResidentLayer)],
         drop_layers: &[Layer],
+        metrics: &TimelineMetrics,
+    ) {
+        self.rewrite_layers_inner(rewrite_layers, drop_layers, &[], metrics);
+    }
+
+    fn rewrite_layers_inner(
+        &mut self,
+        rewrite_layers: &[(Layer, ResidentLayer)],
+        drop_layers: &[Layer],
+        add_layers: &[ResidentLayer],
         metrics: &TimelineMetrics,
     ) {
         let mut updates = self.layer_map.batch_update();
@@ -436,6 +410,10 @@ impl OpenLayerManager {
         }
         for l in drop_layers {
             Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
+        }
+        for l in add_layers {
+            Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+            metrics.record_new_file_metrics(l.layer_desc().file_size);
         }
         updates.flush();
     }
