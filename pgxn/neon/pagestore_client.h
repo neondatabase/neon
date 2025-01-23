@@ -34,6 +34,8 @@ typedef enum
 	T_NeonGetPageRequest,
 	T_NeonDbSizeRequest,
 	T_NeonGetSlruSegmentRequest,
+	/* future tags above this line */
+	T_NeonTestRequest = 99, /* only in cfg(feature = "testing") */
 
 	/* pagestore -> pagestore_client */
 	T_NeonExistsResponse = 100,
@@ -42,6 +44,8 @@ typedef enum
 	T_NeonErrorResponse,
 	T_NeonDbSizeResponse,
 	T_NeonGetSlruSegmentResponse,
+	/* future tags above this line */
+	T_NeonTestResponse = 199, /* only in cfg(feature = "testing") */
 } NeonMessageTag;
 
 typedef uint64 NeonRequestId;
@@ -192,9 +196,29 @@ typedef uint16 shardno_t;
 
 typedef struct
 {
+	/*
+	 * Send this request to the PageServer associated with this shard.
+	 */
 	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
+	/*
+	 * Blocking read for the next response of this shard.
+	 *
+	 * When a CANCEL signal is handled, the connection state will be
+	 * unmodified.
+	 */
 	NeonResponse *(*receive) (shardno_t shard_no);
+	/*
+	 * Try get the next response from the TCP buffers, if any.
+	 * Returns NULL when the data is not yet available. 
+	 */
+	NeonResponse *(*try_receive) (shardno_t shard_no);
+	/*
+	 * Make sure all requests are sent to PageServer.
+	 */
 	bool		(*flush) (shardno_t shard_no);
+	/*
+	 * Disconnect from this pageserver shard.
+	 */
 	void        (*disconnect) (shardno_t shard_no);
 } page_server_api;
 

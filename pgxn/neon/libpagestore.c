@@ -911,7 +911,74 @@ pageserver_receive(shardno_t shard_no)
 		}
 		PG_CATCH();
 		{
-			neon_shard_log(shard_no, LOG, "pageserver_receive: disconnect due malformatted response");
+			neon_shard_log(shard_no, LOG, "pageserver_receive: disconnect due to failure while parsing response");
+			pageserver_disconnect(shard_no);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+
+		if (message_level_is_interesting(PageStoreTrace))
+		{
+			char	   *msg = nm_to_string((NeonMessage *) resp);
+
+			neon_shard_log(shard_no, PageStoreTrace, "got response: %s", msg);
+			pfree(msg);
+		}
+	}
+	else if (rc == -1)
+	{
+		neon_shard_log(shard_no, LOG, "pageserver_receive disconnect: psql end of copy data: %s", pchomp(PQerrorMessage(pageserver_conn)));
+		pageserver_disconnect(shard_no);
+		resp = NULL;
+	}
+	else if (rc == -2)
+	{
+		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+
+		pageserver_disconnect(shard_no);
+		neon_shard_log(shard_no, ERROR, "pageserver_receive disconnect: could not read COPY data: %s", msg);
+	}
+	else
+	{
+		pageserver_disconnect(shard_no);
+		neon_shard_log(shard_no, ERROR, "pageserver_receive disconnect: unexpected PQgetCopyData return value: %d", rc);
+	}
+
+	shard->nresponses_received++;
+	return (NeonResponse *) resp;
+}
+
+static NeonResponse *
+pageserver_try_receive(shardno_t shard_no)
+{
+	StringInfoData resp_buff;
+	NeonResponse *resp;
+	PageServer *shard = &page_servers[shard_no];
+	PGconn	   *pageserver_conn = shard->conn;
+	/* read response */
+	int			rc;
+
+	if (shard->state != PS_Connected)
+		return NULL;
+
+	Assert(pageserver_conn);
+
+	rc = PQgetCopyData(shard->conn, &resp_buff.data, 1 /* async = true */);
+
+	if (rc == 0)
+		return NULL;
+	else if (rc > 0)
+	{
+		PG_TRY();
+		{
+			resp_buff.len = rc;
+			resp_buff.cursor = 0;
+			resp = nm_unpack_response(&resp_buff);
+			PQfreemem(resp_buff.data);
+		}
+		PG_CATCH();
+		{
+			neon_shard_log(shard_no, LOG, "pageserver_receive: disconnect due to failure while parsing response");
 			pageserver_disconnect(shard_no);
 			PG_RE_THROW();
 		}
@@ -980,6 +1047,7 @@ page_server_api api =
 	.send = pageserver_send,
 	.flush = pageserver_flush,
 	.receive = pageserver_receive,
+	.try_receive = pageserver_try_receive,
 	.disconnect = pageserver_disconnect_shard
 };
 

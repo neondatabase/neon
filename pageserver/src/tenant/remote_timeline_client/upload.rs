@@ -40,6 +40,10 @@ pub(crate) async fn upload_index_part(
     });
     pausable_failpoint!("before-upload-index-pausable");
 
+    // Safety: refuse to persist invalid index metadata, to mitigate the impact of any bug that produces this
+    // (this should never happen)
+    index_part.validate().map_err(|e| anyhow::anyhow!(e))?;
+
     // FIXME: this error comes too late
     let serialized = index_part.to_json_bytes()?;
     let serialized = Bytes::from(serialized);

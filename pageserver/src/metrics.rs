@@ -91,15 +91,6 @@ pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "pageserver_layers_visited_per_read_global",
-        "Number of layers visited to reconstruct one key",
-        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
-    )
-    .expect("failed to define a metric")
-});
-
 pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_layers_visited_per_vectored_read_global",
@@ -109,71 +100,30 @@ pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-// Metrics collected on operations on the storage repository.
-#[derive(
-    Clone, Copy, enum_map::Enum, strum_macros::EnumString, strum_macros::Display, IntoStaticStr,
-)]
-pub(crate) enum GetKind {
-    Singular,
-    Vectored,
-}
-
-pub(crate) struct ReconstructTimeMetrics {
-    singular: Histogram,
-    vectored: Histogram,
-}
-
-pub(crate) static RECONSTRUCT_TIME: Lazy<ReconstructTimeMetrics> = Lazy::new(|| {
-    let inner = register_histogram_vec!(
-        "pageserver_getpage_reconstruct_seconds",
-        "Time spent in reconstruct_value (reconstruct a page from deltas)",
-        &["get_kind"],
-        CRITICAL_OP_BUCKETS.into(),
+pub(crate) static CONCURRENT_INITDBS: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_concurrent_initdb",
+        "Number of initdb processes running"
     )
-    .expect("failed to define a metric");
-
-    ReconstructTimeMetrics {
-        singular: inner.with_label_values(&[GetKind::Singular.into()]),
-        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
-    }
+    .expect("failed to define a metric")
 });
 
-impl ReconstructTimeMetrics {
-    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
-        match get_kind {
-            GetKind::Singular => &self.singular,
-            GetKind::Vectored => &self.vectored,
-        }
-    }
-}
-
-pub(crate) struct ReconstructDataTimeMetrics {
-    singular: Histogram,
-    vectored: Histogram,
-}
-
-impl ReconstructDataTimeMetrics {
-    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
-        match get_kind {
-            GetKind::Singular => &self.singular,
-            GetKind::Vectored => &self.vectored,
-        }
-    }
-}
-
-pub(crate) static GET_RECONSTRUCT_DATA_TIME: Lazy<ReconstructDataTimeMetrics> = Lazy::new(|| {
-    let inner = register_histogram_vec!(
-        "pageserver_getpage_get_reconstruct_data_seconds",
-        "Time spent in get_reconstruct_value_data",
-        &["get_kind"],
-        CRITICAL_OP_BUCKETS.into(),
+pub(crate) static INITDB_SEMAPHORE_ACQUISITION_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_initdb_semaphore_seconds_global",
+        "Time spent getting a permit from the global initdb semaphore",
+        STORAGE_OP_BUCKETS.into()
     )
-    .expect("failed to define a metric");
+    .expect("failed to define metric")
+});
 
-    ReconstructDataTimeMetrics {
-        singular: inner.with_label_values(&[GetKind::Singular.into()]),
-        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
-    }
+pub(crate) static INITDB_RUN_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_initdb_seconds_global",
+        "Time spent performing initdb",
+        STORAGE_OP_BUCKETS.into()
+    )
+    .expect("failed to define metric")
 });
 
 pub(crate) struct GetVectoredLatency {
@@ -1233,117 +1183,189 @@ pub(crate) struct SmgrOpTimerInner {
     global_flush_in_progress_micros: IntCounter,
     per_timeline_flush_in_progress_micros: IntCounter,
 
+    throttling: Arc<tenant_throttling::Pagestream>,
+
     timings: SmgrOpTimerState,
 }
 
+/// The stages of request processing are represented by the enum variants.
+/// Used as part of [`SmgrOpTimerInner::timings`].
+///
+/// Request processing calls into the `SmgrOpTimer::observe_*` methods at the
+/// transition points.
+/// These methods bump relevant counters and then update [`SmgrOpTimerInner::timings`]
+/// to the next state.
+///
+/// Each request goes through every stage, in all configurations.
+///
 #[derive(Debug)]
 enum SmgrOpTimerState {
     Received {
+        // In the future, we may want to track the full time the request spent
+        // inside pageserver process (time spent in kernel buffers can't be tracked).
+        // `received_at` would be used for that.
+        #[allow(dead_code)]
         received_at: Instant,
     },
-    ThrottleDoneExecutionStarting {
-        received_at: Instant,
+    Throttling {
         throttle_started_at: Instant,
-        started_execution_at: Instant,
     },
+    Batching {
+        throttle_done_at: Instant,
+    },
+    Executing {
+        execution_started_at: Instant,
+    },
+    Flushing,
+    // NB: when adding observation points, remember to update the Drop impl.
 }
 
+// NB: when adding observation points, remember to update the Drop impl.
+impl SmgrOpTimer {
+    /// See [`SmgrOpTimerState`] for more context.
+    pub(crate) fn observe_throttle_start(&mut self, at: Instant) {
+        let Some(inner) = self.0.as_mut() else {
+            return;
+        };
+        let SmgrOpTimerState::Received { received_at: _ } = &mut inner.timings else {
+            return;
+        };
+        inner.throttling.count_accounted_start.inc();
+        inner.timings = SmgrOpTimerState::Throttling {
+            throttle_started_at: at,
+        };
+    }
+
+    /// See [`SmgrOpTimerState`] for more context.
+    pub(crate) fn observe_throttle_done(&mut self, throttle: ThrottleResult) {
+        let Some(inner) = self.0.as_mut() else {
+            return;
+        };
+        let SmgrOpTimerState::Throttling {
+            throttle_started_at,
+        } = &inner.timings
+        else {
+            return;
+        };
+        inner.throttling.count_accounted_finish.inc();
+        match throttle {
+            ThrottleResult::NotThrottled { end } => {
+                inner.timings = SmgrOpTimerState::Batching {
+                    throttle_done_at: end,
+                };
+            }
+            ThrottleResult::Throttled { end } => {
+                // update metrics
+                inner.throttling.count_throttled.inc();
+                inner
+                    .throttling
+                    .wait_time
+                    .inc_by((end - *throttle_started_at).as_micros().try_into().unwrap());
+                // state transition
+                inner.timings = SmgrOpTimerState::Batching {
+                    throttle_done_at: end,
+                };
+            }
+        }
+    }
+
+    /// See [`SmgrOpTimerState`] for more context.
+    pub(crate) fn observe_execution_start(&mut self, at: Instant) {
+        let Some(inner) = self.0.as_mut() else {
+            return;
+        };
+        let SmgrOpTimerState::Batching { throttle_done_at } = &inner.timings else {
+            return;
+        };
+        // update metrics
+        let batch = at - *throttle_done_at;
+        inner.global_batch_wait_time.observe(batch.as_secs_f64());
+        inner
+            .per_timeline_batch_wait_time
+            .observe(batch.as_secs_f64());
+        // state transition
+        inner.timings = SmgrOpTimerState::Executing {
+            execution_started_at: at,
+        }
+    }
+
+    /// For all but the first caller, this is a no-op.
+    /// The first callers receives Some, subsequent ones None.
+    ///
+    /// See [`SmgrOpTimerState`] for more context.
+    pub(crate) fn observe_execution_end_flush_start(
+        &mut self,
+        at: Instant,
+    ) -> Option<SmgrOpFlushInProgress> {
+        // NB: unlike the other observe_* methods, this one take()s.
+        #[allow(clippy::question_mark)] // maintain similar code pattern.
+        let Some(mut inner) = self.0.take() else {
+            return None;
+        };
+        let SmgrOpTimerState::Executing {
+            execution_started_at,
+        } = &inner.timings
+        else {
+            return None;
+        };
+        // update metrics
+        let execution = at - *execution_started_at;
+        inner
+            .global_execution_latency_histo
+            .observe(execution.as_secs_f64());
+        if let Some(per_timeline_execution_latency_histo) =
+            &inner.per_timeline_execution_latency_histo
+        {
+            per_timeline_execution_latency_histo.observe(execution.as_secs_f64());
+        }
+
+        // state transition
+        inner.timings = SmgrOpTimerState::Flushing;
+
+        // return the flush in progress object which
+        // will do the remaining metrics updates
+        let SmgrOpTimerInner {
+            global_flush_in_progress_micros,
+            per_timeline_flush_in_progress_micros,
+            ..
+        } = inner;
+        Some(SmgrOpFlushInProgress {
+            flush_started_at: at,
+            global_micros: global_flush_in_progress_micros,
+            per_timeline_micros: per_timeline_flush_in_progress_micros,
+        })
+    }
+}
+
+/// The last stage of request processing is serializing and flushing the request
+/// into the TCP connection. We want to make slow flushes observable
+/// _while they are occuring_, so this struct provides a wrapper method [`Self::measure`]
+/// to periodically bump the metric.
+///
+/// If in the future we decide that we're not interested in live updates, we can
+/// add another `observe_*` method to [`SmgrOpTimer`], follow the existing pattern there,
+/// and remove this struct from the code base.
 pub(crate) struct SmgrOpFlushInProgress {
     flush_started_at: Instant,
     global_micros: IntCounter,
     per_timeline_micros: IntCounter,
 }
 
-impl SmgrOpTimer {
-    pub(crate) fn observe_throttle_done_execution_starting(&mut self, throttle: &ThrottleResult) {
-        let inner = self.0.as_mut().expect("other public methods consume self");
-        match (&mut inner.timings, throttle) {
-            (SmgrOpTimerState::Received { received_at }, throttle) => match throttle {
-                ThrottleResult::NotThrottled { start } => {
-                    inner.timings = SmgrOpTimerState::ThrottleDoneExecutionStarting {
-                        received_at: *received_at,
-                        throttle_started_at: *start,
-                        started_execution_at: *start,
-                    };
-                }
-                ThrottleResult::Throttled { start, end } => {
-                    inner.timings = SmgrOpTimerState::ThrottleDoneExecutionStarting {
-                        received_at: *start,
-                        throttle_started_at: *start,
-                        started_execution_at: *end,
-                    };
-                }
-            },
-            (x, _) => panic!("called in unexpected state: {x:?}"),
-        }
-    }
-
-    pub(crate) fn observe_smgr_op_completion_and_start_flushing(mut self) -> SmgrOpFlushInProgress {
-        let (flush_start, inner) = self
-            .smgr_op_end()
-            .expect("this method consume self, and the only other caller is drop handler");
-        let SmgrOpTimerInner {
-            global_flush_in_progress_micros,
-            per_timeline_flush_in_progress_micros,
-            ..
-        } = inner;
-        SmgrOpFlushInProgress {
-            flush_started_at: flush_start,
-            global_micros: global_flush_in_progress_micros,
-            per_timeline_micros: per_timeline_flush_in_progress_micros,
-        }
-    }
-
-    /// Returns `None`` if this method has already been called, `Some` otherwise.
-    fn smgr_op_end(&mut self) -> Option<(Instant, SmgrOpTimerInner)> {
-        let inner = self.0.take()?;
-
-        let now = Instant::now();
-
-        let batch;
-        let execution;
-        let throttle;
-        match inner.timings {
-            SmgrOpTimerState::Received { received_at } => {
-                batch = (now - received_at).as_secs_f64();
-                // TODO: use label for dropped requests.
-                // This is quite rare in practice, only during tenant/pageservers shutdown.
-                throttle = Duration::ZERO;
-                execution = Duration::ZERO.as_secs_f64();
-            }
-            SmgrOpTimerState::ThrottleDoneExecutionStarting {
-                received_at,
-                throttle_started_at,
-                started_execution_at,
-            } => {
-                batch = (throttle_started_at - received_at).as_secs_f64();
-                throttle = started_execution_at - throttle_started_at;
-                execution = (now - started_execution_at).as_secs_f64();
-            }
-        }
-
-        // update time spent in batching
-        inner.global_batch_wait_time.observe(batch);
-        inner.per_timeline_batch_wait_time.observe(batch);
-
-        // time spent in throttle metric is updated by throttle impl
-        let _ = throttle;
-
-        // update metrics for execution latency
-        inner.global_execution_latency_histo.observe(execution);
-        if let Some(per_timeline_execution_latency_histo) =
-            &inner.per_timeline_execution_latency_histo
-        {
-            per_timeline_execution_latency_histo.observe(execution);
-        }
-
-        Some((now, inner))
-    }
-}
-
 impl Drop for SmgrOpTimer {
     fn drop(&mut self) {
-        self.smgr_op_end();
+        // In case of early drop, update any of the remaining metrics with
+        // observations so that (started,finished) counter pairs balance out
+        // and all counters on the latency path have the the same number of
+        // observations.
+        // It's technically lying and it would be better if each metric had
+        // a separate label or similar for cancelled requests.
+        // But we don't have that right now and counter pairs balancing
+        // out is useful when using the metrics in panels and whatnot.
+        let now = Instant::now();
+        self.observe_throttle_start(now);
+        self.observe_throttle_done(ThrottleResult::NotThrottled { end: now });
+        self.observe_execution_start(now);
+        self.observe_execution_end_flush_start(now);
     }
 }
 
@@ -1354,12 +1376,12 @@ impl SmgrOpFlushInProgress {
     {
         let mut fut = std::pin::pin!(fut);
 
-        let now = Instant::now();
         // Whenever observe_guard gets called, or dropped,
         // it adds the time elapsed since its last call to metrics.
         // Last call is tracked in `now`.
         let mut observe_guard = scopeguard::guard(
             || {
+                let now = Instant::now();
                 let elapsed = now - self.flush_started_at;
                 self.global_micros
                     .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
@@ -1400,9 +1422,10 @@ pub enum SmgrQueryType {
     GetPageAtLsn,
     GetDbSize,
     GetSlruSegment,
+    #[cfg(feature = "testing")]
+    Test,
 }
 
-#[derive(Debug)]
 pub(crate) struct SmgrQueryTimePerTimeline {
     global_started: [IntCounter; SmgrQueryType::COUNT],
     global_latency: [Histogram; SmgrQueryType::COUNT],
@@ -1414,6 +1437,7 @@ pub(crate) struct SmgrQueryTimePerTimeline {
     per_timeline_flush_in_progress_micros: IntCounter,
     global_batch_wait_time: Histogram,
     per_timeline_batch_wait_time: Histogram,
+    throttling: Arc<tenant_throttling::Pagestream>,
 }
 
 static SMGR_QUERY_STARTED_GLOBAL: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -1619,7 +1643,11 @@ static PAGE_SERVICE_SMGR_BATCH_WAIT_TIME_GLOBAL: Lazy<Histogram> = Lazy::new(|| 
 });
 
 impl SmgrQueryTimePerTimeline {
-    pub(crate) fn new(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
+    pub(crate) fn new(
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+        pagestream_throttle_metrics: Arc<tenant_throttling::Pagestream>,
+    ) -> Self {
         let tenant_id = tenant_shard_id.tenant_id.to_string();
         let shard_slug = format!("{}", tenant_shard_id.shard_slug());
         let timeline_id = timeline_id.to_string();
@@ -1680,6 +1708,7 @@ impl SmgrQueryTimePerTimeline {
             per_timeline_flush_in_progress_micros,
             global_batch_wait_time,
             per_timeline_batch_wait_time,
+            throttling: pagestream_throttle_metrics,
         }
     }
     pub(crate) fn start_smgr_op(&self, op: SmgrQueryType, received_at: Instant) -> SmgrOpTimer {
@@ -1695,85 +1724,21 @@ impl SmgrQueryTimePerTimeline {
         SmgrOpTimer(Some(SmgrOpTimerInner {
             global_execution_latency_histo: self.global_latency[op as usize].clone(),
             per_timeline_execution_latency_histo: per_timeline_latency_histo,
-            timings: SmgrOpTimerState::Received { received_at },
             global_flush_in_progress_micros: self.global_flush_in_progress_micros.clone(),
             per_timeline_flush_in_progress_micros: self
                 .per_timeline_flush_in_progress_micros
                 .clone(),
             global_batch_wait_time: self.global_batch_wait_time.clone(),
             per_timeline_batch_wait_time: self.per_timeline_batch_wait_time.clone(),
+            throttling: self.throttling.clone(),
+            timings: SmgrOpTimerState::Received { received_at },
         }))
     }
 
+    /// TODO: do something about this? seems odd, we have a similar call on SmgrOpTimer
     pub(crate) fn observe_getpage_batch_start(&self, batch_size: usize) {
         self.global_batch_size.observe(batch_size as f64);
         self.per_timeline_batch_size.observe(batch_size as f64);
-    }
-}
-
-#[cfg(test)]
-mod smgr_query_time_tests {
-    use std::time::Instant;
-
-    use pageserver_api::shard::TenantShardId;
-    use strum::IntoEnumIterator;
-    use utils::id::{TenantId, TimelineId};
-
-    // Regression test, we used hard-coded string constants before using an enum.
-    #[test]
-    fn op_label_name() {
-        use super::SmgrQueryType::*;
-        let expect: [(super::SmgrQueryType, &'static str); 5] = [
-            (GetRelExists, "get_rel_exists"),
-            (GetRelSize, "get_rel_size"),
-            (GetPageAtLsn, "get_page_at_lsn"),
-            (GetDbSize, "get_db_size"),
-            (GetSlruSegment, "get_slru_segment"),
-        ];
-        for (op, expect) in expect {
-            let actual: &'static str = op.into();
-            assert_eq!(actual, expect);
-        }
-    }
-
-    #[test]
-    fn basic() {
-        let ops: Vec<_> = super::SmgrQueryType::iter().collect();
-
-        for op in &ops {
-            let tenant_id = TenantId::generate();
-            let timeline_id = TimelineId::generate();
-            let metrics = super::SmgrQueryTimePerTimeline::new(
-                &TenantShardId::unsharded(tenant_id),
-                &timeline_id,
-            );
-
-            let get_counts = || {
-                let global: u64 = ops
-                    .iter()
-                    .map(|op| metrics.global_latency[*op as usize].get_sample_count())
-                    .sum();
-                (
-                    global,
-                    metrics.per_timeline_getpage_latency.get_sample_count(),
-                )
-            };
-
-            let (pre_global, pre_per_tenant_timeline) = get_counts();
-            assert_eq!(pre_per_tenant_timeline, 0);
-
-            let timer = metrics.start_smgr_op(*op, Instant::now());
-            drop(timer);
-
-            let (post_global, post_per_tenant_timeline) = get_counts();
-            if matches!(op, super::SmgrQueryType::GetPageAtLsn) {
-                // getpage ops are tracked per-timeline, others aren't
-                assert_eq!(post_per_tenant_timeline, 1);
-            } else {
-                assert_eq!(post_per_tenant_timeline, 0);
-            }
-            assert!(post_global > pre_global);
-        }
     }
 }
 
@@ -2518,12 +2483,19 @@ impl StorageTimeMetricsTimer {
         }
     }
 
-    /// Record the time from creation to now.
-    pub fn stop_and_record(self) {
-        let duration = self.start.elapsed().as_secs_f64();
-        self.metrics.timeline_sum.inc_by(duration);
+    /// Returns the elapsed duration of the timer.
+    pub fn elapsed(&self) -> Duration {
+        self.start.elapsed()
+    }
+
+    /// Record the time from creation to now and return it.
+    pub fn stop_and_record(self) -> Duration {
+        let duration = self.elapsed();
+        let seconds = duration.as_secs_f64();
+        self.metrics.timeline_sum.inc_by(seconds);
         self.metrics.timeline_count.inc();
-        self.metrics.global_histogram.observe(duration);
+        self.metrics.global_histogram.observe(seconds);
+        duration
     }
 
     /// Turns this timer into a timer, which will always record -- usually this means recording
@@ -2540,6 +2512,14 @@ impl Drop for AlwaysRecordingStorageTimeMetricsTimer {
         if let Some(inner) = self.0.take() {
             inner.stop_and_record();
         }
+    }
+}
+
+impl AlwaysRecordingStorageTimeMetricsTimer {
+    /// Returns the elapsed duration of the timer.
+    #[allow(unused)]
+    pub fn elapsed(&self) -> Duration {
+        self.0.as_ref().expect("not dropped yet").elapsed()
     }
 }
 
@@ -3572,9 +3552,7 @@ pub(crate) mod tenant_throttling {
     use once_cell::sync::Lazy;
     use utils::shard::TenantShardId;
 
-    use crate::tenant::{self};
-
-    struct GlobalAndPerTenantIntCounter {
+    pub(crate) struct GlobalAndPerTenantIntCounter {
         global: IntCounter,
         per_tenant: IntCounter,
     }
@@ -3592,10 +3570,10 @@ pub(crate) mod tenant_throttling {
     }
 
     pub(crate) struct Metrics<const KIND: usize> {
-        count_accounted_start: GlobalAndPerTenantIntCounter,
-        count_accounted_finish: GlobalAndPerTenantIntCounter,
-        wait_time: GlobalAndPerTenantIntCounter,
-        count_throttled: GlobalAndPerTenantIntCounter,
+        pub(super) count_accounted_start: GlobalAndPerTenantIntCounter,
+        pub(super) count_accounted_finish: GlobalAndPerTenantIntCounter,
+        pub(super) wait_time: GlobalAndPerTenantIntCounter,
+        pub(super) count_throttled: GlobalAndPerTenantIntCounter,
     }
 
     static COUNT_ACCOUNTED_START: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
@@ -3728,26 +3706,6 @@ pub(crate) mod tenant_throttling {
                     &tenant_shard_id.shard_slug().to_string(),
                 ]);
             }
-        }
-    }
-
-    impl<const KIND: usize> tenant::throttle::Metric for Metrics<KIND> {
-        #[inline(always)]
-        fn accounting_start(&self) {
-            self.count_accounted_start.inc();
-        }
-        #[inline(always)]
-        fn accounting_finish(&self) {
-            self.count_accounted_finish.inc();
-        }
-        #[inline(always)]
-        fn observe_throttling(
-            &self,
-            tenant::throttle::Observation { wait_time }: &tenant::throttle::Observation,
-        ) {
-            let val = u64::try_from(wait_time.as_micros()).unwrap();
-            self.wait_time.inc_by(val);
-            self.count_throttled.inc();
         }
     }
 }
@@ -3894,7 +3852,6 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
 
     // histograms
     [
-        &READ_NUM_LAYERS_VISITED,
         &VEC_READ_NUM_LAYERS_VISITED,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
@@ -3910,7 +3867,6 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
     });
 
     // Custom
-    Lazy::force(&RECONSTRUCT_TIME);
     Lazy::force(&BASEBACKUP_QUERY_TIME);
     Lazy::force(&COMPUTE_COMMANDS_COUNTERS);
     Lazy::force(&tokio_epoll_uring::THREAD_LOCAL_METRICS_STORAGE);

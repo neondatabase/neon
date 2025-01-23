@@ -14,20 +14,22 @@ pub mod uninit;
 mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
+use futures::{stream::FuturesUnordered, StreamExt};
 use handle::ShardTimelineId;
 use offload::OffloadError;
 use once_cell::sync::Lazy;
+use pageserver_api::models::PageTraceEvent;
 use pageserver_api::{
     config::tenant_conf_defaults::DEFAULT_COMPACTION_THRESHOLD,
     key::{
         KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
-        NON_INHERITED_SPARSE_RANGE,
+        SPARSE_RANGE,
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
@@ -42,6 +44,7 @@ use rand::Rng;
 use remote_storage::DownloadError;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
+use tokio::sync::mpsc::Sender;
 use tokio::{
     runtime::Handle,
     sync::{oneshot, watch},
@@ -49,13 +52,16 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
-    fs_ext, pausable_failpoint,
+    fs_ext,
+    guard_arc_swap::GuardArcSwap,
+    pausable_failpoint,
     postgres_client::PostgresClientProtocol,
     sync::gate::{Gate, GateGuard},
 };
 use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use std::{
@@ -68,15 +74,19 @@ use std::{
     collections::btree_map::Entry,
     ops::{Deref, Range},
 };
-use std::{pin::pin, sync::OnceLock};
 
+use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::{
     aux_file::AuxFileSizeEstimator,
+    page_service::TenantManagerTypes,
     tenant::{
         config::AttachmentMode,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
-        storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
+        storage_layer::{
+            inmemory_layer::IndexEntry, IoConcurrency, PersistentLayerDesc,
+            ValueReconstructSituation,
+        },
     },
     walingest::WalLagCooldown,
     walredo,
@@ -96,10 +106,6 @@ use crate::{
 };
 use crate::{
     disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
-};
-use crate::{
-    l0_flush::{self, L0FlushGlobalState},
-    metrics::GetKind,
 };
 use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
@@ -208,8 +214,8 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
     pub remote_client: RemoteTimelineClient,
-    pub pagestream_throttle:
-        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::Pagestream>>,
+    pub pagestream_throttle: Arc<crate::tenant::throttle::Throttle>,
+    pub pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
@@ -351,8 +357,8 @@ pub struct Timeline {
     // though let's keep them both for better error visibility.
     pub initdb_lsn: Lsn,
 
-    /// When did we last calculate the partitioning? Make it pub to test cases.
-    pub(super) partitioning: tokio::sync::Mutex<((KeyPartitioning, SparseKeyPartitioning), Lsn)>,
+    /// The repartitioning result. Allows a single writer and multiple readers.
+    pub(crate) partitioning: GuardArcSwap<((KeyPartitioning, SparseKeyPartitioning), Lsn)>,
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
@@ -412,8 +418,7 @@ pub struct Timeline {
     gc_lock: tokio::sync::Mutex<()>,
 
     /// Cloned from [`super::Tenant::pagestream_throttle`] on construction.
-    pub(crate) pagestream_throttle:
-        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::Pagestream>>,
+    pub(crate) pagestream_throttle: Arc<crate::tenant::throttle::Throttle>,
 
     /// Size estimator for aux file v2
     pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
@@ -428,12 +433,15 @@ pub struct Timeline {
 
     pub(crate) l0_flush_global_state: L0FlushGlobalState,
 
-    pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
+    pub(crate) handles: handle::PerTimelineState<TenantManagerTypes>,
 
     pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
 
     /// Cf. [`crate::tenant::CreateTimelineIdempotency`].
     pub(crate) create_idempotency: crate::tenant::CreateTimelineIdempotency,
+
+    /// If Some, collects GetPage metadata for an ongoing PageTrace.
+    pub(crate) page_trace: ArcSwapOption<Sender<PageTraceEvent>>,
 }
 
 pub type TimelineDeleteProgress = Arc<tokio::sync::Mutex<DeleteTimelineFlow>>;
@@ -998,9 +1006,7 @@ impl Timeline {
             ranges: vec![key..key.next()],
         };
 
-        // Initialise the reconstruct state for the key with the cache
-        // entry returned above.
-        let mut reconstruct_state = ValuesReconstructState::new();
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
 
         let vectored_res = self
             .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
@@ -1043,6 +1049,7 @@ impl Timeline {
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
+        io_concurrency: super::storage_layer::IoConcurrency,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         if !lsn.is_valid() {
@@ -1077,7 +1084,7 @@ impl Timeline {
             .get_vectored_impl(
                 keyspace.clone(),
                 lsn,
-                &mut ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(io_concurrency),
                 ctx,
             )
             .await;
@@ -1102,6 +1109,7 @@ impl Timeline {
         keyspace: KeySpace,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: super::storage_layer::IoConcurrency,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         if !lsn.is_valid() {
             return Err(GetVectoredError::InvalidLsn(lsn));
@@ -1133,7 +1141,7 @@ impl Timeline {
             .get_vectored_impl(
                 keyspace.clone(),
                 lsn,
-                &mut ValuesReconstructState::default(),
+                &mut ValuesReconstructState::new(io_concurrency),
                 ctx,
             )
             .await;
@@ -1152,39 +1160,56 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let get_kind = if keyspace.total_raw_size() == 1 {
-            GetKind::Singular
-        } else {
-            GetKind::Vectored
+        let traversal_res: Result<(), _> = self
+            .get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
+            .await;
+        if let Err(err) = traversal_res {
+            // Wait for all the spawned IOs to complete.
+            // See comments on `spawn_io` inside `storage_layer` for more details.
+            let mut collect_futs = std::mem::take(&mut reconstruct_state.keys)
+                .into_values()
+                .map(|state| state.collect_pending_ios())
+                .collect::<FuturesUnordered<_>>();
+            while collect_futs.next().await.is_some() {}
+            return Err(err);
         };
 
-        let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
-            .for_get_kind(get_kind)
-            .start_timer();
-        self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
-            .await?;
-        get_data_timer.stop_and_record();
-
-        let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
-            .for_get_kind(get_kind)
-            .start_timer();
-        let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
         let layers_visited = reconstruct_state.get_layers_visited();
 
-        for (key, res) in std::mem::take(&mut reconstruct_state.keys) {
-            match res {
-                Err(err) => {
-                    results.insert(key, Err(err));
-                }
-                Ok(state) => {
-                    let state = ValueReconstructState::from(state);
+        let futs = FuturesUnordered::new();
+        for (key, state) in std::mem::take(&mut reconstruct_state.keys) {
+            futs.push({
+                let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
+                async move {
+                    assert_eq!(state.situation, ValueReconstructSituation::Complete);
 
-                    let reconstruct_res = self.reconstruct_value(key, lsn, state).await;
-                    results.insert(key, reconstruct_res);
+                    let converted = match state.collect_pending_ios().await {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            return (key, Err(err));
+                        }
+                    };
+
+                    // The walredo module expects the records to be descending in terms of Lsn.
+                    // And we submit the IOs in that order, so, there shuold be no need to sort here.
+                    debug_assert!(
+                        converted
+                            .records
+                            .is_sorted_by_key(|(lsn, _)| std::cmp::Reverse(*lsn)),
+                        "{converted:?}"
+                    );
+
+                    (
+                        key,
+                        walredo_self.reconstruct_value(key, lsn, converted).await,
+                    )
                 }
-            }
+            });
         }
-        reconstruct_timer.stop_and_record();
+
+        let results = futs
+            .collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>()
+            .await;
 
         // For aux file keys (v1 or v2) the vectored read path does not return an error
         // when they're missing. Instead they are omitted from the resulting btree
@@ -2310,6 +2335,7 @@ impl Timeline {
                 query_metrics: crate::metrics::SmgrQueryTimePerTimeline::new(
                     &tenant_shard_id,
                     &timeline_id,
+                    resources.pagestream_throttle_metrics,
                 ),
 
                 directory_metrics: array::from_fn(|_| AtomicU64::new(0)),
@@ -2335,7 +2361,8 @@ impl Timeline {
                     // initial logical size is 0.
                     LogicalSize::empty_initial()
                 },
-                partitioning: tokio::sync::Mutex::new((
+
+                partitioning: GuardArcSwap::new((
                     (KeyPartitioning::new(), KeyPartitioning::new().into_sparse()),
                     Lsn(0),
                 )),
@@ -2380,6 +2407,8 @@ impl Timeline {
                 attach_wal_lag_cooldown,
 
                 create_idempotency,
+
+                page_trace: Default::default(),
             };
 
             result.repartition_threshold =
@@ -2793,12 +2822,10 @@ impl Timeline {
             "initial size calculation",
             // NB: don't log errors here, task_mgr will do that.
             async move {
-                let cancel = task_mgr::shutdown_token();
                 self_clone
                     .initial_logical_size_calculation_task(
                         initial_part_end,
                         cancel_wait_for_background_loop_concurrency_limit_semaphore,
-                        cancel,
                         background_ctx,
                     )
                     .await;
@@ -2808,11 +2835,21 @@ impl Timeline {
         );
     }
 
+    /// # Cancellation
+    ///
+    /// This method is sensitive to `Timeline::cancel`.
+    ///
+    /// It is _not_ sensitive to task_mgr::shutdown_token().
+    ///
+    /// # Cancel-Safety
+    ///
+    /// It does Timeline IO, hence this should be polled to completion because
+    /// we could be leaving in-flight IOs behind, which is safe, but annoying
+    /// to reason about.
     async fn initial_logical_size_calculation_task(
         self: Arc<Self>,
         initial_part_end: Lsn,
         skip_concurrency_limiter: CancellationToken,
-        cancel: CancellationToken,
         background_ctx: RequestContext,
     ) {
         scopeguard::defer! {
@@ -2825,7 +2862,6 @@ impl Timeline {
             let self_ref = &self;
             let skip_concurrency_limiter = &skip_concurrency_limiter;
             async move {
-                let cancel = task_mgr::shutdown_token();
                 let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
                     BackgroundLoopKind::InitialLogicalSizeCalculation,
                     background_ctx,
@@ -2839,9 +2875,6 @@ impl Timeline {
                     _ = self_ref.cancel.cancelled() => {
                         return Err(CalculateLogicalSizeError::Cancelled);
                     }
-                    _ = cancel.cancelled() => {
-                        return Err(CalculateLogicalSizeError::Cancelled);
-                    },
                     () = skip_concurrency_limiter.cancelled() => {
                         // Some action that is part of a end user interaction requested logical size
                         // => break out of the rate limit
@@ -2858,6 +2891,14 @@ impl Timeline {
                     crate::metrics::initial_logical_size::START_CALCULATION.retry(circumstances)
                 };
 
+                let io_concurrency = IoConcurrency::spawn_from_conf(
+                    self_ref.conf,
+                    self_ref
+                        .gate
+                        .enter()
+                        .map_err(|_| CalculateLogicalSizeError::Cancelled)?,
+                );
+
                 let calculated_size = self_ref
                     .logical_size_calculation_task(
                         initial_part_end,
@@ -2867,7 +2908,11 @@ impl Timeline {
                     .await?;
 
                 self_ref
-                    .trigger_aux_file_size_computation(initial_part_end, background_ctx)
+                    .trigger_aux_file_size_computation(
+                        initial_part_end,
+                        background_ctx,
+                        io_concurrency,
+                    )
                     .await?;
 
                 // TODO: add aux file size to logical size
@@ -2900,22 +2945,18 @@ impl Timeline {
                             )
                             .expect("10min < 1hour"),
                         );
-                        tokio::time::sleep(sleep_duration).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(sleep_duration) => {}
+                            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
+                        }
                     }
                 }
             }
         };
 
-        let (calculated_size, metrics_guard) = tokio::select! {
-            res = retrying  => {
-                match res {
-                    ControlFlow::Continue(calculated_size) => calculated_size,
-                    ControlFlow::Break(()) => return,
-                }
-            }
-            _ = cancel.cancelled() => {
-                return;
-            }
+        let (calculated_size, metrics_guard) = match retrying.await {
+            ControlFlow::Continue(calculated_size) => calculated_size,
+            ControlFlow::Break(()) => return,
         };
 
         // we cannot query current_logical_size.current_size() to know the current
@@ -2971,9 +3012,6 @@ impl Timeline {
         receiver
     }
 
-    /// # Cancel-Safety
-    ///
-    /// This method is cancellation-safe.
     #[instrument(skip_all)]
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
@@ -2991,32 +3029,13 @@ impl Timeline {
             .enter()
             .map_err(|_| CalculateLogicalSizeError::Cancelled)?;
 
-        let self_calculation = Arc::clone(self);
-
-        let mut calculation = pin!(async {
-            let ctx = ctx.attached_child();
-            self_calculation
-                .calculate_logical_size(lsn, cause, &guard, &ctx)
-                .await
-        });
-
-        tokio::select! {
-            res = &mut calculation => { res }
-            _ = self.cancel.cancelled() => {
-                debug!("cancelling logical size calculation for timeline shutdown");
-                calculation.await
-            }
-        }
+        self.calculate_logical_size(lsn, cause, &guard, ctx).await
     }
 
     /// Calculate the logical size of the database at the latest LSN.
     ///
     /// NOTE: counted incrementally, includes ancestors. This can be a slow operation,
     /// especially if we need to download remote layers.
-    ///
-    /// # Cancel-Safety
-    ///
-    /// This method is cancellation-safe.
     async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
@@ -3029,7 +3048,10 @@ impl Timeline {
             self.timeline_id, up_to_lsn
         );
 
-        pausable_failpoint!("timeline-calculate-logical-size-pause");
+        if let Err(()) = pausable_failpoint!("timeline-calculate-logical-size-pause", &self.cancel)
+        {
+            return Err(CalculateLogicalSizeError::Cancelled);
+        }
 
         // See if we've already done the work for initial size calculation.
         // This is a short-cut for timelines that are mostly unused.
@@ -3221,7 +3243,7 @@ impl Timeline {
             // We don't return a blanket [`GetVectoredError::MissingKey`] to avoid
             // stalling compaction.
             keyspace.remove_overlapping_with(&KeySpace {
-                ranges: vec![NON_INHERITED_RANGE, NON_INHERITED_SPARSE_RANGE],
+                ranges: vec![NON_INHERITED_RANGE, Key::sparse_non_inherited_keyspace()],
             });
 
             // Keyspace is fully retrieved
@@ -3242,7 +3264,11 @@ impl Timeline {
             // keys from `keyspace`, we expect there to be no overlap between it and the image covered key
             // space. If that's not the case, we had at least one key encounter a gap in the image layer
             // and stop the search as a result of that.
-            let removed = keyspace.remove_overlapping_with(&image_covered_keyspace);
+            let mut removed = keyspace.remove_overlapping_with(&image_covered_keyspace);
+            // Do not fire missing key error for sparse keys.
+            removed.remove_overlapping_with(&KeySpace {
+                ranges: vec![SPARSE_RANGE],
+            });
             if !removed.is_empty() {
                 break Some(removed);
             }
@@ -3255,6 +3281,21 @@ impl Timeline {
                 .get_ready_ancestor_timeline(ancestor_timeline, ctx)
                 .await?;
             timeline = &*timeline_owned;
+        };
+
+        // Remove sparse keys from the keyspace so that it doesn't fire errors.
+        let missing_keyspace = if let Some(missing_keyspace) = missing_keyspace {
+            let mut missing_keyspace = missing_keyspace;
+            missing_keyspace.remove_overlapping_with(&KeySpace {
+                ranges: vec![SPARSE_RANGE],
+            });
+            if missing_keyspace.is_empty() {
+                None
+            } else {
+                Some(missing_keyspace)
+            }
+        } else {
+            None
         };
 
         if let Some(missing_keyspace) = missing_keyspace {
@@ -3587,6 +3628,12 @@ impl Timeline {
                     return;
                 }
 
+                // Break to notify potential waiters as soon as we've flushed the requested LSN. If
+                // more requests have arrived in the meanwhile, we'll resume flushing afterwards.
+                if flushed_to_lsn >= frozen_to_lsn {
+                    break Ok(());
+                }
+
                 let timer = self.metrics.flush_time_histo.start_timer();
 
                 let num_frozen_layers;
@@ -3762,35 +3809,34 @@ impl Timeline {
                 return Err(FlushLayerError::Cancelled);
             }
 
-            let mut layers_to_upload = Vec::new();
-            layers_to_upload.extend(
-                self.create_image_layers(
-                    &rel_partition,
-                    self.initdb_lsn,
-                    ImageLayerCreationMode::Initial,
-                    ctx,
-                )
-                .await?,
-            );
+            // Ensure that we have a single call to `create_image_layers` with a combined dense keyspace.
+            // So that the key ranges don't overlap.
+            let mut partitions = KeyPartitioning::default();
+            partitions.parts.extend(rel_partition.parts);
             if !metadata_partition.parts.is_empty() {
                 assert_eq!(
                     metadata_partition.parts.len(),
                     1,
                     "currently sparse keyspace should only contain a single metadata keyspace"
                 );
-                layers_to_upload.extend(
-                    self.create_image_layers(
-                        // Safety: create_image_layers treat sparse keyspaces differently that it does not scan
-                        // every single key within the keyspace, and therefore, it's safe to force converting it
-                        // into a dense keyspace before calling this function.
-                        &metadata_partition.into_dense(),
-                        self.initdb_lsn,
-                        ImageLayerCreationMode::Initial,
-                        ctx,
-                    )
-                    .await?,
-                );
+                // Safety: create_image_layers treat sparse keyspaces differently that it does not scan
+                // every single key within the keyspace, and therefore, it's safe to force converting it
+                // into a dense keyspace before calling this function.
+                partitions
+                    .parts
+                    .extend(metadata_partition.into_dense().parts);
             }
+
+            let mut layers_to_upload = Vec::new();
+            layers_to_upload.extend(
+                self.create_image_layers(
+                    &partitions,
+                    self.initdb_lsn,
+                    ImageLayerCreationMode::Initial,
+                    ctx,
+                )
+                .await?,
+            );
 
             (layers_to_upload, None)
         } else {
@@ -4003,18 +4049,15 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<((KeyPartitioning, SparseKeyPartitioning), Lsn), CompactionError> {
-        let Ok(mut partitioning_guard) = self.partitioning.try_lock() else {
+        let Ok(mut guard) = self.partitioning.try_write_guard() else {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
-            // Note that there are a third "caller" that will take the `partitioning` lock. It is `gc_compaction_split_jobs` for
-            // gc-compaction where it uses the repartition data to determine the split jobs. In the future, it might use its own
-            // heuristics, but for now, we should allow concurrent access to it and let the caller retry compaction.
             return Err(CompactionError::Other(anyhow!(
-                "repartition() called concurrently, this is rare and a retry should be fine"
+                "repartition() called concurrently"
             )));
         };
-        let ((dense_partition, sparse_partition), partition_lsn) = &*partitioning_guard;
+        let ((dense_partition, sparse_partition), partition_lsn) = &*guard.read();
         if lsn < *partition_lsn {
             return Err(CompactionError::Other(anyhow!(
                 "repartition() called with LSN going backwards, this should not happen"
@@ -4042,9 +4085,9 @@ impl Timeline {
         let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
         }; // no partitioning for metadata keys for now
-        *partitioning_guard = ((dense_partitioning, sparse_partitioning), lsn);
-
-        Ok((partitioning_guard.0.clone(), partitioning_guard.1))
+        let result = ((dense_partitioning, sparse_partitioning), lsn);
+        guard.write(result.clone());
+        Ok(result)
     }
 
     // Is it time to create a new image layer for the given partition?
@@ -4102,6 +4145,7 @@ impl Timeline {
 
     /// Create image layers for Postgres data. Assumes the caller passes a partition that is not too large,
     /// so that at most one image layer will be produced from this function.
+    #[allow(clippy::too_many_arguments)]
     async fn create_image_layer_for_rel_blocks(
         self: &Arc<Self>,
         partition: &KeySpace,
@@ -4110,6 +4154,7 @@ impl Timeline {
         ctx: &RequestContext,
         img_range: Range<Key>,
         start: Key,
+        io_concurrency: IoConcurrency,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         let mut wrote_keys = false;
 
@@ -4138,7 +4183,12 @@ impl Timeline {
                     || (last_key_in_range && key_request_accum.raw_size() > 0)
                 {
                     let results = self
-                        .get_vectored(key_request_accum.consume_keyspace(), lsn, ctx)
+                        .get_vectored(
+                            key_request_accum.consume_keyspace(),
+                            lsn,
+                            io_concurrency.clone(),
+                            ctx,
+                        )
                         .await?;
 
                     if self.cancel.is_cancelled() {
@@ -4217,9 +4267,10 @@ impl Timeline {
         img_range: Range<Key>,
         mode: ImageLayerCreationMode,
         start: Key,
+        io_concurrency: IoConcurrency,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         // Metadata keys image layer creation.
-        let mut reconstruct_state = ValuesReconstructState::default();
+        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
         let begin = Instant::now();
         let data = self
             .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
@@ -4436,6 +4487,13 @@ impl Timeline {
                 )))
             });
 
+            let io_concurrency = IoConcurrency::spawn_from_conf(
+                self.conf,
+                self.gate
+                    .enter()
+                    .map_err(|_| CreateImageLayersError::Cancelled)?,
+            );
+
             if !compact_metadata {
                 let ImageLayerCreationOutcome {
                     image,
@@ -4448,6 +4506,7 @@ impl Timeline {
                         ctx,
                         img_range,
                         start,
+                        io_concurrency,
                     )
                     .await?;
 
@@ -4466,6 +4525,7 @@ impl Timeline {
                         img_range,
                         mode,
                         start,
+                        io_concurrency,
                     )
                     .await?;
                 start = next_start_key;
@@ -4600,6 +4660,10 @@ impl Drop for Timeline {
                 }
             }
         }
+        info!(
+            "Timeline {} for tenant {} is being dropped",
+            self.timeline_id, self.tenant_shard_id.tenant_id
+        );
     }
 }
 
@@ -5648,8 +5712,16 @@ impl Timeline {
         info!("force created image layer {}", image_layer.local_path());
         {
             let mut guard = self.layers.write().await;
-            guard.open_mut().unwrap().force_insert_layer(image_layer);
+            guard
+                .open_mut()
+                .unwrap()
+                .force_insert_layer(image_layer.clone());
         }
+
+        // Update remote_timeline_client state to reflect existence of this layer
+        self.remote_client
+            .schedule_layer_file_upload(image_layer)
+            .unwrap();
 
         Ok(())
     }
@@ -5701,8 +5773,16 @@ impl Timeline {
         info!("force created delta layer {}", delta_layer.local_path());
         {
             let mut guard = self.layers.write().await;
-            guard.open_mut().unwrap().force_insert_layer(delta_layer);
+            guard
+                .open_mut()
+                .unwrap()
+                .force_insert_layer(delta_layer.clone());
         }
+
+        // Update remote_timeline_client state to reflect existence of this layer
+        self.remote_client
+            .schedule_layer_file_upload(delta_layer)
+            .unwrap();
 
         Ok(())
     }
@@ -5713,13 +5793,14 @@ impl Timeline {
         self: &Arc<Timeline>,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> anyhow::Result<Vec<(Key, Bytes)>> {
         let mut all_data = Vec::new();
         let guard = self.layers.read().await;
         for layer in guard.layer_map()?.iter_historic_layers() {
             if !layer.is_delta() && layer.image_layer_lsn() == lsn {
                 let layer = guard.get_from_desc(&layer);
-                let mut reconstruct_data = ValuesReconstructState::default();
+                let mut reconstruct_data = ValuesReconstructState::new(io_concurrency.clone());
                 layer
                     .get_values_reconstruct_data(
                         KeySpace::single(Key::MIN..Key::MAX),
@@ -5728,8 +5809,9 @@ impl Timeline {
                         ctx,
                     )
                     .await?;
-                for (k, v) in reconstruct_data.keys {
-                    all_data.push((k, v?.img.unwrap().1));
+                for (k, v) in std::mem::take(&mut reconstruct_data.keys) {
+                    let v = v.collect_pending_ios().await?;
+                    all_data.push((k, v.img.unwrap().1));
                 }
             }
         }

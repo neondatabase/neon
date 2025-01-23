@@ -4,7 +4,7 @@
 //!
 //! The old legacy algorithm is implemented directly in `timeline.rs`.
 
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
@@ -16,10 +16,12 @@ use super::{
 
 use anyhow::{anyhow, bail, Context};
 use bytes::Bytes;
+use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::key::KEY_SIZE;
 use pageserver_api::keyspace::ShardedRange;
+use pageserver_api::models::CompactInfoResponse;
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -30,6 +32,7 @@ use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder}
 use crate::page_cache;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
+use crate::tenant::gc_block::GcBlock;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::batch_split_writer::{
     BatchWriterResult, SplitDeltaLayerWriter, SplitImageLayerWriter,
@@ -39,8 +42,8 @@ use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::{
     AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
 };
-use crate::tenant::timeline::ImageLayerCreationOutcome;
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
+use crate::tenant::timeline::{ImageLayerCreationOutcome, IoConcurrency};
 use crate::tenant::timeline::{Layer, ResidentLayer};
 use crate::tenant::{gc_block, DeltaLayer, MaybeOffloaded};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
@@ -63,16 +66,284 @@ use super::CompactionError;
 /// Maximum number of deltas before generating an image layer in bottom-most compaction.
 const COMPACTION_DELTA_THRESHOLD: usize = 5;
 
-/// A scheduled compaction task.
-pub(crate) struct ScheduledCompactionTask {
-    /// It's unfortunate that we need to store a compact options struct here because the only outer
-    /// API we can call here is `compact_with_options` which does a few setup calls before starting the
-    /// actual compaction job... We should refactor this to store `GcCompactionJob` in the future.
-    pub options: CompactOptions,
-    /// The channel to send the compaction result. If this is a subcompaction, the last compaction job holds the sender.
-    pub result_tx: Option<tokio::sync::oneshot::Sender<()>>,
-    /// Hold the GC block. If this is a subcompaction, the last compaction job holds the gc block guard.
-    pub gc_block: Option<gc_block::Guard>,
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct GcCompactionJobId(pub usize);
+
+impl std::fmt::Display for GcCompactionJobId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum GcCompactionQueueItem {
+    Manual(CompactOptions),
+    SubCompactionJob(CompactOptions),
+    #[allow(dead_code)]
+    UpdateL2Lsn(Lsn),
+    Notify(GcCompactionJobId),
+}
+
+impl GcCompactionQueueItem {
+    pub fn into_compact_info_resp(
+        self,
+        id: GcCompactionJobId,
+        running: bool,
+    ) -> Option<CompactInfoResponse> {
+        match self {
+            GcCompactionQueueItem::Manual(options) => Some(CompactInfoResponse {
+                compact_key_range: options.compact_key_range,
+                compact_lsn_range: options.compact_lsn_range,
+                sub_compaction: options.sub_compaction,
+                running,
+                job_id: id.0,
+            }),
+            GcCompactionQueueItem::SubCompactionJob(options) => Some(CompactInfoResponse {
+                compact_key_range: options.compact_key_range,
+                compact_lsn_range: options.compact_lsn_range,
+                sub_compaction: options.sub_compaction,
+                running,
+                job_id: id.0,
+            }),
+            GcCompactionQueueItem::UpdateL2Lsn(_) => None,
+            GcCompactionQueueItem::Notify(_) => None,
+        }
+    }
+}
+
+struct GcCompactionQueueInner {
+    running: Option<(GcCompactionJobId, GcCompactionQueueItem)>,
+    queued: VecDeque<(GcCompactionJobId, GcCompactionQueueItem)>,
+    notify: HashMap<GcCompactionJobId, tokio::sync::oneshot::Sender<()>>,
+    gc_guards: HashMap<GcCompactionJobId, gc_block::Guard>,
+    last_id: GcCompactionJobId,
+}
+
+impl GcCompactionQueueInner {
+    fn next_id(&mut self) -> GcCompactionJobId {
+        let id = self.last_id;
+        self.last_id = GcCompactionJobId(id.0 + 1);
+        id
+    }
+}
+
+/// A structure to store gc_compaction jobs.
+pub struct GcCompactionQueue {
+    /// All items in the queue, and the currently-running job.
+    inner: std::sync::Mutex<GcCompactionQueueInner>,
+    /// Ensure only one thread is consuming the queue.
+    consumer_lock: tokio::sync::Mutex<()>,
+}
+
+impl GcCompactionQueue {
+    pub fn new() -> Self {
+        GcCompactionQueue {
+            inner: std::sync::Mutex::new(GcCompactionQueueInner {
+                running: None,
+                queued: VecDeque::new(),
+                notify: HashMap::new(),
+                gc_guards: HashMap::new(),
+                last_id: GcCompactionJobId(0),
+            }),
+            consumer_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    pub fn cancel_scheduled(&self) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.queued.clear();
+        guard.notify.clear();
+        guard.gc_guards.clear();
+    }
+
+    /// Schedule a manual compaction job.
+    pub fn schedule_manual_compaction(
+        &self,
+        options: CompactOptions,
+        notify: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> GcCompactionJobId {
+        let mut guard = self.inner.lock().unwrap();
+        let id = guard.next_id();
+        guard
+            .queued
+            .push_back((id, GcCompactionQueueItem::Manual(options)));
+        if let Some(notify) = notify {
+            guard.notify.insert(id, notify);
+        }
+        info!("scheduled compaction job id={}", id);
+        id
+    }
+
+    /// Trigger an auto compaction.
+    #[allow(dead_code)]
+    pub fn trigger_auto_compaction(&self, _: &Arc<Timeline>) {}
+
+    /// Notify the caller the job has finished and unblock GC.
+    fn notify_and_unblock(&self, id: GcCompactionJobId) {
+        info!("compaction job id={} finished", id);
+        let mut guard = self.inner.lock().unwrap();
+        if let Some(blocking) = guard.gc_guards.remove(&id) {
+            drop(blocking)
+        }
+        if let Some(tx) = guard.notify.remove(&id) {
+            let _ = tx.send(());
+        }
+    }
+
+    async fn handle_sub_compaction(
+        &self,
+        id: GcCompactionJobId,
+        options: CompactOptions,
+        timeline: &Arc<Timeline>,
+        gc_block: &GcBlock,
+    ) -> Result<(), CompactionError> {
+        info!("running scheduled enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs");
+        let jobs: Vec<GcCompactJob> = timeline
+            .gc_compaction_split_jobs(
+                GcCompactJob::from_compact_options(options.clone()),
+                options.sub_compaction_max_job_size_mb,
+            )
+            .await
+            .map_err(CompactionError::Other)?;
+        if jobs.is_empty() {
+            info!("no jobs to run, skipping scheduled compaction task");
+            self.notify_and_unblock(id);
+        } else {
+            let gc_guard = match gc_block.start().await {
+                Ok(guard) => guard,
+                Err(e) => {
+                    return Err(CompactionError::Other(anyhow!(
+                        "cannot run gc-compaction because gc is blocked: {}",
+                        e
+                    )));
+                }
+            };
+
+            let jobs_len = jobs.len();
+            let mut pending_tasks = Vec::new();
+            for job in jobs {
+                // Unfortunately we need to convert the `GcCompactJob` back to `CompactionOptions`
+                // until we do further refactors to allow directly call `compact_with_gc`.
+                let mut flags: EnumSet<CompactFlags> = EnumSet::default();
+                flags |= CompactFlags::EnhancedGcBottomMostCompaction;
+                if job.dry_run {
+                    flags |= CompactFlags::DryRun;
+                }
+                let options = CompactOptions {
+                    flags,
+                    sub_compaction: false,
+                    compact_key_range: Some(job.compact_key_range.into()),
+                    compact_lsn_range: Some(job.compact_lsn_range.into()),
+                    sub_compaction_max_job_size_mb: None,
+                };
+                pending_tasks.push(GcCompactionQueueItem::SubCompactionJob(options));
+            }
+            pending_tasks.push(GcCompactionQueueItem::Notify(id));
+            {
+                let mut guard = self.inner.lock().unwrap();
+                guard.gc_guards.insert(id, gc_guard);
+                let mut tasks = Vec::new();
+                for task in pending_tasks {
+                    let id = guard.next_id();
+                    tasks.push((id, task));
+                }
+                tasks.reverse();
+                for item in tasks {
+                    guard.queued.push_front(item);
+                }
+            }
+            info!("scheduled enhanced gc bottom-most compaction with sub-compaction, split into {} jobs", jobs_len);
+        }
+        Ok(())
+    }
+
+    /// Take a job from the queue and process it. Returns if there are still pending tasks.
+    pub async fn iteration(
+        &self,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+        gc_block: &GcBlock,
+        timeline: &Arc<Timeline>,
+    ) -> Result<bool, CompactionError> {
+        let _one_op_at_a_time_guard = self.consumer_lock.lock().await;
+        let has_pending_tasks;
+        let (id, item) = {
+            let mut guard = self.inner.lock().unwrap();
+            let Some((id, item)) = guard.queued.pop_front() else {
+                return Ok(false);
+            };
+            guard.running = Some((id, item.clone()));
+            has_pending_tasks = !guard.queued.is_empty();
+            (id, item)
+        };
+
+        match item {
+            GcCompactionQueueItem::Manual(options) => {
+                if !options
+                    .flags
+                    .contains(CompactFlags::EnhancedGcBottomMostCompaction)
+                {
+                    warn!("ignoring scheduled compaction task: scheduled task must be gc compaction: {:?}", options);
+                } else if options.sub_compaction {
+                    self.handle_sub_compaction(id, options, timeline, gc_block)
+                        .await?;
+                } else {
+                    let gc_guard = match gc_block.start().await {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            return Err(CompactionError::Other(anyhow!(
+                                "cannot run gc-compaction because gc is blocked: {}",
+                                e
+                            )));
+                        }
+                    };
+                    {
+                        let mut guard = self.inner.lock().unwrap();
+                        guard.gc_guards.insert(id, gc_guard);
+                    }
+                    let _ = timeline
+                        .compact_with_options(cancel, options, ctx)
+                        .instrument(info_span!("scheduled_compact_timeline", %timeline.timeline_id))
+                        .await?;
+                    self.notify_and_unblock(id);
+                }
+            }
+            GcCompactionQueueItem::SubCompactionJob(options) => {
+                let _ = timeline
+                    .compact_with_options(cancel, options, ctx)
+                    .instrument(info_span!("scheduled_compact_timeline", %timeline.timeline_id))
+                    .await?;
+            }
+            GcCompactionQueueItem::Notify(id) => {
+                self.notify_and_unblock(id);
+            }
+            GcCompactionQueueItem::UpdateL2Lsn(_) => {
+                unreachable!()
+            }
+        }
+        {
+            let mut guard = self.inner.lock().unwrap();
+            guard.running = None;
+        }
+        Ok(has_pending_tasks)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn remaining_jobs(
+        &self,
+    ) -> (
+        Option<(GcCompactionJobId, GcCompactionQueueItem)>,
+        VecDeque<(GcCompactionJobId, GcCompactionQueueItem)>,
+    ) {
+        let guard = self.inner.lock().unwrap();
+        (guard.running.clone(), guard.queued.clone())
+    }
+
+    #[allow(dead_code)]
+    pub fn remaining_jobs_num(&self) -> usize {
+        let guard = self.inner.lock().unwrap();
+        guard.queued.len() + if guard.running.is_some() { 1 } else { 0 }
+    }
 }
 
 /// A job description for the gc-compaction job. This structure describes the rectangle range that the job will
@@ -1505,7 +1776,10 @@ impl Timeline {
         base_img_from_ancestor: Option<(Key, Lsn, Bytes)>,
     ) -> anyhow::Result<KeyHistoryRetention> {
         // Pre-checks for the invariants
-        if cfg!(debug_assertions) {
+
+        let debug_mode = cfg!(debug_assertions) || cfg!(feature = "testing");
+
+        if debug_mode {
             for (log_key, _, _) in full_history {
                 assert_eq!(log_key, &key, "mismatched key");
             }
@@ -1651,14 +1925,18 @@ impl Timeline {
             output
         }
 
+        let mut key_exists = false;
         for (i, split_for_lsn) in split_history.into_iter().enumerate() {
             // TODO: there could be image keys inside the splits, and we can compute records_since_last_image accordingly.
             records_since_last_image += split_for_lsn.len();
-            let generate_image = if i == 0 && !has_ancestor {
+            // Whether to produce an image into the final layer files
+            let produce_image = if i == 0 && !has_ancestor {
                 // We always generate images for the first batch (below horizon / lowest retain_lsn)
                 true
             } else if i == batch_cnt - 1 {
                 // Do not generate images for the last batch (above horizon)
+                false
+            } else if records_since_last_image == 0 {
                 false
             } else if records_since_last_image >= delta_threshold_cnt {
                 // Generate images when there are too many records
@@ -1674,29 +1952,45 @@ impl Timeline {
                     break;
                 }
             }
-            if let Some((_, _, val)) = replay_history.first() {
-                if !val.will_init() {
-                    return Err(anyhow::anyhow!("invalid history, no base image")).with_context(
-                        || {
-                            generate_debug_trace(
-                                Some(&replay_history),
-                                full_history,
-                                retain_lsn_below_horizon,
-                                horizon,
-                            )
-                        },
-                    );
-                }
+            if replay_history.is_empty() && !key_exists {
+                // The key does not exist at earlier LSN, we can skip this iteration.
+                retention.push(Vec::new());
+                continue;
+            } else {
+                key_exists = true;
             }
-            if generate_image && records_since_last_image > 0 {
+            let Some((_, _, val)) = replay_history.first() else {
+                unreachable!("replay history should not be empty once it exists")
+            };
+            if !val.will_init() {
+                return Err(anyhow::anyhow!("invalid history, no base image")).with_context(|| {
+                    generate_debug_trace(
+                        Some(&replay_history),
+                        full_history,
+                        retain_lsn_below_horizon,
+                        horizon,
+                    )
+                });
+            }
+            // Whether to reconstruct the image. In debug mode, we will generate an image
+            // at every retain_lsn to ensure data is not corrupted, but we won't put the
+            // image into the final layer.
+            let generate_image = produce_image || debug_mode;
+            if produce_image {
                 records_since_last_image = 0;
-                let replay_history_for_debug = if cfg!(debug_assertions) {
+            }
+            let img_and_lsn = if generate_image {
+                let replay_history_for_debug = if debug_mode {
                     Some(replay_history.clone())
                 } else {
                     None
                 };
                 let replay_history_for_debug_ref = replay_history_for_debug.as_deref();
-                let history = std::mem::take(&mut replay_history);
+                let history = if produce_image {
+                    std::mem::take(&mut replay_history)
+                } else {
+                    replay_history.clone()
+                };
                 let mut img = None;
                 let mut records = Vec::with_capacity(history.len());
                 if let (_, lsn, Value::Image(val)) = history.first().as_ref().unwrap() {
@@ -1733,8 +2027,20 @@ impl Timeline {
                 }
                 records.reverse();
                 let state = ValueReconstructState { img, records };
-                let request_lsn = lsn_split_points[i]; // last batch does not generate image so i is always in range
+                // last batch does not generate image so i is always in range, unless we force generate
+                // an image during testing
+                let request_lsn = if i >= lsn_split_points.len() {
+                    Lsn::MAX
+                } else {
+                    lsn_split_points[i]
+                };
                 let img = self.reconstruct_value(key, request_lsn, state).await?;
+                Some((request_lsn, img))
+            } else {
+                None
+            };
+            if produce_image {
+                let (request_lsn, img) = img_and_lsn.unwrap();
                 replay_history.push((key, request_lsn, Value::Image(img.clone())));
                 retention.push(vec![(request_lsn, Value::Image(img))]);
             } else {
@@ -1840,12 +2146,7 @@ impl Timeline {
         let mut compact_jobs = Vec::new();
         // For now, we simply use the key partitioning information; we should do a more fine-grained partitioning
         // by estimating the amount of files read for a compaction job. We should also partition on LSN.
-        let ((dense_ks, sparse_ks), _) = {
-            let Ok(partition) = self.partitioning.try_lock() else {
-                bail!("failed to acquire partition lock during gc-compaction");
-            };
-            partition.clone()
-        };
+        let ((dense_ks, sparse_ks), _) = self.partitioning.read().as_ref().clone();
         // Truncate the key range to be within user specified compaction range.
         fn truncate_to(
             source_start: &Key,
@@ -1908,6 +2209,12 @@ impl Timeline {
                 // In this case, we simply use the specified key range end.
                 let end = if let Some(extended_end) = extended_end {
                     extended_end.max(end)
+                } else {
+                    end
+                };
+                let end = if ranges_num == idx + 1 {
+                    // extend the compaction range to the end of the key range if it's the last partition
+                    end.max(job.compact_key_range.end)
                 } else {
                     end
                 };
@@ -2001,6 +2308,8 @@ impl Timeline {
         let dry_run = job.dry_run;
         let compact_key_range = job.compact_key_range;
         let compact_lsn_range = job.compact_lsn_range;
+
+        let debug_mode = cfg!(debug_assertions) || cfg!(feature = "testing");
 
         info!("running enhanced gc bottom-most compaction, dry_run={dry_run}, compact_key_range={}..{}, compact_lsn_range={}..{}", compact_key_range.start, compact_key_range.end, compact_lsn_range.start, compact_lsn_range.end);
 
@@ -2127,7 +2436,7 @@ impl Timeline {
                 .first()
                 .copied()
                 .unwrap_or(job_desc.gc_cutoff);
-            if cfg!(debug_assertions) {
+            if debug_mode {
                 assert_eq!(
                     res,
                     job_desc
@@ -2867,6 +3176,7 @@ impl TimelineAdaptor {
                 ctx,
                 key_range.clone(),
                 start,
+                IoConcurrency::sequential(),
             )
             .await?;
 

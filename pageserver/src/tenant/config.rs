@@ -11,7 +11,7 @@
 pub(crate) use pageserver_api::config::TenantConfigToml as TenantConf;
 use pageserver_api::models::CompactionAlgorithmSettings;
 use pageserver_api::models::EvictionPolicy;
-use pageserver_api::models::{self, TenantConfigPatch, ThrottleConfig};
+use pageserver_api::models::{self, TenantConfigPatch};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
@@ -357,6 +357,18 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rel_size_v2_enabled: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gc_compaction_enabled: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gc_compaction_initial_threshold_kb: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gc_compaction_ratio_percent: Option<u64>,
 }
 
 impl TenantConfOpt {
@@ -425,6 +437,16 @@ impl TenantConfOpt {
             wal_receiver_protocol_override: self
                 .wal_receiver_protocol_override
                 .or(global_conf.wal_receiver_protocol_override),
+            rel_size_v2_enabled: self.rel_size_v2_enabled.or(global_conf.rel_size_v2_enabled),
+            gc_compaction_enabled: self
+                .gc_compaction_enabled
+                .unwrap_or(global_conf.gc_compaction_enabled),
+            gc_compaction_initial_threshold_kb: self
+                .gc_compaction_initial_threshold_kb
+                .unwrap_or(global_conf.gc_compaction_initial_threshold_kb),
+            gc_compaction_ratio_percent: self
+                .gc_compaction_ratio_percent
+                .unwrap_or(global_conf.gc_compaction_ratio_percent),
         }
     }
 
@@ -454,6 +476,10 @@ impl TenantConfOpt {
             mut lsn_lease_length_for_ts,
             mut timeline_offloading,
             mut wal_receiver_protocol_override,
+            mut rel_size_v2_enabled,
+            mut gc_compaction_enabled,
+            mut gc_compaction_initial_threshold_kb,
+            mut gc_compaction_ratio_percent,
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
@@ -522,6 +548,16 @@ impl TenantConfOpt {
         patch
             .wal_receiver_protocol_override
             .apply(&mut wal_receiver_protocol_override);
+        patch.rel_size_v2_enabled.apply(&mut rel_size_v2_enabled);
+        patch
+            .gc_compaction_enabled
+            .apply(&mut gc_compaction_enabled);
+        patch
+            .gc_compaction_initial_threshold_kb
+            .apply(&mut gc_compaction_initial_threshold_kb);
+        patch
+            .gc_compaction_ratio_percent
+            .apply(&mut gc_compaction_ratio_percent);
 
         Ok(Self {
             checkpoint_distance,
@@ -548,6 +584,10 @@ impl TenantConfOpt {
             lsn_lease_length_for_ts,
             timeline_offloading,
             wal_receiver_protocol_override,
+            rel_size_v2_enabled,
+            gc_compaction_enabled,
+            gc_compaction_initial_threshold_kb,
+            gc_compaction_ratio_percent,
         })
     }
 }
@@ -597,12 +637,16 @@ impl From<TenantConfOpt> for models::TenantConfig {
                 .map(humantime),
             heatmap_period: value.heatmap_period.map(humantime),
             lazy_slru_download: value.lazy_slru_download,
-            timeline_get_throttle: value.timeline_get_throttle.map(ThrottleConfig::from),
+            timeline_get_throttle: value.timeline_get_throttle,
             image_layer_creation_check_threshold: value.image_layer_creation_check_threshold,
             lsn_lease_length: value.lsn_lease_length.map(humantime),
             lsn_lease_length_for_ts: value.lsn_lease_length_for_ts.map(humantime),
             timeline_offloading: value.timeline_offloading,
             wal_receiver_protocol_override: value.wal_receiver_protocol_override,
+            rel_size_v2_enabled: value.rel_size_v2_enabled,
+            gc_compaction_enabled: value.gc_compaction_enabled,
+            gc_compaction_initial_threshold_kb: value.gc_compaction_initial_threshold_kb,
+            gc_compaction_ratio_percent: value.gc_compaction_ratio_percent,
         }
     }
 }

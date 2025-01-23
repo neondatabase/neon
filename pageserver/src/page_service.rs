@@ -39,6 +39,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 use utils::{
     auth::{Claims, Scope, SwappableJwtAuth},
@@ -61,12 +62,14 @@ use crate::task_mgr::{self, COMPUTE_REQUEST_RUNTIME};
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::mgr::TenantManager;
 use crate::tenant::mgr::{GetActiveTenantError, GetTenantError, ShardResolveResult};
+use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::{basebackup, timed_after_cancellation};
 use pageserver_api::key::rel_block_to_key;
+use pageserver_api::models::PageTraceEvent;
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
@@ -89,6 +92,7 @@ pub struct Listener {
 pub struct Connections {
     cancel: CancellationToken,
     tasks: tokio::task::JoinSet<ConnectionHandlerResult>,
+    gate: Gate,
 }
 
 pub fn spawn(
@@ -109,6 +113,7 @@ pub fn spawn(
     let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
         "libpq listener",
         libpq_listener_main(
+            conf,
             tenant_manager,
             pg_auth,
             tcp_listener,
@@ -133,11 +138,16 @@ impl Listener {
 }
 impl Connections {
     pub(crate) async fn shutdown(self) {
-        let Self { cancel, mut tasks } = self;
+        let Self {
+            cancel,
+            mut tasks,
+            gate,
+        } = self;
         cancel.cancel();
         while let Some(res) = tasks.join_next().await {
             Self::handle_connection_completion(res);
         }
+        gate.close().await;
     }
 
     fn handle_connection_completion(res: Result<anyhow::Result<()>, tokio::task::JoinError>) {
@@ -157,7 +167,9 @@ impl Connections {
 /// Returns Ok(()) upon cancellation via `cancel`, returning the set of
 /// open connections.
 ///
+#[allow(clippy::too_many_arguments)]
 pub async fn libpq_listener_main(
+    conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
     listener: tokio::net::TcpListener,
@@ -167,9 +179,15 @@ pub async fn libpq_listener_main(
     listener_cancel: CancellationToken,
 ) -> Connections {
     let connections_cancel = CancellationToken::new();
+    let connections_gate = Gate::default();
     let mut connection_handler_tasks = tokio::task::JoinSet::default();
 
     loop {
+        let gate_guard = match connections_gate.enter() {
+            Ok(guard) => guard,
+            Err(_) => break,
+        };
+
         let accepted = tokio::select! {
             biased;
             _ = listener_cancel.cancelled() => break,
@@ -189,6 +207,7 @@ pub async fn libpq_listener_main(
                 let connection_ctx = listener_ctx
                     .detached_child(TaskKind::PageRequestHandler, DownloadBehavior::Download);
                 connection_handler_tasks.spawn(page_service_conn_main(
+                    conf,
                     tenant_manager.clone(),
                     local_auth,
                     socket,
@@ -196,6 +215,7 @@ pub async fn libpq_listener_main(
                     pipelining_config.clone(),
                     connection_ctx,
                     connections_cancel.child_token(),
+                    gate_guard,
                 ));
             }
             Err(err) => {
@@ -210,13 +230,16 @@ pub async fn libpq_listener_main(
     Connections {
         cancel: connections_cancel,
         tasks: connection_handler_tasks,
+        gate: connections_gate,
     }
 }
 
 type ConnectionHandlerResult = anyhow::Result<()>;
 
 #[instrument(skip_all, fields(peer_addr))]
+#[allow(clippy::too_many_arguments)]
 async fn page_service_conn_main(
+    conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
@@ -224,6 +247,7 @@ async fn page_service_conn_main(
     pipelining_config: PageServicePipeliningConfig,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
+    gate_guard: GateGuard,
 ) -> ConnectionHandlerResult {
     let _guard = LIVE_CONNECTIONS
         .with_label_values(&["page_service"])
@@ -273,11 +297,13 @@ async fn page_service_conn_main(
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
     let mut conn_handler = PageServerHandler::new(
+        conf,
         tenant_manager,
         auth,
         pipelining_config,
         connection_ctx,
         cancel.clone(),
+        gate_guard,
     );
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
@@ -309,6 +335,7 @@ async fn page_service_conn_main(
 }
 
 struct PageServerHandler {
+    conf: &'static PageServerConf,
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
 
@@ -324,6 +351,8 @@ struct PageServerHandler {
     timeline_handles: Option<TimelineHandles>,
 
     pipelining_config: PageServicePipeliningConfig,
+
+    gate_guard: GateGuard,
 }
 
 struct TimelineHandles {
@@ -554,36 +583,51 @@ struct BatchedGetPageRequest {
     timer: SmgrOpTimer,
 }
 
+#[cfg(feature = "testing")]
+struct BatchedTestRequest {
+    req: models::PagestreamTestRequest,
+    timer: SmgrOpTimer,
+}
+
+/// NB: we only hold [`timeline::handle::WeakHandle`] inside this enum,
+/// so that we don't keep the [`Timeline::gate`] open while the batch
+/// is being built up inside the [`spsc_fold`] (pagestream pipelining).
 enum BatchedFeMessage {
     Exists {
         span: Span,
         timer: SmgrOpTimer,
-        shard: timeline::handle::Handle<TenantManagerTypes>,
+        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         req: models::PagestreamExistsRequest,
     },
     Nblocks {
         span: Span,
         timer: SmgrOpTimer,
-        shard: timeline::handle::Handle<TenantManagerTypes>,
+        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         req: models::PagestreamNblocksRequest,
     },
     GetPage {
         span: Span,
-        shard: timeline::handle::Handle<TenantManagerTypes>,
+        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         effective_request_lsn: Lsn,
         pages: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
     },
     DbSize {
         span: Span,
         timer: SmgrOpTimer,
-        shard: timeline::handle::Handle<TenantManagerTypes>,
+        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         req: models::PagestreamDbSizeRequest,
     },
     GetSlruSegment {
         span: Span,
         timer: SmgrOpTimer,
-        shard: timeline::handle::Handle<TenantManagerTypes>,
+        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         req: models::PagestreamGetSlruSegmentRequest,
+    },
+    #[cfg(feature = "testing")]
+    Test {
+        span: Span,
+        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
+        requests: Vec<BatchedTestRequest>,
     },
     RespondError {
         span: Span,
@@ -592,58 +636,49 @@ enum BatchedFeMessage {
 }
 
 impl BatchedFeMessage {
-    async fn throttle_and_record_start_processing(
-        &mut self,
-        cancel: &CancellationToken,
-    ) -> Result<(), QueryError> {
-        let (shard, tokens, timers) = match self {
-            BatchedFeMessage::Exists { shard, timer, .. }
-            | BatchedFeMessage::Nblocks { shard, timer, .. }
-            | BatchedFeMessage::DbSize { shard, timer, .. }
-            | BatchedFeMessage::GetSlruSegment { shard, timer, .. } => {
-                (
-                    shard,
-                    // 1 token is probably under-estimating because these
-                    // request handlers typically do several Timeline::get calls.
-                    1,
-                    itertools::Either::Left(std::iter::once(timer)),
-                )
+    fn observe_execution_start(&mut self, at: Instant) {
+        match self {
+            BatchedFeMessage::Exists { timer, .. }
+            | BatchedFeMessage::Nblocks { timer, .. }
+            | BatchedFeMessage::DbSize { timer, .. }
+            | BatchedFeMessage::GetSlruSegment { timer, .. } => {
+                timer.observe_execution_start(at);
             }
-            BatchedFeMessage::GetPage { shard, pages, .. } => (
-                shard,
-                pages.len(),
-                itertools::Either::Right(pages.iter_mut().map(|p| &mut p.timer)),
-            ),
-            BatchedFeMessage::RespondError { .. } => return Ok(()),
-        };
-        let throttled = tokio::select! {
-            throttled = shard.pagestream_throttle.throttle(tokens) => { throttled }
-            _ = cancel.cancelled() => {
-                return Err(QueryError::Shutdown);
+            BatchedFeMessage::GetPage { pages, .. } => {
+                for page in pages {
+                    page.timer.observe_execution_start(at);
+                }
             }
-        };
-        for timer in timers {
-            timer.observe_throttle_done_execution_starting(&throttled);
+            #[cfg(feature = "testing")]
+            BatchedFeMessage::Test { requests, .. } => {
+                for req in requests {
+                    req.timer.observe_execution_start(at);
+                }
+            }
+            BatchedFeMessage::RespondError { .. } => {}
         }
-        Ok(())
     }
 }
 
 impl PageServerHandler {
     pub fn new(
+        conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
         pipelining_config: PageServicePipeliningConfig,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
+        gate_guard: GateGuard,
     ) -> Self {
         PageServerHandler {
+            conf,
             auth,
             claims: None,
             connection_ctx,
             timeline_handles: Some(TimelineHandles::new(tenant_manager)),
             cancel,
             pipelining_config,
+            gate_guard,
         }
     }
 
@@ -717,6 +752,26 @@ impl PageServerHandler {
         let neon_fe_msg =
             PagestreamFeMessage::parse(&mut copy_data_bytes.reader(), protocol_version)?;
 
+        // TODO: turn in to async closure once available to avoid repeating received_at
+        async fn record_op_start_and_throttle(
+            shard: &timeline::handle::Handle<TenantManagerTypes>,
+            op: metrics::SmgrQueryType,
+            received_at: Instant,
+        ) -> Result<SmgrOpTimer, QueryError> {
+            // It's important to start the smgr op metric recorder as early as possible
+            // so that the _started counters are incremented before we do
+            // any serious waiting, e.g., for throttle, batching, or actual request handling.
+            let mut timer = shard.query_metrics.start_smgr_op(op, received_at);
+            let now = Instant::now();
+            timer.observe_throttle_start(now);
+            let throttled = tokio::select! {
+                res = shard.pagestream_throttle.throttle(1, now) => res,
+                _ = shard.cancel.cancelled() => return Err(QueryError::Shutdown),
+            };
+            timer.observe_throttle_done(throttled);
+            Ok(timer)
+        }
+
         let batched_msg = match neon_fe_msg {
             PagestreamFeMessage::Exists(req) => {
                 let span = tracing::info_span!(parent: parent_span, "handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn);
@@ -724,13 +779,16 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
-                let timer = shard
-                    .query_metrics
-                    .start_smgr_op(metrics::SmgrQueryType::GetRelExists, received_at);
+                let timer = record_op_start_and_throttle(
+                    &shard,
+                    metrics::SmgrQueryType::GetRelExists,
+                    received_at,
+                )
+                .await?;
                 BatchedFeMessage::Exists {
                     span,
                     timer,
-                    shard,
+                    shard: shard.downgrade(),
                     req,
                 }
             }
@@ -740,13 +798,16 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
-                let timer = shard
-                    .query_metrics
-                    .start_smgr_op(metrics::SmgrQueryType::GetRelSize, received_at);
+                let timer = record_op_start_and_throttle(
+                    &shard,
+                    metrics::SmgrQueryType::GetRelSize,
+                    received_at,
+                )
+                .await?;
                 BatchedFeMessage::Nblocks {
                     span,
                     timer,
-                    shard,
+                    shard: shard.downgrade(),
                     req,
                 }
             }
@@ -756,13 +817,16 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
-                let timer = shard
-                    .query_metrics
-                    .start_smgr_op(metrics::SmgrQueryType::GetDbSize, received_at);
+                let timer = record_op_start_and_throttle(
+                    &shard,
+                    metrics::SmgrQueryType::GetDbSize,
+                    received_at,
+                )
+                .await?;
                 BatchedFeMessage::DbSize {
                     span,
                     timer,
-                    shard,
+                    shard: shard.downgrade(),
                     req,
                 }
             }
@@ -772,13 +836,16 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
-                let timer = shard
-                    .query_metrics
-                    .start_smgr_op(metrics::SmgrQueryType::GetSlruSegment, received_at);
+                let timer = record_op_start_and_throttle(
+                    &shard,
+                    metrics::SmgrQueryType::GetSlruSegment,
+                    received_at,
+                )
+                .await?;
                 BatchedFeMessage::GetSlruSegment {
                     span,
                     timer,
-                    shard,
+                    shard: shard.downgrade(),
                     req,
                 }
             }
@@ -823,13 +890,14 @@ impl PageServerHandler {
                     }
                 };
 
-                // It's important to start the timer before waiting for the LSN
-                // so that the _started counters are incremented before we do
-                // any serious waiting, e.g., for LSNs.
-                let timer = shard
-                    .query_metrics
-                    .start_smgr_op(metrics::SmgrQueryType::GetPageAtLsn, received_at);
+                let timer = record_op_start_and_throttle(
+                    &shard,
+                    metrics::SmgrQueryType::GetPageAtLsn,
+                    received_at,
+                )
+                .await?;
 
+                // We're holding the Handle
                 let effective_request_lsn = match Self::wait_or_get_last_lsn(
                     &shard,
                     req.hdr.request_lsn,
@@ -847,9 +915,25 @@ impl PageServerHandler {
                 };
                 BatchedFeMessage::GetPage {
                     span,
-                    shard,
+                    shard: shard.downgrade(),
                     effective_request_lsn,
                     pages: smallvec::smallvec![BatchedGetPageRequest { req, timer }],
+                }
+            }
+            #[cfg(feature = "testing")]
+            PagestreamFeMessage::Test(req) => {
+                let span = tracing::info_span!(parent: parent_span, "handle_test_request");
+                let shard = timeline_handles
+                    .get(tenant_id, timeline_id, ShardSelector::Zero)
+                    .instrument(span.clone()) // sets `shard_id` field
+                    .await?;
+                let timer =
+                    record_op_start_and_throttle(&shard, metrics::SmgrQueryType::Test, received_at)
+                        .await?;
+                BatchedFeMessage::Test {
+                    span,
+                    shard: shard.downgrade(),
+                    requests: vec![BatchedTestRequest { req, timer }],
                 }
             }
         };
@@ -893,9 +977,7 @@ impl PageServerHandler {
                     assert_eq!(accum_pages.len(), max_batch_size.get());
                     return false;
                 }
-                if (accum_shard.tenant_shard_id, accum_shard.timeline_id)
-                    != (this_shard.tenant_shard_id, this_shard.timeline_id)
-                {
+                if !accum_shard.is_same_handle_as(&this_shard) {
                     trace!(%accum_lsn, %this_lsn, "stopping batching because timeline object mismatch");
                     // TODO: we _could_ batch & execute each shard seperately (and in parallel).
                     // But the current logic for keeping responses in order does not support that.
@@ -914,6 +996,44 @@ impl PageServerHandler {
                 accum_pages.extend(this_pages);
                 Ok(())
             }
+            #[cfg(feature = "testing")]
+            (
+                Ok(BatchedFeMessage::Test {
+                    shard: accum_shard,
+                    requests: accum_requests,
+                    ..
+                }),
+                BatchedFeMessage::Test {
+                    shard: this_shard,
+                    requests: this_requests,
+                    ..
+                },
+            ) if (|| {
+                assert!(this_requests.len() == 1);
+                if accum_requests.len() >= max_batch_size.get() {
+                    trace!(%max_batch_size, "stopping batching because of batch size");
+                    assert_eq!(accum_requests.len(), max_batch_size.get());
+                    return false;
+                }
+                if !accum_shard.is_same_handle_as(&this_shard) {
+                    trace!("stopping batching because timeline object mismatch");
+                    // TODO: we _could_ batch & execute each shard seperately (and in parallel).
+                    // But the current logic for keeping responses in order does not support that.
+                    return false;
+                }
+                let this_batch_key = this_requests[0].req.batch_key;
+                let accum_batch_key = accum_requests[0].req.batch_key;
+                if this_requests[0].req.batch_key != accum_requests[0].req.batch_key {
+                    trace!(%accum_batch_key, %this_batch_key, "stopping batching because batch key changed");
+                    return false;
+                }
+                true
+            })() =>
+            {
+                // ok to batch
+                accum_requests.extend(this_requests);
+                Ok(())
+            }
             // something batched already but this message is unbatchable
             (_, this_msg) => {
                 // by default, don't continue batching
@@ -927,6 +1047,7 @@ impl PageServerHandler {
         &mut self,
         pgb_writer: &mut PostgresBackend<IO>,
         batch: BatchedFeMessage,
+        io_concurrency: IoConcurrency,
         cancel: &CancellationToken,
         protocol_version: PagestreamProtocolVersion,
         ctx: &RequestContext,
@@ -934,6 +1055,13 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
+        let started_at = Instant::now();
+        let batch = {
+            let mut batch = batch;
+            batch.observe_execution_start(started_at);
+            batch
+        };
+
         // invoke handler function
         let (handler_results, span): (
             Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>>,
@@ -948,7 +1076,7 @@ impl PageServerHandler {
                 fail::fail_point!("ps::handle-pagerequest-message::exists");
                 (
                     vec![self
-                        .handle_get_rel_exists_request(&shard, &req, ctx)
+                        .handle_get_rel_exists_request(&*shard.upgrade()?, &req, ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -965,7 +1093,7 @@ impl PageServerHandler {
                 fail::fail_point!("ps::handle-pagerequest-message::nblocks");
                 (
                     vec![self
-                        .handle_get_nblocks_request(&shard, &req, ctx)
+                        .handle_get_nblocks_request(&*shard.upgrade()?, &req, ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -986,9 +1114,10 @@ impl PageServerHandler {
                         trace!(npages, "handling getpage request");
                         let res = self
                             .handle_get_page_at_lsn_request_batched(
-                                &shard,
+                                &*shard.upgrade()?,
                                 effective_request_lsn,
                                 pages,
+                                io_concurrency,
                                 ctx,
                             )
                             .instrument(span.clone())
@@ -1008,7 +1137,7 @@ impl PageServerHandler {
                 fail::fail_point!("ps::handle-pagerequest-message::dbsize");
                 (
                     vec![self
-                        .handle_db_size_request(&shard, &req, ctx)
+                        .handle_db_size_request(&*shard.upgrade()?, &req, ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -1025,11 +1154,32 @@ impl PageServerHandler {
                 fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
                 (
                     vec![self
-                        .handle_get_slru_segment_request(&shard, &req, ctx)
+                        .handle_get_slru_segment_request(&*shard.upgrade()?, &req, ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
                         .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
+                    span,
+                )
+            }
+            #[cfg(feature = "testing")]
+            BatchedFeMessage::Test {
+                span,
+                shard,
+                requests,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::test");
+                (
+                    {
+                        let npages = requests.len();
+                        trace!(npages, "handling getpage request");
+                        let res = self
+                            .handle_test_request_batch(&*shard.upgrade()?, requests, ctx)
+                            .instrument(span.clone())
+                            .await;
+                        assert_eq!(res.len(), npages);
+                        res
+                    },
                     span,
                 )
             }
@@ -1100,8 +1250,11 @@ impl PageServerHandler {
             // The timer's underlying metric is used for a storage-internal latency SLO and
             // we don't want to include latency in it that we can't control.
             // And as pointed out above, in this case, we don't control the time that flush will take.
-            let flushing_timer =
-                timer.map(|timer| timer.observe_smgr_op_completion_and_start_flushing());
+            let flushing_timer = timer.map(|mut timer| {
+                timer
+                    .observe_execution_end_flush_start(Instant::now())
+                    .expect("we are the first caller")
+            });
 
             // what we want to do
             let flush_fut = pgb_writer.flush();
@@ -1169,6 +1322,17 @@ impl PageServerHandler {
             }
         }
 
+        let io_concurrency = IoConcurrency::spawn_from_conf(
+            self.conf,
+            match self.gate_guard.try_clone() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    info!("shutdown request received in page handler");
+                    return Err(QueryError::Shutdown);
+                }
+            },
+        );
+
         let pgb_reader = pgb
             .split()
             .context("implementation error: split pgb into reader and writer")?;
@@ -1190,6 +1354,7 @@ impl PageServerHandler {
                     request_span,
                     pipelining_config,
                     protocol_version,
+                    io_concurrency,
                     &ctx,
                 )
                 .await
@@ -1203,6 +1368,7 @@ impl PageServerHandler {
                     timeline_handles,
                     request_span,
                     protocol_version,
+                    io_concurrency,
                     &ctx,
                 )
                 .await
@@ -1230,6 +1396,7 @@ impl PageServerHandler {
         mut timeline_handles: TimelineHandles,
         request_span: Span,
         protocol_version: PagestreamProtocolVersion,
+        io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> (
         (PostgresBackendReader<IO>, TimelineHandles),
@@ -1255,7 +1422,7 @@ impl PageServerHandler {
                 Ok(msg) => msg,
                 Err(e) => break e,
             };
-            let mut msg = match msg {
+            let msg = match msg {
                 Some(msg) => msg,
                 None => {
                     debug!("pagestream subprotocol end observed");
@@ -1263,12 +1430,15 @@ impl PageServerHandler {
                 }
             };
 
-            if let Err(cancelled) = msg.throttle_and_record_start_processing(&self.cancel).await {
-                break cancelled;
-            }
-
             let err = self
-                .pagesteam_handle_batched_message(pgb_writer, msg, &cancel, protocol_version, ctx)
+                .pagesteam_handle_batched_message(
+                    pgb_writer,
+                    msg,
+                    io_concurrency.clone(),
+                    &cancel,
+                    protocol_version,
+                    ctx,
+                )
                 .await;
             match err {
                 Ok(()) => {}
@@ -1292,6 +1462,7 @@ impl PageServerHandler {
         request_span: Span,
         pipelining_config: PageServicePipeliningConfigPipelined,
         protocol_version: PagestreamProtocolVersion,
+        io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> (
         (PostgresBackendReader<IO>, TimelineHandles),
@@ -1426,18 +1597,16 @@ impl PageServerHandler {
                             return Ok(());
                         }
                     };
-                    let mut batch = match batch {
+                    let batch = match batch {
                         Ok(batch) => batch,
                         Err(e) => {
                             return Err(e);
                         }
                     };
-                    batch
-                        .throttle_and_record_start_processing(&self.cancel)
-                        .await?;
                     self.pagesteam_handle_batched_message(
                         pgb_writer,
                         batch,
+                        io_concurrency.clone(),
                         &cancel,
                         protocol_version,
                         &ctx,
@@ -1694,6 +1863,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         effective_lsn: Lsn,
         requests: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
+        io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
@@ -1702,10 +1872,25 @@ impl PageServerHandler {
             .query_metrics
             .observe_getpage_batch_start(requests.len());
 
+        // If a page trace is running, submit an event for this request.
+        if let Some(page_trace) = timeline.page_trace.load().as_ref() {
+            let time = SystemTime::now();
+            for batch in &requests {
+                let key = rel_block_to_key(batch.req.rel, batch.req.blkno).to_compact();
+                // Ignore error (trace buffer may be full or tracer may have disconnected).
+                _ = page_trace.try_send(PageTraceEvent {
+                    key,
+                    effective_lsn,
+                    time,
+                });
+            }
+        }
+
         let results = timeline
             .get_rel_page_at_lsn_batched(
                 requests.iter().map(|p| (&p.req.rel, &p.req.blkno)),
                 effective_lsn,
+                io_concurrency,
                 ctx,
             )
             .await;
@@ -1758,6 +1943,51 @@ impl PageServerHandler {
         Ok(PagestreamBeMessage::GetSlruSegment(
             PagestreamGetSlruSegmentResponse { req: *req, segment },
         ))
+    }
+
+    // NB: this impl mimics what we do for batched getpage requests.
+    #[cfg(feature = "testing")]
+    #[instrument(skip_all, fields(shard_id))]
+    async fn handle_test_request_batch(
+        &mut self,
+        timeline: &Timeline,
+        requests: Vec<BatchedTestRequest>,
+        _ctx: &RequestContext,
+    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
+        // real requests would do something with the timeline
+        let mut results = Vec::with_capacity(requests.len());
+        for _req in requests.iter() {
+            tokio::task::yield_now().await;
+
+            results.push({
+                if timeline.cancel.is_cancelled() {
+                    Err(PageReconstructError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            });
+        }
+
+        // TODO: avoid creating the new Vec here
+        Vec::from_iter(
+            requests
+                .into_iter()
+                .zip(results.into_iter())
+                .map(|(req, res)| {
+                    res.map(|()| {
+                        (
+                            PagestreamBeMessage::Test(models::PagestreamTestResponse {
+                                req: req.req.clone(),
+                            }),
+                            req.timer,
+                        )
+                    })
+                    .map_err(|e| BatchedPageStreamError {
+                        err: PageStreamError::from(e),
+                        req: req.req.hdr,
+                    })
+                }),
+        )
     }
 
     /// Note on "fullbackup":
@@ -2371,6 +2601,14 @@ impl From<GetActiveTimelineError> for QueryError {
             GetActiveTimelineError::Tenant(GetActiveTenantError::Cancelled) => QueryError::Shutdown,
             GetActiveTimelineError::Tenant(e) => e.into(),
             GetActiveTimelineError::Timeline(e) => QueryError::NotFound(format!("{e}").into()),
+        }
+    }
+}
+
+impl From<crate::tenant::timeline::handle::HandleUpgradeError> for QueryError {
+    fn from(e: crate::tenant::timeline::handle::HandleUpgradeError) -> Self {
+        match e {
+            crate::tenant::timeline::handle::HandleUpgradeError::ShutDown => QueryError::Shutdown,
         }
     }
 }

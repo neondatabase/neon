@@ -313,6 +313,10 @@ class PgProtocol:
         """
         return self.safe_psql(query, log_query=log_query)[0][0]
 
+    def show_timeline_id(self) -> TimelineId:
+        """SHOW neon.timeline_id"""
+        return TimelineId(cast("str", self.safe_psql("show neon.timeline_id")[0][0]))
+
 
 class PageserverWalReceiverProtocol(StrEnum):
     VANILLA = "vanilla"
@@ -370,6 +374,7 @@ class NeonEnvBuilder:
         pageserver_config_override: str | Callable[[dict[str, Any]], None] | None = None,
         num_safekeepers: int = 1,
         num_pageservers: int = 1,
+        num_azs: int = 1,
         # Use non-standard SK ids to check for various parsing bugs
         safekeepers_id_start: int = 0,
         # fsync is disabled by default to make the tests go faster
@@ -386,6 +391,7 @@ class NeonEnvBuilder:
         storage_controller_port_override: int | None = None,
         pageserver_virtual_file_io_mode: str | None = None,
         pageserver_wal_receiver_protocol: PageserverWalReceiverProtocol | None = None,
+        pageserver_get_vectored_concurrent_io: str | None = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -401,6 +407,7 @@ class NeonEnvBuilder:
         self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
         self.num_pageservers = num_pageservers
+        self.num_azs = num_azs
         self.safekeepers_id_start = safekeepers_id_start
         self.safekeepers_enable_fsync = safekeepers_enable_fsync
         self.auth_enabled = auth_enabled
@@ -424,6 +431,9 @@ class NeonEnvBuilder:
         self.storage_controller_config: dict[Any, Any] | None = None
 
         self.pageserver_virtual_file_io_engine: str | None = pageserver_virtual_file_io_engine
+        self.pageserver_get_vectored_concurrent_io: str | None = (
+            pageserver_get_vectored_concurrent_io
+        )
 
         self.pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None = (
             pageserver_default_tenant_config_compaction_algorithm
@@ -450,6 +460,7 @@ class NeonEnvBuilder:
         self.test_name = test_name
         self.compatibility_neon_binpath = compatibility_neon_binpath
         self.compatibility_pg_distrib_dir = compatibility_pg_distrib_dir
+        self.test_may_use_compatibility_snapshot_binaries = False
         self.version_combination = combination
         self.mixdir = self.test_output_dir / "mixdir_neon"
         if self.version_combination is not None:
@@ -461,6 +472,7 @@ class NeonEnvBuilder:
             ), "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required when using mixed versions"
             self.mixdir.mkdir(mode=0o755, exist_ok=True)
             self._mix_versions()
+            self.test_may_use_compatibility_snapshot_binaries = True
 
     def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
         # Cannot create more than one environment from one builder
@@ -990,6 +1002,7 @@ class NeonEnv:
         self.endpoints = EndpointFactory(self)
         self.safekeepers: list[Safekeeper] = []
         self.pageservers: list[NeonPageserver] = []
+        self.num_azs = config.num_azs
         self.broker = NeonBroker(self)
         self.pageserver_remote_storage = config.pageserver_remote_storage
         self.safekeepers_remote_storage = config.safekeepers_remote_storage
@@ -1059,6 +1072,7 @@ class NeonEnv:
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
         self.pageserver_wal_receiver_protocol = config.pageserver_wal_receiver_protocol
+        self.pageserver_get_vectored_concurrent_io = config.pageserver_get_vectored_concurrent_io
 
         # Create the neon_local's `NeonLocalInitConf`
         cfg: dict[str, Any] = {
@@ -1090,14 +1104,21 @@ class NeonEnv:
                 http=self.port_distributor.get_port(),
             )
 
+            # Availabilty zones may also be configured manually with `NeonEnvBuilder.pageserver_config_override`
+            if self.num_azs > 1:
+                # Round-robin assignment of AZ names like us-east-2a, us-east-2b, etc.
+                az_prefix = DEFAULT_AZ_ID[:-1]
+                availability_zone = f"{az_prefix}{chr(ord('a') + (ps_id - 1) % self.num_azs)}"
+            else:
+                availability_zone = DEFAULT_AZ_ID
+
             ps_cfg: dict[str, Any] = {
                 "id": ps_id,
                 "listen_pg_addr": f"localhost:{pageserver_port.pg}",
                 "listen_http_addr": f"localhost:{pageserver_port.http}",
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
-                # Default which can be overriden with `NeonEnvBuilder.pageserver_config_override`
-                "availability_zone": DEFAULT_AZ_ID,
+                "availability_zone": availability_zone,
                 # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
                 # the pageserver taking a long time to start up due to syncfs flushing other tests' data
                 "no_sync": True,
@@ -1105,12 +1126,24 @@ class NeonEnv:
 
             # Batching (https://github.com/neondatabase/neon/issues/9377):
             # enable batching by default in tests and benchmarks.
+            ps_cfg["page_service_pipelining"] = {
+                "mode": "pipelined",
+                "execution": "concurrent-futures",
+                "max_batch_size": 32,
+            }
+
+            # Concurrent IO (https://github.com/neondatabase/neon/issues/9378):
+            # enable concurrent IO by default in tests and benchmarks.
             # Compat tests are exempt because old versions fail to parse the new config.
-            if not config.compatibility_neon_binpath:
-                ps_cfg["page_service_pipelining"] = {
-                    "mode": "pipelined",
-                    "execution": "concurrent-futures",
-                    "max_batch_size": 32,
+            get_vectored_concurrent_io = self.pageserver_get_vectored_concurrent_io
+            if config.test_may_use_compatibility_snapshot_binaries:
+                log.info(
+                    "Forcing use of binary-built-in default to avoid forward-compatibility related test failures"
+                )
+                get_vectored_concurrent_io = None
+            if get_vectored_concurrent_io is not None:
+                ps_cfg["get_vectored_concurrent_io"] = {
+                    "mode": self.pageserver_get_vectored_concurrent_io,
                 }
 
             if self.pageserver_virtual_file_io_engine is not None:
@@ -1447,6 +1480,7 @@ def neon_simple_env(
     pageserver_virtual_file_io_engine: str,
     pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None,
     pageserver_virtual_file_io_mode: str | None,
+    pageserver_get_vectored_concurrent_io: str | None,
 ) -> Iterator[NeonEnv]:
     """
     Simple Neon environment, with 1 safekeeper and 1 pageserver. No authentication, no fsync.
@@ -1479,6 +1513,7 @@ def neon_simple_env(
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
+        pageserver_get_vectored_concurrent_io=pageserver_get_vectored_concurrent_io,
         combination=combination,
     ) as builder:
         env = builder.init_start()
@@ -1505,6 +1540,7 @@ def neon_env_builder(
     pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None,
     record_property: Callable[[str, object], None],
     pageserver_virtual_file_io_mode: str | None,
+    pageserver_get_vectored_concurrent_io: str | None,
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1547,6 +1583,7 @@ def neon_env_builder(
         test_overlay_dir=test_overlay_dir,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
+        pageserver_get_vectored_concurrent_io=pageserver_get_vectored_concurrent_io,
     ) as builder:
         yield builder
         # Propogate `preserve_database_files` to make it possible to use in other fixtures,
@@ -1884,11 +1921,26 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         return response.json()
 
-    def tenant_list(self):
+    def tenant_shard_dump(self):
+        """
+        Debug listing API: dumps the internal map of tenant shards
+        """
         response = self.request(
             "GET",
             f"{self.api}/debug/v1/tenant",
             headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
+    def tenant_list(self, **kwargs):
+        """
+        Control API tenant listing: a vector of the same content returned by tenant_describe
+        """
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/tenant",
+            headers=self.headers(TokenScope.ADMIN),
+            params=kwargs,
         )
         return response.json()
 
@@ -2238,7 +2290,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         """
         Get the intent and observed placements of all tenants known to the storage controller.
         """
-        tenants = self.tenant_list()
+        tenants = self.tenant_shard_dump()
 
         tenant_placement: defaultdict[str, dict[str, Any]] = defaultdict(
             lambda: {
@@ -2319,6 +2371,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
             f"{self.api}/control/v1/safekeeper/{id}",
             headers=self.headers(TokenScope.ADMIN),
             json=body,
+        )
+
+    def safekeeper_scheduling_policy(self, id: int, scheduling_policy: str):
+        self.request(
+            "POST",
+            f"{self.api}/control/v1/safekeeper/{id}/scheduling_policy",
+            headers=self.headers(TokenScope.ADMIN),
+            json={"id": id, "scheduling_policy": scheduling_policy},
         )
 
     def get_safekeeper(self, id: int) -> dict[str, Any] | None:
@@ -3858,6 +3918,7 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: int | None = None,
         safekeepers: list[int] | None = None,
         allow_multiple: bool = False,
+        create_test_user: bool = False,
         basebackup_request_tries: int | None = None,
         env: dict[str, str] | None = None,
     ) -> Self:
@@ -3879,6 +3940,7 @@ class Endpoint(PgProtocol, LogUtils):
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            create_test_user=create_test_user,
             basebackup_request_tries=basebackup_request_tries,
             env=env,
         )
@@ -4120,7 +4182,7 @@ class Endpoint(PgProtocol, LogUtils):
 
     # Checkpoints running endpoint and returns pg_wal size in MB.
     def get_pg_wal_size(self):
-        log.info(f'checkpointing at LSN {self.safe_psql("select pg_current_wal_lsn()")[0][0]}')
+        log.info(f"checkpointing at LSN {self.safe_psql('select pg_current_wal_lsn()')[0][0]}")
         self.safe_psql("checkpoint")
         assert self.pgdata_dir is not None  # please mypy
         return get_dir_size(self.pgdata_dir / "pg_wal") / 1024 / 1024
@@ -4960,7 +5022,7 @@ def logical_replication_sync(
         if res:
             log.info(f"subscriber_lsn={res}")
             subscriber_lsn = Lsn(res)
-            log.info(f"Subscriber LSN={subscriber_lsn}, publisher LSN={ publisher_lsn}")
+            log.info(f"Subscriber LSN={subscriber_lsn}, publisher LSN={publisher_lsn}")
             if subscriber_lsn >= publisher_lsn:
                 return subscriber_lsn
         time.sleep(0.5)
