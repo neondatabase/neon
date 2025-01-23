@@ -67,6 +67,9 @@ RUN cd postgres && \
     # Enable some of contrib extensions
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/autoinc.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/dblink.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgres_fdw.control && \
+    file=/usr/local/pgsql/share/extension/postgres_fdw--1.0.sql && [ -e $file ] && \
+    echo 'GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO neon_superuser;' >> $file && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/bloom.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/earthdistance.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/insert_username.control && \
