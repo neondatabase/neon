@@ -79,5 +79,4 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         exit 1
         fi
     fi
-    cleanup
 done
