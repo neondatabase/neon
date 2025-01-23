@@ -2212,6 +2212,12 @@ impl Timeline {
                 } else {
                     end
                 };
+                let end = if ranges_num == idx + 1 {
+                    // extend the compaction range to the end of the key range if it's the last partition
+                    end.max(job.compact_key_range.end)
+                } else {
+                    end
+                };
                 info!(
                     "splitting compaction job: {}..{}, estimated_size={}",
                     start, end, total_size
