@@ -6,7 +6,10 @@ FAILED=
 LIST=$( (echo -e "${SKIP//","/"\n"}"; ls -d -- *-src) | sort | uniq -u)
 for d in ${LIST}; do
     [ -d "${d}" ] || continue
-    psql -c "select 1" >/dev/null || break
+    if ! psql -w -c "select 1" >/dev/null; then
+      FAILED="${d} ${FAILED}"
+      break
+    fi
     if [ -f "${d}/neon-test.sh" ]; then
        cd "${d}" || exit 1
        ./neon-test.sh || FAILED="${d} ${FAILED}"

@@ -42,8 +42,8 @@ use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::{
     AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
 };
-use crate::tenant::timeline::ImageLayerCreationOutcome;
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
+use crate::tenant::timeline::{ImageLayerCreationOutcome, IoConcurrency};
 use crate::tenant::timeline::{Layer, ResidentLayer};
 use crate::tenant::{gc_block, DeltaLayer, MaybeOffloaded};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
@@ -2212,6 +2212,12 @@ impl Timeline {
                 } else {
                     end
                 };
+                let end = if ranges_num == idx + 1 {
+                    // extend the compaction range to the end of the key range if it's the last partition
+                    end.max(job.compact_key_range.end)
+                } else {
+                    end
+                };
                 info!(
                     "splitting compaction job: {}..{}, estimated_size={}",
                     start, end, total_size
@@ -3170,6 +3176,7 @@ impl TimelineAdaptor {
                 ctx,
                 key_range.clone(),
                 start,
+                IoConcurrency::sequential(),
             )
             .await?;
 
