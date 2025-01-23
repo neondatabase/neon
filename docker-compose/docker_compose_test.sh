@@ -22,7 +22,6 @@ PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
 cleanup() {
     echo "show container information"
     docker ps
-    docker compose --profile test-extensions -f $COMPOSE_FILE logs
     echo "stop containers..."
     docker compose --profile test-extensions -f $COMPOSE_FILE down
 }
@@ -41,7 +40,6 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         cnt=`expr $cnt + 3`
         if [ $cnt -gt 60 ]; then
             echo "timeout before the compute is ready."
-            cleanup
             exit 1
         fi
         if docker compose --profile test-extensions -f $COMPOSE_FILE logs "compute_is_ready" | grep -q "accepting connections"; then
@@ -53,6 +51,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     done
 
     if [ $pg_version -ge 16 ]; then
+        docker cp ext-src $TEST_CONTAINER_NAME:/
         # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
         # It cannot be moved to Dockerfile now because the database directory is created after the start of the container
         echo Adding dummy config
@@ -73,11 +72,9 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         rm -rf $TMPDIR
 
         # We are running tests now
-        if docker exec -e SKIP=timescaledb-src,rdkit-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,pg_graphql-src,kq_imcx-src,wal2json_2_5-src \
+        if ! docker exec -e SKIP=timescaledb-src,rdkit-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src \
             $TEST_CONTAINER_NAME /run-tests.sh | tee testout.txt
         then
-            cleanup
-        else
             FAILED=$(tail -1 testout.txt)
             for d in $FAILED
             do
@@ -87,9 +84,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
                 cat $d/regression.out $d/regression.diffs || true
             done
         rm -rf $FAILED
-        cleanup
         exit 1
         fi
     fi
-    cleanup
 done

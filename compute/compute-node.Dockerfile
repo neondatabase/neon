@@ -360,6 +360,8 @@ COPY compute/patches/pgvector.patch /pgvector.patch
 RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.0.tar.gz -O pgvector.tar.gz && \
     echo "867a2c328d4928a5a9d6f052cd3bc78c7d60228a9b914ad32aa3db88e9de27b0 pgvector.tar.gz" | sha256sum --check && \
     mkdir pgvector-src && cd pgvector-src && tar xzf ../pgvector.tar.gz --strip-components=1 -C . && \
+    wget https://github.com/pgvector/pgvector/raw/refs/tags/v0.7.4/sql/vector.sql -O ./sql/vector--0.7.4.sql && \
+    echo "10218d05dc02299562252a9484775178b14a1d8edb92a2d1672ef488530f7778 ./sql/vector--0.7.4.sql" | sha256sum --check && \
     patch -p1 < /pgvector.patch && \
     make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" && \
     make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" install && \
@@ -1342,7 +1344,8 @@ COPY --from=vector-pg-build /pgvector.patch /ext-src/
 COPY --from=pgjwt-pg-build /pgjwt.tar.gz /ext-src
 #COPY --from=pgrag-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 #COPY --from=pg-jsonschema-pg-build /home/nonroot/pg_jsonschema.tar.gz /ext-src
-#COPY --from=pg-graphql-pg-build /home/nonroot/pg_graphql.tar.gz /ext-src
+COPY --from=pg-graphql-pg-build /home/nonroot/pg_graphql.tar.gz /ext-src
+COPY compute/patches/pg_graphql.patch /ext-src
 #COPY --from=pg-tiktoken-pg-build /home/nonroot/pg_tiktoken.tar.gz /ext-src
 COPY --from=hypopg-pg-build /hypopg.tar.gz /ext-src
 COPY --from=pg-hashids-pg-build /pg_hashids.tar.gz /ext-src
@@ -1376,6 +1379,7 @@ RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
 RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan_${PG_VERSION}.patch
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN patch -p1 </ext-src/pg_cron.patch
+RUN cd /ext-src/pg_graphql-src && patch -p1 </ext-src/pg_graphql.patch
 ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
 ENV PGPORT=55433

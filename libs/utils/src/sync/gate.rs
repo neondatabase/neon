@@ -64,6 +64,12 @@ pub struct GateGuard {
     gate: Arc<GateInner>,
 }
 
+impl GateGuard {
+    pub fn try_clone(&self) -> Result<Self, GateError> {
+        Gate::enter_impl(self.gate.clone())
+    }
+}
+
 impl Drop for GateGuard {
     fn drop(&mut self) {
         if self.gate.closing.load(Ordering::Relaxed) {
@@ -107,11 +113,11 @@ impl Gate {
     /// to avoid blocking close() indefinitely: typically types that contain a Gate will
     /// also contain a CancellationToken.
     pub fn enter(&self) -> Result<GateGuard, GateError> {
-        let permit = self
-            .inner
-            .sem
-            .try_acquire()
-            .map_err(|_| GateError::GateClosed)?;
+        Self::enter_impl(self.inner.clone())
+    }
+
+    fn enter_impl(gate: Arc<GateInner>) -> Result<GateGuard, GateError> {
+        let permit = gate.sem.try_acquire().map_err(|_| GateError::GateClosed)?;
 
         // we now have the permit, let's disable the normal raii functionality and leave
         // "returning" the permit to our GateGuard::drop.
@@ -122,7 +128,7 @@ impl Gate {
 
         Ok(GateGuard {
             span_at_enter: tracing::Span::current(),
-            gate: self.inner.clone(),
+            gate,
         })
     }
 
@@ -251,5 +257,40 @@ mod tests {
 
         // Attempting to enter() is still forbidden
         gate.enter().expect_err("enter should fail finishing close");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn clone_gate_guard() {
+        let gate = Gate::default();
+        let forever = Duration::from_secs(24 * 7 * 365);
+
+        let guard1 = gate.enter().expect("gate isn't closed");
+
+        let guard2 = guard1.try_clone().expect("gate isn't clsoed");
+
+        let mut close_fut = std::pin::pin!(gate.close());
+
+        tokio::time::timeout(forever, &mut close_fut)
+            .await
+            .unwrap_err();
+
+        // we polled close_fut once, that should prevent all later enters and clones
+        gate.enter().unwrap_err();
+        guard1.try_clone().unwrap_err();
+        guard2.try_clone().unwrap_err();
+
+        // guard2 keeps gate open even if guard1 is closed
+        drop(guard1);
+        tokio::time::timeout(forever, &mut close_fut)
+            .await
+            .unwrap_err();
+
+        drop(guard2);
+
+        // now that the last guard is dropped, closing should complete
+        close_fut.await;
+
+        // entering is still forbidden
+        gate.enter().expect_err("enter should stilll fail");
     }
 }

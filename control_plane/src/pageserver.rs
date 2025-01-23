@@ -423,6 +423,21 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'rel_size_v2_enabled' as bool")?,
+            gc_compaction_enabled: settings
+                .remove("gc_compaction_enabled")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_enabled' as bool")?,
+            gc_compaction_initial_threshold_kb: settings
+                .remove("gc_compaction_initial_threshold_kb")
+                .map(|x| x.parse::<u64>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_initial_threshold_kb' as integer")?,
+            gc_compaction_ratio_percent: settings
+                .remove("gc_compaction_ratio_percent")
+                .map(|x| x.parse::<u64>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_ratio_percent' as integer")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
