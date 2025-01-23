@@ -22,7 +22,6 @@ PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
 cleanup() {
     echo "show container information"
     docker ps
-    #docker compose --profile test-extensions -f $COMPOSE_FILE logs
     echo "stop containers..."
     docker compose --profile test-extensions -f $COMPOSE_FILE down
 }
@@ -41,7 +40,6 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         cnt=`expr $cnt + 3`
         if [ $cnt -gt 60 ]; then
             echo "timeout before the compute is ready."
-            cleanup
             exit 1
         fi
         if docker compose --profile test-extensions -f $COMPOSE_FILE logs "compute_is_ready" | grep -q "accepting connections"; then
@@ -75,16 +73,11 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         $TEST_CONTAINER_NAME /run-tests.sh /ext-src | tee testout.txt && EXT_SUCCESS=1 || EXT_SUCCESS=0
         docker exec -e SKIP=start-scripts,postgres_fdw,ltree_plpython,jsonb_plpython,jsonb_plperl,hstore_plpython,hstore_plperl,dblink,bool_plperl \
         $TEST_CONTAINER_NAME /run-tests.sh /postgres/contrib | tee testout_contrib.txt && CONTRIB_SUCCESS=1 || CONTRIB_SUCCESS=0
-        if [ $EXT_SUCCESS -eq 1 ] && [ $CONTRIB_SUCCESS -eq 1 ]
-        then
-            cleanup
-        else
+        if [ $EXT_SUCCESS -eq 0 ] || [ $CONTRIB_SUCCESS -eq 0 ]; then
             CONTRIB_FAILED=
             FAILED=
-            [ $EXT_SUCCESS -ne 1 ] && FAILED=$(tail -1 testout.txt | awk '{for (i=1; i<=NF; i++) {print "/ext-src/"$i} }')
-            [ 0$CONTRIB_SUCCESS -ne 1 ] && CONTRIB_FAILED=$(tail -1 testout_contrib.txt | awk '{for (i=1; i<=NF; i++) {print "/postgres/contrib/"$i} }')
-            for d in $FAILED $CONTRIB_FAILED
-            do
+            FAILED=$(tail -1 testout.txt)
+            for d in $FAILED $CONTRIB_FAILED; do
                 dn="$(basename $d)"
                 rm -rf $dn
                 mkdir $dn
@@ -93,9 +86,8 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
                 cat $dn/regression.out $dn/regression.diffs || true
                 rm -rf $dn
             done
-        cleanup
+        rm -rf $FAILED
         exit 1
         fi
     fi
-    cleanup
 done

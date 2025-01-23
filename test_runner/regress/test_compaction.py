@@ -150,8 +150,7 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder, with_b
     child_workloads: list[Workload] = []
 
     for i in range(1, churn_rounds + 1):
-        if i % 10 == 0:
-            log.info(f"Running churn round {i}/{churn_rounds} ...")
+        log.info(f"Running churn round {i}/{churn_rounds} ...")
         if i % 10 == 5 and with_branches == "with_branches":
             branch_name = f"child-{i}"
             branch_timeline_id = env.create_branch(branch_name)
@@ -172,8 +171,10 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder, with_b
                     "sub_compaction_max_job_size_mb": 16,
                 },
             )
-
-        workload.churn_rows(row_count, env.pageserver.id)
+        # do not wait for upload so that we can see if gc_compaction works well with data being ingested
+        workload.churn_rows(row_count, env.pageserver.id, upload=False)
+        time.sleep(1)
+        workload.validate(env.pageserver.id)
 
     def compaction_finished():
         queue_depth = len(ps_http.timeline_compact_info(tenant_id, timeline_id))
