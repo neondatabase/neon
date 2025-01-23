@@ -82,6 +82,7 @@ static char *FormatSafekeeperState(Safekeeper *sk);
 static void AssertEventsOkForState(uint32 events, Safekeeper *sk);
 static char *FormatEvents(WalProposer *wp, uint32 events);
 static void UpdateDonorShmem(WalProposer *wp);
+static char *MembershipConfigurationToString(MembershipConfiguration *mconf);
 static void MembershipConfigurationFree(MembershipConfiguration *mconf);
 
 WalProposer *
@@ -690,6 +691,10 @@ static void
 SendProposerGreeting(Safekeeper *sk)
 {
 	WalProposer *wp = sk->wp;
+	char	   *mconf_toml = MembershipConfigurationToString(&wp->greetRequest.mconf);
+
+	wp_log(LOG, "sending ProposerGreeting to safekeeper %s:%s with mconf = %s", sk->host, sk->port, mconf_toml);
+	pfree(mconf_toml);
 
 	PAMessageSerialize(wp, (ProposerAcceptorMessage *) &wp->greetRequest,
 					   &sk->outbuf, wp->config->proto_version);
@@ -705,6 +710,7 @@ static void
 RecvAcceptorGreeting(Safekeeper *sk)
 {
 	WalProposer *wp = sk->wp;
+	char	   *mconf_toml;
 
 	/*
 	 * If our reading doesn't immediately succeed, any necessary error
@@ -715,7 +721,10 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) &sk->greetResponse))
 		return;
 
-	wp_log(LOG, "received AcceptorGreeting from safekeeper %s:%s, term=" INT64_FORMAT, sk->host, sk->port, sk->greetResponse.term);
+	mconf_toml = MembershipConfigurationToString(&sk->greetResponse.mconf);
+	wp_log(LOG, "received AcceptorGreeting from safekeeper %s:%s, node_id = %lu, mconf = %s, term=" UINT64_FORMAT,
+		   sk->host, sk->port, sk->greetResponse.nodeId, mconf_toml, sk->greetResponse.term);
+	pfree(mconf_toml);
 
 	/* Protocol is all good, move to voting. */
 	sk->state = SS_VOTING;
@@ -2458,6 +2467,37 @@ FormatEvents(WalProposer *wp, uint32 events)
 		return_str[6] = '\0';
 
 	return (char *) &return_str;
+}
+
+/* Dump mconf as toml for observability / debugging. Result is palloc'ed. */
+static char *
+MembershipConfigurationToString(MembershipConfiguration *mconf)
+{
+	StringInfoData s;
+	uint32		i;
+
+	initStringInfo(&s);
+	appendStringInfo(&s, "{gen = %u", mconf->generation);
+	appendStringInfoString(&s, ", members = [");
+	for (i = 0; i < mconf->members.len; i++)
+	{
+		if (i > 0)
+			appendStringInfoString(&s, ", ");
+		appendStringInfo(&s, "{node_id = %lu", mconf->members.m[i].node_id);
+		appendStringInfo(&s, ", host = %s", mconf->members.m[i].host);
+		appendStringInfo(&s, ", port = %u }", mconf->members.m[i].port);
+	}
+	appendStringInfo(&s, "], new_members = [");
+	for (i = 0; i < mconf->new_members.len; i++)
+	{
+		if (i > 0)
+			appendStringInfoString(&s, ", ");
+		appendStringInfo(&s, "{node_id = %lu", mconf->new_members.m[i].node_id);
+		appendStringInfo(&s, ", host = %s", mconf->new_members.m[i].host);
+		appendStringInfo(&s, ", port = %u }", mconf->new_members.m[i].port);
+	}
+	appendStringInfoString(&s, "]}");
+	return s.data;
 }
 
 static void

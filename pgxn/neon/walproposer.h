@@ -169,9 +169,6 @@ typedef struct MembershipConfiguration
 	MemberSet	new_members;
 } MembershipConfiguration;
 
-/* Used only for debug printing */
-#define MaxMembershipConfLen 8192
-
 /*
  * Proposer <-> Acceptor messaging.
  */
