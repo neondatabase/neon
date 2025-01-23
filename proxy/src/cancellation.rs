@@ -17,7 +17,7 @@ use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::ext::LockExt;
-use crate::metrics::{CancellationRequest, Metrics};
+use crate::metrics::{CancellationRequest, Metrics, RedisMsgKind};
 use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::keys::KeyPrefix;
 use crate::redis::kv_ops::RedisOp;
@@ -97,7 +97,6 @@ impl CancellationHandler {
         //
         // if we forwarded the backend_pid from postgres to the client, there would be a lot
         // of overlap between our computes as most pids are small (~100).
-        // let node_id_bits: u64 = (node_id as u64) << 32;
 
         let key: CancelKeyData = rand::random();
 
@@ -160,6 +159,10 @@ impl CancellationHandler {
         let op = RedisOp::HGetAll {
             key: redis_key,
             resp_tx,
+            _guard: Metrics::get()
+                .proxy
+                .cancel_channel_size
+                .guard(RedisMsgKind::HGetAll),
         };
 
         tx.send(op).await.map_err(|e| {
@@ -320,6 +323,10 @@ impl Session {
             field: "data".to_string(),
             value: closure_json,
             resp_tx: None, // error handling is done in the worker task,
+            _guard: Metrics::get()
+                .proxy
+                .cancel_channel_size
+                .guard(RedisMsgKind::HSet),
         };
 
         tx.try_send(op).map_err(|e| {
@@ -340,6 +347,10 @@ impl Session {
             key: self.redis_key.clone(),
             field: "data".to_string(),
             resp_tx: None,
+            _guard: Metrics::get()
+                .proxy
+                .cancel_channel_size
+                .guard(RedisMsgKind::HDel),
         };
 
         tx.try_send(op).map_err(|e| {

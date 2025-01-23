@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use tokio::sync::{mpsc, oneshot};
 
 use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
+use crate::metrics::CancelChannelSizeGuard;
 use crate::rate_limiter::{GlobalRateLimiter, RateBucketInfo};
 
 // Message types for sending through mpsc channel
@@ -12,25 +13,30 @@ pub enum RedisOp {
         field: String,
         value: String,
         resp_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+        _guard: CancelChannelSizeGuard<'static>,
     },
     HSetMultiple {
         key: String,
         items: Vec<(String, String)>,
         resp_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+        _guard: CancelChannelSizeGuard<'static>,
     },
     HGet {
         key: String,
         field: String,
         resp_tx: oneshot::Sender<anyhow::Result<String>>,
+        _guard: CancelChannelSizeGuard<'static>,
     },
     HGetAll {
         key: String,
         resp_tx: oneshot::Sender<anyhow::Result<Vec<(String, String)>>>,
+        _guard: CancelChannelSizeGuard<'static>,
     },
     HDel {
         key: String,
         field: String,
         resp_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+        _guard: CancelChannelSizeGuard<'static>,
     },
 }
 
@@ -74,6 +80,7 @@ impl RedisKVClient {
                         field,
                         value,
                         resp_tx,
+                        _guard,
                     } => {
                         if let Some(resp_tx) = resp_tx {
                             drop(resp_tx.send(self.hset(key, field, value).await));
@@ -85,6 +92,7 @@ impl RedisKVClient {
                         key,
                         items,
                         resp_tx,
+                        _guard,
                     } => {
                         if let Some(resp_tx) = resp_tx {
                             drop(resp_tx.send(self.hset_multiple(&key, &items).await));
@@ -96,16 +104,22 @@ impl RedisKVClient {
                         key,
                         field,
                         resp_tx,
+                        _guard,
                     } => {
                         drop(resp_tx.send(self.hget(key, field).await));
                     }
-                    RedisOp::HGetAll { key, resp_tx } => {
+                    RedisOp::HGetAll {
+                        key,
+                        resp_tx,
+                        _guard,
+                    } => {
                         drop(resp_tx.send(self.hget_all(key).await));
                     }
                     RedisOp::HDel {
                         key,
                         field,
                         resp_tx,
+                        _guard,
                     } => {
                         if let Some(resp_tx) = resp_tx {
                             drop(resp_tx.send(self.hdel(key, field).await));
