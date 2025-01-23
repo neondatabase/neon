@@ -858,7 +858,7 @@ where
     ///
     /// Note: it is assumed that 'WAL we have is from the right term' check has
     /// already been done outside.
-    async fn update_commit_lsn(&mut self, mut candidate: Lsn) -> Result<()> {
+    async fn update_commit_lsn(&mut self, mut candidate: Lsn) -> Result<()> { // updates to inmem.commit_lsn go through here
         // Both peers and walproposer communicate this value, we might already
         // have a fresher (higher) version.
         candidate = max(candidate, self.state.inmem.commit_lsn);

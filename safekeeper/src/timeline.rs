@@ -124,6 +124,7 @@ impl Drop for WriteGuardSharedState<'_> {
             }
         });
 
+        // this here wakes `send_wal`
         let _ = self.tli.commit_lsn_watch_tx.send_if_modified(|old| {
             if *old != commit_lsn {
                 *old = commit_lsn;

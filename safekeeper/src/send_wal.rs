@@ -468,7 +468,7 @@ impl SafekeeperPostgresHandler {
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         start_pos: Lsn,
-        term: Option<Term>,
+        term: Option<Term>, // none for pageserver
         tli: WalResidentTimeline,
     ) -> Result<(), CopyStreamHandlerEnd> {
         let appname = self.appname.clone();

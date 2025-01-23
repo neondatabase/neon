@@ -227,7 +227,7 @@ where
         }
 
         // keep in memory values up to date
-        self.inmem.commit_lsn = s.commit_lsn;
+        self.inmem.commit_lsn = s.commit_lsn; // and here?
         self.inmem.backup_lsn = s.backup_lsn;
         self.inmem.peer_horizon_lsn = s.peer_horizon_lsn;
         self.inmem.remote_consistent_lsn = s.remote_consistent_lsn;
