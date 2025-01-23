@@ -76,6 +76,7 @@ pub struct EndpointConf {
     http_port: u16,
     pg_version: u32,
     skip_pg_catalog_updates: bool,
+    drop_subscriptions_before_start: bool,
     features: Vec<ComputeFeature>,
 }
 
@@ -143,6 +144,7 @@ impl ComputeControlPlane {
         pg_version: u32,
         mode: ComputeMode,
         skip_pg_catalog_updates: bool,
+        drop_subscriptions_before_start: bool,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let http_port = http_port.unwrap_or_else(|| self.get_port() + 1);
@@ -162,6 +164,7 @@ impl ComputeControlPlane {
             // with this we basically test a case of waking up an idle compute, where
             // we also skip catalog updates in the cloud.
             skip_pg_catalog_updates,
+            drop_subscriptions_before_start,
             features: vec![],
         });
 
@@ -177,6 +180,7 @@ impl ComputeControlPlane {
                 pg_port,
                 pg_version,
                 skip_pg_catalog_updates,
+                drop_subscriptions_before_start,
                 features: vec![],
             })?,
         )?;
@@ -240,6 +244,7 @@ pub struct Endpoint {
     // Optimizations
     skip_pg_catalog_updates: bool,
 
+    drop_subscriptions_before_start: bool,
     // Feature flags
     features: Vec<ComputeFeature>,
 }
@@ -291,6 +296,7 @@ impl Endpoint {
             tenant_id: conf.tenant_id,
             pg_version: conf.pg_version,
             skip_pg_catalog_updates: conf.skip_pg_catalog_updates,
+            drop_subscriptions_before_start: conf.drop_subscriptions_before_start,
             features: conf.features,
         })
     }
@@ -625,6 +631,7 @@ impl Endpoint {
             shard_stripe_size: Some(shard_stripe_size),
             local_proxy_config: None,
             reconfigure_concurrency: 1,
+            drop_subscriptions_before_start: self.drop_subscriptions_before_start,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
