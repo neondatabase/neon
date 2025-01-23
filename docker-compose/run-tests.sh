@@ -11,9 +11,7 @@ for d in ${LIST}; do
       break
     fi
     if [ -f "${d}/neon-test.sh" ]; then
-       cd "${d}" || exit 1
-       ./neon-test.sh || FAILED="${d} ${FAILED}"
-       cd ..
+       "${d}/neon-test.sh" || FAILED="${d} ${FAILED}"
     else
        USE_PGXS=1 make -C "${d}" installcheck || FAILED="${d} ${FAILED}"
     fi
