@@ -49,10 +49,10 @@ use compute_tools::compute::{
     BUILD_TAG, ComputeNode, ComputeNodeParams, forward_termination_signal,
 };
 use compute_tools::extension_server::get_pg_version_string;
-use compute_tools::logger::*;
 use compute_tools::params::*;
 use compute_tools::pg_isready::get_pg_isready_bin;
 use compute_tools::spec::*;
+use compute_tools::{hadron_metrics, installed_extensions, logger::*};
 use rlimit::{Resource, setrlimit};
 use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -204,6 +204,9 @@ fn main() -> Result<()> {
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
+
+    installed_extensions::initialize_metrics();
+    hadron_metrics::initialize_metrics();
 
     let connstr = Url::parse(&cli.connstr).context("cannot parse connstr as a URL")?;
 
