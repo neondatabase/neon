@@ -1118,6 +1118,7 @@ FROM build-deps AS pg-duckdb-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY compute/patches/duckdb-v1-1-3.patch /duckdb-v1-1-3.patch
+COPY compute/patches/pg_duckdb-0-2-0.patch /pg_duckdb-0-2-0.patch
 
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 
@@ -1133,6 +1134,7 @@ RUN git clone --depth 1 --branch v0.2.0 https://github.com/duckdb/pg_duckdb.git 
     cd third_party/duckdb && \
     patch -p1 < /duckdb-v1-1-3.patch && \
     cd ../.. && \
+    patch -p1 < /pg_duckdb-0-2-0.patch && \
     make install -j $(getconf _NPROCESSORS_ONLN) && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control && \
     file=/usr/local/pgsql/share/extension/pg_duckdb--0.1.0--0.2.0.sql && \
