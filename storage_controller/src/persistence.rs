@@ -293,9 +293,9 @@ impl Persistence {
             + 'a,
         R: Send + 'b,
     {
-        let mut conn = self.connection_pool.get().await?;
         let mut retry_count = 0;
         loop {
+            let mut conn = self.connection_pool.get().await?;
             match conn
                 .build_transaction()
                 .serializable()
@@ -1228,26 +1228,29 @@ impl Persistence {
     ) -> Result<(), DatabaseError> {
         use crate::schema::safekeepers::dsl::*;
 
-        self.with_conn(move |conn| -> DatabaseResult<()> {
-            #[derive(Insertable, AsChangeset)]
-            #[diesel(table_name = crate::schema::safekeepers)]
-            struct UpdateSkSchedulingPolicy<'a> {
-                id: i64,
-                scheduling_policy: &'a str,
-            }
-            let scheduling_policy_ = String::from(scheduling_policy_);
+        self.with_conn(move |conn| {
+            Box::pin(async move {
+                #[derive(Insertable, AsChangeset)]
+                #[diesel(table_name = crate::schema::safekeepers)]
+                struct UpdateSkSchedulingPolicy<'a> {
+                    id: i64,
+                    scheduling_policy: &'a str,
+                }
+                let scheduling_policy_ = String::from(scheduling_policy_);
 
-            let rows_affected = diesel::update(safekeepers.filter(id.eq(id_)))
-                .set(scheduling_policy.eq(scheduling_policy_))
-                .execute(conn)?;
+                let rows_affected = diesel::update(safekeepers.filter(id.eq(id_)))
+                    .set(scheduling_policy.eq(scheduling_policy_))
+                    .execute(conn)
+                    .await?;
 
-            if rows_affected != 1 {
-                return Err(DatabaseError::Logical(format!(
-                    "unexpected number of rows ({rows_affected})",
-                )));
-            }
+                if rows_affected != 1 {
+                    return Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({rows_affected})",
+                    )));
+                }
 
-            Ok(())
+                Ok(())
+            })
         })
         .await
     }
