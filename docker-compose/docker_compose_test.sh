@@ -76,7 +76,8 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         if [ $EXT_SUCCESS -eq 0 ] || [ $CONTRIB_SUCCESS -eq 0 ]; then
             CONTRIB_FAILED=
             FAILED=
-            FAILED=$(tail -1 testout.txt)
+            [ $EXT_SUCCESS -eq 0 ] && FAILED=$(tail -1 testout.txt)
+            [ $CONTRIB_SUCCESS -eq 0 ] && CONTRIB_FAILED=$(tail -1 testout_contrib.txt)
             for d in $FAILED $CONTRIB_FAILED; do
                 dn="$(basename $d)"
                 rm -rf $dn
