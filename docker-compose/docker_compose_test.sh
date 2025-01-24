@@ -66,7 +66,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/postgres/contrib/file_fdw/data
         rm -rf $TMPDIR
         # Apply patches
-        cat ../compute/patches/contrib_pg${pg_version}.patch | docker exec -i $TEST_CONTAINER_NAME bash -c "(cd /postgres && patch -p1)"
+        #cat ../compute/patches/contrib_pg${pg_version}.patch | docker exec -i $TEST_CONTAINER_NAME bash -c "(cd /postgres && patch -p1)"
         # We are running tests now
         rm -f testout.txt testout_contrib.txt
         docker exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,pg_graphql-src,kq_imcx-src,wal2json_2_5-src \
@@ -76,8 +76,8 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         if [ $EXT_SUCCESS -eq 0 ] || [ $CONTRIB_SUCCESS -eq 0 ]; then
             CONTRIB_FAILED=
             FAILED=
-            [ $EXT_SUCCESS -eq 0 ] && FAILED=$(tail -1 testout.txt)
-            [ $CONTRIB_SUCCESS -eq 0 ] && CONTRIB_FAILED=$(tail -1 testout_contrib.txt)
+            [ $EXT_SUCCESS -eq 0 ] && FAILED=$(tail -1 testout.txt | awk '{for(i=1;i<=NF;i++){print "/ext-src/"$i;}}')
+            [ $CONTRIB_SUCCESS -eq 0 ] && CONTRIB_FAILED=$(tail -1 testout_contrib.txt | awk '{for(i=0;i<=NF;i++){print "/postgres/contrib/"$i;}}')
             for d in $FAILED $CONTRIB_FAILED; do
                 dn="$(basename $d)"
                 rm -rf $dn
