@@ -1704,14 +1704,16 @@ impl Timeline {
         };
 
         // Signal compaction failure to avoid L0 flush stalls when it's broken.
-        let compaction_failed = match result {
-            Ok(_) => false,
-            Err(CompactionError::Offload(_)) => false, // doesn't halt compaction
-            Err(CompactionError::ShuttingDown) => false, // not a failure
-            Err(CompactionError::Other(_)) => true,
+        match result {
+            Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
+            Err(CompactionError::Other(_)) => {
+                self.compaction_failed.store(true, AtomicOrdering::Relaxed)
+            }
+            // Don't change the current value on offload failure or shutdown. We don't want to
+            // abruptly stall nor resume L0 flushes in these cases.
+            Err(CompactionError::Offload(_)) => {}
+            Err(CompactionError::ShuttingDown) => {}
         };
-        self.compaction_failed
-            .store(compaction_failed, AtomicOrdering::Relaxed);
 
         result
     }
