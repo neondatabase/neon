@@ -499,6 +499,12 @@ pub struct TenantConfigPatch {
     pub wal_receiver_protocol_override: FieldPatch<PostgresClientProtocol>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub rel_size_v2_enabled: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_compaction_enabled: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_compaction_initial_threshold_kb: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_compaction_ratio_percent: FieldPatch<u64>,
 }
 
 /// An alternative representation of `pageserver::tenant::TenantConf` with
@@ -531,6 +537,9 @@ pub struct TenantConfig {
     pub timeline_offloading: Option<bool>,
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
     pub rel_size_v2_enabled: Option<bool>,
+    pub gc_compaction_enabled: Option<bool>,
+    pub gc_compaction_initial_threshold_kb: Option<u64>,
+    pub gc_compaction_ratio_percent: Option<u64>,
 }
 
 impl TenantConfig {
@@ -561,6 +570,9 @@ impl TenantConfig {
             mut timeline_offloading,
             mut wal_receiver_protocol_override,
             mut rel_size_v2_enabled,
+            mut gc_compaction_enabled,
+            mut gc_compaction_initial_threshold_kb,
+            mut gc_compaction_ratio_percent,
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
@@ -606,6 +618,15 @@ impl TenantConfig {
             .wal_receiver_protocol_override
             .apply(&mut wal_receiver_protocol_override);
         patch.rel_size_v2_enabled.apply(&mut rel_size_v2_enabled);
+        patch
+            .gc_compaction_enabled
+            .apply(&mut gc_compaction_enabled);
+        patch
+            .gc_compaction_initial_threshold_kb
+            .apply(&mut gc_compaction_initial_threshold_kb);
+        patch
+            .gc_compaction_ratio_percent
+            .apply(&mut gc_compaction_ratio_percent);
 
         Self {
             checkpoint_distance,
@@ -633,6 +654,9 @@ impl TenantConfig {
             timeline_offloading,
             wal_receiver_protocol_override,
             rel_size_v2_enabled,
+            gc_compaction_enabled,
+            gc_compaction_initial_threshold_kb,
+            gc_compaction_ratio_percent,
         }
     }
 }

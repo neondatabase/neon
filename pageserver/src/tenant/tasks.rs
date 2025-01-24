@@ -67,10 +67,9 @@ pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
 ) -> tokio::sync::SemaphorePermit<'static> {
     let _guard = crate::metrics::BACKGROUND_LOOP_SEMAPHORE.measure_acquisition(loop_kind);
 
-    pausable_failpoint!(
-        "initial-size-calculation-permit-pause",
-        loop_kind == BackgroundLoopKind::InitialLogicalSizeCalculation
-    );
+    if loop_kind == BackgroundLoopKind::InitialLogicalSizeCalculation {
+        pausable_failpoint!("initial-size-calculation-permit-pause");
+    }
 
     // TODO: assert that we run on BACKGROUND_RUNTIME; requires tokio_unstable Handle::id();
     match CONCURRENT_BACKGROUND_TASKS.acquire().await {

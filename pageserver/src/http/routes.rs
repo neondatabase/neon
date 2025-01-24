@@ -84,6 +84,7 @@ use crate::tenant::remote_timeline_client::list_remote_tenant_shards;
 use crate::tenant::remote_timeline_client::list_remote_timelines;
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
+use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::import_pgdata;
@@ -2938,8 +2939,15 @@ async fn list_aux_files(
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
 
+    let io_concurrency = IoConcurrency::spawn_from_conf(
+        state.conf,
+        timeline.gate.enter().map_err(|_| ApiError::Cancelled)?,
+    );
+
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let files = timeline.list_aux_files(body.lsn, &ctx).await?;
+    let files = timeline
+        .list_aux_files(body.lsn, &ctx, io_concurrency)
+        .await?;
     json_response(StatusCode::OK, files)
 }
 
