@@ -1271,7 +1271,7 @@ RUN set -e \
 #########################################################################################
 
 FROM quay.io/prometheuscommunity/postgres-exporter:v0.16.0 AS postgres-exporter
-FROM quay.io/prometheuscommunity/pgbouncer-exporter:v0.10.2 as pgbouncer-exporter
+FROM quay.io/prometheuscommunity/pgbouncer-exporter:v0.10.2 AS pgbouncer-exporter
 
 # Keep the version the same as in build-tools.Dockerfile and
 # test_runner/regress/test_compute_metrics.py.
