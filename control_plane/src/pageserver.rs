@@ -352,6 +352,16 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("Failed to parse 'compaction_algorithm' json")?,
+            l0_flush_delay_threshold: settings
+                .remove("l0_flush_delay_threshold")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'l0_flush_delay_threshold' as an integer")?,
+            l0_flush_stall_threshold: settings
+                .remove("l0_flush_stall_threshold")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'l0_flush_stall_threshold' as an integer")?,
             gc_horizon: settings
                 .remove("gc_horizon")
                 .map(|x| x.parse::<u64>())
