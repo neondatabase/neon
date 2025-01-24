@@ -1266,11 +1266,12 @@ RUN set -e \
 
 #########################################################################################
 #
-# Layers "postgres-exporter" and "sql-exporter"
+# Layers "postgres-exporter", "pgbouncer-exporter", and "sql-exporter"
 #
 #########################################################################################
 
 FROM quay.io/prometheuscommunity/postgres-exporter:v0.16.0 AS postgres-exporter
+FROM quay.io/prometheuscommunity/pgbouncer-exporter:v0.10.2 as pgbouncer-exporter
 
 # Keep the version the same as in build-tools.Dockerfile and
 # test_runner/regress/test_compute_metrics.py.
@@ -1402,6 +1403,7 @@ RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 
 # Metrics exporter binaries and  configuration files
 COPY --from=postgres-exporter /bin/postgres_exporter /bin/postgres_exporter
+COPY --from=pgbouncer-exporter /bin/pgbouncer_exporter /bin/pgbouncer_exporter
 COPY --from=sql-exporter      /bin/sql_exporter      /bin/sql_exporter
 
 COPY --chown=postgres compute/etc/postgres_exporter.yml /etc/postgres_exporter.yml
