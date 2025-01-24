@@ -1,6 +1,6 @@
 use std::time::UNIX_EPOCH;
 
-use pageserver_api::key::CONTROLFILE_KEY;
+use pageserver_api::key::{Key, CONTROLFILE_KEY};
 use tokio::task::JoinSet;
 use utils::{
     completion::{self, Completion},
@@ -9,7 +9,13 @@ use utils::{
 
 use super::failpoints::{Failpoint, FailpointKind};
 use super::*;
-use crate::{context::DownloadBehavior, tenant::storage_layer::LayerVisibilityHint};
+use crate::{
+    context::DownloadBehavior,
+    tenant::{
+        harness::test_img,
+        storage_layer::{IoConcurrency, LayerVisibilityHint},
+    },
+};
 use crate::{task_mgr::TaskKind, tenant::harness::TenantHarness};
 
 /// Used in tests to advance a future to wanted await point, and not futher.
@@ -28,23 +34,55 @@ async fn smoke_test() {
     let span = h.span();
     let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
     let (tenant, _) = h.load().await;
+    let io_concurrency = IoConcurrency::spawn_for_test();
 
     let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Download);
 
+    let image_layers = vec![(
+        Lsn(0x40),
+        vec![(
+            Key::from_hex("620000000033333333444444445500000000").unwrap(),
+            test_img("foo"),
+        )],
+    )];
+
+    // Create a test timeline with one real layer, and one synthetic test layer.  The synthetic
+    // one is only there so that we can GC the real one without leaving the timeline's metadata
+    // empty, which is an illegal state (see [`IndexPart::validate`]).
     let timeline = tenant
-        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .create_test_timeline_with_layers(
+            TimelineId::generate(),
+            Lsn(0x10),
+            14,
+            &ctx,
+            Default::default(),
+            image_layers,
+            Lsn(0x100),
+        )
         .await
         .unwrap();
 
-    let layer = {
+    // Grab one of the timeline's layers to exercise in the test, and the other layer that is just
+    // there to avoid the timeline being illegally empty
+    let (layer, dummy_layer) = {
         let mut layers = {
             let layers = timeline.layers.read().await;
             layers.likely_resident_layers().cloned().collect::<Vec<_>>()
         };
 
-        assert_eq!(layers.len(), 1);
+        assert_eq!(layers.len(), 2);
 
-        layers.swap_remove(0)
+        layers.sort_by_key(|l| l.layer_desc().get_key_range().start);
+        let synthetic_layer = layers.pop().unwrap();
+        let real_layer = layers.pop().unwrap();
+        tracing::info!(
+            "real_layer={:?} ({}), synthetic_layer={:?} ({})",
+            real_layer,
+            real_layer.layer_desc().file_size,
+            synthetic_layer,
+            synthetic_layer.layer_desc().file_size
+        );
+        (real_layer, synthetic_layer)
     };
 
     // all layers created at pageserver are like `layer`, initialized with strong
@@ -55,7 +93,7 @@ async fn smoke_test() {
     };
 
     let img_before = {
-        let mut data = ValuesReconstructState::default();
+        let mut data = ValuesReconstructState::new(io_concurrency.clone());
         layer
             .get_values_reconstruct_data(
                 controlfile_keyspace.clone(),
@@ -65,10 +103,13 @@ async fn smoke_test() {
             )
             .await
             .unwrap();
+
         data.keys
             .remove(&CONTROLFILE_KEY)
             .expect("must be present")
-            .expect("should not error")
+            .collect_pending_ios()
+            .await
+            .expect("must not error")
             .img
             .take()
             .expect("tenant harness writes the control file")
@@ -87,7 +128,7 @@ async fn smoke_test() {
 
     // on accesses when the layer is evicted, it will automatically be downloaded.
     let img_after = {
-        let mut data = ValuesReconstructState::default();
+        let mut data = ValuesReconstructState::new(io_concurrency.clone());
         layer
             .get_values_reconstruct_data(
                 controlfile_keyspace.clone(),
@@ -101,7 +142,9 @@ async fn smoke_test() {
         data.keys
             .remove(&CONTROLFILE_KEY)
             .expect("must be present")
-            .expect("should not error")
+            .collect_pending_ios()
+            .await
+            .expect("must not error")
             .img
             .take()
             .expect("tenant harness writes the control file")
@@ -173,10 +216,13 @@ async fn smoke_test() {
 
     let rtc = &timeline.remote_client;
 
+    // Simulate GC removing our test layer.
     {
-        let layers = &[layer];
         let mut g = timeline.layers.write().await;
+
+        let layers = &[layer];
         g.open_mut().unwrap().finish_gc_timeline(layers);
+
         // this just updates the remote_physical_size for demonstration purposes
         rtc.schedule_gc_update(layers).unwrap();
     }
@@ -191,7 +237,10 @@ async fn smoke_test() {
 
     rtc.wait_completion().await.unwrap();
 
-    assert_eq!(rtc.get_remote_physical_size(), 0);
+    assert_eq!(
+        rtc.get_remote_physical_size(),
+        dummy_layer.metadata().file_size
+    );
     assert_eq!(0, LAYER_IMPL_METRICS.inits_cancelled.get())
 }
 

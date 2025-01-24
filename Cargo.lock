@@ -6774,7 +6774,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#33e00106a268644d02ba0461bbd64476073b0ee1"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#781989bb540a1408b0b93daa1e9d1fa452195497"
 dependencies = [
  "futures",
  "nix 0.26.4",
@@ -7004,12 +7004,9 @@ version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877c5b330756d856ffcc4553ab34a5684481ade925ecc54bcd1bf02b1d0d4d52"
 dependencies = [
- "async-stream",
  "async-trait",
- "axum",
  "base64 0.22.1",
  "bytes",
- "h2 0.4.4",
  "http 1.1.0",
  "http-body 1.0.0",
  "http-body-util",
@@ -7021,7 +7018,6 @@ dependencies = [
  "prost",
  "rustls-native-certs 0.8.0",
  "rustls-pemfile 2.1.1",
- "socket2",
  "tokio",
  "tokio-rustls 0.26.0",
  "tokio-stream",
@@ -7373,7 +7369,7 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#33e00106a268644d02ba0461bbd64476073b0ee1"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#781989bb540a1408b0b93daa1e9d1fa452195497"
 dependencies = [
  "bytes",
  "io-uring",
@@ -7582,7 +7578,6 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tokio-util",
- "tonic",
  "tonic-build",
  "tracing",
  "utils",
@@ -7991,8 +7986,6 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "anyhow",
- "axum",
- "axum-core",
  "base64 0.13.1",
  "base64 0.21.1",
  "base64ct",
@@ -8073,7 +8066,6 @@ dependencies = [
  "toml_edit",
  "tonic",
  "tower 0.4.13",
- "tower 0.5.2",
  "tracing",
  "tracing-core",
  "url",

@@ -308,7 +308,7 @@ impl Layer {
         reconstruct_data: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
-        let layer = self
+        let downloaded = self
             .0
             .get_or_maybe_download(true, Some(ctx))
             .await
@@ -318,11 +318,15 @@ impl Layer {
                 }
                 other => GetVectoredError::Other(anyhow::anyhow!(other)),
             })?;
+        let this = ResidentLayer {
+            downloaded: downloaded.clone(),
+            owner: self.clone(),
+        };
 
         self.record_access(ctx);
 
-        layer
-            .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
+        downloaded
+            .get_values_reconstruct_data(this, keyspace, lsn_range, reconstruct_data, ctx)
             .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
             .await
             .map_err(|err| match err {
@@ -1768,25 +1772,25 @@ impl DownloadedLayer {
 
     async fn get_values_reconstruct_data(
         &self,
+        this: ResidentLayer,
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValuesReconstructState,
-        owner: &Arc<LayerInner>,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
         use LayerKind::*;
 
         match self
-            .get(owner, ctx)
+            .get(&this.owner.0, ctx)
             .await
             .map_err(GetVectoredError::Other)?
         {
             Delta(d) => {
-                d.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, ctx)
+                d.get_values_reconstruct_data(this, keyspace, lsn_range, reconstruct_data, ctx)
                     .await
             }
             Image(i) => {
-                i.get_values_reconstruct_data(keyspace, reconstruct_data, ctx)
+                i.get_values_reconstruct_data(this, keyspace, reconstruct_data, ctx)
                     .await
             }
         }

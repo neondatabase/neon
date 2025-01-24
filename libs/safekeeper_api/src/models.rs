@@ -277,3 +277,8 @@ pub struct TimelineTermBumpResponse {
     pub previous_term: u64,
     pub current_term: u64,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SafekeeperUtilization {
+    pub timeline_count: u64,
+}
