@@ -72,7 +72,7 @@ index 2d35512b21..d1597173ee 100644
  
  } // namespace duckdb
 diff --git a/src/main/extension/extension_install.cpp b/src/main/extension/extension_install.cpp
-index 1258d95ead..fc9ce1c77d 100644
+index 1258d95ead..def1ba71cb 100644
 --- a/src/main/extension/extension_install.cpp
 +++ b/src/main/extension/extension_install.cpp
 @@ -57,6 +57,7 @@ const vector<string> ExtensionHelper::PathComponents() {
@@ -83,6 +83,31 @@ index 1258d95ead..fc9ce1c77d 100644
  	string home_directory = fs.GetHomeDirectory();
  	// exception if the home directory does not exist, don't create whatever we think is home
  	if (!fs.DirectoryExists(home_directory)) {
+@@ -84,6 +85,7 @@ string ExtensionHelper::ExtensionDirectory(DatabaseInstance &db, FileSystem &fs)
+ 		extension_directory = DefaultExtensionFolder(fs);
+ 	}
+ 	{
++		FileSystem::TrustedContext trusted(fs);
+ 		extension_directory = fs.ConvertSeparators(extension_directory);
+ 		// expand ~ in extension directory
+ 		extension_directory = fs.ExpandPath(extension_directory);
+@@ -107,6 +109,7 @@ string ExtensionHelper::ExtensionDirectory(DatabaseInstance &db, FileSystem &fs)
+ 
+ 	auto path_components = PathComponents();
+ 	for (auto &path_ele : path_components) {
++		FileSystem::TrustedContext trusted(fs);
+ 		extension_directory = fs.JoinPath(extension_directory, path_ele);
+ 		if (!fs.DirectoryExists(extension_directory)) {
+ 			fs.CreateDirectory(extension_directory);
+@@ -538,7 +541,7 @@ ExtensionHelper::InstallExtensionInternal(DatabaseInstance &db, FileSystem &fs,
+ 	if (!db.config.options.enable_external_access) {
+ 		throw PermissionException("Installing extensions is disabled through configuration");
+ 	}
+-
++	FileSystem::TrustedContext trusted(fs);
+ 	auto extension_name = ApplyExtensionAlias(fs.ExtractBaseName(extension));
+ 	string local_extension_path = fs.JoinPath(local_path, extension_name + ".duckdb_extension");
+ 	string temp_path = local_extension_path + ".tmp-" + UUID::ToString(UUID::GenerateRandomUUID());
 diff --git a/src/main/extension/extension_load.cpp b/src/main/extension/extension_load.cpp
 index b0282a7103..c2765f97c6 100644
 --- a/src/main/extension/extension_load.cpp
