@@ -3571,7 +3571,6 @@ impl Service {
             models::TimelineCreateRequestMode::Bootstrap { .. } => timeline_info.last_record_lsn,
             models::TimelineCreateRequestMode::Branch { .. } => timeline_info.last_record_lsn,
             models::TimelineCreateRequestMode::ImportPgdata { .. } => {
-                // Can't do return Err because of async block, must do ? plus unreachable!()
                 return Err(ApiError::InternalServerError(anyhow!(
                     "import pgdata doesn't specify the start lsn, aborting creation on safekeepers"
                 )))?;

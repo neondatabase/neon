@@ -1,3 +1,4 @@
+use crate::metrics::PageserverRequestLabelGroup;
 use safekeeper_api::models::{TimelineCreateRequest, TimelineStatus};
 use safekeeper_client::mgmt_api::{Client, Result};
 use utils::{
@@ -17,7 +18,7 @@ pub(crate) struct SafekeeperClient {
 
 macro_rules! measured_request {
     ($name:literal, $method:expr, $node_id: expr, $invoke:expr) => {{
-        let labels = crate::metrics::PageserverRequestLabelGroup {
+        let labels = PageserverRequestLabelGroup {
             pageserver_id: $node_id,
             path: $name,
             method: $method,
