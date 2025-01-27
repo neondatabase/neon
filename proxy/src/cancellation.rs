@@ -25,6 +25,8 @@ use crate::tls::postgres_rustls::MakeRustlsConnect;
 
 type IpSubnetKey = IpNet;
 
+const _EXPIRE_TIME: i64 = 1_209_600; // 2 weeks cancellation key expire time
+
 /// Enables serving `CancelRequest`s.
 ///
 /// If `CancellationPublisher` is available, cancel request will be used to publish the cancellation key to other proxy instances.

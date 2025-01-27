@@ -21,6 +21,12 @@ pub enum RedisOp {
         resp_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
         _guard: CancelChannelSizeGuard<'static>,
     },
+    Expire {
+        key: String,
+        seconds: i64, // TTL
+        resp_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+        _guard: CancelChannelSizeGuard<'static>,
+    },
     HGet {
         key: String,
         field: String,
@@ -99,6 +105,18 @@ impl RedisKVClient {
                             drop(resp_tx.send(self.hset_multiple(&key, &items).await));
                         } else {
                             drop(self.hset_multiple(&key, &items).await);
+                        }
+                    }
+                    RedisOp::Expire {
+                        key,
+                        seconds,
+                        resp_tx,
+                        _guard,
+                    } => {
+                        if let Some(resp_tx) = resp_tx {
+                            drop(resp_tx.send(self.expire(&key, seconds).await));
+                        } else {
+                            drop(self.expire(&key, seconds).await);
                         }
                     }
                     RedisOp::HGet {
@@ -184,6 +202,30 @@ impl RedisKVClient {
         self.try_connect().await?;
         self.client
             .hset_multiple(key, items)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    async fn expire<K>(&mut self, key: K, seconds: i64) -> anyhow::Result<()>
+    where
+        K: ToRedisArgs + Send + Sync + Clone,
+    {
+        if !self.limiter.check() {
+            tracing::info!("Rate limit exceeded. Skipping expire");
+            return Err(anyhow::anyhow!("Rate limit exceeded"));
+        }
+
+        match self.client.expire(key.clone(), seconds).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::error!("failed to set a key-value pair: {e}");
+            }
+        }
+
+        tracing::info!("Redis client is disconnected. Reconnectiong...");
+        self.try_connect().await?;
+        self.client
+            .expire(key, seconds)
             .await
             .map_err(anyhow::Error::new)
     }
