@@ -460,7 +460,7 @@ for the safekeeper and does the jobs, infinitely retrying failures:
 
 In cases 1 and 2 remove `safekeeper_timeline_pending_ops` for the sk and 
 timeline with generation <= `n` if `op_type` is not `delete`.
-In case 3 remove also remove `safekeeper_timeline_pending_ops` 
+In case 3 also remove `safekeeper_timeline_pending_ops` 
 entry + remove `timelines` entry if there is nothing left  in `safekeeper_timeline_pending_ops` for the timeline.
 
 Let's consider in details how APIs can be implemented from this angle.
