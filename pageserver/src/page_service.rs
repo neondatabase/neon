@@ -39,6 +39,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 use utils::{
     auth::{Claims, Scope, SwappableJwtAuth},
@@ -61,6 +62,7 @@ use crate::task_mgr::{self, COMPUTE_REQUEST_RUNTIME};
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::mgr::TenantManager;
 use crate::tenant::mgr::{GetActiveTenantError, GetTenantError, ShardResolveResult};
+use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
@@ -90,6 +92,7 @@ pub struct Listener {
 pub struct Connections {
     cancel: CancellationToken,
     tasks: tokio::task::JoinSet<ConnectionHandlerResult>,
+    gate: Gate,
 }
 
 pub fn spawn(
@@ -110,6 +113,7 @@ pub fn spawn(
     let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
         "libpq listener",
         libpq_listener_main(
+            conf,
             tenant_manager,
             pg_auth,
             tcp_listener,
@@ -134,11 +138,16 @@ impl Listener {
 }
 impl Connections {
     pub(crate) async fn shutdown(self) {
-        let Self { cancel, mut tasks } = self;
+        let Self {
+            cancel,
+            mut tasks,
+            gate,
+        } = self;
         cancel.cancel();
         while let Some(res) = tasks.join_next().await {
             Self::handle_connection_completion(res);
         }
+        gate.close().await;
     }
 
     fn handle_connection_completion(res: Result<anyhow::Result<()>, tokio::task::JoinError>) {
@@ -158,7 +167,9 @@ impl Connections {
 /// Returns Ok(()) upon cancellation via `cancel`, returning the set of
 /// open connections.
 ///
+#[allow(clippy::too_many_arguments)]
 pub async fn libpq_listener_main(
+    conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
     listener: tokio::net::TcpListener,
@@ -168,9 +179,15 @@ pub async fn libpq_listener_main(
     listener_cancel: CancellationToken,
 ) -> Connections {
     let connections_cancel = CancellationToken::new();
+    let connections_gate = Gate::default();
     let mut connection_handler_tasks = tokio::task::JoinSet::default();
 
     loop {
+        let gate_guard = match connections_gate.enter() {
+            Ok(guard) => guard,
+            Err(_) => break,
+        };
+
         let accepted = tokio::select! {
             biased;
             _ = listener_cancel.cancelled() => break,
@@ -190,6 +207,7 @@ pub async fn libpq_listener_main(
                 let connection_ctx = listener_ctx
                     .detached_child(TaskKind::PageRequestHandler, DownloadBehavior::Download);
                 connection_handler_tasks.spawn(page_service_conn_main(
+                    conf,
                     tenant_manager.clone(),
                     local_auth,
                     socket,
@@ -197,6 +215,7 @@ pub async fn libpq_listener_main(
                     pipelining_config.clone(),
                     connection_ctx,
                     connections_cancel.child_token(),
+                    gate_guard,
                 ));
             }
             Err(err) => {
@@ -211,13 +230,16 @@ pub async fn libpq_listener_main(
     Connections {
         cancel: connections_cancel,
         tasks: connection_handler_tasks,
+        gate: connections_gate,
     }
 }
 
 type ConnectionHandlerResult = anyhow::Result<()>;
 
 #[instrument(skip_all, fields(peer_addr))]
+#[allow(clippy::too_many_arguments)]
 async fn page_service_conn_main(
+    conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
@@ -225,6 +247,7 @@ async fn page_service_conn_main(
     pipelining_config: PageServicePipeliningConfig,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
+    gate_guard: GateGuard,
 ) -> ConnectionHandlerResult {
     let _guard = LIVE_CONNECTIONS
         .with_label_values(&["page_service"])
@@ -274,11 +297,13 @@ async fn page_service_conn_main(
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
     let mut conn_handler = PageServerHandler::new(
+        conf,
         tenant_manager,
         auth,
         pipelining_config,
         connection_ctx,
         cancel.clone(),
+        gate_guard,
     );
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
@@ -310,6 +335,7 @@ async fn page_service_conn_main(
 }
 
 struct PageServerHandler {
+    conf: &'static PageServerConf,
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
 
@@ -325,6 +351,8 @@ struct PageServerHandler {
     timeline_handles: Option<TimelineHandles>,
 
     pipelining_config: PageServicePipeliningConfig,
+
+    gate_guard: GateGuard,
 }
 
 struct TimelineHandles {
@@ -634,19 +662,23 @@ impl BatchedFeMessage {
 
 impl PageServerHandler {
     pub fn new(
+        conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
         pipelining_config: PageServicePipeliningConfig,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
+        gate_guard: GateGuard,
     ) -> Self {
         PageServerHandler {
+            conf,
             auth,
             claims: None,
             connection_ctx,
             timeline_handles: Some(TimelineHandles::new(tenant_manager)),
             cancel,
             pipelining_config,
+            gate_guard,
         }
     }
 
@@ -1015,6 +1047,7 @@ impl PageServerHandler {
         &mut self,
         pgb_writer: &mut PostgresBackend<IO>,
         batch: BatchedFeMessage,
+        io_concurrency: IoConcurrency,
         cancel: &CancellationToken,
         protocol_version: PagestreamProtocolVersion,
         ctx: &RequestContext,
@@ -1084,6 +1117,7 @@ impl PageServerHandler {
                                 &*shard.upgrade()?,
                                 effective_request_lsn,
                                 pages,
+                                io_concurrency,
                                 ctx,
                             )
                             .instrument(span.clone())
@@ -1288,6 +1322,17 @@ impl PageServerHandler {
             }
         }
 
+        let io_concurrency = IoConcurrency::spawn_from_conf(
+            self.conf,
+            match self.gate_guard.try_clone() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    info!("shutdown request received in page handler");
+                    return Err(QueryError::Shutdown);
+                }
+            },
+        );
+
         let pgb_reader = pgb
             .split()
             .context("implementation error: split pgb into reader and writer")?;
@@ -1309,6 +1354,7 @@ impl PageServerHandler {
                     request_span,
                     pipelining_config,
                     protocol_version,
+                    io_concurrency,
                     &ctx,
                 )
                 .await
@@ -1322,6 +1368,7 @@ impl PageServerHandler {
                     timeline_handles,
                     request_span,
                     protocol_version,
+                    io_concurrency,
                     &ctx,
                 )
                 .await
@@ -1349,6 +1396,7 @@ impl PageServerHandler {
         mut timeline_handles: TimelineHandles,
         request_span: Span,
         protocol_version: PagestreamProtocolVersion,
+        io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> (
         (PostgresBackendReader<IO>, TimelineHandles),
@@ -1383,7 +1431,14 @@ impl PageServerHandler {
             };
 
             let err = self
-                .pagesteam_handle_batched_message(pgb_writer, msg, &cancel, protocol_version, ctx)
+                .pagesteam_handle_batched_message(
+                    pgb_writer,
+                    msg,
+                    io_concurrency.clone(),
+                    &cancel,
+                    protocol_version,
+                    ctx,
+                )
                 .await;
             match err {
                 Ok(()) => {}
@@ -1407,6 +1462,7 @@ impl PageServerHandler {
         request_span: Span,
         pipelining_config: PageServicePipeliningConfigPipelined,
         protocol_version: PagestreamProtocolVersion,
+        io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> (
         (PostgresBackendReader<IO>, TimelineHandles),
@@ -1550,6 +1606,7 @@ impl PageServerHandler {
                     self.pagesteam_handle_batched_message(
                         pgb_writer,
                         batch,
+                        io_concurrency.clone(),
                         &cancel,
                         protocol_version,
                         &ctx,
@@ -1806,6 +1863,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         effective_lsn: Lsn,
         requests: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
+        io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
@@ -1832,6 +1890,7 @@ impl PageServerHandler {
             .get_rel_page_at_lsn_batched(
                 requests.iter().map(|p| (&p.req.rel, &p.req.blkno)),
                 effective_lsn,
+                io_concurrency,
                 ctx,
             )
             .await;

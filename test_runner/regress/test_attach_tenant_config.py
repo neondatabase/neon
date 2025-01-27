@@ -139,6 +139,8 @@ def test_fully_custom_config(positive_env: NeonEnv):
     fully_custom_config = {
         "compaction_period": "1h",
         "compaction_threshold": 13,
+        "l0_flush_delay_threshold": 25,
+        "l0_flush_stall_threshold": 42,
         "compaction_target_size": 1048576,
         "checkpoint_distance": 10000,
         "checkpoint_timeout": "13m",
@@ -176,6 +178,10 @@ def test_fully_custom_config(positive_env: NeonEnv):
             "type": "interpreted",
             "args": {"format": "bincode", "compression": {"zstd": {"level": 1}}},
         },
+        "rel_size_v2_enabled": True,
+        "gc_compaction_enabled": True,
+        "gc_compaction_initial_threshold_kb": 1024000,
+        "gc_compaction_ratio_percent": 200,
     }
 
     vps_http = env.storage_controller.pageserver_api()

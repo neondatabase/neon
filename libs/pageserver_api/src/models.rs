@@ -462,6 +462,10 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_algorithm: FieldPatch<CompactionAlgorithmSettings>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub l0_flush_delay_threshold: FieldPatch<usize>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub l0_flush_stall_threshold: FieldPatch<usize>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_horizon: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_period: FieldPatch<String>,
@@ -497,6 +501,14 @@ pub struct TenantConfigPatch {
     pub timeline_offloading: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub wal_receiver_protocol_override: FieldPatch<PostgresClientProtocol>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub rel_size_v2_enabled: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_compaction_enabled: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_compaction_initial_threshold_kb: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_compaction_ratio_percent: FieldPatch<u64>,
 }
 
 /// An alternative representation of `pageserver::tenant::TenantConf` with
@@ -510,6 +522,8 @@ pub struct TenantConfig {
     pub compaction_threshold: Option<usize>,
     // defer parsing compaction_algorithm, like eviction_policy
     pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
+    pub l0_flush_delay_threshold: Option<usize>,
+    pub l0_flush_stall_threshold: Option<usize>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
     pub image_creation_threshold: Option<usize>,
@@ -528,6 +542,10 @@ pub struct TenantConfig {
     pub lsn_lease_length_for_ts: Option<String>,
     pub timeline_offloading: Option<bool>,
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
+    pub rel_size_v2_enabled: Option<bool>,
+    pub gc_compaction_enabled: Option<bool>,
+    pub gc_compaction_initial_threshold_kb: Option<u64>,
+    pub gc_compaction_ratio_percent: Option<u64>,
 }
 
 impl TenantConfig {
@@ -539,6 +557,8 @@ impl TenantConfig {
             mut compaction_period,
             mut compaction_threshold,
             mut compaction_algorithm,
+            mut l0_flush_delay_threshold,
+            mut l0_flush_stall_threshold,
             mut gc_horizon,
             mut gc_period,
             mut image_creation_threshold,
@@ -557,6 +577,10 @@ impl TenantConfig {
             mut lsn_lease_length_for_ts,
             mut timeline_offloading,
             mut wal_receiver_protocol_override,
+            mut rel_size_v2_enabled,
+            mut gc_compaction_enabled,
+            mut gc_compaction_initial_threshold_kb,
+            mut gc_compaction_ratio_percent,
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
@@ -567,6 +591,12 @@ impl TenantConfig {
         patch.compaction_period.apply(&mut compaction_period);
         patch.compaction_threshold.apply(&mut compaction_threshold);
         patch.compaction_algorithm.apply(&mut compaction_algorithm);
+        patch
+            .l0_flush_delay_threshold
+            .apply(&mut l0_flush_delay_threshold);
+        patch
+            .l0_flush_stall_threshold
+            .apply(&mut l0_flush_stall_threshold);
         patch.gc_horizon.apply(&mut gc_horizon);
         patch.gc_period.apply(&mut gc_period);
         patch
@@ -601,6 +631,16 @@ impl TenantConfig {
         patch
             .wal_receiver_protocol_override
             .apply(&mut wal_receiver_protocol_override);
+        patch.rel_size_v2_enabled.apply(&mut rel_size_v2_enabled);
+        patch
+            .gc_compaction_enabled
+            .apply(&mut gc_compaction_enabled);
+        patch
+            .gc_compaction_initial_threshold_kb
+            .apply(&mut gc_compaction_initial_threshold_kb);
+        patch
+            .gc_compaction_ratio_percent
+            .apply(&mut gc_compaction_ratio_percent);
 
         Self {
             checkpoint_distance,
@@ -609,6 +649,8 @@ impl TenantConfig {
             compaction_period,
             compaction_threshold,
             compaction_algorithm,
+            l0_flush_delay_threshold,
+            l0_flush_stall_threshold,
             gc_horizon,
             gc_period,
             image_creation_threshold,
@@ -627,6 +669,10 @@ impl TenantConfig {
             lsn_lease_length_for_ts,
             timeline_offloading,
             wal_receiver_protocol_override,
+            rel_size_v2_enabled,
+            gc_compaction_enabled,
+            gc_compaction_initial_threshold_kb,
+            gc_compaction_ratio_percent,
         }
     }
 }

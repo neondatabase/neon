@@ -3,7 +3,7 @@ use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
     register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
-    Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
+    Counter, CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
     IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
@@ -37,6 +37,9 @@ const CRITICAL_OP_BUCKETS: &[f64] = &[
 pub(crate) enum StorageTimeOperation {
     #[strum(serialize = "layer flush")]
     LayerFlush,
+
+    #[strum(serialize = "layer flush delay")]
+    LayerFlushDelay,
 
     #[strum(serialize = "compact")]
     Compact,
@@ -124,73 +127,6 @@ pub(crate) static INITDB_RUN_TIME: Lazy<Histogram> = Lazy::new(|| {
         STORAGE_OP_BUCKETS.into()
     )
     .expect("failed to define metric")
-});
-
-// Metrics collected on operations on the storage repository.
-#[derive(
-    Clone, Copy, enum_map::Enum, strum_macros::EnumString, strum_macros::Display, IntoStaticStr,
-)]
-pub(crate) enum GetKind {
-    Singular,
-    Vectored,
-}
-
-pub(crate) struct ReconstructTimeMetrics {
-    singular: Histogram,
-    vectored: Histogram,
-}
-
-pub(crate) static RECONSTRUCT_TIME: Lazy<ReconstructTimeMetrics> = Lazy::new(|| {
-    let inner = register_histogram_vec!(
-        "pageserver_getpage_reconstruct_seconds",
-        "Time spent in reconstruct_value (reconstruct a page from deltas)",
-        &["get_kind"],
-        CRITICAL_OP_BUCKETS.into(),
-    )
-    .expect("failed to define a metric");
-
-    ReconstructTimeMetrics {
-        singular: inner.with_label_values(&[GetKind::Singular.into()]),
-        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
-    }
-});
-
-impl ReconstructTimeMetrics {
-    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
-        match get_kind {
-            GetKind::Singular => &self.singular,
-            GetKind::Vectored => &self.vectored,
-        }
-    }
-}
-
-pub(crate) struct ReconstructDataTimeMetrics {
-    singular: Histogram,
-    vectored: Histogram,
-}
-
-impl ReconstructDataTimeMetrics {
-    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
-        match get_kind {
-            GetKind::Singular => &self.singular,
-            GetKind::Vectored => &self.vectored,
-        }
-    }
-}
-
-pub(crate) static GET_RECONSTRUCT_DATA_TIME: Lazy<ReconstructDataTimeMetrics> = Lazy::new(|| {
-    let inner = register_histogram_vec!(
-        "pageserver_getpage_get_reconstruct_data_seconds",
-        "Time spent in get_reconstruct_value_data",
-        &["get_kind"],
-        CRITICAL_OP_BUCKETS.into(),
-    )
-    .expect("failed to define a metric");
-
-    ReconstructDataTimeMetrics {
-        singular: inner.with_label_values(&[GetKind::Singular.into()]),
-        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
-    }
 });
 
 pub(crate) struct GetVectoredLatency {
@@ -458,15 +394,6 @@ pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
         "pageserver_wait_lsn_seconds",
         "Time spent waiting for WAL to arrive",
         CRITICAL_OP_BUCKETS.into(),
-    )
-    .expect("failed to define a metric")
-});
-
-static FLUSH_WAIT_UPLOAD_TIME: Lazy<GaugeVec> = Lazy::new(|| {
-    register_gauge_vec!(
-        "pageserver_flush_wait_upload_seconds",
-        "Time spent waiting for preceding uploads during layer flush",
-        &["tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -2550,12 +2477,19 @@ impl StorageTimeMetricsTimer {
         }
     }
 
-    /// Record the time from creation to now.
-    pub fn stop_and_record(self) {
-        let duration = self.start.elapsed().as_secs_f64();
-        self.metrics.timeline_sum.inc_by(duration);
+    /// Returns the elapsed duration of the timer.
+    pub fn elapsed(&self) -> Duration {
+        self.start.elapsed()
+    }
+
+    /// Record the time from creation to now and return it.
+    pub fn stop_and_record(self) -> Duration {
+        let duration = self.elapsed();
+        let seconds = duration.as_secs_f64();
+        self.metrics.timeline_sum.inc_by(seconds);
         self.metrics.timeline_count.inc();
-        self.metrics.global_histogram.observe(duration);
+        self.metrics.global_histogram.observe(seconds);
+        duration
     }
 
     /// Turns this timer into a timer, which will always record -- usually this means recording
@@ -2572,6 +2506,13 @@ impl Drop for AlwaysRecordingStorageTimeMetricsTimer {
         if let Some(inner) = self.0.take() {
             inner.stop_and_record();
         }
+    }
+}
+
+impl AlwaysRecordingStorageTimeMetricsTimer {
+    /// Returns the elapsed duration of the timer.
+    pub fn elapsed(&self) -> Duration {
+        self.0.as_ref().expect("not dropped yet").elapsed()
     }
 }
 
@@ -2627,7 +2568,7 @@ pub(crate) struct TimelineMetrics {
     shard_id: String,
     timeline_id: String,
     pub flush_time_histo: StorageTimeMetrics,
-    pub flush_wait_upload_time_gauge: Gauge,
+    pub flush_delay_histo: StorageTimeMetrics,
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
     pub logical_size_histo: StorageTimeMetrics,
@@ -2673,9 +2614,12 @@ impl TimelineMetrics {
             &shard_id,
             &timeline_id,
         );
-        let flush_wait_upload_time_gauge = FLUSH_WAIT_UPLOAD_TIME
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
+        let flush_delay_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::LayerFlushDelay,
+            &tenant_id,
+            &shard_id,
+            &timeline_id,
+        );
         let compact_time_histo = StorageTimeMetrics::new(
             StorageTimeOperation::Compact,
             &tenant_id,
@@ -2821,7 +2765,7 @@ impl TimelineMetrics {
             shard_id,
             timeline_id,
             flush_time_histo,
-            flush_wait_upload_time_gauge,
+            flush_delay_histo,
             compact_time_histo,
             create_images_time_histo,
             logical_size_histo,
@@ -2871,14 +2815,6 @@ impl TimelineMetrics {
         self.resident_physical_size_gauge.get()
     }
 
-    pub(crate) fn flush_wait_upload_time_gauge_add(&self, duration: f64) {
-        self.flush_wait_upload_time_gauge.add(duration);
-        crate::metrics::FLUSH_WAIT_UPLOAD_TIME
-            .get_metric_with_label_values(&[&self.tenant_id, &self.shard_id, &self.timeline_id])
-            .unwrap()
-            .add(duration);
-    }
-
     pub(crate) fn shutdown(&self) {
         let was_shutdown = self
             .shutdown
@@ -2896,7 +2832,6 @@ impl TimelineMetrics {
         let shard_id = &self.shard_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = DISK_CONSISTENT_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
-        let _ = FLUSH_WAIT_UPLOAD_TIME.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = STANDBY_HORIZON.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
@@ -3919,7 +3854,6 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
     });
 
     // Custom
-    Lazy::force(&RECONSTRUCT_TIME);
     Lazy::force(&BASEBACKUP_QUERY_TIME);
     Lazy::force(&COMPUTE_COMMANDS_COUNTERS);
     Lazy::force(&tokio_epoll_uring::THREAD_LOCAL_METRICS_STORAGE);

@@ -208,6 +208,10 @@ class ShardIndex:
             shard_count=int(input[2:4], 16),
         )
 
+    @property
+    def is_sharded(self) -> bool:
+        return self.shard_count != 0
+
 
 class TenantShardId:
     def __init__(self, tenant_id: TenantId, shard_number: int, shard_count: int):

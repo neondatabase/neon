@@ -20,12 +20,13 @@ use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
+use futures::{stream::FuturesUnordered, StreamExt};
 use handle::ShardTimelineId;
+use layer_manager::Shutdown;
 use offload::OffloadError;
 use once_cell::sync::Lazy;
 use pageserver_api::models::PageTraceEvent;
 use pageserver_api::{
-    config::tenant_conf_defaults::DEFAULT_COMPACTION_THRESHOLD,
     key::{
         KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
         SPARSE_RANGE,
@@ -59,21 +60,16 @@ use utils::{
 };
 use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
-use std::sync::atomic::Ordering as AtomicOrdering;
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::array;
+use std::cmp::{max, min};
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::{ControlFlow, Deref, Range};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
-use std::{
-    array,
-    collections::{BTreeMap, HashMap, HashSet},
-    sync::atomic::AtomicU64,
-};
-use std::{cmp::min, ops::ControlFlow};
-use std::{
-    collections::btree_map::Entry,
-    ops::{Deref, Range},
-};
-use std::{pin::pin, sync::OnceLock};
 
+use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::{
     aux_file::AuxFileSizeEstimator,
     page_service::TenantManagerTypes,
@@ -81,7 +77,10 @@ use crate::{
         config::AttachmentMode,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
-        storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
+        storage_layer::{
+            inmemory_layer::IndexEntry, IoConcurrency, PersistentLayerDesc,
+            ValueReconstructSituation,
+        },
     },
     walingest::WalLagCooldown,
     walredo,
@@ -101,10 +100,6 @@ use crate::{
 };
 use crate::{
     disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
-};
-use crate::{
-    l0_flush::{self, L0FlushGlobalState},
-    metrics::GetKind,
 };
 use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
@@ -149,19 +144,15 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
+use super::config::TenantConf;
+use super::remote_timeline_client::index::IndexPart;
+use super::remote_timeline_client::RemoteTimelineClient;
+use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
+use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
+use super::upload_queue::NotInitialized;
+use super::GcError;
 use super::{
-    config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
-    MaybeOffloaded,
-};
-use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
-use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
-use super::{
-    remote_timeline_client::RemoteTimelineClient, remote_timeline_client::WaitCompletionError,
-    storage_layer::ReadableLayer,
-};
-use super::{
-    secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
-    GcError,
+    debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf, MaybeOffloaded,
 };
 
 #[cfg(test)]
@@ -406,6 +397,9 @@ pub struct Timeline {
     ///
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     compaction_lock: tokio::sync::Mutex<()>,
+
+    /// If true, the last compaction failed.
+    compaction_failed: AtomicBool,
 
     /// Make sure we only have one running gc at a time.
     ///
@@ -1005,9 +999,7 @@ impl Timeline {
             ranges: vec![key..key.next()],
         };
 
-        // Initialise the reconstruct state for the key with the cache
-        // entry returned above.
-        let mut reconstruct_state = ValuesReconstructState::new();
+        let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
 
         let vectored_res = self
             .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
@@ -1050,6 +1042,7 @@ impl Timeline {
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
+        io_concurrency: super::storage_layer::IoConcurrency,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         if !lsn.is_valid() {
@@ -1084,7 +1077,7 @@ impl Timeline {
             .get_vectored_impl(
                 keyspace.clone(),
                 lsn,
-                &mut ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(io_concurrency),
                 ctx,
             )
             .await;
@@ -1109,6 +1102,7 @@ impl Timeline {
         keyspace: KeySpace,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: super::storage_layer::IoConcurrency,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         if !lsn.is_valid() {
             return Err(GetVectoredError::InvalidLsn(lsn));
@@ -1140,7 +1134,7 @@ impl Timeline {
             .get_vectored_impl(
                 keyspace.clone(),
                 lsn,
-                &mut ValuesReconstructState::default(),
+                &mut ValuesReconstructState::new(io_concurrency),
                 ctx,
             )
             .await;
@@ -1159,39 +1153,56 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let get_kind = if keyspace.total_raw_size() == 1 {
-            GetKind::Singular
-        } else {
-            GetKind::Vectored
+        let traversal_res: Result<(), _> = self
+            .get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
+            .await;
+        if let Err(err) = traversal_res {
+            // Wait for all the spawned IOs to complete.
+            // See comments on `spawn_io` inside `storage_layer` for more details.
+            let mut collect_futs = std::mem::take(&mut reconstruct_state.keys)
+                .into_values()
+                .map(|state| state.collect_pending_ios())
+                .collect::<FuturesUnordered<_>>();
+            while collect_futs.next().await.is_some() {}
+            return Err(err);
         };
 
-        let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
-            .for_get_kind(get_kind)
-            .start_timer();
-        self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
-            .await?;
-        get_data_timer.stop_and_record();
-
-        let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
-            .for_get_kind(get_kind)
-            .start_timer();
-        let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
         let layers_visited = reconstruct_state.get_layers_visited();
 
-        for (key, res) in std::mem::take(&mut reconstruct_state.keys) {
-            match res {
-                Err(err) => {
-                    results.insert(key, Err(err));
-                }
-                Ok(state) => {
-                    let state = ValueReconstructState::from(state);
+        let futs = FuturesUnordered::new();
+        for (key, state) in std::mem::take(&mut reconstruct_state.keys) {
+            futs.push({
+                let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
+                async move {
+                    assert_eq!(state.situation, ValueReconstructSituation::Complete);
 
-                    let reconstruct_res = self.reconstruct_value(key, lsn, state).await;
-                    results.insert(key, reconstruct_res);
+                    let converted = match state.collect_pending_ios().await {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            return (key, Err(err));
+                        }
+                    };
+
+                    // The walredo module expects the records to be descending in terms of Lsn.
+                    // And we submit the IOs in that order, so, there shuold be no need to sort here.
+                    debug_assert!(
+                        converted
+                            .records
+                            .is_sorted_by_key(|(lsn, _)| std::cmp::Reverse(*lsn)),
+                        "{converted:?}"
+                    );
+
+                    (
+                        key,
+                        walredo_self.reconstruct_value(key, lsn, converted).await,
+                    )
                 }
-            }
+            });
         }
-        reconstruct_timer.stop_and_record();
+
+        let results = futs
+            .collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>()
+            .await;
 
         // For aux file keys (v1 or v2) the vectored read path does not return an error
         // when they're missing. Instead they are omitted from the resulting btree
@@ -1684,13 +1695,27 @@ impl Timeline {
             return Ok(false);
         }
 
-        match self.get_compaction_algorithm_settings().kind {
+        let result = match self.get_compaction_algorithm_settings().kind {
             CompactionAlgorithm::Tiered => {
                 self.compact_tiered(cancel, ctx).await?;
                 Ok(false)
             }
             CompactionAlgorithm::Legacy => self.compact_legacy(cancel, options, ctx).await,
-        }
+        };
+
+        // Signal compaction failure to avoid L0 flush stalls when it's broken.
+        match result {
+            Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
+            Err(CompactionError::Other(_)) => {
+                self.compaction_failed.store(true, AtomicOrdering::Relaxed)
+            }
+            // Don't change the current value on offload failure or shutdown. We don't want to
+            // abruptly stall nor resume L0 flushes in these cases.
+            Err(CompactionError::Offload(_)) => {}
+            Err(CompactionError::ShuttingDown) => {}
+        };
+
+        result
     }
 
     /// Mutate the timeline with a [`TimelineWriter`].
@@ -2119,6 +2144,13 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
+    fn get_compaction_period(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .compaction_period
+            .unwrap_or(self.conf.default_tenant_conf.compaction_period)
+    }
+
     fn get_compaction_target_size(&self) -> u64 {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2133,6 +2165,91 @@ impl Timeline {
             .tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
+    }
+
+    fn get_l0_flush_delay_threshold(&self) -> Option<usize> {
+        // Default to delay L0 flushes at 3x compaction threshold.
+        const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 3;
+
+        // If compaction is disabled, don't delay.
+        if self.get_compaction_period() == Duration::ZERO {
+            return None;
+        }
+
+        let compaction_threshold = self.get_compaction_threshold();
+        let tenant_conf = self.tenant_conf.load();
+        let l0_flush_delay_threshold = tenant_conf
+            .tenant_conf
+            .l0_flush_delay_threshold
+            .or(self.conf.default_tenant_conf.l0_flush_delay_threshold)
+            .unwrap_or(DEFAULT_L0_FLUSH_DELAY_FACTOR * compaction_threshold);
+
+        // 0 disables backpressure.
+        if l0_flush_delay_threshold == 0 {
+            return None;
+        }
+
+        // Clamp the flush delay threshold to the compaction threshold; it doesn't make sense to
+        // backpressure flushes below this.
+        // TODO: the tenant config should have validation to prevent this instead.
+        debug_assert!(l0_flush_delay_threshold >= compaction_threshold);
+        Some(max(l0_flush_delay_threshold, compaction_threshold))
+    }
+
+    fn get_l0_flush_stall_threshold(&self) -> Option<usize> {
+        // Default to stall L0 flushes at 5x compaction threshold.
+        // TODO: stalls are temporarily disabled by default, see below.
+        #[allow(unused)]
+        const DEFAULT_L0_FLUSH_STALL_FACTOR: usize = 5;
+
+        // If compaction is disabled, don't stall.
+        if self.get_compaction_period() == Duration::ZERO {
+            return None;
+        }
+
+        // If compaction is failing, don't stall and try to keep the tenant alive. This may not be a
+        // good idea: read amp can grow unbounded, leading to terrible performance, and we may take
+        // on unbounded compaction debt that can take a long time to fix once compaction comes back
+        // online. At least we'll delay flushes, slowing down the growth and buying some time.
+        if self.compaction_failed.load(AtomicOrdering::Relaxed) {
+            return None;
+        }
+
+        let compaction_threshold = self.get_compaction_threshold();
+        let tenant_conf = self.tenant_conf.load();
+        let l0_flush_stall_threshold = tenant_conf
+            .tenant_conf
+            .l0_flush_stall_threshold
+            .or(self.conf.default_tenant_conf.l0_flush_stall_threshold);
+
+        // Tests sometimes set compaction_threshold=1 to generate lots of layer files, and don't
+        // handle the 20-second compaction delay. Some (e.g. `test_backward_compatibility`) can't
+        // easily adjust the L0 backpressure settings, so just disable stalls in this case.
+        if cfg!(feature = "testing")
+            && compaction_threshold == 1
+            && l0_flush_stall_threshold.is_none()
+        {
+            return None;
+        }
+
+        // Disable stalls by default. In ingest benchmarks, we see image compaction take >10
+        // minutes, blocking L0 compaction, and we can't stall L0 flushes for that long.
+        //
+        // TODO: fix this.
+        // let l0_flush_stall_threshold = l0_flush_stall_threshold
+        //    .unwrap_or(DEFAULT_L0_FLUSH_STALL_FACTOR * compaction_threshold);
+        let l0_flush_stall_threshold = l0_flush_stall_threshold?;
+
+        // 0 disables backpressure.
+        if l0_flush_stall_threshold == 0 {
+            return None;
+        }
+
+        // Clamp the flush stall threshold to the compaction threshold; it doesn't make sense to
+        // backpressure flushes below this.
+        // TODO: the tenant config should have validation to prevent this instead.
+        debug_assert!(l0_flush_stall_threshold >= compaction_threshold);
+        Some(max(l0_flush_stall_threshold, compaction_threshold))
     }
 
     fn get_image_creation_threshold(&self) -> usize {
@@ -2371,6 +2488,7 @@ impl Timeline {
                 gate: Gate::default(),
 
                 compaction_lock: tokio::sync::Mutex::default(),
+                compaction_failed: AtomicBool::default(),
                 gc_lock: tokio::sync::Mutex::default(),
 
                 standby_horizon: AtomicLsn::new(0),
@@ -2804,12 +2922,10 @@ impl Timeline {
             "initial size calculation",
             // NB: don't log errors here, task_mgr will do that.
             async move {
-                let cancel = task_mgr::shutdown_token();
                 self_clone
                     .initial_logical_size_calculation_task(
                         initial_part_end,
                         cancel_wait_for_background_loop_concurrency_limit_semaphore,
-                        cancel,
                         background_ctx,
                     )
                     .await;
@@ -2819,11 +2935,21 @@ impl Timeline {
         );
     }
 
+    /// # Cancellation
+    ///
+    /// This method is sensitive to `Timeline::cancel`.
+    ///
+    /// It is _not_ sensitive to task_mgr::shutdown_token().
+    ///
+    /// # Cancel-Safety
+    ///
+    /// It does Timeline IO, hence this should be polled to completion because
+    /// we could be leaving in-flight IOs behind, which is safe, but annoying
+    /// to reason about.
     async fn initial_logical_size_calculation_task(
         self: Arc<Self>,
         initial_part_end: Lsn,
         skip_concurrency_limiter: CancellationToken,
-        cancel: CancellationToken,
         background_ctx: RequestContext,
     ) {
         scopeguard::defer! {
@@ -2836,7 +2962,6 @@ impl Timeline {
             let self_ref = &self;
             let skip_concurrency_limiter = &skip_concurrency_limiter;
             async move {
-                let cancel = task_mgr::shutdown_token();
                 let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
                     BackgroundLoopKind::InitialLogicalSizeCalculation,
                     background_ctx,
@@ -2850,9 +2975,6 @@ impl Timeline {
                     _ = self_ref.cancel.cancelled() => {
                         return Err(CalculateLogicalSizeError::Cancelled);
                     }
-                    _ = cancel.cancelled() => {
-                        return Err(CalculateLogicalSizeError::Cancelled);
-                    },
                     () = skip_concurrency_limiter.cancelled() => {
                         // Some action that is part of a end user interaction requested logical size
                         // => break out of the rate limit
@@ -2869,6 +2991,14 @@ impl Timeline {
                     crate::metrics::initial_logical_size::START_CALCULATION.retry(circumstances)
                 };
 
+                let io_concurrency = IoConcurrency::spawn_from_conf(
+                    self_ref.conf,
+                    self_ref
+                        .gate
+                        .enter()
+                        .map_err(|_| CalculateLogicalSizeError::Cancelled)?,
+                );
+
                 let calculated_size = self_ref
                     .logical_size_calculation_task(
                         initial_part_end,
@@ -2878,7 +3008,11 @@ impl Timeline {
                     .await?;
 
                 self_ref
-                    .trigger_aux_file_size_computation(initial_part_end, background_ctx)
+                    .trigger_aux_file_size_computation(
+                        initial_part_end,
+                        background_ctx,
+                        io_concurrency,
+                    )
                     .await?;
 
                 // TODO: add aux file size to logical size
@@ -2911,22 +3045,18 @@ impl Timeline {
                             )
                             .expect("10min < 1hour"),
                         );
-                        tokio::time::sleep(sleep_duration).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(sleep_duration) => {}
+                            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
+                        }
                     }
                 }
             }
         };
 
-        let (calculated_size, metrics_guard) = tokio::select! {
-            res = retrying  => {
-                match res {
-                    ControlFlow::Continue(calculated_size) => calculated_size,
-                    ControlFlow::Break(()) => return,
-                }
-            }
-            _ = cancel.cancelled() => {
-                return;
-            }
+        let (calculated_size, metrics_guard) = match retrying.await {
+            ControlFlow::Continue(calculated_size) => calculated_size,
+            ControlFlow::Break(()) => return,
         };
 
         // we cannot query current_logical_size.current_size() to know the current
@@ -2982,9 +3112,6 @@ impl Timeline {
         receiver
     }
 
-    /// # Cancel-Safety
-    ///
-    /// This method is cancellation-safe.
     #[instrument(skip_all)]
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
@@ -3002,32 +3129,13 @@ impl Timeline {
             .enter()
             .map_err(|_| CalculateLogicalSizeError::Cancelled)?;
 
-        let self_calculation = Arc::clone(self);
-
-        let mut calculation = pin!(async {
-            let ctx = ctx.attached_child();
-            self_calculation
-                .calculate_logical_size(lsn, cause, &guard, &ctx)
-                .await
-        });
-
-        tokio::select! {
-            res = &mut calculation => { res }
-            _ = self.cancel.cancelled() => {
-                debug!("cancelling logical size calculation for timeline shutdown");
-                calculation.await
-            }
-        }
+        self.calculate_logical_size(lsn, cause, &guard, ctx).await
     }
 
     /// Calculate the logical size of the database at the latest LSN.
     ///
     /// NOTE: counted incrementally, includes ancestors. This can be a slow operation,
     /// especially if we need to download remote layers.
-    ///
-    /// # Cancel-Safety
-    ///
-    /// This method is cancellation-safe.
     async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
@@ -3040,7 +3148,10 @@ impl Timeline {
             self.timeline_id, up_to_lsn
         );
 
-        pausable_failpoint!("timeline-calculate-logical-size-pause");
+        if let Err(()) = pausable_failpoint!("timeline-calculate-logical-size-pause", &self.cancel)
+        {
+            return Err(CalculateLogicalSizeError::Cancelled);
+        }
 
         // See if we've already done the work for initial size calculation.
         // This is a short-cut for timelines that are mostly unused.
@@ -3593,6 +3704,12 @@ impl Timeline {
         mut layer_flush_start_rx: tokio::sync::watch::Receiver<(u64, Lsn)>,
         ctx: &RequestContext,
     ) {
+        // Subscribe to L0 delta layer updates, for compaction backpressure.
+        let mut watch_l0 = match self.layers.read().await.layer_map() {
+            Ok(lm) => lm.watch_level0_deltas(),
+            Err(Shutdown) => return,
+        };
+
         info!("started flush loop");
         loop {
             tokio::select! {
@@ -3617,43 +3734,68 @@ impl Timeline {
                     return;
                 }
 
-                let timer = self.metrics.flush_time_histo.start_timer();
+                // Break to notify potential waiters as soon as we've flushed the requested LSN. If
+                // more requests have arrived in the meanwhile, we'll resume flushing afterwards.
+                if flushed_to_lsn >= frozen_to_lsn {
+                    break Ok(());
+                }
 
-                let num_frozen_layers;
-                let frozen_layer_total_size;
-                let layer_to_flush = {
-                    let guard = self.layers.read().await;
-                    let Ok(lm) = guard.layer_map() else {
+                // Fetch the next layer to flush, if any.
+                let (layer, l0_count, frozen_count, frozen_size) = {
+                    let layers = self.layers.read().await;
+                    let Ok(lm) = layers.layer_map() else {
                         info!("dropping out of flush loop for timeline shutdown");
                         return;
                     };
-                    num_frozen_layers = lm.frozen_layers.len();
-                    frozen_layer_total_size = lm
+                    let l0_count = lm.level0_deltas().len();
+                    let frozen_count = lm.frozen_layers.len();
+                    let frozen_size: u64 = lm
                         .frozen_layers
                         .iter()
                         .map(|l| l.estimated_in_mem_size())
-                        .sum::<u64>();
-                    lm.frozen_layers.front().cloned()
-                    // drop 'layers' lock to allow concurrent reads and writes
+                        .sum();
+                    let layer = lm.frozen_layers.front().cloned();
+                    (layer, l0_count, frozen_count, frozen_size)
+                    // drop 'layers' lock
                 };
-                let Some(layer_to_flush) = layer_to_flush else {
+                let Some(layer) = layer else {
                     break Ok(());
                 };
-                if num_frozen_layers
-                    > std::cmp::max(
-                        self.get_compaction_threshold(),
-                        DEFAULT_COMPACTION_THRESHOLD,
-                    )
-                    && frozen_layer_total_size >= /* 128 MB */ 128000000
-                {
-                    tracing::warn!(
-                        "too many frozen layers: {num_frozen_layers} layers with estimated in-mem size of {frozen_layer_total_size} bytes",
-                    );
-                }
-                match self.flush_frozen_layer(layer_to_flush, ctx).await {
-                    Ok(this_layer_to_lsn) => {
-                        flushed_to_lsn = std::cmp::max(flushed_to_lsn, this_layer_to_lsn);
+
+                // Stall flushes to backpressure if compaction can't keep up. This is propagated up
+                // to WAL ingestion by having ephemeral layer rolls wait for flushes.
+                //
+                // NB: the compaction loop only checks `compaction_threshold` every 20 seconds, so
+                // we can end up stalling before compaction even starts. Consider making it more
+                // responsive (e.g. via `watch_level0_deltas`).
+                if let Some(stall_threshold) = self.get_l0_flush_stall_threshold() {
+                    if l0_count >= stall_threshold {
+                        warn!(
+                            "stalling layer flushes for compaction backpressure at {l0_count} \
+                            L0 layers ({frozen_count} frozen layers with {frozen_size} bytes)"
+                        );
+                        let stall_timer = self
+                            .metrics
+                            .flush_delay_histo
+                            .start_timer()
+                            .record_on_drop();
+                        tokio::select! {
+                            result = watch_l0.wait_for(|l0| *l0 < stall_threshold) => {
+                                if let Ok(l0) = result.as_deref() {
+                                    let delay = stall_timer.elapsed().as_secs_f64();
+                                    info!("resuming layer flushes at {l0} L0 layers after {delay:.3}s");
+                                }
+                            },
+                            _ = self.cancel.cancelled() => {},
+                        }
+                        continue; // check again
                     }
+                }
+
+                // Flush the layer.
+                let flush_timer = self.metrics.flush_time_histo.start_timer();
+                match self.flush_frozen_layer(layer, ctx).await {
+                    Ok(layer_lsn) => flushed_to_lsn = max(flushed_to_lsn, layer_lsn),
                     Err(FlushLayerError::Cancelled) => {
                         info!("dropping out of flush loop for timeline shutdown");
                         return;
@@ -3667,7 +3809,30 @@ impl Timeline {
                         break err.map(|_| ());
                     }
                 }
-                timer.stop_and_record();
+                let flush_duration = flush_timer.stop_and_record();
+
+                // Delay the next flush to backpressure if compaction can't keep up. We delay by the
+                // flush duration such that the flush takes 2x as long. This is propagated up to WAL
+                // ingestion by having ephemeral layer rolls wait for flushes.
+                if let Some(delay_threshold) = self.get_l0_flush_delay_threshold() {
+                    if l0_count >= delay_threshold {
+                        let delay = flush_duration.as_secs_f64();
+                        info!(
+                            "delaying layer flush by {delay:.3}s for compaction backpressure at \
+                            {l0_count} L0 layers ({frozen_count} frozen layers with {frozen_size} bytes)"
+                        );
+                        let _delay_timer = self
+                            .metrics
+                            .flush_delay_histo
+                            .start_timer()
+                            .record_on_drop();
+                        tokio::select! {
+                            _ = tokio::time::sleep(flush_duration) => {},
+                            _ = watch_l0.wait_for(|l0| *l0 < delay_threshold) => {},
+                            _ = self.cancel.cancelled() => {},
+                        }
+                    }
+                }
             };
 
             // Unsharded tenants should never advance their LSN beyond the end of the
@@ -3868,24 +4033,6 @@ impl Timeline {
             }
             // release lock on 'layers'
         };
-
-        // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
-        // This makes us refuse ingest until the new layers have been persisted to the remote
-        let start = Instant::now();
-        self.remote_client
-            .wait_completion()
-            .await
-            .map_err(|e| match e {
-                WaitCompletionError::UploadQueueShutDownOrStopped
-                | WaitCompletionError::NotInitialized(
-                    NotInitialized::ShuttingDown | NotInitialized::Stopped,
-                ) => FlushLayerError::Cancelled,
-                WaitCompletionError::NotInitialized(NotInitialized::Uninitialized) => {
-                    FlushLayerError::Other(anyhow!(e).into())
-                }
-            })?;
-        let duration = start.elapsed().as_secs_f64();
-        self.metrics.flush_wait_upload_time_gauge_add(duration);
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
@@ -4128,6 +4275,7 @@ impl Timeline {
 
     /// Create image layers for Postgres data. Assumes the caller passes a partition that is not too large,
     /// so that at most one image layer will be produced from this function.
+    #[allow(clippy::too_many_arguments)]
     async fn create_image_layer_for_rel_blocks(
         self: &Arc<Self>,
         partition: &KeySpace,
@@ -4136,6 +4284,7 @@ impl Timeline {
         ctx: &RequestContext,
         img_range: Range<Key>,
         start: Key,
+        io_concurrency: IoConcurrency,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         let mut wrote_keys = false;
 
@@ -4164,7 +4313,12 @@ impl Timeline {
                     || (last_key_in_range && key_request_accum.raw_size() > 0)
                 {
                     let results = self
-                        .get_vectored(key_request_accum.consume_keyspace(), lsn, ctx)
+                        .get_vectored(
+                            key_request_accum.consume_keyspace(),
+                            lsn,
+                            io_concurrency.clone(),
+                            ctx,
+                        )
                         .await?;
 
                     if self.cancel.is_cancelled() {
@@ -4243,9 +4397,10 @@ impl Timeline {
         img_range: Range<Key>,
         mode: ImageLayerCreationMode,
         start: Key,
+        io_concurrency: IoConcurrency,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         // Metadata keys image layer creation.
-        let mut reconstruct_state = ValuesReconstructState::default();
+        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
         let begin = Instant::now();
         let data = self
             .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
@@ -4462,6 +4617,13 @@ impl Timeline {
                 )))
             });
 
+            let io_concurrency = IoConcurrency::spawn_from_conf(
+                self.conf,
+                self.gate
+                    .enter()
+                    .map_err(|_| CreateImageLayersError::Cancelled)?,
+            );
+
             if !compact_metadata {
                 let ImageLayerCreationOutcome {
                     image,
@@ -4474,6 +4636,7 @@ impl Timeline {
                         ctx,
                         img_range,
                         start,
+                        io_concurrency,
                     )
                     .await?;
 
@@ -4492,6 +4655,7 @@ impl Timeline {
                         img_range,
                         mode,
                         start,
+                        io_concurrency,
                     )
                     .await?;
                 start = next_start_key;
@@ -5759,13 +5923,14 @@ impl Timeline {
         self: &Arc<Timeline>,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> anyhow::Result<Vec<(Key, Bytes)>> {
         let mut all_data = Vec::new();
         let guard = self.layers.read().await;
         for layer in guard.layer_map()?.iter_historic_layers() {
             if !layer.is_delta() && layer.image_layer_lsn() == lsn {
                 let layer = guard.get_from_desc(&layer);
-                let mut reconstruct_data = ValuesReconstructState::default();
+                let mut reconstruct_data = ValuesReconstructState::new(io_concurrency.clone());
                 layer
                     .get_values_reconstruct_data(
                         KeySpace::single(Key::MIN..Key::MAX),
@@ -5774,8 +5939,9 @@ impl Timeline {
                         ctx,
                     )
                     .await?;
-                for (k, v) in reconstruct_data.keys {
-                    all_data.push((k, v?.img.unwrap().1));
+                for (k, v) in std::mem::take(&mut reconstruct_data.keys) {
+                    let v = v.collect_pending_ios().await?;
+                    all_data.push((k, v.img.unwrap().1));
                 }
             }
         }
@@ -5896,12 +6062,36 @@ impl TimelineWriter<'_> {
     async fn roll_layer(&mut self, freeze_at: Lsn) -> Result<(), FlushLayerError> {
         let current_size = self.write_guard.as_ref().unwrap().current_size;
 
+        // If layer flushes are backpressured due to compaction not keeping up, wait for the flush
+        // to propagate the backpressure up into WAL ingestion.
+        let l0_count = self
+            .tl
+            .layers
+            .read()
+            .await
+            .layer_map()?
+            .level0_deltas()
+            .len();
+        let wait_thresholds = [
+            self.get_l0_flush_delay_threshold(),
+            self.get_l0_flush_stall_threshold(),
+        ];
+        let wait_threshold = wait_thresholds.into_iter().flatten().min();
+
         // self.write_guard will be taken by the freezing
-        self.tl
+        let flush_id = self
+            .tl
             .freeze_inmem_layer_at(freeze_at, &mut self.write_guard)
             .await?;
 
         assert!(self.write_guard.is_none());
+
+        if let Some(wait_threshold) = wait_threshold {
+            if l0_count >= wait_threshold {
+                info!("layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers");
+                self.tl.wait_flush_completion(flush_id).await?;
+            }
+        }
 
         if current_size >= self.get_checkpoint_distance() * 2 {
             warn!("Flushed oversized open layer with size {}", current_size)

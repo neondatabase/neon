@@ -13,7 +13,7 @@ use rand::prelude::*;
 use tokio::task::JoinSet;
 use tracing::info;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -62,6 +62,10 @@ pub(crate) struct Args {
     /// Before starting the benchmark, live-reconfigure the pageserver to use specified io mode (buffered vs. direct).
     #[clap(long)]
     set_io_mode: Option<pageserver_api::models::virtual_file::IoMode>,
+
+    /// Queue depth generated in each client.
+    #[clap(long, default_value = "1")]
+    queue_depth: NonZeroUsize,
 
     targets: Option<Vec<TenantTimelineId>>,
 }
@@ -298,6 +302,7 @@ async fn main_impl(
             start_work_barrier.wait().await;
             let client_start = Instant::now();
             let mut ticks_processed = 0;
+            let mut inflight = VecDeque::new();
             while !cancel.is_cancelled() {
                 // Detect if a request took longer than the RPS rate
                 if let Some(period) = &rps_period {
@@ -311,31 +316,37 @@ async fn main_impl(
                     ticks_processed = periods_passed_until_now;
                 }
 
-                let start = Instant::now();
-                let req = {
-                    let mut rng = rand::thread_rng();
-                    let r = &ranges[weights.sample(&mut rng)];
-                    let key: i128 = rng.gen_range(r.start..r.end);
-                    let key = Key::from_i128(key);
-                    assert!(key.is_rel_block_key());
-                    let (rel_tag, block_no) = key
-                        .to_rel_block()
-                        .expect("we filter non-rel-block keys out above");
-                    PagestreamGetPageRequest {
-                        hdr: PagestreamRequest {
-                            reqid: 0,
-                            request_lsn: if rng.gen_bool(args.req_latest_probability) {
-                                Lsn::MAX
-                            } else {
-                                r.timeline_lsn
+                while inflight.len() < args.queue_depth.get() {
+                    let start = Instant::now();
+                    let req = {
+                        let mut rng = rand::thread_rng();
+                        let r = &ranges[weights.sample(&mut rng)];
+                        let key: i128 = rng.gen_range(r.start..r.end);
+                        let key = Key::from_i128(key);
+                        assert!(key.is_rel_block_key());
+                        let (rel_tag, block_no) = key
+                            .to_rel_block()
+                            .expect("we filter non-rel-block keys out above");
+                        PagestreamGetPageRequest {
+                            hdr: PagestreamRequest {
+                                reqid: 0,
+                                request_lsn: if rng.gen_bool(args.req_latest_probability) {
+                                    Lsn::MAX
+                                } else {
+                                    r.timeline_lsn
+                                },
+                                not_modified_since: r.timeline_lsn,
                             },
-                            not_modified_since: r.timeline_lsn,
-                        },
-                        rel: rel_tag,
-                        blkno: block_no,
-                    }
-                };
-                client.getpage(req).await.unwrap();
+                            rel: rel_tag,
+                            blkno: block_no,
+                        }
+                    };
+                    client.getpage_send(req).await.unwrap();
+                    inflight.push_back(start);
+                }
+
+                let start = inflight.pop_front().unwrap();
+                client.getpage_recv().await.unwrap();
                 let end = Instant::now();
                 live_stats.request_done();
                 ticks_processed += 1;

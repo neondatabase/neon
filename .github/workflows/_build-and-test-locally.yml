@@ -229,8 +229,13 @@ jobs:
           ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E '!package(pageserver)'
 
           # run pageserver tests with different settings
-          for io_engine in std-fs tokio-epoll-uring ; do
-            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES  -E 'package(pageserver)'
+          for get_vectored_concurrent_io in sequential sidecar-task; do
+            for io_engine in std-fs tokio-epoll-uring ; do
+              NEON_PAGESERVER_UNIT_TEST_GET_VECTORED_CONCURRENT_IO=$get_vectored_concurrent_io \
+                NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine \
+                ${cov_prefix} \
+                cargo nextest run $CARGO_FLAGS $CARGO_FEATURES  -E 'package(pageserver)'
+            done
           done
 
           # Run separate tests for real S3
@@ -314,6 +319,7 @@ jobs:
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
+          PAGESERVER_GET_VECTORED_CONCURRENT_IO: sidecar-task
           USE_LFC: ${{ matrix.lfc_state == 'with-lfc' && 'true' || 'false' }}
 
       # Temporary disable this step until we figure out why it's so flaky
