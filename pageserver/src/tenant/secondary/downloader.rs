@@ -1079,6 +1079,15 @@ impl<'a> TenantDownloader<'a> {
                 }
             }
 
+            if on_disk.metadata.generation_file_size() != on_disk.metadata.generation_file_size() {
+                tracing::info!(
+                    "Re-downloading layer {} with changed size or generation: {:?}->{:?}",
+                    layer.name,
+                    on_disk.metadata.generation_file_size(),
+                    on_disk.metadata.generation_file_size()
+                );
+                return LayerAction::Download;
+            }
             if on_disk.metadata != layer.metadata || on_disk.access_time != layer.access_time {
                 // We already have this layer on disk.  Update its access time.
                 tracing::debug!(
