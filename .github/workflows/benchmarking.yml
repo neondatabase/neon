@@ -67,6 +67,10 @@ jobs:
             PLATFORM: "neon-staging"
             region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
             RUNNER: [ self-hosted, us-east-2, x64 ]
+          - DEFAULT_PG_VERSION: 17
+            PLATFORM: "neon-staging"
+            region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+            RUNNER: [ self-hosted, us-east-2, x64 ]
           - DEFAULT_PG_VERSION: 16
             PLATFORM: "azure-staging"
             region_id: 'azure-eastus2'
