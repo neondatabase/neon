@@ -92,7 +92,7 @@
 use crate::task_mgr::TaskKind;
 
 // The main structure of this module, see module-level comment.
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct RequestContext {
     task_kind: TaskKind,
     download_behavior: DownloadBehavior,
@@ -161,18 +161,15 @@ impl RequestContextBuilder {
         }
     }
 
-    pub fn extend(original: &RequestContext) -> Self {
+    pub fn from(original: &RequestContext) -> Self {
         Self {
-            // This is like a Copy, but avoid implementing Copy because ordinary users of
-            // RequestContext should always move or ref it.
-            inner: RequestContext {
-                task_kind: original.task_kind,
-                download_behavior: original.download_behavior,
-                access_stats_behavior: original.access_stats_behavior,
-                page_content_kind: original.page_content_kind,
-                read_path_debug: original.read_path_debug,
-            },
+            inner: original.clone(),
         }
+    }
+
+    pub fn task_kind(mut self, b: TaskKind) -> Self {
+        self.inner.task_kind = b;
+        self
     }
 
     /// Configure the DownloadBehavior of the context: whether to
@@ -199,7 +196,15 @@ impl RequestContextBuilder {
         self
     }
 
-    pub fn build(self) -> RequestContext {
+    pub fn root(self) -> RequestContext {
+        self.inner
+    }
+
+    pub fn attached_child(self) -> RequestContext {
+        self.inner
+    }
+
+    pub fn detached_child(self) -> RequestContext {
         self.inner
     }
 }
@@ -220,7 +225,7 @@ impl RequestContext {
     pub fn new(task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
         RequestContextBuilder::new(task_kind)
             .download_behavior(download_behavior)
-            .build()
+            .root()
     }
 
     /// Create a detached child context for a task that may outlive `self`.
@@ -241,7 +246,10 @@ impl RequestContext {
     ///
     /// We could make new calls to this function fail if `self` is already canceled.
     pub fn detached_child(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        self.child_impl(task_kind, download_behavior)
+        RequestContextBuilder::from(self)
+            .task_kind(task_kind)
+            .download_behavior(download_behavior)
+            .detached_child()
     }
 
     /// Create a child of context `self` for a task that shall not outlive `self`.
@@ -265,7 +273,7 @@ impl RequestContext {
     /// The method to wait for child tasks would return an error, indicating
     /// that the child task was not started because the context was canceled.
     pub fn attached_child(&self) -> Self {
-        self.child_impl(self.task_kind(), self.download_behavior())
+        RequestContextBuilder::from(self).attached_child()
     }
 
     /// Use this function when you should be creating a child context using
@@ -277,10 +285,6 @@ impl RequestContext {
     /// [`attached_child`]: Self::attached_child
     /// [`detached_child`]: Self::detached_child
     pub fn todo_child(task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        Self::new(task_kind, download_behavior)
-    }
-
-    fn child_impl(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
         Self::new(task_kind, download_behavior)
     }
 

@@ -644,9 +644,9 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
         .unwrap();
 
     // This test does downloads
-    let ctx = RequestContextBuilder::extend(&ctx)
+    let ctx = RequestContextBuilder::from(&ctx)
         .download_behavior(DownloadBehavior::Download)
-        .build();
+        .attached_child();
 
     let layer = {
         let mut layers = {
@@ -729,9 +729,9 @@ async fn evict_and_wait_does_not_wait_for_download() {
         .unwrap();
 
     // This test does downloads
-    let ctx = RequestContextBuilder::extend(&ctx)
+    let ctx = RequestContextBuilder::from(&ctx)
         .download_behavior(DownloadBehavior::Download)
-        .build();
+        .attached_child();
 
     let layer = {
         let mut layers = {
