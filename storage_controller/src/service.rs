@@ -85,7 +85,7 @@ use utils::{
     backoff,
     completion::Barrier,
     failpoint_support,
-    generation::Generation,
+    generation::{Generation, SafekeeperGeneration},
     http::error::ApiError,
     id::{NodeId, TenantId, TimelineId},
     logging::SecretString,
@@ -3564,7 +3564,7 @@ impl Service {
         tenant_id: TenantId,
         timeline_info: &TimelineInfo,
         create_mode: models::TimelineCreateRequestMode,
-    ) -> Result<(u32, Vec<NodeId>), ApiError> {
+    ) -> Result<(SafekeeperGeneration, Vec<NodeId>), ApiError> {
         let timeline_id = timeline_info.timeline_id;
         let pg_version = timeline_info.pg_version;
         let start_lsn = match create_mode {
@@ -3613,7 +3613,7 @@ impl Service {
             &sk_persistences,
         )
         .await?;
-        Ok((0, sks))
+        Ok((SafekeeperGeneration::new(0), sks))
     }
 
     pub(crate) async fn tenant_timeline_create(
@@ -3646,7 +3646,7 @@ impl Service {
             let res = self
                 .tenant_timeline_create_safekeepers(tenant_id, &timeline_info, create_mode)
                 .await?;
-            (Some(res.0), Some(res.1))
+            (Some(res.0.into_inner()), Some(res.1))
         } else {
             (None, None)
         };
