@@ -284,7 +284,7 @@ impl Persistence {
         res
     }
 
-    /// Call the provided function in a tokio blocking thread, with a Diesel database connection.
+    /// Call the provided function with a Diesel database connection in a retry loop
     async fn with_conn<'a, 'b, F, R>(&self, func: F) -> DatabaseResult<R>
     where
         F: for<'r> Fn(&'r mut AsyncPgConnection) -> ScopedBoxFuture<'b, 'r, DatabaseResult<R>>
