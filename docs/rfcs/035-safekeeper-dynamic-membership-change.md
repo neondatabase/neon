@@ -409,11 +409,11 @@ members missed their exclusion. And of course e.g. such pending exclusion on
 node C after migration ABC -> ABD must not prevent next migration ABD -> ABE. As
 another example, if some node missed timeline creation it clearly must not block
 migration from it. Hence it is natural to have per safekeeper background
-reconciler which retries these ops until they succeed. Actually inside storcon
-probably it is better to consider this as a single kind of operation
-`sync<generation>` which depending on current configuration creates timeline on
-sk (node added) or locally deletes it (node excluded, analogue of detach) or
-globally deletes it (timeline is deleted).
+reconciler which retries these ops until they succeed. There are 3 possible
+operation types, and the type is defined by timeline state (membership
+configuration and whether it is deleted) and safekeeper id: we may need to
+create timeline on sk (node added), locally delete it (node excluded, somewhat
+similar to detach) or globally delete it (timeline is deleted).
 
 Next, on storage controller restart in principle these pending operations can be
 figured out by comparing safekeepers state against storcon state. But it seems
