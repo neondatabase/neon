@@ -23,6 +23,8 @@ def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
             "checkpoint_distance": "16384",
             "compaction_period": "1 s",
             "compaction_threshold": "1",
+            "l0_flush_delay_threshold": "0",
+            "l0_flush_stall_threshold": "0",
             "compaction_target_size": "16384",
         }
     )

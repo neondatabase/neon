@@ -271,8 +271,14 @@ def test_scrubber_physical_gc_ancestors(neon_env_builder: NeonEnvBuilder, shard_
         ps.http_client().timeline_compact(
             shard, timeline_id, force_image_layer_creation=True, wait_until_uploaded=True
         )
-        # Add some WAL so that we don't gc at the latest remote consistent lsn
-        workload.churn_rows(1)
+
+    # Add some WAL so that we don't gc at the latest remote consistent lsn
+    workload.churn_rows(10)
+
+    # Now gc the old stuff away
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+        assert ps is not None
         ps.http_client().timeline_gc(shard, timeline_id, 0)
 
     # We will use a min_age_secs=1 threshold for deletion, let it pass

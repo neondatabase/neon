@@ -1360,6 +1360,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 args.pg_version,
                 mode,
                 !args.update_catalog,
+                false,
             )?;
         }
         EndpointCmd::Start(args) => {
