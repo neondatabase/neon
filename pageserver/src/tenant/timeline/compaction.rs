@@ -436,12 +436,14 @@ impl KeyHistoryRetention {
         if dry_run {
             return true;
         }
-        let guard = tline.layers.read().await;
-        if !guard.contains_key(key) {
-            return false;
+        let layer_generation;
+        {
+            let guard = tline.layers.read().await;
+            if !guard.contains_key(key) {
+                return false;
+            }
+            layer_generation = guard.get_from_key(key).metadata().generation;
         }
-        let layer_generation = guard.get_from_key(key).metadata().generation;
-        drop(guard);
         if layer_generation == tline.generation {
             info!(
                 key=%key,
@@ -2138,6 +2140,11 @@ impl Timeline {
             self.get_gc_compaction_watermark()
         };
 
+        if compact_below_lsn == Lsn::INVALID {
+            tracing::warn!("no layers to compact with gc: gc_cutoff not generated yet, skipping gc bottom-most compaction");
+            return Ok(vec![]);
+        }
+
         // Split compaction job to about 4GB each
         const GC_COMPACT_MAX_SIZE_MB: u64 = 4 * 1024;
         let sub_compaction_max_job_size_mb =
@@ -2338,6 +2345,11 @@ impl Timeline {
                 // each of the retain_lsn. Therefore, if the user-provided `compact_lsn_range.end` is larger than the real gc cutoff, we will use
                 // the real cutoff.
                 let mut gc_cutoff = if compact_lsn_range.end == Lsn::MAX {
+                    if real_gc_cutoff == Lsn::INVALID {
+                        // If the gc_cutoff is not generated yet, we should not compact anything.
+                        tracing::warn!("no layers to compact with gc: gc_cutoff not generated yet, skipping gc bottom-most compaction");
+                        return Ok(());
+                    }
                     real_gc_cutoff
                 } else {
                     compact_lsn_range.end
@@ -2869,7 +2881,7 @@ impl Timeline {
             "produced {} delta layers and {} image layers, {} layers are kept",
             produced_delta_layers_len,
             produced_image_layers_len,
-            layer_selection.len()
+            keep_layers.len()
         );
 
         // Step 3: Place back to the layer map.
@@ -2915,8 +2927,28 @@ impl Timeline {
         // be batched into `schedule_compaction_update`.
         let disk_consistent_lsn = self.disk_consistent_lsn.load();
         self.schedule_uploads(disk_consistent_lsn, None)?;
+        // If a layer gets rewritten throughout gc-compaction, we need to keep that layer only in `compact_to` instead
+        // of `compact_from`.
+        let compact_from = {
+            let mut compact_from = Vec::new();
+            let mut compact_to_set = HashMap::new();
+            for layer in &compact_to {
+                compact_to_set.insert(layer.layer_desc().key(), layer);
+            }
+            for layer in &layer_selection {
+                if let Some(to) = compact_to_set.get(&layer.layer_desc().key()) {
+                    tracing::info!(
+                        "skipping delete {} because found same layer key at different generation {}",
+                        layer, to
+                    );
+                } else {
+                    compact_from.push(layer.clone());
+                }
+            }
+            compact_from
+        };
         self.remote_client
-            .schedule_compaction_update(&layer_selection, &compact_to)?;
+            .schedule_compaction_update(&compact_from, &compact_to)?;
 
         drop(gc_lock);
 

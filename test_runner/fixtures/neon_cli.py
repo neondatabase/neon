@@ -523,6 +523,7 @@ class NeonLocalCli(AbstractNeonCli):
         remote_ext_config: str | None = None,
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
+        create_test_user: bool = False,
         basebackup_request_tries: int | None = None,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
@@ -544,6 +545,8 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--pageserver-id", str(pageserver_id)])
         if allow_multiple:
             args.extend(["--allow-multiple"])
+        if create_test_user:
+            args.extend(["--create-test-user"])
 
         res = self.raw_cli(args, extra_env_vars)
         res.check_returncode()
