@@ -22,11 +22,11 @@ use enumset::EnumSet;
 use fail::fail_point;
 use futures::{stream::FuturesUnordered, StreamExt};
 use handle::ShardTimelineId;
+use layer_manager::Shutdown;
 use offload::OffloadError;
 use once_cell::sync::Lazy;
 use pageserver_api::models::PageTraceEvent;
 use pageserver_api::{
-    config::tenant_conf_defaults::DEFAULT_COMPACTION_THRESHOLD,
     key::{
         KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
         SPARSE_RANGE,
@@ -60,20 +60,14 @@ use utils::{
 };
 use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
-use std::sync::atomic::Ordering as AtomicOrdering;
-use std::sync::OnceLock;
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::array;
+use std::cmp::{max, min};
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::{ControlFlow, Deref, Range};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
-use std::{
-    array,
-    collections::{BTreeMap, HashMap, HashSet},
-    sync::atomic::AtomicU64,
-};
-use std::{cmp::min, ops::ControlFlow};
-use std::{
-    collections::btree_map::Entry,
-    ops::{Deref, Range},
-};
 
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::{
@@ -150,19 +144,15 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
+use super::config::TenantConf;
+use super::remote_timeline_client::index::IndexPart;
+use super::remote_timeline_client::RemoteTimelineClient;
+use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
+use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
+use super::upload_queue::NotInitialized;
+use super::GcError;
 use super::{
-    config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
-    MaybeOffloaded,
-};
-use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
-use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
-use super::{
-    remote_timeline_client::RemoteTimelineClient, remote_timeline_client::WaitCompletionError,
-    storage_layer::ReadableLayer,
-};
-use super::{
-    secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
-    GcError,
+    debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf, MaybeOffloaded,
 };
 
 #[cfg(test)]
@@ -407,6 +397,9 @@ pub struct Timeline {
     ///
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     compaction_lock: tokio::sync::Mutex<()>,
+
+    /// If true, the last compaction failed.
+    compaction_failed: AtomicBool,
 
     /// Make sure we only have one running gc at a time.
     ///
@@ -1702,13 +1695,27 @@ impl Timeline {
             return Ok(false);
         }
 
-        match self.get_compaction_algorithm_settings().kind {
+        let result = match self.get_compaction_algorithm_settings().kind {
             CompactionAlgorithm::Tiered => {
                 self.compact_tiered(cancel, ctx).await?;
                 Ok(false)
             }
             CompactionAlgorithm::Legacy => self.compact_legacy(cancel, options, ctx).await,
-        }
+        };
+
+        // Signal compaction failure to avoid L0 flush stalls when it's broken.
+        match result {
+            Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
+            Err(CompactionError::Other(_)) => {
+                self.compaction_failed.store(true, AtomicOrdering::Relaxed)
+            }
+            // Don't change the current value on offload failure or shutdown. We don't want to
+            // abruptly stall nor resume L0 flushes in these cases.
+            Err(CompactionError::Offload(_)) => {}
+            Err(CompactionError::ShuttingDown) => {}
+        };
+
+        result
     }
 
     /// Mutate the timeline with a [`TimelineWriter`].
@@ -2137,6 +2144,13 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
+    fn get_compaction_period(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .compaction_period
+            .unwrap_or(self.conf.default_tenant_conf.compaction_period)
+    }
+
     fn get_compaction_target_size(&self) -> u64 {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2151,6 +2165,91 @@ impl Timeline {
             .tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
+    }
+
+    fn get_l0_flush_delay_threshold(&self) -> Option<usize> {
+        // Default to delay L0 flushes at 3x compaction threshold.
+        const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 3;
+
+        // If compaction is disabled, don't delay.
+        if self.get_compaction_period() == Duration::ZERO {
+            return None;
+        }
+
+        let compaction_threshold = self.get_compaction_threshold();
+        let tenant_conf = self.tenant_conf.load();
+        let l0_flush_delay_threshold = tenant_conf
+            .tenant_conf
+            .l0_flush_delay_threshold
+            .or(self.conf.default_tenant_conf.l0_flush_delay_threshold)
+            .unwrap_or(DEFAULT_L0_FLUSH_DELAY_FACTOR * compaction_threshold);
+
+        // 0 disables backpressure.
+        if l0_flush_delay_threshold == 0 {
+            return None;
+        }
+
+        // Clamp the flush delay threshold to the compaction threshold; it doesn't make sense to
+        // backpressure flushes below this.
+        // TODO: the tenant config should have validation to prevent this instead.
+        debug_assert!(l0_flush_delay_threshold >= compaction_threshold);
+        Some(max(l0_flush_delay_threshold, compaction_threshold))
+    }
+
+    fn get_l0_flush_stall_threshold(&self) -> Option<usize> {
+        // Default to stall L0 flushes at 5x compaction threshold.
+        // TODO: stalls are temporarily disabled by default, see below.
+        #[allow(unused)]
+        const DEFAULT_L0_FLUSH_STALL_FACTOR: usize = 5;
+
+        // If compaction is disabled, don't stall.
+        if self.get_compaction_period() == Duration::ZERO {
+            return None;
+        }
+
+        // If compaction is failing, don't stall and try to keep the tenant alive. This may not be a
+        // good idea: read amp can grow unbounded, leading to terrible performance, and we may take
+        // on unbounded compaction debt that can take a long time to fix once compaction comes back
+        // online. At least we'll delay flushes, slowing down the growth and buying some time.
+        if self.compaction_failed.load(AtomicOrdering::Relaxed) {
+            return None;
+        }
+
+        let compaction_threshold = self.get_compaction_threshold();
+        let tenant_conf = self.tenant_conf.load();
+        let l0_flush_stall_threshold = tenant_conf
+            .tenant_conf
+            .l0_flush_stall_threshold
+            .or(self.conf.default_tenant_conf.l0_flush_stall_threshold);
+
+        // Tests sometimes set compaction_threshold=1 to generate lots of layer files, and don't
+        // handle the 20-second compaction delay. Some (e.g. `test_backward_compatibility`) can't
+        // easily adjust the L0 backpressure settings, so just disable stalls in this case.
+        if cfg!(feature = "testing")
+            && compaction_threshold == 1
+            && l0_flush_stall_threshold.is_none()
+        {
+            return None;
+        }
+
+        // Disable stalls by default. In ingest benchmarks, we see image compaction take >10
+        // minutes, blocking L0 compaction, and we can't stall L0 flushes for that long.
+        //
+        // TODO: fix this.
+        // let l0_flush_stall_threshold = l0_flush_stall_threshold
+        //    .unwrap_or(DEFAULT_L0_FLUSH_STALL_FACTOR * compaction_threshold);
+        let l0_flush_stall_threshold = l0_flush_stall_threshold?;
+
+        // 0 disables backpressure.
+        if l0_flush_stall_threshold == 0 {
+            return None;
+        }
+
+        // Clamp the flush stall threshold to the compaction threshold; it doesn't make sense to
+        // backpressure flushes below this.
+        // TODO: the tenant config should have validation to prevent this instead.
+        debug_assert!(l0_flush_stall_threshold >= compaction_threshold);
+        Some(max(l0_flush_stall_threshold, compaction_threshold))
     }
 
     fn get_image_creation_threshold(&self) -> usize {
@@ -2389,6 +2488,7 @@ impl Timeline {
                 gate: Gate::default(),
 
                 compaction_lock: tokio::sync::Mutex::default(),
+                compaction_failed: AtomicBool::default(),
                 gc_lock: tokio::sync::Mutex::default(),
 
                 standby_horizon: AtomicLsn::new(0),
@@ -3604,6 +3704,12 @@ impl Timeline {
         mut layer_flush_start_rx: tokio::sync::watch::Receiver<(u64, Lsn)>,
         ctx: &RequestContext,
     ) {
+        // Subscribe to L0 delta layer updates, for compaction backpressure.
+        let mut watch_l0 = match self.layers.read().await.layer_map() {
+            Ok(lm) => lm.watch_level0_deltas(),
+            Err(Shutdown) => return,
+        };
+
         info!("started flush loop");
         loop {
             tokio::select! {
@@ -3634,43 +3740,62 @@ impl Timeline {
                     break Ok(());
                 }
 
-                let timer = self.metrics.flush_time_histo.start_timer();
-
-                let num_frozen_layers;
-                let frozen_layer_total_size;
-                let layer_to_flush = {
-                    let guard = self.layers.read().await;
-                    let Ok(lm) = guard.layer_map() else {
+                // Fetch the next layer to flush, if any.
+                let (layer, l0_count, frozen_count, frozen_size) = {
+                    let layers = self.layers.read().await;
+                    let Ok(lm) = layers.layer_map() else {
                         info!("dropping out of flush loop for timeline shutdown");
                         return;
                     };
-                    num_frozen_layers = lm.frozen_layers.len();
-                    frozen_layer_total_size = lm
+                    let l0_count = lm.level0_deltas().len();
+                    let frozen_count = lm.frozen_layers.len();
+                    let frozen_size: u64 = lm
                         .frozen_layers
                         .iter()
                         .map(|l| l.estimated_in_mem_size())
-                        .sum::<u64>();
-                    lm.frozen_layers.front().cloned()
-                    // drop 'layers' lock to allow concurrent reads and writes
+                        .sum();
+                    let layer = lm.frozen_layers.front().cloned();
+                    (layer, l0_count, frozen_count, frozen_size)
+                    // drop 'layers' lock
                 };
-                let Some(layer_to_flush) = layer_to_flush else {
+                let Some(layer) = layer else {
                     break Ok(());
                 };
-                if num_frozen_layers
-                    > std::cmp::max(
-                        self.get_compaction_threshold(),
-                        DEFAULT_COMPACTION_THRESHOLD,
-                    )
-                    && frozen_layer_total_size >= /* 128 MB */ 128000000
-                {
-                    tracing::warn!(
-                        "too many frozen layers: {num_frozen_layers} layers with estimated in-mem size of {frozen_layer_total_size} bytes",
-                    );
-                }
-                match self.flush_frozen_layer(layer_to_flush, ctx).await {
-                    Ok(this_layer_to_lsn) => {
-                        flushed_to_lsn = std::cmp::max(flushed_to_lsn, this_layer_to_lsn);
+
+                // Stall flushes to backpressure if compaction can't keep up. This is propagated up
+                // to WAL ingestion by having ephemeral layer rolls wait for flushes.
+                //
+                // NB: the compaction loop only checks `compaction_threshold` every 20 seconds, so
+                // we can end up stalling before compaction even starts. Consider making it more
+                // responsive (e.g. via `watch_level0_deltas`).
+                if let Some(stall_threshold) = self.get_l0_flush_stall_threshold() {
+                    if l0_count >= stall_threshold {
+                        warn!(
+                            "stalling layer flushes for compaction backpressure at {l0_count} \
+                            L0 layers ({frozen_count} frozen layers with {frozen_size} bytes)"
+                        );
+                        let stall_timer = self
+                            .metrics
+                            .flush_delay_histo
+                            .start_timer()
+                            .record_on_drop();
+                        tokio::select! {
+                            result = watch_l0.wait_for(|l0| *l0 < stall_threshold) => {
+                                if let Ok(l0) = result.as_deref() {
+                                    let delay = stall_timer.elapsed().as_secs_f64();
+                                    info!("resuming layer flushes at {l0} L0 layers after {delay:.3}s");
+                                }
+                            },
+                            _ = self.cancel.cancelled() => {},
+                        }
+                        continue; // check again
                     }
+                }
+
+                // Flush the layer.
+                let flush_timer = self.metrics.flush_time_histo.start_timer();
+                match self.flush_frozen_layer(layer, ctx).await {
+                    Ok(layer_lsn) => flushed_to_lsn = max(flushed_to_lsn, layer_lsn),
                     Err(FlushLayerError::Cancelled) => {
                         info!("dropping out of flush loop for timeline shutdown");
                         return;
@@ -3684,7 +3809,30 @@ impl Timeline {
                         break err.map(|_| ());
                     }
                 }
-                timer.stop_and_record();
+                let flush_duration = flush_timer.stop_and_record();
+
+                // Delay the next flush to backpressure if compaction can't keep up. We delay by the
+                // flush duration such that the flush takes 2x as long. This is propagated up to WAL
+                // ingestion by having ephemeral layer rolls wait for flushes.
+                if let Some(delay_threshold) = self.get_l0_flush_delay_threshold() {
+                    if l0_count >= delay_threshold {
+                        let delay = flush_duration.as_secs_f64();
+                        info!(
+                            "delaying layer flush by {delay:.3}s for compaction backpressure at \
+                            {l0_count} L0 layers ({frozen_count} frozen layers with {frozen_size} bytes)"
+                        );
+                        let _delay_timer = self
+                            .metrics
+                            .flush_delay_histo
+                            .start_timer()
+                            .record_on_drop();
+                        tokio::select! {
+                            _ = tokio::time::sleep(flush_duration) => {},
+                            _ = watch_l0.wait_for(|l0| *l0 < delay_threshold) => {},
+                            _ = self.cancel.cancelled() => {},
+                        }
+                    }
+                }
             };
 
             // Unsharded tenants should never advance their LSN beyond the end of the
@@ -3885,24 +4033,6 @@ impl Timeline {
             }
             // release lock on 'layers'
         };
-
-        // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
-        // This makes us refuse ingest until the new layers have been persisted to the remote
-        let start = Instant::now();
-        self.remote_client
-            .wait_completion()
-            .await
-            .map_err(|e| match e {
-                WaitCompletionError::UploadQueueShutDownOrStopped
-                | WaitCompletionError::NotInitialized(
-                    NotInitialized::ShuttingDown | NotInitialized::Stopped,
-                ) => FlushLayerError::Cancelled,
-                WaitCompletionError::NotInitialized(NotInitialized::Uninitialized) => {
-                    FlushLayerError::Other(anyhow!(e).into())
-                }
-            })?;
-        let duration = start.elapsed().as_secs_f64();
-        self.metrics.flush_wait_upload_time_gauge_add(duration);
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
@@ -5932,12 +6062,36 @@ impl TimelineWriter<'_> {
     async fn roll_layer(&mut self, freeze_at: Lsn) -> Result<(), FlushLayerError> {
         let current_size = self.write_guard.as_ref().unwrap().current_size;
 
+        // If layer flushes are backpressured due to compaction not keeping up, wait for the flush
+        // to propagate the backpressure up into WAL ingestion.
+        let l0_count = self
+            .tl
+            .layers
+            .read()
+            .await
+            .layer_map()?
+            .level0_deltas()
+            .len();
+        let wait_thresholds = [
+            self.get_l0_flush_delay_threshold(),
+            self.get_l0_flush_stall_threshold(),
+        ];
+        let wait_threshold = wait_thresholds.into_iter().flatten().min();
+
         // self.write_guard will be taken by the freezing
-        self.tl
+        let flush_id = self
+            .tl
             .freeze_inmem_layer_at(freeze_at, &mut self.write_guard)
             .await?;
 
         assert!(self.write_guard.is_none());
+
+        if let Some(wait_threshold) = wait_threshold {
+            if l0_count >= wait_threshold {
+                info!("layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers");
+                self.tl.wait_flush_completion(flush_id).await?;
+            }
+        }
 
         if current_size >= self.get_checkpoint_distance() * 2 {
             warn!("Flushed oversized open layer with size {}", current_size)
