@@ -447,7 +447,7 @@ timeline id but lower `generation` as next op makes previous obsolete. Insertion
 of `op_type` `delete` overwrites all rows.
 
 About `exclude`: rather than adding explicit safekeeper http endpoint, it is
-reasonable to reuse configuration switch endpoint: if safekeeper is not member
+reasonable to reuse membership switch endpoint: if safekeeper is not member
 of the configuration it locally removes the timeline on the switch. In this case
 404 should also be considered an 'ok' answer by the caller.
 
@@ -505,7 +505,8 @@ corruption. The following sequence works:
 
 For pg version / wal segment size: while we may persist them in `timelines`
 table, it is not necessary as initial creation at step 3 can take them from
-cplane call and later pull_timeline will carry them around.
+pageserver or cplane creation call and later pull_timeline will carry them
+around.
 
 Timeline migration.
 1) CAS to the db to create joint conf, and in the same transaction create
