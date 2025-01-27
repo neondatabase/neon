@@ -102,6 +102,7 @@ use crate::{
 };
 
 // The main structure of this module, see module-level comment.
+#[derive(Clone)]
 pub struct RequestContext {
     task_kind: TaskKind,
     download_behavior: DownloadBehavior,
@@ -258,18 +259,9 @@ impl RequestContextBuilder {
         }
     }
 
-    pub fn extend(original: &RequestContext) -> Self {
+    pub fn from(original: &RequestContext) -> Self {
         Self {
-            // This is like a Copy, but avoid implementing Copy because ordinary users of
-            // RequestContext should always move or ref it.
-            inner: RequestContext {
-                task_kind: original.task_kind,
-                download_behavior: original.download_behavior,
-                access_stats_behavior: original.access_stats_behavior,
-                page_content_kind: original.page_content_kind,
-                read_path_debug: original.read_path_debug,
-                scope: original.scope.clone(),
-            },
+            inner: original.clone(),
         }
     }
 
@@ -307,7 +299,15 @@ impl RequestContextBuilder {
         self
     }
 
-    pub fn build(self) -> RequestContext {
+    pub fn root(self) -> RequestContext {
+        self.inner
+    }
+
+    pub fn attached_child(self) -> RequestContext {
+        self.inner
+    }
+
+    pub fn detached_child(self) -> RequestContext {
         self.inner
     }
 }
@@ -328,7 +328,7 @@ impl RequestContext {
     pub fn new(task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
         RequestContextBuilder::new(task_kind)
             .download_behavior(download_behavior)
-            .build()
+            .root()
     }
 
     /// Create a detached child context for a task that may outlive `self`.
@@ -349,7 +349,10 @@ impl RequestContext {
     ///
     /// We could make new calls to this function fail if `self` is already canceled.
     pub fn detached_child(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        self.child_impl(task_kind, download_behavior)
+        RequestContextBuilder::from(self)
+            .task_kind(task_kind)
+            .download_behavior(download_behavior)
+            .detached_child()
     }
 
     /// Create a child of context `self` for a task that shall not outlive `self`.
@@ -373,7 +376,7 @@ impl RequestContext {
     /// The method to wait for child tasks would return an error, indicating
     /// that the child task was not started because the context was canceled.
     pub fn attached_child(&self) -> Self {
-        self.child_impl(self.task_kind(), self.download_behavior())
+        RequestContextBuilder::from(self).attached_child()
     }
 
     /// Use this function when you should be creating a child context using
@@ -388,17 +391,10 @@ impl RequestContext {
         Self::new(task_kind, download_behavior)
     }
 
-    fn child_impl(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        RequestContextBuilder::extend(self)
-            .task_kind(task_kind)
-            .download_behavior(download_behavior)
-            .build()
-    }
-
     pub fn with_scope_timeline(&self, timeline: &Arc<Timeline>) -> Self {
-        RequestContextBuilder::extend(self)
+        RequestContextBuilder::from(self)
             .scope(Scope::new_timeline(timeline))
-            .build()
+            .attached_child()
     }
 
     pub(crate) fn with_scope_page_service_pagestream(
@@ -407,9 +403,9 @@ impl RequestContext {
             crate::page_service::TenantManagerTypes,
         >,
     ) -> Self {
-        RequestContextBuilder::extend(self)
+        RequestContextBuilder::from(self)
             .scope(Scope::new_page_service_pagestream(timeline_handle))
-            .build()
+            .attached_child()
     }
 
     pub fn with_scope_secondary_timeline(
@@ -417,22 +413,23 @@ impl RequestContext {
         tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
     ) -> Self {
-        RequestContextBuilder::extend(self)
+        RequestContextBuilder::from(self)
             .scope(Scope::new_secondary_timeline(tenant_shard_id, timeline_id))
-            .build()
+            .attached_child()
     }
 
     pub fn with_scope_secondary_tenant(&self, tenant_shard_id: &TenantShardId) -> Self {
-        RequestContextBuilder::extend(self)
+        RequestContextBuilder::from(self)
             .scope(Scope::new_secondary_tenant(tenant_shard_id))
-            .build()
+            .attached_child()
     }
 
     #[cfg(test)]
     pub fn with_scope_unit_test(&self) -> Self {
-        RequestContextBuilder::new(TaskKind::UnitTest)
+        RequestContextBuilder::from(self)
+            .task_kind(TaskKind::UnitTest)
             .scope(Scope::new_unit_test())
-            .build()
+            .attached_child()
     }
 
     pub fn task_kind(&self) -> TaskKind {

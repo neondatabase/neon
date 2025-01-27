@@ -2656,11 +2656,12 @@ async fn getpage_at_lsn_handler_inner(
     let lsn: Option<Lsn> = parse_query_param(&request, "lsn")?;
 
     async {
-        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-        // Enable read path debugging
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
-        let ctx = RequestContextBuilder::extend(&ctx).read_path_debug(true)
-        .scope(context::Scope::new_timeline(&timeline)).build();
+        let ctx = RequestContextBuilder::new(TaskKind::MgmtRequest)
+            .download_behavior(DownloadBehavior::Download)
+            .scope(context::Scope::new_timeline(&timeline))
+            .read_path_debug(true)
+            .root();
 
         // Use last_record_lsn if no lsn is provided
         let lsn = lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
@@ -3391,14 +3392,15 @@ async fn put_tenant_timeline_import_wal(
 
     check_permission(&request, Some(tenant_id))?;
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-
     let span = info_span!("import_wal", tenant_id=%tenant_id, timeline_id=%timeline_id, start_lsn=%start_lsn, end_lsn=%end_lsn);
     async move {
         let state = get_state(&request);
 
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, TenantShardId::unsharded(tenant_id), timeline_id).await?;
-        let ctx = RequestContextBuilder::extend(&ctx).scope(context::Scope::new_timeline(&timeline)).build();
+        let ctx = RequestContextBuilder::new(TaskKind::MgmtRequest)
+            .download_behavior(DownloadBehavior::Warn)
+            .scope(context::Scope::new_timeline(&timeline))
+            .root();
 
         let mut body = StreamReader::new(request.into_body().map(|res| {
             res.map_err(|error| {

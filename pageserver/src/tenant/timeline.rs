@@ -7193,9 +7193,9 @@ mod tests {
 
             eprintln!("Downloading {layer} and re-generating heatmap");
 
-            let ctx = &RequestContextBuilder::extend(ctx)
+            let ctx = &RequestContextBuilder::from(ctx)
                 .download_behavior(crate::context::DownloadBehavior::Download)
-                .build();
+                .attached_child();
 
             let _resident = layer
                 .download_and_keep_resident(ctx)
