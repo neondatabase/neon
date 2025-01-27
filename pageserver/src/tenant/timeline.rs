@@ -1704,14 +1704,16 @@ impl Timeline {
         };
 
         // Signal compaction failure to avoid L0 flush stalls when it's broken.
-        let compaction_failed = match result {
-            Ok(_) => false,
-            Err(CompactionError::Offload(_)) => false, // doesn't halt compaction
-            Err(CompactionError::ShuttingDown) => false, // not a failure
-            Err(CompactionError::Other(_)) => true,
+        match result {
+            Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
+            Err(CompactionError::Other(_)) => {
+                self.compaction_failed.store(true, AtomicOrdering::Relaxed)
+            }
+            // Don't change the current value on offload failure or shutdown. We don't want to
+            // abruptly stall nor resume L0 flushes in these cases.
+            Err(CompactionError::Offload(_)) => {}
+            Err(CompactionError::ShuttingDown) => {}
         };
-        self.compaction_failed
-            .store(compaction_failed, AtomicOrdering::Relaxed);
 
         result
     }
@@ -2166,8 +2168,8 @@ impl Timeline {
     }
 
     fn get_l0_flush_delay_threshold(&self) -> Option<usize> {
-        // Default to delay L0 flushes at 2x compaction threshold.
-        const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 2;
+        // Default to delay L0 flushes at 3x compaction threshold.
+        const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 3;
 
         // If compaction is disabled, don't delay.
         if self.get_compaction_period() == Duration::ZERO {
@@ -2195,8 +2197,10 @@ impl Timeline {
     }
 
     fn get_l0_flush_stall_threshold(&self) -> Option<usize> {
-        // Default to stall L0 flushes at 4x compaction threshold.
-        const DEFAULT_L0_FLUSH_STALL_FACTOR: usize = 4;
+        // Default to stall L0 flushes at 5x compaction threshold.
+        // TODO: stalls are temporarily disabled by default, see below.
+        #[allow(unused)]
+        const DEFAULT_L0_FLUSH_STALL_FACTOR: usize = 5;
 
         // If compaction is disabled, don't stall.
         if self.get_compaction_period() == Duration::ZERO {
@@ -2228,8 +2232,13 @@ impl Timeline {
             return None;
         }
 
-        let l0_flush_stall_threshold = l0_flush_stall_threshold
-            .unwrap_or(DEFAULT_L0_FLUSH_STALL_FACTOR * compaction_threshold);
+        // Disable stalls by default. In ingest benchmarks, we see image compaction take >10
+        // minutes, blocking L0 compaction, and we can't stall L0 flushes for that long.
+        //
+        // TODO: fix this.
+        // let l0_flush_stall_threshold = l0_flush_stall_threshold
+        //    .unwrap_or(DEFAULT_L0_FLUSH_STALL_FACTOR * compaction_threshold);
+        let l0_flush_stall_threshold = l0_flush_stall_threshold?;
 
         // 0 disables backpressure.
         if l0_flush_stall_threshold == 0 {
