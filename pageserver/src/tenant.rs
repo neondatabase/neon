@@ -5330,15 +5330,9 @@ impl Tenant {
         )
         .await
         {
-            None => {
-                Err(TenantManifestError::Cancelled)
-            }
-            Some(Err(_)) if self.cancel.is_cancelled() => {
-                Err(TenantManifestError::Cancelled)
-            }
-            Some(Err(e)) => {
-                Err(TenantManifestError::RemoteStorage(e))
-            },
+            None => Err(TenantManifestError::Cancelled),
+            Some(Err(_)) if self.cancel.is_cancelled() => Err(TenantManifestError::Cancelled),
+            Some(Err(e)) => Err(TenantManifestError::RemoteStorage(e)),
             Some(Ok(_)) => {
                 // Store the successfully uploaded manifest, so that future callers can avoid
                 // re-uploading the same thing.
