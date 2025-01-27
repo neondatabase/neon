@@ -71,6 +71,7 @@ impl RedisKVClient {
     }
 
     // Running as a separate task to accept messages through the rx channel
+    // In case of problems with RTT: switch to recv_many() + redis pipeline
     pub async fn handle_messages(&mut self) -> anyhow::Result<Infallible> {
         loop {
             if let Some(msg) = self.rx.recv().await {

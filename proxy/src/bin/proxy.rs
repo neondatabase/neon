@@ -384,14 +384,8 @@ async fn main() -> anyhow::Result<()> {
     let redis_rps_limit = Vec::leak(args.redis_rps_limit.clone());
     RateBucketInfo::validate(redis_rps_limit)?;
 
-    let max_redis_rps = redis_rps_limit
-        .iter()
-        .map(|x| x.rps() as usize)
-        .max()
-        .unwrap_or(100_000); // this is the global proxy limit
-
     // channel size should be higher than redis client limit to avoid blocking
-    let (tx, rx) = tokio::sync::mpsc::channel(max_redis_rps * 2);
+    let (tx, rx) = tokio::sync::mpsc::channel(1024);
     let redis_kv_client = match &regional_redis_client {
         Some(redis_publisher) => Some(RedisKVClient::new(
             redis_publisher.clone(),

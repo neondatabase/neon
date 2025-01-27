@@ -14,18 +14,14 @@ pub(crate) enum KeyPrefix {
 }
 
 impl KeyPrefix {
-    pub(crate) fn build_redis_key(&self) -> anyhow::Result<String> {
+    pub(crate) fn build_redis_key(&self) -> String {
         match self {
             KeyPrefix::Cancel(key) => {
-                let key_str = format!("{key}");
-                if let Some(key_str) = key_str
-                    .strip_prefix("CancelKeyData(")
-                    .and_then(|s| s.strip_suffix(')'))
-                {
-                    Ok(format!("{}:{}", keyspace::CANCEL_PREFIX, key_str))
-                } else {
-                    Err(anyhow::anyhow!("Invalid key format"))
-                }
+                let hi = (key.backend_pid as u64) << 32;
+                let lo = (key.cancel_key as u64) & 0xffff_ffff;
+                let id = hi | lo;
+                let keyspace = keyspace::CANCEL_PREFIX;
+                format!("{keyspace}:{id:x}")
             }
         }
     }
@@ -71,7 +67,7 @@ mod tests {
             cancel_key: 54321,
         });
 
-        let redis_key = cancel_key.build_redis_key().expect("Failed to parse key");
+        let redis_key = cancel_key.build_redis_key();
         assert_eq!(redis_key, "cancel:30390000d431");
     }
 

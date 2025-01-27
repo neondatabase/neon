@@ -90,7 +90,7 @@ impl CancellationHandler {
         }
     }
 
-    pub(crate) fn get_key(self: &Arc<Self>) -> Result<Session, CancelError> {
+    pub(crate) fn get_key(self: &Arc<Self>) -> Session {
         // we intentionally generate a random "backend pid" and "secret key" here.
         // we use the corresponding u64 as an identifier for the
         // actual endpoint+pid+secret for postgres/pgbouncer.
@@ -101,17 +101,14 @@ impl CancellationHandler {
         let key: CancelKeyData = rand::random();
 
         let prefix_key: KeyPrefix = KeyPrefix::Cancel(key);
-        let redis_key = prefix_key.build_redis_key().map_err(|e| {
-            tracing::warn!("failed to build redis key: {e}");
-            CancelError::InternalError
-        })?;
+        let redis_key = prefix_key.build_redis_key();
 
         debug!("registered new query cancellation key {key}");
-        Ok(Session {
+        Session {
             key,
             redis_key,
             cancellation_handler: Arc::clone(self),
-        })
+        }
     }
 
     /// Try to cancel a running query for the corresponding connection.
@@ -145,10 +142,7 @@ impl CancellationHandler {
 
         let prefix_key: KeyPrefix = KeyPrefix::Cancel(key);
 
-        let redis_key = prefix_key.build_redis_key().map_err(|e| {
-            tracing::warn!("failed to build redis key: {e}");
-            CancelError::InternalError
-        })?;
+        let redis_key = prefix_key.build_redis_key();
 
         let Some(tx) = &self.tx else {
             tracing::warn!("cancellation handler is not available");
@@ -304,7 +298,7 @@ impl Session {
     }
 
     // Add the redis event to the redis task queue
-    pub(crate) fn write_cancel_key(
+    pub(crate) async fn write_cancel_key(
         &self,
         cancel_closure: CancelClosure,
     ) -> Result<(), CancelError> {
@@ -329,15 +323,17 @@ impl Session {
                 .guard(RedisMsgKind::HSet),
         };
 
-        tx.try_send(op).map_err(|e| {
-            tracing::warn!("failed to send RedisOp: {e}");
-            CancelError::InternalError
-        })?;
-
+        let _ = tx
+            .send_timeout(op, std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| {
+                let key = self.key;
+                tracing::warn!("failed to send HSet RedisOp for {key}: {e}");
+            });
         Ok(())
     }
 
-    pub(crate) fn remove_cancel_key(&self) -> Result<(), CancelError> {
+    pub(crate) async fn remove_cancel_key(&self) -> Result<(), CancelError> {
         let Some(tx) = &self.cancellation_handler.tx else {
             tracing::warn!("cancellation handler is not available");
             return Err(CancelError::InternalError);
@@ -353,11 +349,13 @@ impl Session {
                 .guard(RedisMsgKind::HDel),
         };
 
-        tx.try_send(op).map_err(|e| {
-            tracing::warn!("failed to send RedisOp: {e}");
-            CancelError::InternalError
-        })?;
-
+        let _ = tx
+            .send_timeout(op, std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| {
+                let key = self.key;
+                tracing::warn!("failed to send HDel RedisOp for {key}: {e}");
+            });
         Ok(())
     }
 }

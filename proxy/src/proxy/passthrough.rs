@@ -82,9 +82,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
             tracing::warn!(session_id = ?self.session_id, ?err, "could not cancel the query in the database");
         }
 
-        if let Err(e) = self.cancel.remove_cancel_key() {
-            tracing::warn!(session_id = ?self.session_id, ?e, "could not remove the cancel key");
-        }
+        drop(self.cancel.remove_cancel_key().await); // we don't need a result. If the queue is full, we just log the error
 
         res
     }
