@@ -54,6 +54,7 @@ docker compose --profile test-extensions down
 TAG=${OLDTAG} docker compose --profile test-extensions up --build -d --force-recreate
 wait_for_ready
 docker compose cp  ext-src neon-test-extensions:/
+docker compose exec neon-test-extensions psql -c "DROP DATABASE IF EXISTS contrib_regression"
 docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regression"
 create_extensions "${EXTNAMES}"
 query="select pge.extname from pg_extension pge join (select key as extname, value as extversion from json_each_text('${new_vers}')) x on pge.extname=x.extname and pge.extversion <> x.extversion"
