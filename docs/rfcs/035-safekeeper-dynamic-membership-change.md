@@ -442,6 +442,10 @@ observability.
 `generation` is necessary there because after op is done reconciler must remove
 it and not remove another row with higher gen which in theory might appear.
 
+Any insert of row should overwrite (remove) all rows with the same sk and
+timeline id but lower `generation` as next op makes previous obsolete. Insertion
+of `op_type` `delete` overwrites all rows.
+
 About `exclude`: rather than adding explicit safekeeper http endpoint, it is
 reasonable to reuse configuration switch endpoint: if safekeeper is not member
 of the configuration it locally removes the timeline on the switch. In this case
