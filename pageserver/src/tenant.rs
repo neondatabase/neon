@@ -8225,6 +8225,13 @@ mod tests {
         assert_eq!(images.len(), 0); // the image layer should not contain tombstones, or it is not created
     }
 
+    fn key_max_minus_1() -> Key {
+        Key {
+            field6: u32::MAX - 1,
+            ..Key::MAX
+        }
+    }
+
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_images() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_simple_bottom_most_compaction_images").await?;
@@ -8405,7 +8412,7 @@ mod tests {
             vec![
                 // Image layer at GC horizon
                 PersistentLayerKey {
-                    key_range: Key::MIN..Key::MAX,
+                    key_range: Key::MIN..key_max_minus_1(),
                     lsn_range: Lsn(0x30)..Lsn(0x31),
                     is_delta: false
                 },
@@ -10777,7 +10784,7 @@ mod tests {
             vec![
                 // The compacted image layer (full key range)
                 PersistentLayerKey {
-                    key_range: Key::MIN..Key::MAX,
+                    key_range: Key::MIN..key_max_minus_1(),
                     lsn_range: Lsn(0x10)..Lsn(0x11),
                     is_delta: false,
                 },
@@ -11124,7 +11131,7 @@ mod tests {
             vec![
                 // The compacted image layer (full key range)
                 PersistentLayerKey {
-                    key_range: Key::MIN..Key::MAX,
+                    key_range: Key::MIN..key_max_minus_1(),
                     lsn_range: Lsn(0x10)..Lsn(0x11),
                     is_delta: false,
                 },
