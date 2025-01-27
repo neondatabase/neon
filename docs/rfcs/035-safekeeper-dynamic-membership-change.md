@@ -341,7 +341,7 @@ this RFC it is not needed.
 #### API
 
 Node management is similar to pageserver:
-1) POST `/control/v1/safekeepers` upserts safekeeper.
+1) POST `/control/v1/safekeepers` inserts safekeeper.
 2) GET `/control/v1/safekeepers` lists safekeepers.
 3) GET `/control/v1/safekeepers/:node_id` gets safekeeper.
 4) PUT `/control/v1/safekepers/:node_id/status` changes status to e.g.
@@ -478,9 +478,9 @@ safekeeper and its own, and so absense of it would be a clear sign of
 corruption. The following sequence works:
 1) Create timeline (or observe that it exists) on pageserver,
    figuring out last_record_lsn in response.
-2) Choose safekeepers and upsert (ON CONFLICT DO NOTHING) timeline row into the
+2) Choose safekeepers and insert (ON CONFLICT DO NOTHING) timeline row into the
    db. Note that last_record_lsn returned on the previous step is movable as it
-   changes once ingestion starts, upsert must not overwrite it (as well as other
+   changes once ingestion starts, insert must not overwrite it (as well as other
    fields like membership conf). On the contrary, start_lsn used in the next
    step must be set to the value in the db. cplane_notified_generation can be set
    to 1 (initial generation) in insert to avoid notifying cplane about initial 
