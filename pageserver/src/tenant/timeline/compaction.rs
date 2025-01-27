@@ -436,6 +436,16 @@ impl KeyHistoryRetention {
         if dry_run {
             return true;
         }
+        if key.key_range.end == Key::MAX {
+            warn!(
+                key=%key,
+                "discard layer due to layer key range being Key::MAX, which should not happen",
+            );
+            if cfg!(feature = "testing") {
+                panic!("Key::MAX should not be part of the key space");
+            }
+            return true;
+        }
         let layer_generation;
         {
             let guard = tline.layers.read().await;
@@ -2760,7 +2770,15 @@ impl Timeline {
 
         let produced_image_layers = if let Some(writer) = image_layer_writer {
             if !dry_run {
-                let end_key = job_desc.compaction_key_range.end;
+                let mut end_key = job_desc.compaction_key_range.end;
+                if end_key == Key::MAX {
+                    // There's a potential bug to-be-resolved when end_key is Key::MAX, so we need to subtract 1 to workaround it.
+                    // Note that we never write Key::MAX into the image layer, as this is not part of the key space.
+                    end_key = Key {
+                        field6: u32::MAX - 1,
+                        ..Key::MAX
+                    };
+                }
                 writer
                     .finish_with_discard_fn(self, ctx, end_key, discard)
                     .await?
