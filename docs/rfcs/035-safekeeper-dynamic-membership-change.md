@@ -424,7 +424,7 @@ outstanding work directly at the source of truth -- the db. So we can add table
 ```
 table! {
     // timeline_id, sk_id is primary key
-    timelines (sk_id, tenant_id, timeline_id) {
+    safekeeper_timeline_pending_ops (sk_id, tenant_id, timeline_id) {
         sk_id -> int8,
         tenant_id -> Varchar,
         timeline_id -> Varchar,
@@ -502,6 +502,10 @@ corruption. The following sequence works:
    re-reads the db for work to do. Passing work in memory is faster, but
    that shouldn't matter, and path to scan db for work will exist anyway, 
    simpler to reuse it.
+
+For pg version / wal segment size: while we may persist them in `timelines`
+table, it is not necessary as initial creation at step 3 can take them from
+cplane call and later pull_timeline will carry them around.
 
 Timeline migration.
 1) CAS to the db to create joint conf, and in the same transaction create
