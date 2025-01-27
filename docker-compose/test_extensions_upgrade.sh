@@ -43,7 +43,7 @@ EXTENSIONS='[
 {"extname": "pg_ivm", "extdir": "pg_ivm-src"}
 ]'
 EXTNAMES=$(echo ${EXTENSIONS} | jq -r '.[].extname' | paste -sd ' ' -)
-TAG=${NEWTAG} docker compose --profile test-extensions up --build -d
+TAG=${NEWTAG} docker compose --profile test-extensions up --quiet-pull --build -d
 wait_for_ready
 docker compose exec neon-test-extensions psql -c "DROP DATABASE IF EXISTS contrib_regression"
 docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regression"
@@ -51,7 +51,7 @@ create_extensions "${EXTNAMES}"
 query="select json_object_agg(extname,extversion) from pg_extension where extname in ('${EXTNAMES// /\',\'}')"
 new_vers=$(docker compose exec neon-test-extensions psql -Aqt -d contrib_regression -c "$query")
 docker compose --profile test-extensions down
-TAG=${OLDTAG} docker compose --profile test-extensions up --build -d --force-recreate
+TAG=${OLDTAG} docker compose --profile test-extensions up --quiet-pull --build -d --force-recreate
 wait_for_ready
 docker compose cp  ext-src neon-test-extensions:/
 docker compose exec neon-test-extensions psql -c "DROP DATABASE IF EXISTS contrib_regression"
@@ -78,7 +78,7 @@ else
     result=$(curl "${PARAMS[@]}")
     echo $result | jq .
     TENANT_ID=${tenant_id} TIMELINE_ID=${new_timeline_id} TAG=${OLDTAG} docker compose down compute compute_is_ready
-    COMPUTE_TAG=${NEWTAG} TAG=${OLDTAG} TENANT_ID=${tenant_id} TIMELINE_ID=${new_timeline_id} docker compose up -d --build compute compute_is_ready
+    COMPUTE_TAG=${NEWTAG} TAG=${OLDTAG} TENANT_ID=${tenant_id} TIMELINE_ID=${new_timeline_id} docker compose up --quiet-pull -d --build compute compute_is_ready
     wait_for_ready
     TID=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.timeline_id")
     if [ ${TID} != ${new_timeline_id} ]; then
@@ -91,4 +91,3 @@ else
     docker compose exec neon-test-extensions psql -d contrib_regression -c "\dx ${ext}"
   done
 fi
-docker compose --profile test-extensions down
