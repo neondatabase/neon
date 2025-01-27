@@ -112,11 +112,7 @@ typedef enum FileCacheBlockState
 	UNAVAILABLE, /* block is not present in cache */
 	AVAILABLE,   /* block can be used */
 	PENDING,     /* block is loaded */
-<<<<<<< HEAD
 	REQUESTED    /* some other backend is waiting for block to be loaded */
-=======
-    REQUESTED    /* some other backend is waiting for block to be loaded */
->>>>>>> dde427c35 (Store prefetch results in LFC cache once as soon as they are received)
 } FileCacheBlockState;
 
 
@@ -230,12 +226,6 @@ lfc_switch_off(void)
 		else
 			close(fd);
 
-<<<<<<< HEAD
-=======
-			if (rc < 0)
-				elog(WARNING, "Failed to truncate local file cache %s: %m", lfc_path);
-		}
->>>>>>> dde427c35 (Store prefetch results in LFC cache once as soon as they are received)
 		/* Wakeup waiting backends */
 		for (int i = 0; i < N_COND_VARS; i++)
 			ConditionVariableBroadcast(&lfc_ctl->cv[i]);
