@@ -256,6 +256,10 @@ pub struct TenantConfigToml {
     pub compaction_period: Duration,
     /// Level0 delta layer threshold for compaction.
     pub compaction_threshold: usize,
+    /// Maximum number of level0 delta layer for compaction. The final number of level0 delta layers
+    /// included depends on the layer size, which could be larger than this value. The total size of
+    /// level0 delta layers for compaction is computed as `compaction_upper_limit * checkpoint_distance`.
+    pub compaction_upper_limit: usize,
     pub compaction_algorithm: crate::models::CompactionAlgorithmSettings,
     /// Level0 delta layer threshold at which to delay layer flushes for compaction backpressure,
     /// such that they take 2x as long, and start waiting for layer flushes during ephemeral layer
@@ -523,6 +527,12 @@ pub mod tenant_conf_defaults {
 
     pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
+
+    // This value needs to be tuned to avoid OOM. We have 3/4 of the total CPU threads to do background works, that's 16*3/4=9 on
+    // most of our pageservers. Compaction ~50 layers requires about 2GB memory (could be reduced later by optimizing L0 hole
+    // calculation to avoid loading all keys into the memory). So with this config, we can get a maximum peak compaction usage of 18GB.
+    pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 50;
+
     pub const DEFAULT_COMPACTION_ALGORITHM: crate::models::CompactionAlgorithm =
         crate::models::CompactionAlgorithm::Legacy;
 
@@ -563,6 +573,7 @@ impl Default for TenantConfigToml {
             compaction_period: humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
                 .expect("cannot parse default compaction period"),
             compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
+            compaction_upper_limit: DEFAULT_COMPACTION_UPPER_LIMIT,
             compaction_algorithm: crate::models::CompactionAlgorithmSettings {
                 kind: DEFAULT_COMPACTION_ALGORITHM,
             },

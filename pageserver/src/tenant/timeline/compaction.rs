@@ -47,9 +47,7 @@ use crate::tenant::timeline::{ImageLayerCreationOutcome, IoConcurrency};
 use crate::tenant::timeline::{Layer, ResidentLayer};
 use crate::tenant::{gc_block, DeltaLayer, MaybeOffloaded};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
-use pageserver_api::config::tenant_conf_defaults::{
-    DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD,
-};
+use pageserver_api::config::tenant_conf_defaults::DEFAULT_CHECKPOINT_DISTANCE;
 
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpace;
@@ -1117,14 +1115,7 @@ impl Timeline {
         // Under normal circumstances, we will accumulate up to compaction_interval L0s of size
         // checkpoint_distance each.  To avoid edge cases using extra system resources, bound our
         // work in this function to only operate on this much delta data at once.
-        //
-        // Take the max of the configured value & the default, so that tests that configure tiny values
-        // can still use a sensible amount of memory, but if a deployed system configures bigger values we
-        // still let them compact a full stack of L0s in one go.
-        let delta_size_limit = std::cmp::max(
-            self.get_compaction_threshold(),
-            DEFAULT_COMPACTION_THRESHOLD,
-        ) as u64
+        let delta_size_limit = self.get_compaction_upper_limit() as u64
             * std::cmp::max(self.get_checkpoint_distance(), DEFAULT_CHECKPOINT_DISTANCE);
 
         let mut fully_compacted = true;
