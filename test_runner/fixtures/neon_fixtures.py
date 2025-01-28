@@ -4996,13 +4996,39 @@ def check_restored_datadir_content(
     assert (mismatch, error) == ([], [])
 
 
+# wait for subscriber to catch up with publisher
 def logical_replication_sync(
     subscriber: PgProtocol,
     publisher: PgProtocol,
+    # pass subname explicitly to avoid confusion
+    # when multiple subscriptions are present
+    subname: str,
     sub_dbname: str | None = None,
     pub_dbname: str | None = None,
-) -> Lsn:
+):
     """Wait logical replication subscriber to sync with publisher."""
+    not_ready = True
+    while not_ready:
+        # first check if the subscription is active `r` = `ready` normal state
+        query = f"""SELECT 1 FROM pg_subscription_rel join pg_catalog.pg_subscription
+                    on pg_subscription_rel.srsubid = pg_subscription.oid
+                    WHERE srsubstate NOT IN ('r', 's') and subname='{subname}'"""
+
+        if sub_dbname is not None:
+            res = subscriber.safe_psql(query, dbname=sub_dbname)
+        else:
+            res = subscriber.safe_psql(query)
+
+        log.info(f"res: {res}")
+        if res is None:
+            not_ready = False
+        if len(res) == 0:
+            not_ready = False
+
+        time.sleep(0.5)
+
+    # wait for the subscription to catch up with current state of publisher
+    # caller is responsible to call checkpoint before calling this function
     if pub_dbname is not None:
         publisher_lsn = Lsn(
             publisher.safe_psql("SELECT pg_current_wal_flush_lsn()", dbname=pub_dbname)[0][0]
@@ -5011,21 +5037,20 @@ def logical_replication_sync(
         publisher_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
     while True:
+        query = f"select latest_end_lsn from pg_catalog.pg_stat_subscription where latest_end_lsn is NOT NULL and subname='{subname}'"
+
         if sub_dbname is not None:
-            res = subscriber.safe_psql(
-                "select latest_end_lsn from pg_catalog.pg_stat_subscription", dbname=sub_dbname
-            )[0][0]
+            res = subscriber.safe_psql(query, dbname=sub_dbname)
         else:
-            res = subscriber.safe_psql(
-                "select latest_end_lsn from pg_catalog.pg_stat_subscription"
-            )[0][0]
+            res = subscriber.safe_psql(query)
 
         if res:
-            log.info(f"subscriber_lsn={res}")
-            subscriber_lsn = Lsn(res)
+            res_lsn = res[0][0]
+            log.info(f"subscriber_lsn={res_lsn}")
+            subscriber_lsn = Lsn(res_lsn)
             log.info(f"Subscriber LSN={subscriber_lsn}, publisher LSN={publisher_lsn}")
             if subscriber_lsn >= publisher_lsn:
-                return subscriber_lsn
+                return
         time.sleep(0.5)
 
 
