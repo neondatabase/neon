@@ -144,15 +144,19 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
-use super::remote_timeline_client::index::IndexPart;
-use super::remote_timeline_client::RemoteTimelineClient;
-use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
-use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
-use super::upload_queue::NotInitialized;
-use super::GcError;
 use super::{
-    debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf, MaybeOffloaded,
+    config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
+    MaybeOffloaded,
+};
+use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
+use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
+use super::{
+    remote_timeline_client::RemoteTimelineClient, remote_timeline_client::WaitCompletionError,
+    storage_layer::ReadableLayer,
+};
+use super::{
+    secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
+    GcError,
 };
 
 #[cfg(test)]
@@ -2168,8 +2172,8 @@ impl Timeline {
     }
 
     fn get_l0_flush_delay_threshold(&self) -> Option<usize> {
-        // Default to delay L0 flushes at 3x compaction threshold.
-        const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 3;
+        // Disable L0 flushes by default. This and compaction needs further tuning.
+        const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 0; // TODO: default to e.g. 3
 
         // If compaction is disabled, don't delay.
         if self.get_compaction_period() == Duration::ZERO {
@@ -2197,10 +2201,9 @@ impl Timeline {
     }
 
     fn get_l0_flush_stall_threshold(&self) -> Option<usize> {
-        // Default to stall L0 flushes at 5x compaction threshold.
-        // TODO: stalls are temporarily disabled by default, see below.
-        #[allow(unused)]
-        const DEFAULT_L0_FLUSH_STALL_FACTOR: usize = 5;
+        // Disable L0 stalls by default. In ingest benchmarks, we see image compaction take >10
+        // minutes, blocking L0 compaction, and we can't stall L0 flushes for that long.
+        const DEFAULT_L0_FLUSH_STALL_FACTOR: usize = 0; // TODO: default to e.g. 5
 
         // If compaction is disabled, don't stall.
         if self.get_compaction_period() == Duration::ZERO {
@@ -2232,13 +2235,8 @@ impl Timeline {
             return None;
         }
 
-        // Disable stalls by default. In ingest benchmarks, we see image compaction take >10
-        // minutes, blocking L0 compaction, and we can't stall L0 flushes for that long.
-        //
-        // TODO: fix this.
-        // let l0_flush_stall_threshold = l0_flush_stall_threshold
-        //    .unwrap_or(DEFAULT_L0_FLUSH_STALL_FACTOR * compaction_threshold);
-        let l0_flush_stall_threshold = l0_flush_stall_threshold?;
+        let l0_flush_stall_threshold = l0_flush_stall_threshold
+            .unwrap_or(DEFAULT_L0_FLUSH_STALL_FACTOR * compaction_threshold);
 
         // 0 disables backpressure.
         if l0_flush_stall_threshold == 0 {
@@ -4033,6 +4031,24 @@ impl Timeline {
             }
             // release lock on 'layers'
         };
+
+        // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
+        // This makes us refuse ingest until the new layers have been persisted to the remote
+        let start = Instant::now();
+        self.remote_client
+            .wait_completion()
+            .await
+            .map_err(|e| match e {
+                WaitCompletionError::UploadQueueShutDownOrStopped
+                | WaitCompletionError::NotInitialized(
+                    NotInitialized::ShuttingDown | NotInitialized::Stopped,
+                ) => FlushLayerError::Cancelled,
+                WaitCompletionError::NotInitialized(NotInitialized::Uninitialized) => {
+                    FlushLayerError::Other(anyhow!(e).into())
+                }
+            })?;
+        let duration = start.elapsed().as_secs_f64();
+        self.metrics.flush_wait_upload_time_gauge_add(duration);
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
