@@ -1264,18 +1264,14 @@ RUN set -e \
     && make -j $(nproc) dist_man_MANS= \
     && make install dist_man_MANS=
 
-#########################################################################################
-#
-# Layers "postgres-exporter", "pgbouncer-exporter", and "sql-exporter"
-#
-#########################################################################################
-
-FROM quay.io/prometheuscommunity/postgres-exporter:v0.16.0 AS postgres-exporter
-FROM quay.io/prometheuscommunity/pgbouncer-exporter:v0.10.2 AS pgbouncer-exporter
-
-# Keep the version the same as in build-tools.Dockerfile and
-# test_runner/regress/test_compute_metrics.py.
-FROM burningalchemist/sql_exporter:0.17.0 AS sql-exporter
+FROM alpine:latest AS exporters
+RUN apk add --no-cache wget tar\
+    && wget -qO- https://github.com/prometheus-community/postgres_exporter/releases/download/v0.16.0/postgres_exporter-0.16.0.linux-amd64.tar.gz\
+     | tar xzf - --strip-components=1 -C.\
+    && wget -qO- https://github.com/prometheus-community/pgbouncer_exporter/releases/download/v0.10.2/pgbouncer_exporter-0.10.2.linux-amd64.tar.gz\
+     | tar xzf - --strip-components=1 -C.\
+    && wget -qO- https://github.com/burningalchemist/sql_exporter/releases/download/0.17.0/sql_exporter-0.17.0.linux-amd64.tar.gz\
+     | tar xzf - --strip-components=1 -C.
 
 #########################################################################################
 #
@@ -1401,10 +1397,10 @@ COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
 COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local_proxy
 RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 
-# Metrics exporter binaries and  configuration files
-COPY --from=postgres-exporter /bin/postgres_exporter /bin/postgres_exporter
-COPY --from=pgbouncer-exporter /bin/pgbouncer_exporter /bin/pgbouncer_exporter
-COPY --from=sql-exporter      /bin/sql_exporter      /bin/sql_exporter
+# Metrics exporter binaries and configuration files
+COPY --from=exporters ./postgres_exporter /bin/postgres_exporter
+COPY --from=exporters ./pgbouncer_exporter /bin/pgbouncer_exporter
+COPY --from=exporters ./sql_exporter /bin/sql_exporter
 
 COPY --chown=postgres compute/etc/postgres_exporter.yml /etc/postgres_exporter.yml
 
