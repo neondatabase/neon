@@ -83,6 +83,9 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
                 docker cp $TEST_CONTAINER_NAME:/ext-src/$d/regression.out $d || true
                 cat $d/regression.out $d/regression.diffs || true
             done
+            if echo $FAILED | grep -q postgis-src; then
+              docker exec $TEST_CONTAINER_NAME cat /tmp/pgis_reg/regress_log || true
+            fi
         rm -rf $FAILED
         exit 1
         fi
