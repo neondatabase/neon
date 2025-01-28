@@ -458,6 +458,8 @@ pub struct TenantConfigPatch {
     pub compaction_period: FieldPatch<String>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_threshold: FieldPatch<usize>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_upper_limit: FieldPatch<usize>,
     // defer parsing compaction_algorithm, like eviction_policy
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_algorithm: FieldPatch<CompactionAlgorithmSettings>,
@@ -522,6 +524,7 @@ pub struct TenantConfig {
     pub compaction_target_size: Option<u64>,
     pub compaction_period: Option<String>,
     pub compaction_threshold: Option<usize>,
+    pub compaction_upper_limit: Option<usize>,
     // defer parsing compaction_algorithm, like eviction_policy
     pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
     pub l0_flush_delay_threshold: Option<usize>,
@@ -559,6 +562,7 @@ impl TenantConfig {
             mut compaction_target_size,
             mut compaction_period,
             mut compaction_threshold,
+            mut compaction_upper_limit,
             mut compaction_algorithm,
             mut l0_flush_delay_threshold,
             mut l0_flush_stall_threshold,
@@ -594,6 +598,9 @@ impl TenantConfig {
             .apply(&mut compaction_target_size);
         patch.compaction_period.apply(&mut compaction_period);
         patch.compaction_threshold.apply(&mut compaction_threshold);
+        patch
+            .compaction_upper_limit
+            .apply(&mut compaction_upper_limit);
         patch.compaction_algorithm.apply(&mut compaction_algorithm);
         patch
             .l0_flush_delay_threshold
@@ -653,6 +660,7 @@ impl TenantConfig {
             compaction_target_size,
             compaction_period,
             compaction_threshold,
+            compaction_upper_limit,
             compaction_algorithm,
             l0_flush_delay_threshold,
             l0_flush_stall_threshold,

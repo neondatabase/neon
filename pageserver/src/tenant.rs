@@ -3816,6 +3816,13 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
+    pub fn get_compaction_upper_limit(&self) -> usize {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .compaction_upper_limit
+            .unwrap_or(self.conf.default_tenant_conf.compaction_upper_limit)
+    }
+
     pub fn get_gc_horizon(&self) -> u64 {
         let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
         tenant_conf
@@ -5469,6 +5476,7 @@ pub(crate) mod harness {
                 compaction_target_size: Some(tenant_conf.compaction_target_size),
                 compaction_period: Some(tenant_conf.compaction_period),
                 compaction_threshold: Some(tenant_conf.compaction_threshold),
+                compaction_upper_limit: Some(tenant_conf.compaction_upper_limit),
                 compaction_algorithm: Some(tenant_conf.compaction_algorithm),
                 l0_flush_delay_threshold: tenant_conf.l0_flush_delay_threshold,
                 l0_flush_stall_threshold: tenant_conf.l0_flush_stall_threshold,

@@ -2181,6 +2181,14 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
+    fn get_compaction_upper_limit(&self) -> usize {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .compaction_upper_limit
+            .unwrap_or(self.conf.default_tenant_conf.compaction_upper_limit)
+    }
+
     fn get_l0_flush_delay_threshold(&self) -> Option<usize> {
         // Disable L0 flushes by default. This and compaction needs further tuning.
         const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 0; // TODO: default to e.g. 3
