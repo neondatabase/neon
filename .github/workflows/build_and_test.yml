@@ -242,7 +242,7 @@ jobs:
       statuses: write
       contents: write
       pull-requests: write
-    runs-on: [ self-hosted, small ]
+    runs-on: [ self-hosted, small-metal ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
@@ -1101,7 +1101,7 @@ jobs:
                 state: 'closed',
                 base: branch,
               });
-              
+
               const pr = pullRequests.data.find(pr => pr.merge_commit_sha === context.sha);
               const prNumber = pr ? pr.number : null;
 
