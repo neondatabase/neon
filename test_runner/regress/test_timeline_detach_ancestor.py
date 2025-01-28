@@ -607,7 +607,7 @@ def test_timeline_ancestor_detach_idempotent_success(
 
     if shards_after > 1:
         # FIXME: should this be in the neon_env_builder.init_start?
-        env.storage_controller.reconcile_until_idle()
+        env.storage_controller.reconcile_until_idle(timeout_secs=120)
         client = env.storage_controller.pageserver_api()
     else:
         client = env.pageserver.http_client()
@@ -636,7 +636,7 @@ def test_timeline_ancestor_detach_idempotent_success(
         # Do a shard split
         # This is a reproducer for https://github.com/neondatabase/neon/issues/9667
         env.storage_controller.tenant_shard_split(env.initial_tenant, shards_after)
-        env.storage_controller.reconcile_until_idle()
+        env.storage_controller.reconcile_until_idle(timeout_secs=120)
 
     first_reparenting_response = client.detach_ancestor(env.initial_tenant, first_branch)
     assert set(first_reparenting_response) == {reparented1, reparented2}
