@@ -786,6 +786,15 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
+      - name: Get the last compute release tag
+        id: get-last-compute-release-tag
+        run: |
+          tag=$(gh api -q '[.[].tag_name | select(startswith("release-compute"))][0]'\
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/releases")
+          echo tag=${tag} >> ${GITHUB_OUTPUT}
+
       # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
       # Pick pageserver as currently the only binary with extra "version" features printed in the string to verify.
       # Regular pageserver version string looks like
@@ -828,7 +837,7 @@ jobs:
         if: ${{ needs.tag.outputs.build-tag == github.run_id }}
         env:
           NEWTAG: ${{ needs.tag.outputs.build-tag }}
-          OLDTAG: latest
+          OLDTAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
         run: ./docker-compose/test_extensions_upgrade.sh
 
       - name: Print logs and clean up
