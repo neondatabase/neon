@@ -17,15 +17,98 @@ use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::ext::LockExt;
+use crate::metrics::CancelChannelSizeGuard;
 use crate::metrics::{CancellationRequest, Metrics, RedisMsgKind};
 use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::keys::KeyPrefix;
-use crate::redis::kv_ops::RedisOp;
+use crate::redis::kv_ops::RedisKVClient;
 use crate::tls::postgres_rustls::MakeRustlsConnect;
+use std::convert::Infallible;
+use tokio::sync::oneshot;
 
 type IpSubnetKey = IpNet;
 
-const _EXPIRE_TIME: i64 = 1_209_600; // 2 weeks cancellation key expire time
+const CANCEL_KEY_TTL: i64 = 1_209_600; // 2 weeks cancellation key expire time
+
+// Message types for sending through mpsc channel
+pub enum CancelKeyOp {
+    StoreCancelKey {
+        key: String,
+        field: String,
+        value: String,
+        resp_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+        _guard: CancelChannelSizeGuard<'static>,
+        expire: i64, // TTL for key
+    },
+    GetCancelData {
+        key: String,
+        resp_tx: oneshot::Sender<anyhow::Result<Vec<(String, String)>>>,
+        _guard: CancelChannelSizeGuard<'static>,
+    },
+    RemoveCancelKey {
+        key: String,
+        field: String,
+        resp_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+        _guard: CancelChannelSizeGuard<'static>,
+    },
+}
+
+// Running as a separate task to accept messages through the rx channel
+// In case of problems with RTT: switch to recv_many() + redis pipeline
+pub async fn handle_cancel_messages(
+    client: &mut RedisKVClient,
+    mut rx: mpsc::Receiver<CancelKeyOp>,
+) -> anyhow::Result<Infallible> {
+    loop {
+        if let Some(msg) = rx.recv().await {
+            match msg {
+                CancelKeyOp::StoreCancelKey {
+                    key,
+                    field,
+                    value,
+                    resp_tx,
+                    _guard,
+                    expire: _,
+                } => {
+                    if let Some(resp_tx) = resp_tx {
+                        resp_tx
+                            .send(client.hset(key, field, value).await)
+                            .inspect_err(|e| {
+                                tracing::debug!("failed to send StoreCancelKey response: {:?}", e);
+                            })
+                            .ok();
+                    } else {
+                        drop(client.hset(key, field, value).await);
+                    }
+                }
+                CancelKeyOp::GetCancelData {
+                    key,
+                    resp_tx,
+                    _guard,
+                } => {
+                    drop(resp_tx.send(client.hget_all(key).await));
+                }
+                CancelKeyOp::RemoveCancelKey {
+                    key,
+                    field,
+                    resp_tx,
+                    _guard,
+                } => {
+                    if let Some(resp_tx) = resp_tx {
+                        resp_tx
+                            .send(client.hdel(key, field).await)
+                            .inspect_err(|e| {
+                                tracing::debug!("failed to send StoreCancelKey response: {:?}", e);
+                            })
+                            .ok();
+                    } else {
+                        drop(client.hdel(key, field).await);
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Enables serving `CancelRequest`s.
 ///
@@ -34,7 +117,7 @@ pub struct CancellationHandler {
     compute_config: &'static ComputeConfig,
     // rate limiter of cancellation requests
     limiter: Arc<std::sync::Mutex<LeakyBucketRateLimiter<IpSubnetKey>>>,
-    tx: Option<mpsc::Sender<RedisOp>>, // send messages to the redis KV client task
+    tx: Option<mpsc::Sender<CancelKeyOp>>, // send messages to the redis KV client task
 }
 
 #[derive(Debug, Error)]
@@ -79,7 +162,10 @@ impl ReportableError for CancelError {
 }
 
 impl CancellationHandler {
-    pub fn new(compute_config: &'static ComputeConfig, tx: Option<mpsc::Sender<RedisOp>>) -> Self {
+    pub fn new(
+        compute_config: &'static ComputeConfig,
+        tx: Option<mpsc::Sender<CancelKeyOp>>,
+    ) -> Self {
         Self {
             compute_config,
             tx,
@@ -113,6 +199,67 @@ impl CancellationHandler {
         }
     }
 
+    async fn get_cancel_key(
+        &self,
+        key: CancelKeyData,
+    ) -> Result<Option<CancelClosure>, CancelError> {
+        let prefix_key: KeyPrefix = KeyPrefix::Cancel(key);
+        let redis_key = prefix_key.build_redis_key();
+
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let op = CancelKeyOp::GetCancelData {
+            key: redis_key,
+            resp_tx,
+            _guard: Metrics::get()
+                .proxy
+                .cancel_channel_size
+                .guard(RedisMsgKind::HGetAll),
+        };
+
+        let Some(tx) = &self.tx else {
+            tracing::warn!("cancellation handler is not available");
+            return Err(CancelError::InternalError);
+        };
+
+        tx.send_timeout(op, std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| {
+                tracing::warn!("failed to send GetCancelData for {key}: {e}");
+            })
+            .map_err(|()| CancelError::InternalError)?;
+
+        let result = resp_rx.await.map_err(|e| {
+            tracing::warn!("failed to receive GetCancelData response: {e}");
+            CancelError::InternalError
+        })?;
+
+        let cancel_state_str: Option<String> = match result {
+            Ok(mut state) => {
+                if state.len() == 1 {
+                    Some(state.remove(0).1)
+                } else {
+                    tracing::warn!("unexpected number of entries in cancel state: {state:?}");
+                    return Err(CancelError::InternalError);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to receive cancel state from redis: {e}");
+                return Err(CancelError::InternalError);
+            }
+        };
+
+        let cancel_state: Option<CancelClosure> = match cancel_state_str {
+            Some(state) => {
+                let cancel_closure: CancelClosure = serde_json::from_str(&state).map_err(|e| {
+                    tracing::warn!("failed to deserialize cancel state: {e}");
+                    CancelError::InternalError
+                })?;
+                Some(cancel_closure)
+            }
+            None => None,
+        };
+        Ok(cancel_state)
+    }
     /// Try to cancel a running query for the corresponding connection.
     /// If the cancellation key is not found, it will be published to Redis.
     /// check_allowed - if true, check if the IP is allowed to cancel the query.
@@ -142,60 +289,10 @@ impl CancellationHandler {
             return Err(CancelError::RateLimit);
         }
 
-        let prefix_key: KeyPrefix = KeyPrefix::Cancel(key);
-
-        let redis_key = prefix_key.build_redis_key();
-
-        let Some(tx) = &self.tx else {
-            tracing::warn!("cancellation handler is not available");
-            return Err(CancelError::InternalError);
-        };
-
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let op = RedisOp::HGetAll {
-            key: redis_key,
-            resp_tx,
-            _guard: Metrics::get()
-                .proxy
-                .cancel_channel_size
-                .guard(RedisMsgKind::HGetAll),
-        };
-
-        tx.send(op).await.map_err(|e| {
-            tracing::warn!("failed to send RedisOp: {e}");
-            CancelError::InternalError
-        })?;
-
-        let result = resp_rx.await.map_err(|e| {
+        let cancel_state = self.get_cancel_key(key).await.map_err(|e| {
             tracing::warn!("failed to receive RedisOp response: {e}");
             CancelError::InternalError
         })?;
-
-        let cancel_state_str: Option<String> = match result {
-            Ok(mut state) => {
-                if state.len() == 1 {
-                    Some(state.remove(0).1)
-                } else {
-                    tracing::warn!("unexpected number of entries in cancel state: {state:?}");
-                    return Err(CancelError::InternalError);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("failed to receive cancel state from redis: {e}");
-                return Err(CancelError::InternalError);
-            }
-        };
-
-        let cancel_state: Option<CancelClosure> = match cancel_state_str {
-            Some(state) => {
-                let cancel_closure: CancelClosure = serde_json::from_str(&state).map_err(|e| {
-                    tracing::warn!("failed to deserialize cancel state: {e}");
-                    CancelError::InternalError
-                })?;
-                Some(cancel_closure)
-            }
-            None => None,
-        };
 
         let Some(cancel_closure) = cancel_state else {
             tracing::warn!("query cancellation key not found: {key}");
@@ -299,7 +396,7 @@ impl Session {
         &self.key
     }
 
-    // Add the redis event to the redis task queue
+    // Send the store key op to the cancellation handler
     pub(crate) async fn write_cancel_key(
         &self,
         cancel_closure: CancelClosure,
@@ -314,11 +411,38 @@ impl Session {
             CancelError::InternalError
         })?;
 
-        let op = RedisOp::HSet {
+        let op = CancelKeyOp::StoreCancelKey {
             key: self.redis_key.clone(),
             field: "data".to_string(),
             value: closure_json,
-            resp_tx: None, // error handling is done in the worker task,
+            resp_tx: None,
+            _guard: Metrics::get()
+                .proxy
+                .cancel_channel_size
+                .guard(RedisMsgKind::HSet),
+            expire: CANCEL_KEY_TTL,
+        };
+
+        let _ = tx
+            .send_timeout(op, std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| {
+                let key = self.key;
+                tracing::warn!("failed to send StoreCancelKey for {key}: {e}");
+            });
+        Ok(())
+    }
+
+    pub(crate) async fn remove_cancel_key(&self) -> Result<(), CancelError> {
+        let Some(tx) = &self.cancellation_handler.tx else {
+            tracing::warn!("cancellation handler is not available");
+            return Err(CancelError::InternalError);
+        };
+
+        let op = CancelKeyOp::RemoveCancelKey {
+            key: self.redis_key.clone(),
+            field: "data".to_string(),
+            resp_tx: None,
             _guard: Metrics::get()
                 .proxy
                 .cancel_channel_size
@@ -330,33 +454,7 @@ impl Session {
             .await
             .map_err(|e| {
                 let key = self.key;
-                tracing::warn!("failed to send HSet RedisOp for {key}: {e}");
-            });
-        Ok(())
-    }
-
-    pub(crate) async fn remove_cancel_key(&self) -> Result<(), CancelError> {
-        let Some(tx) = &self.cancellation_handler.tx else {
-            tracing::warn!("cancellation handler is not available");
-            return Err(CancelError::InternalError);
-        };
-
-        let op = RedisOp::HDel {
-            key: self.redis_key.clone(),
-            field: "data".to_string(),
-            resp_tx: None,
-            _guard: Metrics::get()
-                .proxy
-                .cancel_channel_size
-                .guard(RedisMsgKind::HDel),
-        };
-
-        let _ = tx
-            .send_timeout(op, std::time::Duration::from_secs(10))
-            .await
-            .map_err(|e| {
-                let key = self.key;
-                tracing::warn!("failed to send HDel RedisOp for {key}: {e}");
+                tracing::warn!("failed to send RemoveCancelKey for {key}: {e}");
             });
         Ok(())
     }

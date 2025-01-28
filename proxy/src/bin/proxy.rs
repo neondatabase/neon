@@ -7,7 +7,7 @@ use anyhow::bail;
 use futures::future::Either;
 use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
-use proxy::cancellation::CancellationHandler;
+use proxy::cancellation::{handle_cancel_messages, CancellationHandler};
 use proxy::config::{
     self, remote_storage_from_toml, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig,
     ProjectInfoCacheOptions, ProxyConfig, ProxyProtocolV2,
@@ -384,20 +384,15 @@ async fn main() -> anyhow::Result<()> {
     let redis_rps_limit = Vec::leak(args.redis_rps_limit.clone());
     RateBucketInfo::validate(redis_rps_limit)?;
 
-    // channel size should be higher than redis client limit to avoid blocking
-    let (tx, rx) = tokio::sync::mpsc::channel(1024);
-    let redis_kv_client = match &regional_redis_client {
-        Some(redis_publisher) => Some(RedisKVClient::new(
-            redis_publisher.clone(),
-            redis_rps_limit,
-            rx,
-        )?),
-        None => None,
-    };
+    let redis_kv_client = regional_redis_client
+        .as_ref()
+        .map(|redis_publisher| RedisKVClient::new(redis_publisher.clone(), redis_rps_limit));
 
+    // channel size should be higher than redis client limit to avoid blocking
+    let (tx_cancel, rx_cancel) = tokio::sync::mpsc::channel(1024);
     let cancellation_handler = Arc::new(CancellationHandler::new(
         &config.connect_to_compute,
-        Some(tx),
+        Some(tx_cancel),
     ));
 
     // bit of a hack - find the min rps and max rps supported and turn it into
@@ -509,7 +504,7 @@ async fn main() -> anyhow::Result<()> {
             if let Some(mut redis_kv_client) = redis_kv_client {
                 maintenance_tasks.spawn(async move {
                     redis_kv_client.try_connect().await?;
-                    redis_kv_client.handle_messages().await
+                    handle_cancel_messages(&mut redis_kv_client, rx_cancel).await
                 });
             }
 
