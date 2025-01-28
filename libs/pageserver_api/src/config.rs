@@ -256,9 +256,10 @@ pub struct TenantConfigToml {
     pub compaction_period: Duration,
     /// Level0 delta layer threshold for compaction.
     pub compaction_threshold: usize,
-    /// Maximum number of level0 delta layer for compaction. The final number of level0 delta layers
-    /// included depends on the layer size, which could be larger than this value. The total size of
-    /// level0 delta layers for compaction is computed as `compaction_upper_limit * checkpoint_distance`.
+    /// Controls the amount of L0 included in a single compaction iteration.
+    /// The unit is `checkpoint_distance`, i.e., a size.
+    /// We add L0s to the set of layers to compact until their cumulative
+    /// size exceeds `compaction_upper_limit * checkpoint_distance`.
     pub compaction_upper_limit: usize,
     pub compaction_algorithm: crate::models::CompactionAlgorithmSettings,
     /// Level0 delta layer threshold at which to delay layer flushes for compaction backpressure,
