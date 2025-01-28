@@ -1343,10 +1343,8 @@ async fn init_timeline_state(
                     Some(remote_meta) => {
                         // TODO: checksums for layers (https://github.com/neondatabase/neon/issues/2784)
                         if local_meta.len() != remote_meta.metadata.file_size {
-                            // This should not happen, because we do crashsafe write-then-rename when downloading
-                            // layers, and layers in remote storage are immutable.  Remove the local file because
-                            // we cannot trust it.
-                            tracing::warn!(
+                            // This can happen if the remote layer changes on the remote, e.g. because it gets rewritten.
+                            tracing::info!(
                                 "Removing local layer {name} with unexpected local size {} != {}",
                                 local_meta.len(),
                                 remote_meta.metadata.file_size
