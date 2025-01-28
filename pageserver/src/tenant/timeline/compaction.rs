@@ -666,10 +666,31 @@ impl Timeline {
 
         // Define partitioning schema if needed
 
-        // FIXME: the match should only cover repartitioning, not the next steps
-        let (partition_count, has_pending_tasks) = match self
+        // 1. L0 Compact
+        let fully_compacted = {
+            let timer = self.metrics.compact_time_histo.start_timer();
+            let fully_compacted = self
+                .compact_level0(
+                    target_file_size,
+                    options.flags.contains(CompactFlags::ForceL0Compaction),
+                    ctx,
+                )
+                .await?;
+            timer.stop_and_record();
+            fully_compacted
+        };
+
+        if !fully_compacted {
+            // Yield and do not do any other kind of compaction. True means
+            // that we have pending L0 compaction tasks and the compaction scheduler
+            // will prioritize compacting this tenant/timeline again.
+            return Ok(true);
+        }
+
+        // 2. Repartition and create image layers if necessary
+        let partition_count = match self
             .repartition(
-                self.get_last_record_lsn(),
+                self.get_last_record_lsn(), // TODO: use L0-L1 boundary
                 self.get_compaction_target_size(),
                 options.flags,
                 ctx,
@@ -681,17 +702,6 @@ impl Timeline {
                 let image_ctx = RequestContextBuilder::extend(ctx)
                     .access_stats_behavior(AccessStatsBehavior::Skip)
                     .build();
-
-                // 2. Compact
-                let timer = self.metrics.compact_time_histo.start_timer();
-                let fully_compacted = self
-                    .compact_level0(
-                        target_file_size,
-                        options.flags.contains(CompactFlags::ForceL0Compaction),
-                        ctx,
-                    )
-                    .await?;
-                timer.stop_and_record();
 
                 let mut partitioning = dense_partitioning;
                 partitioning
@@ -721,7 +731,7 @@ impl Timeline {
                 } else {
                     info!("skipping image layer generation due to L0 compaction did not include all layers.");
                 }
-                (partitioning.parts.len(), !fully_compacted)
+                partitioning.parts.len()
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -733,9 +743,11 @@ impl Timeline {
                 if !self.cancel.is_cancelled() && !err.is_cancelled() {
                     tracing::error!("could not compact, repartitioning keyspace failed: {err:?}");
                 }
-                (1, false)
+                1
             }
         };
+
+        // 3. Shard ancestor compaction
 
         if self.shard_identity.count >= ShardCount::new(2) {
             // Limit the number of layer rewrites to the number of partitions: this means its
@@ -746,7 +758,7 @@ impl Timeline {
             self.compact_shard_ancestors(rewrite_max, ctx).await?;
         }
 
-        Ok(has_pending_tasks)
+        Ok(false)
     }
 
     /// Check for layers that are elegible to be rewritten:
