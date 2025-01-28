@@ -704,7 +704,7 @@ impl<'a> TenantDownloader<'a> {
         let last_heatmap_timelines = last_heatmap.as_ref().map(|htm| {
             htm.timelines
                 .iter()
-                .map(|tl| (tl.timeline_id, &*tl))
+                .map(|tl| (tl.timeline_id, tl))
                 .collect::<HashMap<_, _>>()
         });
 
@@ -742,9 +742,7 @@ impl<'a> TenantDownloader<'a> {
                         last_heatmap_timelines
                             .as_ref()
                             .and_then(|last_heatmap_timelines| {
-                                last_heatmap_timelines
-                                    .get(&timeline.timeline_id)
-                                    .map(|tl| *tl)
+                                last_heatmap_timelines.get(&timeline.timeline_id).copied()
                             });
                     // We have no existing state: need to scan local disk for layers first.
                     let timeline_state = init_timeline_state(

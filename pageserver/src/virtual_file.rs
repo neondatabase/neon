@@ -245,7 +245,7 @@ impl VirtualFile {
     ) -> Result<String, anyhow::Error> {
         let mut buf = Vec::new();
         self.read_to_end(&mut buf, ctx).await?;
-        return Ok(String::from_utf8(buf)?);
+        Ok(String::from_utf8(buf)?)
     }
 }
 
