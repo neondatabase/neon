@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS results (
     flaky        BOOLEAN NOT NULL,
     arch         arch DEFAULT 'X64',
     lfc          BOOLEAN DEFAULT false NOT NULL,
+    sanitizers   BOOLEAN DEFAULT false NOT NULL,
     build_type   TEXT NOT NULL,
     pg_version   INT NOT NULL,
     run_id       BIGINT NOT NULL,
@@ -39,7 +40,7 @@ CREATE TABLE IF NOT EXISTS results (
     reference    TEXT NOT NULL,
     revision     CHAR(40) NOT NULL,
     raw          JSONB COMPRESSION lz4 NOT NULL,
-    UNIQUE (parent_suite, suite, name, arch, build_type, pg_version, started_at, stopped_at, run_id)
+    UNIQUE (parent_suite, suite, name, arch, lfc, sanitizers, build_type, pg_version, started_at, stopped_at, run_id)
 );
 """
 
