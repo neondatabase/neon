@@ -77,10 +77,10 @@ camino = "1.1.6"
 cfg-if = "1.0.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.0", features = ["derive", "env"] }
+clashmap = { version = "1.0", features = ["raw-api"] }
 comfy-table = "7.1"
 const_format = "0.2"
 crc32c = "0.6"
-dashmap = { version = "5.5.0", features = ["raw-api"] }
 diatomic-waker = { version = "0.2.3" }
 either = "1.8"
 enum-map = "2.4.2"

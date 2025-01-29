@@ -6,7 +6,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashmap::DashMap;
+use clashmap::ClashMap;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
@@ -148,7 +148,7 @@ impl ApiCaches {
 /// Various caches for [`control_plane`](super).
 pub struct ApiLocks<K> {
     name: &'static str,
-    node_locks: DashMap<K, Arc<DynamicLimiter>>,
+    node_locks: ClashMap<K, Arc<DynamicLimiter>>,
     config: RateLimiterConfig,
     timeout: Duration,
     epoch: std::time::Duration,
@@ -180,7 +180,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
     ) -> prometheus::Result<Self> {
         Ok(Self {
             name,
-            node_locks: DashMap::with_shard_amount(shards),
+            node_locks: ClashMap::with_shard_amount(shards),
             config,
             timeout,
             epoch,
@@ -238,7 +238,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
                 let mut lock = shard.write();
                 let timer = self.metrics.reclamation_lag_seconds.start_timer();
                 let count = lock
-                    .extract_if(|_, semaphore| Arc::strong_count(semaphore.get_mut()) == 1)
+                    .extract_if(|(_, semaphore)| Arc::strong_count(semaphore) == 1)
                     .count();
                 drop(lock);
                 self.metrics.semaphores_unregistered.inc_by(count as u64);
