@@ -70,6 +70,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::l0_flush::{self, L0FlushGlobalState};
+use crate::tenant::storage_layer::ImageLayerName;
 use crate::{
     aux_file::AuxFileSizeEstimator,
     page_service::TenantManagerTypes,
@@ -78,7 +79,7 @@ use crate::{
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
         storage_layer::{
-            inmemory_layer::IndexEntry, IoConcurrency, PersistentLayerDesc,
+            inmemory_layer::IndexEntry, BatchLayerWriter, IoConcurrency, PersistentLayerDesc,
             ValueReconstructSituation,
         },
     },
@@ -901,10 +902,17 @@ impl From<GetReadyAncestorError> for PageReconstructError {
     }
 }
 
+pub(crate) enum WaitLsnTimeout {
+    Custom(Duration),
+    // Use the [`PageServerConf::wait_lsn_timeout`] default
+    Default,
+}
+
 pub(crate) enum WaitLsnWaiter<'a> {
     Timeline(&'a Timeline),
     Tenant,
     PageService,
+    HttpEndpoint,
 }
 
 /// Argument to [`Timeline::shutdown`].
@@ -926,7 +934,7 @@ pub(crate) enum ShutdownMode {
 }
 
 struct ImageLayerCreationOutcome {
-    image: Option<ResidentLayer>,
+    unfinished_image_layer: Option<ImageLayerWriter>,
     next_start_key: Key,
 }
 
@@ -1301,6 +1309,7 @@ impl Timeline {
         &self,
         lsn: Lsn,
         who_is_waiting: WaitLsnWaiter<'_>,
+        timeout: WaitLsnTimeout,
         ctx: &RequestContext, /* Prepare for use by cancellation */
     ) -> Result<(), WaitLsnError> {
         let state = self.current_state();
@@ -1317,7 +1326,7 @@ impl Timeline {
                 | TaskKind::WalReceiverConnectionPoller => {
                     let is_myself = match who_is_waiting {
                         WaitLsnWaiter::Timeline(waiter) => Weak::ptr_eq(&waiter.myself, &self.myself),
-                        WaitLsnWaiter::Tenant | WaitLsnWaiter::PageService => unreachable!("tenant or page_service context are not expected to have task kind {:?}", ctx.task_kind()),
+                        WaitLsnWaiter::Tenant | WaitLsnWaiter::PageService | WaitLsnWaiter::HttpEndpoint => unreachable!("tenant or page_service context are not expected to have task kind {:?}", ctx.task_kind()),
                     };
                     if is_myself {
                         if let Err(current) = self.last_record_lsn.would_wait_for(lsn) {
@@ -1333,13 +1342,14 @@ impl Timeline {
             }
         }
 
+        let timeout = match timeout {
+            WaitLsnTimeout::Custom(t) => t,
+            WaitLsnTimeout::Default => self.conf.wait_lsn_timeout,
+        };
+
         let _timer = crate::metrics::WAIT_LSN_TIME.start_timer();
 
-        match self
-            .last_record_lsn
-            .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
-            .await
-        {
+        match self.last_record_lsn.wait_for_timeout(lsn, timeout).await {
             Ok(()) => Ok(()),
             Err(e) => {
                 use utils::seqwait::SeqWaitError::*;
@@ -2171,6 +2181,14 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
+    fn get_compaction_upper_limit(&self) -> usize {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .compaction_upper_limit
+            .unwrap_or(self.conf.default_tenant_conf.compaction_upper_limit)
+    }
+
     fn get_l0_flush_delay_threshold(&self) -> Option<usize> {
         // Disable L0 flushes by default. This and compaction needs further tuning.
         const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 0; // TODO: default to e.g. 3
@@ -2248,6 +2266,14 @@ impl Timeline {
         // TODO: the tenant config should have validation to prevent this instead.
         debug_assert!(l0_flush_stall_threshold >= compaction_threshold);
         Some(max(l0_flush_stall_threshold, compaction_threshold))
+    }
+
+    fn get_l0_flush_wait_upload(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .l0_flush_wait_upload
+            .unwrap_or(self.conf.default_tenant_conf.l0_flush_wait_upload)
     }
 
     fn get_image_creation_threshold(&self) -> usize {
@@ -3582,7 +3608,12 @@ impl Timeline {
             }
         }
         ancestor
-            .wait_lsn(self.ancestor_lsn, WaitLsnWaiter::Timeline(self), ctx)
+            .wait_lsn(
+                self.ancestor_lsn,
+                WaitLsnWaiter::Timeline(self),
+                WaitLsnTimeout::Default,
+                ctx,
+            )
             .await
             .map_err(|e| match e {
                 e @ WaitLsnError::Timeout(_) => GetReadyAncestorError::AncestorLsnTimeout(e),
@@ -4034,21 +4065,24 @@ impl Timeline {
 
         // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
         // This makes us refuse ingest until the new layers have been persisted to the remote
-        let start = Instant::now();
-        self.remote_client
-            .wait_completion()
-            .await
-            .map_err(|e| match e {
-                WaitCompletionError::UploadQueueShutDownOrStopped
-                | WaitCompletionError::NotInitialized(
-                    NotInitialized::ShuttingDown | NotInitialized::Stopped,
-                ) => FlushLayerError::Cancelled,
-                WaitCompletionError::NotInitialized(NotInitialized::Uninitialized) => {
-                    FlushLayerError::Other(anyhow!(e).into())
-                }
-            })?;
-        let duration = start.elapsed().as_secs_f64();
-        self.metrics.flush_wait_upload_time_gauge_add(duration);
+        // TODO: remove this, and rely on l0_flush_{delay,stall}_threshold instead.
+        if self.get_l0_flush_wait_upload() {
+            let start = Instant::now();
+            self.remote_client
+                .wait_completion()
+                .await
+                .map_err(|e| match e {
+                    WaitCompletionError::UploadQueueShutDownOrStopped
+                    | WaitCompletionError::NotInitialized(
+                        NotInitialized::ShuttingDown | NotInitialized::Stopped,
+                    ) => FlushLayerError::Cancelled,
+                    WaitCompletionError::NotInitialized(NotInitialized::Uninitialized) => {
+                        FlushLayerError::Other(anyhow!(e).into())
+                    }
+                })?;
+            let duration = start.elapsed().as_secs_f64();
+            self.metrics.flush_wait_upload_time_gauge_add(duration);
+        }
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
@@ -4380,11 +4414,15 @@ impl Timeline {
         if wrote_keys {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
-            let (desc, path) = image_layer_writer.finish(ctx).await?;
-            let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
-            info!("created image layer for rel {}", image_layer.local_path());
+            info!(
+                "produced image layer for rel {}",
+                ImageLayerName {
+                    key_range: img_range.clone(),
+                    lsn
+                },
+            );
             Ok(ImageLayerCreationOutcome {
-                image: Some(image_layer),
+                unfinished_image_layer: Some(image_layer_writer),
                 next_start_key: img_range.end,
             })
         } else {
@@ -4394,7 +4432,7 @@ impl Timeline {
             // layer we write will cover the key range that we just scanned.
             tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
             Ok(ImageLayerCreationOutcome {
-                image: None,
+                unfinished_image_layer: None,
                 next_start_key: start,
             })
         }
@@ -4443,7 +4481,7 @@ impl Timeline {
 
         if !trigger_generation && mode == ImageLayerCreationMode::Try {
             return Ok(ImageLayerCreationOutcome {
-                image: None,
+                unfinished_image_layer: None,
                 next_start_key: img_range.end,
             });
         }
@@ -4469,14 +4507,15 @@ impl Timeline {
         if wrote_any_image {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
-            let (desc, path) = image_layer_writer.finish(ctx).await?;
-            let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
             info!(
                 "created image layer for metadata {}",
-                image_layer.local_path()
+                ImageLayerName {
+                    key_range: img_range.clone(),
+                    lsn
+                }
             );
             Ok(ImageLayerCreationOutcome {
-                image: Some(image_layer),
+                unfinished_image_layer: Some(image_layer_writer),
                 next_start_key: img_range.end,
             })
         } else {
@@ -4486,7 +4525,7 @@ impl Timeline {
             // layer we write will cover the key range that we just scanned.
             tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
             Ok(ImageLayerCreationOutcome {
-                image: None,
+                unfinished_image_layer: None,
                 next_start_key: start,
             })
         }
@@ -4553,7 +4592,6 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Vec<ResidentLayer>, CreateImageLayersError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
-        let mut image_layers = Vec::new();
 
         // We need to avoid holes between generated image layers.
         // Otherwise LayerMap::image_layer_exists will return false if key range of some layer is covered by more than one
@@ -4567,6 +4605,8 @@ impl Timeline {
         let mut start = Key::MIN;
 
         let check_for_image_layers = self.should_check_if_image_layers_required(lsn);
+
+        let mut batch_image_writer = BatchLayerWriter::new(self.conf).await?;
 
         for partition in partitioning.parts.iter() {
             if self.cancel.is_cancelled() {
@@ -4640,44 +4680,44 @@ impl Timeline {
                     .map_err(|_| CreateImageLayersError::Cancelled)?,
             );
 
-            if !compact_metadata {
-                let ImageLayerCreationOutcome {
-                    image,
-                    next_start_key,
-                } = self
-                    .create_image_layer_for_rel_blocks(
-                        partition,
-                        image_layer_writer,
-                        lsn,
-                        ctx,
-                        img_range,
-                        start,
-                        io_concurrency,
-                    )
-                    .await?;
-
-                start = next_start_key;
-                image_layers.extend(image);
+            let ImageLayerCreationOutcome {
+                unfinished_image_layer,
+                next_start_key,
+            } = if !compact_metadata {
+                self.create_image_layer_for_rel_blocks(
+                    partition,
+                    image_layer_writer,
+                    lsn,
+                    ctx,
+                    img_range.clone(),
+                    start,
+                    io_concurrency,
+                )
+                .await?
             } else {
-                let ImageLayerCreationOutcome {
-                    image,
-                    next_start_key,
-                } = self
-                    .create_image_layer_for_metadata_keys(
-                        partition,
-                        image_layer_writer,
-                        lsn,
-                        ctx,
-                        img_range,
-                        mode,
-                        start,
-                        io_concurrency,
-                    )
-                    .await?;
-                start = next_start_key;
-                image_layers.extend(image);
+                self.create_image_layer_for_metadata_keys(
+                    partition,
+                    image_layer_writer,
+                    lsn,
+                    ctx,
+                    img_range.clone(),
+                    mode,
+                    start,
+                    io_concurrency,
+                )
+                .await?
+            };
+            start = next_start_key;
+            if let Some(unfinished_image_layer) = unfinished_image_layer {
+                batch_image_writer.add_unfinished_image_writer(
+                    unfinished_image_layer,
+                    img_range,
+                    lsn,
+                );
             }
         }
+
+        let image_layers = batch_image_writer.finish(self, ctx).await?;
 
         let mut guard = self.layers.write().await;
 

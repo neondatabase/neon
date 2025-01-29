@@ -279,6 +279,10 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    pub compaction_upper_limit: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -288,6 +292,10 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub l0_flush_stall_threshold: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub l0_flush_wait_upload: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -397,6 +405,9 @@ impl TenantConfOpt {
             compaction_threshold: self
                 .compaction_threshold
                 .unwrap_or(global_conf.compaction_threshold),
+            compaction_upper_limit: self
+                .compaction_upper_limit
+                .unwrap_or(global_conf.compaction_upper_limit),
             compaction_algorithm: self
                 .compaction_algorithm
                 .as_ref()
@@ -408,6 +419,9 @@ impl TenantConfOpt {
             l0_flush_stall_threshold: self
                 .l0_flush_stall_threshold
                 .or(global_conf.l0_flush_stall_threshold),
+            l0_flush_wait_upload: self
+                .l0_flush_wait_upload
+                .unwrap_or(global_conf.l0_flush_wait_upload),
             gc_horizon: self.gc_horizon.unwrap_or(global_conf.gc_horizon),
             gc_period: self.gc_period.unwrap_or(global_conf.gc_period),
             image_creation_threshold: self
@@ -471,9 +485,11 @@ impl TenantConfOpt {
             mut compaction_target_size,
             mut compaction_period,
             mut compaction_threshold,
+            mut compaction_upper_limit,
             mut compaction_algorithm,
             mut l0_flush_delay_threshold,
             mut l0_flush_stall_threshold,
+            mut l0_flush_wait_upload,
             mut gc_horizon,
             mut gc_period,
             mut image_creation_threshold,
@@ -511,6 +527,9 @@ impl TenantConfOpt {
             .map(|v| humantime::parse_duration(&v))?
             .apply(&mut compaction_period);
         patch.compaction_threshold.apply(&mut compaction_threshold);
+        patch
+            .compaction_upper_limit
+            .apply(&mut compaction_upper_limit);
         patch.compaction_algorithm.apply(&mut compaction_algorithm);
         patch
             .l0_flush_delay_threshold
@@ -518,6 +537,7 @@ impl TenantConfOpt {
         patch
             .l0_flush_stall_threshold
             .apply(&mut l0_flush_stall_threshold);
+        patch.l0_flush_wait_upload.apply(&mut l0_flush_wait_upload);
         patch.gc_horizon.apply(&mut gc_horizon);
         patch
             .gc_period
@@ -587,9 +607,11 @@ impl TenantConfOpt {
             compaction_target_size,
             compaction_period,
             compaction_threshold,
+            compaction_upper_limit,
             compaction_algorithm,
             l0_flush_delay_threshold,
             l0_flush_stall_threshold,
+            l0_flush_wait_upload,
             gc_horizon,
             gc_period,
             image_creation_threshold,
@@ -647,8 +669,10 @@ impl From<TenantConfOpt> for models::TenantConfig {
             compaction_target_size: value.compaction_target_size,
             compaction_period: value.compaction_period.map(humantime),
             compaction_threshold: value.compaction_threshold,
+            compaction_upper_limit: value.compaction_upper_limit,
             l0_flush_delay_threshold: value.l0_flush_delay_threshold,
             l0_flush_stall_threshold: value.l0_flush_stall_threshold,
+            l0_flush_wait_upload: value.l0_flush_wait_upload,
             gc_horizon: value.gc_horizon,
             gc_period: value.gc_period.map(humantime),
             image_creation_threshold: value.image_creation_threshold,
