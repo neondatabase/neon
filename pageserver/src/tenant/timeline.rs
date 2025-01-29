@@ -3703,7 +3703,7 @@ impl Timeline {
             let mut guard = self.layers.write().await;
             guard
                 .open_mut()?
-                .try_freeze_in_memory_layer(at, &self.last_freeze_at, write_lock)
+                .try_freeze_in_memory_layer(at, &self.last_freeze_at, write_lock, &self.metrics)
                 .await
         };
 
