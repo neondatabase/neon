@@ -59,6 +59,9 @@ def test_pgdata_import_smoke(
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
+    # The test needs LocalFs support, which is only built in testing mode.
+    env.pageserver.is_testing_enabled_or_skip()
+
     env.pageserver.patch_config_toml_nonrecursive(
         {
             "import_pgdata_upcall_api": f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/path/to/mgmt/api"
