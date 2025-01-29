@@ -239,10 +239,18 @@ typedef struct AcceptorGreeting
  */
 typedef struct VoteRequest
 {
+	ProposerAcceptorMessage pam;	/* message tag */
+	Generation	generation;		/* membership conf generation */
+	term_t		term;
+} VoteRequest;
+
+/* protocol v2 variant, kept while wp supports it */
+typedef struct VoteRequestV2
+{
 	uint64		tag;
 	term_t		term;
 	pg_uuid_t	proposerId;		/* for monitoring/debugging */
-} VoteRequest;
+} VoteRequestV2;
 
 /* Element of term switching chain. */
 typedef struct TermSwitchEntry
@@ -717,11 +725,14 @@ typedef struct WalProposerConfig
 typedef struct WalProposer
 {
 	WalProposerConfig *config;
-	int			n_safekeepers;
+	/* Current walproposer membership configuration */
+	MembershipConfiguration mconf;
 
 	/* (n_safekeepers / 2) + 1 */
 	int			quorum;
 
+	/* Number of occupied slots in safekeepers[] */
+	int			n_safekeepers;
 	Safekeeper	safekeeper[MAX_SAFEKEEPERS];
 
 	/* WAL has been generated up to this point */

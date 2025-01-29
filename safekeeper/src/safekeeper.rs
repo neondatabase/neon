@@ -6,6 +6,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use postgres_ffi::{TimeLineID, MAX_SEND_SIZE};
 use safekeeper_api::membership;
+use safekeeper_api::membership::Generation;
 use safekeeper_api::membership::MemberSet;
 use safekeeper_api::membership::SafekeeperId;
 use safekeeper_api::membership::INVALID_GENERATION;
@@ -237,8 +238,15 @@ pub struct AcceptorGreeting {
 }
 
 /// Vote request sent from proposer to safekeepers
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct VoteRequest {
+    pub generation: Generation,
+    pub term: Term,
+}
+
+/// V2 of the message; exists as a struct because we (de)serialized it as is.
+#[derive(Debug, Deserialize)]
+pub struct VoteRequestV2 {
     pub term: Term,
 }
 
@@ -448,7 +456,7 @@ impl ProposerAcceptorMessage {
     pub fn parse(mut msg_bytes: Bytes, proto_version: u32) -> Result<ProposerAcceptorMessage> {
         // TODO remove after converting all msgs
         let t = msg_bytes[0] as char;
-        if proto_version == SK_PROTO_VERSION_3 && t == 'g' {
+        if proto_version == SK_PROTO_VERSION_3 && (t == 'g' || t == 'v') {
             if msg_bytes.is_empty() {
                 bail!("ProposerAcceptorMessage is not complete: missing tag");
             }
@@ -481,6 +489,14 @@ impl ProposerAcceptorMessage {
                     };
                     Ok(ProposerAcceptorMessage::Greeting(g))
                 }
+                'v' => {
+                    let generation = msg_bytes
+                        .get_u32_f()
+                        .with_context(|| "reading generation")?;
+                    let term = msg_bytes.get_u64_f().with_context(|| "reading term")?;
+                    let v = VoteRequest { generation, term };
+                    Ok(ProposerAcceptorMessage::VoteRequest(v))
+                }
                 _ => bail!("unknown proposer-acceptor message tag: {}", tag),
             }
         // TODO remove proto_version == 3 after converting all msgs
@@ -507,8 +523,12 @@ impl ProposerAcceptorMessage {
                     Ok(ProposerAcceptorMessage::Greeting(g))
                 }
                 'v' => {
-                    let msg = VoteRequest::des_from(&mut stream)?;
-                    Ok(ProposerAcceptorMessage::VoteRequest(msg))
+                    let msg = VoteRequestV2::des_from(&mut stream)?;
+                    let v = VoteRequest {
+                        generation: INVALID_GENERATION,
+                        term: msg.term,
+                    };
+                    Ok(ProposerAcceptorMessage::VoteRequest(v))
                 }
                 'e' => {
                     let mut msg_bytes = stream.into_inner();
@@ -571,7 +591,7 @@ impl ProposerAcceptorMessage {
         size += match self {
             Self::Greeting(_) => 0,
 
-            Self::VoteRequest(VoteRequest { term: _ }) => 0,
+            Self::VoteRequest(_) => 0,
 
             Self::Elected(ProposerElected {
                 term: _,
@@ -904,7 +924,7 @@ where
             resp.term = self.state.acceptor_state.term;
             resp.vote_given = true as u64;
         }
-        info!("processed VoteRequest for term {}: {:?}", msg.term, &resp);
+        info!("processed {:?}: sending {:?}", msg, &resp);
         Ok(Some(AcceptorProposerMessage::VoteResponse(resp)))
     }
 

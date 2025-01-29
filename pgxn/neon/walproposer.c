@@ -164,6 +164,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 void
 WalProposerFree(WalProposer *wp)
 {
+	MembershipConfigurationFree(&wp->mconf);
 	for (int i = 0; i < wp->n_safekeepers; i++)
 	{
 		Safekeeper *sk = &wp->safekeeper[i];
@@ -723,11 +724,9 @@ RecvAcceptorGreeting(Safekeeper *sk)
 			wp->propTerm++;
 			wp_log(LOG, "proposer connected to quorum (%d) safekeepers, propTerm=" INT64_FORMAT, wp->quorum, wp->propTerm);
 
-			wp->voteRequest = (VoteRequest)
-			{
-				.tag = 'v',
-					.term = wp->propTerm
-			};
+			wp->voteRequest.pam.tag = 'v';
+			wp->voteRequest.generation = wp->mconf.generation;
+			wp->voteRequest.term = wp->propTerm;
 		}
 	}
 	else if (sk->greetResponse.term > wp->propTerm)
@@ -778,7 +777,8 @@ SendVoteRequest(Safekeeper *sk)
 					   &sk->outbuf, wp->config->proto_version);
 
 	/* We have quorum for voting, send our vote request */
-	wp_log(LOG, "requesting vote from %s:%s for term " UINT64_FORMAT, sk->host, sk->port, wp->voteRequest.term);
+	wp_log(LOG, "requesting vote from %s:%s for generation %u term " UINT64_FORMAT, sk->host, sk->port,
+		   wp->voteRequest.generation, wp->voteRequest.term);
 	/* On failure, logging & resetting is handled */
 	BlockingWrite(sk, sk->outbuf.data, sk->outbuf.len, SS_WAIT_VERDICT);
 	/* If successful, wait for read-ready with SS_WAIT_VERDICT */
@@ -1797,7 +1797,7 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 	resetStringInfo(buf);
 
 	/* removeme tag check after converting all msgs */
-	if (proto_version == 3 && msg->tag == 'g')
+	if (proto_version == 3 && (msg->tag == 'g' || msg->tag == 'v'))
 	{
 		/*
 		 * v2 sends structs for some messages as is, so commonly send tag only
@@ -1819,6 +1819,15 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 					pq_sendint64(buf, m->system_id);
 					pq_sendint32(buf, m->wal_seg_size);
 					break;
+				}
+			case 'v':
+				{
+					VoteRequest *m = (VoteRequest *) msg;
+
+					pq_sendint32(buf, m->generation);
+					pq_sendint64(buf, m->term);
+					break;
+
 				}
 			default:
 				wp_log(FATAL, "unexpected message type %c to serialize", msg->tag);
@@ -1865,7 +1874,14 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 			case 'v':
 				{
 					/* v2 sent struct as is */
-					pq_sendbytes(buf, (char *) &wp->voteRequest, sizeof(wp->voteRequest));
+					VoteRequest *m = (VoteRequest *) msg;
+					VoteRequestV2 voteRequestV2;
+
+					voteRequestV2.tag = m->pam.tag;
+					voteRequestV2.term = m->term;
+					/* removed field */
+					memset(&voteRequestV2.proposerId, 0, sizeof(voteRequestV2.proposerId));
+					pq_sendbytes(buf, (char *) &voteRequestV2, sizeof(voteRequestV2));
 					break;
 				}
 			case 'e':
