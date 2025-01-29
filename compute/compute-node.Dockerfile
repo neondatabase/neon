@@ -19,7 +19,7 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
-    echo -e "--retry-connrefused\--conntect-timeout 15\nn--retry 5\n--max-time 300\n" > /root/.curlrc
+    echo -e "--retry-connrefused\--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
 
 RUN case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):
@@ -841,7 +841,7 @@ ENV PATH="/home/nonroot/.cargo/bin:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 
-RUN echo -e "--retry-connrefused\--conntect-timeout 15\nn--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
+RUN echo -e "--retry-connrefused\--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
 
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
@@ -879,7 +879,7 @@ ENV PATH="/home/nonroot/.cargo/bin:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 
-RUN echo -e "--retry-connrefused\--conntect-timeout 15\nn--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
+RUN echo -e "--retry-connrefused\--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
 
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
