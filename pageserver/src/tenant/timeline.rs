@@ -116,7 +116,7 @@ use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::{TimelineMetrics, LAYERS_PER_READ_GLOBAL};
+use crate::metrics::{TimelineMetrics, DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_GLOBAL};
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
 use pageserver_api::reltag::RelTag;
@@ -1195,6 +1195,7 @@ impl Timeline {
                             return (key, Err(err));
                         }
                     };
+                    DELTAS_PER_READ_GLOBAL.observe(converted.num_deltas() as f64);
 
                     // The walredo module expects the records to be descending in terms of Lsn.
                     // And we submit the IOs in that order, so, there shuold be no need to sort here.
