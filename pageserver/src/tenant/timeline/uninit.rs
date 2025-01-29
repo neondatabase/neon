@@ -6,10 +6,13 @@ use tracing::{error, info, info_span};
 use utils::{fs_ext, id::TimelineId, lsn::Lsn, sync::gate::GateGuard};
 
 use crate::{
-    context::RequestContext, import_datadir, span::debug_assert_current_span_has_tenant_and_timeline_id, tenant::{CreateTimelineError, CreateTimelineIdempotency, Tenant, TimelineOrOffloaded}
+    context::RequestContext,
+    import_datadir,
+    span::debug_assert_current_span_has_tenant_and_timeline_id,
+    tenant::{CreateTimelineError, CreateTimelineIdempotency, Tenant, TimelineOrOffloaded},
 };
 
-use super::{Timeline};
+use super::Timeline;
 
 /// A timeline with some of its files on disk, being initialized.
 /// This struct ensures the atomicity of the timeline init: it's either properly created and inserted into pageserver's memory, or
