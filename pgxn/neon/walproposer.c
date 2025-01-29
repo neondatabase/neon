@@ -156,29 +156,6 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	wp->greetRequest.system_id = wp->config->systemId;
 	wp->greetRequest.wal_seg_size = wp->config->wal_segment_size;
 
-
-	/* Fill also v2 struct. */
-	wp->greetRequestV2.tag = 'g';
-	wp->greetRequestV2.protocolVersion = wp->config->proto_version;
-	wp->greetRequestV2.pgVersion = PG_VERSION_NUM;
-
-	/*
-	 * v3 removed this field because it's easier to pass as libq or
-	 * START_WAL_PUSH options
-	 */
-	memset(&wp->greetRequestV2.proposerId, 0, sizeof(wp->greetRequestV2.proposerId));
-	wp->api.strong_random(wp, &wp->greetRequestV2.proposerId, sizeof(wp->greetRequestV2.proposerId));
-	wp->greetRequestV2.systemId = wp->config->systemId;
-	if (*wp->config->neon_timeline != '\0' &&
-		!HexDecodeString(wp->greetRequestV2.timeline_id, wp->config->neon_timeline, 16))
-		wp_log(FATAL, "could not parse neon.timeline_id, %s", wp->config->neon_timeline);
-	if (*wp->config->neon_tenant != '\0' &&
-		!HexDecodeString(wp->greetRequestV2.tenant_id, wp->config->neon_tenant, 16))
-		wp_log(FATAL, "could not parse neon.tenant_id, %s", wp->config->neon_tenant);
-
-	wp->greetRequestV2.timeline = wp->config->pgTimeline;
-	wp->greetRequestV2.walSegSize = wp->config->wal_segment_size;
-
 	wp->api.init_event_set(wp);
 
 	return wp;
@@ -1859,7 +1836,31 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 			case 'g':
 				{
 					/* v2 sent struct as is */
-					pq_sendbytes(buf, (char *) &wp->greetRequestV2, sizeof(wp->greetRequestV2));
+					ProposerGreeting *m = (ProposerGreeting *) msg;
+					ProposerGreetingV2 greetRequestV2;
+
+					/* Fill also v2 struct. */
+					greetRequestV2.tag = 'g';
+					greetRequestV2.protocolVersion = proto_version;
+					greetRequestV2.pgVersion = m->pg_version;
+
+					/*
+					 * v3 removed this field because it's easier to pass as
+					 * libq or START_WAL_PUSH options
+					 */
+					memset(&greetRequestV2.proposerId, 0, sizeof(greetRequestV2.proposerId));
+					greetRequestV2.systemId = wp->config->systemId;
+					if (*m->timeline_id != '\0' &&
+						!HexDecodeString(greetRequestV2.timeline_id, m->timeline_id, 16))
+						wp_log(FATAL, "could not parse neon.timeline_id, %s", m->timeline_id);
+					if (*m->tenant_id != '\0' &&
+						!HexDecodeString(greetRequestV2.tenant_id, m->tenant_id, 16))
+						wp_log(FATAL, "could not parse neon.tenant_id, %s", m->tenant_id);
+
+					greetRequestV2.timeline = wp->config->pgTimeline;
+					greetRequestV2.walSegSize = wp->config->wal_segment_size;
+
+					pq_sendbytes(buf, (char *) &greetRequestV2, sizeof(greetRequestV2));
 					break;
 				}
 			case 'v':
