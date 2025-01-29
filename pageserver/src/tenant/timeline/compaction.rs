@@ -1115,7 +1115,13 @@ impl Timeline {
         // Under normal circumstances, we will accumulate up to compaction_upper_limit L0s of size
         // checkpoint_distance each.  To avoid edge cases using extra system resources, bound our
         // work in this function to only operate on this much delta data at once.
-        let delta_size_limit = self.get_compaction_upper_limit() as u64
+        //
+        // In general, compaction_threshold should be <= compaction_upper_limit, but in case that
+        // the constraint is not respected, we use the larger of the two.
+        let delta_size_limit = std::cmp::max(
+            self.get_compaction_upper_limit(),
+            self.get_compaction_threshold(),
+        ) as u64
             * std::cmp::max(self.get_checkpoint_distance(), DEFAULT_CHECKPOINT_DISTANCE);
 
         let mut fully_compacted = true;
