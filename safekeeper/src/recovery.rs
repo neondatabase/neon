@@ -7,6 +7,7 @@ use std::{fmt, pin::pin};
 use anyhow::{bail, Context};
 use futures::StreamExt;
 use postgres_protocol::message::backend::ReplicationMessage;
+use safekeeper_api::membership::INVALID_GENERATION;
 use safekeeper_api::models::{PeerInfo, TimelineStatus};
 use safekeeper_api::Term;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -267,7 +268,10 @@ async fn recover(
     );
 
     // Now understand our term history.
-    let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: donor.term });
+    let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest {
+        generation: INVALID_GENERATION,
+        term: donor.term,
+    });
     let vote_response = match tli
         .process_msg(&vote_request)
         .await
