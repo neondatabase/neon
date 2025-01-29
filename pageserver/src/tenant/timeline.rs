@@ -340,6 +340,8 @@ pub struct Timeline {
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
     pub latest_gc_cutoff_lsn: Rcu<Lsn>,
 
+    pub(crate) gc_compaction_layer_update_lock: tokio::sync::RwLock<()>,
+
     // List of child timelines and their branch points. This is needed to avoid
     // garbage collecting data that is still needed by the child timelines.
     pub(crate) gc_info: std::sync::RwLock<GcInfo>,
@@ -2432,6 +2434,7 @@ impl Timeline {
                 shard_identity,
                 pg_version,
                 layers: Default::default(),
+                gc_compaction_layer_update_lock: tokio::sync::RwLock::new(()),
 
                 walredo_mgr,
                 walreceiver: Mutex::new(None),
@@ -3474,6 +3477,9 @@ impl Timeline {
         // the current get request (read-path cannot "look back" and notice the new
         // image layer).
         let _gc_cutoff_holder = timeline.get_latest_gc_cutoff_lsn();
+
+        // See `compaction::compact_with_gc` for why we need this.
+        let _guard = timeline.gc_compaction_layer_update_lock.read().await;
 
         loop {
             if cancel.is_cancelled() {
