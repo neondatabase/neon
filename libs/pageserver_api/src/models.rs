@@ -282,7 +282,7 @@ pub struct TimelineCreateRequest {
     pub mode: TimelineCreateRequestMode,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(untagged)]
 pub enum TimelineCreateRequestMode {
     Branch {
@@ -307,7 +307,7 @@ pub enum TimelineCreateRequestMode {
     },
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TimelineCreateRequestModeImportPgdata {
     pub location: ImportPgdataLocation,
     pub idempotency_key: ImportPgdataIdempotencyKey,
@@ -326,7 +326,7 @@ pub enum ImportPgdataLocation {
     },
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(transparent)]
 pub struct ImportPgdataIdempotencyKey(pub String);
 

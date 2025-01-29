@@ -152,7 +152,7 @@ def test_pgdata_import_smoke(
     )
 
     timeline_id = TimelineId.generate()
-    log.info("starting import")
+    log.info(f"starting import (tenant {tenant_id} timeline {timeline_id})")
     start = time.monotonic()
 
     idempotency = ImportPgdataIdemptencyKey.random()
@@ -172,6 +172,7 @@ def test_pgdata_import_smoke(
         },
     )
     env.neon_cli.mappings_map_branch(import_branch_name, tenant_id, timeline_id)
+    time.sleep(10)
 
     while True:
         locations = env.storage_controller.locate(tenant_id)

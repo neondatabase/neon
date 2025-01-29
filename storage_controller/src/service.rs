@@ -3275,9 +3275,10 @@ impl Service {
         mut create_req: TimelineCreateRequest,
     ) -> Result<TimelineInfo, ApiError> {
         tracing::info!(
-            "Creating timeline {}/{}",
+            "Creating timeline {}/{}, mode={:?}",
             tenant_id,
             create_req.new_timeline_id,
+            create_req.mode
         );
 
         let _tenant_lock = trace_shared_lock(
