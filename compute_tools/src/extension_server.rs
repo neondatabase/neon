@@ -85,7 +85,7 @@ use tracing::info;
 use tracing::log::warn;
 use zstd::stream::read::Decoder;
 
-use crate::metrics::{REMOTE_EXT_REQUESTS_FAILED, REMOTE_EXT_REQUESTS_TOTAL, UNKNOWN_HTTP_STATUS};
+use crate::metrics::{REMOTE_EXT_REQUESTS_TOTAL, UNKNOWN_HTTP_STATUS};
 
 fn get_pg_config(argument: &str, pgbin: &str) -> String {
     // gives the result of `pg_config [argument]`
@@ -260,22 +260,20 @@ async fn download_extension_tar(ext_remote_storage: &str, ext_path: &str) -> Res
 
     info!("Download extension {:?} from uri {:?}", ext_path, uri);
 
-    REMOTE_EXT_REQUESTS_TOTAL.with_label_values(&[]).inc();
-
     match do_extension_server_request(&uri).await {
         Ok(resp) => {
             info!(
                 "Successfully downloaded remote extension data {:?}",
                 ext_path
             );
+            REMOTE_EXT_REQUESTS_TOTAL
+                .with_label_values(&[&StatusCode::OK.to_string()])
+                .inc();
             Ok(resp)
         }
         Err((msg, status)) => {
-            let status_str = status
-                .map(|s| s.to_string())
-                .unwrap_or(UNKNOWN_HTTP_STATUS.to_string());
-            REMOTE_EXT_REQUESTS_FAILED
-                .with_label_values(&[&status_str])
+            REMOTE_EXT_REQUESTS_TOTAL
+                .with_label_values(&[&status])
                 .inc();
             bail!(msg);
         }
@@ -283,12 +281,12 @@ async fn download_extension_tar(ext_remote_storage: &str, ext_path: &str) -> Res
 }
 
 // Do a single remote extensions server request.
-// Return result or (error message + status code) in case of any failures.
-async fn do_extension_server_request(uri: &str) -> Result<Bytes, (String, Option<StatusCode>)> {
+// Return result or (error message + stringified status code) in case of any failures.
+async fn do_extension_server_request(uri: &str) -> Result<Bytes, (String, String)> {
     let resp = reqwest::get(uri).await.map_err(|e| {
         (
             format!("could not perform remote extensions server request: {}", e),
-            None,
+            UNKNOWN_HTTP_STATUS.to_string(),
         )
     })?;
     let status = resp.status();
@@ -300,19 +298,19 @@ async fn do_extension_server_request(uri: &str) -> Result<Bytes, (String, Option
                 format!("could not read remote extensions server response: {}", e),
                 // It's fine to return and report error with status as 200 OK,
                 // because we still failed to read the response.
-                Some(status),
+                status.to_string(),
             )),
         },
         StatusCode::SERVICE_UNAVAILABLE => Err((
             "remote extensions server is temporarily unavailable".to_string(),
-            Some(status),
+            status.to_string(),
         )),
         _ => Err((
             format!(
                 "unexpected remote extensions server response status code: {}",
                 status
             ),
-            Some(status),
+            status.to_string(),
         )),
     }
 }
