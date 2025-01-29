@@ -31,7 +31,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     echo "clean up containers if exists"
     cleanup
     PG_TEST_VERSION=$((pg_version < 16 ? 16 : pg_version))
-    PG_VERSION=$pg_version PG_TEST_VERSION=$PG_TEST_VERSION docker compose --profile test-extensions -f $COMPOSE_FILE up --build -d
+    PG_VERSION=$pg_version PG_TEST_VERSION=$PG_TEST_VERSION docker compose --profile test-extensions -f $COMPOSE_FILE up --quiet-pull --build -d
 
     echo "wait until the compute is ready. timeout after 60s. "
     cnt=0
