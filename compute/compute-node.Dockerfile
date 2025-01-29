@@ -841,6 +841,8 @@ ENV PATH="/home/nonroot/.cargo/bin:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 
+RUN echo -e "--retry-connrefused\--conntect-timeout 15\nn--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
+
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
@@ -876,6 +878,8 @@ ENV HOME=/home/nonroot
 ENV PATH="/home/nonroot/.cargo/bin:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
+
+RUN echo -e "--retry-connrefused\--conntect-timeout 15\nn--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
 
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
