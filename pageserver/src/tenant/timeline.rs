@@ -3468,6 +3468,13 @@ impl Timeline {
         let mut completed_keyspace = KeySpace::default();
         let mut image_covered_keyspace = KeySpaceRandomAccum::new();
 
+        // Prevent GC from progressing while visiting the current timeline.
+        // If we are GC-ing because a new image layer was added while traversing
+        // the timeline, then it will remove layers that are required for fulfilling
+        // the current get request (read-path cannot "look back" and notice the new
+        // image layer).
+        let _gc_cutoff_holder = timeline.get_latest_gc_cutoff_lsn();
+
         loop {
             if cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
