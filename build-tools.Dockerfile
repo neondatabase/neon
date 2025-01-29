@@ -65,14 +65,14 @@ RUN mkdir -p /pgcopydb/bin && \
 COPY --from=pgcopydb_builder /usr/lib/postgresql/16/bin/pgcopydb /pgcopydb/bin/pgcopydb
 COPY --from=pgcopydb_builder /pgcopydb/lib/libpq.so.5 /pgcopydb/lib/libpq.so.5
 
-# System deps
-#
-# 'gdb' is included so that we get backtraces of core dumps produced in
-# regression tests
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
     echo -e "--retry-connrefused\--conntect-timeout 15\nn--retry 5\n--max-time 300\n" > /root/.curlrc
 
+# System deps
+#
+# 'gdb' is included so that we get backtraces of core dumps produced in
+# regression tests
 RUN set -e \
     && apt update \
     && apt install -y \
