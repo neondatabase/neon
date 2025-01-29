@@ -18,7 +18,8 @@ ARG DEBIAN_VERSION
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
+    echo -e "--retry-connrefused\--conntect-timeout 15\nn--retry 5\n--max-time 300\n" > /root/.curlrc
 
 RUN case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):
@@ -1431,7 +1432,7 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 # ca-certificates for communicating with s3 by compute_ctl
 
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
 
 RUN apt update && \
     case $DEBIAN_VERSION in \
