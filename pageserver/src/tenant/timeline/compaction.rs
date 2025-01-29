@@ -1112,7 +1112,7 @@ impl Timeline {
         // Accumulate the size of layers in `deltas_to_compact`
         let mut deltas_to_compact_bytes = 0;
 
-        // Under normal circumstances, we will accumulate up to compaction_interval L0s of size
+        // Under normal circumstances, we will accumulate up to compaction_upper_limit L0s of size
         // checkpoint_distance each.  To avoid edge cases using extra system resources, bound our
         // work in this function to only operate on this much delta data at once.
         let delta_size_limit = self.get_compaction_upper_limit() as u64

@@ -32,16 +32,7 @@ pub const UNKNOWN_HTTP_STATUS: &str = "unknown";
 pub(crate) static CPLANE_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "compute_ctl_cplane_requests_total",
-        "Total number of control plane requests made by compute_ctl",
-        &["rpc"]
-    )
-    .expect("failed to define a metric")
-});
-
-pub(crate) static CPLANE_REQUESTS_FAILED: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "compute_ctl_cplane_requests_failed_total",
-        "Total number of failed control plane requests made by compute_ctl",
+        "Total number of control plane requests made by compute_ctl by status",
         &["rpc", "http_status"]
     )
     .expect("failed to define a metric")
@@ -62,18 +53,9 @@ pub(crate) static DB_MIGRATION_FAILED: Lazy<IntCounterVec> = Lazy::new(|| {
 pub(crate) static REMOTE_EXT_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "compute_ctl_remote_ext_requests_total",
-        "Total number of requests made by compute_ctl to download extensions from S3 proxy",
+        "Total number of requests made by compute_ctl to download extensions from S3 proxy by status",
         // Do not use any labels like extension name yet.
         // We can add them later if needed.
-        &[]
-    )
-    .expect("failed to define a metric")
-});
-
-pub(crate) static REMOTE_EXT_REQUESTS_FAILED: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "compute_ctl_remote_ext_requests_failed_total",
-        "Total number of failed requests to S3 proxy",
         &["http_status"]
     )
     .expect("failed to define a metric")
@@ -82,9 +64,7 @@ pub(crate) static REMOTE_EXT_REQUESTS_FAILED: Lazy<IntCounterVec> = Lazy::new(||
 pub fn collect() -> Vec<MetricFamily> {
     let mut metrics = INSTALLED_EXTENSIONS.collect();
     metrics.extend(CPLANE_REQUESTS_TOTAL.collect());
-    metrics.extend(CPLANE_REQUESTS_FAILED.collect());
-    metrics.extend(DB_MIGRATION_FAILED.collect());
     metrics.extend(REMOTE_EXT_REQUESTS_TOTAL.collect());
-    metrics.extend(REMOTE_EXT_REQUESTS_FAILED.collect());
+    metrics.extend(DB_MIGRATION_FAILED.collect());
     metrics
 }
