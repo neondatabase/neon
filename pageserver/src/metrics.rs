@@ -1,4 +1,13 @@
+use std::collections::HashMap;
+use std::num::NonZeroUsize;
+use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+
 use enum_map::EnumMap;
+use futures::Future;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
@@ -11,12 +20,25 @@ use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
     PageServiceProtocolPipelinedExecutionStrategy,
 };
+use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
+use pin_project_lite::pin_project;
 use postgres_backend::{is_expected_io_error, QueryError};
 use pq_proto::framed::ConnectionError;
-use strum::{EnumCount, VariantNames};
+
+use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
 use utils::id::TimelineId;
+
+use crate::config::PageServerConf;
+use crate::context::{PageContentKind, RequestContext};
+use crate::task_mgr::TaskKind;
+use crate::tenant::layer_map::LayerMap;
+use crate::tenant::mgr::TenantSlot;
+use crate::tenant::storage_layer::{InMemoryLayer, PersistentLayerDesc};
+use crate::tenant::tasks::BackgroundLoopKind;
+use crate::tenant::throttle::ThrottleResult;
+use crate::tenant::Timeline;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
 /// path. In other words, operations that directly affect that latency of user
@@ -443,18 +465,38 @@ static PITR_HISTORY_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-#[derive(strum_macros::EnumString, strum_macros::Display, strum_macros::IntoStaticStr)]
+#[derive(
+    strum_macros::EnumIter,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    strum_macros::IntoStaticStr,
+)]
 #[strum(serialize_all = "kebab_case")]
-pub(crate) enum MetricLayerKind {
+pub(crate) enum LayerKind {
     Delta,
     Image,
+}
+
+#[derive(
+    strum_macros::EnumIter,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    strum_macros::IntoStaticStr,
+)]
+#[strum(serialize_all = "kebab_case")]
+pub(crate) enum LayerLevel {
+    // We don't track the currently open ephemeral layer, since there's always exactly 1 and its
+    // size changes. See `TIMELINE_EPHEMERAL_BYTES`.
+    Frozen,
+    L0,
+    L1,
 }
 
 static TIMELINE_LAYER_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_layer_bytes",
-        "Sum of layer physical sizes in bytes",
-        &["tenant_id", "shard_id", "timeline_id", "kind"]
+        "Sum of frozen, L0, and L1 layer physical sizes in bytes (excluding the open ephemeral layer)",
+        &["tenant_id", "shard_id", "timeline_id", "level", "kind"]
     )
     .expect("failed to define a metric")
 });
@@ -462,8 +504,8 @@ static TIMELINE_LAYER_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
 static TIMELINE_LAYER_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_layer_count",
-        "Number of layers that exist",
-        &["tenant_id", "shard_id", "timeline_id", "kind"]
+        "Number of frozen, L0, and L1 layers (excluding the open ephemeral layer)",
+        &["tenant_id", "shard_id", "timeline_id", "level", "kind"]
     )
     .expect("failed to define a metric")
 });
@@ -2590,10 +2632,6 @@ pub(crate) struct TimelineMetrics {
     pub disk_consistent_lsn_gauge: IntGauge,
     pub pitr_history_size: UIntGauge,
     pub archival_size: UIntGauge,
-    pub(crate) layer_size_image: UIntGauge,
-    pub(crate) layer_count_image: UIntGauge,
-    pub(crate) layer_size_delta: UIntGauge,
-    pub(crate) layer_count_delta: UIntGauge,
     pub standby_horizon_gauge: IntGauge,
     pub resident_physical_size_gauge: UIntGauge,
     pub visible_physical_size_gauge: UIntGauge,
@@ -2691,42 +2729,6 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
-        let layer_size_image = TIMELINE_LAYER_SIZE
-            .get_metric_with_label_values(&[
-                &tenant_id,
-                &shard_id,
-                &timeline_id,
-                MetricLayerKind::Image.into(),
-            ])
-            .unwrap();
-
-        let layer_count_image = TIMELINE_LAYER_COUNT
-            .get_metric_with_label_values(&[
-                &tenant_id,
-                &shard_id,
-                &timeline_id,
-                MetricLayerKind::Image.into(),
-            ])
-            .unwrap();
-
-        let layer_size_delta = TIMELINE_LAYER_SIZE
-            .get_metric_with_label_values(&[
-                &tenant_id,
-                &shard_id,
-                &timeline_id,
-                MetricLayerKind::Delta.into(),
-            ])
-            .unwrap();
-
-        let layer_count_delta = TIMELINE_LAYER_COUNT
-            .get_metric_with_label_values(&[
-                &tenant_id,
-                &shard_id,
-                &timeline_id,
-                MetricLayerKind::Delta.into(),
-            ])
-            .unwrap();
-
         let standby_horizon_gauge = STANDBY_HORIZON
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -2791,10 +2793,6 @@ impl TimelineMetrics {
             disk_consistent_lsn_gauge,
             pitr_history_size,
             archival_size,
-            layer_size_image,
-            layer_count_image,
-            layer_size_delta,
-            layer_count_delta,
             standby_horizon_gauge,
             resident_physical_size_gauge,
             visible_physical_size_gauge,
@@ -2837,6 +2835,92 @@ impl TimelineMetrics {
             .add(duration);
     }
 
+    /// Generates TIMELINE_LAYER labels for a persistent layer.
+    fn make_layer_labels(&self, layer_desc: &PersistentLayerDesc) -> [&str; 5] {
+        let level = match LayerMap::is_l0(&layer_desc.key_range, layer_desc.is_delta()) {
+            true => LayerLevel::L0,
+            false => LayerLevel::L1,
+        };
+        let kind = match layer_desc.is_delta() {
+            true => LayerKind::Delta,
+            false => LayerKind::Image,
+        };
+        [
+            &self.tenant_id,
+            &self.shard_id,
+            &self.timeline_id,
+            level.into(),
+            kind.into(),
+        ]
+    }
+
+    /// Generates TIMELINE_LAYER labels for a frozen ephemeral layer.
+    fn make_frozen_layer_labels(&self, _layer: &InMemoryLayer) -> [&str; 5] {
+        [
+            &self.tenant_id,
+            &self.shard_id,
+            &self.timeline_id,
+            LayerLevel::Frozen.into(),
+            LayerKind::Delta.into(), // by definition
+        ]
+    }
+
+    /// Removes a frozen ephemeral layer to TIMELINE_LAYER metrics.
+    pub fn dec_frozen_layer(&self, layer: &InMemoryLayer) {
+        assert!(matches!(layer.info(), InMemoryLayerInfo::Frozen { .. }));
+        let labels = self.make_frozen_layer_labels(layer);
+        let size = layer.try_len().expect("frozen layer should have no writer");
+        TIMELINE_LAYER_COUNT
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .dec();
+        TIMELINE_LAYER_SIZE
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .sub(size);
+    }
+
+    /// Adds a frozen ephemeral layer to TIMELINE_LAYER metrics.
+    pub fn inc_frozen_layer(&self, layer: &InMemoryLayer) {
+        assert!(matches!(layer.info(), InMemoryLayerInfo::Frozen { .. }));
+        let labels = self.make_frozen_layer_labels(layer);
+        let size = layer.try_len().expect("frozen layer should have no writer");
+        TIMELINE_LAYER_COUNT
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .inc();
+        TIMELINE_LAYER_SIZE
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .add(size);
+    }
+
+    /// Removes a persistent layer from TIMELINE_LAYER metrics.
+    pub fn dec_layer(&self, layer_desc: &PersistentLayerDesc) {
+        let labels = self.make_layer_labels(layer_desc);
+        TIMELINE_LAYER_COUNT
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .dec();
+        TIMELINE_LAYER_SIZE
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .sub(layer_desc.file_size);
+    }
+
+    /// Adds a persistent layer to TIMELINE_LAYER metrics.
+    pub fn inc_layer(&self, layer_desc: &PersistentLayerDesc) {
+        let labels = self.make_layer_labels(layer_desc);
+        TIMELINE_LAYER_COUNT
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .inc();
+        TIMELINE_LAYER_SIZE
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .add(layer_desc.file_size);
+    }
+
     pub(crate) fn shutdown(&self) {
         let was_shutdown = self
             .shutdown
@@ -2869,30 +2953,14 @@ impl TimelineMetrics {
         let _ = TIMELINE_ARCHIVE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = PITR_HISTORY_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
 
-        let _ = TIMELINE_LAYER_SIZE.remove_label_values(&[
-            tenant_id,
-            shard_id,
-            timeline_id,
-            MetricLayerKind::Image.into(),
-        ]);
-        let _ = TIMELINE_LAYER_COUNT.remove_label_values(&[
-            tenant_id,
-            shard_id,
-            timeline_id,
-            MetricLayerKind::Image.into(),
-        ]);
-        let _ = TIMELINE_LAYER_SIZE.remove_label_values(&[
-            tenant_id,
-            shard_id,
-            timeline_id,
-            MetricLayerKind::Delta.into(),
-        ]);
-        let _ = TIMELINE_LAYER_COUNT.remove_label_values(&[
-            tenant_id,
-            shard_id,
-            timeline_id,
-            MetricLayerKind::Delta.into(),
-        ]);
+        for ref level in LayerLevel::iter() {
+            for ref kind in LayerKind::iter() {
+                let labels: [&str; 5] =
+                    [tenant_id, shard_id, timeline_id, level.into(), kind.into()];
+                let _ = TIMELINE_LAYER_SIZE.remove_label_values(&labels);
+                let _ = TIMELINE_LAYER_COUNT.remove_label_values(&labels);
+            }
+        }
 
         let _ = EVICTIONS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = AUX_FILE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
@@ -2973,24 +3041,6 @@ pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
 
     // we leave the BROKEN_TENANTS_SET entry if any
 }
-
-use futures::Future;
-use pin_project_lite::pin_project;
-use std::collections::HashMap;
-use std::num::NonZeroUsize;
-use std::pin::Pin;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
-
-use crate::config::PageServerConf;
-use crate::context::{PageContentKind, RequestContext};
-use crate::task_mgr::TaskKind;
-use crate::tenant::mgr::TenantSlot;
-use crate::tenant::tasks::BackgroundLoopKind;
-use crate::tenant::throttle::ThrottleResult;
-use crate::tenant::Timeline;
 
 /// Maintain a per timeline gauge in addition to the global gauge.
 pub(crate) struct PerTimelineRemotePhysicalSizeGauge {
