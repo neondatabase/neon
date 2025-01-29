@@ -14,10 +14,8 @@ from fixtures.pageserver.http import (
     ImportPgdataIdemptencyKey,
     PageserverApiException,
 )
-from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.utils import run_only_on_postgres
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
@@ -39,10 +37,6 @@ smoke_params = [
 ]
 
 
-@run_only_on_postgres(
-    [PgVersion.V14, PgVersion.V15, PgVersion.V16],
-    "newer control file catalog version and struct format isn't supported",
-)
 @pytest.mark.parametrize("shard_count,stripe_size,rel_block_size", smoke_params)
 def test_pgdata_import_smoke(
     vanilla_pg: VanillaPostgres,
@@ -117,13 +111,15 @@ def test_pgdata_import_smoke(
         # TODO: would be nicer to just compare pgdump
 
         # Enable IO concurrency for batching on large sequential scan, to avoid making
-        # this test unnecessarily onerous on CPU
+        # this test unnecessarily onerous on CPU. Especially on debug mode, it's still
+        # pretty onerous though, so increase statement_timeout to avoid timeouts.
         assert ep.safe_psql_many(
             [
                 "set effective_io_concurrency=32;",
+                "SET statement_timeout='300s';",
                 "select count(*), sum(data::bigint)::bigint from t",
             ]
-        ) == [[], [(expect_nrows, expect_sum)]]
+        ) == [[], [], [(expect_nrows, expect_sum)]]
 
     validate_vanilla_equivalence(vanilla_pg)
 
@@ -317,10 +313,6 @@ def test_pgdata_import_smoke(
         br_initdb_endpoint.safe_psql("select * from othertable")
 
 
-@run_only_on_postgres(
-    [PgVersion.V14, PgVersion.V15, PgVersion.V16],
-    "newer control file catalog version and struct format isn't supported",
-)
 def test_fast_import_binary(
     test_output_dir,
     vanilla_pg: VanillaPostgres,
