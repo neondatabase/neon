@@ -1373,6 +1373,7 @@ async fn init_timeline_state(
             Ok(name) => {
                 let remote_meta = heatmap_metadata.get(&name);
                 let last_meta = last_heatmap_metadata.get(&name);
+                let mut remove = false;
                 match remote_meta {
                     Some(remote_meta) => {
                         let last_meta_generation_file_size = last_meta
@@ -1387,15 +1388,16 @@ async fn init_timeline_state(
                                 last_meta_generation_file_size,
                                 remote_meta.metadata.generation_file_size()
                             );
+                            remove = true;
                         } else if local_meta.len() != remote_meta.metadata.file_size {
-                            // This should not happen, because we do crashsafe write-then-rename when downloading
-                            // layers, and layers in remote storage are immutable.  Remove the local file because
-                            // we cannot trust it.
-                            tracing::warn!(
+                            // This can happen in the presence of race conditions: the remote and on-disk metadata have changed, but we haven't had
+                            // the chance yet to download the new layer to disk, before the process restarted.
+                            tracing::info!(
                                 "Removing local layer {name} with unexpected local size {} != {}",
                                 local_meta.len(),
                                 remote_meta.metadata.file_size
                             );
+                            remove = true;
                         } else {
                             // We expect the access time to be initialized immediately afterwards, when
                             // the latest heatmap is applied to the state.
@@ -1417,14 +1419,17 @@ async fn init_timeline_state(
                             "Removing secondary local layer {} because it's absent in heatmap",
                             name
                         );
-                        tokio::fs::remove_file(&dentry.path())
-                            .await
-                            .or_else(fs_ext::ignore_not_found)
-                            .fatal_err(&format!(
-                                "Removing layer {}",
-                                dentry.path().to_string_lossy()
-                            ));
+                        remove = true;
                     }
+                }
+                if remove {
+                    tokio::fs::remove_file(&dentry.path())
+                        .await
+                        .or_else(fs_ext::ignore_not_found)
+                        .fatal_err(&format!(
+                            "Removing layer {}",
+                            dentry.path().to_string_lossy()
+                        ));
                 }
             }
             Err(_) => {
