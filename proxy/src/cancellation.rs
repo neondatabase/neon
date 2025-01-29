@@ -29,6 +29,7 @@ use tokio::sync::oneshot;
 type IpSubnetKey = IpNet;
 
 const CANCEL_KEY_TTL: i64 = 1_209_600; // 2 weeks cancellation key expire time
+const REDIS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(10);
 
 // Message types for sending through mpsc channel
 pub enum CancelKeyOp {
@@ -221,7 +222,7 @@ impl CancellationHandler {
             return Err(CancelError::InternalError);
         };
 
-        tx.send_timeout(op, std::time::Duration::from_secs(10))
+        tx.send_timeout(op, REDIS_SEND_TIMEOUT)
             .await
             .map_err(|e| {
                 tracing::warn!("failed to send GetCancelData for {key}: {e}");
@@ -423,13 +424,10 @@ impl Session {
             expire: CANCEL_KEY_TTL,
         };
 
-        let _ = tx
-            .send_timeout(op, std::time::Duration::from_secs(10))
-            .await
-            .map_err(|e| {
-                let key = self.key;
-                tracing::warn!("failed to send StoreCancelKey for {key}: {e}");
-            });
+        let _ = tx.send_timeout(op, REDIS_SEND_TIMEOUT).await.map_err(|e| {
+            let key = self.key;
+            tracing::warn!("failed to send StoreCancelKey for {key}: {e}");
+        });
         Ok(())
     }
 
@@ -449,13 +447,10 @@ impl Session {
                 .guard(RedisMsgKind::HSet),
         };
 
-        let _ = tx
-            .send_timeout(op, std::time::Duration::from_secs(10))
-            .await
-            .map_err(|e| {
-                let key = self.key;
-                tracing::warn!("failed to send RemoveCancelKey for {key}: {e}");
-            });
+        let _ = tx.send_timeout(op, REDIS_SEND_TIMEOUT).await.map_err(|e| {
+            let key = self.key;
+            tracing::warn!("failed to send RemoveCancelKey for {key}: {e}");
+        });
         Ok(())
     }
 }

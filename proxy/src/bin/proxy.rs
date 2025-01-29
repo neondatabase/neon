@@ -159,6 +159,9 @@ struct ProxyCliArgs {
     /// Redis rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_REDIS_SET)]
     redis_rps_limit: Vec<RateBucketInfo>,
+    /// Cancellation channel size (max queue size for redis kv client)
+    #[clap(long, default_value = "1024")]
+    cancellation_ch_size: usize,
     /// cache for `allowed_ips` (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     allowed_ips_cache: String,
@@ -389,7 +392,8 @@ async fn main() -> anyhow::Result<()> {
         .map(|redis_publisher| RedisKVClient::new(redis_publisher.clone(), redis_rps_limit));
 
     // channel size should be higher than redis client limit to avoid blocking
-    let (tx_cancel, rx_cancel) = tokio::sync::mpsc::channel(1024);
+    let cancel_ch_size = args.cancellation_ch_size;
+    let (tx_cancel, rx_cancel) = tokio::sync::mpsc::channel(cancel_ch_size);
     let cancellation_handler = Arc::new(CancellationHandler::new(
         &config.connect_to_compute,
         Some(tx_cancel),
