@@ -4,7 +4,7 @@
 //! united.
 
 use reqwest::{IntoUrl, Method, StatusCode};
-use safekeeper_api::models::{TimelineCreateRequest, TimelineStatus};
+use safekeeper_api::models::{SafekeeperUtilization, TimelineCreateRequest, TimelineStatus};
 use std::error::Error as _;
 use utils::{
     http::error::HttpErrorBody,
@@ -124,9 +124,10 @@ impl Client {
         self.get(&uri).await
     }
 
-    pub async fn utilization(&self) -> Result<reqwest::Response> {
+    pub async fn utilization(&self) -> Result<SafekeeperUtilization> {
         let uri = format!("{}/v1/utilization/", self.mgmt_api_endpoint);
-        self.get(&uri).await
+        let resp = self.get(&uri).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
     }
 
     async fn post<B: serde::Serialize, U: IntoUrl>(
