@@ -887,7 +887,7 @@ jobs:
                 CONNSTR_SECRET_NAME="BENCHMARK_CAPTEST_TPCH_S10_CONNSTR"
                 ;;
               17)
-                CONNSTR_SECRET_NAME=${{ secrets.BENCHMARK_CAPTEST_CONNSTR_PG17 }}
+                CONNSTR_SECRET_NAME="BENCHMARK_CAPTEST_CONNSTR_PG17"
                 ;;
               *)
                 echo >&2 "Unsupported PG_VERSION=${PG_VERSION} for PLATFORM=${PLATFORM}"
