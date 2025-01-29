@@ -677,19 +677,6 @@ impl<'a> TenantDownloader<'a> {
         let heatmap_path = self.conf.tenant_heatmap_path(tenant_shard_id);
 
         let last_heatmap = if last_download.is_none() {
-            async fn load_heatmap(
-                path: &Utf8PathBuf,
-                ctx: &RequestContext,
-            ) -> Result<Option<HeatMapTenant>, anyhow::Error> {
-                let mut file = match VirtualFile::open(path, ctx).await {
-                    Ok(file) => file,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                    Err(e) => Err(e)?,
-                };
-                let st = file.read_to_string(ctx).await?;
-                let htm = serde_json::from_str(&st)?;
-                Ok(Some(htm))
-            }
             match load_heatmap(&heatmap_path, ctx).await {
                 Ok(htm) => htm,
                 Err(e) => {
@@ -1448,4 +1435,19 @@ async fn init_timeline_state(
     }
 
     detail
+}
+
+/// Loads a json-encoded heatmap file from the provided on-disk path
+async fn load_heatmap(
+    path: &Utf8PathBuf,
+    ctx: &RequestContext,
+) -> Result<Option<HeatMapTenant>, anyhow::Error> {
+    let mut file = match VirtualFile::open(path, ctx).await {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => Err(e)?,
+    };
+    let st = file.read_to_string(ctx).await?;
+    let htm = serde_json::from_str(&st)?;
+    Ok(Some(htm))
 }
