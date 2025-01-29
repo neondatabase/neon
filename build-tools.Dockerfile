@@ -226,6 +226,8 @@ RUN wget -O /tmp/libicu-${ICU_VERSION}.tgz https://github.com/unicode-org/icu/re
 USER nonroot:nonroot
 WORKDIR /home/nonroot
 
+RUN echo -e "--retry-connrefused\--conntect-timeout 15\nn--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
+
 # Python
 ENV PYTHON_VERSION=3.11.10 \
     PYENV_ROOT=/home/nonroot/.pyenv \
