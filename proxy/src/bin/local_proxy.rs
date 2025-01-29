@@ -85,8 +85,8 @@ struct LocalProxyCliArgs {
     /// Address of the postgres server
     #[clap(long, default_value = "127.0.0.1:5432")]
     postgres: SocketAddr,
-    /// Address of the compute-ctl api service
-    #[clap(long, default_value = "http://127.0.0.1:3080/")]
+    /// Address of the internal compute-ctl api service
+    #[clap(long, default_value = "http://127.0.0.1:3081/")]
     compute_ctl: ApiUrl,
     /// Path of the local proxy config file
     #[clap(long, default_value = "./local_proxy.json")]
