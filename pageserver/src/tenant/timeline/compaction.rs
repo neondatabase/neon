@@ -624,7 +624,13 @@ impl Timeline {
 
         // High level strategy for compaction / image creation:
         //
-        // 1. First, calculate the desired "partitioning" of the
+        // 1. First, do a L0 compaction to ensure we move the L0
+        // layers into the historic layer map get flat levels of
+        // layers. If we did not compact all L0 layers, we will
+        // prioritize compacting the timeline again and not do
+        // any of the compactions below.
+        //
+        // 2. Then, calculate the desired "partitioning" of the
         // currently in-use key space. The goal is to partition the
         // key space into roughly fixed-size chunks, but also take into
         // account any existing image layers, and try to align the
@@ -638,7 +644,7 @@ impl Timeline {
         // identify a relation. This is just an optimization,
         // though.
         //
-        // 2. Once we know the partitioning, for each partition,
+        // 3. Once we know the partitioning, for each partition,
         // decide if it's time to create a new image layer. The
         // criteria is: there has been too much "churn" since the last
         // image layer? The "churn" is fuzzy concept, it's a
@@ -646,15 +652,8 @@ impl Timeline {
         // total in the delta file. Or perhaps: if creating an image
         // file would allow to delete some older files.
         //
-        // 3. After that, we compact all level0 delta files if there
-        // are too many of them.  While compacting, we also garbage
-        // collect any page versions that are no longer needed because
-        // of the new image layers we created in step 2.
-        //
-        // TODO: This high level strategy hasn't been implemented yet.
-        // Below are functions compact_level0() and create_image_layers()
-        // but they are a bit ad hoc and don't quite work like it's explained
-        // above. Rewrite it.
+        // 4. In the end, if the tenant gets auto-sharded, we will run
+        // a shard-ancestor compaction.
 
         // Is the timeline being deleted?
         if self.is_stopping() {
@@ -666,10 +665,32 @@ impl Timeline {
 
         // Define partitioning schema if needed
 
-        // FIXME: the match should only cover repartitioning, not the next steps
-        let (partition_count, has_pending_tasks) = match self
+        // 1. L0 Compact
+        let fully_compacted = {
+            let timer = self.metrics.compact_time_histo.start_timer();
+            let fully_compacted = self
+                .compact_level0(
+                    target_file_size,
+                    options.flags.contains(CompactFlags::ForceL0Compaction),
+                    ctx,
+                )
+                .await?;
+            timer.stop_and_record();
+            fully_compacted
+        };
+
+        if !fully_compacted {
+            // Yield and do not do any other kind of compaction. True means
+            // that we have pending L0 compaction tasks and the compaction scheduler
+            // will prioritize compacting this tenant/timeline again.
+            info!("skipping image layer generation and shard ancestor compaction due to L0 compaction did not include all layers.");
+            return Ok(true);
+        }
+
+        // 2. Repartition and create image layers if necessary
+        let partition_count = match self
             .repartition(
-                self.get_last_record_lsn(),
+                self.get_last_record_lsn(), // TODO: use L0-L1 boundary
                 self.get_compaction_target_size(),
                 options.flags,
                 ctx,
@@ -682,46 +703,30 @@ impl Timeline {
                     .access_stats_behavior(AccessStatsBehavior::Skip)
                     .build();
 
-                // 2. Compact
-                let timer = self.metrics.compact_time_histo.start_timer();
-                let fully_compacted = self
-                    .compact_level0(
-                        target_file_size,
-                        options.flags.contains(CompactFlags::ForceL0Compaction),
-                        ctx,
-                    )
-                    .await?;
-                timer.stop_and_record();
-
                 let mut partitioning = dense_partitioning;
                 partitioning
                     .parts
                     .extend(sparse_partitioning.into_dense().parts);
 
-                // 3. Create new image layers for partitions that have been modified
-                // "enough". Skip image layer creation if L0 compaction cannot keep up.
-                if fully_compacted {
-                    let image_layers = self
-                        .create_image_layers(
-                            &partitioning,
-                            lsn,
-                            if options
-                                .flags
-                                .contains(CompactFlags::ForceImageLayerCreation)
-                            {
-                                ImageLayerCreationMode::Force
-                            } else {
-                                ImageLayerCreationMode::Try
-                            },
-                            &image_ctx,
-                        )
-                        .await?;
+                // 3. Create new image layers for partitions that have been modified "enough".
+                let image_layers = self
+                    .create_image_layers(
+                        &partitioning,
+                        lsn,
+                        if options
+                            .flags
+                            .contains(CompactFlags::ForceImageLayerCreation)
+                        {
+                            ImageLayerCreationMode::Force
+                        } else {
+                            ImageLayerCreationMode::Try
+                        },
+                        &image_ctx,
+                    )
+                    .await?;
 
-                    self.upload_new_image_layers(image_layers)?;
-                } else {
-                    info!("skipping image layer generation due to L0 compaction did not include all layers.");
-                }
-                (partitioning.parts.len(), !fully_compacted)
+                self.upload_new_image_layers(image_layers)?;
+                partitioning.parts.len()
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -733,9 +738,11 @@ impl Timeline {
                 if !self.cancel.is_cancelled() && !err.is_cancelled() {
                     tracing::error!("could not compact, repartitioning keyspace failed: {err:?}");
                 }
-                (1, false)
+                1
             }
         };
+
+        // 4. Shard ancestor compaction
 
         if self.shard_identity.count >= ShardCount::new(2) {
             // Limit the number of layer rewrites to the number of partitions: this means its
@@ -746,7 +753,7 @@ impl Timeline {
             self.compact_shard_ancestors(rewrite_max, ctx).await?;
         }
 
-        Ok(has_pending_tasks)
+        Ok(false)
     }
 
     /// Check for layers that are elegible to be rewritten:
