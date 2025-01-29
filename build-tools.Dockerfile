@@ -3,6 +3,10 @@ ARG DEBIAN_VERSION=bookworm
 FROM debian:bookworm-slim AS pgcopydb_builder
 ARG DEBIAN_VERSION
 
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
+    echo "--retry-connrefused\--conntect-timeout 15\nn--retry 5\n--max-time 300\n" > /root/.curlrc
+
 RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         set -e && \
         apt update && \
@@ -65,6 +69,10 @@ COPY --from=pgcopydb_builder /pgcopydb/lib/libpq.so.5 /pgcopydb/lib/libpq.so.5
 #
 # 'gdb' is included so that we get backtraces of core dumps produced in
 # regression tests
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
+    echo "--retry-connrefused\--conntect-timeout 15\nn--retry 5\n--max-time 300\n" > /root/.curlrc
+
 RUN set -e \
     && apt update \
     && apt install -y \
