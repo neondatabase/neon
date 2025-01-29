@@ -67,6 +67,9 @@ RUN cd postgres && \
     # Enable some of contrib extensions
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/autoinc.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/dblink.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgres_fdw.control && \
+    file=/usr/local/pgsql/share/extension/postgres_fdw--1.0.sql && [ -e $file ] && \
+    echo 'GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO neon_superuser;' >> $file && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/bloom.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/earthdistance.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/insert_username.control && \
@@ -360,6 +363,8 @@ COPY compute/patches/pgvector.patch /pgvector.patch
 RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.0.tar.gz -O pgvector.tar.gz && \
     echo "867a2c328d4928a5a9d6f052cd3bc78c7d60228a9b914ad32aa3db88e9de27b0 pgvector.tar.gz" | sha256sum --check && \
     mkdir pgvector-src && cd pgvector-src && tar xzf ../pgvector.tar.gz --strip-components=1 -C . && \
+    wget https://github.com/pgvector/pgvector/raw/refs/tags/v0.7.4/sql/vector.sql -O ./sql/vector--0.7.4.sql && \
+    echo "10218d05dc02299562252a9484775178b14a1d8edb92a2d1672ef488530f7778 ./sql/vector--0.7.4.sql" | sha256sum --check && \
     patch -p1 < /pgvector.patch && \
     make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" && \
     make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" install && \
@@ -1261,11 +1266,12 @@ RUN set -e \
 
 #########################################################################################
 #
-# Layers "postgres-exporter" and "sql-exporter"
+# Layers "postgres-exporter", "pgbouncer-exporter", and "sql-exporter"
 #
 #########################################################################################
 
 FROM quay.io/prometheuscommunity/postgres-exporter:v0.16.0 AS postgres-exporter
+FROM quay.io/prometheuscommunity/pgbouncer-exporter:v0.10.2 AS pgbouncer-exporter
 
 # Keep the version the same as in build-tools.Dockerfile and
 # test_runner/regress/test_compute_metrics.py.
@@ -1397,6 +1403,7 @@ RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 
 # Metrics exporter binaries and  configuration files
 COPY --from=postgres-exporter /bin/postgres_exporter /bin/postgres_exporter
+COPY --from=pgbouncer-exporter /bin/pgbouncer_exporter /bin/pgbouncer_exporter
 COPY --from=sql-exporter      /bin/sql_exporter      /bin/sql_exporter
 
 COPY --chown=postgres compute/etc/postgres_exporter.yml /etc/postgres_exporter.yml

@@ -120,6 +120,7 @@ pub struct ConfigToml {
     pub no_sync: Option<bool>,
     pub wal_receiver_protocol: PostgresClientProtocol,
     pub page_service_pipelining: PageServicePipeliningConfig,
+    pub get_vectored_concurrent_io: GetVectoredConcurrentIo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -156,6 +157,25 @@ pub struct PageServicePipeliningConfigPipelined {
 pub enum PageServiceProtocolPipelinedExecutionStrategy {
     ConcurrentFutures,
     Tasks,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
+#[serde(deny_unknown_fields)]
+pub enum GetVectoredConcurrentIo {
+    /// The read path is fully sequential: layers are visited
+    /// one after the other and IOs are issued and waited upon
+    /// from the same task that traverses the layers.
+    Sequential,
+    /// The read path still traverses layers sequentially, and
+    /// index blocks will be read into the PS PageCache from
+    /// that task, with waiting.
+    /// But data IOs are dispatched and waited upon from a sidecar
+    /// task so that the traversing task can continue to traverse
+    /// layers while the IOs are in flight.
+    /// If the PS PageCache miss rate is low, this improves
+    /// throughput dramatically.
+    SidecarTask,
 }
 
 pub mod statvfs {
@@ -234,9 +254,21 @@ pub struct TenantConfigToml {
     // Duration::ZERO means automatic compaction is disabled.
     #[serde(with = "humantime_serde")]
     pub compaction_period: Duration,
-    // Level0 delta layer threshold for compaction.
+    /// Level0 delta layer threshold for compaction.
     pub compaction_threshold: usize,
     pub compaction_algorithm: crate::models::CompactionAlgorithmSettings,
+    /// Level0 delta layer threshold at which to delay layer flushes for compaction backpressure,
+    /// such that they take 2x as long, and start waiting for layer flushes during ephemeral layer
+    /// rolls. This helps compaction keep up with WAL ingestion, and avoids read amplification
+    /// blowing up. Should be >compaction_threshold. 0 to disable. Disabled by default.
+    pub l0_flush_delay_threshold: Option<usize>,
+    /// Level0 delta layer threshold at which to stall layer flushes. Must be >compaction_threshold
+    /// to avoid deadlock. 0 to disable. Disabled by default.
+    pub l0_flush_stall_threshold: Option<usize>,
+    /// If true, Level0 delta layer flushes will wait for S3 upload before flushing the next
+    /// layer. This is a temporary backpressure mechanism which should be removed once
+    /// l0_flush_{delay,stall}_threshold is fully enabled.
+    pub l0_flush_wait_upload: bool,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
     // The unit is #of bytes of WAL.
@@ -464,6 +496,11 @@ impl Default for ConfigToml {
                     execution: PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures,
                 })
             },
+            get_vectored_concurrent_io: if !cfg!(test) {
+                GetVectoredConcurrentIo::Sequential
+            } else {
+                GetVectoredConcurrentIo::SidecarTask
+            },
         }
     }
 }
@@ -488,6 +525,8 @@ pub mod tenant_conf_defaults {
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
     pub const DEFAULT_COMPACTION_ALGORITHM: crate::models::CompactionAlgorithm =
         crate::models::CompactionAlgorithm::Legacy;
+
+    pub const DEFAULT_L0_FLUSH_WAIT_UPLOAD: bool = true;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 
@@ -527,6 +566,9 @@ impl Default for TenantConfigToml {
             compaction_algorithm: crate::models::CompactionAlgorithmSettings {
                 kind: DEFAULT_COMPACTION_ALGORITHM,
             },
+            l0_flush_delay_threshold: None,
+            l0_flush_stall_threshold: None,
+            l0_flush_wait_upload: DEFAULT_L0_FLUSH_WAIT_UPLOAD,
             gc_horizon: DEFAULT_GC_HORIZON,
             gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)
                 .expect("cannot parse default gc period"),

@@ -4,7 +4,7 @@
 //! united.
 
 use reqwest::{IntoUrl, Method, StatusCode};
-use safekeeper_api::models::TimelineStatus;
+use safekeeper_api::models::{TimelineCreateRequest, TimelineStatus};
 use std::error::Error as _;
 use utils::{
     http::error::HttpErrorBody,
@@ -76,6 +76,28 @@ impl Client {
         }
     }
 
+    pub async fn create_timeline(&self, req: &TimelineCreateRequest) -> Result<TimelineStatus> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}",
+            self.mgmt_api_endpoint, req.tenant_id, req.timeline_id
+        );
+        let resp = self.post(&uri, req).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+
+    pub async fn delete_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<TimelineStatus> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}",
+            self.mgmt_api_endpoint, tenant_id, timeline_id
+        );
+        let resp = self.request(Method::DELETE, &uri, ()).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+
     pub async fn timeline_status(
         &self,
         tenant_id: TenantId,
@@ -105,6 +127,14 @@ impl Client {
     pub async fn utilization(&self) -> Result<reqwest::Response> {
         let uri = format!("{}/v1/utilization/", self.mgmt_api_endpoint);
         self.get(&uri).await
+    }
+
+    async fn post<B: serde::Serialize, U: IntoUrl>(
+        &self,
+        uri: U,
+        body: B,
+    ) -> Result<reqwest::Response> {
+        self.request(Method::POST, uri, body).await
     }
 
     async fn get<U: IntoUrl>(&self, uri: U) -> Result<reqwest::Response> {

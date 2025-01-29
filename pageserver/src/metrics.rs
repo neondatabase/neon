@@ -38,6 +38,9 @@ pub(crate) enum StorageTimeOperation {
     #[strum(serialize = "layer flush")]
     LayerFlush,
 
+    #[strum(serialize = "layer flush delay")]
+    LayerFlushDelay,
+
     #[strum(serialize = "compact")]
     Compact,
 
@@ -124,73 +127,6 @@ pub(crate) static INITDB_RUN_TIME: Lazy<Histogram> = Lazy::new(|| {
         STORAGE_OP_BUCKETS.into()
     )
     .expect("failed to define metric")
-});
-
-// Metrics collected on operations on the storage repository.
-#[derive(
-    Clone, Copy, enum_map::Enum, strum_macros::EnumString, strum_macros::Display, IntoStaticStr,
-)]
-pub(crate) enum GetKind {
-    Singular,
-    Vectored,
-}
-
-pub(crate) struct ReconstructTimeMetrics {
-    singular: Histogram,
-    vectored: Histogram,
-}
-
-pub(crate) static RECONSTRUCT_TIME: Lazy<ReconstructTimeMetrics> = Lazy::new(|| {
-    let inner = register_histogram_vec!(
-        "pageserver_getpage_reconstruct_seconds",
-        "Time spent in reconstruct_value (reconstruct a page from deltas)",
-        &["get_kind"],
-        CRITICAL_OP_BUCKETS.into(),
-    )
-    .expect("failed to define a metric");
-
-    ReconstructTimeMetrics {
-        singular: inner.with_label_values(&[GetKind::Singular.into()]),
-        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
-    }
-});
-
-impl ReconstructTimeMetrics {
-    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
-        match get_kind {
-            GetKind::Singular => &self.singular,
-            GetKind::Vectored => &self.vectored,
-        }
-    }
-}
-
-pub(crate) struct ReconstructDataTimeMetrics {
-    singular: Histogram,
-    vectored: Histogram,
-}
-
-impl ReconstructDataTimeMetrics {
-    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
-        match get_kind {
-            GetKind::Singular => &self.singular,
-            GetKind::Vectored => &self.vectored,
-        }
-    }
-}
-
-pub(crate) static GET_RECONSTRUCT_DATA_TIME: Lazy<ReconstructDataTimeMetrics> = Lazy::new(|| {
-    let inner = register_histogram_vec!(
-        "pageserver_getpage_get_reconstruct_data_seconds",
-        "Time spent in get_reconstruct_value_data",
-        &["get_kind"],
-        CRITICAL_OP_BUCKETS.into(),
-    )
-    .expect("failed to define a metric");
-
-    ReconstructDataTimeMetrics {
-        singular: inner.with_label_values(&[GetKind::Singular.into()]),
-        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
-    }
 });
 
 pub(crate) struct GetVectoredLatency {
@@ -2584,7 +2520,6 @@ impl Drop for AlwaysRecordingStorageTimeMetricsTimer {
 
 impl AlwaysRecordingStorageTimeMetricsTimer {
     /// Returns the elapsed duration of the timer.
-    #[allow(unused)]
     pub fn elapsed(&self) -> Duration {
         self.0.as_ref().expect("not dropped yet").elapsed()
     }
@@ -2642,6 +2577,7 @@ pub(crate) struct TimelineMetrics {
     shard_id: String,
     timeline_id: String,
     pub flush_time_histo: StorageTimeMetrics,
+    pub flush_delay_histo: StorageTimeMetrics,
     pub flush_wait_upload_time_gauge: Gauge,
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
@@ -2684,6 +2620,12 @@ impl TimelineMetrics {
         let timeline_id = timeline_id_raw.to_string();
         let flush_time_histo = StorageTimeMetrics::new(
             StorageTimeOperation::LayerFlush,
+            &tenant_id,
+            &shard_id,
+            &timeline_id,
+        );
+        let flush_delay_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::LayerFlushDelay,
             &tenant_id,
             &shard_id,
             &timeline_id,
@@ -2836,6 +2778,7 @@ impl TimelineMetrics {
             shard_id,
             timeline_id,
             flush_time_histo,
+            flush_delay_histo,
             flush_wait_upload_time_gauge,
             compact_time_histo,
             create_images_time_histo,
@@ -3934,7 +3877,6 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
     });
 
     // Custom
-    Lazy::force(&RECONSTRUCT_TIME);
     Lazy::force(&BASEBACKUP_QUERY_TIME);
     Lazy::force(&COMPUTE_COMMANDS_COUNTERS);
     Lazy::force(&tokio_epoll_uring::THREAD_LOCAL_METRICS_STORAGE);
