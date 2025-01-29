@@ -37,6 +37,8 @@ use remote_timeline_client::manifest::{
     OffloadedTimelineManifest, TenantManifest, LATEST_TENANT_MANIFEST_VERSION,
 };
 use remote_timeline_client::UploadQueueNotReadyError;
+use remote_timeline_client::FAILED_REMOTE_OP_RETRIES;
+use remote_timeline_client::FAILED_UPLOAD_WARN_THRESHOLD;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -2558,7 +2560,12 @@ impl Tenant {
                     // sizes etc. and that would get confused if the previous page versions
                     // are not in the repository yet.
                     ancestor_timeline
-                        .wait_lsn(*lsn, timeline::WaitLsnWaiter::Tenant, ctx)
+                        .wait_lsn(
+                            *lsn,
+                            timeline::WaitLsnWaiter::Tenant,
+                            timeline::WaitLsnTimeout::Default,
+                            ctx,
+                        )
                         .await
                         .map_err(|e| match e {
                             e @ (WaitLsnError::Timeout(_) | WaitLsnError::BadState { .. }) => {
@@ -3807,6 +3814,13 @@ impl Tenant {
         tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
+    }
+
+    pub fn get_compaction_upper_limit(&self) -> usize {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .compaction_upper_limit
+            .unwrap_or(self.conf.default_tenant_conf.compaction_upper_limit)
     }
 
     pub fn get_gc_horizon(&self) -> u64 {
@@ -5308,27 +5322,37 @@ impl Tenant {
             return Ok(());
         }
 
-        upload_tenant_manifest(
-            &self.remote_storage,
-            &self.tenant_shard_id,
-            self.generation,
-            &manifest,
+        // Remote storage does no retries internally, so wrap it
+        match backoff::retry(
+            || async {
+                upload_tenant_manifest(
+                    &self.remote_storage,
+                    &self.tenant_shard_id,
+                    self.generation,
+                    &manifest,
+                    &self.cancel,
+                )
+                .await
+            },
+            |_e| self.cancel.is_cancelled(),
+            FAILED_UPLOAD_WARN_THRESHOLD,
+            FAILED_REMOTE_OP_RETRIES,
+            "uploading tenant manifest",
             &self.cancel,
         )
         .await
-        .map_err(|e| {
-            if self.cancel.is_cancelled() {
-                TenantManifestError::Cancelled
-            } else {
-                TenantManifestError::RemoteStorage(e)
+        {
+            None => Err(TenantManifestError::Cancelled),
+            Some(Err(_)) if self.cancel.is_cancelled() => Err(TenantManifestError::Cancelled),
+            Some(Err(e)) => Err(TenantManifestError::RemoteStorage(e)),
+            Some(Ok(_)) => {
+                // Store the successfully uploaded manifest, so that future callers can avoid
+                // re-uploading the same thing.
+                *guard = Some(manifest);
+
+                Ok(())
             }
-        })?;
-
-        // Store the successfully uploaded manifest, so that future callers can avoid
-        // re-uploading the same thing.
-        *guard = Some(manifest);
-
-        Ok(())
+        }
     }
 }
 
@@ -5452,9 +5476,11 @@ pub(crate) mod harness {
                 compaction_target_size: Some(tenant_conf.compaction_target_size),
                 compaction_period: Some(tenant_conf.compaction_period),
                 compaction_threshold: Some(tenant_conf.compaction_threshold),
+                compaction_upper_limit: Some(tenant_conf.compaction_upper_limit),
                 compaction_algorithm: Some(tenant_conf.compaction_algorithm),
                 l0_flush_delay_threshold: tenant_conf.l0_flush_delay_threshold,
                 l0_flush_stall_threshold: tenant_conf.l0_flush_stall_threshold,
+                l0_flush_wait_upload: Some(tenant_conf.l0_flush_wait_upload),
                 gc_horizon: Some(tenant_conf.gc_horizon),
                 gc_period: Some(tenant_conf.gc_period),
                 image_creation_threshold: Some(tenant_conf.image_creation_threshold),
