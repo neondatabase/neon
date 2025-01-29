@@ -1,6 +1,8 @@
 use futures::{stream::FuturesUnordered, StreamExt};
 use std::{
     collections::HashMap,
+    fmt::Debug,
+    future::Future,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -13,11 +15,11 @@ use utils::id::NodeId;
 
 use crate::node::Node;
 
-struct HeartbeaterTask {
-    receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest>,
+struct HeartbeaterTask<Server, State> {
+    receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest<Server, State>>,
     cancel: CancellationToken,
 
-    state: HashMap<NodeId, PageserverState>,
+    state: HashMap<NodeId, State>,
 
     max_offline_interval: Duration,
     max_warming_up_interval: Duration,
@@ -37,7 +39,7 @@ pub(crate) enum PageserverState {
 }
 
 #[derive(Debug)]
-pub(crate) struct AvailablityDeltas(pub Vec<(NodeId, PageserverState)>);
+pub(crate) struct AvailablityDeltas<State>(pub Vec<(NodeId, State)>);
 
 #[derive(Debug, Error)]
 pub(crate) enum HeartbeaterError {
@@ -45,23 +47,28 @@ pub(crate) enum HeartbeaterError {
     Cancel,
 }
 
-struct HeartbeatRequest {
-    pageservers: Arc<HashMap<NodeId, Node>>,
-    reply: tokio::sync::oneshot::Sender<Result<AvailablityDeltas, HeartbeaterError>>,
+struct HeartbeatRequest<Server, State> {
+    servers: Arc<HashMap<NodeId, Server>>,
+    reply: tokio::sync::oneshot::Sender<Result<AvailablityDeltas<State>, HeartbeaterError>>,
 }
 
-pub(crate) struct Heartbeater {
-    sender: tokio::sync::mpsc::UnboundedSender<HeartbeatRequest>,
+pub(crate) struct Heartbeater<Server, State> {
+    sender: tokio::sync::mpsc::UnboundedSender<HeartbeatRequest<Server, State>>,
 }
 
-impl Heartbeater {
+#[allow(private_bounds)]
+impl<Server: Send + Sync + 'static, State: Debug + Send + 'static> Heartbeater<Server, State>
+where
+    HeartbeaterTask<Server, State>: HeartBeat<Server, State>,
+{
     pub(crate) fn new(
         jwt_token: Option<String>,
         max_offline_interval: Duration,
         max_warming_up_interval: Duration,
         cancel: CancellationToken,
     ) -> Self {
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<HeartbeatRequest>();
+        let (sender, receiver) =
+            tokio::sync::mpsc::unbounded_channel::<HeartbeatRequest<Server, State>>();
         let mut heartbeater = HeartbeaterTask::new(
             receiver,
             jwt_token,
@@ -76,12 +83,12 @@ impl Heartbeater {
 
     pub(crate) async fn heartbeat(
         &self,
-        pageservers: Arc<HashMap<NodeId, Node>>,
-    ) -> Result<AvailablityDeltas, HeartbeaterError> {
+        servers: Arc<HashMap<NodeId, Server>>,
+    ) -> Result<AvailablityDeltas<State>, HeartbeaterError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.sender
             .send(HeartbeatRequest {
-                pageservers,
+                servers,
                 reply: sender,
             })
             .map_err(|_| HeartbeaterError::Cancel)?;
@@ -93,9 +100,12 @@ impl Heartbeater {
     }
 }
 
-impl HeartbeaterTask {
+impl<Server, State: Debug> HeartbeaterTask<Server, State>
+where
+    HeartbeaterTask<Server, State>: HeartBeat<Server, State>,
+{
     fn new(
-        receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest>,
+        receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest<Server, State>>,
         jwt_token: Option<String>,
         max_offline_interval: Duration,
         max_warming_up_interval: Duration,
@@ -110,14 +120,13 @@ impl HeartbeaterTask {
             jwt_token,
         }
     }
-
     async fn run(&mut self) {
         loop {
             tokio::select! {
                 request = self.receiver.recv() => {
                     match request {
                         Some(req) => {
-                            let res = self.heartbeat(req.pageservers).await;
+                            let res = self.heartbeat(req.servers).await;
                             req.reply.send(res).unwrap();
                         },
                         None => { return; }
@@ -127,11 +136,20 @@ impl HeartbeaterTask {
             }
         }
     }
+}
 
+pub(crate) trait HeartBeat<Server, State> {
+    fn heartbeat(
+        &mut self,
+        pageservers: Arc<HashMap<NodeId, Server>>,
+    ) -> impl Future<Output = Result<AvailablityDeltas<State>, HeartbeaterError>> + Send;
+}
+
+impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState> {
     async fn heartbeat(
         &mut self,
         pageservers: Arc<HashMap<NodeId, Node>>,
-    ) -> Result<AvailablityDeltas, HeartbeaterError> {
+    ) -> Result<AvailablityDeltas<PageserverState>, HeartbeaterError> {
         let mut new_state = HashMap::new();
 
         let mut heartbeat_futs = FuturesUnordered::new();
