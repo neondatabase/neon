@@ -18,6 +18,10 @@ ARG DEBIAN_VERSION
 # Use strict mode for bash to catch errors early
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
+    echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
+
 RUN case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):
       # The h3_pg extension needs a cmake 3.20+, but Debian bullseye has 3.18.
@@ -838,6 +842,8 @@ ENV PATH="/home/nonroot/.cargo/bin:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 
+RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
+
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
@@ -873,6 +879,8 @@ ENV HOME=/home/nonroot
 ENV PATH="/home/nonroot/.cargo/bin:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
+
+RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
 
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
@@ -1243,6 +1251,7 @@ RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin c
 
 FROM debian:$DEBIAN_FLAVOR AS pgbouncer
 RUN set -e \
+    && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
     && apt update \
     && apt install --no-install-suggests --no-install-recommends -y \
         build-essential \
@@ -1444,6 +1453,8 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 # libboost* for rdkit
 # ca-certificates for communicating with s3 by compute_ctl
 
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
 
 RUN apt update && \
     case $DEBIAN_VERSION in \
@@ -1500,7 +1511,7 @@ RUN set -ex; \
     else \
         echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
     fi; \
-    curl -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
+    curl --retry 5 -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
     echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
     unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
     /tmp/awscliv2/aws/install; \
