@@ -1312,7 +1312,7 @@ dependencies = [
  "tar",
  "thiserror 1.0.69",
  "tokio",
- "tokio-postgres 0.7.7",
+ "tokio-postgres 0.7.9",
  "tokio-stream",
  "tokio-util",
  "tower 0.5.2",
@@ -1421,7 +1421,7 @@ dependencies = [
  "storage_broker",
  "thiserror 1.0.69",
  "tokio",
- "tokio-postgres 0.7.7",
+ "tokio-postgres 0.7.9",
  "tokio-util",
  "toml",
  "toml_edit",
@@ -4060,8 +4060,8 @@ dependencies = [
  "pageserver_compaction",
  "pin-project-lite",
  "postgres",
- "postgres-protocol 0.6.4",
- "postgres-types 0.2.4",
+ "postgres-protocol 0.6.6",
+ "postgres-types 0.2.6",
  "postgres_backend",
  "postgres_connection",
  "postgres_ffi",
@@ -4092,7 +4092,7 @@ dependencies = [
  "tokio",
  "tokio-epoll-uring",
  "tokio-io-timeout",
- "tokio-postgres 0.7.7",
+ "tokio-postgres 0.7.9",
  "tokio-stream",
  "tokio-tar",
  "tokio-util",
@@ -4150,7 +4150,7 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "tokio",
- "tokio-postgres 0.7.7",
+ "tokio-postgres 0.7.9",
  "tokio-stream",
  "tokio-util",
  "utils",
@@ -4448,23 +4448,23 @@ dependencies = [
 
 [[package]]
 name = "postgres"
-version = "0.19.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#511f998c00148ab7c847bd7e6cfd3a906d0e7473"
+version = "0.19.6"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#8b44892f7851e705810b2cb54504325699966070"
 dependencies = [
  "bytes",
  "fallible-iterator",
  "futures-util",
  "log",
  "tokio",
- "tokio-postgres 0.7.7",
+ "tokio-postgres 0.7.9",
 ]
 
 [[package]]
 name = "postgres-protocol"
-version = "0.6.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#511f998c00148ab7c847bd7e6cfd3a906d0e7473"
+version = "0.6.6"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#8b44892f7851e705810b2cb54504325699966070"
 dependencies = [
- "base64 0.20.0",
+ "base64 0.21.1",
  "byteorder",
  "bytes",
  "fallible-iterator",
@@ -4513,12 +4513,13 @@ dependencies = [
 
 [[package]]
 name = "postgres-types"
-version = "0.2.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#511f998c00148ab7c847bd7e6cfd3a906d0e7473"
+version = "0.2.6"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#8b44892f7851e705810b2cb54504325699966070"
 dependencies = [
  "bytes",
+ "chrono",
  "fallible-iterator",
- "postgres-protocol 0.6.4",
+ "postgres-protocol 0.6.6",
 ]
 
 [[package]]
@@ -4554,7 +4555,7 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "tokio",
- "tokio-postgres 0.7.7",
+ "tokio-postgres 0.7.9",
  "tokio-postgres-rustls",
  "tokio-rustls 0.26.0",
  "tokio-util",
@@ -4569,7 +4570,7 @@ dependencies = [
  "itertools 0.10.5",
  "once_cell",
  "postgres",
- "tokio-postgres 0.7.7",
+ "tokio-postgres 0.7.9",
  "url",
 ]
 
@@ -4663,7 +4664,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "itertools 0.10.5",
- "postgres-protocol 0.6.4",
+ "postgres-protocol 0.6.6",
  "rand 0.8.5",
  "serde",
  "thiserror 1.0.69",
@@ -4911,7 +4912,7 @@ dependencies = [
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
  "tokio",
- "tokio-postgres 0.7.7",
+ "tokio-postgres 0.7.9",
  "tokio-postgres2",
  "tokio-rustls 0.26.0",
  "tokio-tungstenite 0.21.0",
@@ -5699,7 +5700,7 @@ dependencies = [
  "pageserver_api",
  "parking_lot 0.12.1",
  "postgres",
- "postgres-protocol 0.6.4",
+ "postgres-protocol 0.6.6",
  "postgres_backend",
  "postgres_ffi",
  "pprof",
@@ -5723,7 +5724,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tokio-io-timeout",
- "tokio-postgres 0.7.7",
+ "tokio-postgres 0.7.9",
  "tokio-stream",
  "tokio-tar",
  "tokio-util",
@@ -6393,7 +6394,7 @@ dependencies = [
  "serde_json",
  "storage_controller_client",
  "tokio",
- "tokio-postgres 0.7.7",
+ "tokio-postgres 0.7.9",
  "tokio-postgres-rustls",
  "tokio-stream",
  "tokio-util",
@@ -6858,8 +6859,8 @@ dependencies = [
 
 [[package]]
 name = "tokio-postgres"
-version = "0.7.7"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#511f998c00148ab7c847bd7e6cfd3a906d0e7473"
+version = "0.7.9"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#8b44892f7851e705810b2cb54504325699966070"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -6872,11 +6873,13 @@ dependencies = [
  "percent-encoding",
  "phf",
  "pin-project-lite",
- "postgres-protocol 0.6.4",
- "postgres-types 0.2.4",
+ "postgres-protocol 0.6.6",
+ "postgres-types 0.2.6",
+ "rand 0.8.5",
  "socket2",
  "tokio",
  "tokio-util",
+ "whoami",
 ]
 
 [[package]]
@@ -6914,7 +6917,7 @@ dependencies = [
  "ring",
  "rustls 0.23.18",
  "tokio",
- "tokio-postgres 0.7.7",
+ "tokio-postgres 0.7.9",
  "tokio-rustls 0.26.0",
  "x509-certificate",
 ]
@@ -6935,6 +6938,7 @@ dependencies = [
  "pin-project-lite",
  "postgres-protocol2",
  "postgres-types2",
+ "serde",
  "tokio",
  "tokio-util",
 ]
@@ -7591,7 +7595,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tokio",
- "tokio-postgres 0.7.7",
+ "tokio-postgres 0.7.9",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
