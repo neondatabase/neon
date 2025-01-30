@@ -438,13 +438,12 @@ async fn network_io(
         match msg {
             ReplicationMessage::XLogData(xlog_data) => {
                 let ar_hdr = AppendRequestHeader {
+                    generation: INVALID_GENERATION,
                     term: donor.term,
-                    term_start_lsn: Lsn::INVALID, // unused
                     begin_lsn: Lsn(xlog_data.wal_start()),
                     end_lsn: Lsn(xlog_data.wal_start()) + xlog_data.data().len() as u64,
                     commit_lsn: Lsn::INVALID, // do not attempt to advance, peer communication anyway does it
                     truncate_lsn: Lsn::INVALID, // do not attempt to advance
-                    proposer_uuid: [0; 16],
                 };
                 let ar = AppendRequest {
                     h: ar_hdr,
