@@ -45,9 +45,6 @@ pub(crate) enum SafekeeperState {
         last_seen_at: Instant,
         utilization: SafekeeperUtilization,
     },
-    WarmingUp {
-        started_at: Instant,
-    },
     Offline,
 }
 
@@ -372,22 +369,17 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
             }
         }
 
-        let mut warming_up = 0;
         let mut offline = 0;
         for state in new_state.values() {
             match state {
-                SafekeeperState::WarmingUp { .. } => {
-                    warming_up += 1;
-                }
                 SafekeeperState::Offline { .. } => offline += 1,
                 SafekeeperState::Available { .. } => {}
             }
         }
 
         tracing::info!(
-            "Heartbeat round complete for {} safekeepers, {} warming-up, {} offline",
+            "Heartbeat round complete for {} safekeepers, {} offline",
             new_state.len(),
-            warming_up,
             offline
         );
 
@@ -406,14 +398,6 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
                             deltas.push((*node_id, ps_state.clone()));
                             needs_update = true;
                         }
-                    }
-                    (_, SafekeeperState::WarmingUp { started_at }) => {
-                        if now - *started_at >= self.max_warming_up_interval {
-                            *ps_state = SafekeeperState::Offline;
-                        }
-
-                        deltas.push((*node_id, ps_state.clone()));
-                        needs_update = true;
                     }
                     _ => {
                         deltas.push((*node_id, ps_state.clone()));
