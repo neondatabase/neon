@@ -505,13 +505,6 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            if let Some(mut redis_kv_client) = redis_kv_client {
-                maintenance_tasks.spawn(async move {
-                    redis_kv_client.try_connect().await?;
-                    handle_cancel_messages(&mut redis_kv_client, rx_cancel).await
-                });
-            }
-
             if let Some(regional_redis_client) = regional_redis_client {
                 let cache = api.caches.endpoints_cache.clone();
                 let con = regional_redis_client;
@@ -522,6 +515,15 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+    }
+
+    if let Some(mut redis_kv_client) = redis_kv_client {
+        maintenance_tasks.spawn(async move {
+            if let Err(err) = redis_kv_client.try_connect().await {
+                tracing::error!(?err, "could not connect to redis")
+            }
+            handle_cancel_messages(&mut redis_kv_client, rx_cancel).await
+        });
     }
 
     let maintenance = loop {
