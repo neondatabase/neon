@@ -7,8 +7,7 @@ use tokio_util::sync::CancellationToken;
 use utils::{backoff, id::NodeId, logging::SecretString};
 
 use crate::{
-    persistence::{DatabaseError, SafekeeperPersistence},
-    safekeeper_client::SafekeeperClient,
+    heartbeater::SafekeeperState, persistence::{DatabaseError, SafekeeperPersistence}, safekeeper_client::SafekeeperClient
 };
 
 #[derive(Clone)]
@@ -18,6 +17,7 @@ pub struct Safekeeper {
     listen_http_addr: String,
     listen_http_port: u16,
     id: NodeId,
+    availability: SafekeeperState,
 }
 
 impl Safekeeper {
@@ -28,6 +28,7 @@ impl Safekeeper {
             listen_http_port: skp.http_port as u16,
             id: NodeId(skp.id as u64),
             skp,
+            availability: SafekeeperState::Offline,
         }
     }
     pub(crate) fn base_url(&self) -> String {
@@ -39,6 +40,9 @@ impl Safekeeper {
     }
     pub(crate) fn describe_response(&self) -> Result<SafekeeperDescribeResponse, DatabaseError> {
         self.skp.as_describe_response()
+    }
+    pub(crate) fn set_availability(&mut self, availability: SafekeeperState) {
+        self.availability = availability;
     }
     pub(crate) async fn with_client_retries<T, O, F>(
         &self,

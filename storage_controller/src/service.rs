@@ -991,8 +991,14 @@ impl Service {
                 locked.nodes.clone()
             };
 
-            let res = self.heartbeater_ps.heartbeat(nodes).await;
-            if let Ok(deltas) = res {
+            let safekeepers = {
+                let locked = self.inner.read().unwrap();
+                locked.safekeepers.clone()
+            };
+
+            let res_ps = self.heartbeater_ps.heartbeat(nodes).await;
+            let res_sk = self.heartbeater_sk.heartbeat(safekeepers).await;
+            if let Ok(deltas) = res_ps {
                 let mut to_handle = Vec::default();
 
                 for (node_id, state) in deltas.0 {
@@ -1092,6 +1098,18 @@ impl Service {
                         }
                     }
                 }
+            }
+            if let Ok(deltas) = res_sk {
+                let mut locked = self.inner.write().unwrap();
+                let mut safekeepers = (*locked.safekeepers).clone();
+                for (id, state) in deltas.0 {
+                    let Some(sk) = safekeepers.get_mut(&id) else {
+                        tracing::info!("Couldn't update safekeeper safekeeper state for id {id} from heartbeat={state:?}");
+                        continue;
+                    };
+                    sk.set_availability(state);
+                }
+                locked.safekeepers = Arc::new(safekeepers);
             }
         }
     }
