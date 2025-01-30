@@ -4423,8 +4423,8 @@ dependencies = [
 
 [[package]]
 name = "postgres"
-version = "0.19.6"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#8b44892f7851e705810b2cb54504325699966070"
+version = "0.19.7"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -4437,9 +4437,9 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.6"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#8b44892f7851e705810b2cb54504325699966070"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
 dependencies = [
- "base64 0.21.1",
+ "base64 0.22.1",
  "byteorder",
  "bytes",
  "fallible-iterator",
@@ -4471,7 +4471,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.6"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#8b44892f7851e705810b2cb54504325699966070"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
 dependencies = [
  "bytes",
  "chrono",
@@ -6824,8 +6824,8 @@ dependencies = [
 
 [[package]]
 name = "tokio-postgres"
-version = "0.7.9"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#8b44892f7851e705810b2cb54504325699966070"
+version = "0.7.10"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
 dependencies = [
  "async-trait",
  "byteorder",
