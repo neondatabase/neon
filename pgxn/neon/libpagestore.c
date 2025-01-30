@@ -48,7 +48,6 @@
 #define MIN_RECONNECT_INTERVAL_USEC 1000
 #define MAX_RECONNECT_INTERVAL_USEC 1000000
 
-
 enum NeonComputeMode {
 	CP_MODE_PRIMARY = 0,
 	CP_MODE_REPLICA,
@@ -994,6 +993,7 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 		pageserver_conn = NULL;
 	}
 
+	request->reqid = GENERATE_REQUEST_ID();
 	req_buff = nm_pack_request(request);
 
 	/*
