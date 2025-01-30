@@ -8,6 +8,7 @@ use utils::{backoff, id::NodeId, logging::SecretString};
 use crate::{persistence::SafekeeperPersistence, safekeeper_client::SafekeeperClient};
 
 pub struct Safekeeper {
+    #[expect(dead_code)]
     skp: SafekeeperPersistence,
     cancel: CancellationToken,
     listen_http_addr: String,
