@@ -3276,24 +3276,41 @@ impl Timeline {
 
         let guard = self.layers.read().await;
 
-        // Retrieve the previous heatmap from disk.
-        // Keep any layers that are present in the old heatmap and not resident,
-        // _unless_ they are `LayerVisibilityHint::Covered`.
+        // Firstly, if there's any heatmap left over from when this location
+        // was a secondary, take that into account. Any layers that are present
+        // in the layer map, visible and non-resident will be kept.
         //
-        // Once all layers in the previous heatmap are either likely resident
-        // or `LayerVisibilityHint::Covered`, remove the heatmap from disk.
-        //
-        // Q: Do we update the on-disk heatmap?
-        // A: Probably not.
-        //
-        // Q: When do we upload?
-        // A: Can always upload with this approach since we don't clobber
+        // Without this, a new cold, attached location would clobber the previous
+        // heatamp.
+        let previous_heatmap = self.heatmap.load();
+        let visible_non_resident = previous_heatmap.as_ref().map(|h| {
+            h.layers.iter().filter_map(|hl| {
+                let desc: PersistentLayerDesc = hl.name.clone().into();
+                let layer = guard.try_get_from_key(&desc.key())?;
+
+                if layer.visibility() == LayerVisibilityHint::Covered {
+                    return None;
+                }
+
+                if layer.is_likely_resident() {
+                    return None;
+                }
+
+                Some((desc, hl.metadata.clone(), hl.access_time))
+            })
+        });
+
+        // Secondly, all currently visible, resident layers are included.
         let resident = guard.likely_resident_layers().filter_map(|layer| {
             match layer.visibility() {
                 LayerVisibilityHint::Visible => {
                     // Layer is visible to one or more read LSNs: elegible for inclusion in layer map
                     let last_activity_ts = layer.latest_activity();
-                    Some((layer.layer_desc(), layer.metadata(), last_activity_ts))
+                    Some((
+                        layer.layer_desc().clone(),
+                        layer.metadata(),
+                        last_activity_ts,
+                    ))
                 }
                 LayerVisibilityHint::Covered => {
                     // Layer is resident but unlikely to be read: not elegible for inclusion in heatmap.
@@ -3302,7 +3319,17 @@ impl Timeline {
             }
         });
 
-        let mut layers = resident.collect::<Vec<_>>();
+        let mut layers = match visible_non_resident {
+            Some(non_resident) => {
+                let mut non_resident = non_resident.peekable();
+                if non_resident.peek().is_none() {
+                    self.heatmap.store(None);
+                }
+
+                non_resident.chain(resident).collect::<Vec<_>>()
+            }
+            None => resident.collect::<Vec<_>>(),
+        };
 
         // Sort layers in order of which to download first.  For a large set of layers to download, we
         // want to prioritize those layers which are most likely to still be in the resident many minutes
@@ -6350,6 +6377,8 @@ fn is_send() {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use pageserver_api::key::Key;
     use pageserver_api::value::Value;
     use utils::{id::TimelineId, lsn::Lsn};
@@ -6357,10 +6386,21 @@ mod tests {
     use crate::tenant::{
         harness::{test_img, TenantHarness},
         layer_map::LayerMap,
-        storage_layer::{Layer, LayerName},
+        storage_layer::{Layer, LayerName, LayerVisibilityHint},
         timeline::{DeltaLayerTestDesc, EvictionError},
         Timeline,
     };
+
+    use super::HeatMapTimeline;
+
+    fn assert_heatmaps_have_same_layers(lhs: &HeatMapTimeline, rhs: &HeatMapTimeline) {
+        assert_eq!(lhs.layers.len(), rhs.layers.len());
+        let lhs_rhs = lhs.layers.iter().zip(rhs.layers.iter());
+        for (l, r) in lhs_rhs {
+            assert_eq!(l.name, r.name);
+            assert_eq!(l.metadata, r.metadata);
+        }
+    }
 
     #[tokio::test]
     async fn test_heatmap_generation() {
@@ -6435,7 +6475,7 @@ mod tests {
         assert_eq!(heatmap.layers.last().unwrap().name, l0_delta.layer_name());
 
         let mut last_lsn = Lsn::MAX;
-        for layer in heatmap.layers {
+        for layer in &heatmap.layers {
             // Covered layer should be omitted
             assert!(layer.name != covered_delta.layer_name());
 
@@ -6450,6 +6490,41 @@ mod tests {
                 last_lsn = layer_lsn;
             }
         }
+
+        // Evict all the layers and stash the old heatmap in the timeline.
+        // This simulates a migration to a cold secondary location.
+        timeline.heatmap.store(Some(Arc::new(heatmap.clone())));
+
+        let guard = timeline.layers.read().await;
+        let mut all_layers = Vec::new();
+        let forever = std::time::Duration::from_secs(120);
+        for layer in guard.likely_resident_layers() {
+            all_layers.push(layer.clone());
+            layer.evict_and_wait(forever).await.unwrap();
+        }
+        drop(guard);
+
+        // Generate a new heatmap and assert that it contains the same layers as the old one.
+        let post_migration_heatmap = timeline.generate_heatmap().await.unwrap();
+        assert_heatmaps_have_same_layers(&heatmap, &post_migration_heatmap);
+
+        // Download each layer one by one. Generate the heatmap at each step and check
+        // that it's stable.
+        for layer in all_layers {
+            if layer.visibility() == LayerVisibilityHint::Covered {
+                continue;
+            }
+
+            eprintln!("Downloading {layer} and re-generating heatmap");
+
+            let _resident = layer.download_and_keep_resident().await.unwrap();
+            let post_download_heatmap = timeline.generate_heatmap().await.unwrap();
+            assert_heatmaps_have_same_layers(&heatmap, &post_download_heatmap);
+        }
+
+        // Everything from the post-migration heatmap is now resident.
+        // Check that we drop it from memory.
+        assert!(timeline.heatmap.load().is_none());
     }
 
     #[tokio::test]

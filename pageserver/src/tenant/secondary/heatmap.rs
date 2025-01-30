@@ -35,7 +35,7 @@ impl HeatMapTenant {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct HeatMapTimeline {
     #[serde_as(as = "DisplayFromStr")]
     pub(crate) timeline_id: TimelineId,
@@ -44,13 +44,13 @@ pub(crate) struct HeatMapTimeline {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct HeatMapLayer {
     pub(crate) name: LayerName,
     pub(crate) metadata: LayerFileMetadata,
 
     #[serde_as(as = "TimestampSeconds<i64>")]
-    pub(super) access_time: SystemTime,
+    pub(crate) access_time: SystemTime,
     // TODO: an actual 'heat' score that would let secondary locations prioritize downloading
     // the hottest layers, rather than trying to simply mirror whatever layers are on-disk on the primary.
 }
