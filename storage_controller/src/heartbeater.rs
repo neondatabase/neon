@@ -301,7 +301,6 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
     }
 }
 
-
 impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, SafekeeperState> {
     async fn heartbeat(
         &mut self,

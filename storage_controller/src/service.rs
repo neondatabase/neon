@@ -20,6 +20,7 @@ use crate::{
     },
     compute_hook::{self, NotifyError},
     drain_utils::{self, TenantShardDrain, TenantShardIterator},
+    heartbeater::SafekeeperState,
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
     leadership::Leadership,
     metrics,
@@ -29,6 +30,7 @@ use crate::{
         ShardGenerationState, TenantFilter,
     },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
+    safekeeper::Safekeeper,
     scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
     tenant_shard::{
         MigrateAttachment, ObservedStateDelta, ReconcileNeeded, ReconcilerStatus,
@@ -397,7 +399,8 @@ pub struct Service {
     compute_hook: Arc<ComputeHook>,
     result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
 
-    heartbeater: Heartbeater<Node, PageserverState>,
+    heartbeater_ps: Heartbeater<Node, PageserverState>,
+    heartbeater_sk: Heartbeater<Safekeeper, SafekeeperState>,
 
     // Channel for background cleanup from failed operations that require cleanup, such as shard split
     abort_tx: tokio::sync::mpsc::UnboundedSender<TenantShardSplitAbort>,
@@ -758,7 +761,7 @@ impl Service {
 
         tracing::info!("Sending initial heartbeats...");
         let res = self
-            .heartbeater
+            .heartbeater_ps
             .heartbeat(Arc::new(nodes_to_heartbeat))
             .await;
 
@@ -984,7 +987,7 @@ impl Service {
                 locked.nodes.clone()
             };
 
-            let res = self.heartbeater.heartbeat(nodes).await;
+            let res = self.heartbeater_ps.heartbeat(nodes).await;
             if let Ok(deltas) = res {
                 let mut to_handle = Vec::default();
 
@@ -1437,7 +1440,14 @@ impl Service {
         let cancel = CancellationToken::new();
         let reconcilers_cancel = cancel.child_token();
 
-        let heartbeater = Heartbeater::new(
+        let heartbeater_ps = Heartbeater::new(
+            config.jwt_token.clone(),
+            config.max_offline_interval,
+            config.max_warming_up_interval,
+            cancel.clone(),
+        );
+
+        let heartbeater_sk = Heartbeater::new(
             config.jwt_token.clone(),
             config.max_offline_interval,
             config.max_warming_up_interval,
@@ -1462,7 +1472,8 @@ impl Service {
             persistence,
             compute_hook: Arc::new(ComputeHook::new(config.clone())),
             result_tx,
-            heartbeater,
+            heartbeater_ps,
+            heartbeater_sk,
             reconciler_concurrency: Arc::new(tokio::sync::Semaphore::new(
                 config.reconciler_concurrency,
             )),
