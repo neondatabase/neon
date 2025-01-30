@@ -188,6 +188,14 @@ pub enum ImageLayerCreationMode {
     Initial,
 }
 
+#[derive(Clone, Debug, Default)]
+pub enum LastImageLayerCreationStatus {
+    Incomplete, // TODO: record the last key being processed
+    Complete,
+    #[default]
+    Initial,
+}
+
 impl std::fmt::Display for ImageLayerCreationMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
@@ -343,6 +351,8 @@ pub struct Timeline {
     // List of child timelines and their branch points. This is needed to avoid
     // garbage collecting data that is still needed by the child timelines.
     pub(crate) gc_info: std::sync::RwLock<GcInfo>,
+
+    pub(crate) last_image_layer_creation_status: ArcSwap<LastImageLayerCreationStatus>,
 
     // It may change across major versions so for simplicity
     // keep it after running initdb for a timeline.
@@ -2330,6 +2340,18 @@ impl Timeline {
             )
     }
 
+    fn get_image_creation_preempt_threshold(&self) -> usize {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .image_creation_preempt_threshold
+            .unwrap_or(
+                self.conf
+                    .default_tenant_conf
+                    .image_creation_preempt_threshold,
+            )
+    }
+
     /// Resolve the effective WAL receiver protocol to use for this tenant.
     ///
     /// Priority order is:
@@ -2478,6 +2500,10 @@ impl Timeline {
                 write_lock: tokio::sync::Mutex::new(None),
 
                 gc_info: std::sync::RwLock::new(GcInfo::default()),
+
+                last_image_layer_creation_status: ArcSwap::new(Arc::new(
+                    LastImageLayerCreationStatus::default(),
+                )),
 
                 latest_gc_cutoff_lsn: Rcu::new(metadata.latest_gc_cutoff_lsn()),
                 initdb_lsn: metadata.initdb_lsn(),
@@ -4025,10 +4051,11 @@ impl Timeline {
                     self.initdb_lsn,
                     ImageLayerCreationMode::Initial,
                     ctx,
+                    LastImageLayerCreationStatus::Initial,
                 )
                 .await?;
             debug_assert!(
-                is_complete,
+                matches!(is_complete, LastImageLayerCreationStatus::Complete),
                 "init image generation mode must fully cover the keyspace"
             );
             layers_to_upload.extend(generated_image_layers);
@@ -4442,10 +4469,6 @@ impl Timeline {
                 unfinished_image_layer: image_layer_writer,
             })
         } else {
-            // Special case: the image layer may be empty if this is a sharded tenant and the
-            // partition does not cover any keys owned by this shard.  In this case, to ensure
-            // we don't leave gaps between image layers, leave `start` where it is, so that the next
-            // layer we write will cover the key range that we just scanned.
             tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
             Ok(ImageLayerCreationOutcome::Empty)
         }
@@ -4534,10 +4557,6 @@ impl Timeline {
                 unfinished_image_layer: image_layer_writer,
             })
         } else {
-            // Special case: the image layer may be empty if this is a sharded tenant and the
-            // partition does not cover any keys owned by this shard. In this case, to ensure
-            // we don't leave gaps between image layers, leave `start` where it is, so that the next
-            // layer we write will cover the key range that we just scanned.
             tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
             Ok(ImageLayerCreationOutcome::Empty)
         }
@@ -4604,7 +4623,8 @@ impl Timeline {
         lsn: Lsn,
         mode: ImageLayerCreationMode,
         ctx: &RequestContext,
-    ) -> Result<(Vec<ResidentLayer>, bool), CreateImageLayersError> {
+        last_status: LastImageLayerCreationStatus,
+    ) -> Result<(Vec<ResidentLayer>, LastImageLayerCreationStatus), CreateImageLayersError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
 
         // We need to avoid holes between generated image layers.
@@ -4618,11 +4638,22 @@ impl Timeline {
         // image layers  <100000000..100000099> and <200000000..200000199> are not completely covering it.
         let mut start = Key::MIN;
 
-        let check_for_image_layers = self.should_check_if_image_layers_required(lsn);
+        let check_for_image_layers = if let LastImageLayerCreationStatus::Incomplete = last_status {
+            info!(
+                "resuming image layer creation: last_status={:?}",
+                last_status
+            );
+            true
+        } else {
+            self.should_check_if_image_layers_required(lsn)
+        };
 
         let mut batch_image_writer = BatchLayerWriter::new(self.conf).await?;
 
         let mut all_generated = true;
+
+        let mut partition_processed = 0;
+        let total_partitions = partitioning.parts.len();
 
         for partition in partitioning.parts.iter() {
             if self.cancel.is_cancelled() {
@@ -4743,6 +4774,8 @@ impl Timeline {
                 }
             }
 
+            partition_processed += 1;
+
             if let ImageLayerCreationMode::Try = mode {
                 // We have at least made some progress
                 if batch_image_writer.pending_layer_num() >= 1 {
@@ -4754,8 +4787,9 @@ impl Timeline {
                         let layers = self.layers.read().await;
                         layers.layer_map()?.level0_deltas().len()
                     };
-                    // TODO: make `* 10` into a config item?
-                    if num_of_l0_layers >= self.get_compaction_threshold() * 10 {
+                    let image_preempt_threshold = self.get_image_creation_preempt_threshold()
+                        * self.get_compaction_threshold();
+                    if image_preempt_threshold != 0 && num_of_l0_layers >= image_preempt_threshold {
                         tracing::info!(
                         "preempt image layer generation at {start} at {lsn}: too many L0 layers {num_of_l0_layers}",
                     );
@@ -4777,14 +4811,35 @@ impl Timeline {
             .open_mut()?
             .track_new_image_layers(&image_layers, &self.metrics);
         drop_wlock(guard);
-        timer.stop_and_record();
+        let duration = timer.stop_and_record();
 
         // Creating image layers may have caused some previously visible layers to be covered
         if !image_layers.is_empty() {
             self.update_layer_visibility().await?;
         }
 
-        Ok((image_layers, all_generated))
+        let total_layer_size = image_layers
+            .iter()
+            .map(|l| l.metadata().file_size)
+            .sum::<u64>();
+
+        info!(
+            "created {} image layers ({} bytes) in {}s, processed {} out of {} partitions",
+            image_layers.len(),
+            total_layer_size,
+            duration.as_secs_f64(),
+            partition_processed,
+            total_partitions
+        );
+
+        Ok((
+            image_layers,
+            if all_generated {
+                LastImageLayerCreationStatus::Complete
+            } else {
+                LastImageLayerCreationStatus::Incomplete
+            },
+        ))
     }
 
     /// Wait until the background initial logical size calculation is complete, or

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use super::layer_manager::LayerManager;
 use super::{
     CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, ImageLayerCreationMode,
-    RecordedDuration, Timeline,
+    LastImageLayerCreationStatus, RecordedDuration, Timeline,
 };
 
 use anyhow::{anyhow, bail, Context};
@@ -722,11 +722,18 @@ impl Timeline {
                             ImageLayerCreationMode::Try
                         },
                         &image_ctx,
+                        self.last_image_layer_creation_status
+                            .load()
+                            .as_ref()
+                            .clone(),
                     )
                     .await?;
 
+                self.last_image_layer_creation_status
+                    .store(Arc::new(is_complete.clone()));
+
                 self.upload_new_image_layers(image_layers)?;
-                if !is_complete {
+                if let LastImageLayerCreationStatus::Incomplete = is_complete {
                     // Yield and do not do any other kind of compaction.
                     info!("skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction).");
                     return Ok(true);
