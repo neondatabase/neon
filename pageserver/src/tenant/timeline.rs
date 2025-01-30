@@ -1797,7 +1797,7 @@ impl Timeline {
         self.last_record_lsn.shutdown();
 
         if let ShutdownMode::FreezeAndFlush = mode {
-            if let Some((open, frozen)) = self
+            let do_flush = if let Some((open, frozen)) = self
                 .layers
                 .read()
                 .await
@@ -1806,43 +1806,54 @@ impl Timeline {
                 .ok()
                 .filter(|(open, frozen)| *open || *frozen > 0)
             {
-                tracing::info!(?open, frozen, "flushing and freezing on shutdown");
+                if self.remote_client.is_archived() == Some(true) {
+                    // No point flushing on shutdown for an archived timeline: it is not important
+                    // to have it nice and fresh after our restart, and trying to flush here might
+                    // race with trying to offload it (which also stops the flush loop)
+                    false
+                } else {
+                    tracing::info!(?open, frozen, "flushing and freezing on shutdown");
+                    true
+                }
             } else {
                 // this is double-shutdown, ignore it
-            }
+                false
+            };
 
             // we shut down walreceiver above, so, we won't add anything more
             // to the InMemoryLayer; freeze it and wait for all frozen layers
             // to reach the disk & upload queue, then shut the upload queue and
             // wait for it to drain.
-            match self.freeze_and_flush().await {
-                Ok(_) => {
-                    // drain the upload queue
-                    // if we did not wait for completion here, it might be our shutdown process
-                    // didn't wait for remote uploads to complete at all, as new tasks can forever
-                    // be spawned.
-                    //
-                    // what is problematic is the shutting down of RemoteTimelineClient, because
-                    // obviously it does not make sense to stop while we wait for it, but what
-                    // about corner cases like s3 suddenly hanging up?
-                    self.remote_client.shutdown().await;
+            if do_flush {
+                match self.freeze_and_flush().await {
+                    Ok(_) => {
+                        // drain the upload queue
+                        // if we did not wait for completion here, it might be our shutdown process
+                        // didn't wait for remote uploads to complete at all, as new tasks can forever
+                        // be spawned.
+                        //
+                        // what is problematic is the shutting down of RemoteTimelineClient, because
+                        // obviously it does not make sense to stop while we wait for it, but what
+                        // about corner cases like s3 suddenly hanging up?
+                        self.remote_client.shutdown().await;
+                    }
+                    Err(FlushLayerError::Cancelled) => {
+                        // this is likely the second shutdown, ignore silently.
+                        // TODO: this can be removed once https://github.com/neondatabase/neon/issues/5080
+                        debug_assert!(self.cancel.is_cancelled());
+                    }
+                    Err(e) => {
+                        // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
+                        // we have some extra WAL replay to do next time the timeline starts.
+                        warn!("failed to freeze and flush: {e:#}");
+                    }
                 }
-                Err(FlushLayerError::Cancelled) => {
-                    // this is likely the second shutdown, ignore silently.
-                    // TODO: this can be removed once https://github.com/neondatabase/neon/issues/5080
-                    debug_assert!(self.cancel.is_cancelled());
-                }
-                Err(e) => {
-                    // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
-                    // we have some extra WAL replay to do next time the timeline starts.
-                    warn!("failed to freeze and flush: {e:#}");
-                }
-            }
 
-            // `self.remote_client.shutdown().await` above should have already flushed everything from the queue, but
-            // we also do a final check here to ensure that the queue is empty.
-            if !self.remote_client.no_pending_work() {
-                warn!("still have pending work in remote upload queue, but continuing shutting down anyways");
+                // `self.remote_client.shutdown().await` above should have already flushed everything from the queue, but
+                // we also do a final check here to ensure that the queue is empty.
+                if !self.remote_client.no_pending_work() {
+                    warn!("still have pending work in remote upload queue, but continuing shutting down anyways");
+                }
             }
         }
 
