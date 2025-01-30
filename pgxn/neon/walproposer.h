@@ -269,8 +269,15 @@ typedef struct TermHistory
 typedef struct VoteResponse
 {
 	AcceptorProposerMessage apm;
+
+	/*
+	 * Membership conf generation. It's redundant because on mismatch
+	 * safekeeper is expected to ERROR the connection, but let's sanity check
+	 * it.
+	 */
+	Generation	generation;
 	term_t		term;
-	uint64		voteGiven;
+	uint8		voteGiven;
 
 	/*
 	 * Safekeeper flush_lsn (end of WAL) + history of term switches allow
@@ -280,7 +287,6 @@ typedef struct VoteResponse
 	XLogRecPtr	truncateLsn;	/* minimal LSN which may be needed for*
 								 * recovery of some safekeeper */
 	TermHistory termHistory;
-	XLogRecPtr	timelineStartLsn;	/* timeline globally starts at this LSN */
 } VoteResponse;
 
 /*
