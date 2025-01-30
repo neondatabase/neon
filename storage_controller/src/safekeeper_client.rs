@@ -55,7 +55,6 @@ impl SafekeeperClient {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn from_client(
         node_id: NodeId,
         raw_client: reqwest::Client,
