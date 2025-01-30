@@ -1,15 +1,19 @@
 use std::time::Duration;
 
+use pageserver_api::controller_api::SafekeeperDescribeResponse;
 use reqwest::StatusCode;
 use safekeeper_client::mgmt_api;
 use tokio_util::sync::CancellationToken;
 use utils::{backoff, id::NodeId, logging::SecretString};
 
-use crate::{persistence::SafekeeperPersistence, safekeeper_client::SafekeeperClient};
+use crate::{
+    persistence::{DatabaseError, SafekeeperPersistence},
+    safekeeper_client::SafekeeperClient,
+};
 
+#[derive(Clone)]
 pub struct Safekeeper {
-    #[expect(dead_code)]
-    skp: SafekeeperPersistence,
+    pub(crate) skp: SafekeeperPersistence,
     cancel: CancellationToken,
     listen_http_addr: String,
     listen_http_port: u16,
@@ -17,12 +21,24 @@ pub struct Safekeeper {
 }
 
 impl Safekeeper {
+    pub(crate) fn from_persistence(skp: SafekeeperPersistence, cancel: CancellationToken) -> Self {
+        Self {
+            cancel,
+            listen_http_addr: skp.host.clone(),
+            listen_http_port: skp.http_port as u16,
+            id: NodeId(skp.id as u64),
+            skp,
+        }
+    }
     pub(crate) fn base_url(&self) -> String {
         format!("http://{}:{}", self.listen_http_addr, self.listen_http_port)
     }
 
     pub(crate) fn get_id(&self) -> NodeId {
         self.id
+    }
+    pub(crate) fn describe_response(&self) -> Result<SafekeeperDescribeResponse, DatabaseError> {
+        self.skp.as_describe_response()
     }
     pub(crate) async fn with_client_retries<T, O, F>(
         &self,
