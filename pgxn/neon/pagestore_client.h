@@ -202,6 +202,7 @@ typedef struct
 {
 	/*
 	 * Send this request to the PageServer associated with this shard.
+	 * This function assigns request_id to the request which can be extracted by caller from request struct.
 	 */
 	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
 	/*
