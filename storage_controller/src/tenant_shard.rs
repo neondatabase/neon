@@ -710,7 +710,11 @@ impl TenantShard {
                     modified = true;
                 } else if self.intent.secondary.is_empty() {
                     // Populate secondary by scheduling a fresh node
-                    let node_id = scheduler.schedule_shard::<SecondaryShardTag>(
+                    //
+                    // We use [`AttachedShardTag`] because when a secondary location is the only one
+                    // a shard has, we expect that its next use will be as an attached location: we want
+                    // the tenant to be ready to warm up and run fast in their preferred AZ.
+                    let node_id = scheduler.schedule_shard::<AttachedShardTag>(
                         &[],
                         &self.intent.preferred_az_id,
                         context,
