@@ -1242,6 +1242,7 @@ impl Timeline {
             }
 
             for _ in &results {
+                self.metrics.layers_per_read.observe(layers_visited as f64);
                 LAYERS_PER_READ_GLOBAL.observe(layers_visited as f64);
             }
         }
