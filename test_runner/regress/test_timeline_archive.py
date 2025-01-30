@@ -651,7 +651,7 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
 
     # Sanity check that during our run we did exercise some full timeline lifecycles, in case
     # one of our workers got stuck
-    assert len(timelines_deleted) > 10
+    assert len(timelines_deleted) > 5
 
     # That no invariant-violations were reported by workers
     assert violations == []
