@@ -309,7 +309,6 @@ async fn recover(
         term: donor.term,
         start_streaming_at: last_common_point.lsn,
         term_history: donor_th,
-        timeline_start_lsn: Lsn::INVALID,
     });
     // Successful ProposerElected handling always returns None. If term changed,
     // we'll find out that during the streaming. Note: it is expected to get

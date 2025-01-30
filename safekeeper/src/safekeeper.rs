@@ -272,6 +272,13 @@ pub struct ProposerElected {
     pub term: Term,
     pub start_streaming_at: Lsn,
     pub term_history: TermHistory,
+}
+
+/// V2 of the message; exists as a struct because we (de)serialized it as is.
+pub struct ProposerElectedV2 {
+    pub term: Term,
+    pub start_streaming_at: Lsn,
+    pub term_history: TermHistory,
     pub timeline_start_lsn: Lsn,
 }
 
@@ -541,11 +548,10 @@ impl ProposerAcceptorMessage {
                     if msg_bytes.remaining() < 8 {
                         bail!("ProposerElected message is not complete");
                     }
-                    let timeline_start_lsn = msg_bytes.get_u64_le().into();
+                    let _timeline_start_lsn = msg_bytes.get_u64_le();
                     let msg = ProposerElected {
                         term,
                         start_streaming_at,
-                        timeline_start_lsn,
                         term_history,
                     };
                     Ok(ProposerAcceptorMessage::Elected(msg))
@@ -593,12 +599,7 @@ impl ProposerAcceptorMessage {
 
             Self::VoteRequest(_) => 0,
 
-            Self::Elected(ProposerElected {
-                term: _,
-                start_streaming_at: _,
-                term_history: _,
-                timeline_start_lsn: _,
-            }) => 0,
+            Self::Elected(_) => 0,
 
             Self::AppendRequest(AppendRequest {
                 h:
@@ -1045,18 +1046,22 @@ where
             // Here we learn initial LSN for the first time, set fields
             // interested in that.
 
-            if state.timeline_start_lsn == Lsn(0) {
-                // Remember point where WAL begins globally.
-                state.timeline_start_lsn = msg.timeline_start_lsn;
-                info!(
-                    "setting timeline_start_lsn to {:?}",
-                    state.timeline_start_lsn
-                );
+            if let Some(start_lsn) = msg.term_history.0.first() {
+                if state.timeline_start_lsn == Lsn(0) {
+                    // Remember point where WAL begins globally. In the future it
+                    // will be intialized immediately on timeline creation.
+                    state.timeline_start_lsn = start_lsn.lsn;
+                    info!(
+                        "setting timeline_start_lsn to {:?}",
+                        state.timeline_start_lsn
+                    );
+                }
             }
+
             if state.peer_horizon_lsn == Lsn(0) {
                 // Update peer_horizon_lsn as soon as we know where timeline starts.
                 // It means that peer_horizon_lsn cannot be zero after we know timeline_start_lsn.
-                state.peer_horizon_lsn = msg.timeline_start_lsn;
+                state.peer_horizon_lsn = state.timeline_start_lsn;
             }
             if state.local_start_lsn == Lsn(0) {
                 state.local_start_lsn = msg.start_streaming_at;
