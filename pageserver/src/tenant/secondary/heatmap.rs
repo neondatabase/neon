@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::{collections::HashMap, time::SystemTime};
 
 use crate::tenant::{remote_timeline_client::index::LayerFileMetadata, storage_layer::LayerName};
 
@@ -8,7 +8,7 @@ use serde_with::{serde_as, DisplayFromStr, TimestampSeconds};
 use utils::{generation::Generation, id::TimelineId};
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct HeatMapTenant {
+pub(crate) struct HeatMapTenant {
     /// Generation of the attached location that uploaded the heatmap: this is not required
     /// for correctness, but acts as a hint to secondary locations in order to detect thrashing
     /// in the unlikely event that two attached locations are both uploading conflicting heatmaps.
@@ -23,6 +23,15 @@ pub(super) struct HeatMapTenant {
     /// a heatmap explicitly via API for a tenant that has no periodic upload configured.
     #[serde(default)]
     pub(super) upload_period_ms: Option<u128>,
+}
+
+impl HeatMapTenant {
+    pub(crate) fn into_timelines_index(self) -> HashMap<TimelineId, HeatMapTimeline> {
+        self.timelines
+            .into_iter()
+            .map(|htl| (htl.timeline_id, htl))
+            .collect()
+    }
 }
 
 #[serde_as]

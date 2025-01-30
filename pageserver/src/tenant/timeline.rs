@@ -440,6 +440,8 @@ pub struct Timeline {
 
     /// If Some, collects GetPage metadata for an ongoing PageTrace.
     pub(crate) page_trace: ArcSwapOption<Sender<PageTraceEvent>>,
+
+    heatmap: ArcSwapOption<HeatMapTimeline>,
 }
 
 pub type TimelineDeleteProgress = Arc<tokio::sync::Mutex<DeleteTimelineFlow>>;
@@ -2377,6 +2379,7 @@ impl Timeline {
         conf: &'static PageServerConf,
         tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
         metadata: &TimelineMetadata,
+        heatmap: Option<HeatMapTimeline>,
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
@@ -2533,6 +2536,8 @@ impl Timeline {
                 create_idempotency,
 
                 page_trace: Default::default(),
+
+                heatmap: ArcSwapOption::from_pointee(heatmap),
             };
 
             result.repartition_threshold =
@@ -3271,6 +3276,18 @@ impl Timeline {
 
         let guard = self.layers.read().await;
 
+        // Retrieve the previous heatmap from disk.
+        // Keep any layers that are present in the old heatmap and not resident,
+        // _unless_ they are `LayerVisibilityHint::Covered`.
+        //
+        // Once all layers in the previous heatmap are either likely resident
+        // or `LayerVisibilityHint::Covered`, remove the heatmap from disk.
+        //
+        // Q: Do we update the on-disk heatmap?
+        // A: Probably not.
+        //
+        // Q: When do we upload?
+        // A: Can always upload with this approach since we don't clobber
         let resident = guard.likely_resident_layers().filter_map(|layer| {
             match layer.visibility() {
                 LayerVisibilityHint::Visible => {
