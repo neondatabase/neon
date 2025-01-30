@@ -253,14 +253,14 @@ pub struct VoteRequestV2 {
 /// Vote itself, sent from safekeeper to proposer
 #[derive(Debug, Serialize)]
 pub struct VoteResponse {
+    generation: Generation,
     pub term: Term, // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
-    vote_given: u64, // fixme u64 due to padding
+    vote_given: bool,
     // Safekeeper flush_lsn (end of WAL) + history of term switches allow
     // proposer to choose the most advanced one.
     pub flush_lsn: Lsn,
     truncate_lsn: Lsn,
     pub term_history: TermHistory,
-    timeline_start_lsn: Lsn,
 }
 
 /*
@@ -674,7 +674,8 @@ impl AcceptorProposerMessage {
     pub fn serialize(&self, buf: &mut BytesMut, proto_version: u32) -> Result<()> {
         // TODO remove after converting all msgs
         if proto_version == SK_PROTO_VERSION_3
-            && (matches!(self, AcceptorProposerMessage::Greeting(_)))
+            && (matches!(self, AcceptorProposerMessage::Greeting(_))
+                || matches!(self, AcceptorProposerMessage::VoteResponse(_)))
         {
             match self {
                 AcceptorProposerMessage::Greeting(msg) => {
@@ -682,6 +683,19 @@ impl AcceptorProposerMessage {
                     buf.put_u64(msg.node_id.0);
                     Self::serialize_mconf(buf, &msg.mconf);
                     buf.put_u64(msg.term)
+                }
+                AcceptorProposerMessage::VoteResponse(msg) => {
+                    buf.put_u8('v' as u8);
+                    buf.put_u32(msg.generation);
+                    buf.put_u64(msg.term);
+                    buf.put_u8(msg.vote_given as u8);
+                    buf.put_u64(msg.flush_lsn.into());
+                    buf.put_u64(msg.truncate_lsn.into());
+                    buf.put_u32(msg.term_history.0.len() as u32);
+                    for e in &msg.term_history.0 {
+                        buf.put_u64(e.term);
+                        buf.put_u64(e.lsn.into());
+                    }
                 }
                 _ => bail!("not impl"),
             }
@@ -696,9 +710,10 @@ impl AcceptorProposerMessage {
                     buf.put_u64_le(msg.node_id.0);
                 }
                 AcceptorProposerMessage::VoteResponse(msg) => {
+                    // v2 didn't have generation, had u64 vote_given and timeline_start_lsn
                     buf.put_u64_le('v' as u64);
                     buf.put_u64_le(msg.term);
-                    buf.put_u64_le(msg.vote_given);
+                    buf.put_u64_le(msg.vote_given as u64);
                     buf.put_u64_le(msg.flush_lsn.into());
                     buf.put_u64_le(msg.truncate_lsn.into());
                     buf.put_u32_le(msg.term_history.0.len() as u32);
@@ -706,7 +721,8 @@ impl AcceptorProposerMessage {
                         buf.put_u64_le(e.term);
                         buf.put_u64_le(e.lsn.into());
                     }
-                    buf.put_u64_le(msg.timeline_start_lsn.into());
+                    // removed timeline_start_lsn
+                    buf.put_u64_le(0);
                 }
                 AcceptorProposerMessage::AppendResponse(msg) => {
                     buf.put_u64_le('a' as u64);
@@ -908,12 +924,12 @@ where
         self.wal_store.flush_wal().await?;
         // initialize with refusal
         let mut resp = VoteResponse {
+            generation: self.state.mconf.generation,
             term: self.state.acceptor_state.term,
-            vote_given: false as u64,
+            vote_given: false,
             flush_lsn: self.flush_lsn(),
             truncate_lsn: self.state.inmem.peer_horizon_lsn,
             term_history: self.get_term_history(),
-            timeline_start_lsn: self.state.timeline_start_lsn,
         };
         if self.state.acceptor_state.term < msg.term {
             let mut state = self.state.start_change();
@@ -922,7 +938,7 @@ where
             self.state.finish_change(&state).await?;
 
             resp.term = self.state.acceptor_state.term;
-            resp.vote_given = true as u64;
+            resp.vote_given = true;
         }
         info!("processed {:?}: sending {:?}", msg, &resp);
         Ok(Some(AcceptorProposerMessage::VoteResponse(resp)))

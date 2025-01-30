@@ -794,11 +794,12 @@ RecvVoteResponse(Safekeeper *sk)
 		return;
 
 	wp_log(LOG,
-		   "got VoteResponse from acceptor %s:%s, voteGiven=" UINT64_FORMAT ", epoch=" UINT64_FORMAT ", flushLsn=%X/%X, truncateLsn=%X/%X, timelineStartLsn=%X/%X",
-		   sk->host, sk->port, sk->voteResponse.voteGiven, GetHighestTerm(&sk->voteResponse.termHistory),
+		   "got VoteResponse from acceptor %s:%s, generation=%u, term=%lu, voteGiven=%u, last_log_term=" UINT64_FORMAT ", flushLsn=%X/%X, truncateLsn=%X/%X",
+		   sk->host, sk->port, sk->voteResponse.generation, sk->voteResponse.term,
+		   sk->voteResponse.voteGiven,
+		   GetHighestTerm(&sk->voteResponse.termHistory),
 		   LSN_FORMAT_ARGS(sk->voteResponse.flushLsn),
-		   LSN_FORMAT_ARGS(sk->voteResponse.truncateLsn),
-		   LSN_FORMAT_ARGS(sk->voteResponse.timelineStartLsn));
+		   LSN_FORMAT_ARGS(sk->voteResponse.truncateLsn));
 
 	/*
 	 * In case of acceptor rejecting our vote, bail out, but only if either it
@@ -958,7 +959,6 @@ DetermineEpochStartLsn(WalProposer *wp)
 	wp->propEpochStartLsn = InvalidXLogRecPtr;
 	wp->donorEpoch = 0;
 	wp->truncateLsn = InvalidXLogRecPtr;
-	wp->timelineStartLsn = InvalidXLogRecPtr;
 
 	for (int i = 0; i < wp->n_safekeepers; i++)
 	{
@@ -975,20 +975,6 @@ DetermineEpochStartLsn(WalProposer *wp)
 				wp->donor = i;
 			}
 			wp->truncateLsn = Max(wp->safekeeper[i].voteResponse.truncateLsn, wp->truncateLsn);
-
-			if (wp->safekeeper[i].voteResponse.timelineStartLsn != InvalidXLogRecPtr)
-			{
-				/* timelineStartLsn should be the same everywhere or unknown */
-				if (wp->timelineStartLsn != InvalidXLogRecPtr &&
-					wp->timelineStartLsn != wp->safekeeper[i].voteResponse.timelineStartLsn)
-				{
-					wp_log(WARNING,
-						   "inconsistent timelineStartLsn: current %X/%X, received %X/%X",
-						   LSN_FORMAT_ARGS(wp->timelineStartLsn),
-						   LSN_FORMAT_ARGS(wp->safekeeper[i].voteResponse.timelineStartLsn));
-				}
-				wp->timelineStartLsn = wp->safekeeper[i].voteResponse.timelineStartLsn;
-			}
 		}
 	}
 
@@ -1011,22 +997,11 @@ DetermineEpochStartLsn(WalProposer *wp)
 	if (wp->propEpochStartLsn == InvalidXLogRecPtr && !wp->config->syncSafekeepers)
 	{
 		wp->propEpochStartLsn = wp->truncateLsn = wp->api.get_redo_start_lsn(wp);
-		if (wp->timelineStartLsn == InvalidXLogRecPtr)
-		{
-			wp->timelineStartLsn = wp->api.get_redo_start_lsn(wp);
-		}
 		wp_log(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(wp->propEpochStartLsn));
 	}
 	pg_atomic_write_u64(&wp->api.get_shmem_state(wp)->propEpochStartLsn, wp->propEpochStartLsn);
 
-	/*
-	 * Safekeepers are setting truncateLsn after timelineStartLsn is known, so
-	 * it should never be zero at this point, if we know timelineStartLsn.
-	 *
-	 * timelineStartLsn can be zero only on the first syncSafekeepers run.
-	 */
-	Assert((wp->truncateLsn != InvalidXLogRecPtr) ||
-		   (wp->config->syncSafekeepers && wp->truncateLsn == wp->timelineStartLsn));
+	Assert(wp->truncateLsn != InvalidXLogRecPtr || wp->config->syncSafekeepers);
 
 	/*
 	 * We will be generating WAL since propEpochStartLsn, so we should set
@@ -1142,14 +1117,8 @@ SendProposerElected(Safekeeper *sk)
 	{
 		/* safekeeper is empty or no common point, start from the beginning */
 		sk->startStreamingAt = wp->propTermHistory.entries[0].lsn;
-		wp_log(LOG, "no common point with sk %s:%s, streaming since first term at %X/%X, timelineStartLsn=%X/%X, termHistory.n_entries=%u",
-			   sk->host, sk->port, LSN_FORMAT_ARGS(sk->startStreamingAt), LSN_FORMAT_ARGS(wp->timelineStartLsn), wp->propTermHistory.n_entries);
-
-		/*
-		 * wp->timelineStartLsn == InvalidXLogRecPtr can be only when timeline
-		 * is created manually (test_s3_wal_replay)
-		 */
-		Assert(sk->startStreamingAt == wp->timelineStartLsn || wp->timelineStartLsn == InvalidXLogRecPtr);
+		wp_log(LOG, "no common point with sk %s:%s, streaming since first term at %X/%X, termHistory.n_entries=%u",
+			   sk->host, sk->port, LSN_FORMAT_ARGS(sk->startStreamingAt), wp->propTermHistory.n_entries);
 	}
 	else
 	{
@@ -1178,12 +1147,12 @@ SendProposerElected(Safekeeper *sk)
 	msg.term = wp->propTerm;
 	msg.startStreamingAt = sk->startStreamingAt;
 	msg.termHistory = &wp->propTermHistory;
-	msg.timelineStartLsn = wp->timelineStartLsn;
+	msg.timelineStartLsn = 0;
 
 	lastCommonTerm = idx >= 0 ? wp->propTermHistory.entries[idx].term : 0;
 	wp_log(LOG,
-		   "sending elected msg to node " UINT64_FORMAT " term=" UINT64_FORMAT ", startStreamingAt=%X/%X (lastCommonTerm=" UINT64_FORMAT "), termHistory.n_entries=%u to %s:%s, timelineStartLsn=%X/%X",
-		   sk->greetResponse.nodeId, msg.term, LSN_FORMAT_ARGS(msg.startStreamingAt), lastCommonTerm, msg.termHistory->n_entries, sk->host, sk->port, LSN_FORMAT_ARGS(msg.timelineStartLsn));
+		   "sending elected msg to node " UINT64_FORMAT " term=" UINT64_FORMAT ", startStreamingAt=%X/%X (lastCommonTerm=" UINT64_FORMAT "), termHistory.n_entries=%u to %s:%s",
+		   sk->greetResponse.nodeId, msg.term, LSN_FORMAT_ARGS(msg.startStreamingAt), lastCommonTerm, msg.termHistory->n_entries, sk->host, sk->port);
 
 	PAMessageSerialize(wp, (ProposerAcceptorMessage *) &msg, &sk->outbuf, wp->config->proto_version);
 	if (!AsyncWrite(sk, sk->outbuf.data, sk->outbuf.len, SS_SEND_ELECTED_FLUSH))
@@ -1897,7 +1866,7 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 						pq_sendint64_le(buf, m->termHistory->entries[i].term);
 						pq_sendint64_le(buf, m->termHistory->entries[i].lsn);
 					}
-					pq_sendint64_le(buf, m->timelineStartLsn);
+					pq_sendint64_le(buf, 0);
 					break;
 				}
 			case 'a':
@@ -2008,10 +1977,11 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 	/* parse it */
 	s.data = buf;
 	s.len = buf_size;
+	s.maxlen = buf_size;
 	s.cursor = 0;
 
 	/* removeme tag check after converting all msgs */
-	if (wp->config->proto_version == 3 && anymsg->tag == 'g')
+	if (wp->config->proto_version == 3 && (anymsg->tag == 'g' || anymsg->tag == 'v'))
 	{
 		tag = pq_getmsgbyte(&s);
 		if (tag != anymsg->tag)
@@ -2030,6 +2000,25 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 					msg->nodeId = pq_getmsgint64(&s);
 					MembershipConfigurationDeserialize(&msg->mconf, &s);
 					msg->term = pq_getmsgint64(&s);
+					pq_getmsgend(&s);
+					return true;
+				}
+			case 'v':
+				{
+					VoteResponse *msg = (VoteResponse *) anymsg;
+
+					msg->generation = pq_getmsgint32(&s);
+					msg->term = pq_getmsgint64(&s);
+					msg->voteGiven = pq_getmsgbyte(&s);
+					msg->flushLsn = pq_getmsgint64(&s);
+					msg->truncateLsn = pq_getmsgint64(&s);
+					msg->termHistory.n_entries = pq_getmsgint32(&s);
+					msg->termHistory.entries = palloc(sizeof(TermSwitchEntry) * msg->termHistory.n_entries);
+					for (uint32 i = 0; i < msg->termHistory.n_entries; i++)
+					{
+						msg->termHistory.entries[i].term = pq_getmsgint64(&s);
+						msg->termHistory.entries[i].lsn = pq_getmsgint64(&s);
+					}
 					pq_getmsgend(&s);
 					return true;
 				}
@@ -2078,7 +2067,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 						msg->termHistory.entries[i].term = pq_getmsgint64_le(&s);
 						msg->termHistory.entries[i].lsn = pq_getmsgint64_le(&s);
 					}
-					msg->timelineStartLsn = pq_getmsgint64_le(&s);
+					pq_getmsgint64_le(&s);	/* timelineStartLsn */
 					pq_getmsgend(&s);
 					return true;
 				}
