@@ -295,14 +295,13 @@ typedef struct VoteResponse
  */
 typedef struct ProposerElected
 {
-	uint64		tag;
+	AcceptorProposerMessage apm;
+	Generation	generation; /* membership conf generation */
 	term_t		term;
 	/* proposer will send since this point */
 	XLogRecPtr	startStreamingAt;
 	/* history of term switches up to this proposer */
 	TermHistory *termHistory;
-	/* timeline globally starts at this LSN */
-	XLogRecPtr	timelineStartLsn;
 } ProposerElected;
 
 /*

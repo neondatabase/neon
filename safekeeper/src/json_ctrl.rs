@@ -8,7 +8,7 @@
 
 use anyhow::Context;
 use postgres_backend::QueryError;
-use safekeeper_api::membership::Configuration;
+use safekeeper_api::membership::{Configuration, INVALID_GENERATION};
 use safekeeper_api::{ServerInfo, Term};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -133,6 +133,7 @@ async fn send_proposer_elected(
     let history = TermHistory(history_entries);
 
     let proposer_elected_request = ProposerAcceptorMessage::Elected(ProposerElected {
+        generation: INVALID_GENERATION,
         term,
         start_streaming_at: lsn,
         term_history: history,

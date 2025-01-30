@@ -63,8 +63,28 @@ impl TermHistory {
         TermHistory(Vec::new())
     }
 
-    // Parse TermHistory as n_entries followed by TermLsn pairs
+    // Parse TermHistory as n_entries followed by TermLsn pairs in network order.
     pub fn from_bytes(bytes: &mut Bytes) -> Result<TermHistory> {
+        let n_entries = bytes
+            .get_u32_f()
+            .with_context(|| "TermHistory misses len")?;
+        let mut res = Vec::with_capacity(n_entries as usize);
+        for i in 0..n_entries {
+            let term = bytes
+                .get_u64_f()
+                .with_context(|| format!("TermHistory pos {} misses term", i))?;
+            let lsn = bytes
+                .get_u64_f()
+                .with_context(|| format!("TermHistory pos {} misses lsn", i))?
+                .into();
+            res.push(TermLsn { term, lsn })
+        }
+        Ok(TermHistory(res))
+    }
+
+    // Parse TermHistory as n_entries followed by TermLsn pairs in LE order.
+    // TODO remove once v2 protocol is fully dropped.
+    pub fn from_bytes_le(bytes: &mut Bytes) -> Result<TermHistory> {
         if bytes.remaining() < 4 {
             bail!("TermHistory misses len");
         }
@@ -269,17 +289,10 @@ pub struct VoteResponse {
  */
 #[derive(Debug)]
 pub struct ProposerElected {
+    pub generation: Generation,
     pub term: Term,
     pub start_streaming_at: Lsn,
     pub term_history: TermHistory,
-}
-
-/// V2 of the message; exists as a struct because we (de)serialized it as is.
-pub struct ProposerElectedV2 {
-    pub term: Term,
-    pub start_streaming_at: Lsn,
-    pub term_history: TermHistory,
-    pub timeline_start_lsn: Lsn,
 }
 
 /// Request with WAL message sent from proposer to safekeeper. Along the way it
@@ -463,7 +476,7 @@ impl ProposerAcceptorMessage {
     pub fn parse(mut msg_bytes: Bytes, proto_version: u32) -> Result<ProposerAcceptorMessage> {
         // TODO remove after converting all msgs
         let t = msg_bytes[0] as char;
-        if proto_version == SK_PROTO_VERSION_3 && (t == 'g' || t == 'v') {
+        if proto_version == SK_PROTO_VERSION_3 && (t == 'g' || t == 'v' || t == 'e') {
             if msg_bytes.is_empty() {
                 bail!("ProposerAcceptorMessage is not complete: missing tag");
             }
@@ -503,6 +516,24 @@ impl ProposerAcceptorMessage {
                     let term = msg_bytes.get_u64_f().with_context(|| "reading term")?;
                     let v = VoteRequest { generation, term };
                     Ok(ProposerAcceptorMessage::VoteRequest(v))
+                }
+                'e' => {
+                    let generation = msg_bytes
+                        .get_u32_f()
+                        .with_context(|| "reading generation")?;
+                    let term = msg_bytes.get_u64_f().with_context(|| "reading term")?;
+                    let start_streaming_at: Lsn = msg_bytes
+                        .get_u64_f()
+                        .with_context(|| "reading start_streaming_at")?
+                        .into();
+                    let term_history = TermHistory::from_bytes(&mut msg_bytes)?;
+                    let msg = ProposerElected {
+                        generation,
+                        term,
+                        start_streaming_at,
+                        term_history,
+                    };
+                    Ok(ProposerAcceptorMessage::Elected(msg))
                 }
                 _ => bail!("unknown proposer-acceptor message tag: {}", tag),
             }
@@ -544,12 +575,13 @@ impl ProposerAcceptorMessage {
                     }
                     let term = msg_bytes.get_u64_le();
                     let start_streaming_at = msg_bytes.get_u64_le().into();
-                    let term_history = TermHistory::from_bytes(&mut msg_bytes)?;
+                    let term_history = TermHistory::from_bytes_le(&mut msg_bytes)?;
                     if msg_bytes.remaining() < 8 {
                         bail!("ProposerElected message is not complete");
                     }
                     let _timeline_start_lsn = msg_bytes.get_u64_le();
                     let msg = ProposerElected {
+                        generation: INVALID_GENERATION,
                         term,
                         start_streaming_at,
                         term_history,
