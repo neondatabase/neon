@@ -1083,12 +1083,33 @@ impl TenantShard {
                 None => vec![],
             };
 
-            let replacement = self.find_better_location::<SecondaryShardTag>(
-                scheduler,
-                &schedule_context,
-                *secondary,
-                &exclude,
-            );
+            let replacement = match &self.policy {
+                PlacementPolicy::Attached(_) => {
+                    // Secondaries for an attached shard should be scheduled using `SecondaryShardTag`
+                    // to avoid placing them in the preferred AZ.
+                    self.find_better_location::<SecondaryShardTag>(
+                        scheduler,
+                        &schedule_context,
+                        *secondary,
+                        &exclude,
+                    )
+                },
+                PlacementPolicy::Secondary => {
+                    // In secondary-only mode, we want our secondary locations in the preferred AZ,
+                    // so that they're ready to take over as an attached location when we transition
+                    // into PlacementPolicy::Attached.
+                    self.find_better_location::<AttachedShardTag>(
+                        scheduler,
+                        &schedule_context,
+                        *secondary,
+                        &exclude,
+                    )
+                }
+                PlacementPolicy::Detached => {
+                    None
+                }
+            };
+
             assert!(replacement != Some(*secondary));
             if let Some(replacement) = replacement {
                 // We have found a candidate and confirmed that its score is preferable
