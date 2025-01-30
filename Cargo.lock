@@ -1317,7 +1317,7 @@ dependencies = [
  "tar",
  "thiserror 1.0.69",
  "tokio",
- "tokio-postgres 0.7.9",
+ "tokio-postgres",
  "tokio-stream",
  "tokio-util",
  "tower 0.5.2",
@@ -1426,7 +1426,7 @@ dependencies = [
  "storage_broker",
  "thiserror 1.0.69",
  "tokio",
- "tokio-postgres 0.7.9",
+ "tokio-postgres",
  "tokio-util",
  "toml",
  "toml_edit",
@@ -1817,7 +1817,7 @@ dependencies = [
  "futures-util",
  "scoped-futures",
  "tokio",
- "tokio-postgres 0.7.12",
+ "tokio-postgres",
 ]
 
 [[package]]
@@ -4092,8 +4092,8 @@ dependencies = [
  "pageserver_compaction",
  "pin-project-lite",
  "postgres",
- "postgres-protocol 0.6.6",
- "postgres-types 0.2.6",
+ "postgres-protocol",
+ "postgres-types",
  "postgres_backend",
  "postgres_connection",
  "postgres_ffi",
@@ -4124,7 +4124,7 @@ dependencies = [
  "tokio",
  "tokio-epoll-uring",
  "tokio-io-timeout",
- "tokio-postgres 0.7.9",
+ "tokio-postgres",
  "tokio-stream",
  "tokio-tar",
  "tokio-util",
@@ -4182,7 +4182,7 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "tokio",
- "tokio-postgres 0.7.9",
+ "tokio-postgres",
  "tokio-stream",
  "tokio-util",
  "utils",
@@ -4498,7 +4498,7 @@ dependencies = [
  "futures-util",
  "log",
  "tokio",
- "tokio-postgres 0.7.9",
+ "tokio-postgres",
 ]
 
 [[package]]
@@ -4512,24 +4512,6 @@ dependencies = [
  "fallible-iterator",
  "hmac",
  "lazy_static",
- "md-5",
- "memchr",
- "rand 0.8.5",
- "sha2",
- "stringprep",
-]
-
-[[package]]
-name = "postgres-protocol"
-version = "0.6.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acda0ebdebc28befa84bee35e651e4c5f09073d668c7aed4cf7e23c3cda84b23"
-dependencies = [
- "base64 0.22.1",
- "byteorder",
- "bytes",
- "fallible-iterator",
- "hmac",
  "md-5",
  "memchr",
  "rand 0.8.5",
@@ -4561,18 +4543,7 @@ dependencies = [
  "bytes",
  "chrono",
  "fallible-iterator",
- "postgres-protocol 0.6.6",
-]
-
-[[package]]
-name = "postgres-types"
-version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f66ea23a2d0e5734297357705193335e0a957696f34bed2f2faefacb2fec336f"
-dependencies = [
- "bytes",
- "fallible-iterator",
- "postgres-protocol 0.6.7",
+ "postgres-protocol",
 ]
 
 [[package]]
@@ -4597,7 +4568,7 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "tokio",
- "tokio-postgres 0.7.9",
+ "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-rustls 0.26.0",
  "tokio-util",
@@ -4612,7 +4583,7 @@ dependencies = [
  "itertools 0.10.5",
  "once_cell",
  "postgres",
- "tokio-postgres 0.7.9",
+ "tokio-postgres",
  "url",
 ]
 
@@ -4706,7 +4677,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "itertools 0.10.5",
- "postgres-protocol 0.6.6",
+ "postgres-protocol",
  "rand 0.8.5",
  "serde",
  "thiserror 1.0.69",
@@ -4954,7 +4925,7 @@ dependencies = [
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
  "tokio",
- "tokio-postgres 0.7.9",
+ "tokio-postgres",
  "tokio-postgres2",
  "tokio-rustls 0.26.0",
  "tokio-tungstenite 0.21.0",
@@ -5748,7 +5719,7 @@ dependencies = [
  "pageserver_api",
  "parking_lot 0.12.1",
  "postgres",
- "postgres-protocol 0.6.6",
+ "postgres-protocol",
  "postgres_backend",
  "postgres_ffi",
  "pprof",
@@ -5772,7 +5743,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tokio-io-timeout",
- "tokio-postgres 0.7.9",
+ "tokio-postgres",
  "tokio-stream",
  "tokio-tar",
  "tokio-util",
@@ -6389,6 +6360,8 @@ dependencies = [
  "rand 0.8.5",
  "reqwest",
  "routerify",
+ "rustls 0.23.18",
+ "rustls-native-certs 0.8.0",
  "scoped-futures",
  "scopeguard",
  "serde",
@@ -6397,6 +6370,8 @@ dependencies = [
  "strum_macros",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
  "tokio-util",
  "tracing",
  "utils",
@@ -6442,7 +6417,7 @@ dependencies = [
  "serde_json",
  "storage_controller_client",
  "tokio",
- "tokio-postgres 0.7.9",
+ "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-stream",
  "tokio-util",
@@ -6639,7 +6614,7 @@ dependencies = [
  "fastrand 2.2.0",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6920,34 +6895,8 @@ dependencies = [
  "percent-encoding",
  "phf",
  "pin-project-lite",
- "postgres-protocol 0.6.6",
- "postgres-types 0.2.6",
- "rand 0.8.5",
- "socket2",
- "tokio",
- "tokio-util",
- "whoami",
-]
-
-[[package]]
-name = "tokio-postgres"
-version = "0.7.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b5d3742945bc7d7f210693b0c58ae542c6fd47b17adbbda0885f3dcb34a6bdb"
-dependencies = [
- "async-trait",
- "byteorder",
- "bytes",
- "fallible-iterator",
- "futures-channel",
- "futures-util",
- "log",
- "parking_lot 0.12.1",
- "percent-encoding",
- "phf",
- "pin-project-lite",
- "postgres-protocol 0.6.7",
- "postgres-types 0.2.8",
+ "postgres-protocol",
+ "postgres-types",
  "rand 0.8.5",
  "socket2",
  "tokio",
@@ -6964,7 +6913,7 @@ dependencies = [
  "ring",
  "rustls 0.23.18",
  "tokio",
- "tokio-postgres 0.7.9",
+ "tokio-postgres",
  "tokio-rustls 0.26.0",
  "x509-certificate",
 ]
@@ -7642,7 +7591,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tokio",
- "tokio-postgres 0.7.9",
+ "tokio-postgres",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
