@@ -13,6 +13,7 @@ use anyhow::{bail, Context, Result};
 use camino::Utf8PathBuf;
 use camino_tempfile::Utf8TempDir;
 use safekeeper_api::membership::Configuration;
+use safekeeper_api::models::SafekeeperUtilization;
 use safekeeper_api::ServerInfo;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -414,6 +415,20 @@ impl GlobalTimelines {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Returns statistics about timeline counts
+    pub fn get_timeline_counts(&self) -> SafekeeperUtilization {
+        let global_lock = self.state.lock().unwrap();
+        let timeline_count = global_lock
+            .timelines
+            .values()
+            .filter(|t| match t {
+                GlobalMapTimeline::CreationInProgress => false,
+                GlobalMapTimeline::Timeline(t) => !t.is_cancelled(),
+            })
+            .count() as u64;
+        SafekeeperUtilization { timeline_count }
     }
 
     /// Returns all timelines belonging to a given tenant. Used for deleting all timelines of a tenant,

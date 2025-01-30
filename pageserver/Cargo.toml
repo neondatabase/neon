@@ -8,7 +8,7 @@ license.workspace = true
 default = []
 # Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
 # which adds some runtime cost to run tests on outage conditions
-testing = ["fail/failpoints", "pageserver_api/testing", "wal_decoder/testing"]
+testing = ["fail/failpoints", "pageserver_api/testing", "wal_decoder/testing", "pageserver_client/testing"]
 
 [dependencies]
 anyhow.workspace = true
@@ -36,7 +36,7 @@ itertools.workspace = true
 md5.workspace = true
 nix.workspace = true
 # hack to get the number of worker threads tokio uses
-num_cpus = { version = "1.15" }
+num_cpus.workspace = true
 num-traits.workspace = true
 once_cell.workspace = true
 pin-project-lite.workspace = true
@@ -114,3 +114,7 @@ harness = false
 [[bench]]
 name = "upload_queue"
 harness = false
+
+[[bin]]
+name = "test_helper_slow_client_reads"
+required-features = [ "testing" ]

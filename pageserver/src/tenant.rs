@@ -37,6 +37,8 @@ use remote_timeline_client::manifest::{
     OffloadedTimelineManifest, TenantManifest, LATEST_TENANT_MANIFEST_VERSION,
 };
 use remote_timeline_client::UploadQueueNotReadyError;
+use remote_timeline_client::FAILED_REMOTE_OP_RETRIES;
+use remote_timeline_client::FAILED_UPLOAD_WARN_THRESHOLD;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -95,6 +97,9 @@ use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::l0_flush::L0FlushGlobalState;
+use crate::metrics::CONCURRENT_INITDBS;
+use crate::metrics::INITDB_RUN_TIME;
+use crate::metrics::INITDB_SEMAPHORE_ACQUISITION_TIME;
 use crate::metrics::TENANT;
 use crate::metrics::{
     remove_tenant_metrics, BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN,
@@ -2555,7 +2560,12 @@ impl Tenant {
                     // sizes etc. and that would get confused if the previous page versions
                     // are not in the repository yet.
                     ancestor_timeline
-                        .wait_lsn(*lsn, timeline::WaitLsnWaiter::Tenant, ctx)
+                        .wait_lsn(
+                            *lsn,
+                            timeline::WaitLsnWaiter::Tenant,
+                            timeline::WaitLsnTimeout::Default,
+                            ctx,
+                        )
                         .await
                         .map_err(|e| match e {
                             e @ (WaitLsnError::Timeout(_) | WaitLsnError::BadState { .. }) => {
@@ -3804,6 +3814,13 @@ impl Tenant {
         tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
+    }
+
+    pub fn get_compaction_upper_limit(&self) -> usize {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .compaction_upper_limit
+            .unwrap_or(self.conf.default_tenant_conf.compaction_upper_limit)
     }
 
     pub fn get_gc_horizon(&self) -> u64 {
@@ -5305,27 +5322,37 @@ impl Tenant {
             return Ok(());
         }
 
-        upload_tenant_manifest(
-            &self.remote_storage,
-            &self.tenant_shard_id,
-            self.generation,
-            &manifest,
+        // Remote storage does no retries internally, so wrap it
+        match backoff::retry(
+            || async {
+                upload_tenant_manifest(
+                    &self.remote_storage,
+                    &self.tenant_shard_id,
+                    self.generation,
+                    &manifest,
+                    &self.cancel,
+                )
+                .await
+            },
+            |_e| self.cancel.is_cancelled(),
+            FAILED_UPLOAD_WARN_THRESHOLD,
+            FAILED_REMOTE_OP_RETRIES,
+            "uploading tenant manifest",
             &self.cancel,
         )
         .await
-        .map_err(|e| {
-            if self.cancel.is_cancelled() {
-                TenantManifestError::Cancelled
-            } else {
-                TenantManifestError::RemoteStorage(e)
+        {
+            None => Err(TenantManifestError::Cancelled),
+            Some(Err(_)) if self.cancel.is_cancelled() => Err(TenantManifestError::Cancelled),
+            Some(Err(e)) => Err(TenantManifestError::RemoteStorage(e)),
+            Some(Ok(_)) => {
+                // Store the successfully uploaded manifest, so that future callers can avoid
+                // re-uploading the same thing.
+                *guard = Some(manifest);
+
+                Ok(())
             }
-        })?;
-
-        // Store the successfully uploaded manifest, so that future callers can avoid
-        // re-uploading the same thing.
-        *guard = Some(manifest);
-
-        Ok(())
+        }
     }
 }
 
@@ -5347,8 +5374,17 @@ async fn run_initdb(
         initdb_bin_path, initdb_target_dir, initdb_lib_dir,
     );
 
-    let _permit = INIT_DB_SEMAPHORE.acquire().await;
+    let _permit = {
+        let _timer = INITDB_SEMAPHORE_ACQUISITION_TIME.start_timer();
+        INIT_DB_SEMAPHORE.acquire().await
+    };
 
+    CONCURRENT_INITDBS.inc();
+    scopeguard::defer! {
+        CONCURRENT_INITDBS.dec();
+    }
+
+    let _timer = INITDB_RUN_TIME.start_timer();
     let res = postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
         superuser: &conf.superuser,
         locale: &conf.locale,
@@ -5440,7 +5476,11 @@ pub(crate) mod harness {
                 compaction_target_size: Some(tenant_conf.compaction_target_size),
                 compaction_period: Some(tenant_conf.compaction_period),
                 compaction_threshold: Some(tenant_conf.compaction_threshold),
+                compaction_upper_limit: Some(tenant_conf.compaction_upper_limit),
                 compaction_algorithm: Some(tenant_conf.compaction_algorithm),
+                l0_flush_delay_threshold: tenant_conf.l0_flush_delay_threshold,
+                l0_flush_stall_threshold: tenant_conf.l0_flush_stall_threshold,
+                l0_flush_wait_upload: Some(tenant_conf.l0_flush_wait_upload),
                 gc_horizon: Some(tenant_conf.gc_horizon),
                 gc_period: Some(tenant_conf.gc_period),
                 image_creation_threshold: Some(tenant_conf.image_creation_threshold),
@@ -5463,6 +5503,12 @@ pub(crate) mod harness {
                 lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),
                 timeline_offloading: Some(tenant_conf.timeline_offloading),
                 wal_receiver_protocol_override: tenant_conf.wal_receiver_protocol_override,
+                rel_size_v2_enabled: tenant_conf.rel_size_v2_enabled,
+                gc_compaction_enabled: Some(tenant_conf.gc_compaction_enabled),
+                gc_compaction_initial_threshold_kb: Some(
+                    tenant_conf.gc_compaction_initial_threshold_kb,
+                ),
+                gc_compaction_ratio_percent: Some(tenant_conf.gc_compaction_ratio_percent),
             }
         }
     }
@@ -5696,7 +5742,7 @@ mod tests {
     use pageserver_api::value::Value;
     use pageserver_compaction::helpers::overlaps_with;
     use rand::{thread_rng, Rng};
-    use storage_layer::PersistentLayerKey;
+    use storage_layer::{IoConcurrency, PersistentLayerKey};
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
     use timeline::{CompactOptions, DeltaLayerTestDesc};
@@ -6477,6 +6523,7 @@ mod tests {
     async fn test_get_vectored() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_get_vectored").await?;
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -6541,7 +6588,7 @@ mod tests {
                 .get_vectored_impl(
                     read.clone(),
                     reads_lsn,
-                    &mut ValuesReconstructState::new(),
+                    &mut ValuesReconstructState::new(io_concurrency.clone()),
                     &ctx,
                 )
                 .await;
@@ -6588,6 +6635,7 @@ mod tests {
         let harness = TenantHarness::create("test_get_vectored_aux_files").await?;
 
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -6622,7 +6670,7 @@ mod tests {
             .get_vectored_impl(
                 aux_keyspace.clone(),
                 read_lsn,
-                &mut ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(io_concurrency.clone()),
                 &ctx,
             )
             .await;
@@ -6670,6 +6718,7 @@ mod tests {
         )
         .await?;
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
 
         let mut current_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let gap_at_key = current_key.add(100);
@@ -6770,7 +6819,7 @@ mod tests {
             .get_vectored_impl(
                 read.clone(),
                 current_lsn,
-                &mut ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(io_concurrency.clone()),
                 &ctx,
             )
             .await?;
@@ -6813,6 +6862,7 @@ mod tests {
     async fn test_get_vectored_ancestor_descent() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_get_vectored_on_lsn_axis").await?;
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
 
         let start_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let end_key = start_key.add(1000);
@@ -6905,7 +6955,7 @@ mod tests {
                         ranges: vec![child_gap_at_key..child_gap_at_key.next()],
                     },
                     query_lsn,
-                    &mut ValuesReconstructState::new(),
+                    &mut ValuesReconstructState::new(io_concurrency.clone()),
                     &ctx,
                 )
                 .await;
@@ -7351,6 +7401,7 @@ mod tests {
     async fn test_metadata_scan() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_metadata_scan").await?;
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -7404,7 +7455,7 @@ mod tests {
                 .get_vectored_impl(
                     keyspace.clone(),
                     lsn,
-                    &mut ValuesReconstructState::default(),
+                    &mut ValuesReconstructState::new(io_concurrency.clone()),
                     &ctx,
                 )
                 .await?
@@ -7519,6 +7570,7 @@ mod tests {
         let harness = TenantHarness::create("test_aux_file_e2e").await.unwrap();
 
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
 
         let mut lsn = Lsn(0x08);
 
@@ -7538,7 +7590,10 @@ mod tests {
         }
 
         // we can read everything from the storage
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        let files = tline
+            .list_aux_files(lsn, &ctx, io_concurrency.clone())
+            .await
+            .unwrap();
         assert_eq!(
             files.get("pg_logical/mappings/test1"),
             Some(&bytes::Bytes::from_static(b"first"))
@@ -7554,7 +7609,10 @@ mod tests {
             modification.commit(&ctx).await.unwrap();
         }
 
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        let files = tline
+            .list_aux_files(lsn, &ctx, io_concurrency.clone())
+            .await
+            .unwrap();
         assert_eq!(
             files.get("pg_logical/mappings/test2"),
             Some(&bytes::Bytes::from_static(b"second"))
@@ -7565,7 +7623,10 @@ mod tests {
             .await
             .unwrap();
 
-        let files = child.list_aux_files(lsn, &ctx).await.unwrap();
+        let files = child
+            .list_aux_files(lsn, &ctx, io_concurrency.clone())
+            .await
+            .unwrap();
         assert_eq!(files.get("pg_logical/mappings/test1"), None);
         assert_eq!(files.get("pg_logical/mappings/test2"), None);
     }
@@ -7574,6 +7635,7 @@ mod tests {
     async fn test_metadata_image_creation() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_metadata_image_creation").await?;
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -7593,8 +7655,9 @@ mod tests {
             keyspace: &KeySpace,
             lsn: Lsn,
             ctx: &RequestContext,
+            io_concurrency: IoConcurrency,
         ) -> anyhow::Result<(BTreeMap<Key, Result<Bytes, PageReconstructError>>, usize)> {
-            let mut reconstruct_state = ValuesReconstructState::default();
+            let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
             let res = tline
                 .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
                 .await?;
@@ -7642,7 +7705,8 @@ mod tests {
 
             if iter % 5 == 0 {
                 let (_, before_delta_file_accessed) =
-                    scan_with_statistics(&tline, &keyspace, lsn, &ctx).await?;
+                    scan_with_statistics(&tline, &keyspace, lsn, &ctx, io_concurrency.clone())
+                        .await?;
                 tline
                     .compact(
                         &cancel,
@@ -7656,7 +7720,8 @@ mod tests {
                     )
                     .await?;
                 let (_, after_delta_file_accessed) =
-                    scan_with_statistics(&tline, &keyspace, lsn, &ctx).await?;
+                    scan_with_statistics(&tline, &keyspace, lsn, &ctx, io_concurrency.clone())
+                        .await?;
                 assert!(after_delta_file_accessed < before_delta_file_accessed, "after_delta_file_accessed={after_delta_file_accessed}, before_delta_file_accessed={before_delta_file_accessed}");
                 // Given that we already produced an image layer, there should be no delta layer needed for the scan, but still setting a low threshold there for unforeseen circumstances.
                 assert!(
@@ -7745,6 +7810,7 @@ mod tests {
     async fn test_vectored_missing_metadata_key_reads() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_vectored_missing_metadata_key_reads").await?;
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
 
         let base_key = Key::from_hex("620000000033333333444444445500000000").unwrap();
         let base_key_child = Key::from_hex("620000000033333333444444445500000001").unwrap();
@@ -7883,7 +7949,7 @@ mod tests {
         );
 
         // test vectored scan on parent timeline
-        let mut reconstruct_state = ValuesReconstructState::new();
+        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency.clone());
         let res = tline
             .get_vectored_impl(
                 KeySpace::single(Key::metadata_key_range()),
@@ -7909,7 +7975,7 @@ mod tests {
         );
 
         // test vectored scan on child timeline
-        let mut reconstruct_state = ValuesReconstructState::new();
+        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency.clone());
         let res = child
             .get_vectored_impl(
                 KeySpace::single(Key::metadata_key_range()),
@@ -7947,7 +8013,9 @@ mod tests {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Option<Bytes>, GetVectoredError> {
-        let mut reconstruct_state = ValuesReconstructState::new();
+        let io_concurrency =
+            IoConcurrency::spawn_from_conf(tline.conf, tline.gate.enter().unwrap());
+        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
         let mut res = tline
             .get_vectored_impl(
                 KeySpace::single(key..key.next()),
@@ -8048,6 +8116,7 @@ mod tests {
             .await
             .unwrap();
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
 
         let key0 = Key::from_hex("620000000033333333444444445500000000").unwrap();
         let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
@@ -8107,7 +8176,7 @@ mod tests {
 
         // Image layers are created at last_record_lsn
         let images = tline
-            .inspect_image_layers(Lsn(0x40), &ctx)
+            .inspect_image_layers(Lsn(0x40), &ctx, io_concurrency.clone())
             .await
             .unwrap()
             .into_iter()
@@ -8122,6 +8191,7 @@ mod tests {
             .await
             .unwrap();
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
 
         let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
         let key2 = Key::from_hex("620000000033333333444444445500000002").unwrap();
@@ -8172,7 +8242,7 @@ mod tests {
 
         // Image layers are created at last_record_lsn
         let images = tline
-            .inspect_image_layers(Lsn(0x30), &ctx)
+            .inspect_image_layers(Lsn(0x30), &ctx, io_concurrency.clone())
             .await
             .unwrap()
             .into_iter()
@@ -8185,6 +8255,7 @@ mod tests {
     async fn test_simple_bottom_most_compaction_images() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_simple_bottom_most_compaction_images").await?;
         let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
 
         fn get_key(id: u32) -> Key {
             // using aux key here b/c they are guaranteed to be inside `collect_keyspace`.
@@ -8326,7 +8397,7 @@ mod tests {
 
         // Check if the image layer at the GC horizon contains exactly what we want
         let image_at_gc_horizon = tline
-            .inspect_image_layers(Lsn(0x30), &ctx)
+            .inspect_image_layers(Lsn(0x30), &ctx, io_concurrency.clone())
             .await
             .unwrap()
             .into_iter()
@@ -10039,7 +10110,12 @@ mod tests {
 
         let keyspace = KeySpace::single(get_key(0)..get_key(10));
         let results = tline
-            .get_vectored(keyspace, delta_layer_end_lsn, &ctx)
+            .get_vectored(
+                keyspace,
+                delta_layer_end_lsn,
+                IoConcurrency::sequential(),
+                &ctx,
+            )
             .await
             .expect("No vectored errors");
         for (key, res) in results {

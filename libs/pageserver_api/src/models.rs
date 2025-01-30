@@ -33,7 +33,6 @@ use crate::{
     reltag::RelTag,
     shard::{ShardCount, ShardStripeSize, TenantShardId},
 };
-use anyhow::bail;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 /// The state of a tenant in this pageserver.
@@ -459,9 +458,17 @@ pub struct TenantConfigPatch {
     pub compaction_period: FieldPatch<String>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_threshold: FieldPatch<usize>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_upper_limit: FieldPatch<usize>,
     // defer parsing compaction_algorithm, like eviction_policy
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_algorithm: FieldPatch<CompactionAlgorithmSettings>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub l0_flush_delay_threshold: FieldPatch<usize>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub l0_flush_stall_threshold: FieldPatch<usize>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub l0_flush_wait_upload: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_horizon: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
@@ -498,6 +505,14 @@ pub struct TenantConfigPatch {
     pub timeline_offloading: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub wal_receiver_protocol_override: FieldPatch<PostgresClientProtocol>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub rel_size_v2_enabled: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_compaction_enabled: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_compaction_initial_threshold_kb: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_compaction_ratio_percent: FieldPatch<u64>,
 }
 
 /// An alternative representation of `pageserver::tenant::TenantConf` with
@@ -509,8 +524,12 @@ pub struct TenantConfig {
     pub compaction_target_size: Option<u64>,
     pub compaction_period: Option<String>,
     pub compaction_threshold: Option<usize>,
+    pub compaction_upper_limit: Option<usize>,
     // defer parsing compaction_algorithm, like eviction_policy
     pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
+    pub l0_flush_delay_threshold: Option<usize>,
+    pub l0_flush_stall_threshold: Option<usize>,
+    pub l0_flush_wait_upload: Option<bool>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
     pub image_creation_threshold: Option<usize>,
@@ -529,6 +548,10 @@ pub struct TenantConfig {
     pub lsn_lease_length_for_ts: Option<String>,
     pub timeline_offloading: Option<bool>,
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
+    pub rel_size_v2_enabled: Option<bool>,
+    pub gc_compaction_enabled: Option<bool>,
+    pub gc_compaction_initial_threshold_kb: Option<u64>,
+    pub gc_compaction_ratio_percent: Option<u64>,
 }
 
 impl TenantConfig {
@@ -539,7 +562,11 @@ impl TenantConfig {
             mut compaction_target_size,
             mut compaction_period,
             mut compaction_threshold,
+            mut compaction_upper_limit,
             mut compaction_algorithm,
+            mut l0_flush_delay_threshold,
+            mut l0_flush_stall_threshold,
+            mut l0_flush_wait_upload,
             mut gc_horizon,
             mut gc_period,
             mut image_creation_threshold,
@@ -558,6 +585,10 @@ impl TenantConfig {
             mut lsn_lease_length_for_ts,
             mut timeline_offloading,
             mut wal_receiver_protocol_override,
+            mut rel_size_v2_enabled,
+            mut gc_compaction_enabled,
+            mut gc_compaction_initial_threshold_kb,
+            mut gc_compaction_ratio_percent,
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
@@ -567,7 +598,17 @@ impl TenantConfig {
             .apply(&mut compaction_target_size);
         patch.compaction_period.apply(&mut compaction_period);
         patch.compaction_threshold.apply(&mut compaction_threshold);
+        patch
+            .compaction_upper_limit
+            .apply(&mut compaction_upper_limit);
         patch.compaction_algorithm.apply(&mut compaction_algorithm);
+        patch
+            .l0_flush_delay_threshold
+            .apply(&mut l0_flush_delay_threshold);
+        patch
+            .l0_flush_stall_threshold
+            .apply(&mut l0_flush_stall_threshold);
+        patch.l0_flush_wait_upload.apply(&mut l0_flush_wait_upload);
         patch.gc_horizon.apply(&mut gc_horizon);
         patch.gc_period.apply(&mut gc_period);
         patch
@@ -602,6 +643,16 @@ impl TenantConfig {
         patch
             .wal_receiver_protocol_override
             .apply(&mut wal_receiver_protocol_override);
+        patch.rel_size_v2_enabled.apply(&mut rel_size_v2_enabled);
+        patch
+            .gc_compaction_enabled
+            .apply(&mut gc_compaction_enabled);
+        patch
+            .gc_compaction_initial_threshold_kb
+            .apply(&mut gc_compaction_initial_threshold_kb);
+        patch
+            .gc_compaction_ratio_percent
+            .apply(&mut gc_compaction_ratio_percent);
 
         Self {
             checkpoint_distance,
@@ -609,7 +660,11 @@ impl TenantConfig {
             compaction_target_size,
             compaction_period,
             compaction_threshold,
+            compaction_upper_limit,
             compaction_algorithm,
+            l0_flush_delay_threshold,
+            l0_flush_stall_threshold,
+            l0_flush_wait_upload,
             gc_horizon,
             gc_period,
             image_creation_threshold,
@@ -628,6 +683,10 @@ impl TenantConfig {
             lsn_lease_length_for_ts,
             timeline_offloading,
             wal_receiver_protocol_override,
+            rel_size_v2_enabled,
+            gc_compaction_enabled,
+            gc_compaction_initial_threshold_kb,
+            gc_compaction_ratio_percent,
         }
     }
 }
@@ -968,6 +1027,13 @@ pub struct TenantConfigPatchRequest {
     pub tenant_id: TenantId,
     #[serde(flatten)]
     pub config: TenantConfigPatch, // as we have a flattened field, we should reject all unknown fields in it
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TenantWaitLsnRequest {
+    #[serde(flatten)]
+    pub timelines: HashMap<TimelineId, Lsn>,
+    pub timeout: Duration,
 }
 
 /// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
@@ -1400,6 +1466,8 @@ pub enum PagestreamFeMessage {
     GetPage(PagestreamGetPageRequest),
     DbSize(PagestreamDbSizeRequest),
     GetSlruSegment(PagestreamGetSlruSegmentRequest),
+    #[cfg(feature = "testing")]
+    Test(PagestreamTestRequest),
 }
 
 // Wrapped in libpq CopyData
@@ -1411,6 +1479,22 @@ pub enum PagestreamBeMessage {
     Error(PagestreamErrorResponse),
     DbSize(PagestreamDbSizeResponse),
     GetSlruSegment(PagestreamGetSlruSegmentResponse),
+    #[cfg(feature = "testing")]
+    Test(PagestreamTestResponse),
+}
+
+// Keep in sync with `pagestore_client.h`
+#[repr(u8)]
+enum PagestreamFeMessageTag {
+    Exists = 0,
+    Nblocks = 1,
+    GetPage = 2,
+    DbSize = 3,
+    GetSlruSegment = 4,
+    /* future tags above this line */
+    /// For testing purposes, not available in production.
+    #[cfg(feature = "testing")]
+    Test = 99,
 }
 
 // Keep in sync with `pagestore_client.h`
@@ -1422,7 +1506,28 @@ enum PagestreamBeMessageTag {
     Error = 103,
     DbSize = 104,
     GetSlruSegment = 105,
+    /* future tags above this line */
+    /// For testing purposes, not available in production.
+    #[cfg(feature = "testing")]
+    Test = 199,
 }
+
+impl TryFrom<u8> for PagestreamFeMessageTag {
+    type Error = u8;
+    fn try_from(value: u8) -> Result<Self, u8> {
+        match value {
+            0 => Ok(PagestreamFeMessageTag::Exists),
+            1 => Ok(PagestreamFeMessageTag::Nblocks),
+            2 => Ok(PagestreamFeMessageTag::GetPage),
+            3 => Ok(PagestreamFeMessageTag::DbSize),
+            4 => Ok(PagestreamFeMessageTag::GetSlruSegment),
+            #[cfg(feature = "testing")]
+            99 => Ok(PagestreamFeMessageTag::Test),
+            _ => Err(value),
+        }
+    }
+}
+
 impl TryFrom<u8> for PagestreamBeMessageTag {
     type Error = u8;
     fn try_from(value: u8) -> Result<Self, u8> {
@@ -1433,6 +1538,8 @@ impl TryFrom<u8> for PagestreamBeMessageTag {
             103 => Ok(PagestreamBeMessageTag::Error),
             104 => Ok(PagestreamBeMessageTag::DbSize),
             105 => Ok(PagestreamBeMessageTag::GetSlruSegment),
+            #[cfg(feature = "testing")]
+            199 => Ok(PagestreamBeMessageTag::Test),
             _ => Err(value),
         }
     }
@@ -1550,6 +1657,20 @@ pub struct PagestreamDbSizeResponse {
     pub db_size: i64,
 }
 
+#[cfg(feature = "testing")]
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct PagestreamTestRequest {
+    pub hdr: PagestreamRequest,
+    pub batch_key: u64,
+    pub message: String,
+}
+
+#[cfg(feature = "testing")]
+#[derive(Debug)]
+pub struct PagestreamTestResponse {
+    pub req: PagestreamTestRequest,
+}
+
 // This is a cut-down version of TenantHistorySize from the pageserver crate, omitting fields
 // that require pageserver-internal types.  It is sufficient to get the total size.
 #[derive(Serialize, Deserialize, Debug)]
@@ -1569,7 +1690,7 @@ impl PagestreamFeMessage {
 
         match self {
             Self::Exists(req) => {
-                bytes.put_u8(0);
+                bytes.put_u8(PagestreamFeMessageTag::Exists as u8);
                 bytes.put_u64(req.hdr.reqid);
                 bytes.put_u64(req.hdr.request_lsn.0);
                 bytes.put_u64(req.hdr.not_modified_since.0);
@@ -1580,7 +1701,7 @@ impl PagestreamFeMessage {
             }
 
             Self::Nblocks(req) => {
-                bytes.put_u8(1);
+                bytes.put_u8(PagestreamFeMessageTag::Nblocks as u8);
                 bytes.put_u64(req.hdr.reqid);
                 bytes.put_u64(req.hdr.request_lsn.0);
                 bytes.put_u64(req.hdr.not_modified_since.0);
@@ -1591,7 +1712,7 @@ impl PagestreamFeMessage {
             }
 
             Self::GetPage(req) => {
-                bytes.put_u8(2);
+                bytes.put_u8(PagestreamFeMessageTag::GetPage as u8);
                 bytes.put_u64(req.hdr.reqid);
                 bytes.put_u64(req.hdr.request_lsn.0);
                 bytes.put_u64(req.hdr.not_modified_since.0);
@@ -1603,7 +1724,7 @@ impl PagestreamFeMessage {
             }
 
             Self::DbSize(req) => {
-                bytes.put_u8(3);
+                bytes.put_u8(PagestreamFeMessageTag::DbSize as u8);
                 bytes.put_u64(req.hdr.reqid);
                 bytes.put_u64(req.hdr.request_lsn.0);
                 bytes.put_u64(req.hdr.not_modified_since.0);
@@ -1611,12 +1732,23 @@ impl PagestreamFeMessage {
             }
 
             Self::GetSlruSegment(req) => {
-                bytes.put_u8(4);
+                bytes.put_u8(PagestreamFeMessageTag::GetSlruSegment as u8);
                 bytes.put_u64(req.hdr.reqid);
                 bytes.put_u64(req.hdr.request_lsn.0);
                 bytes.put_u64(req.hdr.not_modified_since.0);
                 bytes.put_u8(req.kind);
                 bytes.put_u32(req.segno);
+            }
+            #[cfg(feature = "testing")]
+            Self::Test(req) => {
+                bytes.put_u8(PagestreamFeMessageTag::Test as u8);
+                bytes.put_u64(req.hdr.reqid);
+                bytes.put_u64(req.hdr.request_lsn.0);
+                bytes.put_u64(req.hdr.not_modified_since.0);
+                bytes.put_u64(req.batch_key);
+                let message = req.message.as_bytes();
+                bytes.put_u64(message.len() as u64);
+                bytes.put_slice(message);
             }
         }
 
@@ -1645,56 +1777,66 @@ impl PagestreamFeMessage {
             ),
         };
 
-        match msg_tag {
-            0 => Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
-                hdr: PagestreamRequest {
-                    reqid,
-                    request_lsn,
-                    not_modified_since,
-                },
-                rel: RelTag {
-                    spcnode: body.read_u32::<BigEndian>()?,
+        match PagestreamFeMessageTag::try_from(msg_tag)
+            .map_err(|tag: u8| anyhow::anyhow!("invalid tag {tag}"))?
+        {
+            PagestreamFeMessageTag::Exists => {
+                Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
+                    hdr: PagestreamRequest {
+                        reqid,
+                        request_lsn,
+                        not_modified_since,
+                    },
+                    rel: RelTag {
+                        spcnode: body.read_u32::<BigEndian>()?,
+                        dbnode: body.read_u32::<BigEndian>()?,
+                        relnode: body.read_u32::<BigEndian>()?,
+                        forknum: body.read_u8()?,
+                    },
+                }))
+            }
+            PagestreamFeMessageTag::Nblocks => {
+                Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
+                    hdr: PagestreamRequest {
+                        reqid,
+                        request_lsn,
+                        not_modified_since,
+                    },
+                    rel: RelTag {
+                        spcnode: body.read_u32::<BigEndian>()?,
+                        dbnode: body.read_u32::<BigEndian>()?,
+                        relnode: body.read_u32::<BigEndian>()?,
+                        forknum: body.read_u8()?,
+                    },
+                }))
+            }
+            PagestreamFeMessageTag::GetPage => {
+                Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
+                    hdr: PagestreamRequest {
+                        reqid,
+                        request_lsn,
+                        not_modified_since,
+                    },
+                    rel: RelTag {
+                        spcnode: body.read_u32::<BigEndian>()?,
+                        dbnode: body.read_u32::<BigEndian>()?,
+                        relnode: body.read_u32::<BigEndian>()?,
+                        forknum: body.read_u8()?,
+                    },
+                    blkno: body.read_u32::<BigEndian>()?,
+                }))
+            }
+            PagestreamFeMessageTag::DbSize => {
+                Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
+                    hdr: PagestreamRequest {
+                        reqid,
+                        request_lsn,
+                        not_modified_since,
+                    },
                     dbnode: body.read_u32::<BigEndian>()?,
-                    relnode: body.read_u32::<BigEndian>()?,
-                    forknum: body.read_u8()?,
-                },
-            })),
-            1 => Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
-                hdr: PagestreamRequest {
-                    reqid,
-                    request_lsn,
-                    not_modified_since,
-                },
-                rel: RelTag {
-                    spcnode: body.read_u32::<BigEndian>()?,
-                    dbnode: body.read_u32::<BigEndian>()?,
-                    relnode: body.read_u32::<BigEndian>()?,
-                    forknum: body.read_u8()?,
-                },
-            })),
-            2 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
-                hdr: PagestreamRequest {
-                    reqid,
-                    request_lsn,
-                    not_modified_since,
-                },
-                rel: RelTag {
-                    spcnode: body.read_u32::<BigEndian>()?,
-                    dbnode: body.read_u32::<BigEndian>()?,
-                    relnode: body.read_u32::<BigEndian>()?,
-                    forknum: body.read_u8()?,
-                },
-                blkno: body.read_u32::<BigEndian>()?,
-            })),
-            3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
-                hdr: PagestreamRequest {
-                    reqid,
-                    request_lsn,
-                    not_modified_since,
-                },
-                dbnode: body.read_u32::<BigEndian>()?,
-            })),
-            4 => Ok(PagestreamFeMessage::GetSlruSegment(
+                }))
+            }
+            PagestreamFeMessageTag::GetSlruSegment => Ok(PagestreamFeMessage::GetSlruSegment(
                 PagestreamGetSlruSegmentRequest {
                     hdr: PagestreamRequest {
                         reqid,
@@ -1705,7 +1847,21 @@ impl PagestreamFeMessage {
                     segno: body.read_u32::<BigEndian>()?,
                 },
             )),
-            _ => bail!("unknown smgr message tag: {:?}", msg_tag),
+            #[cfg(feature = "testing")]
+            PagestreamFeMessageTag::Test => Ok(PagestreamFeMessage::Test(PagestreamTestRequest {
+                hdr: PagestreamRequest {
+                    reqid,
+                    request_lsn,
+                    not_modified_since,
+                },
+                batch_key: body.read_u64::<BigEndian>()?,
+                message: {
+                    let len = body.read_u64::<BigEndian>()?;
+                    let mut buf = vec![0; len as usize];
+                    body.read_exact(&mut buf)?;
+                    String::from_utf8(buf)?
+                },
+            })),
         }
     }
 }
@@ -1747,6 +1903,15 @@ impl PagestreamBeMessage {
                         bytes.put_u8(Tag::GetSlruSegment as u8);
                         bytes.put_u32((resp.segment.len() / BLCKSZ as usize) as u32);
                         bytes.put(&resp.segment[..]);
+                    }
+
+                    #[cfg(feature = "testing")]
+                    Self::Test(resp) => {
+                        bytes.put_u8(Tag::Test as u8);
+                        bytes.put_u64(resp.req.batch_key);
+                        let message = resp.req.message.as_bytes();
+                        bytes.put_u64(message.len() as u64);
+                        bytes.put_slice(message);
                     }
                 }
             }
@@ -1815,6 +1980,18 @@ impl PagestreamBeMessage {
                         bytes.put_u32(resp.req.segno);
                         bytes.put_u32((resp.segment.len() / BLCKSZ as usize) as u32);
                         bytes.put(&resp.segment[..]);
+                    }
+
+                    #[cfg(feature = "testing")]
+                    Self::Test(resp) => {
+                        bytes.put_u8(Tag::Test as u8);
+                        bytes.put_u64(resp.req.hdr.reqid);
+                        bytes.put_u64(resp.req.hdr.request_lsn.0);
+                        bytes.put_u64(resp.req.hdr.not_modified_since.0);
+                        bytes.put_u64(resp.req.batch_key);
+                        let message = resp.req.message.as_bytes();
+                        bytes.put_u64(message.len() as u64);
+                        bytes.put_slice(message);
                     }
                 }
             }
@@ -1958,6 +2135,28 @@ impl PagestreamBeMessage {
                         segment: segment.into(),
                     })
                 }
+                #[cfg(feature = "testing")]
+                Tag::Test => {
+                    let reqid = buf.read_u64::<BigEndian>()?;
+                    let request_lsn = Lsn(buf.read_u64::<BigEndian>()?);
+                    let not_modified_since = Lsn(buf.read_u64::<BigEndian>()?);
+                    let batch_key = buf.read_u64::<BigEndian>()?;
+                    let len = buf.read_u64::<BigEndian>()?;
+                    let mut msg = vec![0; len as usize];
+                    buf.read_exact(&mut msg)?;
+                    let message = String::from_utf8(msg)?;
+                    Self::Test(PagestreamTestResponse {
+                        req: PagestreamTestRequest {
+                            hdr: PagestreamRequest {
+                                reqid,
+                                request_lsn,
+                                not_modified_since,
+                            },
+                            batch_key,
+                            message,
+                        },
+                    })
+                }
             };
         let remaining = buf.into_inner();
         if !remaining.is_empty() {
@@ -1977,6 +2176,8 @@ impl PagestreamBeMessage {
             Self::Error(_) => "Error",
             Self::DbSize(_) => "DbSize",
             Self::GetSlruSegment(_) => "GetSlruSegment",
+            #[cfg(feature = "testing")]
+            Self::Test(_) => "Test",
         }
     }
 }

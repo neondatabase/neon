@@ -15,7 +15,9 @@ use desim::{
 };
 use http::Uri;
 use safekeeper::{
-    safekeeper::{ProposerAcceptorMessage, SafeKeeper, UNKNOWN_SERVER_VERSION},
+    safekeeper::{
+        ProposerAcceptorMessage, SafeKeeper, SK_PROTOCOL_VERSION, UNKNOWN_SERVER_VERSION,
+    },
     state::{TimelinePersistentState, TimelineState},
     timeline::TimelineError,
     wal_storage::Storage,
@@ -285,7 +287,7 @@ impl ConnState {
                 bail!("finished processing START_REPLICATION")
             }
 
-            let msg = ProposerAcceptorMessage::parse(copy_data)?;
+            let msg = ProposerAcceptorMessage::parse(copy_data, SK_PROTOCOL_VERSION)?;
             debug!("got msg: {:?}", msg);
             self.process(msg, global)
         } else {
