@@ -43,7 +43,6 @@ pub(crate) enum PageserverState {
 pub(crate) enum SafekeeperState {
     Available {
         last_seen_at: Instant,
-        #[expect(dead_code)]
         utilization: SafekeeperUtilization,
     },
     Offline,

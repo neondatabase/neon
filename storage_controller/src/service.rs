@@ -2,6 +2,7 @@ pub mod chaos_injector;
 mod context_iterator;
 
 use hyper::Uri;
+use safekeeper_api::models::SafekeeperUtilization;
 use std::{
     borrow::Cow,
     cmp::Ordering,
@@ -303,6 +304,17 @@ impl ServiceState {
         &mut Scheduler,
     ) {
         (&mut self.nodes, &mut self.tenants, &mut self.scheduler)
+    }
+
+    fn parts_mut_sk(
+        &mut self,
+    ) -> (
+        &mut Arc<HashMap<NodeId, Node>>,
+        &mut Arc<HashMap<NodeId, Safekeeper>>,
+        &mut BTreeMap<TenantShardId, TenantShard>,
+        &mut Scheduler,
+    ) {
+        (&mut self.nodes, &mut self.safekeepers, &mut self.tenants, &mut self.scheduler)
     }
 
     fn get_leadership_status(&self) -> LeadershipStatus {
@@ -614,7 +626,7 @@ impl Service {
             let locked = self.inner.read().unwrap();
             locked.nodes.clone()
         };
-        let mut nodes_online = self.initial_heartbeat_round(all_nodes.keys()).await;
+        let (mut nodes_online, mut sks_online) = self.initial_heartbeat_round(all_nodes.keys()).await;
 
         // List of tenants for which we will attempt to notify compute of their location at startup
         let mut compute_notifications = Vec::new();
@@ -623,7 +635,7 @@ impl Service {
         tracing::info!("Populating tenant shards' states from initial pageserver scan...");
         let shard_count = {
             let mut locked = self.inner.write().unwrap();
-            let (nodes, tenants, scheduler) = locked.parts_mut();
+            let (nodes, safekeepers, tenants, scheduler) = locked.parts_mut_sk();
 
             // Mark nodes online if they responded to us: nodes are offline by default after a restart.
             let mut new_nodes = (**nodes).clone();
@@ -634,6 +646,17 @@ impl Service {
                 }
             }
             *nodes = Arc::new(new_nodes);
+
+            let mut new_sks = (**safekeepers).clone();
+            for (node_id, node) in new_sks.iter_mut() {
+                if let Some((utilization, last_seen_at)) = sks_online.remove(node_id) {
+                    node.set_availability(SafekeeperState::Available {
+                        utilization,
+                        last_seen_at,
+                    });
+                }
+            }
+            *safekeepers = Arc::new(new_sks);
 
             for (tenant_shard_id, observed_state) in observed.0 {
                 let Some(tenant_shard) = tenants.get_mut(&tenant_shard_id) else {
@@ -743,7 +766,10 @@ impl Service {
     async fn initial_heartbeat_round<'a>(
         &self,
         node_ids: impl Iterator<Item = &'a NodeId>,
-    ) -> HashMap<NodeId, PageserverUtilization> {
+    ) -> (
+        HashMap<NodeId, PageserverUtilization>,
+        HashMap<NodeId, (SafekeeperUtilization, Instant)>,
+    ) {
         assert!(!self.startup_complete.is_ready());
 
         let all_nodes = {
@@ -763,14 +789,20 @@ impl Service {
             }
         }
 
+        let all_sks = {
+            let locked = self.inner.read().unwrap();
+            locked.safekeepers.clone()
+        };
+
         tracing::info!("Sending initial heartbeats...");
-        let res = self
+        let res_ps = self
             .heartbeater_ps
             .heartbeat(Arc::new(nodes_to_heartbeat))
             .await;
+        let res_sk = self.heartbeater_sk.heartbeat(all_sks).await;
 
         let mut online_nodes = HashMap::new();
-        if let Ok(deltas) = res {
+        if let Ok(deltas) = res_ps {
             for (node_id, status) in deltas.0 {
                 match status {
                     PageserverState::Available { utilization, .. } => {
@@ -784,7 +816,22 @@ impl Service {
             }
         }
 
-        online_nodes
+        let mut online_sks = HashMap::new();
+        if let Ok(deltas) = res_sk {
+            for (node_id, status) in deltas.0 {
+                match status {
+                    SafekeeperState::Available {
+                        utilization,
+                        last_seen_at,
+                    } => {
+                        online_sks.insert(node_id, (utilization, last_seen_at));
+                    }
+                    SafekeeperState::Offline => {}
+                }
+            }
+        }
+
+        (online_nodes, online_sks)
     }
 
     /// Used during [`Self::startup_reconcile`]: issue GETs to all nodes concurrently, with a deadline.
