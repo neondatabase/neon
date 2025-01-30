@@ -741,10 +741,10 @@ jobs:
           neonvm-captest-reuse)
             case "${PG_VERSION}" in
               16)
-                CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CLICKBENCH_10M_CONNSTR_V16 }}
+                CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CLICKBENCH_10M_CONNSTR }}
                 ;;
               17)
-                CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR_PG17 }}
+                CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CLICKBENCH_CONNSTR_PG17 }}
                 ;;
               *)
                 echo >&2 "Unsupported PG_VERSION=${PG_VERSION} for PLATFORM=${PLATFORM}"
@@ -864,7 +864,7 @@ jobs:
                 CONNSTR_SECRET_NAME="BENCHMARK_CAPTEST_TPCH_S10_CONNSTR"
                 ;;
               17)
-                CONNSTR_SECRET_NAME="BENCHMARK_CAPTEST_CONNSTR_PG17"
+                CONNSTR_SECRET_NAME="BENCHMARK_CAPTEST_TPCH_CONNSTR_PG17"
                 ;;
               *)
                 echo >&2 "Unsupported PG_VERSION=${PG_VERSION} for PLATFORM=${PLATFORM}"
@@ -984,7 +984,7 @@ jobs:
                 CONNSTR=${{ secrets.BENCHMARK_USER_EXAMPLE_CAPTEST_CONNSTR }}
                 ;;
               17)
-                CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR_PG17 }}
+                CONNSTR=${{ secrets.BENCHMARK_CAPTEST_USER_EXAMPLE_CONNSTR_PG17 }}
                 ;;
               *)
                 echo >&2 "Unsupported PG_VERSION=${PG_VERSION} for PLATFORM=${PLATFORM}"
