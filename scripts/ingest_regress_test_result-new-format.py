@@ -57,6 +57,7 @@ class Row:
     flaky: bool
     arch: str
     lfc: bool
+    sanitizers: bool
     build_type: str
     pg_version: int
     run_id: int
@@ -136,6 +137,7 @@ def ingest_test_result(
         }
         arch = parameters.get("arch", "UNKNOWN").strip("'")
         lfc = parameters.get("lfc", "without-lfc").strip("'") == "with-lfc"
+        sanitizers = parameters.get("sanitizers", "disabled").strip("'") == "enabled"
 
         build_type, pg_version, unparametrized_name = parse_test_name(test["name"])
         labels = {label["name"]: label["value"] for label in test["labels"]}
@@ -150,6 +152,7 @@ def ingest_test_result(
             flaky=test["flaky"] or test["retriesStatusChange"],
             arch=arch,
             lfc=lfc,
+            sanitizers=sanitizers,
             build_type=build_type,
             pg_version=pg_version,
             run_id=run_id,

@@ -331,6 +331,7 @@ jobs:
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
           PAGESERVER_GET_VECTORED_CONCURRENT_IO: sidecar-task
           USE_LFC: ${{ matrix.lfc_state == 'with-lfc' && 'true' || 'false' }}
+          SANITIZERS: ${{ matrix.sanitizers }}
 
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540
