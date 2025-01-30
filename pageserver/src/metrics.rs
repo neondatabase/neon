@@ -116,11 +116,17 @@ pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
+/// Measures layers visited per read (i.e. read amplification).
+///
+/// NB: for a batch, we count all visited layers towards each read. While the cost of layer visits
+/// are amortized across the batch, and some layers may not intersect with a given key, each visited
+/// layer contributes directly to the observed latency for every read in the batch, which is what we
+/// care about.
+pub(crate) static LAYERS_PER_READ_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
-        "pageserver_layers_visited_per_vectored_read_global",
-        "Average number of layers visited to reconstruct one key",
-        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+        "pageserver_layers_per_read_global",
+        "Layers visited to serve a single read (read amplification). In a batch, all visited layers count towards every read.",
+        vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
     )
     .expect("failed to define a metric")
 });
@@ -3912,7 +3918,7 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
 
     // histograms
     [
-        &VEC_READ_NUM_LAYERS_VISITED,
+        &LAYERS_PER_READ_GLOBAL,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,
