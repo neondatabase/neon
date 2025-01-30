@@ -1146,6 +1146,7 @@ SendProposerElected(Safekeeper *sk)
 	Assert(sk->startStreamingAt <= wp->availableLsn);
 
 	msg.apm.tag = 'e';
+	msg.generation = wp->mconf.generation;
 	msg.term = wp->propTerm;
 	msg.startStreamingAt = sk->startStreamingAt;
 	msg.termHistory = &wp->propTermHistory;
@@ -1222,9 +1223,9 @@ static void
 PrepareAppendRequest(WalProposer *wp, AppendRequestHeader *req, XLogRecPtr beginLsn, XLogRecPtr endLsn)
 {
 	Assert(endLsn >= beginLsn);
-	req->tag = 'a';
+	req->apm.tag = 'a';
+	req->generation = wp->mconf.generation;
 	req->term = wp->propTerm;
-	req->epochStartLsn = wp->propEpochStartLsn;
 	req->beginLsn = beginLsn;
 	req->endLsn = endLsn;
 	req->commitLsn = wp->commitLsn;
@@ -1767,8 +1768,7 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 
 	resetStringInfo(buf);
 
-	/* removeme tag check after converting all msgs */
-	if (proto_version == 3 && (msg->tag == 'g' || msg->tag == 'v' || msg->tag == 'e'))
+	if (proto_version == 3)
 	{
 		/*
 		 * v2 sends structs for some messages as is, so commonly send tag only
@@ -1814,15 +1814,29 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 					}
 					break;
 				}
+			case 'a':
+				{
+					/*
+					 * Note: this serializes only AppendRequestHeader, caller is
+					 * expected to append WAL data later.
+					 */
+					AppendRequestHeader *m = (AppendRequestHeader *) msg;
+
+					pq_sendint32(buf, m->generation);
+					pq_sendint64(buf, m->term);
+					pq_sendint64(buf, m->beginLsn);
+					pq_sendint64(buf, m->endLsn);
+					pq_sendint64(buf, m->commitLsn);
+					pq_sendint64(buf, m->truncateLsn);
+					break;
+				}
 			default:
 				wp_log(FATAL, "unexpected message type %c to serialize", msg->tag);
 		}
 		return;
 	}
 
-	if (proto_version == 2 || proto_version == 3)
-		/* TODO remove proto_version == 3 after converting all msgs */
-		/* removeme tag check after converting all msgs */
+	if (proto_version == 2)
 	{
 		switch (msg->tag)
 		{
@@ -1886,14 +1900,26 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 					break;
 				}
 			case 'a':
-
 				/*
 				 * Note: this serializes only AppendRequestHeader, caller is
 				 * expected to append WAL data later.
 				 */
 				{
 					/* v2 sent struct as is */
-					pq_sendbytes(buf, (char *) msg, sizeof(AppendRequestHeader));
+					AppendRequestHeader *m = (AppendRequestHeader *) msg;
+					AppendRequestHeaderV2 appendRequestHeaderV2;
+
+					appendRequestHeaderV2.tag = m->apm.tag;
+					appendRequestHeaderV2.term = m->term;
+					appendRequestHeaderV2.epochStartLsn = 0; /* removed field */
+					appendRequestHeaderV2.beginLsn = m->beginLsn;
+					appendRequestHeaderV2.endLsn = m->endLsn;
+					appendRequestHeaderV2.commitLsn = m->commitLsn;
+					appendRequestHeaderV2.truncateLsn = m->truncateLsn;
+					/* removed field */
+					memset(&appendRequestHeaderV2.proposerId, 0, sizeof(appendRequestHeaderV2.proposerId));
+
+					pq_sendbytes(buf, (char *) &appendRequestHeaderV2, sizeof(appendRequestHeaderV2));
 					break;
 				}
 

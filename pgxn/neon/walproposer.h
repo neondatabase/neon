@@ -309,6 +309,24 @@ typedef struct ProposerElected
  */
 typedef struct AppendRequestHeader
 {
+	AcceptorProposerMessage apm;
+	Generation	generation; /* membership conf generation */
+	term_t		term;			/* term of the proposer */
+	XLogRecPtr	beginLsn;		/* start position of message in WAL */
+	XLogRecPtr	endLsn;			/* end position of message in WAL */
+	XLogRecPtr	commitLsn;		/* LSN committed by quorum of safekeepers */
+
+	/*
+	 * minimal LSN which may be needed for recovery of some safekeeper (end
+	 * lsn + 1 of last chunk streamed to everyone)
+	 */
+	XLogRecPtr	truncateLsn;
+	/* in the AppendRequest message, WAL data follows */
+} AppendRequestHeader;
+
+/* protocol v2 variant, kept while wp supports it */
+typedef struct AppendRequestHeaderV2
+{
 	uint64		tag;
 	term_t		term;			/* term of the proposer */
 
@@ -328,7 +346,7 @@ typedef struct AppendRequestHeader
 	XLogRecPtr	truncateLsn;
 	pg_uuid_t	proposerId;		/* for monitoring/debugging */
 	/* in the AppendRequest message, WAL data follows */
-} AppendRequestHeader;
+} AppendRequestHeaderV2;
 
 /*
  * Hot standby feedback received from replica

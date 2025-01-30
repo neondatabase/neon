@@ -273,7 +273,7 @@ pub struct VoteRequestV2 {
 /// Vote itself, sent from safekeeper to proposer
 #[derive(Debug, Serialize)]
 pub struct VoteResponse {
-    generation: Generation,
+    generation: Generation, // membership conf generation
     pub term: Term, // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
     vote_given: bool,
     // Safekeeper flush_lsn (end of WAL) + history of term switches allow
@@ -289,7 +289,7 @@ pub struct VoteResponse {
  */
 #[derive(Debug)]
 pub struct ProposerElected {
-    pub generation: Generation,
+    pub generation: Generation, // membership conf generation
     pub term: Term,
     pub start_streaming_at: Lsn,
     pub term_history: TermHistory,
@@ -304,6 +304,22 @@ pub struct AppendRequest {
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppendRequestHeader {
+    pub generation: Generation, // membership conf generation
+    // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
+    pub term: Term,
+    /// start position of message in WAL
+    pub begin_lsn: Lsn,
+    /// end position of message in WAL
+    pub end_lsn: Lsn,
+    /// LSN committed by quorum of safekeepers
+    pub commit_lsn: Lsn,
+    /// minimal LSN which may be needed by proposer to perform recovery of some safekeeper
+    pub truncate_lsn: Lsn,
+}
+
+/// V2 of the message; exists as a struct because we (de)serialized it as is.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppendRequestHeaderV2 {
     // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
     pub term: Term,
     // TODO: remove this field from the protocol, it in unused -- LSN of term
@@ -474,9 +490,7 @@ impl ProposerAcceptorMessage {
 
     /// Parse proposer message.
     pub fn parse(mut msg_bytes: Bytes, proto_version: u32) -> Result<ProposerAcceptorMessage> {
-        // TODO remove after converting all msgs
-        let t = msg_bytes[0] as char;
-        if proto_version == SK_PROTO_VERSION_3 && (t == 'g' || t == 'v' || t == 'e') {
+        if proto_version == SK_PROTO_VERSION_3 {
             if msg_bytes.is_empty() {
                 bail!("ProposerAcceptorMessage is not complete: missing tag");
             }
@@ -535,6 +549,58 @@ impl ProposerAcceptorMessage {
                     };
                     Ok(ProposerAcceptorMessage::Elected(msg))
                 }
+                'a' => {
+                    let generation = msg_bytes
+                        .get_u32_f()
+                        .with_context(|| "reading generation")?;
+                    let term = msg_bytes.get_u64_f().with_context(|| "reading term")?;
+                    let begin_lsn: Lsn = msg_bytes
+                        .get_u64_f()
+                        .with_context(|| "reading begin_lsn")?
+                        .into();
+                    let end_lsn: Lsn = msg_bytes
+                        .get_u64_f()
+                        .with_context(|| "reading end_lsn")?
+                        .into();
+                    let commit_lsn: Lsn = msg_bytes
+                        .get_u64_f()
+                        .with_context(|| "reading commit_lsn")?
+                        .into();
+                    let truncate_lsn: Lsn = msg_bytes
+                        .get_u64_f()
+                        .with_context(|| "reading truncate_lsn")?
+                        .into();
+                    let hdr = AppendRequestHeader {
+                        generation,
+                        term,
+                        begin_lsn,
+                        end_lsn,
+                        commit_lsn,
+                        truncate_lsn,
+                    };
+                    let rec_size = hdr
+                        .end_lsn
+                        .checked_sub(hdr.begin_lsn)
+                        .context("begin_lsn > end_lsn in AppendRequest")?
+                        .0 as usize;
+                    if rec_size > MAX_SEND_SIZE {
+                        bail!(
+                            "AppendRequest is longer than MAX_SEND_SIZE ({})",
+                            MAX_SEND_SIZE
+                        );
+                    }
+                    if msg_bytes.remaining() < rec_size {
+                        bail!(
+                            "reading WAL: only {} bytes left, wanted {}",
+                            msg_bytes.remaining(),
+                            rec_size
+                        );
+                    }
+                    let wal_data = msg_bytes.copy_to_bytes(rec_size);
+                    let msg = AppendRequest { h: hdr, wal_data };
+
+                    Ok(ProposerAcceptorMessage::AppendRequest(msg))
+                }
                 _ => bail!("unknown proposer-acceptor message tag: {}", tag),
             }
         // TODO remove proto_version == 3 after converting all msgs
@@ -590,7 +656,15 @@ impl ProposerAcceptorMessage {
                 }
                 'a' => {
                     // read header followed by wal data
-                    let hdr = AppendRequestHeader::des_from(&mut stream)?;
+                    let hdrv2 = AppendRequestHeaderV2::des_from(&mut stream)?;
+                    let hdr = AppendRequestHeader {
+                        generation: INVALID_GENERATION,
+                        term: hdrv2.term,
+                        begin_lsn: hdrv2.begin_lsn,
+                        end_lsn: hdrv2.end_lsn,
+                        commit_lsn: hdrv2.commit_lsn,
+                        truncate_lsn: hdrv2.truncate_lsn,
+                    };
                     let rec_size = hdr
                         .end_lsn
                         .checked_sub(hdr.begin_lsn)
@@ -606,6 +680,7 @@ impl ProposerAcceptorMessage {
                     let mut wal_data_vec: Vec<u8> = vec![0; rec_size];
                     stream.read_exact(&mut wal_data_vec)?;
                     let wal_data = Bytes::from(wal_data_vec);
+
                     let msg = AppendRequest { h: hdr, wal_data };
 
                     Ok(ProposerAcceptorMessage::AppendRequest(msg))
@@ -636,13 +711,12 @@ impl ProposerAcceptorMessage {
             Self::AppendRequest(AppendRequest {
                 h:
                     AppendRequestHeader {
+                        generation: _,
                         term: _,
-                        term_start_lsn: _,
                         begin_lsn: _,
                         end_lsn: _,
                         commit_lsn: _,
                         truncate_lsn: _,
-                        proposer_uuid: _,
                     },
                 wal_data,
             }) => wal_data.len(),
@@ -650,13 +724,12 @@ impl ProposerAcceptorMessage {
             Self::NoFlushAppendRequest(AppendRequest {
                 h:
                     AppendRequestHeader {
+                        generation: _,
                         term: _,
-                        term_start_lsn: _,
                         begin_lsn: _,
                         end_lsn: _,
                         commit_lsn: _,
                         truncate_lsn: _,
-                        proposer_uuid: _,
                     },
                 wal_data,
             }) => wal_data.len(),
@@ -1201,10 +1274,8 @@ where
             );
         }
 
-        // Now we know that we are in the same term as the proposer,
-        // processing the message.
-
-        self.state.inmem.proposer_uuid = msg.h.proposer_uuid;
+        // Now we know that we are in the same term as the proposer, process the
+        // message.
 
         // do the job
         if !msg.wal_data.is_empty() {

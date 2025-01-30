@@ -170,13 +170,12 @@ pub async fn append_logical_message(
 
     let append_request = ProposerAcceptorMessage::AppendRequest(AppendRequest {
         h: AppendRequestHeader {
+            generation: INVALID_GENERATION,
             term: msg.term,
-            term_start_lsn: begin_lsn,
             begin_lsn,
             end_lsn,
             commit_lsn,
             truncate_lsn: msg.truncate_lsn,
-            proposer_uuid: [0u8; 16],
         },
         wal_data,
     });
