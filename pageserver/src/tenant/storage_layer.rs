@@ -80,6 +80,16 @@ pub(crate) struct ValueReconstructState {
     pub(crate) img: Option<(Lsn, Bytes)>,
 }
 
+impl ValueReconstructState {
+    /// Returns the number of page deltas applied to the page image.
+    pub fn num_deltas(&self) -> usize {
+        match self.img {
+            Some(_) => self.records.len(),
+            None => self.records.len() - 1, // omit will_init record
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum ValueReconstructSituation {
     Complete,

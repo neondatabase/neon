@@ -51,6 +51,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::rate_limit::RateLimit;
 use utils::{
     fs_ext,
     guard_arc_swap::GuardArcSwap,
@@ -115,7 +116,7 @@ use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::TimelineMetrics;
+use crate::metrics::{TimelineMetrics, DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_GLOBAL};
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
 use pageserver_api::reltag::RelTag;
@@ -1044,7 +1045,7 @@ impl Timeline {
     }
 
     pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 32;
-    pub(crate) const VEC_GET_LAYERS_VISITED_WARN_THRESH: f64 = 512.0;
+    pub(crate) const LAYERS_VISITED_WARN_THRESHOLD: u32 = 100;
 
     /// Look up multiple page versions at a given LSN
     ///
@@ -1194,6 +1195,7 @@ impl Timeline {
                             return (key, Err(err));
                         }
                     };
+                    DELTAS_PER_READ_GLOBAL.observe(converted.num_deltas() as f64);
 
                     // The walredo module expects the records to be descending in terms of Lsn.
                     // And we submit the IOs in that order, so, there shuold be no need to sort here.
@@ -1221,25 +1223,28 @@ impl Timeline {
         // (this is a requirement, not a bug). Skip updating the metric in these cases
         // to avoid infinite results.
         if !results.is_empty() {
-            let avg = layers_visited as f64 / results.len() as f64;
-            if avg >= Self::VEC_GET_LAYERS_VISITED_WARN_THRESH {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<RateLimit>> =
+            // Record the total number of layers visited towards each key in the batch. While some
+            // layers may not intersect with a given read, and the cost of layer visits are
+            // amortized across the batch, each visited layer contributes directly to the observed
+            // latency for every read in the batch, which is what we care about.
+            if layers_visited >= Self::LAYERS_VISITED_WARN_THRESHOLD {
+                static LOG_PACER: Lazy<Mutex<RateLimit>> =
                     Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(60))));
-                let mut rate_limit = LOGGED.lock().unwrap();
-                rate_limit.call(|| {
+                LOG_PACER.lock().unwrap().call(|| {
+                    let num_keys = keyspace.total_raw_size();
+                    let num_pages = results.len();
                     tracing::info!(
                       shard_id = %self.tenant_shard_id.shard_slug(),
                       lsn = %lsn,
-                      "Vectored read for {} visited {} layers on average per key and {} in total. {}/{} pages were returned",
-                      keyspace, avg, layers_visited, results.len(), keyspace.total_raw_size());
+                      "Vectored read for {keyspace} visited {layers_visited} layers. Returned {num_pages}/{num_keys} pages.",
+                    );
                 });
             }
 
-            // Note that this is an approximation. Tracking the exact number of layers visited
-            // per key requires virtually unbounded memory usage and is inefficient
-            // (i.e. segment tree tracking each range queried from a layer)
-            crate::metrics::VEC_READ_NUM_LAYERS_VISITED.observe(avg);
+            for _ in &results {
+                self.metrics.layers_per_read.observe(layers_visited as f64);
+                LAYERS_PER_READ_GLOBAL.observe(layers_visited as f64);
+            }
         }
 
         Ok(results)
