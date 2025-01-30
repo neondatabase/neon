@@ -2394,6 +2394,7 @@ def test_storage_controller_node_deletion(
     Test that deleting a node works & properly reschedules everything that was on the node.
     """
     neon_env_builder.num_pageservers = 3
+    neon_env_builder.num_azs = 3
     env = neon_env_builder.init_configs()
     env.start()
 
@@ -2406,6 +2407,9 @@ def test_storage_controller_node_deletion(
         env.create_tenant(
             tid, placement_policy='{"Attached":1}', shard_count=shard_count_per_tenant
         )
+
+    # Sanity check: initial creations should not leave the system in an unstable scheduling state
+    assert env.storage_controller.reconcile_all() == 0
 
     victim = env.pageservers[-1]
 
@@ -3211,7 +3215,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     # some small tests for the scheduling policy querying and returning APIs
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
-    assert newest_info["scheduling_policy"] == "Disabled"
+    assert newest_info["scheduling_policy"] == "Pause"
     target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info

@@ -5411,6 +5411,15 @@ impl Service {
 
         expect_shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
 
+        // Because JSON contents of persistent tenants might disagree with the fields in current `TenantConfig`
+        // definition, we will do an encode/decode cycle to ensure any legacy fields are dropped and any new
+        // fields are added, before doing a comparison.
+        for tsp in &mut persistent_shards {
+            let config: TenantConfig = serde_json::from_str(&tsp.config)
+                .map_err(|e| ApiError::InternalServerError(e.into()))?;
+            tsp.config = serde_json::to_string(&config).expect("Encoding config is infallible");
+        }
+
         if persistent_shards != expect_shards {
             tracing::error!("Consistency check failed on shards.");
 
@@ -7270,19 +7279,14 @@ impl Service {
         Ok(())
     }
 
-    /// Create a node fill plan (pick secondaries to promote) that meets the following requirements:
-    /// 1. The node should be filled until it reaches the expected cluster average of
-    ///    attached shards. If there are not enough secondaries on the node, the plan stops early.
-    /// 2. Select tenant shards to promote such that the number of attached shards is balanced
-    ///    throughout the cluster. We achieve this by picking tenant shards from each node,
-    ///    starting from the ones with the largest number of attached shards, until the node
-    ///    reaches the expected cluster average.
-    /// 3. Avoid promoting more shards of the same tenant than required. The upper bound
-    ///    for the number of tenants from the same shard promoted to the node being filled is:
-    ///    shard count for the tenant divided by the number of nodes in the cluster.
+    /// Create a node fill plan (pick secondaries to promote), based on:
+    /// 1. Shards which have a secondary on this node, and this node is in their home AZ, and are currently attached to a node
+    ///    outside their home AZ, should be migrated back here.
+    /// 2. If after step 1 we have not migrated enough shards for this node to have its fair share of
+    ///    attached shards, we will promote more shards from the nodes with the most attached shards, unless
+    ///    those shards have a home AZ that doesn't match the node we're filling.
     fn fill_node_plan(&self, node_id: NodeId) -> Vec<TenantShardId> {
         let mut locked = self.inner.write().unwrap();
-        let fill_requirement = locked.scheduler.compute_fill_requirement(node_id);
         let (nodes, tenants, _scheduler) = locked.parts_mut();
 
         let node_az = nodes
@@ -7291,53 +7295,79 @@ impl Service {
             .get_availability_zone_id()
             .clone();
 
-        let mut tids_by_node = tenants
-            .iter_mut()
-            .filter_map(|(tid, tenant_shard)| {
-                if !matches!(
-                    tenant_shard.get_scheduling_policy(),
-                    ShardSchedulingPolicy::Active
-                ) {
-                    // Only include tenants in fills if they have a normal (Active) scheduling policy.  We
-                    // even exclude Essential, because moving to fill a node is not essential to keeping this
-                    // tenant available.
-                    return None;
-                }
+        // The tenant shard IDs that we plan to promote from secondary to attached on this node
+        let mut plan = Vec::new();
 
-                // AZ check: when filling nodes after a restart, our intent is to move _back_ the
-                // shards which belong on this node, not to promote shards whose scheduling preference
-                // would be on their currently attached node.  So will avoid promoting shards whose
-                // home AZ doesn't match the AZ of the node we're filling.
-                match tenant_shard.preferred_az() {
-                    None => {
-                        // Shard doesn't have an AZ preference: it is elegible to be moved.
-                    }
-                    Some(az) if az == &node_az => {
-                        // This shard's home AZ is equal to the node we're filling: it is
-                        // elegible to be moved: fall through;
-                    }
-                    Some(_) => {
-                        // This shard's home AZ is somewhere other than the node we're filling:
-                        // do not include it in the fill plan.
-                        return None;
-                    }
-                }
+        // Collect shards which do not have a preferred AZ & are elegible for moving in stage 2
+        let mut free_tids_by_node: HashMap<NodeId, Vec<TenantShardId>> = HashMap::new();
 
-                if tenant_shard.intent.get_secondary().contains(&node_id) {
+        // Don't respect AZ preferences if there is only one AZ.  This comes up in tests, but it could
+        // conceivably come up in real life if deploying a single-AZ region intentionally.
+        let respect_azs = nodes
+            .values()
+            .map(|n| n.get_availability_zone_id())
+            .unique()
+            .count()
+            > 1;
+
+        // Step 1: collect all shards that we are required to migrate back to this node because their AZ preference
+        // requires it.
+        for (tsid, tenant_shard) in tenants {
+            if !tenant_shard.intent.get_secondary().contains(&node_id) {
+                // Shard doesn't have a secondary on this node, ignore it.
+                continue;
+            }
+
+            // AZ check: when filling nodes after a restart, our intent is to move _back_ the
+            // shards which belong on this node, not to promote shards whose scheduling preference
+            // would be on their currently attached node.  So will avoid promoting shards whose
+            // home AZ doesn't match the AZ of the node we're filling.
+            match tenant_shard.preferred_az() {
+                _ if !respect_azs => {
                     if let Some(primary) = tenant_shard.intent.get_attached() {
-                        return Some((*primary, *tid));
+                        free_tids_by_node.entry(*primary).or_default().push(*tsid);
                     }
                 }
+                None => {
+                    // Shard doesn't have an AZ preference: it is elegible to be moved, but we
+                    // will only do so if our target shard count requires it.
+                    if let Some(primary) = tenant_shard.intent.get_attached() {
+                        free_tids_by_node.entry(*primary).or_default().push(*tsid);
+                    }
+                }
+                Some(az) if az == &node_az => {
+                    // This shard's home AZ is equal to the node we're filling: it should
+                    // be moved back to this node as part of filling, unless its currently
+                    // attached location is also in its home AZ.
+                    if let Some(primary) = tenant_shard.intent.get_attached() {
+                        if nodes
+                            .get(primary)
+                            .expect("referenced node must exist")
+                            .get_availability_zone_id()
+                            != tenant_shard
+                                .preferred_az()
+                                .expect("tenant must have an AZ preference")
+                        {
+                            plan.push(*tsid)
+                        }
+                    } else {
+                        plan.push(*tsid)
+                    }
+                }
+                Some(_) => {
+                    // This shard's home AZ is somewhere other than the node we're filling,
+                    // it may not be moved back to this node as part of filling.  Ignore it
+                }
+            }
+        }
 
-                None
-            })
-            .into_group_map();
+        // Step 2: also promote any AZ-agnostic shards as required to achieve the target number of attachments
+        let fill_requirement = locked.scheduler.compute_fill_requirement(node_id);
 
         let expected_attached = locked.scheduler.expected_attached_shard_count();
         let nodes_by_load = locked.scheduler.nodes_by_attached_shard_count();
 
         let mut promoted_per_tenant: HashMap<TenantId, usize> = HashMap::new();
-        let mut plan = Vec::new();
 
         for (node_id, attached) in nodes_by_load {
             let available = locked.nodes.get(&node_id).is_some_and(|n| n.is_available());
@@ -7346,7 +7376,7 @@ impl Service {
             }
 
             if plan.len() >= fill_requirement
-                || tids_by_node.is_empty()
+                || free_tids_by_node.is_empty()
                 || attached <= expected_attached
             {
                 break;
@@ -7358,7 +7388,7 @@ impl Service {
 
             let mut remove_node = false;
             while take > 0 {
-                match tids_by_node.get_mut(&node_id) {
+                match free_tids_by_node.get_mut(&node_id) {
                     Some(tids) => match tids.pop() {
                         Some(tid) => {
                             let max_promote_for_tenant = std::cmp::max(
@@ -7384,7 +7414,7 @@ impl Service {
             }
 
             if remove_node {
-                tids_by_node.remove(&node_id);
+                free_tids_by_node.remove(&node_id);
             }
         }
 

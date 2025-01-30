@@ -45,7 +45,7 @@ COPY --chown=nonroot . .
 
 ARG ADDITIONAL_RUSTFLAGS
 RUN set -e \
-    && PQ_LIB_DIR=$(pwd)/pg_install/v${STABLE_PG_VERSION}/lib RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment -Cforce-frame-pointers=yes ${ADDITIONAL_RUSTFLAGS}" cargo build \
+    && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment -Cforce-frame-pointers=yes ${ADDITIONAL_RUSTFLAGS}" cargo build \
       --bin pg_sni_router  \
       --bin pageserver  \
       --bin pagectl  \
@@ -64,6 +64,7 @@ ARG DEFAULT_PG_VERSION
 WORKDIR /data
 
 RUN set -e \
+    && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
     && apt update \
     && apt install -y \
         libreadline-dev \
@@ -72,6 +73,7 @@ RUN set -e \
 	# System postgres for use with client libraries (e.g. in storage controller)
         postgresql-15 \
         openssl \
+    && rm -f /etc/apt/apt.conf.d/80-retries \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
     && useradd -d /data neon \
     && chown -R neon:neon /data

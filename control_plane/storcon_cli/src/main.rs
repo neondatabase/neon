@@ -298,14 +298,7 @@ impl FromStr for SkSchedulingPolicyArg {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "active" => Ok(Self(SkSchedulingPolicy::Active)),
-            "disabled" => Ok(Self(SkSchedulingPolicy::Disabled)),
-            "decomissioned" => Ok(Self(SkSchedulingPolicy::Decomissioned)),
-            _ => Err(anyhow::anyhow!(
-                "Unknown scheduling policy '{s}', try active,disabled,decomissioned"
-            )),
-        }
+        SkSchedulingPolicy::from_str(s).map(Self)
     }
 }
 
