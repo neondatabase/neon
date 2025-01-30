@@ -171,6 +171,7 @@ WalProposerFree(WalProposer *wp)
 
 		Assert(sk->outbuf.data != NULL);
 		pfree(sk->outbuf.data);
+		MembershipConfigurationFree(&sk->greetResponse.mconf);
 		if (sk->voteResponse.termHistory.entries)
 			pfree(sk->voteResponse.termHistory.entries);
 		sk->voteResponse.termHistory.entries = NULL;
@@ -1143,16 +1144,16 @@ SendProposerElected(Safekeeper *sk)
 
 	Assert(sk->startStreamingAt <= wp->availableLsn);
 
-	msg.tag = 'e';
+	msg.apm.tag = 'e';
 	msg.term = wp->propTerm;
 	msg.startStreamingAt = sk->startStreamingAt;
 	msg.termHistory = &wp->propTermHistory;
-	msg.timelineStartLsn = 0;
 
 	lastCommonTerm = idx >= 0 ? wp->propTermHistory.entries[idx].term : 0;
 	wp_log(LOG,
-		   "sending elected msg to node " UINT64_FORMAT " term=" UINT64_FORMAT ", startStreamingAt=%X/%X (lastCommonTerm=" UINT64_FORMAT "), termHistory.n_entries=%u to %s:%s",
-		   sk->greetResponse.nodeId, msg.term, LSN_FORMAT_ARGS(msg.startStreamingAt), lastCommonTerm, msg.termHistory->n_entries, sk->host, sk->port);
+		   "sending elected msg to node " UINT64_FORMAT " generation=%u term=" UINT64_FORMAT ", startStreamingAt=%X/%X (lastCommonTerm=" UINT64_FORMAT "), termHistory.n_entries=%u to %s:%s",
+		   sk->greetResponse.nodeId, msg.generation, msg.term, LSN_FORMAT_ARGS(msg.startStreamingAt),
+		   lastCommonTerm, msg.termHistory->n_entries, sk->host, sk->port);
 
 	PAMessageSerialize(wp, (ProposerAcceptorMessage *) &msg, &sk->outbuf, wp->config->proto_version);
 	if (!AsyncWrite(sk, sk->outbuf.data, sk->outbuf.len, SS_SEND_ELECTED_FLUSH))
@@ -1766,14 +1767,13 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 	resetStringInfo(buf);
 
 	/* removeme tag check after converting all msgs */
-	if (proto_version == 3 && (msg->tag == 'g' || msg->tag == 'v'))
+	if (proto_version == 3 && (msg->tag == 'g' || msg->tag == 'v' || msg->tag == 'e'))
 	{
 		/*
 		 * v2 sends structs for some messages as is, so commonly send tag only
 		 * for v3
 		 */
-		if (proto_version == 3)
-			pq_sendint8(buf, msg->tag);
+		pq_sendint8(buf, msg->tag);
 
 		switch (msg->tag)
 		{
@@ -1797,6 +1797,21 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 					pq_sendint64(buf, m->term);
 					break;
 
+				}
+			case 'e':
+				{
+					ProposerElected *m = (ProposerElected *) msg;
+
+					pq_sendint32(buf, m->generation);
+					pq_sendint64(buf, m->term);
+					pq_sendint64(buf, m->startStreamingAt);
+					pq_sendint32(buf, m->termHistory->n_entries);
+					for (uint32 i = 0; i < m->termHistory->n_entries; i++)
+					{
+						pq_sendint64(buf, m->termHistory->entries[i].term);
+						pq_sendint64(buf, m->termHistory->entries[i].lsn);
+					}
+					break;
 				}
 			default:
 				wp_log(FATAL, "unexpected message type %c to serialize", msg->tag);
@@ -1857,7 +1872,7 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 				{
 					ProposerElected *m = (ProposerElected *) msg;
 
-					pq_sendint64_le(buf, m->tag);
+					pq_sendint64_le(buf, m->apm.tag);
 					pq_sendint64_le(buf, m->term);
 					pq_sendint64_le(buf, m->startStreamingAt);
 					pq_sendint32_le(buf, m->termHistory->n_entries);
@@ -1866,7 +1881,7 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 						pq_sendint64_le(buf, m->termHistory->entries[i].term);
 						pq_sendint64_le(buf, m->termHistory->entries[i].lsn);
 					}
-					pq_sendint64_le(buf, 0);
+					pq_sendint64_le(buf, 0); /* removed timeline_start_lsn */
 					break;
 				}
 			case 'a':
@@ -2510,6 +2525,8 @@ MembershipConfigurationFree(MembershipConfiguration *mconf)
 {
 	if (mconf->members.m)
 		pfree(mconf->members.m);
+	mconf->members.m = NULL;
 	if (mconf->new_members.m)
 		pfree(mconf->new_members.m);
+	mconf->new_members.m = NULL;
 }

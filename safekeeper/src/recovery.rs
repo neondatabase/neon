@@ -306,6 +306,7 @@ async fn recover(
 
     // truncate WAL locally
     let pe = ProposerAcceptorMessage::Elected(ProposerElected {
+        generation: INVALID_GENERATION,
         term: donor.term,
         start_streaming_at: last_common_point.lsn,
         term_history: donor_th,
