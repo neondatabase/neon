@@ -58,16 +58,12 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         docker exec $COMPUTE_CONTAINER_NAME touch /var/db/postgres/compute/compute_ctl_temp_override.conf
         # The following block copies the files for the pg_hintplan test to the compute node for the extension test in an isolated docker-compose environment
         TMPDIR=$(mktemp -d)
-        docker cp $TEST_CONTAINER_NAME:/ext-src/pg_hint_plan-src/data $TMPDIR/data
-        docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/ext-src/pg_hint_plan-src/
-        rm -rf $TMPDIR
-        # The following block does the same for the pg_hintplan test
-        docker cp "${TEST_CONTAINER_NAME}:/ext-src/pg_hint_plan-src/data" "${TMPDIR}/data"
-        docker cp "${TMPDIR}/data" "${COMPUTE_CONTAINER_NAME}:/ext-src/pg_hint_plan-src/"
+        docker cp ${TEST_CONTAINER_NAME}:/ext-src/pg_hint_plan-src/data "${TMPDIR}/data"
+        docker cp "${TMPDIR}/data" ${COMPUTE_CONTAINER_NAME}:/ext-src/pg_hint_plan-src/
         rm -rf "${TMPDIR}"
         # We are running tests now
         if ! docker exec -e SKIP=timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src \
-            $TEST_CONTAINER_NAME /run-tests.sh | tee testout.txt
+            ${TEST_CONTAINER_NAME} /run-tests.sh | tee testout.txt
         then
             FAILED=$(tail -1 testout.txt)
             for d in ${FAILED}
