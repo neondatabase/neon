@@ -3,7 +3,6 @@ ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # Where to install Postgres, default is ./pg_install, maybe useful for package managers
 POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
 
-OPENSSL_PREFIX_DIR := /usr/local/openssl
 ICU_PREFIX_DIR := /usr/local/icu
 
 #
@@ -26,11 +25,9 @@ endif
 ifeq ($(shell test -e /home/nonroot/.docker_build && echo -n yes),yes)
 	# Exclude static build openssl, icu for local build (MacOS, Linux)
 	# Only keep for build type release and debug
-	PG_CFLAGS += -I$(OPENSSL_PREFIX_DIR)/include
 	PG_CONFIGURE_OPTS += --with-icu
 	PG_CONFIGURE_OPTS += ICU_CFLAGS='-I/$(ICU_PREFIX_DIR)/include -DU_STATIC_IMPLEMENTATION'
 	PG_CONFIGURE_OPTS += ICU_LIBS='-L$(ICU_PREFIX_DIR)/lib -L$(ICU_PREFIX_DIR)/lib64 -licui18n -licuuc -licudata -lstdc++ -Wl,-Bdynamic -lm'
-	PG_CONFIGURE_OPTS += LDFLAGS='-L$(OPENSSL_PREFIX_DIR)/lib -L$(OPENSSL_PREFIX_DIR)/lib64 -L$(ICU_PREFIX_DIR)/lib -L$(ICU_PREFIX_DIR)/lib64 -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic -lrt -lm -ldl -lpthread'
 endif
 
 UNAME_S := $(shell uname -s)
@@ -67,8 +64,6 @@ CARGO_BUILD_FLAGS += $(filter -j1,$(MAKEFLAGS))
 CARGO_CMD_PREFIX += $(if $(filter n,$(MAKEFLAGS)),,+)
 # Force cargo not to print progress bar
 CARGO_CMD_PREFIX += CARGO_TERM_PROGRESS_WHEN=never CI=1
-# Set PQ_LIB_DIR to make sure `storage_controller` get linked with bundled libpq (through diesel)
-CARGO_CMD_PREFIX += PQ_LIB_DIR=$(POSTGRES_INSTALL_DIR)/v16/lib
 
 CACHEDIR_TAG_CONTENTS := "Signature: 8a477f597d28d172789f06886806bc55"
 

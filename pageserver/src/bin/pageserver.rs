@@ -53,10 +53,12 @@ project_build_tag!(BUILD_TAG);
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-/// Configure jemalloc to sample allocations for profiles every 1 MB (1 << 20).
+/// Configure jemalloc to profile heap allocations by sampling stack traces every 2 MB (1 << 21).
+/// This adds roughly 3% overhead for allocations on average, which is acceptable considering
+/// performance-sensitive code will avoid allocations as far as possible anyway.
 #[allow(non_upper_case_globals)]
 #[export_name = "malloc_conf"]
-pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:20\0";
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 const PID_FILE_NAME: &str = "pageserver.pid";
 
@@ -133,6 +135,7 @@ fn main() -> anyhow::Result<()> {
     info!(?conf.virtual_file_io_mode, "starting with virtual_file IO mode");
     info!(?conf.wal_receiver_protocol, "starting with WAL receiver protocol");
     info!(?conf.page_service_pipelining, "starting with page service pipelining config");
+    info!(?conf.get_vectored_concurrent_io, "starting with get_vectored IO concurrency config");
 
     // The tenants directory contains all the pageserver local disk state.
     // Create if not exists and make sure all the contents are durable before proceeding.

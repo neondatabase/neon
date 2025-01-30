@@ -44,7 +44,7 @@ pub struct ProtocolVersion(u32);
 
 impl ProtocolVersion {
     pub const fn new(major: u16, minor: u16) -> Self {
-        Self((major as u32) << 16 | minor as u32)
+        Self(((major as u32) << 16) | minor as u32)
     }
     pub const fn minor(self) -> u16 {
         self.0 as u16
@@ -180,6 +180,13 @@ impl StartupMessageParams {
 pub struct CancelKeyData {
     pub backend_pid: i32,
     pub cancel_key: i32,
+}
+
+pub fn id_to_cancel_key(id: u64) -> CancelKeyData {
+    CancelKeyData {
+        backend_pid: (id >> 32) as i32,
+        cancel_key: (id & 0xffffffff) as i32,
+    }
 }
 
 impl fmt::Display for CancelKeyData {

@@ -1,14 +1,15 @@
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::bail;
 use futures::future::Either;
 use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
-use proxy::cancellation::{CancelMap, CancellationHandler};
+use proxy::cancellation::{handle_cancel_messages, CancellationHandler};
 use proxy::config::{
-    self, remote_storage_from_toml, AuthenticationConfig, CacheOptions, HttpConfig,
+    self, remote_storage_from_toml, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig,
     ProjectInfoCacheOptions, ProxyConfig, ProxyProtocolV2,
 };
 use proxy::context::parquet::ParquetUploadArgs;
@@ -17,16 +18,16 @@ use proxy::metrics::Metrics;
 use proxy::rate_limiter::{
     EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo, WakeComputeRateLimiter,
 };
-use proxy::redis::cancellation_publisher::RedisPublisherClient;
 use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
+use proxy::redis::kv_ops::RedisKVClient;
 use proxy::redis::{elasticache, notifications};
 use proxy::scram::threadpool::ThreadPool;
 use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::GlobalConnPoolOptions;
+use proxy::tls::client_config::compute_client_config_with_root_certs;
 use proxy::{auth, control_plane, http, serverless, usage_metrics};
 use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn, Instrument};
@@ -129,9 +130,6 @@ struct ProxyCliArgs {
     /// lock for `connect_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
     #[clap(long, default_value = config::ConcurrencyLockOptions::DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK)]
     connect_compute_lock: String,
-    /// Allow self-signed certificates for compute nodes (for testing)
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    allow_self_signed_compute: bool,
     #[clap(flatten)]
     sql_over_http: SqlOverHttpArgs,
     /// timeout for scram authentication protocol
@@ -159,8 +157,11 @@ struct ProxyCliArgs {
     #[clap(long, default_value_t = 64)]
     auth_rate_limit_ip_subnet: u8,
     /// Redis rate limiter max number of requests per second.
-    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
+    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_REDIS_SET)]
     redis_rps_limit: Vec<RateBucketInfo>,
+    /// Cancellation channel size (max queue size for redis kv client)
+    #[clap(long, default_value = "1024")]
+    cancellation_ch_size: usize,
     /// cache for `allowed_ips` (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     allowed_ips_cache: String,
@@ -383,26 +384,19 @@ async fn main() -> anyhow::Result<()> {
 
     let cancellation_token = CancellationToken::new();
 
-    let cancel_map = CancelMap::default();
-
     let redis_rps_limit = Vec::leak(args.redis_rps_limit.clone());
     RateBucketInfo::validate(redis_rps_limit)?;
 
-    let redis_publisher = match &regional_redis_client {
-        Some(redis_publisher) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
-            redis_publisher.clone(),
-            args.region.clone(),
-            redis_rps_limit,
-        )?))),
-        None => None,
-    };
+    let redis_kv_client = regional_redis_client
+        .as_ref()
+        .map(|redis_publisher| RedisKVClient::new(redis_publisher.clone(), redis_rps_limit));
 
-    let cancellation_handler = Arc::new(CancellationHandler::<
-        Option<Arc<Mutex<RedisPublisherClient>>>,
-    >::new(
-        cancel_map.clone(),
-        redis_publisher,
-        proxy::metrics::CancellationSource::FromClient,
+    // channel size should be higher than redis client limit to avoid blocking
+    let cancel_ch_size = args.cancellation_ch_size;
+    let (tx_cancel, rx_cancel) = tokio::sync::mpsc::channel(cancel_ch_size);
+    let cancellation_handler = Arc::new(CancellationHandler::new(
+        &config.connect_to_compute,
+        Some(tx_cancel),
     ));
 
     // bit of a hack - find the min rps and max rps supported and turn it into
@@ -497,7 +491,6 @@ async fn main() -> anyhow::Result<()> {
                         maintenance_tasks.spawn(notifications::task_main(
                             client,
                             cache.clone(),
-                            cancel_map.clone(),
                             args.region.clone(),
                         ));
                     }
@@ -505,13 +498,20 @@ async fn main() -> anyhow::Result<()> {
                         maintenance_tasks.spawn(notifications::task_main(
                             client,
                             cache.clone(),
-                            cancel_map.clone(),
                             args.region.clone(),
                         ));
                     }
                     maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
                 }
             }
+
+            if let Some(mut redis_kv_client) = redis_kv_client {
+                maintenance_tasks.spawn(async move {
+                    redis_kv_client.try_connect().await?;
+                    handle_cancel_messages(&mut redis_kv_client, rx_cancel).await
+                });
+            }
+
             if let Some(regional_redis_client) = regional_redis_client {
                 let cache = api.caches.endpoints_cache.clone();
                 let con = regional_redis_client;
@@ -564,9 +564,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
 
-    if args.allow_self_signed_compute {
-        warn!("allowing self-signed compute certificates");
-    }
     let backup_metric_collection_config = config::MetricBackupCollectionConfig {
         interval: args.metric_backup_collection_interval,
         remote_storage_config: args.metric_backup_collection_remote_storage.clone(),
@@ -638,10 +635,15 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         console_redirect_confirmation_timeout: args.webauth_confirmation_timeout,
     };
 
+    let compute_config = ComputeConfig {
+        retry: config::RetryConfig::parse(&args.connect_to_compute_retry)?,
+        tls: Arc::new(compute_client_config_with_root_certs()?),
+        timeout: Duration::from_secs(2),
+    };
+
     let config = ProxyConfig {
         tls_config,
         metric_collection,
-        allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
         authentication_config,
         proxy_protocol_v2: args.proxy_protocol_v2,
@@ -649,9 +651,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         region: args.region.clone(),
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
-        connect_to_compute_retry_config: config::RetryConfig::parse(
-            &args.connect_to_compute_retry,
-        )?,
+        connect_to_compute: compute_config,
     };
 
     let config = Box::leak(Box::new(config));
@@ -742,9 +742,59 @@ fn build_auth_backend(
         }
 
         AuthBackendType::ConsoleRedirect => {
-            let url = args.uri.parse()?;
-            let backend = ConsoleRedirectBackend::new(url);
+            let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
+            let project_info_cache_config: ProjectInfoCacheOptions =
+                args.project_info_cache.parse()?;
+            let endpoint_cache_config: config::EndpointCacheConfig =
+                args.endpoint_cache_config.parse()?;
 
+            info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
+            info!(
+                "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
+            );
+            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
+            let caches = Box::leak(Box::new(control_plane::caches::ApiCaches::new(
+                wake_compute_cache_config,
+                project_info_cache_config,
+                endpoint_cache_config,
+            )));
+
+            let config::ConcurrencyLockOptions {
+                shards,
+                limiter,
+                epoch,
+                timeout,
+            } = args.wake_compute_lock.parse()?;
+            info!(?limiter, shards, ?epoch, "Using NodeLocks (wake_compute)");
+            let locks = Box::leak(Box::new(control_plane::locks::ApiLocks::new(
+                "wake_compute_lock",
+                limiter,
+                shards,
+                timeout,
+                epoch,
+                &Metrics::get().wake_compute_lock,
+            )?));
+
+            let url = args.uri.clone().parse()?;
+            let ep_url: proxy::url::ApiUrl = args.auth_endpoint.parse()?;
+            let endpoint = http::Endpoint::new(ep_url, http::new_client());
+            let mut wake_compute_rps_limit = args.wake_compute_limit.clone();
+            RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
+            let wake_compute_endpoint_rate_limiter =
+                Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
+
+            // Since we use only get_allowed_ips_and_secret() wake_compute_endpoint_rate_limiter
+            // and locks are not used in ConsoleRedirectBackend,
+            // but they are required by the NeonControlPlaneClient
+            let api = control_plane::client::cplane_proxy_v1::NeonControlPlaneClient::new(
+                endpoint,
+                args.control_plane_token.clone(),
+                caches,
+                locks,
+                wake_compute_endpoint_rate_limiter,
+            );
+
+            let backend = ConsoleRedirectBackend::new(url, api);
             let config = Box::leak(Box::new(backend));
 
             Ok(Either::Right(config))

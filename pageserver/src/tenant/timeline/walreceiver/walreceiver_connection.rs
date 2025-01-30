@@ -118,7 +118,7 @@ pub(super) async fn handle_walreceiver_connection(
     cancellation: CancellationToken,
     connect_timeout: Duration,
     ctx: RequestContext,
-    node: NodeId,
+    safekeeper_node: NodeId,
     ingest_batch_size: u64,
 ) -> Result<(), WalReceiverError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
@@ -140,7 +140,7 @@ pub(super) async fn handle_walreceiver_connection(
 
     let (replication_client, connection) = {
         let mut config = wal_source_connconf.to_tokio_postgres_config();
-        config.application_name("pageserver");
+        config.application_name(format!("pageserver-{}", timeline.conf.id.0).as_str());
         config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
         match time::timeout(connect_timeout, config.connect(postgres::NoTls)).await {
             Ok(client_and_conn) => client_and_conn?,
@@ -162,7 +162,7 @@ pub(super) async fn handle_walreceiver_connection(
         latest_wal_update: Utc::now().naive_utc(),
         streaming_lsn: None,
         commit_lsn: None,
-        node,
+        node: safekeeper_node,
     };
     if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
         warn!("Wal connection event listener dropped right after connection init, aborting the connection: {e}");
@@ -264,6 +264,8 @@ pub(super) async fn handle_walreceiver_connection(
 
     let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx).await?;
 
+    let shard = vec![*timeline.get_shard_identity()];
+
     let interpreted_proto_config = match protocol {
         PostgresClientProtocol::Vanilla => None,
         PostgresClientProtocol::Interpreted {
@@ -319,27 +321,11 @@ pub(super) async fn handle_walreceiver_connection(
             return Ok(());
         }
 
-        async fn commit(
-            modification: &mut DatadirModification<'_>,
-            uncommitted: &mut u64,
-            filtered: &mut u64,
-            ctx: &RequestContext,
-        ) -> anyhow::Result<()> {
-            WAL_INGEST
-                .records_committed
-                .inc_by(*uncommitted - *filtered);
-            modification.commit(ctx).await?;
-            *uncommitted = 0;
-            *filtered = 0;
-            Ok(())
-        }
-
         let status_update = match replication_message {
             ReplicationMessage::RawInterpretedWalRecords(raw) => {
                 WAL_INGEST.bytes_received.inc_by(raw.data().len() as u64);
 
                 let mut uncommitted_records = 0;
-                let mut filtered_records = 0;
 
                 // This is the end LSN of the raw WAL from which the records
                 // were interpreted.
@@ -380,30 +366,22 @@ pub(super) async fn handle_walreceiver_connection(
                     if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes)
                         && uncommitted_records > 0
                     {
-                        commit(
-                            &mut modification,
-                            &mut uncommitted_records,
-                            &mut filtered_records,
-                            &ctx,
-                        )
-                        .await?;
+                        modification.commit(&ctx).await?;
+                        uncommitted_records = 0;
                     }
 
                     let local_next_record_lsn = interpreted.next_record_lsn;
-                    let ingested = walingest
+
+                    if interpreted.is_observed() {
+                        WAL_INGEST.records_observed.inc();
+                    }
+
+                    walingest
                         .ingest_record(interpreted, &mut modification, &ctx)
                         .await
                         .with_context(|| {
                             format!("could not ingest record at {local_next_record_lsn}")
                         })?;
-
-                    if !ingested {
-                        tracing::debug!(
-                            "ingest: filtered out record @ LSN {local_next_record_lsn}"
-                        );
-                        WAL_INGEST.records_filtered.inc();
-                        filtered_records += 1;
-                    }
 
                     uncommitted_records += 1;
 
@@ -418,13 +396,8 @@ pub(super) async fn handle_walreceiver_connection(
                         || modification.approx_pending_bytes()
                             > DatadirModification::MAX_PENDING_BYTES
                     {
-                        commit(
-                            &mut modification,
-                            &mut uncommitted_records,
-                            &mut filtered_records,
-                            &ctx,
-                        )
-                        .await?;
+                        modification.commit(&ctx).await?;
+                        uncommitted_records = 0;
                     }
                 }
 
@@ -432,7 +405,7 @@ pub(super) async fn handle_walreceiver_connection(
                 // need to advance last record LSN on all shards. If we've not ingested the latest
                 // record, then set the LSN of the modification past it. This way all shards
                 // advance their last record LSN at the same time.
-                let needs_last_record_lsn_advance = match next_record_lsn.map(Lsn::from) {
+                let needs_last_record_lsn_advance = match next_record_lsn {
                     Some(lsn) if lsn > modification.get_lsn() => {
                         modification.set_lsn(lsn).unwrap();
                         true
@@ -442,13 +415,7 @@ pub(super) async fn handle_walreceiver_connection(
 
                 if uncommitted_records > 0 || needs_last_record_lsn_advance {
                     // Commit any uncommitted records
-                    commit(
-                        &mut modification,
-                        &mut uncommitted_records,
-                        &mut filtered_records,
-                        &ctx,
-                    )
-                    .await?;
+                    modification.commit(&ctx).await?;
                 }
 
                 if !caught_up && streaming_lsn >= end_of_wal {
@@ -469,6 +436,21 @@ pub(super) async fn handle_walreceiver_connection(
             }
 
             ReplicationMessage::XLogData(xlog_data) => {
+                async fn commit(
+                    modification: &mut DatadirModification<'_>,
+                    uncommitted: &mut u64,
+                    filtered: &mut u64,
+                    ctx: &RequestContext,
+                ) -> anyhow::Result<()> {
+                    WAL_INGEST
+                        .records_committed
+                        .inc_by(*uncommitted - *filtered);
+                    modification.commit(ctx).await?;
+                    *uncommitted = 0;
+                    *filtered = 0;
+                    Ok(())
+                }
+
                 // Pass the WAL data to the decoder, and see if we can decode
                 // more records as a result.
                 let data = xlog_data.data();
@@ -496,10 +478,12 @@ pub(super) async fn handle_walreceiver_connection(
                         // Deserialize and interpret WAL record
                         let interpreted = InterpretedWalRecord::from_bytes_filtered(
                             recdata,
-                            modification.tline.get_shard_identity(),
+                            &shard,
                             next_record_lsn,
                             modification.tline.pg_version,
-                        )?;
+                        )?
+                        .remove(timeline.get_shard_identity())
+                        .unwrap();
 
                         if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes)
                             && uncommitted_records > 0

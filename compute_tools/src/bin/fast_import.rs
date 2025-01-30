@@ -17,7 +17,7 @@
 //!
 //! # Local Testing
 //!
-//! - Comment out most of the pgxns in The Dockerfile.compute-tools to speed up the build.
+//! - Comment out most of the pgxns in compute-node.Dockerfile to speed up the build.
 //! - Build the image with the following command:
 //!
 //! ```bash
@@ -31,26 +31,35 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
 use compute_tools::extension_server::{get_pg_version, PostgresMajorVersion};
 use nix::unistd::Pid;
-use tracing::{info, info_span, warn, Instrument};
+use tracing::{error, info, info_span, warn, Instrument};
 use utils::fs_ext::is_directory_empty;
 
+#[path = "fast_import/aws_s3_sync.rs"]
+mod aws_s3_sync;
 #[path = "fast_import/child_stdio_to_log.rs"]
 mod child_stdio_to_log;
 #[path = "fast_import/s3_uri.rs"]
 mod s3_uri;
-#[path = "fast_import/s5cmd.rs"]
-mod s5cmd;
+
+const PG_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+const PG_WAIT_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 
 #[derive(clap::Parser)]
 struct Args {
     #[clap(long)]
     working_directory: Utf8PathBuf,
     #[clap(long, env = "NEON_IMPORTER_S3_PREFIX")]
-    s3_prefix: s3_uri::S3Uri,
+    s3_prefix: Option<s3_uri::S3Uri>,
+    #[clap(long)]
+    source_connection_string: Option<String>,
+    #[clap(short, long)]
+    interactive: bool,
     #[clap(long)]
     pg_bin_dir: Utf8PathBuf,
     #[clap(long)]
     pg_lib_dir: Utf8PathBuf,
+    #[clap(long)]
+    pg_port: Option<u16>, // port to run postgres on, 5432 is default
 }
 
 #[serde_with::serde_as]
@@ -67,6 +76,13 @@ enum EncryptionSecret {
     KMS { key_id: String },
 }
 
+// copied from pageserver_api::config::defaults::DEFAULT_LOCALE to avoid dependency just for a constant
+const DEFAULT_LOCALE: &str = if cfg!(target_os = "macos") {
+    "C"
+} else {
+    "C.UTF-8"
+};
+
 #[tokio::main]
 pub(crate) async fn main() -> anyhow::Result<()> {
     utils::logging::init(
@@ -77,30 +93,74 @@ pub(crate) async fn main() -> anyhow::Result<()> {
 
     info!("starting");
 
-    let Args {
-        working_directory,
-        s3_prefix,
-        pg_bin_dir,
-        pg_lib_dir,
-    } = Args::parse();
+    let args = Args::parse();
 
-    let aws_config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
+    // Validate arguments
+    if args.s3_prefix.is_none() && args.source_connection_string.is_none() {
+        anyhow::bail!("either s3_prefix or source_connection_string must be specified");
+    }
+    if args.s3_prefix.is_some() && args.source_connection_string.is_some() {
+        anyhow::bail!("only one of s3_prefix or source_connection_string can be specified");
+    }
 
-    let spec: Spec = {
-        let spec_key = s3_prefix.append("/spec.json");
-        let s3_client = aws_sdk_s3::Client::new(&aws_config);
-        let object = s3_client
-            .get_object()
-            .bucket(&spec_key.bucket)
-            .key(spec_key.key)
-            .send()
-            .await
-            .context("get spec from s3")?
-            .body
-            .collect()
-            .await
-            .context("download spec body")?;
-        serde_json::from_slice(&object.into_bytes()).context("parse spec as json")?
+    let working_directory = args.working_directory;
+    let pg_bin_dir = args.pg_bin_dir;
+    let pg_lib_dir = args.pg_lib_dir;
+    let pg_port = args.pg_port.unwrap_or_else(|| {
+        info!("pg_port not specified, using default 5432");
+        5432
+    });
+
+    // Initialize AWS clients only if s3_prefix is specified
+    let (aws_config, kms_client) = if args.s3_prefix.is_some() {
+        let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
+        let kms = aws_sdk_kms::Client::new(&config);
+        (Some(config), Some(kms))
+    } else {
+        (None, None)
+    };
+
+    // Get source connection string either from S3 spec or direct argument
+    let source_connection_string = if let Some(s3_prefix) = &args.s3_prefix {
+        let spec: Spec = {
+            let spec_key = s3_prefix.append("/spec.json");
+            let s3_client = aws_sdk_s3::Client::new(aws_config.as_ref().unwrap());
+            let object = s3_client
+                .get_object()
+                .bucket(&spec_key.bucket)
+                .key(spec_key.key)
+                .send()
+                .await
+                .context("get spec from s3")?
+                .body
+                .collect()
+                .await
+                .context("download spec body")?;
+            serde_json::from_slice(&object.into_bytes()).context("parse spec as json")?
+        };
+
+        match spec.encryption_secret {
+            EncryptionSecret::KMS { key_id } => {
+                let mut output = kms_client
+                    .unwrap()
+                    .decrypt()
+                    .key_id(key_id)
+                    .ciphertext_blob(aws_sdk_s3::primitives::Blob::new(
+                        spec.source_connstring_ciphertext_base64,
+                    ))
+                    .send()
+                    .await
+                    .context("decrypt source connection string")?;
+                let plaintext = output
+                    .plaintext
+                    .take()
+                    .context("get plaintext source connection string")?;
+                String::from_utf8(plaintext.into_inner())
+                    .context("parse source connection string as utf8")?
+            }
+        }
+    } else {
+        args.source_connection_string.unwrap()
     };
 
     match tokio::fs::create_dir(&working_directory).await {
@@ -123,15 +183,6 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         .await
         .context("create pgdata directory")?;
 
-    //
-    // Setup clients
-    //
-    let aws_config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
-    let kms_client = aws_sdk_kms::Client::new(&aws_config);
-
-    //
-    //  Initialize pgdata
-    //
     let pgbin = pg_bin_dir.join("postgres");
     let pg_version = match get_pg_version(pgbin.as_ref()) {
         PostgresMajorVersion::V14 => 14,
@@ -142,7 +193,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     let superuser = "cloud_admin"; // XXX: this shouldn't be hard-coded
     postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
         superuser,
-        locale: "en_US.UTF-8", // XXX: this shouldn't be hard-coded,
+        locale: DEFAULT_LOCALE, // XXX: this shouldn't be hard-coded,
         pg_version,
         initdb_bin: pg_bin_dir.join("initdb").as_ref(),
         library_search_path: &pg_lib_dir, // TODO: is this right? Prob works in compute image, not sure about neon_local.
@@ -159,6 +210,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     let mut postgres_proc = tokio::process::Command::new(pgbin)
         .arg("-D")
         .arg(&pgdata_dir)
+        .args(["-p", &format!("{pg_port}")])
         .args(["-c", "wal_level=minimal"])
         .args(["-c", "shared_buffers=10GB"])
         .args(["-c", "max_wal_senders=0"])
@@ -170,8 +222,15 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         .args(["-c", &format!("max_parallel_workers={nproc}")])
         .args(["-c", &format!("max_parallel_workers_per_gather={nproc}")])
         .args(["-c", &format!("max_worker_processes={nproc}")])
-        .args(["-c", "effective_io_concurrency=100"])
+        .args([
+            "-c",
+            &format!(
+                "effective_io_concurrency={}",
+                if cfg!(target_os = "macos") { 0 } else { 100 }
+            ),
+        ])
         .env_clear()
+        .env("LD_LIBRARY_PATH", &pg_lib_dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -185,44 +244,58 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         )
         .instrument(info_span!("postgres")),
     );
+
+    // Create neondb database in the running postgres
     let restore_pg_connstring =
-        format!("host=localhost port=5432 user={superuser} dbname=postgres");
+        format!("host=localhost port={pg_port} user={superuser} dbname=postgres");
+
+    let start_time = std::time::Instant::now();
+
     loop {
-        let res = tokio_postgres::connect(&restore_pg_connstring, tokio_postgres::NoTls).await;
-        if res.is_ok() {
-            info!("postgres is ready, could connect to it");
-            break;
+        if start_time.elapsed() > PG_WAIT_TIMEOUT {
+            error!(
+                "timeout exceeded: failed to poll postgres and create database within 10 minutes"
+            );
+            std::process::exit(1);
+        }
+
+        match tokio_postgres::connect(&restore_pg_connstring, tokio_postgres::NoTls).await {
+            Ok((client, connection)) => {
+                // Spawn the connection handling task to maintain the connection
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        warn!("connection error: {}", e);
+                    }
+                });
+
+                match client.simple_query("CREATE DATABASE neondb;").await {
+                    Ok(_) => {
+                        info!("created neondb database");
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "failed to create database: {}, retying in {}s",
+                            e,
+                            PG_WAIT_RETRY_INTERVAL.as_secs_f32()
+                        );
+                        tokio::time::sleep(PG_WAIT_RETRY_INTERVAL).await;
+                        continue;
+                    }
+                }
+            }
+            Err(_) => {
+                info!(
+                    "postgres not ready yet, retrying in {}s",
+                    PG_WAIT_RETRY_INTERVAL.as_secs_f32()
+                );
+                tokio::time::sleep(PG_WAIT_RETRY_INTERVAL).await;
+                continue;
+            }
         }
     }
 
-    //
-    // Decrypt connection string
-    //
-    let source_connection_string = {
-        match spec.encryption_secret {
-            EncryptionSecret::KMS { key_id } => {
-                let mut output = kms_client
-                    .decrypt()
-                    .key_id(key_id)
-                    .ciphertext_blob(aws_sdk_s3::primitives::Blob::new(
-                        spec.source_connstring_ciphertext_base64,
-                    ))
-                    .send()
-                    .await
-                    .context("decrypt source connection string")?;
-                let plaintext = output
-                    .plaintext
-                    .take()
-                    .context("get plaintext source connection string")?;
-                String::from_utf8(plaintext.into_inner())
-                    .context("parse source connection string as utf8")?
-            }
-        }
-    };
-
-    //
-    // Start the work
-    //
+    let restore_pg_connstring = restore_pg_connstring.replace("dbname=postgres", "dbname=neondb");
 
     let dumpdir = working_directory.join("dumpdir");
 
@@ -256,6 +329,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             .arg(&source_connection_string)
             // how we run it
             .env_clear()
+            .env("LD_LIBRARY_PATH", &pg_lib_dir)
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -289,6 +363,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             .arg(&dumpdir)
             // how we run it
             .env_clear()
+            .env("LD_LIBRARY_PATH", &pg_lib_dir)
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -310,6 +385,12 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // If interactive mode, wait for Ctrl+C
+    if args.interactive {
+        info!("Running in interactive mode. Press Ctrl+C to shut down.");
+        tokio::signal::ctrl_c().await.context("wait for ctrl-c")?;
+    }
+
     info!("shutdown postgres");
     {
         nix::sys::signal::kill(
@@ -325,21 +406,24 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             .context("wait for postgres to shut down")?;
     }
 
-    info!("upload pgdata");
-    s5cmd::sync(Utf8Path::new(&pgdata_dir), &s3_prefix.append("/"))
-        .await
-        .context("sync dump directory to destination")?;
-
-    info!("write status");
-    {
-        let status_dir = working_directory.join("status");
-        std::fs::create_dir(&status_dir).context("create status directory")?;
-        let status_file = status_dir.join("status");
-        std::fs::write(&status_file, serde_json::json!({"done": true}).to_string())
-            .context("write status file")?;
-        s5cmd::sync(&status_file, &s3_prefix.append("/status/pgdata"))
+    // Only sync if s3_prefix was specified
+    if let Some(s3_prefix) = args.s3_prefix {
+        info!("upload pgdata");
+        aws_s3_sync::sync(Utf8Path::new(&pgdata_dir), &s3_prefix.append("/pgdata/"))
             .await
-            .context("sync status directory to destination")?;
+            .context("sync dump directory to destination")?;
+
+        info!("write status");
+        {
+            let status_dir = working_directory.join("status");
+            std::fs::create_dir(&status_dir).context("create status directory")?;
+            let status_file = status_dir.join("pgdata");
+            std::fs::write(&status_file, serde_json::json!({"done": true}).to_string())
+                .context("write status file")?;
+            aws_s3_sync::sync(&status_dir, &s3_prefix.append("/status/"))
+                .await
+                .context("sync status directory to destination")?;
+        }
     }
 
     Ok(())

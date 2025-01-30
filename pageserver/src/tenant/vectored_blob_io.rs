@@ -35,6 +35,7 @@ use crate::virtual_file::{self, VirtualFile};
 pub struct BlobMeta {
     pub key: Key,
     pub lsn: Lsn,
+    pub will_init: bool,
 }
 
 /// A view into the vectored blobs read buffer.
@@ -310,7 +311,15 @@ pub enum BlobFlag {
 /// * Iterate over the collected blobs and coalesce them into reads at the end
 pub struct VectoredReadPlanner {
     // Track all the blob offsets. Start offsets must be ordered.
-    blobs: BTreeMap<Key, Vec<(Lsn, u64, u64)>>,
+    // Values in the value tuples are:
+    // (
+    //   lsn of the blob,
+    //   start offset of the blob in the underlying file,
+    //   end offset of the blob in the underlying file,
+    //   whether the blob initializes the page image or not
+    //   see [`pageserver_api::record::NeonWalRecord::will_init`]
+    // )
+    blobs: BTreeMap<Key, Vec<(Lsn, u64, u64, bool)>>,
     // Arguments for previous blob passed into [`VectoredReadPlanner::handle`]
     prev: Option<(Key, Lsn, u64, BlobFlag)>,
 
@@ -371,12 +380,12 @@ impl VectoredReadPlanner {
         match flag {
             BlobFlag::None => {
                 let blobs_for_key = self.blobs.entry(key).or_default();
-                blobs_for_key.push((lsn, start_offset, end_offset));
+                blobs_for_key.push((lsn, start_offset, end_offset, false));
             }
             BlobFlag::ReplaceAll => {
                 let blobs_for_key = self.blobs.entry(key).or_default();
                 blobs_for_key.clear();
-                blobs_for_key.push((lsn, start_offset, end_offset));
+                blobs_for_key.push((lsn, start_offset, end_offset, true));
             }
             BlobFlag::Ignore => {}
         }
@@ -387,11 +396,17 @@ impl VectoredReadPlanner {
         let mut reads = Vec::new();
 
         for (key, blobs_for_key) in self.blobs {
-            for (lsn, start_offset, end_offset) in blobs_for_key {
+            for (lsn, start_offset, end_offset, will_init) in blobs_for_key {
                 let extended = match &mut current_read_builder {
-                    Some(read_builder) => {
-                        read_builder.extend(start_offset, end_offset, BlobMeta { key, lsn })
-                    }
+                    Some(read_builder) => read_builder.extend(
+                        start_offset,
+                        end_offset,
+                        BlobMeta {
+                            key,
+                            lsn,
+                            will_init,
+                        },
+                    ),
                     None => VectoredReadExtended::No,
                 };
 
@@ -399,7 +414,11 @@ impl VectoredReadPlanner {
                     let next_read_builder = ChunkedVectoredReadBuilder::new(
                         start_offset,
                         end_offset,
-                        BlobMeta { key, lsn },
+                        BlobMeta {
+                            key,
+                            lsn,
+                            will_init,
+                        },
                         self.max_read_size,
                     );
 
@@ -527,7 +546,7 @@ impl<'a> VectoredBlobReader<'a> {
 pub struct StreamingVectoredReadPlanner {
     read_builder: Option<ChunkedVectoredReadBuilder>,
     // Arguments for previous blob passed into [`StreamingVectoredReadPlanner::handle`]
-    prev: Option<(Key, Lsn, u64)>,
+    prev: Option<(Key, Lsn, u64, bool)>,
     /// Max read size per batch. This is not a strict limit. If there are [0, 100) and [100, 200), while the `max_read_size` is 150,
     /// we will produce a single batch instead of split them.
     max_read_size: u64,
@@ -550,27 +569,47 @@ impl StreamingVectoredReadPlanner {
         }
     }
 
-    pub fn handle(&mut self, key: Key, lsn: Lsn, offset: u64) -> Option<VectoredRead> {
+    pub fn handle(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        offset: u64,
+        will_init: bool,
+    ) -> Option<VectoredRead> {
         // Implementation note: internally lag behind by one blob such that
         // we have a start and end offset when initialising [`VectoredRead`]
-        let (prev_key, prev_lsn, prev_offset) = match self.prev {
+        let (prev_key, prev_lsn, prev_offset, prev_will_init) = match self.prev {
             None => {
-                self.prev = Some((key, lsn, offset));
+                self.prev = Some((key, lsn, offset, will_init));
                 return None;
             }
             Some(prev) => prev,
         };
 
-        let res = self.add_blob(prev_key, prev_lsn, prev_offset, offset, false);
+        let res = self.add_blob(
+            prev_key,
+            prev_lsn,
+            prev_offset,
+            offset,
+            false,
+            prev_will_init,
+        );
 
-        self.prev = Some((key, lsn, offset));
+        self.prev = Some((key, lsn, offset, will_init));
 
         res
     }
 
     pub fn handle_range_end(&mut self, offset: u64) -> Option<VectoredRead> {
-        let res = if let Some((prev_key, prev_lsn, prev_offset)) = self.prev {
-            self.add_blob(prev_key, prev_lsn, prev_offset, offset, true)
+        let res = if let Some((prev_key, prev_lsn, prev_offset, prev_will_init)) = self.prev {
+            self.add_blob(
+                prev_key,
+                prev_lsn,
+                prev_offset,
+                offset,
+                true,
+                prev_will_init,
+            )
         } else {
             None
         };
@@ -587,10 +626,19 @@ impl StreamingVectoredReadPlanner {
         start_offset: u64,
         end_offset: u64,
         is_last_blob_in_read: bool,
+        will_init: bool,
     ) -> Option<VectoredRead> {
         match &mut self.read_builder {
             Some(read_builder) => {
-                let extended = read_builder.extend(start_offset, end_offset, BlobMeta { key, lsn });
+                let extended = read_builder.extend(
+                    start_offset,
+                    end_offset,
+                    BlobMeta {
+                        key,
+                        lsn,
+                        will_init,
+                    },
+                );
                 assert_eq!(extended, VectoredReadExtended::Yes);
             }
             None => {
@@ -598,7 +646,11 @@ impl StreamingVectoredReadPlanner {
                     Some(ChunkedVectoredReadBuilder::new_streaming(
                         start_offset,
                         end_offset,
-                        BlobMeta { key, lsn },
+                        BlobMeta {
+                            key,
+                            lsn,
+                            will_init,
+                        },
                     ))
                 };
             }
@@ -812,7 +864,7 @@ mod tests {
         let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 1000);
         let mut reads = Vec::new();
         for (key, lsn, offset, _) in blob_descriptions.clone() {
-            reads.extend(planner.handle(key, lsn, offset));
+            reads.extend(planner.handle(key, lsn, offset, false));
         }
         reads.extend(planner.handle_range_end(652 * 1024));
 
@@ -850,7 +902,7 @@ mod tests {
         let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 2);
         let mut reads = Vec::new();
         for (key, lsn, offset, _) in blob_descriptions.clone() {
-            reads.extend(planner.handle(key, lsn, offset));
+            reads.extend(planner.handle(key, lsn, offset, false));
         }
         reads.extend(planner.handle_range_end(652 * 1024));
 
@@ -875,7 +927,7 @@ mod tests {
         {
             let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 1);
             let mut reads = Vec::new();
-            reads.extend(planner.handle(key, lsn, 0));
+            reads.extend(planner.handle(key, lsn, 0, false));
             reads.extend(planner.handle_range_end(652 * 1024));
             assert_eq!(reads.len(), 1);
             validate_read(&reads[0], &[(key, lsn, 0, BlobFlag::None)]);
@@ -883,8 +935,8 @@ mod tests {
         {
             let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 1);
             let mut reads = Vec::new();
-            reads.extend(planner.handle(key, lsn, 0));
-            reads.extend(planner.handle(key, lsn, 128 * 1024));
+            reads.extend(planner.handle(key, lsn, 0, false));
+            reads.extend(planner.handle(key, lsn, 128 * 1024, false));
             reads.extend(planner.handle_range_end(652 * 1024));
             assert_eq!(reads.len(), 2);
             validate_read(&reads[0], &[(key, lsn, 0, BlobFlag::None)]);
@@ -893,8 +945,8 @@ mod tests {
         {
             let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 2);
             let mut reads = Vec::new();
-            reads.extend(planner.handle(key, lsn, 0));
-            reads.extend(planner.handle(key, lsn, 128 * 1024));
+            reads.extend(planner.handle(key, lsn, 0, false));
+            reads.extend(planner.handle(key, lsn, 128 * 1024, false));
             reads.extend(planner.handle_range_end(652 * 1024));
             assert_eq!(reads.len(), 1);
             validate_read(
@@ -923,6 +975,7 @@ mod tests {
         let meta = BlobMeta {
             key: Key::MIN,
             lsn: Lsn(0),
+            will_init: false,
         };
 
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {

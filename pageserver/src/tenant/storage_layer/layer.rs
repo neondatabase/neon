@@ -308,7 +308,7 @@ impl Layer {
         reconstruct_data: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
-        let layer = self
+        let downloaded = self
             .0
             .get_or_maybe_download(true, Some(ctx))
             .await
@@ -318,11 +318,15 @@ impl Layer {
                 }
                 other => GetVectoredError::Other(anyhow::anyhow!(other)),
             })?;
+        let this = ResidentLayer {
+            downloaded: downloaded.clone(),
+            owner: self.clone(),
+        };
 
         self.record_access(ctx);
 
-        layer
-            .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
+        downloaded
+            .get_values_reconstruct_data(this, keyspace, lsn_range, reconstruct_data, ctx)
             .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
             .await
             .map_err(|err| match err {
@@ -697,13 +701,7 @@ impl Drop for LayerInner {
         if let Some(timeline) = timeline.as_ref() {
             // Only need to decrement metrics if the timeline still exists: otherwise
             // it will have already de-registered these metrics via TimelineMetrics::shutdown
-            if self.desc.is_delta() {
-                timeline.metrics.layer_count_delta.dec();
-                timeline.metrics.layer_size_delta.sub(self.desc.file_size);
-            } else {
-                timeline.metrics.layer_count_image.dec();
-                timeline.metrics.layer_size_image.sub(self.desc.file_size);
-            }
+            timeline.metrics.dec_layer(&self.desc);
 
             if matches!(self.access_stats.visibility(), LayerVisibilityHint::Visible) {
                 debug_assert!(
@@ -813,13 +811,7 @@ impl LayerInner {
         };
 
         // This object acts as a RAII guard on these metrics: increment on construction
-        if desc.is_delta() {
-            timeline.metrics.layer_count_delta.inc();
-            timeline.metrics.layer_size_delta.add(desc.file_size);
-        } else {
-            timeline.metrics.layer_count_image.inc();
-            timeline.metrics.layer_size_image.add(desc.file_size);
-        }
+        timeline.metrics.inc_layer(&desc);
 
         // New layers are visible by default. This metric is later updated on drop or in set_visibility
         timeline
@@ -1768,25 +1760,25 @@ impl DownloadedLayer {
 
     async fn get_values_reconstruct_data(
         &self,
+        this: ResidentLayer,
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValuesReconstructState,
-        owner: &Arc<LayerInner>,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
         use LayerKind::*;
 
         match self
-            .get(owner, ctx)
+            .get(&this.owner.0, ctx)
             .await
             .map_err(GetVectoredError::Other)?
         {
             Delta(d) => {
-                d.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, ctx)
+                d.get_values_reconstruct_data(this, keyspace, lsn_range, reconstruct_data, ctx)
                     .await
             }
             Image(i) => {
-                i.get_values_reconstruct_data(keyspace, reconstruct_data, ctx)
+                i.get_values_reconstruct_data(this, keyspace, reconstruct_data, ctx)
                     .await
             }
         }
@@ -1812,7 +1804,7 @@ enum LayerKind {
 
 /// Guard for forcing a layer be resident while it exists.
 #[derive(Clone)]
-pub(crate) struct ResidentLayer {
+pub struct ResidentLayer {
     owner: Layer,
     downloaded: Arc<DownloadedLayer>,
 }

@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use compute_api::spec::{PgIdent, Role};
+use compute_api::spec::{Database, PgIdent, Role};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -41,12 +41,14 @@ use crate::local_proxy;
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::spec_apply::ApplySpecPhase::{
-    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateSuperUser,
-    DropInvalidDatabases, DropRoles, HandleNeonExtension, HandleOtherExtensions,
-    RenameAndDeleteDatabases, RenameRoles, RunInEachDatabase,
+    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateSchemaNeon,
+    CreateSuperUser, DropInvalidDatabases, DropRoles, FinalizeDropLogicalSubscriptions,
+    HandleNeonExtension, HandleOtherExtensions, RenameAndDeleteDatabases, RenameRoles,
+    RunInEachDatabase,
 };
+use crate::spec_apply::PerDatabasePhase;
 use crate::spec_apply::PerDatabasePhase::{
-    ChangeSchemaPerms, DeleteDBRoleReferences, HandleAnonExtension,
+    ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions, HandleAnonExtension,
 };
 use crate::spec_apply::{apply_operations, MutableApplyContext, DB};
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
@@ -336,6 +338,15 @@ impl ComputeNode {
 
     pub fn get_status(&self) -> ComputeStatus {
         self.state.lock().unwrap().status
+    }
+
+    pub fn get_timeline_id(&self) -> Option<TimelineId> {
+        self.state
+            .lock()
+            .unwrap()
+            .pspec
+            .as_ref()
+            .map(|s| s.timeline_id)
     }
 
     // Remove `pgdata` directory and create it again with right permissions.
@@ -834,7 +845,7 @@ impl ComputeNode {
         conf
     }
 
-    async fn get_maintenance_client(
+    pub async fn get_maintenance_client(
         conf: &tokio_postgres::Config,
     ) -> Result<tokio_postgres::Client> {
         let mut conf = conf.clone();
@@ -927,6 +938,48 @@ impl ComputeNode {
                 .map(|role| (role.name.clone(), role))
                 .collect::<HashMap<String, Role>>();
 
+            // Check if we need to drop subscriptions before starting the endpoint.
+            //
+            // It is important to do this operation exactly once when endpoint starts on a new branch.
+            // Otherwise, we may drop not inherited, but newly created subscriptions.
+            //
+            // We cannot rely only on spec.drop_subscriptions_before_start flag,
+            // because if for some reason compute restarts inside VM,
+            // it will start again with the same spec and flag value.
+            //
+            // To handle this, we save the fact of the operation in the database
+            // in the neon.drop_subscriptions_done table.
+            // If the table does not exist, we assume that the operation was never performed, so we must do it.
+            // If table exists, we check if the operation was performed on the current timelilne.
+            //
+            let mut drop_subscriptions_done = false;
+
+            if spec.drop_subscriptions_before_start {
+                let timeline_id = self.get_timeline_id().context("timeline_id must be set")?;
+                let query = format!("select 1 from neon.drop_subscriptions_done where timeline_id = '{}'", timeline_id);
+
+                info!("Checking if drop subscription operation was already performed for timeline_id: {}", timeline_id);
+
+                drop_subscriptions_done =  match
+                    client.simple_query(&query).await {
+                    Ok(result) => {
+                        matches!(&result[0], postgres::SimpleQueryMessage::Row(_))
+                    },
+                    Err(e) =>
+                    {
+                        match e.code() {
+                            Some(&SqlState::UNDEFINED_TABLE) => false,
+                            _ => {
+                                // We don't expect any other error here, except for the schema/table not existing
+                                error!("Error checking if drop subscription operation was already performed: {}", e);
+                                return Err(e.into());
+                            }
+                        }
+                    }
+                }
+            };
+
+
             let jwks_roles = Arc::new(
                 spec.as_ref()
                     .local_proxy_config
@@ -943,6 +996,78 @@ impl ComputeNode {
                 dbs: databases,
             }));
 
+            // Apply special pre drop database phase.
+            // NOTE: we use the code of RunInEachDatabase phase for parallelism
+            // and connection management, but we don't really run it in *each* database,
+            // only in databases, we're about to drop.
+            info!("Applying PerDatabase (pre-dropdb) phase");
+            let concurrency_token = Arc::new(tokio::sync::Semaphore::new(concurrency));
+
+            // Run the phase for each database that we're about to drop.
+            let db_processes = spec
+                .delta_operations
+                .iter()
+                .flatten()
+                .filter_map(move |op| {
+                    if op.action.as_str() == "delete_db" {
+                        Some(op.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .map(|dbname| {
+                    let spec = spec.clone();
+                    let ctx = ctx.clone();
+                    let jwks_roles = jwks_roles.clone();
+                    let mut conf = conf.as_ref().clone();
+                    let concurrency_token = concurrency_token.clone();
+                    // We only need dbname field for this phase, so set other fields to dummy values
+                    let db = DB::UserDB(Database {
+                        name: dbname.clone(),
+                        owner: "cloud_admin".to_string(),
+                        options: None,
+                        restrict_conn: false,
+                        invalid: false,
+                    });
+
+                    debug!("Applying per-database phases for Database {:?}", &db);
+
+                    match &db {
+                        DB::SystemDB => {}
+                        DB::UserDB(db) => {
+                            conf.dbname(db.name.as_str());
+                        }
+                    }
+
+                    let conf = Arc::new(conf);
+                    let fut = Self::apply_spec_sql_db(
+                        spec.clone(),
+                        conf,
+                        ctx.clone(),
+                        jwks_roles.clone(),
+                        concurrency_token.clone(),
+                        db,
+                        [DropLogicalSubscriptions].to_vec(),
+                    );
+
+                    Ok(spawn(fut))
+                })
+                .collect::<Vec<Result<_, anyhow::Error>>>();
+
+            for process in db_processes.into_iter() {
+                let handle = process?;
+                if let Err(e) = handle.await? {
+                    // Handle the error case where the database does not exist
+                    // We do not check whether the DB exists or not in the deletion phase,
+                    // so we shouldn't be strict about it in pre-deletion cleanup as well.
+                    if e.to_string().contains("does not exist") {
+                        warn!("Error dropping subscription: {}", e);
+                    } else {
+                        return Err(e);
+                    }
+                };
+            }
+
             for phase in [
                 CreateSuperUser,
                 DropInvalidDatabases,
@@ -950,6 +1075,7 @@ impl ComputeNode {
                 CreateAndAlterRoles,
                 RenameAndDeleteDatabases,
                 CreateAndAlterDatabases,
+                CreateSchemaNeon,
             ] {
                 info!("Applying phase {:?}", &phase);
                 apply_operations(
@@ -962,7 +1088,7 @@ impl ComputeNode {
                 .await?;
             }
 
-            info!("Applying RunInEachDatabase phase");
+            info!("Applying RunInEachDatabase2 phase");
             let concurrency_token = Arc::new(tokio::sync::Semaphore::new(concurrency));
 
             let db_processes = spec
@@ -990,6 +1116,17 @@ impl ComputeNode {
                     }
 
                     let conf = Arc::new(conf);
+                    let mut phases = vec![
+                        DeleteDBRoleReferences,
+                        ChangeSchemaPerms,
+                        HandleAnonExtension,
+                    ];
+
+                    if spec.drop_subscriptions_before_start && !drop_subscriptions_done {
+                        info!("Adding DropLogicalSubscriptions phase because drop_subscriptions_before_start is set");
+                        phases.push(DropLogicalSubscriptions);
+                    }
+
                     let fut = Self::apply_spec_sql_db(
                         spec.clone(),
                         conf,
@@ -997,6 +1134,7 @@ impl ComputeNode {
                         jwks_roles.clone(),
                         concurrency_token.clone(),
                         db,
+                        phases,
                     );
 
                     Ok(spawn(fut))
@@ -1008,12 +1146,20 @@ impl ComputeNode {
                 handle.await??;
             }
 
-            for phase in vec![
+            let mut phases = vec![
                 HandleOtherExtensions,
-                HandleNeonExtension,
+                HandleNeonExtension, // This step depends on CreateSchemaNeon
                 CreateAvailabilityCheck,
                 DropRoles,
-            ] {
+            ];
+
+            // This step depends on CreateSchemaNeon
+            if spec.drop_subscriptions_before_start && !drop_subscriptions_done {
+                info!("Adding FinalizeDropLogicalSubscriptions phase because drop_subscriptions_before_start is set");
+                phases.push(FinalizeDropLogicalSubscriptions);
+            }
+
+            for phase in phases {
                 debug!("Applying phase {:?}", &phase);
                 apply_operations(
                     spec.clone(),
@@ -1043,16 +1189,13 @@ impl ComputeNode {
         jwks_roles: Arc<HashSet<String>>,
         concurrency_token: Arc<tokio::sync::Semaphore>,
         db: DB,
+        subphases: Vec<PerDatabasePhase>,
     ) -> Result<()> {
         let _permit = concurrency_token.acquire().await?;
 
         let mut client_conn = None;
 
-        for subphase in [
-            DeleteDBRoleReferences,
-            ChangeSchemaPerms,
-            HandleAnonExtension,
-        ] {
+        for subphase in subphases {
             apply_operations(
                 spec.clone(),
                 ctx.clone(),
@@ -1181,8 +1324,19 @@ impl ComputeNode {
             let mut conf = postgres::config::Config::from(conf);
             conf.application_name("compute_ctl:migrations");
 
-            let mut client = conf.connect(NoTls)?;
-            handle_migrations(&mut client).context("apply_config handle_migrations")
+            match conf.connect(NoTls) {
+                Ok(mut client) => {
+                    if let Err(e) = handle_migrations(&mut client) {
+                        error!("Failed to run migrations: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to connect to the compute for running migrations: {}",
+                        e
+                    );
+                }
+            };
         });
 
         Ok::<(), anyhow::Error>(())
@@ -1375,6 +1529,14 @@ impl ComputeNode {
                         Ok(())
                     },
                 )?;
+
+                let postgresql_conf_path = pgdata_path.join("postgresql.conf");
+                if config::line_in_file(
+                    &postgresql_conf_path,
+                    "neon.disable_logical_replication_subscribers=false",
+                )? {
+                    info!("updated postgresql.conf to set neon.disable_logical_replication_subscribers=false");
+                }
                 self.pg_reload_conf()?;
             }
             self.post_apply_config()?;

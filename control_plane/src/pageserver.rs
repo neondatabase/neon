@@ -95,21 +95,19 @@ impl PageServerNode {
 
         let mut overrides = vec![pg_distrib_dir_param, broker_endpoint_param];
 
-        if let Some(control_plane_api) = &self.env.control_plane_api {
-            overrides.push(format!(
-                "control_plane_api='{}'",
-                control_plane_api.as_str()
-            ));
+        overrides.push(format!(
+            "control_plane_api='{}'",
+            self.env.control_plane_api.as_str()
+        ));
 
-            // Storage controller uses the same auth as pageserver: if JWT is enabled
-            // for us, we will also need it to talk to them.
-            if matches!(conf.http_auth_type, AuthType::NeonJWT) {
-                let jwt_token = self
-                    .env
-                    .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
-                    .unwrap();
-                overrides.push(format!("control_plane_api_token='{}'", jwt_token));
-            }
+        // Storage controller uses the same auth as pageserver: if JWT is enabled
+        // for us, we will also need it to talk to them.
+        if matches!(conf.http_auth_type, AuthType::NeonJWT) {
+            let jwt_token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
+                .unwrap();
+            overrides.push(format!("control_plane_api_token='{}'", jwt_token));
         }
 
         if !conf.other.contains_key("remote_storage") {
@@ -349,11 +347,31 @@ impl PageServerNode {
                 .map(|x| x.parse::<usize>())
                 .transpose()
                 .context("Failed to parse 'compaction_threshold' as an integer")?,
+            compaction_upper_limit: settings
+                .remove("compaction_upper_limit")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'compaction_upper_limit' as an integer")?,
             compaction_algorithm: settings
                 .remove("compaction_algorithm")
                 .map(serde_json::from_str)
                 .transpose()
                 .context("Failed to parse 'compaction_algorithm' json")?,
+            l0_flush_delay_threshold: settings
+                .remove("l0_flush_delay_threshold")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'l0_flush_delay_threshold' as an integer")?,
+            l0_flush_wait_upload: settings
+                .remove("l0_flush_wait_upload")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'l0_flush_wait_upload' as a boolean")?,
+            l0_flush_stall_threshold: settings
+                .remove("l0_flush_stall_threshold")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'l0_flush_stall_threshold' as an integer")?,
             gc_horizon: settings
                 .remove("gc_horizon")
                 .map(|x| x.parse::<u64>())
@@ -420,6 +438,26 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `wal_receiver_protocol_override` from json")?,
+            rel_size_v2_enabled: settings
+                .remove("rel_size_v2_enabled")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'rel_size_v2_enabled' as bool")?,
+            gc_compaction_enabled: settings
+                .remove("gc_compaction_enabled")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_enabled' as bool")?,
+            gc_compaction_initial_threshold_kb: settings
+                .remove("gc_compaction_initial_threshold_kb")
+                .map(|x| x.parse::<u64>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_initial_threshold_kb' as integer")?,
+            gc_compaction_ratio_percent: settings
+                .remove("gc_compaction_ratio_percent")
+                .map(|x| x.parse::<u64>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_ratio_percent' as integer")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")

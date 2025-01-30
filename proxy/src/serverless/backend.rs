@@ -3,9 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ed25519_dalek::SigningKey;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use p256::ecdsa::SigningKey;
-use p256::elliptic_curve::JwkEcKey;
+use jose_jwk::jose_b64;
 use rand::rngs::OsRng;
 use tokio::net::{lookup_host, TcpStream};
 use tracing::field::display;
@@ -22,7 +22,7 @@ use crate::compute;
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
 };
-use crate::config::ProxyConfig;
+use crate::config::{ComputeConfig, ProxyConfig};
 use crate::context::RequestContext;
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
@@ -196,7 +196,7 @@ impl PoolingBackend {
             },
             &backend,
             self.config.wake_compute_retry_config,
-            self.config.connect_to_compute_retry_config,
+            &self.config.connect_to_compute,
         )
         .await
     }
@@ -237,7 +237,7 @@ impl PoolingBackend {
             },
             &backend,
             self.config.wake_compute_retry_config,
-            self.config.connect_to_compute_retry_config,
+            &self.config.connect_to_compute,
         )
         .await
     }
@@ -354,9 +354,15 @@ impl PoolingBackend {
     }
 }
 
-fn create_random_jwk() -> (SigningKey, JwkEcKey) {
-    let key = SigningKey::random(&mut OsRng);
-    let jwk = p256::PublicKey::from(key.verifying_key()).to_jwk();
+fn create_random_jwk() -> (SigningKey, jose_jwk::Key) {
+    let key = SigningKey::generate(&mut OsRng);
+
+    let jwk = jose_jwk::Key::Okp(jose_jwk::Okp {
+        crv: jose_jwk::OkpCurves::Ed25519,
+        x: jose_b64::serde::Bytes::from(key.verifying_key().to_bytes().to_vec()),
+        d: None,
+    });
+
     (key, jwk)
 }
 
@@ -502,7 +508,7 @@ impl ConnectMechanism for TokioMechanism {
         &self,
         ctx: &RequestContext,
         node_info: &CachedNodeInfo,
-        timeout: Duration,
+        compute_config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
         let host = node_info.config.get_host();
         let permit = self.locks.get_permit(&host).await?;
@@ -511,7 +517,7 @@ impl ConnectMechanism for TokioMechanism {
         let config = config
             .user(&self.conn_info.user_info.user)
             .dbname(&self.conn_info.dbname)
-            .connect_timeout(timeout);
+            .connect_timeout(compute_config.timeout);
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let res = config.connect(postgres_client::NoTls).await;
@@ -552,7 +558,7 @@ impl ConnectMechanism for HyperMechanism {
         &self,
         ctx: &RequestContext,
         node_info: &CachedNodeInfo,
-        timeout: Duration,
+        config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
         let host = node_info.config.get_host();
         let permit = self.locks.get_permit(&host).await?;
@@ -560,7 +566,7 @@ impl ConnectMechanism for HyperMechanism {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
         let port = node_info.config.get_port();
-        let res = connect_http2(&host, port, timeout).await;
+        let res = connect_http2(&host, port, config.timeout).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 

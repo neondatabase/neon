@@ -15,7 +15,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from fixtures.common_types import (
-    Id,
     Lsn,
     TenantId,
     TenantShardId,
@@ -25,7 +24,7 @@ from fixtures.common_types import (
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
-from fixtures.utils import Fn
+from fixtures.utils import EnhancedJSONEncoder, Fn
 
 
 class PageserverApiException(Exception):
@@ -83,14 +82,6 @@ class TimelineCreateRequest:
     mode: TimelineCreateRequestMode
 
     def to_json(self) -> str:
-        class EnhancedJSONEncoder(json.JSONEncoder):
-            def default(self, o):
-                if dataclasses.is_dataclass(o) and not isinstance(o, type):
-                    return dataclasses.asdict(o)
-                elif isinstance(o, Id):
-                    return o.id.hex()
-                return super().default(o)
-
         # mode is flattened
         this = dataclasses.asdict(self)
         mode = this.pop("mode")
@@ -738,6 +729,18 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         assert res_json is None
 
+    def timeline_compact_info(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Any:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        return res_json
+
     def timeline_compact(
         self,
         tenant_id: TenantId | TenantShardId,
@@ -749,7 +752,6 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         enhanced_gc_bottom_most_compaction=False,
         body: dict[str, Any] | None = None,
     ):
-        self.is_testing_enabled_or_skip()
         query = {}
         if force_repartition:
             query["force_repartition"] = "true"

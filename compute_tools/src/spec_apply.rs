@@ -47,6 +47,7 @@ pub enum PerDatabasePhase {
     DeleteDBRoleReferences,
     ChangeSchemaPerms,
     HandleAnonExtension,
+    DropLogicalSubscriptions,
 }
 
 #[derive(Clone, Debug)]
@@ -57,11 +58,13 @@ pub enum ApplySpecPhase {
     CreateAndAlterRoles,
     RenameAndDeleteDatabases,
     CreateAndAlterDatabases,
+    CreateSchemaNeon,
     RunInEachDatabase { db: DB, subphase: PerDatabasePhase },
     HandleOtherExtensions,
     HandleNeonExtension,
     CreateAvailabilityCheck,
     DropRoles,
+    FinalizeDropLogicalSubscriptions,
 }
 
 pub struct Operation {
@@ -74,7 +77,7 @@ pub struct MutableApplyContext {
     pub dbs: HashMap<String, Database>,
 }
 
-/// Appply the operations that belong to the given spec apply phase.
+/// Apply the operations that belong to the given spec apply phase.
 ///
 /// Commands within a single phase are executed in order of Iterator yield.
 /// Commands of ApplySpecPhase::RunInEachDatabase will execute in the database
@@ -326,13 +329,12 @@ async fn get_operations<'a>(
 
                             // Use FORCE to drop database even if there are active connections.
                             // We run this from `cloud_admin`, so it should have enough privileges.
+                            //
                             // NB: there could be other db states, which prevent us from dropping
                             // the database. For example, if db is used by any active subscription
                             // or replication slot.
-                            // TODO: deal with it once we allow logical replication. Proper fix should
-                            // involve returning an error code to the control plane, so it could
-                            // figure out that this is a non-retryable error, return it to the user
-                            // and fail operation permanently.
+                            // Such cases are handled in the DropLogicalSubscriptions
+                            // phase. We do all the cleanup before actually dropping the database.
                             let drop_db_query: String = format!(
                                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                                 &op.name.pg_quote()
@@ -442,8 +444,38 @@ async fn get_operations<'a>(
 
             Ok(Box::new(operations))
         }
+        ApplySpecPhase::CreateSchemaNeon => Ok(Box::new(once(Operation {
+            query: String::from("CREATE SCHEMA IF NOT EXISTS neon"),
+            comment: Some(String::from(
+                "create schema for neon extension and utils tables",
+            )),
+        }))),
         ApplySpecPhase::RunInEachDatabase { db, subphase } => {
             match subphase {
+                PerDatabasePhase::DropLogicalSubscriptions => {
+                    match &db {
+                        DB::UserDB(db) => {
+                            let drop_subscription_query: String = format!(
+                                include_str!("sql/drop_subscriptions.sql"),
+                                datname_str = escape_literal(&db.name),
+                            );
+
+                            let operations = vec![Operation {
+                                query: drop_subscription_query,
+                                comment: Some(format!(
+                                    "optionally dropping subscriptions for DB {}",
+                                    db.name,
+                                )),
+                            }]
+                            .into_iter();
+
+                            Ok(Box::new(operations))
+                        }
+                        // skip this cleanup for the system databases
+                        // because users can't drop them
+                        DB::SystemDB => Ok(Box::new(empty())),
+                    }
+                }
                 PerDatabasePhase::DeleteDBRoleReferences => {
                     let ctx = ctx.read().await;
 
@@ -474,7 +506,19 @@ async fn get_operations<'a>(
                                         ),
                                         comment: None,
                                     },
+                                    // Revoke some potentially blocking privileges (Neon-specific currently)
+                                    Operation {
+                                        query: format!(
+                                            include_str!("sql/pre_drop_role_revoke_privileges.sql"),
+                                            role_name = quoted,
+                                        ),
+                                        comment: None,
+                                    },
                                     // This now will only drop privileges of the role
+                                    // TODO: this is obviously not 100% true because of the above case,
+                                    // there could be still some privileges that are not revoked. Maybe this
+                                    // only drops privileges that were granted *by this* role, not *to this* role,
+                                    // but this has to be checked.
                                     Operation {
                                         query: format!("DROP OWNED BY {}", quoted),
                                         comment: None,
@@ -631,10 +675,6 @@ async fn get_operations<'a>(
         ApplySpecPhase::HandleNeonExtension => {
             let operations = vec![
                 Operation {
-                    query: String::from("CREATE SCHEMA IF NOT EXISTS neon"),
-                    comment: Some(String::from("init: add schema for extension")),
-                },
-                Operation {
                     query: String::from("CREATE EXTENSION IF NOT EXISTS neon WITH SCHEMA neon"),
                     comment: Some(String::from(
                         "init: install the extension if not already installed",
@@ -676,5 +716,9 @@ async fn get_operations<'a>(
 
             Ok(Box::new(operations))
         }
+        ApplySpecPhase::FinalizeDropLogicalSubscriptions => Ok(Box::new(once(Operation {
+            query: String::from(include_str!("sql/finalize_drop_subscriptions.sql")),
+            comment: None,
+        }))),
     }
 }

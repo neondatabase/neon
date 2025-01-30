@@ -1,19 +1,19 @@
 use crate::pageserver_client::PageserverClient;
 use crate::persistence::Persistence;
-use crate::service;
-use pageserver_api::controller_api::PlacementPolicy;
+use crate::{compute_hook, service};
+use pageserver_api::controller_api::{AvailabilityZone, PlacementPolicy};
 use pageserver_api::models::{
-    LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
+    LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig, TenantWaitLsnRequest,
 };
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_client::mgmt_api;
 use reqwest::StatusCode;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use utils::backoff::exponential_backoff;
-use utils::failpoint_support;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
@@ -45,6 +45,7 @@ pub(super) struct Reconciler {
     pub(crate) reconciler_config: ReconcilerConfig,
 
     pub(crate) config: TenantConfig,
+    pub(crate) preferred_az: Option<AvailabilityZone>,
 
     /// Observed state from the point of view of the reconciler.
     /// This gets updated as the reconciliation makes progress.
@@ -210,11 +211,12 @@ impl Reconciler {
         lazy: bool,
     ) -> Result<(), ReconcileError> {
         if !node.is_available() && config.mode == LocationConfigMode::Detached {
-            // Attempts to detach from offline nodes may be imitated without doing I/O: a node which is offline
-            // will get fully reconciled wrt the shard's intent state when it is reactivated, irrespective of
-            // what we put into `observed`, in [`crate::service::Service::node_activate_reconcile`]
-            tracing::info!("Node {node} is unavailable during detach: proceeding anyway, it will be detached on next activation");
-            self.observed.locations.remove(&node.get_id());
+            // [`crate::service::Service::node_activate_reconcile`] will update the observed state
+            // when the node comes back online. At that point, the intent and observed states will
+            // be mismatched and a background reconciliation will detach.
+            tracing::info!(
+                "Node {node} is unavailable during detach: proceeding anyway, it will be detached via background reconciliation"
+            );
             return Ok(());
         }
 
@@ -346,6 +348,32 @@ impl Reconciler {
         Ok(())
     }
 
+    async fn wait_lsn(
+        &self,
+        node: &Node,
+        tenant_shard_id: TenantShardId,
+        timelines: HashMap<TimelineId, Lsn>,
+    ) -> Result<StatusCode, ReconcileError> {
+        const TIMEOUT: Duration = Duration::from_secs(10);
+
+        let client = PageserverClient::new(
+            node.get_id(),
+            node.base_url(),
+            self.service_config.jwt_token.as_deref(),
+        );
+
+        client
+            .wait_lsn(
+                tenant_shard_id,
+                TenantWaitLsnRequest {
+                    timelines,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .map_err(|e| e.into())
+    }
+
     async fn get_lsns(
         &self,
         tenant_shard_id: TenantShardId,
@@ -459,6 +487,39 @@ impl Reconciler {
         node: &Node,
         baseline: HashMap<TimelineId, Lsn>,
     ) -> anyhow::Result<()> {
+        // Signal to the pageserver that it should ingest up to the baseline LSNs.
+        loop {
+            match self.wait_lsn(node, tenant_shard_id, baseline.clone()).await {
+                Ok(StatusCode::OK) => {
+                    // Everything is caught up
+                    return Ok(());
+                }
+                Ok(StatusCode::ACCEPTED) => {
+                    // Some timelines are not caught up yet.
+                    // They'll be polled below.
+                    break;
+                }
+                Ok(StatusCode::NOT_FOUND) => {
+                    // None of the timelines are present on the pageserver.
+                    // This is correct if they've all been deleted, but
+                    // let let the polling loop below cross check.
+                    break;
+                }
+                Ok(status_code) => {
+                    tracing::warn!(
+                        "Unexpected status code ({status_code}) returned by wait_lsn endpoint"
+                    );
+                    break;
+                }
+                Err(e) => {
+                    tracing::info!("🕑 Can't trigger LSN wait on {node} yet, waiting ({e})",);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+            }
+        }
+
+        // Poll the LSNs until they catch up
         loop {
             let latest = match self.get_lsns(tenant_shard_id, node).await {
                 Ok(l) => l,
@@ -694,6 +755,11 @@ impl Reconciler {
     /// First we apply special case handling (e.g. for live migrations), and then a
     /// general case reconciliation where we walk through the intent by pageserver
     /// and call out to the pageserver to apply the desired state.
+    ///
+    /// An Ok(()) result indicates that we successfully attached the tenant, but _not_ that
+    /// all locations for the tenant are in the expected state. When nodes that are to be detached
+    /// or configured as secondary are unavailable, we may return Ok(()) but leave the shard in a
+    /// state where it still requires later reconciliation.
     pub(crate) async fn reconcile(&mut self) -> Result<(), ReconcileError> {
         // Prepare: if we have uncertain `observed` state for our would-be attachement location, then refresh it
         self.maybe_refresh_observed().await?;
@@ -747,6 +813,8 @@ impl Reconciler {
                     };
 
                     if increment_generation {
+                        pausable_failpoint!("reconciler-pre-increment-generation");
+
                         let generation = self
                             .persistence
                             .increment_generation(self.tenant_shard_id, node.get_id())
@@ -780,10 +848,18 @@ impl Reconciler {
                     tracing::info!(node_id=%node.get_id(), "Observed configuration already correct.")
                 }
                 _ => {
-                    // In all cases other than a matching observed configuration, we will
-                    // reconcile this location.
-                    tracing::info!(node_id=%node.get_id(), "Observed configuration requires update.");
-                    changes.push((node.clone(), wanted_conf))
+                    // Only try and configure secondary locations on nodes that are available.  This
+                    // allows the reconciler to "succeed" while some secondaries are offline (e.g. after
+                    // a node failure, where the failed node will have a secondary intent)
+                    if node.is_available() {
+                        tracing::info!(node_id=%node.get_id(), "Observed configuration requires update.");
+                        changes.push((node.clone(), wanted_conf))
+                    } else {
+                        tracing::info!(node_id=%node.get_id(), "Skipping configuration as secondary, node is unavailable");
+                        self.observed
+                            .locations
+                            .insert(node.get_id(), ObservedStateLocation { conf: None });
+                    }
                 }
             }
         }
@@ -809,7 +885,21 @@ impl Reconciler {
             if self.cancel.is_cancelled() {
                 return Err(ReconcileError::Cancel);
             }
-            self.location_config(&node, conf, None, false).await?;
+            // We only try to configure secondary locations if the node is available.  This does
+            // not stop us succeeding with the reconcile, because our core goal is to make the
+            // shard _available_ (the attached location), and configuring secondary locations
+            // can be done lazily when the node becomes available (via background reconciliation).
+            if node.is_available() {
+                self.location_config(&node, conf, None, false).await?;
+            } else {
+                // If the node is unavailable, we skip and consider the reconciliation successful: this
+                // is a common case where a pageserver is marked unavailable: we demote a location on
+                // that unavailable pageserver to secondary.
+                tracing::info!("Skipping configuring secondary location {node}, it is unavailable");
+                self.observed
+                    .locations
+                    .insert(node.get_id(), ObservedStateLocation { conf: None });
+            }
         }
 
         // The condition below identifies a detach. We must have no attached intent and
@@ -822,7 +912,7 @@ impl Reconciler {
                 .handle_detach(self.tenant_shard_id, self.shard.stripe_size);
         }
 
-        failpoint_support::sleep_millis_async!("sleep-on-reconcile-epilogue");
+        pausable_failpoint!("reconciler-epilogue");
 
         Ok(())
     }
@@ -834,9 +924,12 @@ impl Reconciler {
             let result = self
                 .compute_hook
                 .notify(
-                    self.tenant_shard_id,
-                    node.get_id(),
-                    self.shard.stripe_size,
+                    compute_hook::ShardUpdate {
+                        tenant_shard_id: self.tenant_shard_id,
+                        node_id: node.get_id(),
+                        stripe_size: self.shard.stripe_size,
+                        preferred_az: self.preferred_az.as_ref().map(Cow::Borrowed),
+                    },
                     &self.cancel,
                 )
                 .await;

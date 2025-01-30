@@ -3,6 +3,10 @@ ARG DEBIAN_VERSION=bookworm
 FROM debian:bookworm-slim AS pgcopydb_builder
 ARG DEBIAN_VERSION
 
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
+    echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
+
 RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         set -e && \
         apt update && \
@@ -61,6 +65,10 @@ RUN mkdir -p /pgcopydb/bin && \
 COPY --from=pgcopydb_builder /usr/lib/postgresql/16/bin/pgcopydb /pgcopydb/bin/pgcopydb
 COPY --from=pgcopydb_builder /pgcopydb/lib/libpq.so.5 /pgcopydb/lib/libpq.so.5
 
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
+    echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
+
 # System deps
 #
 # 'gdb' is included so that we get backtraces of core dumps produced in
@@ -115,7 +123,7 @@ RUN set -e \
 
 # Keep the version the same as in compute/compute-node.Dockerfile and
 # test_runner/regress/test_compute_metrics.py.
-ENV SQL_EXPORTER_VERSION=0.16.0
+ENV SQL_EXPORTER_VERSION=0.17.0
 RUN curl -fsSL \
     "https://github.com/burningalchemist/sql_exporter/releases/download/${SQL_EXPORTER_VERSION}/sql_exporter-${SQL_EXPORTER_VERSION}.linux-$(case "$(uname -m)" in x86_64) echo amd64;; aarch64) echo arm64;; esac).tar.gz" \
     --output sql_exporter.tar.gz \
@@ -190,21 +198,6 @@ RUN for package in Capture::Tiny DateTime Devel::Cover Digest::MD5 File::Spec JS
     && make install \
     && rm -rf ../lcov.tar.gz
 
-# Compile and install the static OpenSSL library
-ENV OPENSSL_VERSION=1.1.1w
-ENV OPENSSL_PREFIX=/usr/local/openssl
-RUN wget -O /tmp/openssl-${OPENSSL_VERSION}.tar.gz https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz && \
-    echo "cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8 /tmp/openssl-${OPENSSL_VERSION}.tar.gz" | sha256sum --check && \
-    cd /tmp && \
-    tar xzvf /tmp/openssl-${OPENSSL_VERSION}.tar.gz && \
-    rm /tmp/openssl-${OPENSSL_VERSION}.tar.gz && \
-    cd /tmp/openssl-${OPENSSL_VERSION} && \
-    ./config --prefix=${OPENSSL_PREFIX}  -static --static no-shared -fPIC && \
-    make -j "$(nproc)" && \
-    make install && \
-    cd /tmp && \
-    rm -rf /tmp/openssl-${OPENSSL_VERSION}
-
 # Use the same version of libicu as the compute nodes so that
 # clusters created using inidb on pageserver can be used by computes.
 #
@@ -233,6 +226,8 @@ RUN wget -O /tmp/libicu-${ICU_VERSION}.tgz https://github.com/unicode-org/icu/re
 USER nonroot:nonroot
 WORKDIR /home/nonroot
 
+RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
+
 # Python
 ENV PYTHON_VERSION=3.11.10 \
     PYENV_ROOT=/home/nonroot/.pyenv \
@@ -258,7 +253,7 @@ WORKDIR /home/nonroot
 
 # Rust
 # Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
-ENV RUSTC_VERSION=1.83.0
+ENV RUSTC_VERSION=1.84.0
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
 ARG RUSTFILT_VERSION=0.2.1

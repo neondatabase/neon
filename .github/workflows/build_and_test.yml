@@ -164,77 +164,11 @@ jobs:
 
   check-codestyle-rust:
     needs: [ check-permissions, build-build-tools-image ]
-    strategy:
-      matrix:
-        arch: [ x64, arm64 ]
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
-
-    container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
-      credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-      options: --init
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - name: Cache cargo deps
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            !~/.cargo/registry/src
-            ~/.cargo/git
-            target
-          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
-
-      # Some of our rust modules use FFI and need those to be checked
-      - name: Get postgres headers
-        run: make postgres-headers -j$(nproc)
-
-      # cargo hack runs the given cargo subcommand (clippy in this case) for all feature combinations.
-      # This will catch compiler & clippy warnings in all feature combinations.
-      # TODO: use cargo hack for build and test as well, but, that's quite expensive.
-      # NB: keep clippy args in sync with ./run_clippy.sh
-      #
-      # The only difference between "clippy --debug" and "clippy --release" is that in --release mode,
-      # #[cfg(debug_assertions)] blocks are not built. It's not worth building everything for second
-      # time just for that, so skip "clippy --release".
-      - run: |
-          CLIPPY_COMMON_ARGS="$( source .neon_clippy_args; echo "$CLIPPY_COMMON_ARGS")"
-          if [ "$CLIPPY_COMMON_ARGS" = "" ]; then
-            echo "No clippy args found in .neon_clippy_args"
-            exit 1
-          fi
-          echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
-      - name: Run cargo clippy (debug)
-        run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
-
-      - name: Check documentation generation
-        run: cargo doc --workspace --no-deps --document-private-items
-        env:
-            RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
-
-      # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
-      - name: Check formatting
-        if: ${{ !cancelled() }}
-        run: cargo fmt --all -- --check
-
-      # https://github.com/facebookincubator/cargo-guppy/tree/bec4e0eb29dcd1faac70b1b5360267fc02bf830e/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
-      - name: Check rust dependencies
-        if: ${{ !cancelled() }}
-        run: |
-          cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
-          cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
-
-      # https://github.com/EmbarkStudios/cargo-deny
-      - name: Check rust licenses/bans/advisories/sources
-        if: ${{ !cancelled() }}
-        run: cargo deny check --hide-inclusion-graph
+    uses: ./.github/workflows/_check-codestyle-rust.yml
+    with:
+      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
+      archs: '["x64", "arm64"]'
+    secrets: inherit
 
   build-and-test-locally:
     needs: [ tag, build-build-tools-image ]
@@ -308,7 +242,7 @@ jobs:
       statuses: write
       contents: write
       pull-requests: write
-    runs-on: [ self-hosted, small ]
+    runs-on: [ self-hosted, small-metal ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
@@ -346,25 +280,22 @@ jobs:
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
-  report-benchmarks-failures:
+  report-benchmarks-results-to-slack:
     needs: [ benchmarks, create-test-report ]
-    if: github.ref_name == 'main' && failure() && needs.benchmarks.result == 'failure'
-    permissions:
-      id-token: write # aws-actions/configure-aws-credentials
-      statuses: write
-      contents: write
-      pull-requests: write
+    if: github.ref_name == 'main' && !cancelled() && contains(fromJSON('["success", "failure"]'), needs.benchmarks.result)
     runs-on: ubuntu-22.04
 
     steps:
-    - uses: slackapi/slack-github-action@v1
+    - uses: slackapi/slack-github-action@v2
       with:
-        channel-id: C060CNA47S9 # on-call-staging-storage-stream
-        slack-message: |
-          Benchmarks failed on main <${{ github.event.head_commit.url }}|${{ github.sha }}>
-          <${{ needs.create-test-report.outputs.report-url }}|Allure report>
-      env:
-        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        method: chat.postMessage
+        token: ${{ secrets.SLACK_BOT_TOKEN }}
+        payload: |
+          channel: "${{ vars.SLACK_ON_CALL_STORAGE_STAGING_STREAM }}"
+          text: |
+            Benchmarks on main: *${{ needs.benchmarks.result }}*
+            - <${{ needs.create-test-report.outputs.report-url }}|Allure report>
+            - <${{ github.event.head_commit.url }}|${{ github.sha }}>
 
   create-test-report:
     needs: [ check-permissions, build-and-test-locally, coverage-report, build-build-tools-image, benchmarks ]
@@ -538,7 +469,7 @@ jobs:
 
   trigger-e2e-tests:
     if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute' }}
-    needs: [ check-permissions, promote-images, tag ]
+    needs: [ check-permissions, promote-images-dev, tag ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
     secrets: inherit
 
@@ -728,30 +659,6 @@ jobs:
           tags: |
             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
-      - name: Build compute-tools image
-        # compute-tools are Postgres independent, so build it only once
-        # We pick 16, because that builds on debian 11 with older glibc (and is
-        # thus compatible with newer glibc), rather than 17 on Debian 12, as
-        # that isn't guaranteed to be compatible with Debian 11
-        if: matrix.version.pg == 'v16'
-        uses: docker/build-push-action@v6
-        with:
-          target: compute-tools-image
-          context: .
-          build-args: |
-            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
-            DEBIAN_VERSION=${{ matrix.version.debian }}
-          provenance: false
-          push: true
-          pull: true
-          file: compute/compute-node.Dockerfile
-          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-tools-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
-          tags: |
-            neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
-
   compute-node-image:
     needs: [ compute-node-image-arch, tag ]
     permissions:
@@ -794,14 +701,6 @@ jobs:
                                              neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
                                              neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
-      - name: Create multi-arch compute-tools image
-        if: matrix.version.pg == 'v16'
-        run: |
-          docker buildx imagetools create -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }} \
-                                          -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }} \
-                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
-                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -816,12 +715,6 @@ jobs:
         run: |
           docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
                                                                                 neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
-
-      - name: Push multi-arch compute-tools image to ECR
-        if: matrix.version.pg == 'v16'
-        run: |
-          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{ needs.tag.outputs.build-tag }} \
-                                                                                neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}
 
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
@@ -893,6 +786,17 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
+      - name: Get the last compute release tag
+        id: get-last-compute-release-tag
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          tag=$(gh api -q '[.[].tag_name | select(startswith("release-compute"))][0]'\
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/releases")
+          echo tag=${tag} >> ${GITHUB_OUTPUT}
+
       # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
       # Pick pageserver as currently the only binary with extra "version" features printed in the string to verify.
       # Regular pageserver version string looks like
@@ -924,14 +828,28 @@ jobs:
           TEST_VERSION_ONLY: ${{ matrix.pg_version }}
         run: ./docker-compose/docker_compose_test.sh
 
+      - name: Print logs and clean up docker-compose test
+        if: always()
+        run: |
+          docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml logs || true
+          docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml down
+
+      - name: Test extension upgrade
+        timeout-minutes: 20
+        if: ${{ needs.tag.outputs.build-tag == github.run_id }}
+        env:
+          NEWTAG: ${{ needs.tag.outputs.build-tag }}
+          OLDTAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
+        run: ./docker-compose/test_extensions_upgrade.sh
+
       - name: Print logs and clean up
         if: always()
         run: |
-          docker compose -f ./docker-compose/docker-compose.yml logs || 0
-          docker compose -f ./docker-compose/docker-compose.yml down
+          docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml logs || true
+          docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml down
 
-  promote-images:
-    needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
+  promote-images-dev:
+    needs: [ check-permissions, tag, vm-compute-node-image, neon-image ]
     runs-on: ubuntu-22.04
 
     permissions:
@@ -965,15 +883,41 @@ jobs:
                                                neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
           done
 
+  promote-images-prod:
+    needs: [ check-permissions, tag, test-images, promote-images-dev ]
+    runs-on: ubuntu-22.04
+    if: github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
+
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: read
+
+    env:
+      VERSIONS: v14 v15 v16 v17
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon Dev ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
       - name: Add latest tag to images
         if: github.ref_name == 'main'
         run: |
           for repo in neondatabase 369495373322.dkr.ecr.eu-central-1.amazonaws.com; do
             docker buildx imagetools create -t $repo/neon:latest \
                                                $repo/neon:${{ needs.tag.outputs.build-tag }}
-
-            docker buildx imagetools create -t $repo/compute-tools:latest \
-                                               $repo/compute-tools:${{ needs.tag.outputs.build-tag }}
 
             for version in ${VERSIONS}; do
               docker buildx imagetools create -t $repo/compute-node-${version}:latest \
@@ -1003,31 +947,31 @@ jobs:
       - name: Copy all images to prod ECR
         if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
         run: |
-          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16,v17}; do
+          for image in neon {vm-,}compute-node-{v14,v15,v16,v17}; do
             docker buildx imagetools create -t 093970136003.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }} \
                                                369495373322.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }}
           done
 
   push-to-acr-dev:
     if: github.ref_name == 'main'
-    needs: [ tag, promote-images ]
+    needs: [ tag, promote-images-dev ]
     uses: ./.github/workflows/_push-to-acr.yml
     with:
       client_id: ${{ vars.AZURE_DEV_CLIENT_ID }}
       image_tag: ${{ needs.tag.outputs.build-tag }}
-      images: neon compute-tools vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
+      images: neon vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
       registry_name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
       subscription_id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       tenant_id: ${{ vars.AZURE_TENANT_ID }}
 
   push-to-acr-prod:
     if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
-    needs: [ tag, promote-images ]
+    needs: [ tag, promote-images-prod ]
     uses: ./.github/workflows/_push-to-acr.yml
     with:
       client_id: ${{ vars.AZURE_PROD_CLIENT_ID }}
       image_tag: ${{ needs.tag.outputs.build-tag }}
-      images: neon compute-tools vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
+      images: neon vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
       registry_name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
       subscription_id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       tenant_id: ${{ vars.AZURE_TENANT_ID }}
@@ -1112,7 +1056,7 @@ jobs:
           exit 1
 
   deploy:
-    needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
+    needs: [ check-permissions, promote-images-prod, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
     # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
     if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute') && !failure() && !cancelled()
     permissions:
@@ -1131,6 +1075,7 @@ jobs:
           retries: 5
           script: |
             const tag = "${{ needs.tag.outputs.build-tag }}";
+            const branch = "${{ github.ref_name }}";
 
             try {
               const existingRef = await github.rest.git.getRef({
@@ -1159,12 +1104,6 @@ jobs:
               console.log(`Tag ${tag} created successfully.`);
             }
 
-            // TODO: check how GitHub releases looks for proxy/compute releases and enable them if they're ok
-            if (context.ref !== 'refs/heads/release') {
-              console.log(`GitHub release skipped for ${context.ref}.`);
-              return;
-            }
-
             try {
               const existingRelease = await github.rest.repos.getReleaseByTag({
                 owner: context.repo.owner,
@@ -1179,11 +1118,48 @@ jobs:
               }
 
               console.log(`Release for tag ${tag} does not exist. Creating it...`);
+
+              // Find the PR number using the commit SHA
+              const pullRequests = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'closed',
+                base: branch,
+              });
+
+              const pr = pullRequests.data.find(pr => pr.merge_commit_sha === context.sha);
+              const prNumber = pr ? pr.number : null;
+
+              // Find the previous release on the branch
+              const releases = await github.rest.repos.listReleases({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+              });
+
+              const branchReleases = releases.data
+                .filter((release) => {
+                  const regex = new RegExp(`^${branch}-\\d+$`);
+                  return regex.test(release.tag_name) && !release.draft && !release.prerelease;
+                })
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+              const previousTag = branchReleases.length > 0 ? branchReleases[0].tag_name : null;
+
+              const releaseNotes = [
+                prNumber
+                  ? `Release PR https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${prNumber}.`
+                  : 'Release PR not found.',
+                previousTag
+                  ? `Diff with the previous release https://github.com/${context.repo.owner}/${context.repo.repo}/compare/${previousTag}...${tag}.`
+                  : `No previous release found on branch ${branch}.`,
+              ].join('\n\n');
+
               await github.rest.repos.createRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 tag_name: tag,
-                generate_release_notes: true,
+                body: releaseNotes,
               });
               console.log(`Release for tag ${tag} created successfully.`);
             }
@@ -1333,7 +1309,7 @@ jobs:
           done
 
   pin-build-tools-image:
-    needs: [ build-build-tools-image, promote-images, build-and-test-locally ]
+    needs: [ build-build-tools-image, promote-images-prod, build-and-test-locally ]
     if: github.ref_name == 'main'
     uses: ./.github/workflows/pin-build-tools-image.yml
     with:
@@ -1356,7 +1332,7 @@ jobs:
       - build-and-test-locally
       - check-codestyle-python
       - check-codestyle-rust
-      - promote-images
+      - promote-images-dev
       - test-images
       - trigger-custom-extensions-build-and-wait
     runs-on: ubuntu-22.04
