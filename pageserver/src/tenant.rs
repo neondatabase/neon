@@ -1555,6 +1555,9 @@ impl Tenant {
             }
         }
 
+        // TODO(vlad): Could go to S3 if the secondary is freezing cold and hasn't even
+        // pulled the first heatmap. Not entirely necessary since the storage controller
+        // will kick the secondary in any case and cause a download.
         let maybe_heatmap = self.read_on_disk_heatmap().await;
 
         let timelines = self
