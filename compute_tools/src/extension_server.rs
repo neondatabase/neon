@@ -258,14 +258,11 @@ pub fn create_control_files(remote_extensions: &RemoteExtSpec, pgbin: &str) {
 async fn download_extension_tar(ext_remote_storage: &str, ext_path: &str) -> Result<Bytes> {
     let uri = format!("{}/{}", ext_remote_storage, ext_path);
 
-    info!("Download extension {:?} from uri {:?}", ext_path, uri);
+    info!("Download extension {} from uri {}", ext_path, uri);
 
     match do_extension_server_request(&uri).await {
         Ok(resp) => {
-            info!(
-                "Successfully downloaded remote extension data {:?}",
-                ext_path
-            );
+            info!("Successfully downloaded remote extension data {}", ext_path);
             REMOTE_EXT_REQUESTS_TOTAL
                 .with_label_values(&[&StatusCode::OK.to_string()])
                 .inc();
@@ -285,7 +282,10 @@ async fn download_extension_tar(ext_remote_storage: &str, ext_path: &str) -> Res
 async fn do_extension_server_request(uri: &str) -> Result<Bytes, (String, String)> {
     let resp = reqwest::get(uri).await.map_err(|e| {
         (
-            format!("could not perform remote extensions server request: {}", e),
+            format!(
+                "could not perform remote extensions server request: {:?}",
+                e
+            ),
             UNKNOWN_HTTP_STATUS.to_string(),
         )
     })?;
@@ -295,7 +295,7 @@ async fn do_extension_server_request(uri: &str) -> Result<Bytes, (String, String
         StatusCode::OK => match resp.bytes().await {
             Ok(resp) => Ok(resp),
             Err(e) => Err((
-                format!("could not read remote extensions server response: {}", e),
+                format!("could not read remote extensions server response: {:?}", e),
                 // It's fine to return and report error with status as 200 OK,
                 // because we still failed to read the response.
                 status.to_string(),
