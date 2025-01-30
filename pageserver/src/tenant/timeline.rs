@@ -1816,8 +1816,8 @@ impl Timeline {
                     true
                 }
             } else {
-                // this is double-shutdown, ignore it
-                false
+                // this is double-shutdown, it'll be a no-op
+                true
             };
 
             // we shut down walreceiver above, so, we won't add anything more
