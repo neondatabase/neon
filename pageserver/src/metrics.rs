@@ -131,6 +131,16 @@ pub(crate) static LAYERS_PER_READ_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static DELTAS_PER_READ_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
+    // We expect this to be low because of Postgres checkpoints. Let's see if that holds.
+    register_histogram!(
+        "pageserver_deltas_per_read_global",
+        "Number of delta pages applied to image page per read",
+        vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0],
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) static CONCURRENT_INITDBS: Lazy<UIntGauge> = Lazy::new(|| {
     register_uint_gauge!(
         "pageserver_concurrent_initdb",
@@ -3919,6 +3929,7 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
     // histograms
     [
         &LAYERS_PER_READ_GLOBAL,
+        &DELTAS_PER_READ_GLOBAL,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,
