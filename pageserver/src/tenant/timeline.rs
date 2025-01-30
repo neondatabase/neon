@@ -2028,8 +2028,16 @@ impl Timeline {
     pub(crate) async fn download_layer(
         &self,
         layer_file_name: &LayerName,
-    ) -> anyhow::Result<Option<bool>> {
-        let Some(layer) = self.find_layer(layer_file_name).await? else {
+    ) -> Result<Option<bool>, super::storage_layer::layer::DownloadError> {
+        let Some(layer) = self
+            .find_layer(layer_file_name)
+            .await
+            .map_err(|e| match e {
+                layer_manager::Shutdown => {
+                    super::storage_layer::layer::DownloadError::TimelineShutdown
+                }
+            })?
+        else {
             return Ok(None);
         };
 
