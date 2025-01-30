@@ -723,9 +723,16 @@ impl TenantShard {
                     modified = true;
                 }
                 while self.intent.secondary.len() > 1 {
-                    // We have no particular preference for one secondary location over another: just
-                    // arbitrarily drop from the end
-                    self.intent.pop_secondary(scheduler);
+                    // If we have multiple secondaries (e.g. when transitioning from Attached to Secondary and
+                    // having just demoted our attached location), then we should prefer to keep the location
+                    // in our preferred AZ.  Tenants in Secondary mode want to be in the preferred AZ so that
+                    // they have a warm location to become attached when transitioning back into Attached.
+
+                    let mut candidates = self.intent.get_secondary().clone();
+                    // Sort to get secondaries outside preferred AZ last
+                    candidates.sort_by_key(|n| scheduler.get_node_az(n).as_ref() != self.preferred_az());
+                    let secondary_to_remove = candidates.pop().unwrap();
+                    self.intent.remove_secondary(scheduler, secondary_to_remove);
                     modified = true;
                 }
             }
