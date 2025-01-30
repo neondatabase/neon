@@ -136,7 +136,6 @@ async fn send_proposer_elected(
         term,
         start_streaming_at: lsn,
         term_history: history,
-        timeline_start_lsn: lsn,
     });
 
     tli.process_msg(&proposer_elected_request).await?;
