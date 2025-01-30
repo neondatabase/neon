@@ -1468,7 +1468,13 @@ async fn layer_download_handler(
     let downloaded = timeline
         .download_layer(&layer_name)
         .await
-        .map_err(ApiError::InternalServerError)?;
+        .map_err(|e| match e {
+            tenant::storage_layer::layer::DownloadError::TimelineShutdown
+            | tenant::storage_layer::layer::DownloadError::DownloadCancelled => {
+                ApiError::ShuttingDown
+            }
+            other => ApiError::InternalServerError(other.into()),
+        })?;
 
     match downloaded {
         Some(true) => json_response(StatusCode::OK, ()),
