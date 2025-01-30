@@ -65,7 +65,6 @@ typedef enum {
 	SLRU_MULTIXACT_OFFSETS
 } SlruKind;
 
-
 /*--
  * supertype of all the Neon*Request structs below.
  *

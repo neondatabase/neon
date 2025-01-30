@@ -788,6 +788,27 @@ prefetch_read(PrefetchRequest *slot)
 	}
 }
 
+
+/*
+ * Wait completion of previosly registered prefetch request.
+ * Prefetch result should be placed in LFC by prefetch_wait_for.
+ */
+bool
+prefetch_receive(BufferTag tag)
+{
+	PrfHashEntry *entry;
+	PrefetchRequest hashkey;
+
+	hashkey.buftag = tag;
+	entry = prfh_lookup(MyPState->prf_hash, &hashkey);
+	if (entry != NULL && prefetch_wait_for(entry->slot->my_ring_index))
+	{
+		prefetch_set_unused(entry->slot->my_ring_index);
+		return true;
+	}
+	return false;
+}
+
 /*
  * Disconnect hook - drop prefetches when the connection drops
  *
