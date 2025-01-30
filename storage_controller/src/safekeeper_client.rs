@@ -95,7 +95,6 @@ impl SafekeeperClient {
         )
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn get_utilization(&self) -> Result<SafekeeperUtilization> {
         measured_request!(
             "utilization",

@@ -32,6 +32,9 @@ pub enum Error {
     /// Status is not ok; parsed error in body as `HttpErrorBody`.
     #[error("safekeeper API: {1}")]
     ApiError(StatusCode, String),
+
+    #[error("Cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
