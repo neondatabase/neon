@@ -53,8 +53,8 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     if [ $pg_version -ge 16 ]; then
         TMPDIR=$(mktemp -d)
         docker cp $TEST_CONTAINER_NAME:/ext-src/pg_hint_plan-src/data $TMPDIR/data
+        docker compose cp ext-src neon-test-extensions:/
         for i in {1..3}; do
-          docker compose cp ext-src pcompute${i}:/
           # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
           # It cannot be moved to Dockerfile now because the database directory is created after the start of the container
           echo Adding dummy config pcompute${i}
