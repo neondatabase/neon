@@ -283,14 +283,17 @@ async fn auth_quirks(
     };
 
     debug!("fetching authentication info and allowlists");
-    let allowed_ips = api.get_allowed_ips(ctx, &info).await?;
 
     // check allowed list
-    if config.ip_allowlist_check_enabled
-        && !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips)
-    {
-        return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
-    }
+    let allowed_ips = if config.ip_allowlist_check_enabled {
+        let allowed_ips = api.get_allowed_ips(ctx, &info).await?;
+        if !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips) {
+            return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
+        }
+        allowed_ips
+    } else {
+        Cached::new_uncached(Arc::new(vec![]))
+    };
 
     // check if a VPC endpoint ID is coming in and if yes, if it's allowed
     let access_blocks = api.get_block_public_or_vpc_access(ctx, &info).await?;
