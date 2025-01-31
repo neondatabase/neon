@@ -28,7 +28,7 @@ fn do_control_plane_request(
         .map_err(|e| {
             (
                 true,
-                format!("could not perform spec request to control plane: {}", e),
+                format!("could not perform spec request to control plane: {:?}", e),
                 UNKNOWN_HTTP_STATUS.to_string(),
             )
         })?;
@@ -39,7 +39,7 @@ fn do_control_plane_request(
             Ok(spec_resp) => Ok(spec_resp),
             Err(e) => Err((
                 true,
-                format!("could not deserialize control plane response: {}", e),
+                format!("could not deserialize control plane response: {:?}", e),
                 status.to_string(),
             )),
         },

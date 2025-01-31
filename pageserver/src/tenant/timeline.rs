@@ -116,7 +116,7 @@ use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::{TimelineMetrics, LAYERS_PER_READ_GLOBAL};
+use crate::metrics::{TimelineMetrics, DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_GLOBAL};
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
 use pageserver_api::reltag::RelTag;
@@ -340,6 +340,8 @@ pub struct Timeline {
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
     pub latest_gc_cutoff_lsn: Rcu<Lsn>,
+
+    pub(crate) gc_compaction_layer_update_lock: tokio::sync::RwLock<()>,
 
     // List of child timelines and their branch points. This is needed to avoid
     // garbage collecting data that is still needed by the child timelines.
@@ -1195,6 +1197,7 @@ impl Timeline {
                             return (key, Err(err));
                         }
                     };
+                    DELTAS_PER_READ_GLOBAL.observe(converted.num_deltas() as f64);
 
                     // The walredo module expects the records to be descending in terms of Lsn.
                     // And we submit the IOs in that order, so, there shuold be no need to sort here.
@@ -1241,6 +1244,7 @@ impl Timeline {
             }
 
             for _ in &results {
+                self.metrics.layers_per_read.observe(layers_visited as f64);
                 LAYERS_PER_READ_GLOBAL.observe(layers_visited as f64);
             }
         }
@@ -2024,8 +2028,16 @@ impl Timeline {
     pub(crate) async fn download_layer(
         &self,
         layer_file_name: &LayerName,
-    ) -> anyhow::Result<Option<bool>> {
-        let Some(layer) = self.find_layer(layer_file_name).await? else {
+    ) -> Result<Option<bool>, super::storage_layer::layer::DownloadError> {
+        let Some(layer) = self
+            .find_layer(layer_file_name)
+            .await
+            .map_err(|e| match e {
+                layer_manager::Shutdown => {
+                    super::storage_layer::layer::DownloadError::TimelineShutdown
+                }
+            })?
+        else {
             return Ok(None);
         };
 
@@ -2435,6 +2447,7 @@ impl Timeline {
                 shard_identity,
                 pg_version,
                 layers: Default::default(),
+                gc_compaction_layer_update_lock: tokio::sync::RwLock::new(()),
 
                 walredo_mgr,
                 walreceiver: Mutex::new(None),
@@ -3477,6 +3490,9 @@ impl Timeline {
         // the current get request (read-path cannot "look back" and notice the new
         // image layer).
         let _gc_cutoff_holder = timeline.get_latest_gc_cutoff_lsn();
+
+        // See `compaction::compact_with_gc` for why we need this.
+        let _guard = timeline.gc_compaction_layer_update_lock.read().await;
 
         loop {
             if cancel.is_cancelled() {
