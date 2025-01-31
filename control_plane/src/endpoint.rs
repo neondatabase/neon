@@ -53,6 +53,7 @@ use compute_api::spec::Role;
 use nix::sys::signal::kill;
 use nix::sys::signal::Signal;
 use pageserver_api::shard::ShardStripeSize;
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -61,7 +62,7 @@ use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
 use crate::storage_controller::StorageController;
 
-use compute_api::responses::{ComputeState, ComputeStatus};
+use compute_api::responses::{ComputeStatus, ComputeStatusResponse};
 use compute_api::spec::{Cluster, ComputeFeature, ComputeMode, ComputeSpec};
 
 // contents of a endpoint.json file
@@ -75,6 +76,7 @@ pub struct EndpointConf {
     http_port: u16,
     pg_version: u32,
     skip_pg_catalog_updates: bool,
+    drop_subscriptions_before_start: bool,
     features: Vec<ComputeFeature>,
 }
 
@@ -142,6 +144,7 @@ impl ComputeControlPlane {
         pg_version: u32,
         mode: ComputeMode,
         skip_pg_catalog_updates: bool,
+        drop_subscriptions_before_start: bool,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let http_port = http_port.unwrap_or_else(|| self.get_port() + 1);
@@ -161,6 +164,7 @@ impl ComputeControlPlane {
             // with this we basically test a case of waking up an idle compute, where
             // we also skip catalog updates in the cloud.
             skip_pg_catalog_updates,
+            drop_subscriptions_before_start,
             features: vec![],
         });
 
@@ -176,6 +180,7 @@ impl ComputeControlPlane {
                 pg_port,
                 pg_version,
                 skip_pg_catalog_updates,
+                drop_subscriptions_before_start,
                 features: vec![],
             })?,
         )?;
@@ -239,6 +244,7 @@ pub struct Endpoint {
     // Optimizations
     skip_pg_catalog_updates: bool,
 
+    drop_subscriptions_before_start: bool,
     // Feature flags
     features: Vec<ComputeFeature>,
 }
@@ -290,6 +296,7 @@ impl Endpoint {
             tenant_id: conf.tenant_id,
             pg_version: conf.pg_version,
             skip_pg_catalog_updates: conf.skip_pg_catalog_updates,
+            drop_subscriptions_before_start: conf.drop_subscriptions_before_start,
             features: conf.features,
         })
     }
@@ -315,6 +322,10 @@ impl Endpoint {
         // and can cause errors like 'no unpinned buffers available', see
         // <https://github.com/neondatabase/neon/issues/9956>
         conf.append("shared_buffers", "1MB");
+        // Postgres defaults to effective_io_concurrency=1, which does not exercise the pageserver's
+        // batching logic.  Set this to 2 so that we exercise the code a bit without letting
+        // individual tests do a lot of concurrent work on underpowered test machines
+        conf.append("effective_io_concurrency", "2");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
         conf.append("wal_level", "logical");
@@ -580,6 +591,7 @@ impl Endpoint {
             features: self.features.clone(),
             swap_size_bytes: None,
             disk_quota_bytes: None,
+            disable_lfc_resizing: None,
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
@@ -618,6 +630,8 @@ impl Endpoint {
             pgbouncer_settings: None,
             shard_stripe_size: Some(shard_stripe_size),
             local_proxy_config: None,
+            reconfigure_concurrency: 1,
+            drop_subscriptions_before_start: self.drop_subscriptions_before_start,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
@@ -732,7 +746,7 @@ impl Endpoint {
     }
 
     // Call the /status HTTP API
-    pub async fn get_status(&self) -> Result<ComputeState> {
+    pub async fn get_status(&self) -> Result<ComputeStatusResponse> {
         let client = reqwest::Client::new();
 
         let response = client
@@ -808,7 +822,7 @@ impl Endpoint {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(120))
             .build()
             .unwrap();
         let response = client
@@ -817,6 +831,7 @@ impl Endpoint {
                 self.http_address.ip(),
                 self.http_address.port()
             ))
+            .header(CONTENT_TYPE.as_str(), "application/json")
             .body(format!(
                 "{{\"spec\":{}}}",
                 serde_json::to_string_pretty(&spec)?

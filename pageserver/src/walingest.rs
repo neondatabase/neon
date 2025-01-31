@@ -308,7 +308,7 @@ impl WalIngest {
             epoch -= 1;
         }
 
-        Ok((epoch as u64) << 32 | xid as u64)
+        Ok(((epoch as u64) << 32) | xid as u64)
     }
 
     async fn ingest_clear_vm_bits(
@@ -499,7 +499,13 @@ impl WalIngest {
 
                 let content = modification
                     .tline
-                    .get_rel_page_at_lsn(src_rel, blknum, Version::Modified(modification), ctx)
+                    .get_rel_page_at_lsn(
+                        src_rel,
+                        blknum,
+                        Version::Modified(modification),
+                        ctx,
+                        crate::tenant::storage_layer::IoConcurrency::sequential(),
+                    )
                     .await?;
                 modification.put_rel_page_image(dst_rel, blknum, content)?;
                 num_blocks_copied += 1;
@@ -582,18 +588,21 @@ impl WalIngest {
                 forknum: FSM_FORKNUM,
             };
 
+            // Zero out the last remaining FSM page, if this shard owns it. We are not precise here,
+            // and instead of digging in the FSM bitmap format we just clear the whole page.
             let fsm_logical_page_no = blkno / pg_constants::SLOTS_PER_FSM_PAGE;
             let mut fsm_physical_page_no = fsm_logical_to_physical(fsm_logical_page_no);
-            if blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0 {
-                // Tail of last remaining FSM page has to be zeroed.
-                // We are not precise here and instead of digging in FSM bitmap format just clear the whole page.
+            if blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0
+                && self
+                    .shard
+                    .is_key_local(&rel_block_to_key(rel, fsm_physical_page_no))
+            {
                 modification.put_rel_page_image_zero(rel, fsm_physical_page_no)?;
                 fsm_physical_page_no += 1;
             }
-            // TODO: re-examine the None case here wrt. sharding; should we error?
+            // Truncate this shard's view of the FSM relation size, if it even has one.
             let nblocks = get_relsize(modification, rel, ctx).await?.unwrap_or(0);
             if nblocks > fsm_physical_page_no {
-                // check if something to do: FSM is larger than truncate position
                 self.put_rel_truncation(modification, rel, fsm_physical_page_no, ctx)
                     .await?;
             }
@@ -617,7 +626,7 @@ impl WalIngest {
             // tail bits in the last remaining map page, representing truncated heap
             // blocks, need to be cleared. This is not only tidy, but also necessary
             // because we don't get a chance to clear the bits if the heap is extended
-            // again.
+            // again. Only do this on the shard that owns the page.
             if (trunc_byte != 0 || trunc_offs != 0)
                 && self.shard.is_key_local(&rel_block_to_key(rel, vm_page_no))
             {
@@ -631,10 +640,9 @@ impl WalIngest {
                 )?;
                 vm_page_no += 1;
             }
-            // TODO: re-examine the None case here wrt. sharding; should we error?
+            // Truncate this shard's view of the VM relation size, if it even has one.
             let nblocks = get_relsize(modification, rel, ctx).await?.unwrap_or(0);
             if nblocks > vm_page_no {
-                // check if something to do: VM is larger than truncate position
                 self.put_rel_truncation(modification, rel, vm_page_no, ctx)
                     .await?;
             }
@@ -875,22 +883,24 @@ impl WalIngest {
         // will block waiting for the last valid LSN to advance up to
         // it. So we use the previous record's LSN in the get calls
         // instead.
-        for segno in modification
-            .tline
-            .list_slru_segments(SlruKind::Clog, Version::Modified(modification), ctx)
-            .await?
-        {
-            let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
+        if modification.tline.get_shard_identity().is_shard_zero() {
+            for segno in modification
+                .tline
+                .list_slru_segments(SlruKind::Clog, Version::Modified(modification), ctx)
+                .await?
+            {
+                let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
 
-            let may_delete = dispatch_pgversion!(modification.tline.pg_version, {
-                pgv::nonrelfile_utils::slru_may_delete_clogsegment(segpage, pageno)
-            });
+                let may_delete = dispatch_pgversion!(modification.tline.pg_version, {
+                    pgv::nonrelfile_utils::slru_may_delete_clogsegment(segpage, pageno)
+                });
 
-            if may_delete {
-                modification
-                    .drop_slru_segment(SlruKind::Clog, segno, ctx)
-                    .await?;
-                trace!("Drop CLOG segment {:>04X}", segno);
+                if may_delete {
+                    modification
+                        .drop_slru_segment(SlruKind::Clog, segno, ctx)
+                        .await?;
+                    trace!("Drop CLOG segment {:>04X}", segno);
+                }
             }
         }
 
@@ -1045,16 +1055,18 @@ impl WalIngest {
 
         // Delete all the segments except the last one. The last segment can still
         // contain, possibly partially, valid data.
-        while segment != endsegment {
-            modification
-                .drop_slru_segment(SlruKind::MultiXactMembers, segment as u32, ctx)
-                .await?;
+        if modification.tline.get_shard_identity().is_shard_zero() {
+            while segment != endsegment {
+                modification
+                    .drop_slru_segment(SlruKind::MultiXactMembers, segment as u32, ctx)
+                    .await?;
 
-            /* move to next segment, handling wraparound correctly */
-            if segment == maxsegment {
-                segment = 0;
-            } else {
-                segment += 1;
+                /* move to next segment, handling wraparound correctly */
+                if segment == maxsegment {
+                    segment = 0;
+                } else {
+                    segment += 1;
+                }
             }
         }
 
@@ -1483,6 +1495,7 @@ mod tests {
     use super::*;
     use crate::tenant::harness::*;
     use crate::tenant::remote_timeline_client::{remote_initdb_archive_path, INITDB_PATH};
+    use crate::tenant::storage_layer::IoConcurrency;
     use postgres_ffi::RELSEG_SIZE;
 
     use crate::DEFAULT_PG_VERSION;
@@ -1526,6 +1539,7 @@ mod tests {
     #[tokio::test]
     async fn test_relsize() -> Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_relsize").await?.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -1593,7 +1607,13 @@ mod tests {
         // Check page contents at each LSN
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x20)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x20)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 2")
@@ -1601,7 +1621,13 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x30)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x30)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
@@ -1609,14 +1635,26 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x40)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x40)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x40)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x40)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
@@ -1624,21 +1662,39 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    2,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 2 at 5")
@@ -1661,14 +1717,26 @@ mod tests {
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x60)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x60)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x60)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x60)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
@@ -1683,7 +1751,13 @@ mod tests {
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    2,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 2 at 5")
@@ -1716,14 +1790,26 @@ mod tests {
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x70)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x70)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             ZERO_PAGE
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x70)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x70)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1")
@@ -1744,7 +1830,13 @@ mod tests {
         for blk in 2..1500 {
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blk, Version::Lsn(Lsn(0x80)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blk,
+                        Version::Lsn(Lsn(0x80)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 ZERO_PAGE
@@ -1752,7 +1844,13 @@ mod tests {
         }
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1500, Version::Lsn(Lsn(0x80)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1500,
+                    Version::Lsn(Lsn(0x80)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1500")
@@ -1845,6 +1943,7 @@ mod tests {
             .await?
             .load()
             .await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -1897,7 +1996,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(lsn), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(lsn),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -1925,7 +2030,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x60)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x60)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -1944,7 +2055,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x50)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x50)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -1981,7 +2098,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x80)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x80)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -2157,10 +2280,12 @@ mod tests {
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
                 let interpreted = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
-                    modification.tline.get_shard_identity(),
+                    &[*modification.tline.get_shard_identity()],
                     lsn,
                     modification.tline.pg_version,
                 )
+                .unwrap()
+                .remove(modification.tline.get_shard_identity())
                 .unwrap();
 
                 walingest

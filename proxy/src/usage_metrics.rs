@@ -396,17 +396,18 @@ async fn upload_backup_events(
         TimeoutOrCancel::caused_by_cancel,
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_UPLOAD_MAX_RETRIES,
-        "request_data_upload",
+        "usage_metrics_upload",
         cancel,
     )
     .await
     .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
     .and_then(|x| x)
-    .context("request_data_upload")?;
+    .with_context(|| format!("usage_metrics_upload: path={remote_path}"))?;
     Ok(())
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use std::fs;
     use std::io::BufReader;

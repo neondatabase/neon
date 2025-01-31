@@ -12,6 +12,7 @@ use rand::{Rng, SeedableRng};
 use tokio::time::{Duration, Instant};
 use tracing::info;
 
+use crate::ext::LockExt;
 use crate::intern::EndpointIdInt;
 
 pub struct GlobalRateLimiter {
@@ -137,6 +138,12 @@ impl RateBucketInfo {
         Self::new(200, Duration::from_secs(600)),
     ];
 
+    // For all the sessions will be cancel key. So this limit is essentially global proxy limit.
+    pub const DEFAULT_REDIS_SET: [Self; 2] = [
+        Self::new(100_000, Duration::from_secs(1)),
+        Self::new(50_000, Duration::from_secs(10)),
+    ];
+
     /// All of these are per endpoint-maskedip pair.
     /// Context: 4096 rounds of pbkdf2 take about 1ms of cpu time to execute (1 milli-cpu-second or 1mcpus).
     ///
@@ -246,12 +253,13 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         let n = self.map.shards().len();
         // this lock is ok as the periodic cycle of do_gc makes this very unlikely to collide
         // (impossible, infact, unless we have 2048 threads)
-        let shard = self.rand.lock().unwrap().gen_range(0..n);
+        let shard = self.rand.lock_propagate_poison().gen_range(0..n);
         self.map.shards()[shard].write().clear();
     }
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use std::hash::BuildHasherDefault;
     use std::time::Duration;

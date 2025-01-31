@@ -24,7 +24,9 @@ pub struct Key {
 
 /// When working with large numbers of Keys in-memory, it is more efficient to handle them as i128 than as
 /// a struct of fields.
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Default, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize, Debug,
+)]
 pub struct CompactKey(i128);
 
 /// The storage key size.
@@ -565,6 +567,10 @@ impl Key {
             && self.field5 == 0
             && self.field6 == u32::MAX
     }
+
+    pub fn is_slru_dir_key(&self) -> bool {
+        slru_dir_kind(self).is_some()
+    }
 }
 
 #[inline(always)]
@@ -702,7 +708,7 @@ pub fn repl_origin_key_range() -> Range<Key> {
 /// Non inherited range for vectored get.
 pub const NON_INHERITED_RANGE: Range<Key> = AUX_FILES_KEY..AUX_FILES_KEY.next();
 /// Sparse keyspace range for vectored get. Missing key error will be ignored for this range.
-pub const NON_INHERITED_SPARSE_RANGE: Range<Key> = Key::metadata_key_range();
+pub const SPARSE_RANGE: Range<Key> = Key::metadata_key_range();
 
 impl Key {
     // AUX_FILES currently stores only data for logical replication (slots etc), and
@@ -710,7 +716,42 @@ impl Key {
     // switch (and generally it likely should be optional), so ignore these.
     #[inline(always)]
     pub fn is_inherited_key(self) -> bool {
-        !NON_INHERITED_RANGE.contains(&self) && !NON_INHERITED_SPARSE_RANGE.contains(&self)
+        if self.is_sparse() {
+            self.is_inherited_sparse_key()
+        } else {
+            !NON_INHERITED_RANGE.contains(&self)
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_sparse(self) -> bool {
+        self.field1 >= METADATA_KEY_BEGIN_PREFIX && self.field1 < METADATA_KEY_END_PREFIX
+    }
+
+    /// Check if the key belongs to the inherited keyspace.
+    fn is_inherited_sparse_key(self) -> bool {
+        debug_assert!(self.is_sparse());
+        self.field1 == RELATION_SIZE_PREFIX
+    }
+
+    pub fn sparse_non_inherited_keyspace() -> Range<Key> {
+        // The two keys are adjacent; if we will have non-adjancent keys in the future, we should return a keyspace
+        debug_assert_eq!(AUX_KEY_PREFIX + 1, REPL_ORIGIN_KEY_PREFIX);
+        Key {
+            field1: AUX_KEY_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }..Key {
+            field1: REPL_ORIGIN_KEY_PREFIX + 1,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }
     }
 
     #[inline(always)]

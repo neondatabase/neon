@@ -8,7 +8,7 @@ license.workspace = true
 default = []
 # Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
 # which adds some runtime cost to run tests on outage conditions
-testing = ["fail/failpoints", "pageserver_api/testing", "wal_decoder/testing"]
+testing = ["fail/failpoints", "pageserver_api/testing", "wal_decoder/testing", "pageserver_client/testing"]
 
 [dependencies]
 anyhow.workspace = true
@@ -16,6 +16,7 @@ arc-swap.workspace = true
 async-compression.workspace = true
 async-stream.workspace = true
 bit_field.workspace = true
+bincode.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
 camino.workspace = true
@@ -35,7 +36,7 @@ itertools.workspace = true
 md5.workspace = true
 nix.workspace = true
 # hack to get the number of worker threads tokio uses
-num_cpus = { version = "1.15" }
+num_cpus.workspace = true
 num-traits.workspace = true
 once_cell.workspace = true
 pin-project-lite.workspace = true
@@ -44,6 +45,7 @@ postgres_backend.workspace = true
 postgres-protocol.workspace = true
 postgres-types.workspace = true
 postgres_initdb.workspace = true
+pprof.workspace = true
 rand.workspace = true
 range-set-blaze = { version = "0.1.16", features = ["alloc"] }
 regex.workspace = true
@@ -108,3 +110,11 @@ harness = false
 [[bench]]
 name = "bench_ingest"
 harness = false
+
+[[bench]]
+name = "upload_queue"
+harness = false
+
+[[bin]]
+name = "test_helper_slow_client_reads"
+required-features = [ "testing" ]

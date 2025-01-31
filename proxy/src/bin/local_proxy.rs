@@ -7,13 +7,14 @@ use std::time::Duration;
 use anyhow::{bail, ensure, Context};
 use camino::{Utf8Path, Utf8PathBuf};
 use compute_api::spec::LocalProxySpec;
-use dashmap::DashMap;
 use futures::future::Either;
 use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::local::{LocalBackend, JWKS_ROLE_MAP};
 use proxy::auth::{self};
-use proxy::cancellation::CancellationHandlerMain;
-use proxy::config::{self, AuthenticationConfig, HttpConfig, ProxyConfig, RetryConfig};
+use proxy::cancellation::CancellationHandler;
+use proxy::config::{
+    self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig,
+};
 use proxy::control_plane::locks::ApiLocks;
 use proxy::control_plane::messages::{EndpointJwksResponse, JwksSettings};
 use proxy::http::health_server::AppMetrics;
@@ -25,6 +26,7 @@ use proxy::rate_limiter::{
 use proxy::scram::threadpool::ThreadPool;
 use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::{self, GlobalConnPoolOptions};
+use proxy::tls::client_config::compute_client_config_with_root_certs;
 use proxy::types::RoleName;
 use proxy::url::ApiUrl;
 
@@ -208,11 +210,7 @@ async fn main() -> anyhow::Result<()> {
         auth_backend,
         http_listener,
         shutdown.clone(),
-        Arc::new(CancellationHandlerMain::new(
-            Arc::new(DashMap::new()),
-            None,
-            proxy::metrics::CancellationSource::Local,
-        )),
+        Arc::new(CancellationHandler::new(&config.connect_to_compute, None)),
         endpoint_rate_limiter,
     );
 
@@ -268,10 +266,15 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         max_response_size_bytes: args.sql_over_http.sql_over_http_max_response_size_bytes,
     };
 
+    let compute_config = ComputeConfig {
+        retry: RetryConfig::parse(RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES)?,
+        tls: Arc::new(compute_client_config_with_root_certs()?),
+        timeout: Duration::from_secs(2),
+    };
+
     Ok(Box::leak(Box::new(ProxyConfig {
         tls_config: None,
         metric_collection: None,
-        allow_self_signed_compute: false,
         http_config,
         authentication_config: AuthenticationConfig {
             jwks_cache: JwkCache::default(),
@@ -290,9 +293,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         region: "local".into(),
         wake_compute_retry_config: RetryConfig::parse(RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)?,
         connect_compute_locks,
-        connect_to_compute_retry_config: RetryConfig::parse(
-            RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES,
-        )?,
+        connect_to_compute: compute_config,
     })))
 }
 

@@ -19,6 +19,10 @@ pub type PgIdent = String;
 /// String type alias representing Postgres extension version
 pub type ExtVersion = String;
 
+fn default_reconfigure_concurrency() -> usize {
+    1
+}
+
 /// Cluster spec or configuration represented as an optional number of
 /// delta operations + final cluster state description.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -63,11 +67,20 @@ pub struct ComputeSpec {
     #[serde(default)]
     pub disk_quota_bytes: Option<u64>,
 
+    /// Disables the vm-monitor behavior that resizes LFC on upscale/downscale, instead relying on
+    /// the initial size of LFC.
+    ///
+    /// This is intended for use when the LFC size is being overridden from the default but
+    /// autoscaling is still enabled, and we don't want the vm-monitor to interfere with the custom
+    /// LFC sizing.
+    #[serde(default)]
+    pub disable_lfc_resizing: Option<bool>,
+
     /// Expected cluster state at the end of transition process.
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
 
-    /// An optinal hint that can be passed to speed up startup time if we know
+    /// An optional hint that can be passed to speed up startup time if we know
     /// that no pg catalog mutations (like role creation, database creation,
     /// extension creation) need to be done on the actual database to start.
     #[serde(default)] // Default false
@@ -86,9 +99,7 @@ pub struct ComputeSpec {
     // etc. GUCs in cluster.settings. TODO: Once the control plane has been
     // updated to fill these fields, we can make these non optional.
     pub tenant_id: Option<TenantId>,
-
     pub timeline_id: Option<TimelineId>,
-
     pub pageserver_connstring: Option<String>,
 
     #[serde(default)]
@@ -113,6 +124,27 @@ pub struct ComputeSpec {
     /// Local Proxy configuration used for JWT authentication
     #[serde(default)]
     pub local_proxy_config: Option<LocalProxySpec>,
+
+    /// Number of concurrent connections during the parallel RunInEachDatabase
+    /// phase of the apply config process.
+    ///
+    /// We need a higher concurrency during reconfiguration in case of many DBs,
+    /// but instance is already running and used by client. We can easily get out of
+    /// `max_connections` limit, and the current code won't handle that.
+    ///
+    /// Default is 1, but also allow control plane to override this value for specific
+    /// projects. It's also recommended to bump `superuser_reserved_connections` +=
+    /// `reconfigure_concurrency` for such projects to ensure that we always have
+    /// enough spare connections for reconfiguration process to succeed.
+    #[serde(default = "default_reconfigure_concurrency")]
+    pub reconfigure_concurrency: usize,
+
+    /// If set to true, the compute_ctl will drop all subscriptions before starting the
+    /// compute. This is needed when we start an endpoint on a branch, so that child
+    /// would not compete with parent branch subscriptions
+    /// over the same replication content from publisher.
+    #[serde(default)] // Default false
+    pub drop_subscriptions_before_start: bool,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -315,6 +347,9 @@ mod tests {
 
         // Features list defaults to empty vector.
         assert!(spec.features.is_empty());
+
+        // Reconfigure concurrency defaults to 1.
+        assert_eq!(spec.reconfigure_concurrency, 1);
     }
 
     #[test]

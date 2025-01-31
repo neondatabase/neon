@@ -4,8 +4,11 @@
 use anyhow::{anyhow, bail, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use remote_storage::RemotePath;
-use safekeeper_api::models::TimelineTermBumpResponse;
-use serde::{Deserialize, Serialize};
+use safekeeper_api::membership::Configuration;
+use safekeeper_api::models::{
+    PeerInfo, TimelineMembershipSwitchResponse, TimelineTermBumpResponse,
+};
+use safekeeper_api::Term;
 use tokio::fs::{self};
 use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
@@ -31,10 +34,8 @@ use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use crate::control_file;
 use crate::rate_limit::RateLimiter;
 use crate::receive_wal::WalReceivers;
-use crate::safekeeper::{
-    AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, Term, TermLsn,
-};
-use crate::send_wal::WalSenders;
+use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, TermLsn};
+use crate::send_wal::{WalSenders, WalSendersTimelineMetricValues};
 use crate::state::{EvictionState, TimelineMemState, TimelinePersistentState, TimelineState};
 use crate::timeline_guard::ResidenceGuard;
 use crate::timeline_manager::{AtomicStatus, ManagerCtl};
@@ -44,43 +45,20 @@ use crate::wal_backup_partial::PartialRemoteSegment;
 
 use crate::metrics::{FullTimelineInfo, WalStorageMetrics, MISC_OPERATION_SECONDS};
 use crate::wal_storage::{Storage as wal_storage_iface, WalReader};
+use crate::SafeKeeperConf;
 use crate::{debug_dump, timeline_manager, wal_storage};
-use crate::{GlobalTimelines, SafeKeeperConf};
 
-/// Things safekeeper should know about timeline state on peers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PeerInfo {
-    pub sk_id: NodeId,
-    pub term: Term,
-    /// Term of the last entry.
-    pub last_log_term: Term,
-    /// LSN of the last record.
-    pub flush_lsn: Lsn,
-    pub commit_lsn: Lsn,
-    /// Since which LSN safekeeper has WAL.
-    pub local_start_lsn: Lsn,
-    /// When info was received. Serde annotations are not very useful but make
-    /// the code compile -- we don't rely on this field externally.
-    #[serde(skip)]
-    #[serde(default = "Instant::now")]
-    ts: Instant,
-    pub pg_connstr: String,
-    pub http_connstr: String,
-}
-
-impl PeerInfo {
-    fn from_sk_info(sk_info: &SafekeeperTimelineInfo, ts: Instant) -> PeerInfo {
-        PeerInfo {
-            sk_id: NodeId(sk_info.safekeeper_id),
-            term: sk_info.term,
-            last_log_term: sk_info.last_log_term,
-            flush_lsn: Lsn(sk_info.flush_lsn),
-            commit_lsn: Lsn(sk_info.commit_lsn),
-            local_start_lsn: Lsn(sk_info.local_start_lsn),
-            pg_connstr: sk_info.safekeeper_connstr.clone(),
-            http_connstr: sk_info.http_connstr.clone(),
-            ts,
-        }
+fn peer_info_from_sk_info(sk_info: &SafekeeperTimelineInfo, ts: Instant) -> PeerInfo {
+    PeerInfo {
+        sk_id: NodeId(sk_info.safekeeper_id),
+        term: sk_info.term,
+        last_log_term: sk_info.last_log_term,
+        flush_lsn: Lsn(sk_info.flush_lsn),
+        commit_lsn: Lsn(sk_info.commit_lsn),
+        local_start_lsn: Lsn(sk_info.local_start_lsn),
+        pg_connstr: sk_info.safekeeper_connstr.clone(),
+        http_connstr: sk_info.http_connstr.clone(),
+        ts,
     }
 }
 
@@ -211,6 +189,13 @@ impl StateSK {
 
     pub async fn term_bump(&mut self, to: Option<Term>) -> Result<TimelineTermBumpResponse> {
         self.state_mut().term_bump(to).await
+    }
+
+    pub async fn membership_switch(
+        &mut self,
+        to: Configuration,
+    ) -> Result<TimelineMembershipSwitchResponse> {
+        self.state_mut().membership_switch(to).await
     }
 
     /// Close open WAL files to release FDs.
@@ -467,6 +452,7 @@ pub struct Timeline {
     walreceivers: Arc<WalReceivers>,
     timeline_dir: Utf8PathBuf,
     manager_ctl: ManagerCtl,
+    conf: Arc<SafeKeeperConf>,
 
     /// Hold this gate from code that depends on the Timeline's non-shut-down state.  While holding
     /// this gate, you must respect [`Timeline::cancel`]
@@ -489,6 +475,7 @@ impl Timeline {
         timeline_dir: &Utf8Path,
         remote_path: &RemotePath,
         shared_state: SharedState,
+        conf: Arc<SafeKeeperConf>,
     ) -> Arc<Self> {
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
             watch::channel(shared_state.sk.state().commit_lsn);
@@ -516,6 +503,7 @@ impl Timeline {
             gate: Default::default(),
             cancel: CancellationToken::default(),
             manager_ctl: ManagerCtl::new(),
+            conf,
             broker_active: AtomicBool::new(false),
             wal_backup_active: AtomicBool::new(false),
             last_removed_segno: AtomicU64::new(0),
@@ -524,11 +512,14 @@ impl Timeline {
     }
 
     /// Load existing timeline from disk.
-    pub fn load_timeline(conf: &SafeKeeperConf, ttid: TenantTimelineId) -> Result<Arc<Timeline>> {
+    pub fn load_timeline(
+        conf: Arc<SafeKeeperConf>,
+        ttid: TenantTimelineId,
+    ) -> Result<Arc<Timeline>> {
         let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
 
-        let shared_state = SharedState::restore(conf, &ttid)?;
-        let timeline_dir = get_timeline_dir(conf, &ttid);
+        let shared_state = SharedState::restore(conf.as_ref(), &ttid)?;
+        let timeline_dir = get_timeline_dir(conf.as_ref(), &ttid);
         let remote_path = remote_timeline_path(&ttid)?;
 
         Ok(Timeline::new(
@@ -536,6 +527,7 @@ impl Timeline {
             &timeline_dir,
             &remote_path,
             shared_state,
+            conf,
         ))
     }
 
@@ -604,8 +596,7 @@ impl Timeline {
         // it is cancelled, so WAL storage won't be opened again.
         shared_state.sk.close_wal_store();
 
-        let conf = GlobalTimelines::get_global_config();
-        if !only_local && conf.is_wal_backup_enabled() {
+        if !only_local && self.conf.is_wal_backup_enabled() {
             // Note: we concurrently delete remote storage data from multiple
             // safekeepers. That's ok, s3 replies 200 if object doesn't exist and we
             // do some retries anyway.
@@ -691,7 +682,7 @@ impl Timeline {
         {
             let mut shared_state = self.write_shared_state().await;
             shared_state.sk.record_safekeeper_info(&sk_info).await?;
-            let peer_info = PeerInfo::from_sk_info(&sk_info, Instant::now());
+            let peer_info = peer_info_from_sk_info(&sk_info, Instant::now());
             shared_state.peers_info.upsert(&peer_info);
         }
         Ok(())
@@ -721,16 +712,22 @@ impl Timeline {
             return None;
         }
 
-        let (ps_feedback_count, last_ps_feedback) = self.walsenders.get_ps_feedback_stats();
+        let WalSendersTimelineMetricValues {
+            ps_feedback_counter,
+            last_ps_feedback,
+            interpreted_wal_reader_tasks,
+        } = self.walsenders.info_for_metrics();
+
         let state = self.read_shared_state().await;
         Some(FullTimelineInfo {
             ttid: self.ttid,
-            ps_feedback_count,
+            ps_feedback_count: ps_feedback_counter,
             last_ps_feedback,
             wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
             timeline_is_active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: self.last_removed_segno.load(Ordering::Relaxed),
+            interpreted_wal_reader_tasks,
             epoch_start_lsn: state.sk.term_start_lsn(),
             mem_state: state.sk.state().inmem.clone(),
             persisted_state: TimelinePersistentState::clone(state.sk.state()),
@@ -749,7 +746,7 @@ impl Timeline {
         debug_dump::Memory {
             is_cancelled: self.is_cancelled(),
             peers_info_len: state.peers_info.0.len(),
-            walsenders: self.walsenders.get_all(),
+            walsenders: self.walsenders.get_all_public(),
             wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
             active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
@@ -785,6 +782,14 @@ impl Timeline {
     pub async fn term_bump(self: &Arc<Self>, to: Option<Term>) -> Result<TimelineTermBumpResponse> {
         let mut state = self.write_shared_state().await;
         state.sk.term_bump(to).await
+    }
+
+    pub async fn membership_switch(
+        self: &Arc<Self>,
+        to: Configuration,
+    ) -> Result<TimelineMembershipSwitchResponse> {
+        let mut state = self.write_shared_state().await;
+        state.sk.membership_switch(to).await
     }
 
     /// Guts of [`Self::wal_residence_guard`] and [`Self::try_wal_residence_guard`]
@@ -951,7 +956,7 @@ impl WalResidentTimeline {
 
     pub async fn get_walreader(&self, start_lsn: Lsn) -> Result<WalReader> {
         let (_, persisted_state) = self.get_state().await;
-        let enable_remote_read = GlobalTimelines::get_global_config().is_wal_backup_enabled();
+        let enable_remote_read = self.conf.is_wal_backup_enabled();
 
         WalReader::new(
             &self.ttid,
@@ -1061,7 +1066,6 @@ impl ManagerTimeline {
 
     /// Try to switch state Offloaded->Present.
     pub(crate) async fn switch_to_present(&self) -> anyhow::Result<()> {
-        let conf = GlobalTimelines::get_global_config();
         let mut shared = self.write_shared_state().await;
 
         // trying to restore WAL storage
@@ -1069,7 +1073,7 @@ impl ManagerTimeline {
             &self.ttid,
             &self.timeline_dir,
             shared.sk.state(),
-            conf.no_sync,
+            self.conf.no_sync,
         )?;
 
         // updating control file
@@ -1096,7 +1100,7 @@ impl ManagerTimeline {
         // now we can switch shared.sk to Present, shouldn't fail
         let prev_sk = std::mem::replace(&mut shared.sk, StateSK::Empty);
         let cfile_state = prev_sk.take_state();
-        shared.sk = StateSK::Loaded(SafeKeeper::new(cfile_state, wal_store, conf.my_id)?);
+        shared.sk = StateSK::Loaded(SafeKeeper::new(cfile_state, wal_store, self.conf.my_id)?);
 
         Ok(())
     }

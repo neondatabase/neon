@@ -25,8 +25,8 @@ use utils::id::{TenantId, TimelineId};
 use tracing::info;
 
 /// Serializes and uploads the given index part data to the remote storage.
-pub(crate) async fn upload_index_part<'a>(
-    storage: &'a GenericRemoteStorage,
+pub(crate) async fn upload_index_part(
+    storage: &GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
     generation: Generation,
@@ -39,6 +39,10 @@ pub(crate) async fn upload_index_part<'a>(
         bail!("failpoint before-upload-index")
     });
     pausable_failpoint!("before-upload-index-pausable");
+
+    // Safety: refuse to persist invalid index metadata, to mitigate the impact of any bug that produces this
+    // (this should never happen)
+    index_part.validate().map_err(|e| anyhow::anyhow!(e))?;
 
     // FIXME: this error comes too late
     let serialized = index_part.to_json_bytes()?;

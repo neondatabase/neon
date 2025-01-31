@@ -17,6 +17,7 @@ use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
 };
+use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::GetVectoredError;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
@@ -200,6 +201,7 @@ impl Timeline {
         blknum: BlockNumber,
         version: Version<'_>,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<Bytes, PageReconstructError> {
         match version {
             Version::Lsn(effective_lsn) => {
@@ -208,6 +210,7 @@ impl Timeline {
                     .get_rel_page_at_lsn_batched(
                         pages.iter().map(|(tag, blknum)| (tag, blknum)),
                         effective_lsn,
+                        io_concurrency.clone(),
                         ctx,
                     )
                     .await;
@@ -246,6 +249,7 @@ impl Timeline {
         &self,
         pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber)>,
         effective_lsn: Lsn,
+        io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> Vec<Result<Bytes, PageReconstructError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
@@ -309,7 +313,10 @@ impl Timeline {
             acc.to_keyspace()
         };
 
-        match self.get_vectored(keyspace, effective_lsn, ctx).await {
+        match self
+            .get_vectored(keyspace, effective_lsn, io_concurrency, ctx)
+            .await
+        {
             Ok(results) => {
                 for (key, res) in results {
                     let mut key_slots = keys_slots.remove(&key).unwrap().into_iter();
@@ -627,7 +634,7 @@ impl Timeline {
             // cannot overflow, high and low are both smaller than u64::MAX / 2
             let mid = (high + low) / 2;
 
-            let cmp = self
+            let cmp = match self
                 .is_latest_commit_timestamp_ge_than(
                     search_timestamp,
                     Lsn(mid * 8),
@@ -635,7 +642,16 @@ impl Timeline {
                     &mut found_larger,
                     ctx,
                 )
-                .await?;
+                .await
+            {
+                Ok(res) => res,
+                Err(PageReconstructError::MissingKey(e)) => {
+                    warn!("Missing key while find_lsn_for_timestamp. Either we might have already garbage-collected that data or the key is really missing. Last error: {:#}", e);
+                    // Return that we didn't find any requests smaller than the LSN, and logging the error.
+                    return Ok(LsnForTimestamp::Past(min_lsn));
+                }
+                Err(e) => return Err(e),
+            };
 
             if cmp {
                 high = mid;
@@ -643,6 +659,7 @@ impl Timeline {
                 low = mid + 1;
             }
         }
+
         // If `found_smaller == true`, `low = t + 1` where `t` is the target LSN,
         // so the LSN of the last commit record before or at `search_timestamp`.
         // Remove one from `low` to get `t`.
@@ -879,9 +896,15 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         let kv = self
-            .scan(KeySpace::single(Key::metadata_aux_key_range()), lsn, ctx)
+            .scan(
+                KeySpace::single(Key::metadata_aux_key_range()),
+                lsn,
+                ctx,
+                io_concurrency,
+            )
             .await?;
         let mut result = HashMap::new();
         let mut sz = 0;
@@ -904,8 +927,9 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<(), PageReconstructError> {
-        self.list_aux_files_v2(lsn, ctx).await?;
+        self.list_aux_files_v2(lsn, ctx, io_concurrency).await?;
         Ok(())
     }
 
@@ -913,17 +937,24 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        self.list_aux_files_v2(lsn, ctx).await
+        self.list_aux_files_v2(lsn, ctx, io_concurrency).await
     }
 
     pub(crate) async fn get_replorigins(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<HashMap<RepOriginId, Lsn>, PageReconstructError> {
         let kv = self
-            .scan(KeySpace::single(repl_origin_key_range()), lsn, ctx)
+            .scan(
+                KeySpace::single(repl_origin_key_range()),
+                lsn,
+                ctx,
+                io_concurrency,
+            )
             .await?;
         let mut result = HashMap::new();
         for (k, v) in kv {
@@ -1242,7 +1273,7 @@ pub struct DatadirModification<'a> {
     pending_metadata_bytes: usize,
 }
 
-impl<'a> DatadirModification<'a> {
+impl DatadirModification<'_> {
     // When a DatadirModification is committed, we do a monolithic serialization of all its contents.  WAL records can
     // contain multiple pages, so the pageserver's record-based batch size isn't sufficient to bound this allocation: we
     // additionally specify a limit on how much payload a DatadirModification may contain before it should be committed.
@@ -1263,7 +1294,7 @@ impl<'a> DatadirModification<'a> {
     pub(crate) fn has_dirty_data(&self) -> bool {
         self.pending_data_batch
             .as_ref()
-            .map_or(false, |b| b.has_data())
+            .is_some_and(|b| b.has_data())
     }
 
     /// Set the current lsn
@@ -1319,18 +1350,23 @@ impl<'a> DatadirModification<'a> {
 
         let buf: Bytes = SlruSegmentDirectory::ser(&SlruSegmentDirectory::default())?.into();
         let empty_dir = Value::Image(buf);
-        self.put(slru_dir_to_key(SlruKind::Clog), empty_dir.clone());
-        self.pending_directory_entries
-            .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
-        self.put(
-            slru_dir_to_key(SlruKind::MultiXactMembers),
-            empty_dir.clone(),
-        );
-        self.pending_directory_entries
-            .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
-        self.put(slru_dir_to_key(SlruKind::MultiXactOffsets), empty_dir);
-        self.pending_directory_entries
-            .push((DirectoryKind::SlruSegment(SlruKind::MultiXactOffsets), 0));
+
+        // Initialize SLRUs on shard 0 only: creating these on other shards would be
+        // harmless but they'd just be dropped on later compaction.
+        if self.tline.tenant_shard_id.is_shard_zero() {
+            self.put(slru_dir_to_key(SlruKind::Clog), empty_dir.clone());
+            self.pending_directory_entries
+                .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
+            self.put(
+                slru_dir_to_key(SlruKind::MultiXactMembers),
+                empty_dir.clone(),
+            );
+            self.pending_directory_entries
+                .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
+            self.put(slru_dir_to_key(SlruKind::MultiXactOffsets), empty_dir);
+            self.pending_directory_entries
+                .push((DirectoryKind::SlruSegment(SlruKind::MultiXactOffsets), 0));
+        }
 
         Ok(())
     }
@@ -2225,7 +2261,7 @@ impl<'a> DatadirModification<'a> {
                 assert!(!self
                     .pending_data_batch
                     .as_ref()
-                    .map_or(false, |b| b.updates_key(&key)));
+                    .is_some_and(|b| b.updates_key(&key)));
             }
         }
 
@@ -2294,7 +2330,7 @@ pub enum Version<'a> {
     Modified(&'a DatadirModification<'a>),
 }
 
-impl<'a> Version<'a> {
+impl Version<'_> {
     async fn get(
         &self,
         timeline: &Timeline,
@@ -2417,7 +2453,11 @@ mod tests {
             ("foo/bar2".to_string(), Bytes::from_static(b"content2")),
         ]);
 
-        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        let io_concurrency = IoConcurrency::spawn_for_test();
+
+        let readback = tline
+            .list_aux_files(Lsn(0x1008), &ctx, io_concurrency.clone())
+            .await?;
         assert_eq!(readback, expect_1008);
 
         // Second modification: update one key, remove the other
@@ -2429,11 +2469,15 @@ mod tests {
         let expect_2008 =
             HashMap::from([("foo/bar1".to_string(), Bytes::from_static(b"content3"))]);
 
-        let readback = tline.list_aux_files(Lsn(0x2008), &ctx).await?;
+        let readback = tline
+            .list_aux_files(Lsn(0x2008), &ctx, io_concurrency.clone())
+            .await?;
         assert_eq!(readback, expect_2008);
 
         // Reading back in time works
-        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        let readback = tline
+            .list_aux_files(Lsn(0x1008), &ctx, io_concurrency.clone())
+            .await?;
         assert_eq!(readback, expect_1008);
 
         Ok(())

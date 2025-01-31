@@ -7,15 +7,15 @@ import psycopg2
 import psycopg2.errors
 import pytest
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
+from fixtures.fast_import import FastImport
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, VanillaPostgres
+from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, PgProtocol, VanillaPostgres
 from fixtures.pageserver.http import (
     ImportPgdataIdemptencyKey,
     PageserverApiException,
 )
-from fixtures.pg_version import PgVersion
+from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.utils import run_only_on_postgres
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
@@ -37,10 +37,6 @@ smoke_params = [
 ]
 
 
-@run_only_on_postgres(
-    [PgVersion.V14, PgVersion.V15, PgVersion.V16],
-    "newer control file catalog version and struct format isn't supported",
-)
 @pytest.mark.parametrize("shard_count,stripe_size,rel_block_size", smoke_params)
 def test_pgdata_import_smoke(
     vanilla_pg: VanillaPostgres,
@@ -63,6 +59,9 @@ def test_pgdata_import_smoke(
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
+    # The test needs LocalFs support, which is only built in testing mode.
+    env.pageserver.is_testing_enabled_or_skip()
+
     env.pageserver.patch_config_toml_nonrecursive(
         {
             "import_pgdata_upcall_api": f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/path/to/mgmt/api"
@@ -70,6 +69,12 @@ def test_pgdata_import_smoke(
     )
     env.pageserver.stop()
     env.pageserver.start()
+
+    # By default our tests run with a tiny shared_buffers=1MB setting. That
+    # doesn't allow any prefetching on v17 and above, where the new streaming
+    # read machinery keeps buffers pinned while prefetching them.  Use a higher
+    # setting to enable prefetching and speed up the tests
+    ep_config = ["shared_buffers=64MB"]
 
     #
     # Put data in vanilla pg
@@ -84,6 +89,8 @@ def test_pgdata_import_smoke(
     elif rel_block_size == RelBlockSize.TWO_STRPES_PER_SHARD:
         target_relblock_size = (shard_count or 1) * stripe_size * 8192 * 2
     elif rel_block_size == RelBlockSize.MULTIPLE_RELATION_SEGMENTS:
+        # Postgres uses a 1GiB segment size, fixed at compile time, so we must use >2GB of data
+        # to exercise multiple segments.
         target_relblock_size = int(((2.333 * 1024 * 1024 * 1024) // 8192) * 8192)
     else:
         raise ValueError
@@ -111,9 +118,17 @@ def test_pgdata_import_smoke(
 
     def validate_vanilla_equivalence(ep):
         # TODO: would be nicer to just compare pgdump
-        assert ep.safe_psql("select count(*), sum(data::bigint)::bigint from t") == [
-            (expect_nrows, expect_sum)
-        ]
+
+        # Enable IO concurrency for batching on large sequential scan, to avoid making
+        # this test unnecessarily onerous on CPU. Especially on debug mode, it's still
+        # pretty onerous though, so increase statement_timeout to avoid timeouts.
+        assert ep.safe_psql_many(
+            [
+                "set effective_io_concurrency=32;",
+                "SET statement_timeout='300s';",
+                "select count(*), sum(data::bigint)::bigint from t",
+            ]
+        ) == [[], [], [(expect_nrows, expect_sum)]]
 
     validate_vanilla_equivalence(vanilla_pg)
 
@@ -237,7 +252,11 @@ def test_pgdata_import_smoke(
     #
 
     ro_endpoint = env.endpoints.create_start(
-        branch_name=import_branch_name, endpoint_id="ro", tenant_id=tenant_id, lsn=last_record_lsn
+        branch_name=import_branch_name,
+        endpoint_id="ro",
+        tenant_id=tenant_id,
+        lsn=last_record_lsn,
+        config_lines=ep_config,
     )
 
     validate_vanilla_equivalence(ro_endpoint)
@@ -267,7 +286,10 @@ def test_pgdata_import_smoke(
     # validate that we can write
     #
     rw_endpoint = env.endpoints.create_start(
-        branch_name=import_branch_name, endpoint_id="rw", tenant_id=tenant_id
+        branch_name=import_branch_name,
+        endpoint_id="rw",
+        tenant_id=tenant_id,
+        config_lines=ep_config,
     )
     rw_endpoint.safe_psql("create table othertable(values text)")
     rw_lsn = Lsn(rw_endpoint.safe_psql_scalar("select pg_current_wal_flush_lsn()"))
@@ -287,7 +309,7 @@ def test_pgdata_import_smoke(
         ancestor_start_lsn=rw_lsn,
     )
     br_tip_endpoint = env.endpoints.create_start(
-        branch_name="br-tip", endpoint_id="br-tip-ro", tenant_id=tenant_id
+        branch_name="br-tip", endpoint_id="br-tip-ro", tenant_id=tenant_id, config_lines=ep_config
     )
     validate_vanilla_equivalence(br_tip_endpoint)
     br_tip_endpoint.safe_psql("select * from othertable")
@@ -300,8 +322,45 @@ def test_pgdata_import_smoke(
         ancestor_start_lsn=initdb_lsn,
     )
     br_initdb_endpoint = env.endpoints.create_start(
-        branch_name="br-initdb", endpoint_id="br-initdb-ro", tenant_id=tenant_id
+        branch_name="br-initdb",
+        endpoint_id="br-initdb-ro",
+        tenant_id=tenant_id,
+        config_lines=ep_config,
     )
     validate_vanilla_equivalence(br_initdb_endpoint)
     with pytest.raises(psycopg2.errors.UndefinedTable):
         br_initdb_endpoint.safe_psql("select * from othertable")
+
+
+def test_fast_import_binary(
+    test_output_dir,
+    vanilla_pg: VanillaPostgres,
+    port_distributor: PortDistributor,
+    fast_import: FastImport,
+):
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("CREATE TABLE foo (a int); INSERT INTO foo SELECT generate_series(1, 10);")
+
+    pg_port = port_distributor.get_port()
+    fast_import.run(pg_port, vanilla_pg.connstr())
+    vanilla_pg.stop()
+
+    pgbin = PgBin(test_output_dir, fast_import.pg_distrib_dir, fast_import.pg_version)
+    with VanillaPostgres(
+        fast_import.workdir / "pgdata", pgbin, pg_port, False
+    ) as new_pgdata_vanilla_pg:
+        new_pgdata_vanilla_pg.start()
+
+        # database name and user are hardcoded in fast_import binary, and they are different from normal vanilla postgres
+        conn = PgProtocol(dsn=f"postgresql://cloud_admin@localhost:{pg_port}/neondb")
+        res = conn.safe_psql("SELECT count(*) FROM foo;")
+        log.info(f"Result: {res}")
+        assert res[0][0] == 10
+
+
+# TODO: Maybe test with pageserver?
+# 1. run whole neon env
+# 2. create timeline with some s3 path???
+# 3. run fast_import with s3 prefix
+# 4. ??? mock http where pageserver will report progress
+# 5. run compute on this timeline and check if data is there
