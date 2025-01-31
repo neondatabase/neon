@@ -32,6 +32,12 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
     neon_env_builder.num_pageservers = shard_count if shard_count is not None else 1
 
     env = neon_env_builder.init_start()
+    # We restart pageserver(s), which will cause storage storage controller
+    # requests to fail and warn.
+    env.storage_controller.allowed_errors.append(".*management API still failed.*")
+    env.storage_controller.allowed_errors.append(
+        ".*Reconcile error.*error sending request for url.*"
+    )
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     branch = "main"
