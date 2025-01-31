@@ -68,7 +68,7 @@ jobs:
       GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
       TAG: ${{ needs.tag.outputs.build-tag }}
     steps:
-      - name: Wait for `promote-images-dev` job to finish
+      - name: Wait for `push-{neon,compute}-image-dev` job to finish
         # It's important to have a timeout here, the script in the step can run infinitely
         timeout-minutes: 60
         run: |
@@ -79,20 +79,20 @@ jobs:
           # For PRs we use the run id as the tag
           BUILD_AND_TEST_RUN_ID=${TAG}
           while true; do
-            conclusion=$(gh run --repo ${GITHUB_REPOSITORY} view ${BUILD_AND_TEST_RUN_ID} --json jobs --jq '.jobs[] | select(.name == "promote-images-dev") | .conclusion')
-            case "$conclusion" in
-              success)
-                break
-                ;;
-              failure | cancelled | skipped)
-                echo "The 'promote-images-dev' job didn't succeed: '${conclusion}'. Exiting..."
-                exit 1
-                ;;
-              *)
-                echo "The 'promote-images-dev' hasn't succeed yet. Waiting..."
-                sleep 60
-                ;;
-            esac
+            gh run --repo ${GITHUB_REPOSITORY} view ${BUILD_AND_TEST_RUN_ID} --json jobs --jq '[.jobs[] | select((.name | startswith("push-neon-image-dev")) or (.name | startswith("push-compute-image-dev"))) | {"name": .name, "conclusion": .conclusion, "url": .url}]' > jobs.json
+            if [ $(jq '[.[] | select(.conclusion == "success")]' jobs.json) -eq 2 ]; then
+              break
+            fi
+            jq -c '.[]' jobs.json | while read -r job; do
+              case $(echo $job | jq .conclusion) in
+                failure | cancelled | skipped)
+                  echo "The '$(echo $job | jq .name)' job didn't succeed: '$(echo $job | jq .conclusion)'. See log in '$(echo $job | jq .url)' Exiting..."
+                  exit 1
+                  ;;
+              esac
+            done
+            echo "The 'push-{neon,compute}-image-dev' jobs haven't succeeded yet. Waiting..."
+            sleep 60
           done
 
       - name: Set e2e-platforms
