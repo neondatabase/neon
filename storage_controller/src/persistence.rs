@@ -1279,7 +1279,7 @@ pub(crate) fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {
     Ok(Arc::new(store))
 }
 
-/// Loads the root certificates and constructs a client config suitable for connecting to the neon compute.
+/// Loads the root certificates and constructs a client config suitable for connecting.
 /// This function is blocking.
 pub fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
     Ok(
