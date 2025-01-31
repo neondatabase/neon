@@ -3945,6 +3945,7 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: int | None = None,
         safekeepers: list[int] | None = None,
         allow_multiple: bool = False,
+        create_test_user: bool = False,
         basebackup_request_tries: int | None = None,
         env: dict[str, str] | None = None,
     ) -> Self:
@@ -3966,6 +3967,7 @@ class Endpoint(PgProtocol, LogUtils):
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            create_test_user=create_test_user,
             basebackup_request_tries=basebackup_request_tries,
             env=env,
         )
@@ -4415,6 +4417,7 @@ class Safekeeper(LogUtils):
                 "1s",
                 "--eviction-min-resident",
                 "10s",
+                "--wal-reader-fanout",
             ]
 
         self.extra_opts = extra_opts

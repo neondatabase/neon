@@ -32,6 +32,12 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
     neon_env_builder.num_pageservers = shard_count if shard_count is not None else 1
 
     env = neon_env_builder.init_start()
+    # We restart pageserver(s), which will cause storage storage controller
+    # requests to fail and warn.
+    env.storage_controller.allowed_errors.append(".*management API still failed.*")
+    env.storage_controller.allowed_errors.append(
+        ".*Reconcile error.*error sending request for url.*"
+    )
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     branch = "main"
@@ -271,8 +277,14 @@ def test_scrubber_physical_gc_ancestors(neon_env_builder: NeonEnvBuilder, shard_
         ps.http_client().timeline_compact(
             shard, timeline_id, force_image_layer_creation=True, wait_until_uploaded=True
         )
-        # Add some WAL so that we don't gc at the latest remote consistent lsn
-        workload.churn_rows(1)
+
+    # Add some WAL so that we don't gc at the latest remote consistent lsn
+    workload.churn_rows(10)
+
+    # Now gc the old stuff away
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+        assert ps is not None
         ps.http_client().timeline_gc(shard, timeline_id, 0)
 
     # We will use a min_age_secs=1 threshold for deletion, let it pass
