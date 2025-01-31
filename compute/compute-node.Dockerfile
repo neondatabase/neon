@@ -18,6 +18,10 @@ ARG DEBIAN_VERSION
 # Use strict mode for bash to catch errors early
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
+    echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
+
 RUN case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):
       # The h3_pg extension needs a cmake 3.20+, but Debian bullseye has 3.18.
@@ -838,6 +842,8 @@ ENV PATH="/home/nonroot/.cargo/bin:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 
+RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
+
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
@@ -873,6 +879,8 @@ ENV HOME=/home/nonroot
 ENV PATH="/home/nonroot/.cargo/bin:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
+
+RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
 
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
@@ -1132,8 +1140,8 @@ RUN wget https://github.com/pgpartman/pg_partman/archive/refs/tags/v5.1.0.tar.gz
 FROM rust-extensions-build AS pg-mooncake-build
 ARG PG_VERSION
 
-RUN wget https://github.com/Mooncake-Labs/pg_mooncake/releases/download/v0.1.0/pg_mooncake-0.1.0.tar.gz -O pg_mooncake.tar.gz && \
-    echo "eafd059b77f541f11525eb8affcd66a176968cbd8fe7c0d436e733f2aa4da59f pg_mooncake.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/Mooncake-Labs/pg_mooncake/releases/download/v0.1.1/pg_mooncake-0.1.1.tar.gz -O pg_mooncake.tar.gz && \
+    echo "a2d16eff7948dde64f072609ca5d2962d6b4d07cb89d45952add473529c55f55 pg_mooncake.tar.gz" | sha256sum --check && \
     mkdir pg_mooncake-src && cd pg_mooncake-src && tar xzf ../pg_mooncake.tar.gz --strip-components=1 -C . && \
     make release -j $(getconf _NPROCESSORS_ONLN) && \
     make install -j $(getconf _NPROCESSORS_ONLN) && \
@@ -1243,6 +1251,7 @@ RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin c
 
 FROM debian:$DEBIAN_FLAVOR AS pgbouncer
 RUN set -e \
+    && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
     && apt update \
     && apt install --no-install-suggests --no-install-recommends -y \
         build-essential \
@@ -1350,7 +1359,7 @@ RUN apt-get update && case $DEBIAN_VERSION in \
       ;; \
     esac
 
-#COPY --from=postgis-build /postgis.tar.gz /ext-src/
+COPY --from=pg-build /postgres /postgres
 COPY --from=postgis-build /postgis-src/ /ext-src/postgis-src
 COPY --from=postgis-build /sfcgal/* /usr
 RUN mkdir -p /ext-src/postgis-src/regress/00-regress-install/lib /ext-src/postgis-src/regress/00-regress-install/share/contrib/postgis
@@ -1462,6 +1471,8 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 # libboost* for rdkit
 # ca-certificates for communicating with s3 by compute_ctl
 
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
 
 RUN apt update && \
     case $DEBIAN_VERSION in \
@@ -1518,7 +1529,7 @@ RUN set -ex; \
     else \
         echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
     fi; \
-    curl -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
+    curl --retry 5 -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
     echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
     unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
     /tmp/awscliv2/aws/install; \

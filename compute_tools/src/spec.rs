@@ -6,9 +6,7 @@ use std::path::Path;
 use tracing::{error, info, instrument, warn};
 
 use crate::config;
-use crate::metrics::{
-    CPlaneRequestRPC, CPLANE_REQUESTS_FAILED, CPLANE_REQUESTS_TOTAL, UNKNOWN_HTTP_STATUS,
-};
+use crate::metrics::{CPlaneRequestRPC, CPLANE_REQUESTS_TOTAL, UNKNOWN_HTTP_STATUS};
 use crate::migration::MigrationRunner;
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
@@ -22,7 +20,7 @@ use compute_api::spec::ComputeSpec;
 fn do_control_plane_request(
     uri: &str,
     jwt: &str,
-) -> Result<ControlPlaneSpecResponse, (bool, String, Option<StatusCode>)> {
+) -> Result<ControlPlaneSpecResponse, (bool, String, String)> {
     let resp = reqwest::blocking::Client::new()
         .get(uri)
         .header("Authorization", format!("Bearer {}", jwt))
@@ -30,8 +28,8 @@ fn do_control_plane_request(
         .map_err(|e| {
             (
                 true,
-                format!("could not perform spec request to control plane: {}", e),
-                None,
+                format!("could not perform spec request to control plane: {:?}", e),
+                UNKNOWN_HTTP_STATUS.to_string(),
             )
         })?;
 
@@ -41,14 +39,14 @@ fn do_control_plane_request(
             Ok(spec_resp) => Ok(spec_resp),
             Err(e) => Err((
                 true,
-                format!("could not deserialize control plane response: {}", e),
-                Some(status),
+                format!("could not deserialize control plane response: {:?}", e),
+                status.to_string(),
             )),
         },
         StatusCode::SERVICE_UNAVAILABLE => Err((
             true,
             "control plane is temporarily unavailable".to_string(),
-            Some(status),
+            status.to_string(),
         )),
         StatusCode::BAD_GATEWAY => {
             // We have a problem with intermittent 502 errors now
@@ -57,7 +55,7 @@ fn do_control_plane_request(
             Err((
                 true,
                 "control plane request failed with 502".to_string(),
-                Some(status),
+                status.to_string(),
             ))
         }
         // Another code, likely 500 or 404, means that compute is unknown to the control plane
@@ -65,7 +63,7 @@ fn do_control_plane_request(
         _ => Err((
             false,
             format!("unexpected control plane response status code: {}", status),
-            Some(status),
+            status.to_string(),
         )),
     }
 }
@@ -92,26 +90,28 @@ pub fn get_spec_from_control_plane(
     // - no spec for compute yet (Empty state) -> return Ok(None)
     // - got spec -> return Ok(Some(spec))
     while attempt < 4 {
-        CPLANE_REQUESTS_TOTAL
-            .with_label_values(&[CPlaneRequestRPC::GetSpec.as_str()])
-            .inc();
         spec = match do_control_plane_request(&cp_uri, &jwt) {
-            Ok(spec_resp) => match spec_resp.status {
-                ControlPlaneComputeStatus::Empty => Ok(None),
-                ControlPlaneComputeStatus::Attached => {
-                    if let Some(spec) = spec_resp.spec {
-                        Ok(Some(spec))
-                    } else {
-                        bail!("compute is attached, but spec is empty")
+            Ok(spec_resp) => {
+                CPLANE_REQUESTS_TOTAL
+                    .with_label_values(&[
+                        CPlaneRequestRPC::GetSpec.as_str(),
+                        &StatusCode::OK.to_string(),
+                    ])
+                    .inc();
+                match spec_resp.status {
+                    ControlPlaneComputeStatus::Empty => Ok(None),
+                    ControlPlaneComputeStatus::Attached => {
+                        if let Some(spec) = spec_resp.spec {
+                            Ok(Some(spec))
+                        } else {
+                            bail!("compute is attached, but spec is empty")
+                        }
                     }
                 }
-            },
+            }
             Err((retry, msg, status)) => {
-                let status_str = status
-                    .map(|s| s.to_string())
-                    .unwrap_or(UNKNOWN_HTTP_STATUS.to_string());
-                CPLANE_REQUESTS_FAILED
-                    .with_label_values(&[CPlaneRequestRPC::GetSpec.as_str(), &status_str])
+                CPLANE_REQUESTS_TOTAL
+                    .with_label_values(&[CPlaneRequestRPC::GetSpec.as_str(), &status])
                     .inc();
                 if retry {
                     Err(anyhow!(msg))
