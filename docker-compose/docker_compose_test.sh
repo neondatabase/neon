@@ -52,7 +52,9 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
 
     if [ $pg_version -ge 16 ]; then
         TMPDIR=$(mktemp -d)
-        docker cp $TEST_CONTAINER_NAME:/ext-src/pg_hint_plan-src/data $TMPDIR/data
+        mkdir $TMPDIR/pg_hint_plan-src $TMPDIR/file_fdw
+        docker cp $TEST_CONTAINER_NAME:/ext-src/pg_hint_plan-src/data $TMPDIR/pg_hint_plan-src/data
+        docker cp $TEST_CONTAINER_NAME:/postgres/contrib/file_fdw/data $TMPDIR/file_fdw/data
         docker compose cp ext-src neon-test-extensions:/
         for i in {1..3}; do
           # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
@@ -63,19 +65,32 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
           docker compose cp $TMPDIR/data pcompute${i}:/ext-src/pg_hint_plan-src/
         done
         rm -rf $TMPDIR
+          # The following block does the same for the contrib/file_fdw test
+          docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/postgres/contrib/file_fdw/data
+          rm -rf $TMPDIR
+        # Apply patches
+        cat ../compute/patches/contrib_pg${pg_version}.patch | docker exec -i $TEST_CONTAINER_NAME bash -c "(cd /postgres && patch -p1)"
         # Add packages
         docker exec $TEST_CONTAINER_NAME bash -c "apt update; apt -y install parallel"
         # We are running tests now
-        if ! docker exec -e SKIP=timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src \
-            $TEST_CONTAINER_NAME /run-tests.sh | tee testout.txt
-        then
-            FAILED=$(tail -1 testout.txt)
-            for d in $FAILED
-            do
-                mkdir $d
-                docker cp $TEST_CONTAINER_NAME:/ext-src/$d/regression.diffs $d || true
-                docker cp $TEST_CONTAINER_NAME:/ext-src/$d/regression.out $d || true
-                cat $d/regression.out $d/regression.diffs || true
+        rm -f testout.txt testout_contrib.txt
+        docker exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src \
+        $TEST_CONTAINER_NAME /run-tests.sh /ext-src | tee testout.txt && EXT_SUCCESS=1 || EXT_SUCCESS=0
+        docker exec -e SKIP=start-scripts,postgres_fdw,ltree_plpython,jsonb_plpython,jsonb_plperl,hstore_plpython,hstore_plperl,dblink,bool_plperl \
+        $TEST_CONTAINER_NAME /run-tests.sh /postgres/contrib | tee testout_contrib.txt && CONTRIB_SUCCESS=1 || CONTRIB_SUCCESS=0
+        if [ $EXT_SUCCESS -eq 0 ] || [ $CONTRIB_SUCCESS -eq 0 ]; then
+            CONTRIB_FAILED=
+            FAILED=
+            [ $EXT_SUCCESS -eq 0 ] && FAILED=$(tail -1 testout.txt | awk '{for(i=1;i<=NF;i++){print "/ext-src/"$i;}}')
+            [ $CONTRIB_SUCCESS -eq 0 ] && CONTRIB_FAILED=$(tail -1 testout_contrib.txt | awk '{for(i=0;i<=NF;i++){print "/postgres/contrib/"$i;}}')
+            for d in $FAILED $CONTRIB_FAILED; do
+                dn="$(basename $d)"
+                rm -rf $dn
+                mkdir $dn
+                docker cp $TEST_CONTAINER_NAME:$d/regression.diffs $dn || [ $? -eq 1 ]
+                docker cp $TEST_CONTAINER_NAME:$d/regression.out $dn || [ $? -eq 1 ]
+                cat $dn/regression.out $dn/regression.diffs || true
+                rm -rf $dn
             done
         rm -rf $FAILED
         exit 1

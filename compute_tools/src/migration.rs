@@ -125,7 +125,7 @@ impl<'m> MigrationRunner<'m> {
                     info!("Finished migration id={}", migration_id);
                 }
                 Err(e) => {
-                    error!("Failed to run migration id={}: {}", migration_id, e);
+                    error!("Failed to run migration id={}: {:?}", migration_id, e);
                     DB_MIGRATION_FAILED
                         .with_label_values(&[migration_id.to_string().as_str()])
                         .inc();
