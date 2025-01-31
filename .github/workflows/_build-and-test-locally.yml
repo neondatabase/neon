@@ -307,7 +307,6 @@ jobs:
         with:
           build_type: ${{ inputs.build-type }}
           test_selection: regress
-          needs_postgres_source: true
           run_with_real_s3: true
           real_s3_bucket: neon-github-ci-tests
           real_s3_region: eu-central-1
