@@ -247,13 +247,18 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         log.info(f"{shard_zero_id} timeline: {timeline_info}")
 
     # Run compaction for all tenants, restart endpoint so that on subsequent reads we will
-    # definitely hit pageserver for reads.  This compaction passis expected to drop unwanted
-    # layers but not do any rewrites (we're still in the same generation)
+    # definitely hit pageserver for reads. We force-compact the entire keyspace to ensure
+    # we read/write all keys, to detect e.g. layer corruption.
     for tenant_id, tenant_state in tenants.items():
         tenant_state.endpoint.stop()
         for shard_id, shard_ps in tenant_get_shards(env, tenant_id):
             shard_ps.http_client().timeline_gc(shard_id, tenant_state.timeline_id, gc_horizon=None)
-            shard_ps.http_client().timeline_compact(shard_id, tenant_state.timeline_id)
+            shard_ps.http_client().timeline_compact(
+                shard_id,
+                tenant_state.timeline_id,
+                force_image_layer_creation=True,
+                force_l0_compaction=True,
+            )
         tenant_state.endpoint.start()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=tenant_count) as pgbench_threads:
