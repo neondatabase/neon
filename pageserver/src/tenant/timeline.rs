@@ -6381,6 +6381,7 @@ mod tests {
 
     use pageserver_api::key::Key;
     use pageserver_api::value::Value;
+    use tracing::Instrument;
     use utils::{id::TimelineId, lsn::Lsn};
 
     use crate::tenant::{
@@ -6517,7 +6518,18 @@ mod tests {
 
             eprintln!("Downloading {layer} and re-generating heatmap");
 
-            let _resident = layer.download_and_keep_resident().await.unwrap();
+            let _resident = layer
+                .download_and_keep_resident()
+                .instrument(tracing::info_span!(
+                    parent: None,
+                    "download_layer",
+                    tenant_id = %timeline.tenant_shard_id.tenant_id,
+                    shard_id = %timeline.tenant_shard_id.shard_slug(),
+                    timeline_id = %timeline.timeline_id
+                ))
+                .await
+                .unwrap();
+
             let post_download_heatmap = timeline.generate_heatmap().await.unwrap();
             assert_heatmaps_have_same_layers(&heatmap, &post_download_heatmap);
         }
