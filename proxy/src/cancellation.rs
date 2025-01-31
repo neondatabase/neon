@@ -7,12 +7,12 @@ use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use postgres_client::CancelToken;
 use postgres_client::tls::MakeTlsConnect;
 use pq_proto::CancelKeyData;
-use redis::{pipe, Cmd, FromRedisValue, Value};
+use redis::{pipe, FromRedisValue, Pipeline, Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::{AuthError, check_peer_addr_is_in_list};
@@ -54,6 +54,43 @@ pub enum CancelKeyOp {
         resp_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
         _guard: CancelChannelSizeGuard<'static>,
     },
+}
+
+impl CancelKeyOp {
+    fn register(self, pipe: &mut Pipeline) -> CancelReplyOp {
+        #[allow(clippy::used_underscore_binding)]
+        match self {
+            CancelKeyOp::StoreCancelKey {
+                key,
+                field,
+                value,
+                resp_tx,
+                _guard,
+                expire,
+            } => {
+                pipe.hset(&key, field, value);
+                pipe.expire(key, expire);
+                CancelReplyOp::StoreCancelKey { resp_tx, _guard }
+            }
+            CancelKeyOp::GetCancelData {
+                key,
+                resp_tx,
+                _guard,
+            } => {
+                pipe.hgetall(key);
+                CancelReplyOp::GetCancelData { resp_tx, _guard }
+            }
+            CancelKeyOp::RemoveCancelKey {
+                key,
+                field,
+                resp_tx,
+                _guard,
+            } => {
+                pipe.hdel(key, field);
+                CancelReplyOp::RemoveCancelKey { resp_tx, _guard }
+            }
+        }
+    }
 }
 
 // Message types for sending through mpsc channel
@@ -145,64 +182,37 @@ pub async fn handle_cancel_messages(
 
     loop {
         if rx.recv_many(&mut buffer, 8).await == 0 {
+            warn!("shutting down cancellation queue");
             break std::future::pending().await;
         }
+        debug!(n = buffer.len(), "running cancellation jobs");
 
         let mut pipe = pipe();
         for msg in buffer.drain(..) {
-            #[allow(clippy::used_underscore_binding)]
-            let (cmd, reply) = match msg {
-                CancelKeyOp::StoreCancelKey {
-                    key,
-                    field,
-                    value,
-                    resp_tx,
-                    _guard,
-                    expire: _,
-                } => (
-                    // todo: Cmd::expire(key, expire)
-                    Cmd::hset(key, field, value),
-                    CancelReplyOp::StoreCancelKey { resp_tx, _guard },
-                ),
-                CancelKeyOp::GetCancelData {
-                    key,
-                    resp_tx,
-                    _guard,
-                } => (
-                    Cmd::hgetall(key),
-                    CancelReplyOp::GetCancelData { resp_tx, _guard },
-                ),
-                CancelKeyOp::RemoveCancelKey {
-                    key,
-                    field,
-                    resp_tx,
-                    _guard,
-                } => (
-                    Cmd::hdel(key, field),
-                    CancelReplyOp::RemoveCancelKey { resp_tx, _guard },
-                ),
-            };
-
-            pipe.add_command(cmd);
-            replies.push(reply);
+            replies.push(msg.register(&mut pipe));
         }
 
         match client.query(pipe).await {
-            Ok(Value::Bulk(values)) if values.len() == buffer.len() => {
+            Ok(Value::Array(values)) if values.len() == buffer.len() => {
+                debug!(n = buffer.len(), "successfully completed cancellation jobs");
                 for (value, reply) in std::iter::zip(values, replies.drain(..)) {
                     reply.send_value(value);
                 }
             }
-            Ok(_) => {
+            Ok(value) => {
+                debug!(?value, "unexpected redis return value");
+
                 for reply in replies.drain(..) {
                     reply.send_err(anyhow!(
                         "could not send cmd to redis: incorrect response type"
                     ));
                 }
             }
-            Err(e) => {
+            Err(err) => {
+                debug!(?err, "failed to run batched query");
+
                 for reply in replies.drain(..) {
-                    reply.send_err(anyhow!("could not send cmd to redis: {e}"));
+                    reply.send_err(anyhow!("could not send cmd to redis: {err}"));
                 }
             }
         };
