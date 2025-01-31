@@ -1503,11 +1503,9 @@ impl Timeline {
                     .await
                     .map_err(CompactionError::Other)?;
             } else {
-                let shard = self.shard_identity.shard_index();
                 let owner = self.shard_identity.get_shard_number(&key);
-                if cfg!(debug_assertions) {
-                    panic!("key {key} does not belong on shard {shard}, owned by {owner}");
-                }
+
+                // This happens after a shard split, when we're compacting an L0 created by our parent shard
                 debug!("dropping key {key} during compaction (it belongs on shard {owner})");
             }
 
