@@ -1349,10 +1349,10 @@ RUN mkdir /ext-src
 # This is required for the PostGIS test
 RUN apt-get update && case $DEBIAN_VERSION in \
       bullseye) \
-        apt-get install -y libproj19 libgdal28; \
+        apt-get install -y libproj19 libgdal28 time; \
       ;; \
       bookworm) \
-        apt-get install -y libgdal32 libproj25; \
+        apt-get install -y libgdal32 libproj25 time; \
       ;; \
       *) \
         echo "Unknown Debian version ${DEBIAN_VERSION}" && exit 1 \
