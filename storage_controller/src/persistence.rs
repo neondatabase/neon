@@ -11,8 +11,8 @@ use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
 use diesel_async::pooled_connection::bb8::Pool;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::pooled_connection::ManagerConfig;
+use diesel_async::AsyncPgConnection;
 use diesel_async::RunQueryDsl;
-use diesel_async::{AsyncConnection, AsyncPgConnection};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use itertools::Itertools;
@@ -193,7 +193,7 @@ impl Persistence {
     ) -> Result<(), diesel::ConnectionError> {
         let started_at = Instant::now();
         loop {
-            match AsyncPgConnection::establish(database_url).await {
+            match establish_connection_rustls(database_url).await {
                 Ok(_) => {
                     tracing::info!("Connected to database.");
                     return Ok(());
