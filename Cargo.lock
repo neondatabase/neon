@@ -1695,9 +1695,9 @@ dependencies = [
 
 [[package]]
 name = "dashmap"
-version = "5.5.0"
+version = "5.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6943ae99c34386c84a470c499d3414f66502a41340aa895406e0d2e4a207b91d"
+checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
 dependencies = [
  "cfg-if",
  "hashbrown 0.14.5",
@@ -3329,7 +3329,7 @@ version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4644821e1c3d7a560fe13d842d13f587c07348a1a05d3a797152d41c90c56df2"
 dependencies = [
- "dashmap 5.5.0",
+ "dashmap 5.5.3",
  "hashbrown 0.13.2",
 ]
 
@@ -4876,6 +4876,7 @@ dependencies = [
  "clashmap",
  "compute_api",
  "consumption_metrics",
+ "dashmap 5.5.3",
  "ecdsa 0.16.9",
  "ed25519-dalek",
  "env_logger 0.10.2",

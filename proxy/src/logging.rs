@@ -1,12 +1,14 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockWriteGuard};
 use std::{env, io};
 
 use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
 use opentelemetry::trace::TraceContextExt;
 use serde::ser::{SerializeMap, Serializer};
 use serde::Serialize;
+use tracing::span;
 use tracing::subscriber::Interest;
 use tracing::{callsite, Event, Level, Metadata, Span, Subscriber};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -16,7 +18,7 @@ use tracing_subscriber::fmt::time::SystemTime;
 use tracing_subscriber::fmt::{FormatEvent, FormatFields};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::registry::{LookupSpan, SpanRef};
 
 /// Initialize logging and OpenTelemetry tracing and exporter.
 ///
@@ -212,7 +214,7 @@ where
                 "timestamp": now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
                 "level": "ERROR",
                 "message": format_args!("cannot log event: {err:?}"),
-                "context": {
+                "fields": {
                     "event": format_args!("{event:?}"),
                 },
             })) {
@@ -220,6 +222,20 @@ where
                 self.writer.make().write_all(&line).ok();
             }
         }
+    }
+
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+        let span = ctx.span(&id).expect("span must exist");
+        let fields = SpanData::default();
+        fields.record_fields(attrs);
+        span.extensions_mut().insert(fields);
+    }
+
+    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
+        let span = ctx.span(&id).expect("span must exist");
+        let ext = span.extensions();
+        let data = ext.get::<SpanData>().expect("extension must exist");
+        data.record_fields(values);
     }
 
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
@@ -251,6 +267,31 @@ where
         }
 
         Interest::always()
+    }
+}
+
+#[derive(Default)]
+struct SpanData {
+    // TODO: Use bump allocator for strings
+    fields: RwLock<IndexMap<&'static str, String>>,
+}
+
+struct SpanFieldsRecorder<'a> {
+    fields: RwLockWriteGuard<'a, IndexMap<&'static str, String>>,
+}
+
+impl SpanData {
+    fn record_fields<R: tracing_subscriber::field::RecordFields>(&self, fields: R) {
+        fields.record(&mut SpanFieldsRecorder {
+            fields: self.fields.write().expect("poisoned"),
+        });
+    }
+}
+
+impl tracing::field::Visit for SpanFieldsRecorder<'_> {
+    #[inline]
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.fields.insert(field.name(), format!("{value:?}"));
     }
 }
 
@@ -308,7 +349,7 @@ impl EventFormatter {
         let mut serialize = || {
             let mut serializer = serde_json::Serializer::new(&mut self.logline_buffer);
 
-            let mut serializer = serializer.serialize_map(None)?;
+            let mut serializer = serializer.serialize_map(Some(14))?;
 
             // Timestamp comes first, so raw lines can be sorted by timestamp.
             serializer.serialize_entry("timestamp", &timestamp)?;
@@ -326,7 +367,7 @@ impl EventFormatter {
             event.record(&mut fields_present);
             if fields_present.0 {
                 serializer.serialize_entry(
-                    "context",
+                    "fields",
                     &SerializableEventFields(event, skipped_field_indices),
                 )?;
             }
@@ -379,8 +420,7 @@ impl EventFormatter {
                 }
             }
 
-            let _ = ctx;
-            // TODO: spans + span fields
+            serializer.serialize_entry("context", &SerializableContext(ctx))?;
 
             serializer.end()
         };
@@ -666,6 +706,59 @@ impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageSkipper<'_, S
         if self.accept_field(field) {
             self.state = self.serializer.serialize_value(&format_args!("{value}"));
         }
+    }
+}
+
+struct SerializableContext<'a, 'b, Span>(&'b Context<'a, Span>)
+where
+    Span: Subscriber + for<'lookup> LookupSpan<'lookup>;
+
+impl<Span> serde::ser::Serialize for SerializableContext<'_, '_, Span>
+where
+    Span: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn serialize<Ser>(&self, serializer: Ser) -> Result<Ser::Ok, Ser::Error>
+    where
+        Ser: serde::ser::Serializer,
+    {
+        use serde::ser::SerializeSeq;
+        let mut serializer = serializer.serialize_seq(None)?;
+
+        if let Some(leaf_span) = self.0.lookup_current() {
+            for span in leaf_span.scope().from_root() {
+                serializer.serialize_element(&SerializableSpan(&span))?;
+            }
+        }
+
+        serializer.end()
+    }
+}
+
+struct SerializableSpan<'a, 'b, Span>(&'b SpanRef<'a, Span>)
+where
+    Span: for<'lookup> LookupSpan<'lookup>;
+
+impl<Span> serde::ser::Serialize for SerializableSpan<'_, '_, Span>
+where
+    Span: for<'lookup> LookupSpan<'lookup>,
+{
+    fn serialize<Ser>(&self, serializer: Ser) -> Result<Ser::Ok, Ser::Error>
+    where
+        Ser: serde::ser::Serializer,
+    {
+        let ext = self.0.extensions();
+        let data = ext.get::<SpanData>().expect("extension must exist");
+        let fields = data.fields.read().expect("poisoned");
+
+        let mut serializer = serializer.serialize_map(Some(2 + fields.len()))?;
+        serializer.serialize_entry("name", self.0.metadata().name())?;
+        serializer.serialize_entry("id", &format_args!("{}", self.0.id().into_u64()))?;
+
+        for (key, value) in fields.iter() {
+            serializer.serialize_entry(key, value)?;
+        }
+
+        serializer.end()
     }
 }
 

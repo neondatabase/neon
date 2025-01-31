@@ -24,6 +24,7 @@ bytes = { workspace = true, features = ["serde"] }
 camino.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
+dashmap = "5.5.3"
 clashmap.workspace = true
 compute_api.workspace = true
 consumption_metrics.workspace = true
