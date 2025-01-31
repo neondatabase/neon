@@ -273,7 +273,7 @@ async fn wait_until_ready(connstring: String, create_dbname: String) {
 #[tokio::main]
 pub(crate) async fn main() -> anyhow::Result<()> {
     utils::logging::init(
-        utils::logging::LogFormat::Plain,
+        utils::logging::LogFormat::Json,
         utils::logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
         utils::logging::Output::Stdout,
     )?;
