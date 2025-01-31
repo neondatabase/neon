@@ -16,9 +16,9 @@ from fixtures.pageserver.http import (
     ImportPgdataIdemptencyKey,
     PageserverApiException,
 )
+from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import MockS3Server, RemoteStorageKind
-from fixtures.utils import run_only_on_postgres
 from mypy_boto3_kms import KMSClient
 from mypy_boto3_kms.type_defs import EncryptResponseTypeDef
 from mypy_boto3_s3 import S3Client
