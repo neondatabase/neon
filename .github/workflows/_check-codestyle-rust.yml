@@ -16,6 +16,9 @@ defaults:
   run:
     shell: bash -euxo pipefail {0}
 
+# No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
+permissions: {}
+
 jobs:
   check-codestyle-rust:
     strategy:
