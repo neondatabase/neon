@@ -1939,8 +1939,7 @@ impl Tenant {
 
             let timeline_heatmap = timeline_heatmaps
                 .as_mut()
-                .map(|hs| hs.remove(&timeline_id))
-                .flatten();
+                .and_then(|hs| hs.remove(&timeline_id));
             part_downloads.spawn(
                 self.load_timeline_metadata(
                     timeline_id,
