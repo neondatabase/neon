@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use dashmap::DashMap;
+use clashmap::ClashMap;
 use rand::{thread_rng, Rng};
 use smol_str::SmolStr;
 use tokio::sync::Mutex;
@@ -108,9 +108,9 @@ impl EndpointInfo {
 /// One may ask, why the data is stored per project, when on the user request there is only data about the endpoint available?
 /// On the cplane side updates are done per project (or per branch), so it's easier to invalidate the whole project cache.
 pub struct ProjectInfoCacheImpl {
-    cache: DashMap<EndpointIdInt, EndpointInfo>,
+    cache: ClashMap<EndpointIdInt, EndpointInfo>,
 
-    project2ep: DashMap<ProjectIdInt, HashSet<EndpointIdInt>>,
+    project2ep: ClashMap<ProjectIdInt, HashSet<EndpointIdInt>>,
     config: ProjectInfoCacheOptions,
 
     start_time: Instant,
@@ -176,8 +176,8 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
 impl ProjectInfoCacheImpl {
     pub(crate) fn new(config: ProjectInfoCacheOptions) -> Self {
         Self {
-            cache: DashMap::new(),
-            project2ep: DashMap::new(),
+            cache: ClashMap::new(),
+            project2ep: ClashMap::new(),
             config,
             ttl_disabled_since_us: AtomicU64::new(u64::MAX),
             start_time: Instant::now(),
@@ -302,7 +302,7 @@ impl ProjectInfoCacheImpl {
         let mut removed = 0;
         let shard = self.project2ep.shards()[shard].write();
         for (_, endpoints) in shard.iter() {
-            for endpoint in endpoints.get() {
+            for endpoint in endpoints {
                 self.cache.remove(endpoint);
                 removed += 1;
             }

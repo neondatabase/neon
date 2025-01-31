@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -8,7 +9,7 @@ use pq_proto::CancelKeyData;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
 use crate::auth::backend::{BackendIpAllowlist, ComputeUserInfo};
@@ -17,14 +18,11 @@ use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::ext::LockExt;
-use crate::metrics::CancelChannelSizeGuard;
-use crate::metrics::{CancellationRequest, Metrics, RedisMsgKind};
+use crate::metrics::{CancelChannelSizeGuard, CancellationRequest, Metrics, RedisMsgKind};
 use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::keys::KeyPrefix;
 use crate::redis::kv_ops::RedisKVClient;
 use crate::tls::postgres_rustls::MakeRustlsConnect;
-use std::convert::Infallible;
-use tokio::sync::oneshot;
 
 type IpSubnetKey = IpNet;
 
