@@ -5007,9 +5007,9 @@ def logical_replication_sync(
     pub_dbname: str | None = None,
 ):
     """Wait logical replication subscriber to sync with publisher."""
-    not_ready = True
-    while not_ready:
-        # first check if the subscription is active `r` = `ready` normal state
+
+    def initial_sync():
+        # first check if the subscription is active `s`=`synchronized`, `r` = `ready`
         query = f"""SELECT 1 FROM pg_subscription_rel join pg_catalog.pg_subscription
                     on pg_subscription_rel.srsubid = pg_subscription.oid
                     WHERE srsubstate NOT IN ('r', 's') and subname='{subname}'"""
@@ -5019,13 +5019,9 @@ def logical_replication_sync(
         else:
             res = subscriber.safe_psql(query)
 
-        log.info(f"res: {res}")
-        if res is None:
-            not_ready = False
-        if len(res) == 0:
-            not_ready = False
+        assert (res is None) or (len(res) == 0)
 
-        time.sleep(0.5)
+    wait_until(initial_sync)
 
     # wait for the subscription to catch up with current state of publisher
     # caller is responsible to call checkpoint before calling this function
@@ -5036,7 +5032,7 @@ def logical_replication_sync(
     else:
         publisher_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
-    while True:
+    def subscriber_catch_up():
         query = f"select latest_end_lsn from pg_catalog.pg_stat_subscription where latest_end_lsn is NOT NULL and subname='{subname}'"
 
         if sub_dbname is not None:
@@ -5044,14 +5040,15 @@ def logical_replication_sync(
         else:
             res = subscriber.safe_psql(query)
 
-        if res:
-            res_lsn = res[0][0]
-            log.info(f"subscriber_lsn={res_lsn}")
-            subscriber_lsn = Lsn(res_lsn)
-            log.info(f"Subscriber LSN={subscriber_lsn}, publisher LSN={publisher_lsn}")
-            if subscriber_lsn >= publisher_lsn:
-                return
-        time.sleep(0.5)
+        assert res is not None
+
+        res_lsn = res[0][0]
+        log.info(f"subscriber_lsn={res_lsn}")
+        subscriber_lsn = Lsn(res_lsn)
+        log.info(f"Subscriber LSN={subscriber_lsn}, publisher LSN={publisher_lsn}")
+        assert subscriber_lsn >= publisher_lsn
+
+    wait_until(subscriber_catch_up)
 
 
 def tenant_get_shards(
