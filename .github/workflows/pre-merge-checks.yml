@@ -59,7 +59,10 @@ jobs:
           echo "${RUST_CHANGED_FILES}"
 
   build-build-tools-image:
-    if: needs.get-changed-files.outputs.python-changed == 'true'
+    if: |
+      false
+      || needs.get-changed-files.outputs.python-changed == 'true'
+      || needs.get-changed-files.outputs.rust-changed == 'true'
     needs: [ get-changed-files ]
     uses: ./.github/workflows/build-build-tools-image.yml
     with:
@@ -124,7 +127,8 @@ jobs:
       - name: Fail the job if any of the dependencies do not succeed or skipped
         run: exit 1
         if: |
-          (needs.check-codestyle-python.result == 'skipped' && needs.get-changed-files.outputs.python-changed == 'true')
-          || (needs.check-codestyle-rust.result == 'skipped' && needs.get-changed-files.outputs.rust-changed == 'true')
+          false
+          || (needs.check-codestyle-python.result == 'skipped' && needs.get-changed-files.outputs.python-changed == 'true')
+          || (needs.check-codestyle-rust.result   == 'skipped' && needs.get-changed-files.outputs.rust-changed   == 'true')
           || contains(needs.*.result, 'failure')
           || contains(needs.*.result, 'cancelled')
