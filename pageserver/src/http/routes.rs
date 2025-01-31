@@ -3387,7 +3387,17 @@ where
                             let status = response.status();
                             info!(%status, "Cancelled request finished successfully")
                         }
-                        Err(e) => error!("Cancelled request finished with an error: {e:?}"),
+                        Err(e) => match e {
+                            ApiError::ShuttingDown | ApiError::ResourceUnavailable(_) => {
+                                // Don't log this at error severity: they are normal during lifecycle of tenants/process
+                                info!("Cancelled request aborted for shutdown")
+                            }
+                            _ => {
+                                // Log these in a highly visible way, because we have no client to send the response to, but
+                                // would like to know that something went wrong.
+                                error!("Cancelled request finished with an error: {e:?}")
+                            }
+                        },
                     }
                 }
                 // only logging for cancelled panicked request handlers is the tracing_panic_hook,
