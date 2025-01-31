@@ -149,7 +149,7 @@ RUN curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v$
     && rm -rf protoc.zip protoc
 
 # s5cmd
-ENV S5CMD_VERSION=2.2.2
+ENV S5CMD_VERSION=2.3.0
 RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-$(uname -m | sed 's/x86_64/64bit/g' | sed 's/aarch64/arm64/g').tar.gz" | tar zxvf - s5cmd \
     && chmod +x s5cmd \
     && mv s5cmd /usr/local/bin/s5cmd
@@ -182,7 +182,7 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "aws
     && rm awscliv2.zip
 
 # Mold: A Modern Linker
-ENV MOLD_VERSION=v2.34.1
+ENV MOLD_VERSION=v2.36.0
 RUN set -e \
     && git clone https://github.com/rui314/mold.git \
     && mkdir mold/build \
@@ -244,7 +244,7 @@ WORKDIR /home/nonroot
 RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
 
 # Python
-ENV PYTHON_VERSION=3.11.10 \
+ENV PYTHON_VERSION=3.11.11 \
     PYENV_ROOT=/home/nonroot/.pyenv \
     PATH=/home/nonroot/.pyenv/shims:/home/nonroot/.pyenv/bin:/home/nonroot/.poetry/bin:$PATH
 RUN set -e \
@@ -272,11 +272,11 @@ ENV RUSTC_VERSION=1.84.1
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
 ARG RUSTFILT_VERSION=0.2.1
-ARG CARGO_HAKARI_VERSION=0.9.33
-ARG CARGO_DENY_VERSION=0.16.2
-ARG CARGO_HACK_VERSION=0.6.33
-ARG CARGO_NEXTEST_VERSION=0.9.85
-ARG CARGO_DIESEL_CLI_VERSION=2.2.6
+ARG CARGO_HAKARI_VERSION=0.9.35
+ARG CARGO_DENY_VERSION=0.16.4
+ARG CARGO_HACK_VERSION=0.6.34
+ARG CARGO_NEXTEST_VERSION=0.9.88
+ARG DIESEL_CLI_VERSION=2.2.6
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
 	chmod +x rustup-init && \
 	./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
@@ -290,7 +290,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     cargo install cargo-deny --locked --version ${CARGO_DENY_VERSION} && \
     cargo install cargo-hack          --version ${CARGO_HACK_VERSION} && \
     cargo install cargo-nextest       --version ${CARGO_NEXTEST_VERSION} && \
-    cargo install diesel_cli          --version ${CARGO_DIESEL_CLI_VERSION} \
+    cargo install diesel_cli          --version ${DIESEL_CLI_VERSION} \
                                       --features postgres-bundled --no-default-features && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
