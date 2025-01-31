@@ -1140,8 +1140,8 @@ RUN wget https://github.com/pgpartman/pg_partman/archive/refs/tags/v5.1.0.tar.gz
 FROM rust-extensions-build AS pg-mooncake-build
 ARG PG_VERSION
 
-RUN wget https://github.com/Mooncake-Labs/pg_mooncake/releases/download/v0.1.0/pg_mooncake-0.1.0.tar.gz -O pg_mooncake.tar.gz && \
-    echo "eafd059b77f541f11525eb8affcd66a176968cbd8fe7c0d436e733f2aa4da59f pg_mooncake.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/Mooncake-Labs/pg_mooncake/releases/download/v0.1.1/pg_mooncake-0.1.1.tar.gz -O pg_mooncake.tar.gz && \
+    echo "a2d16eff7948dde64f072609ca5d2962d6b4d07cb89d45952add473529c55f55 pg_mooncake.tar.gz" | sha256sum --check && \
     mkdir pg_mooncake-src && cd pg_mooncake-src && tar xzf ../pg_mooncake.tar.gz --strip-components=1 -C . && \
     make release -j $(getconf _NPROCESSORS_ONLN) && \
     make install -j $(getconf _NPROCESSORS_ONLN) && \
@@ -1345,6 +1345,7 @@ FROM neon-pg-ext-build AS neon-pg-ext-test
 ARG PG_VERSION
 RUN mkdir /ext-src
 
+COPY --from=pg-build /postgres /postgres
 #COPY --from=postgis-build /postgis.tar.gz /ext-src/
 #COPY --from=postgis-build /sfcgal/* /usr
 COPY --from=plv8-build /plv8.tar.gz /ext-src/

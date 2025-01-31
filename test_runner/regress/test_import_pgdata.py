@@ -59,6 +59,9 @@ def test_pgdata_import_smoke(
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
+    # The test needs LocalFs support, which is only built in testing mode.
+    env.pageserver.is_testing_enabled_or_skip()
+
     env.pageserver.patch_config_toml_nonrecursive(
         {
             "import_pgdata_upcall_api": f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/path/to/mgmt/api"
@@ -66,6 +69,12 @@ def test_pgdata_import_smoke(
     )
     env.pageserver.stop()
     env.pageserver.start()
+
+    # By default our tests run with a tiny shared_buffers=1MB setting. That
+    # doesn't allow any prefetching on v17 and above, where the new streaming
+    # read machinery keeps buffers pinned while prefetching them.  Use a higher
+    # setting to enable prefetching and speed up the tests
+    ep_config = ["shared_buffers=64MB"]
 
     #
     # Put data in vanilla pg
@@ -243,7 +252,11 @@ def test_pgdata_import_smoke(
     #
 
     ro_endpoint = env.endpoints.create_start(
-        branch_name=import_branch_name, endpoint_id="ro", tenant_id=tenant_id, lsn=last_record_lsn
+        branch_name=import_branch_name,
+        endpoint_id="ro",
+        tenant_id=tenant_id,
+        lsn=last_record_lsn,
+        config_lines=ep_config,
     )
 
     validate_vanilla_equivalence(ro_endpoint)
@@ -273,7 +286,10 @@ def test_pgdata_import_smoke(
     # validate that we can write
     #
     rw_endpoint = env.endpoints.create_start(
-        branch_name=import_branch_name, endpoint_id="rw", tenant_id=tenant_id
+        branch_name=import_branch_name,
+        endpoint_id="rw",
+        tenant_id=tenant_id,
+        config_lines=ep_config,
     )
     rw_endpoint.safe_psql("create table othertable(values text)")
     rw_lsn = Lsn(rw_endpoint.safe_psql_scalar("select pg_current_wal_flush_lsn()"))
@@ -293,7 +309,7 @@ def test_pgdata_import_smoke(
         ancestor_start_lsn=rw_lsn,
     )
     br_tip_endpoint = env.endpoints.create_start(
-        branch_name="br-tip", endpoint_id="br-tip-ro", tenant_id=tenant_id
+        branch_name="br-tip", endpoint_id="br-tip-ro", tenant_id=tenant_id, config_lines=ep_config
     )
     validate_vanilla_equivalence(br_tip_endpoint)
     br_tip_endpoint.safe_psql("select * from othertable")
@@ -306,7 +322,10 @@ def test_pgdata_import_smoke(
         ancestor_start_lsn=initdb_lsn,
     )
     br_initdb_endpoint = env.endpoints.create_start(
-        branch_name="br-initdb", endpoint_id="br-initdb-ro", tenant_id=tenant_id
+        branch_name="br-initdb",
+        endpoint_id="br-initdb-ro",
+        tenant_id=tenant_id,
+        config_lines=ep_config,
     )
     validate_vanilla_equivalence(br_initdb_endpoint)
     with pytest.raises(psycopg2.errors.UndefinedTable):

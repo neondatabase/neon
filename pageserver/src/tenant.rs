@@ -2426,7 +2426,7 @@ impl Tenant {
         // Make sure the freeze_and_flush reaches remote storage.
         tline.remote_client.wait_completion().await.unwrap();
 
-        let tl = uninit_tl.finish_creation()?;
+        let tl = uninit_tl.finish_creation().await?;
         // The non-test code would call tl.activate() here.
         tl.set_state(TimelineState::Active);
         Ok(tl)
@@ -4702,7 +4702,7 @@ impl Tenant {
             )
             .await?;
 
-        let new_timeline = uninitialized_timeline.finish_creation()?;
+        let new_timeline = uninitialized_timeline.finish_creation().await?;
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
         // A branch timeline though, when created, can get no writes for some time, hence won't get any layers created.
@@ -4892,10 +4892,11 @@ impl Tenant {
         }
 
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
+        let pgdata_path_deferred = pgdata_path.clone();
         scopeguard::defer! {
-            if let Err(e) = fs::remove_dir_all(&pgdata_path) {
+            if let Err(e) = fs::remove_dir_all(&pgdata_path_deferred) {
                 // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
-                error!("Failed to remove temporary initdb directory '{pgdata_path}': {e}");
+                error!("Failed to remove temporary initdb directory '{pgdata_path_deferred}': {e}");
             }
         }
         if let Some(existing_initdb_timeline_id) = load_existing_initdb {
@@ -4962,7 +4963,7 @@ impl Tenant {
             pgdata_lsn,
             pg_version,
         );
-        let raw_timeline = self
+        let mut raw_timeline = self
             .prepare_new_timeline(
                 timeline_id,
                 &new_metadata,
@@ -4973,42 +4974,33 @@ impl Tenant {
             .await?;
 
         let tenant_shard_id = raw_timeline.owning_tenant.tenant_shard_id;
-        let unfinished_timeline = raw_timeline.raw_timeline()?;
-
-        // Flush the new layer files to disk, before we make the timeline as available to
-        // the outside world.
-        //
-        // Flush loop needs to be spawned in order to be able to flush.
-        unfinished_timeline.maybe_spawn_flush_loop();
-
-        import_datadir::import_timeline_from_postgres_datadir(
-            unfinished_timeline,
-            &pgdata_path,
-            pgdata_lsn,
-            ctx,
-        )
-        .await
-        .with_context(|| {
-            format!("Failed to import pgdatadir for timeline {tenant_shard_id}/{timeline_id}")
-        })?;
-
-        fail::fail_point!("before-checkpoint-new-timeline", |_| {
-            Err(CreateTimelineError::Other(anyhow::anyhow!(
-                "failpoint before-checkpoint-new-timeline"
-            )))
-        });
-
-        unfinished_timeline
-            .freeze_and_flush()
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to flush after pgdatadir import for timeline {tenant_shard_id}/{timeline_id}"
+        raw_timeline
+            .write(|unfinished_timeline| async move {
+                import_datadir::import_timeline_from_postgres_datadir(
+                    &unfinished_timeline,
+                    &pgdata_path,
+                    pgdata_lsn,
+                    ctx,
                 )
-            })?;
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to import pgdatadir for timeline {tenant_shard_id}/{timeline_id}"
+                    )
+                })?;
+
+                fail::fail_point!("before-checkpoint-new-timeline", |_| {
+                    Err(CreateTimelineError::Other(anyhow::anyhow!(
+                        "failpoint before-checkpoint-new-timeline"
+                    )))
+                });
+
+                Ok(())
+            })
+            .await?;
 
         // All done!
-        let timeline = raw_timeline.finish_creation()?;
+        let timeline = raw_timeline.finish_creation().await?;
 
         // Callers are responsible to wait for uploads to complete and for activating the timeline.
 

@@ -2919,10 +2919,45 @@ impl Timeline {
         // Between the sanity check and this compaction update, there could be new layers being flushed, but it should be fine because we only
         // operate on L1 layers.
         {
+            // Gc-compaction will rewrite the history of a key. This could happen in two ways:
+            //
+            // 1. We create an image layer to replace all the deltas below the compact LSN. In this case, assume
+            // we have 2 delta layers A and B, both below the compact LSN. We create an image layer I to replace
+            // A and B at the compact LSN. If the read path finishes reading A, yields, and now we update the layer
+            // map, the read path then cannot find any keys below A, reporting a missing key error, while the key
+            // now gets stored in I at the compact LSN.
+            //
+            // ---------------                                       ---------------
+            //   delta1@LSN20                                         image1@LSN20
+            // ---------------  (read path collects delta@LSN20,  => ---------------  (read path cannot find anything
+            //   delta1@LSN10    yields)                                               below LSN 20)
+            // ---------------
+            //
+            // 2. We create a delta layer to replace all the deltas below the compact LSN, and in the delta layers,
+            // we combines the history of a key into a single image. For example, we have deltas at LSN 1, 2, 3, 4,
+            // Assume one delta layer contains LSN 1, 2, 3 and the other contains LSN 4.
+            //
+            // We let gc-compaction combine delta 2, 3, 4 into an image at LSN 4, which produces a delta layer that
+            // contains the delta at LSN 1, the image at LSN 4. If the read path finishes reading the original delta
+            // layer containing 4, yields, and we update the layer map to put the delta layer.
+            //
+            // ---------------                                      ---------------
+            //   delta1@LSN4                                          image1@LSN4
+            // ---------------  (read path collects delta@LSN4,  => ---------------  (read path collects LSN4 and LSN1,
+            //  delta1@LSN1-3    yields)                              delta1@LSN1     which is an invalid history)
+            // ---------------                                      ---------------
+            //
+            // Therefore, the gc-compaction layer update operation should wait for all ongoing reads, block all pending reads,
+            // and only allow reads to continue after the update is finished.
+
+            let update_guard = self.gc_compaction_layer_update_lock.write().await;
+            // Acquiring the update guard ensures current read operations end and new read operations are blocked.
+            // TODO: can we use `latest_gc_cutoff` Rcu to achieve the same effect?
             let mut guard = self.layers.write().await;
             guard
                 .open_mut()?
-                .finish_gc_compaction(&layer_selection, &compact_to, &self.metrics)
+                .finish_gc_compaction(&layer_selection, &compact_to, &self.metrics);
+            drop(update_guard); // Allow new reads to start ONLY after we finished updating the layer map.
         };
 
         // Schedule an index-only upload to update the `latest_gc_cutoff` in the index_part.json.
