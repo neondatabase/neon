@@ -341,7 +341,7 @@ jobs:
           ],
           "pg_version" : [
             16,17
-          ],
+          ]
         }'
 
         if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
