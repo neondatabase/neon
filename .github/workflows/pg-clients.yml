@@ -104,6 +104,7 @@ jobs:
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           postgres_version: ${{ env.DEFAULT_PG_VERSION }}
+          enable_logical_replication: true
 
       - name: Run tests
         uses: ./.github/actions/run-python-test-set

@@ -41,7 +41,10 @@ inputs:
     description: 'Path to directory containing libpq library - it is caller responsibility to provision the libpq library'
     required: false
     default: '/tmp/neon/pg_install/v16/lib'
-  
+  enable_logical_replication:
+    description: 'Enable logical replication (true/false)'
+    required: false
+    default: 'false'
 
 outputs:
   dsn:
@@ -59,6 +62,10 @@ runs:
       # A shell without `set -x` to not to expose password/dsn in logs
       shell: bash -euo pipefail {0}
       run: |
+        project_settings="{
+          \"enable_logical_replication\": ${ENABLE_LOGICAL_REPLICATION}
+        }"
+
         project=$(curl \
           "https://${API_HOST}/api/v2/projects" \
           --fail \
@@ -73,7 +80,7 @@ runs:
               \"provisioner\": \"k8s-neonvm\",
               \"autoscaling_limit_min_cu\": ${MIN_CU},
               \"autoscaling_limit_max_cu\": ${MAX_CU},
-              \"settings\": { }
+              \"settings\": ${project_settings}
             }
           }")
 
@@ -92,12 +99,12 @@ runs:
         if [ "${SHARD_SPLIT_PROJECT}" = "true" ]; then
           # determine tenant ID
           TENANT_ID=`${PSQL} ${dsn} -t -A -c "SHOW neon.tenant_id"`
-          
+
           echo "Splitting project ${project_id} with tenant_id ${TENANT_ID} into $((SHARD_COUNT)) shards with stripe size $((STRIPE_SIZE))"
 
           echo "Sending PUT request to https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/storage/proxy/control/v1/tenant/${TENANT_ID}/shard_split"
           echo "with body {\"new_shard_count\": $((SHARD_COUNT)), \"new_stripe_size\": $((STRIPE_SIZE))}"
-          
+
           # we need an ADMIN API KEY to invoke storage controller API for shard splitting (bash -u above checks that the variable is set)
           curl -X PUT \
             "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/storage/proxy/control/v1/tenant/${TENANT_ID}/shard_split" \
@@ -118,3 +125,4 @@ runs:
         STRIPE_SIZE: ${{ inputs.stripe_size }}
         PSQL: ${{ inputs.psql_path }}
         LD_LIBRARY_PATH: ${{ inputs.libpq_lib_path }}
+        ENABLE_LOGICAL_REPLICATION: ${{ inputs.enable_logical_replication }}
