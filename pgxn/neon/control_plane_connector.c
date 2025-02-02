@@ -44,6 +44,7 @@
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 static fmgr_hook_type next_fmgr_hook = NULL;
 static needs_fmgr_hook_type next_needs_fmgr_hook = NULL;
+static bool neon_disable_event_triggers_for_superuser = false;
 
 static const char *jwt_token = NULL;
 
@@ -817,9 +818,9 @@ force_noop(FmgrInfo *finfo)
 static void
 neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 {
-    if (event == FHET_START && superuser())
+    if (event == FHET_START && neon_disable_event_triggers_for_superuser && superuser())
 	{
-		elog(WARNING, "Skipping event trigger for superuser");
+		ereport(WARNING, (errmsg("Skipping event trigger for superuser"), errbacktrace()));
 		/* we can't skip execution directly inside the fmgr_hook so instead we change the event trigger function to a noop function */
 		force_noop(flinfo);
 	}
@@ -962,6 +963,18 @@ InitControlPlaneConnector()
 
 	RegisterXactCallback(NeonXactCallback, NULL);
 	RegisterSubXactCallback(NeonSubXactCallback, NULL);
+
+	DefineCustomBoolVariable(
+							 "neon.disable_event_triggers_for_superuser",
+							 "Disable event triggers for superuser",
+							 NULL,
+							 &neon_disable_event_triggers_for_superuser,
+							 false,
+							 PGC_SUSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
 
 	DefineCustomStringVariable(
 							   "neon.console_url",
