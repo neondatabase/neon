@@ -24,6 +24,7 @@
 #include <curl/curl.h>
 
 #include "access/xact.h"
+#include "catalog/pg_authid.h"
 #include "commands/defrem.h"
 #include "fmgr.h"
 #include "libpq/crypt.h"
@@ -35,11 +36,14 @@
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
 #include "utils/jsonb.h"
+#include <utils/lsyscache.h>
 
 #include "control_plane_connector.h"
 #include "neon_utils.h"
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
+static fmgr_hook_type next_fmgr_hook = NULL;
+static needs_fmgr_hook_type next_needs_fmgr_hook = NULL;
 
 static const char *jwt_token = NULL;
 
@@ -785,6 +789,82 @@ HandleRename(RenameStmt *stmt)
 		return HandleRoleRename(stmt);
 }
 
+static bool
+neon_needs_fmgr_hook(Oid functionId) {
+
+	return (next_needs_fmgr_hook && (*next_needs_fmgr_hook) (functionId))
+		|| get_func_rettype(functionId) == EVENT_TRIGGEROID;
+}
+
+
+PG_FUNCTION_INFO_V1(noop);
+Datum noop(__attribute__ ((unused)) PG_FUNCTION_ARGS) { PG_RETURN_VOID();}
+
+static void
+force_noop(FmgrInfo *finfo)
+{
+    finfo->fn_addr   = (PGFunction) noop;
+    finfo->fn_oid    = InvalidOid;           /* not a known function OID anymore */
+    finfo->fn_nargs  = 0;                    /* no arguments for noop */
+    finfo->fn_strict = false;
+    finfo->fn_retset = false;
+    finfo->fn_stats  = 0;                    /* no stats collection */
+    finfo->fn_extra  = NULL;                 /* clear out old context data */
+    finfo->fn_mcxt   = CurrentMemoryContext;
+    finfo->fn_expr   = NULL;                 /* no parse tree */
+}
+
+static void
+neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
+{
+    if (event == FHET_START && superuser())
+	{
+		elog(WARNING, "Skipping event trigger for superuser");
+		/* we can't skip execution directly inside the fmgr_hook so instead we change the event trigger function to a noop function */
+		force_noop(flinfo);
+	}
+	if (next_fmgr_hook)
+		(*next_fmgr_hook) (event, flinfo, private);
+}
+
+static Oid prev_role_oid = 0;
+static int prev_role_sec_context = 0;
+static bool switched_to_superuser = false;
+
+static bool
+switch_to_superuser(void)
+{
+    Oid superuser_oid;
+
+	if (switched_to_superuser)
+		return false;
+	switched_to_superuser = true;
+
+	superuser_oid = get_role_oid("cloud_admin", true /*missing_ok*/);
+	if (superuser_oid == InvalidOid)
+		superuser_oid = BOOTSTRAP_SUPERUSERID;
+
+    GetUserIdAndSecContext(&prev_role_oid, &prev_role_sec_context);
+    SetUserIdAndSecContext(superuser_oid, prev_role_sec_context |
+                                              SECURITY_LOCAL_USERID_CHANGE |
+                                              SECURITY_RESTRICTED_OPERATION);
+	return true;
+}
+
+static void
+switch_to_original_role(void)
+{
+    SetUserIdAndSecContext(prev_role_oid, prev_role_sec_context);
+    switched_to_superuser = false;
+}
+
+static bool
+neon_superuser(void)
+{
+	Oid neon_superuser_oid = get_role_oid("neon_superuser", true /*missing_ok*/);
+	return neon_superuser_oid != InvalidOid && has_privs_of_role(GetUserId(), neon_superuser_oid);
+}
+
 static void
 NeonProcessUtility(
 				   PlannedStmt *pstmt,
@@ -797,6 +877,7 @@ NeonProcessUtility(
 				   QueryCompletion *qc)
 {
 	Node	   *parseTree = pstmt->utilityStmt;
+	bool		sudo = false;
 
 	switch (nodeTag(parseTree))
 	{
@@ -829,6 +910,12 @@ NeonProcessUtility(
 					errmsg("CREATE TABLESPACE is not supported on Neon")));
 			}
    			break;
+		case T_CreateEventTrigStmt:
+			if (IsTransactionState() && neon_superuser())
+			{
+				sudo = switch_to_superuser();
+			}
+			break;
 		default:
 			break;
 	}
@@ -857,6 +944,8 @@ NeonProcessUtility(
 								dest,
 								qc);
 	}
+	if (sudo)
+		switch_to_original_role();
 }
 
 void
@@ -864,6 +953,13 @@ InitControlPlaneConnector()
 {
 	PreviousProcessUtilityHook = ProcessUtility_hook;
 	ProcessUtility_hook = NeonProcessUtility;
+
+    next_needs_fmgr_hook = needs_fmgr_hook;
+	needs_fmgr_hook = neon_needs_fmgr_hook;
+
+	next_fmgr_hook = fmgr_hook;
+	fmgr_hook = neon_fmgr_hook;
+
 	RegisterXactCallback(NeonXactCallback, NULL);
 	RegisterSubXactCallback(NeonSubXactCallback, NULL);
 
