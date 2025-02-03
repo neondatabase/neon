@@ -912,9 +912,20 @@ NeonProcessUtility(
 			}
    			break;
 		case T_CreateEventTrigStmt:
+		case T_AlterEventTrigStmt:
 			if (IsTransactionState() && neon_superuser())
 			{
 				sudo = switch_to_superuser();
+			}
+			break;
+		case T_DropStmt:
+			if (neon_superuser())
+			{
+				DropStmt *stmt = (DropStmt *)parseTree;
+				if (stmt->removeType == OBJECT_EVENT_TRIGGER)
+				{
+					sudo = switch_to_superuser();
+				}
 			}
 			break;
 		default:

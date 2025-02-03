@@ -37,3 +37,8 @@ set neon.disable_event_triggers_for_superuser=on;
 
 -- Check that even trigger is not fired in this case
 create table t3(x integer);
+
+set role neon_superuser;
+
+-- Check that neon_superuser can drop event trigger
+drop event trigger on_ddl;
