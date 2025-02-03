@@ -19,12 +19,12 @@ aws-config.workspace = true
 aws-sdk-iam.workspace = true
 aws-sigv4.workspace = true
 base64.workspace = true
+boxcar = "0.2.8"
 bstr.workspace = true
 bytes = { workspace = true, features = ["serde"] }
 camino.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
-dashmap = "5.5.3"
 clashmap.workspace = true
 compute_api.workspace = true
 consumption_metrics.workspace = true
@@ -53,6 +53,7 @@ measured = { workspace = true, features = ["lasso"] }
 metrics.workspace = true
 once_cell.workspace = true
 opentelemetry = { workspace = true, features = ["trace"] }
+papaya = "0.1.8"
 parking_lot.workspace = true
 parquet.workspace = true
 parquet_derive.workspace = true

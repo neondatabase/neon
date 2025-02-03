@@ -1,11 +1,11 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock, RwLockWriteGuard};
+use std::hash::BuildHasher;
 use std::{env, io};
 
 use chrono::{DateTime, Utc};
-use indexmap::IndexMap;
 use opentelemetry::trace::TraceContextExt;
+use scopeguard::defer;
 use serde::ser::{SerializeMap, Serializer};
 use serde::Serialize;
 use tracing::span;
@@ -50,7 +50,7 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
     let json_log_layer = if logfmt == LogFormat::Json {
         Some(JsonLoggingLayer {
             clock: RealClock,
-            skipped_field_index: Arc::default(),
+            skipped_field_indices: papaya::HashMap::default(),
             writer: StderrWriter {
                 stderr: std::io::stderr(),
             },
@@ -179,9 +179,18 @@ impl Clock for RealClock {
     }
 }
 
+/// Name of the field used by tracing crate to store the event message.
+const MESSAGE_FIELD: &str = "message";
+
+thread_local! {
+    static REENTRANCY_GUARD: Cell<bool> = const { Cell::new(false) };
+    static EVENT_FORMATTER: RefCell<EventFormatter> = RefCell::new(EventFormatter::new());
+    static THREAD_ID: Cell<u64> = Cell::new(gettid::gettid());
+}
+
 pub struct JsonLoggingLayer<C: Clock, W: MakeWriter> {
     clock: C,
-    skipped_field_index: Arc<RwLock<HashMap<callsite::Identifier, Vec<usize>>>>,
+    skipped_field_indices: papaya::HashMap<callsite::Identifier, SkippedFieldIndices>,
     writer: W,
 }
 
@@ -196,16 +205,21 @@ where
         //       early, before OTel machinery, and add as event extension.
         let now = self.clock.now();
 
-        let res: io::Result<()> = EVENT_FORMATTER.with_borrow_mut(move |formatter| {
-            formatter.reset();
-            formatter.format(
-                now,
-                event,
-                &ctx,
-                &self.skipped_field_index.read().expect("poisoned"),
-            )?;
+        let res: io::Result<()> = REENTRANCY_GUARD.with(move |entered| {
+            if entered.get() {
+                let mut formatter = EventFormatter::new();
+                formatter.format(now, event, &ctx, &self.skipped_field_indices)?;
+                self.writer.make().write_all(&formatter.logline_buffer)
+            } else {
+                entered.set(true);
+                defer!(entered.set(false););
 
-            self.writer.make().write_all(&formatter.logline_buffer)
+                EVENT_FORMATTER.with_borrow_mut(move |formatter| {
+                    formatter.reset();
+                    formatter.format(now, event, &ctx, &self.skipped_field_indices)?;
+                    self.writer.make().write_all(&formatter.logline_buffer)
+                })
+            }
         });
 
         // TODO: maybe simplify this
@@ -225,17 +239,18 @@ where
     }
 
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
-        let span = ctx.span(&id).expect("span must exist");
-        let fields = SpanData::default();
+        let span = ctx.span(id).expect("span must exist");
+        let fields = SpanFields::default();
         fields.record_fields(attrs);
         span.extensions_mut().insert(fields);
     }
 
     fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
-        let span = ctx.span(&id).expect("span must exist");
+        let span = ctx.span(id).expect("span must exist");
         let ext = span.extensions();
-        let data = ext.get::<SpanData>().expect("extension must exist");
-        data.record_fields(values);
+        if let Some(data) = ext.get::<SpanFields>() {
+            data.record_fields(values);
+        }
     }
 
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
@@ -244,8 +259,7 @@ where
             return Interest::always();
         }
 
-        let mut skipped_field_indices = self.skipped_field_index.write().expect("poisoned");
-
+        let mut field_indices = SkippedFieldIndices::default();
         let mut seen_fields = HashMap::<&'static str, usize>::new();
         for field in metadata.fields() {
             use std::collections::hash_map::Entry;
@@ -258,12 +272,15 @@ where
                     // replace currently stored index
                     let old_index = entry.insert(field.index());
                     // ... and append it to list of skippable indices
-                    skipped_field_indices
-                        .entry(metadata.callsite())
-                        .and_modify(|v| v.push(old_index))
-                        .or_insert_with(|| vec![old_index]);
+                    field_indices.push(old_index);
                 }
             }
+        }
+
+        if !field_indices.is_empty() {
+            self.skipped_field_indices
+                .pin()
+                .insert(metadata.callsite(), field_indices);
         }
 
         Interest::always()
@@ -271,33 +288,122 @@ where
 }
 
 #[derive(Default)]
-struct SpanData {
+struct SpanFields {
     // TODO: Use bump allocator for strings
-    fields: RwLock<IndexMap<&'static str, String>>,
+    fields: papaya::HashMap<&'static str, serde_json::Value>,
 }
 
-struct SpanFieldsRecorder<'a> {
-    fields: RwLockWriteGuard<'a, IndexMap<&'static str, String>>,
-}
-
-impl SpanData {
+impl SpanFields {
+    #[inline]
     fn record_fields<R: tracing_subscriber::field::RecordFields>(&self, fields: R) {
         fields.record(&mut SpanFieldsRecorder {
-            fields: self.fields.write().expect("poisoned"),
+            fields: self.fields.pin(),
         });
     }
 }
 
-impl tracing::field::Visit for SpanFieldsRecorder<'_> {
+struct SpanFieldsRecorder<'m, S, G> {
+    fields: papaya::HashMapRef<'m, &'static str, serde_json::Value, S, G>,
+}
+
+impl<S: BuildHasher, G: papaya::Guard> tracing::field::Visit for SpanFieldsRecorder<'_, S, G> {
+    #[inline]
+    fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
+        self.fields
+            .insert(field.name(), serde_json::Value::from(value));
+    }
+
+    #[inline]
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.fields
+            .insert(field.name(), serde_json::Value::from(value));
+    }
+
+    #[inline]
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.fields
+            .insert(field.name(), serde_json::Value::from(value));
+    }
+
+    #[inline]
+    fn record_i128(&mut self, field: &tracing::field::Field, value: i128) {
+        if let Ok(value) = i64::try_from(value) {
+            self.fields
+                .insert(field.name(), serde_json::Value::from(value));
+        } else {
+            self.fields
+                .insert(field.name(), serde_json::Value::from(format!("{value}")));
+        }
+    }
+
+    #[inline]
+    fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
+        if let Ok(value) = u64::try_from(value) {
+            self.fields
+                .insert(field.name(), serde_json::Value::from(value));
+        } else {
+            self.fields
+                .insert(field.name(), serde_json::Value::from(format!("{value}")));
+        }
+    }
+
+    #[inline]
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.fields
+            .insert(field.name(), serde_json::Value::from(value));
+    }
+
+    #[inline]
+    fn record_bytes(&mut self, field: &tracing::field::Field, value: &[u8]) {
+        self.fields
+            .insert(field.name(), serde_json::Value::from(value));
+    }
+
+    #[inline]
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.fields
+            .insert(field.name(), serde_json::Value::from(value));
+    }
+
     #[inline]
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.fields.insert(field.name(), format!("{value:?}"));
+        self.fields
+            .insert(field.name(), serde_json::Value::from(format!("{value:?}")));
+    }
+
+    #[inline]
+    fn record_error(
+        &mut self,
+        field: &tracing::field::Field,
+        value: &(dyn std::error::Error + 'static),
+    ) {
+        self.fields
+            .insert(field.name(), serde_json::Value::from(format!("{value}")));
     }
 }
 
-thread_local! {
-    static EVENT_FORMATTER: RefCell<EventFormatter> = RefCell::new(EventFormatter::new());
-    static THREAD_ID: Cell<u64> = Cell::new(gettid::gettid());
+#[derive(Clone, Default)]
+struct SkippedFieldIndices {
+    indices: Vec<usize>,
+}
+
+impl SkippedFieldIndices {
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    #[inline]
+    fn push(&mut self, index: usize) {
+        self.indices.push(index);
+    }
+
+    #[inline]
+    fn contains(&self, index: usize) -> bool {
+        // TODO: For now we do a linear search as these index lists are assumed
+        //       to be short.
+        self.indices.contains(&index)
+    }
 }
 
 // TODO: buffer capacity management
@@ -326,25 +432,19 @@ impl EventFormatter {
         now: DateTime<Utc>,
         event: &Event<'_>,
         ctx: &Context<'_, S>,
-        skipped_field_indices: &HashMap<callsite::Identifier, Vec<usize>>,
+        skipped_field_indices: &papaya::HashMap<callsite::Identifier, SkippedFieldIndices>,
     ) -> io::Result<()>
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
     {
         let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
 
-        // TODO: translate "log." fields and ignore.
-        // log.target, log.module_path, log.file, log.line
-
         use tracing_log::NormalizeEvent;
         let normalized_meta = event.normalized_metadata();
         let meta = normalized_meta.as_ref().unwrap_or_else(|| event.metadata());
-        // let meta = event.metadata();
 
-        let skipped_field_indices = skipped_field_indices
-            .get(&meta.callsite())
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+        let skipped_field_indices = skipped_field_indices.pin();
+        let skipped_field_indices = skipped_field_indices.get(&meta.callsite());
 
         let mut serialize = || {
             let mut serializer = serde_json::Serializer::new(&mut self.logline_buffer);
@@ -415,12 +515,12 @@ impl EventFormatter {
                         "trace_id",
                         &format_args!("{}", span_context.trace_id()),
                     )?;
-                    serializer
-                        .serialize_entry("span_id", &format_args!("{}", span_context.span_id()))?;
+                    // serializer
+                    //     .serialize_entry("span_id", &format_args!("{}", span_context.span_id()))?;
                 }
             }
 
-            serializer.serialize_entry("context", &SerializableContext(ctx))?;
+            serializer.serialize_entry("spans", &SerializableSpanStack(ctx))?;
 
             serializer.end()
         };
@@ -438,7 +538,7 @@ impl Serialize for SerializeLevel<'_> {
     where
         S: Serializer,
     {
-        // This order was chosen to match log level probabilities.
+        // This order was chosen to match log level probabilities in prod.
         if self.0 == &Level::INFO {
             serializer.serialize_str("INFO")
         } else if self.0 == &Level::WARN {
@@ -455,18 +555,15 @@ impl Serialize for SerializeLevel<'_> {
     }
 }
 
-/// Name of the field used by tracing crate to store the event message.
-const MESSAGE_FIELD: &str = "message";
-
 pub struct MessageExtractor<'a, S: serde::ser::SerializeMap> {
     serializer: S,
-    skipped_field_indices: &'a [usize],
+    skipped_field_indices: Option<&'a SkippedFieldIndices>,
     state: Option<Result<(), S::Error>>,
 }
 
 impl<'a, S: serde::ser::SerializeMap> MessageExtractor<'a, S> {
     #[inline]
-    fn new(serializer: S, skipped_field_indices: &'a [usize]) -> Self {
+    fn new(serializer: S, skipped_field_indices: Option<&'a SkippedFieldIndices>) -> Self {
         Self {
             serializer,
             skipped_field_indices,
@@ -488,7 +585,9 @@ impl<'a, S: serde::ser::SerializeMap> MessageExtractor<'a, S> {
     fn accept_field(&self, field: &tracing::field::Field) -> bool {
         self.state.is_none()
             && field.name() == MESSAGE_FIELD
-            && !self.skipped_field_indices.contains(&field.index())
+            && !self
+                .skipped_field_indices
+                .is_some_and(|i| i.contains(field.index()))
     }
 }
 
@@ -568,12 +667,12 @@ impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageExtractor<'_,
     }
 }
 
-struct FieldsPresent<'a>(pub bool, &'a [usize]);
+struct FieldsPresent<'a>(pub bool, Option<&'a SkippedFieldIndices>);
 
 impl tracing::field::Visit for FieldsPresent<'_> {
     #[inline]
     fn record_debug(&mut self, field: &tracing::field::Field, _: &dyn std::fmt::Debug) {
-        if !self.1.contains(&field.index())
+        if !self.1.is_some_and(|i| i.contains(field.index()))
             && field.name() != MESSAGE_FIELD
             && !field.name().starts_with("log.")
         {
@@ -582,7 +681,10 @@ impl tracing::field::Visit for FieldsPresent<'_> {
     }
 }
 
-struct SerializableEventFields<'a, 'event>(&'a tracing::Event<'event>, &'a [usize]);
+struct SerializableEventFields<'a, 'event>(
+    &'a tracing::Event<'event>,
+    Option<&'a SkippedFieldIndices>,
+);
 
 impl serde::ser::Serialize for SerializableEventFields<'_, '_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -600,13 +702,13 @@ impl serde::ser::Serialize for SerializableEventFields<'_, '_> {
 
 pub struct MessageSkipper<'a, S: serde::ser::SerializeMap> {
     serializer: S,
-    skipped_field_indices: &'a [usize],
+    skipped_field_indices: Option<&'a SkippedFieldIndices>,
     state: Result<(), S::Error>,
 }
 
 impl<'a, S: serde::ser::SerializeMap> MessageSkipper<'a, S> {
     #[inline]
-    fn new(serializer: S, skipped_field_indices: &'a [usize]) -> Self {
+    fn new(serializer: S, skipped_field_indices: Option<&'a SkippedFieldIndices>) -> Self {
         Self {
             serializer,
             skipped_field_indices,
@@ -619,7 +721,9 @@ impl<'a, S: serde::ser::SerializeMap> MessageSkipper<'a, S> {
         self.state.is_ok()
             && field.name() != MESSAGE_FIELD
             && !field.name().starts_with("log.")
-            && !self.skipped_field_indices.contains(&field.index())
+            && !self
+                .skipped_field_indices
+                .is_some_and(|i| i.contains(field.index()))
     }
 
     #[inline]
@@ -709,11 +813,11 @@ impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageSkipper<'_, S
     }
 }
 
-struct SerializableContext<'a, 'b, Span>(&'b Context<'a, Span>)
+struct SerializableSpanStack<'a, 'b, Span>(&'b Context<'a, Span>)
 where
     Span: Subscriber + for<'lookup> LookupSpan<'lookup>;
 
-impl<Span> serde::ser::Serialize for SerializableContext<'_, '_, Span>
+impl<Span> serde::ser::Serialize for SerializableSpanStack<'_, '_, Span>
 where
     Span: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
@@ -746,16 +850,15 @@ where
     where
         Ser: serde::ser::Serializer,
     {
+        let mut serializer = serializer.serialize_map(None)?;
+        serializer.serialize_entry("span_id", &self.0.id().into_u64())?;
+        serializer.serialize_entry("span_name", self.0.metadata().name())?;
+
         let ext = self.0.extensions();
-        let data = ext.get::<SpanData>().expect("extension must exist");
-        let fields = data.fields.read().expect("poisoned");
-
-        let mut serializer = serializer.serialize_map(Some(2 + fields.len()))?;
-        serializer.serialize_entry("name", self.0.metadata().name())?;
-        serializer.serialize_entry("id", &format_args!("{}", self.0.id().into_u64()))?;
-
-        for (key, value) in fields.iter() {
-            serializer.serialize_entry(key, value)?;
+        if let Some(data) = ext.get::<SpanFields>() {
+            for (key, value) in &data.fields.pin() {
+                serializer.serialize_entry(key, value)?;
+            }
         }
 
         serializer.end()
@@ -764,7 +867,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::{Arc, Mutex, MutexGuard};
 
     use assert_json_diff::assert_json_eq;
     use tracing::info_span;
@@ -811,15 +914,16 @@ mod tests {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let log_layer = JsonLoggingLayer {
             clock: clock.clone(),
-            skipped_field_index: Arc::default(),
+            skipped_field_indices: papaya::HashMap::default(),
             writer: buffer.clone(),
         };
 
         let registry = tracing_subscriber::Registry::default().with(log_layer);
 
         tracing::subscriber::with_default(registry, || {
-            let _span = info_span!("test_unset_fields").entered();
-            tracing::info!(
+            let _span1 = info_span!("span1", x = 40, x = 41, x = 42).entered();
+            let _span2 = info_span!("span2").entered();
+            tracing::error!(
                 a = 1,
                 a = 2,
                 a = 3,
@@ -836,11 +940,19 @@ mod tests {
         let expected: serde_json::Value = serde_json::json!(
             {
                 "timestamp": clock.now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
-                "level": "INFO",
+                "level": "ERROR",
                 "message": "explicit message field",
-                "context": {
-                    "a": 3
+                "fields": {
+                    "a": 3,
                 },
+                "spans": [{
+                    "span_id": 1,
+                    "span_name": "span1",
+                    "x": 42,
+                }, {
+                    "span_id": 2,
+                    "span_name": "span2",
+                }],
                 "src": actual.as_object().unwrap().get("src").unwrap().as_str().unwrap(),
                 "target": "proxy::logging::tests",
                 "process_id": actual.as_object().unwrap().get("process_id").unwrap().as_number().unwrap(),

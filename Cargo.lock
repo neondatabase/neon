@@ -1021,6 +1021,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "boxcar"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2721c3c5a6f0e7f7e607125d963fedeb765f545f67adc9d71ed934693881eb42"
+
+[[package]]
 name = "bstr"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4233,6 +4239,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "papaya"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc7c76487f7eaa00a0fc1d7f88dc6b295aec478d11b0fc79f857b62c2874124c"
+dependencies = [
+ "equivalent",
+ "seize",
+]
+
+[[package]]
 name = "parking"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4867,6 +4883,7 @@ dependencies = [
  "aws-sdk-iam",
  "aws-sigv4",
  "base64 0.13.1",
+ "boxcar",
  "bstr",
  "bytes",
  "camino",
@@ -4876,7 +4893,6 @@ dependencies = [
  "clashmap",
  "compute_api",
  "consumption_metrics",
- "dashmap 5.5.3",
  "ecdsa 0.16.9",
  "ed25519-dalek",
  "env_logger 0.10.2",
@@ -4909,6 +4925,7 @@ dependencies = [
  "once_cell",
  "opentelemetry",
  "p256 0.13.2",
+ "papaya",
  "parking_lot 0.12.1",
  "parquet",
  "parquet_derive",
@@ -5909,6 +5926,16 @@ checksum = "f51d0c0d83bec45f16480d0ce0058397a69e48fcdc52d1dc8855fb68acbd31a7"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "seize"
+version = "0.4.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d84b0c858bdd30cb56f5597f8b3bf702ec23829e652cc636a1e5a7b9de46ae93"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
