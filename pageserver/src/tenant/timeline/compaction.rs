@@ -709,7 +709,7 @@ impl Timeline {
                     .extend(sparse_partitioning.into_dense().parts);
 
                 // 3. Create new image layers for partitions that have been modified "enough".
-                let (image_layers, is_complete) = self
+                let (image_layers, outcome) = self
                     .create_image_layers(
                         &partitioning,
                         lsn,
@@ -730,10 +730,10 @@ impl Timeline {
                     .await?;
 
                 self.last_image_layer_creation_status
-                    .store(Arc::new(is_complete.clone()));
+                    .store(Arc::new(outcome.clone()));
 
                 self.upload_new_image_layers(image_layers)?;
-                if let LastImageLayerCreationStatus::Incomplete = is_complete {
+                if let LastImageLayerCreationStatus::Incomplete = outcome {
                     // Yield and do not do any other kind of compaction.
                     info!("skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction).");
                     return Ok(true);

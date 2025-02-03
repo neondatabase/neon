@@ -4614,7 +4614,7 @@ impl Timeline {
         decision
     }
 
-    /// Returns the image layers generated and a boolean indicating whether the process is fully completed.
+    /// Returns the image layers generated and an enum indicating whether the process is fully completed.
     /// true = we have generate all image layers, false = we preempt the process for L0 compaction.
     #[tracing::instrument(skip_all, fields(%lsn, %mode))]
     async fn create_image_layers(
