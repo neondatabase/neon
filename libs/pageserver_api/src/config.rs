@@ -323,7 +323,7 @@ pub struct TenantConfigToml {
     // Expresed in multiples of checkpoint distance.
     pub image_layer_creation_check_threshold: u8,
 
-    // How many multiple of l0 threshold will preempt image layer creation and do L0 compaction.
+    // How many multiples of L0 `compaction_threshold` will preempt image layer creation and do L0 compaction.
     // Set to 0 to disable preemption.
     pub image_creation_preempt_threshold: usize,
 
