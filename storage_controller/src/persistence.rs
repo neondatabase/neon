@@ -1288,8 +1288,11 @@ fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
         rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
             .with_safe_default_protocol_versions()
             .expect("ring should support the default protocol versions");
-    let do_cert_checks = false;
-    Ok(if do_cert_checks {
+    static DO_CERT_CHECKS :std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let do_cert_checks = DO_CERT_CHECKS.get_or_init(|| {
+        std::env::var("STORCON_CERT_CHECKS").is_ok()
+    });
+    Ok(if *do_cert_checks {
         use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified};
         #[derive(Debug)]
         struct AcceptAll(Arc<WebPkiServerVerifier>);
