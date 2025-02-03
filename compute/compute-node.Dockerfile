@@ -825,11 +825,11 @@ RUN case "${PG_VERSION}" in "v17") \
 
 #########################################################################################
 #
-# Layer "rust extensions"
-# This layer is used to build `pgrx` deps
+# Layer "pg build with nonroot user and cargo installed"
+# This layer is base and common for layers with `pgrx`
 #
 #########################################################################################
-FROM pg-build AS rust-extensions-build
+FROM pg-build AS pg-build-nonroot-with-cargo
 ARG PG_VERSION
 
 RUN apt update && \
@@ -847,8 +847,18 @@ RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 30
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
-    rm rustup-init && \
-    case "${PG_VERSION}" in \
+    rm rustup-init
+
+#########################################################################################
+#
+# Layer "rust extensions"
+# This layer is used to build `pgrx` deps
+#
+#########################################################################################
+FROM pg-build-nonroot-with-cargo AS rust-extensions-build
+ARG PG_VERSION
+
+RUN case "${PG_VERSION}" in \
         'v17') \
             echo 'v17 is not supported yet by pgrx. Quit' && exit 0;; \
     esac && \
@@ -867,26 +877,10 @@ USER root
 # and eventually get merged with `rust-extensions-build`
 #
 #########################################################################################
-FROM pg-build AS rust-extensions-build-pgrx12
+FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx12
 ARG PG_VERSION
 
-RUN apt update && \
-    apt install --no-install-recommends --no-install-suggests -y curl libclang-dev && \
-    apt clean && rm -rf /var/lib/apt/lists/* && \
-    useradd -ms /bin/bash nonroot -b /home
-
-ENV HOME=/home/nonroot
-ENV PATH="/home/nonroot/.cargo/bin:$PATH"
-USER nonroot
-WORKDIR /home/nonroot
-
-RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
-
-RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
-    chmod +x rustup-init && \
-    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
-    rm rustup-init && \
-    cargo install --locked --version 0.12.9 cargo-pgrx && \
+RUN cargo install --locked --version 0.12.9 cargo-pgrx && \
     /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
 USER root
@@ -1283,7 +1277,8 @@ FROM alpine/curl:${ALPINE_CURL_VERSION} AS exporters
 ARG TARGETARCH
 # Keep sql_exporter version same as in build-tools.Dockerfile and
 # test_runner/regress/test_compute_metrics.py
-RUN if [ "$TARGETARCH" = "amd64" ]; then\
+RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc; \
+    if [ "$TARGETARCH" = "amd64" ]; then\
         postgres_exporter_sha256='027e75dda7af621237ff8f5ac66b78a40b0093595f06768612b92b1374bd3105';\
         pgbouncer_exporter_sha256='c9f7cf8dcff44f0472057e9bf52613d93f3ffbc381ad7547a959daa63c5e84ac';\
         sql_exporter_sha256='38e439732bbf6e28ca4a94d7bc3686d3fa1abdb0050773d5617a9efdb9e64d08';\
