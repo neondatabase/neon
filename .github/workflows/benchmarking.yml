@@ -11,8 +11,7 @@ on:
     #          │ │ ┌───────────── day of the month (1 - 31)
     #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    # - cron:   '0 3 * * *' # run once a day, timezone is utc
-    - cron: '0 */10 * * *' # Runs every 10 hours at minute 0
+    - cron:   '0 3 * * *' # run once a day, timezone is utc
   workflow_dispatch: # adds ability to run this manually
     inputs:
       region_id:
@@ -551,7 +550,6 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   pgbench-pgvector:
-    if: false
     permissions:
       contents: write
       statuses: write
@@ -685,8 +683,7 @@ jobs:
     #
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
-    # if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
-    if: false
+    if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
     permissions:
       contents: write
       statuses: write
@@ -814,7 +811,6 @@ jobs:
     #
     # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
     # if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
-    if: false
     permissions:
       contents: write
       statuses: write
@@ -934,7 +930,6 @@ jobs:
 
   user-examples-compare:
     # if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
-    if: false
     permissions:
       contents: write
       statuses: write
