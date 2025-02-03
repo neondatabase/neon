@@ -263,38 +263,11 @@ pub(crate) const TENANT_HEATMAP_BASENAME: &str = "heatmap-v1.json";
 /// data directory at pageserver startup can be automatically removed.
 pub(crate) const TEMP_FILE_SUFFIX: &str = "___temp";
 
-/// A marker file to mark that a timeline directory was not fully initialized.
-/// If a timeline directory with this marker is encountered at pageserver startup,
-/// the timeline directory and the marker file are both removed.
-/// Full path: `tenants/<tenant_id>/timelines/<timeline_id>___uninit`.
-pub(crate) const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
-
-pub(crate) const TIMELINE_DELETE_MARK_SUFFIX: &str = "___delete";
-
 pub fn is_temporary(path: &Utf8Path) -> bool {
     match path.file_name() {
         Some(name) => name.ends_with(TEMP_FILE_SUFFIX),
         None => false,
     }
-}
-
-fn ends_with_suffix(path: &Utf8Path, suffix: &str) -> bool {
-    match path.file_name() {
-        Some(name) => name.ends_with(suffix),
-        None => false,
-    }
-}
-
-// FIXME: DO NOT ADD new query methods like this, which will have a next step of parsing timelineid
-// from the directory name. Instead create type "UninitMark(TimelineId)" and only parse it once
-// from the name.
-
-pub(crate) fn is_uninit_mark(path: &Utf8Path) -> bool {
-    ends_with_suffix(path, TIMELINE_UNINIT_MARK_SUFFIX)
-}
-
-pub(crate) fn is_delete_mark(path: &Utf8Path) -> bool {
-    ends_with_suffix(path, TIMELINE_DELETE_MARK_SUFFIX)
 }
 
 /// During pageserver startup, we need to order operations not to exhaust tokio worker threads by
