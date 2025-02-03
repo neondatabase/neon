@@ -1337,7 +1337,7 @@ fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
             .expect("ring should support the default protocol versions");
     static DO_CERT_CHECKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let do_cert_checks =
-        DO_CERT_CHECKS.get_or_init(|| std::env::var("STORCON_CERT_CHECKS").is_ok());
+        DO_CERT_CHECKS.get_or_init(|| std::env::var("STORCON_DB_CERT_CHECKS").is_ok());
     Ok(if *do_cert_checks {
         client_config
             .with_root_certificates(load_certs()?)
