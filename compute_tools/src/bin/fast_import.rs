@@ -271,7 +271,14 @@ async fn wait_until_ready(connstring: String, create_dbname: String) {
 }
 
 #[tokio::main]
-pub(crate) async fn main() -> anyhow::Result<()> {
+pub(crate) async fn main() {
+    if let Err(e) = real_main().await {
+        error!("{:?}", e);
+        std::process::exit(1);
+    }
+}
+
+async fn real_main() -> anyhow::Result<()> {
     utils::logging::init(
         utils::logging::LogFormat::Json,
         utils::logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
