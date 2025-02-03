@@ -18,6 +18,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
+use compaction::CompactionOutcome;
 use enumset::EnumSet;
 use fail::fail_point;
 use futures::{stream::FuturesUnordered, StreamExt};
@@ -1679,7 +1680,7 @@ impl Timeline {
         cancel: &CancellationToken,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> Result<bool, CompactionError> {
+    ) -> Result<CompactionOutcome, CompactionError> {
         self.compact_with_options(
             cancel,
             CompactOptions {
@@ -1701,7 +1702,7 @@ impl Timeline {
         cancel: &CancellationToken,
         options: CompactOptions,
         ctx: &RequestContext,
-    ) -> Result<bool, CompactionError> {
+    ) -> Result<CompactionOutcome, CompactionError> {
         // most likely the cancellation token is from background task, but in tests it could be the
         // request task as well.
 
@@ -1721,8 +1722,8 @@ impl Timeline {
         // compaction task goes over it's period (20s) which is quite often in production.
         let (_guard, _permit) = tokio::select! {
             tuple = prepare => { tuple },
-            _ = self.cancel.cancelled() => return Ok(false),
-            _ = cancel.cancelled() => return Ok(false),
+            _ = self.cancel.cancelled() => return Ok(CompactionOutcome::Done),
+            _ = cancel.cancelled() => return Ok(CompactionOutcome::Done),
         };
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -1730,13 +1731,13 @@ impl Timeline {
         // Last record Lsn could be zero in case the timeline was just created
         if !last_record_lsn.is_valid() {
             warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
-            return Ok(false);
+            return Ok(CompactionOutcome::Done);
         }
 
         let result = match self.get_compaction_algorithm_settings().kind {
             CompactionAlgorithm::Tiered => {
                 self.compact_tiered(cancel, ctx).await?;
-                Ok(false)
+                Ok(CompactionOutcome::Done)
             }
             CompactionAlgorithm::Legacy => self.compact_legacy(cancel, options, ctx).await,
         };
