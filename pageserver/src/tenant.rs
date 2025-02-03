@@ -95,7 +95,6 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
-use crate::is_uninit_mark;
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::CONCURRENT_INITDBS;
 use crate::metrics::INITDB_RUN_TIME;
@@ -1793,11 +1792,7 @@ impl Tenant {
             let entry = entry.context("read timeline dir entry")?;
             let entry_path = entry.path();
 
-            let purge = if crate::is_temporary(entry_path)
-                // TODO: remove uninit mark code (https://github.com/neondatabase/neon/issues/5718)
-                || is_uninit_mark(entry_path)
-                || crate::is_delete_mark(entry_path)
-            {
+            let purge = if crate::is_temporary(entry_path) {
                 true
             } else {
                 match TimelineId::try_from(entry_path.file_name()) {
@@ -2426,7 +2421,7 @@ impl Tenant {
         // Make sure the freeze_and_flush reaches remote storage.
         tline.remote_client.wait_completion().await.unwrap();
 
-        let tl = uninit_tl.finish_creation()?;
+        let tl = uninit_tl.finish_creation().await?;
         // The non-test code would call tl.activate() here.
         tl.set_state(TimelineState::Active);
         Ok(tl)
@@ -3816,6 +3811,13 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
+    pub fn get_compaction_upper_limit(&self) -> usize {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .compaction_upper_limit
+            .unwrap_or(self.conf.default_tenant_conf.compaction_upper_limit)
+    }
+
     pub fn get_gc_horizon(&self) -> u64 {
         let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
         tenant_conf
@@ -4695,7 +4697,7 @@ impl Tenant {
             )
             .await?;
 
-        let new_timeline = uninitialized_timeline.finish_creation()?;
+        let new_timeline = uninitialized_timeline.finish_creation().await?;
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
         // A branch timeline though, when created, can get no writes for some time, hence won't get any layers created.
@@ -4885,10 +4887,11 @@ impl Tenant {
         }
 
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
+        let pgdata_path_deferred = pgdata_path.clone();
         scopeguard::defer! {
-            if let Err(e) = fs::remove_dir_all(&pgdata_path) {
+            if let Err(e) = fs::remove_dir_all(&pgdata_path_deferred) {
                 // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
-                error!("Failed to remove temporary initdb directory '{pgdata_path}': {e}");
+                error!("Failed to remove temporary initdb directory '{pgdata_path_deferred}': {e}");
             }
         }
         if let Some(existing_initdb_timeline_id) = load_existing_initdb {
@@ -4955,7 +4958,7 @@ impl Tenant {
             pgdata_lsn,
             pg_version,
         );
-        let raw_timeline = self
+        let mut raw_timeline = self
             .prepare_new_timeline(
                 timeline_id,
                 &new_metadata,
@@ -4966,42 +4969,33 @@ impl Tenant {
             .await?;
 
         let tenant_shard_id = raw_timeline.owning_tenant.tenant_shard_id;
-        let unfinished_timeline = raw_timeline.raw_timeline()?;
-
-        // Flush the new layer files to disk, before we make the timeline as available to
-        // the outside world.
-        //
-        // Flush loop needs to be spawned in order to be able to flush.
-        unfinished_timeline.maybe_spawn_flush_loop();
-
-        import_datadir::import_timeline_from_postgres_datadir(
-            unfinished_timeline,
-            &pgdata_path,
-            pgdata_lsn,
-            ctx,
-        )
-        .await
-        .with_context(|| {
-            format!("Failed to import pgdatadir for timeline {tenant_shard_id}/{timeline_id}")
-        })?;
-
-        fail::fail_point!("before-checkpoint-new-timeline", |_| {
-            Err(CreateTimelineError::Other(anyhow::anyhow!(
-                "failpoint before-checkpoint-new-timeline"
-            )))
-        });
-
-        unfinished_timeline
-            .freeze_and_flush()
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to flush after pgdatadir import for timeline {tenant_shard_id}/{timeline_id}"
+        raw_timeline
+            .write(|unfinished_timeline| async move {
+                import_datadir::import_timeline_from_postgres_datadir(
+                    &unfinished_timeline,
+                    &pgdata_path,
+                    pgdata_lsn,
+                    ctx,
                 )
-            })?;
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to import pgdatadir for timeline {tenant_shard_id}/{timeline_id}"
+                    )
+                })?;
+
+                fail::fail_point!("before-checkpoint-new-timeline", |_| {
+                    Err(CreateTimelineError::Other(anyhow::anyhow!(
+                        "failpoint before-checkpoint-new-timeline"
+                    )))
+                });
+
+                Ok(())
+            })
+            .await?;
 
         // All done!
-        let timeline = raw_timeline.finish_creation()?;
+        let timeline = raw_timeline.finish_creation().await?;
 
         // Callers are responsible to wait for uploads to complete and for activating the timeline.
 
@@ -5469,6 +5463,7 @@ pub(crate) mod harness {
                 compaction_target_size: Some(tenant_conf.compaction_target_size),
                 compaction_period: Some(tenant_conf.compaction_period),
                 compaction_threshold: Some(tenant_conf.compaction_threshold),
+                compaction_upper_limit: Some(tenant_conf.compaction_upper_limit),
                 compaction_algorithm: Some(tenant_conf.compaction_algorithm),
                 l0_flush_delay_threshold: tenant_conf.l0_flush_delay_threshold,
                 l0_flush_stall_threshold: tenant_conf.l0_flush_stall_threshold,

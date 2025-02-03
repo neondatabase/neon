@@ -1,6 +1,7 @@
 pub(crate) mod split_state;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -9,8 +10,11 @@ use diesel::prelude::*;
 use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
 use diesel_async::pooled_connection::bb8::Pool;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
+use diesel_async::pooled_connection::ManagerConfig;
+use diesel_async::AsyncPgConnection;
 use diesel_async::RunQueryDsl;
-use diesel_async::{AsyncConnection, AsyncPgConnection};
+use futures::future::BoxFuture;
+use futures::FutureExt;
 use itertools::Itertools;
 use pageserver_api::controller_api::AvailabilityZone;
 use pageserver_api::controller_api::MetadataHealthRecord;
@@ -23,6 +27,7 @@ use pageserver_api::shard::ShardConfigError;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::ShardStripeSize;
 use pageserver_api::shard::{ShardCount, ShardNumber, TenantShardId};
+use rustls::crypto::ring;
 use scoped_futures::ScopedBoxFuture;
 use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
@@ -156,7 +161,13 @@ impl Persistence {
     const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(60);
 
     pub async fn new(database_url: String) -> Self {
-        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(database_url);
+        let mut mgr_config = ManagerConfig::default();
+        mgr_config.custom_setup = Box::new(establish_connection_rustls);
+
+        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(
+            database_url,
+            mgr_config,
+        );
 
         // We will use a connection pool: this is primarily to _limit_ our connection count, rather than to optimize time
         // to execute queries (database queries are not generally on latency-sensitive paths).
@@ -182,7 +193,7 @@ impl Persistence {
     ) -> Result<(), diesel::ConnectionError> {
         let started_at = Instant::now();
         loop {
-            match AsyncPgConnection::establish(database_url).await {
+            match establish_connection_rustls(database_url).await {
                 Ok(_) => {
                     tracing::info!("Connected to database.");
                     return Ok(());
@@ -1254,6 +1265,45 @@ impl Persistence {
         })
         .await
     }
+}
+
+pub(crate) fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {
+    let der_certs = rustls_native_certs::load_native_certs();
+
+    if !der_certs.errors.is_empty() {
+        anyhow::bail!("could not parse certificates: {:?}", der_certs.errors);
+    }
+
+    let mut store = rustls::RootCertStore::empty();
+    store.add_parsable_certificates(der_certs.certs);
+    Ok(Arc::new(store))
+}
+
+/// Loads the root certificates and constructs a client config suitable for connecting.
+/// This function is blocking.
+pub fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
+    Ok(
+        rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring should support the default protocol versions")
+            .with_root_certificates(load_certs()?)
+            .with_no_client_auth(),
+    )
+}
+
+fn establish_connection_rustls(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConnection>> {
+    let fut = async {
+        // We first set up the way we want rustls to work.
+        let rustls_config = client_config_with_root_certs()
+            .map_err(|err| ConnectionError::BadConnection(format!("{err:?}")))?;
+        let tls = tokio_postgres_rustls::MakeRustlsConnect::new(rustls_config);
+        let (client, conn) = tokio_postgres::connect(config, tls)
+            .await
+            .map_err(|e| ConnectionError::BadConnection(e.to_string()))?;
+
+        AsyncPgConnection::try_from_client_and_connection(client, conn).await
+    };
+    fut.boxed()
 }
 
 /// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably

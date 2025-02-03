@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use anyhow::bail;
-use dashmap::DashMap;
+use clashmap::ClashMap;
 use itertools::Itertools;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -62,7 +62,7 @@ impl GlobalRateLimiter {
 pub type WakeComputeRateLimiter = BucketRateLimiter<EndpointIdInt, StdRng, RandomState>;
 
 pub struct BucketRateLimiter<Key, Rand = StdRng, Hasher = RandomState> {
-    map: DashMap<Key, Vec<RateBucket>, Hasher>,
+    map: ClashMap<Key, Vec<RateBucket>, Hasher>,
     info: Cow<'static, [RateBucketInfo]>,
     access_count: AtomicUsize,
     rand: Mutex<Rand>,
@@ -138,6 +138,12 @@ impl RateBucketInfo {
         Self::new(200, Duration::from_secs(600)),
     ];
 
+    // For all the sessions will be cancel key. So this limit is essentially global proxy limit.
+    pub const DEFAULT_REDIS_SET: [Self; 2] = [
+        Self::new(100_000, Duration::from_secs(1)),
+        Self::new(50_000, Duration::from_secs(10)),
+    ];
+
     /// All of these are per endpoint-maskedip pair.
     /// Context: 4096 rounds of pbkdf2 take about 1ms of cpu time to execute (1 milli-cpu-second or 1mcpus).
     ///
@@ -196,7 +202,7 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         info!(buckets = ?info, "endpoint rate limiter");
         Self {
             info,
-            map: DashMap::with_hasher_and_shard_amount(hasher, 64),
+            map: ClashMap::with_hasher_and_shard_amount(hasher, 64),
             access_count: AtomicUsize::new(1), // start from 1 to avoid GC on the first request
             rand: Mutex::new(rand),
         }

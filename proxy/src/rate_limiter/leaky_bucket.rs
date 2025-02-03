@@ -2,7 +2,7 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ahash::RandomState;
-use dashmap::DashMap;
+use clashmap::ClashMap;
 use rand::{thread_rng, Rng};
 use tokio::time::Instant;
 use tracing::info;
@@ -14,7 +14,7 @@ use crate::intern::EndpointIdInt;
 pub type EndpointRateLimiter = LeakyBucketRateLimiter<EndpointIdInt>;
 
 pub struct LeakyBucketRateLimiter<Key> {
-    map: DashMap<Key, LeakyBucketState, RandomState>,
+    map: ClashMap<Key, LeakyBucketState, RandomState>,
     config: utils::leaky_bucket::LeakyBucketConfig,
     access_count: AtomicUsize,
 }
@@ -27,7 +27,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
 
     pub fn new_with_shards(config: LeakyBucketConfig, shards: usize) -> Self {
         Self {
-            map: DashMap::with_hasher_and_shard_amount(RandomState::new(), shards),
+            map: ClashMap::with_hasher_and_shard_amount(RandomState::new(), shards),
             config: config.into(),
             access_count: AtomicUsize::new(0),
         }
@@ -58,7 +58,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
         let shard = thread_rng().gen_range(0..n);
         self.map.shards()[shard]
             .write()
-            .retain(|_, value| !value.get().bucket_is_empty(now));
+            .retain(|(_, value)| !value.bucket_is_empty(now));
     }
 }
 

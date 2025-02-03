@@ -279,6 +279,10 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    pub compaction_upper_limit: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -401,6 +405,9 @@ impl TenantConfOpt {
             compaction_threshold: self
                 .compaction_threshold
                 .unwrap_or(global_conf.compaction_threshold),
+            compaction_upper_limit: self
+                .compaction_upper_limit
+                .unwrap_or(global_conf.compaction_upper_limit),
             compaction_algorithm: self
                 .compaction_algorithm
                 .as_ref()
@@ -478,6 +485,7 @@ impl TenantConfOpt {
             mut compaction_target_size,
             mut compaction_period,
             mut compaction_threshold,
+            mut compaction_upper_limit,
             mut compaction_algorithm,
             mut l0_flush_delay_threshold,
             mut l0_flush_stall_threshold,
@@ -519,6 +527,9 @@ impl TenantConfOpt {
             .map(|v| humantime::parse_duration(&v))?
             .apply(&mut compaction_period);
         patch.compaction_threshold.apply(&mut compaction_threshold);
+        patch
+            .compaction_upper_limit
+            .apply(&mut compaction_upper_limit);
         patch.compaction_algorithm.apply(&mut compaction_algorithm);
         patch
             .l0_flush_delay_threshold
@@ -596,6 +607,7 @@ impl TenantConfOpt {
             compaction_target_size,
             compaction_period,
             compaction_threshold,
+            compaction_upper_limit,
             compaction_algorithm,
             l0_flush_delay_threshold,
             l0_flush_stall_threshold,
@@ -657,6 +669,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             compaction_target_size: value.compaction_target_size,
             compaction_period: value.compaction_period.map(humantime),
             compaction_threshold: value.compaction_threshold,
+            compaction_upper_limit: value.compaction_upper_limit,
             l0_flush_delay_threshold: value.l0_flush_delay_threshold,
             l0_flush_stall_threshold: value.l0_flush_stall_threshold,
             l0_flush_wait_upload: value.l0_flush_wait_upload,

@@ -347,6 +347,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<usize>())
                 .transpose()
                 .context("Failed to parse 'compaction_threshold' as an integer")?,
+            compaction_upper_limit: settings
+                .remove("compaction_upper_limit")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'compaction_upper_limit' as an integer")?,
             compaction_algorithm: settings
                 .remove("compaction_algorithm")
                 .map(serde_json::from_str)

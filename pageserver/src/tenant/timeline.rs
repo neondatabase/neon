@@ -51,6 +51,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::rate_limit::RateLimit;
 use utils::{
     fs_ext,
     guard_arc_swap::GuardArcSwap,
@@ -70,6 +71,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::l0_flush::{self, L0FlushGlobalState};
+use crate::tenant::storage_layer::ImageLayerName;
 use crate::{
     aux_file::AuxFileSizeEstimator,
     page_service::TenantManagerTypes,
@@ -78,7 +80,7 @@ use crate::{
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
         storage_layer::{
-            inmemory_layer::IndexEntry, IoConcurrency, PersistentLayerDesc,
+            inmemory_layer::IndexEntry, BatchLayerWriter, IoConcurrency, PersistentLayerDesc,
             ValueReconstructSituation,
         },
     },
@@ -114,7 +116,7 @@ use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::TimelineMetrics;
+use crate::metrics::{TimelineMetrics, DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_GLOBAL};
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
 use pageserver_api::reltag::RelTag;
@@ -338,6 +340,8 @@ pub struct Timeline {
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
     pub latest_gc_cutoff_lsn: Rcu<Lsn>,
+
+    pub(crate) gc_compaction_layer_update_lock: tokio::sync::RwLock<()>,
 
     // List of child timelines and their branch points. This is needed to avoid
     // garbage collecting data that is still needed by the child timelines.
@@ -933,7 +937,7 @@ pub(crate) enum ShutdownMode {
 }
 
 struct ImageLayerCreationOutcome {
-    image: Option<ResidentLayer>,
+    unfinished_image_layer: Option<ImageLayerWriter>,
     next_start_key: Key,
 }
 
@@ -1043,7 +1047,7 @@ impl Timeline {
     }
 
     pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 32;
-    pub(crate) const VEC_GET_LAYERS_VISITED_WARN_THRESH: f64 = 512.0;
+    pub(crate) const LAYERS_VISITED_WARN_THRESHOLD: u32 = 100;
 
     /// Look up multiple page versions at a given LSN
     ///
@@ -1193,6 +1197,7 @@ impl Timeline {
                             return (key, Err(err));
                         }
                     };
+                    DELTAS_PER_READ_GLOBAL.observe(converted.num_deltas() as f64);
 
                     // The walredo module expects the records to be descending in terms of Lsn.
                     // And we submit the IOs in that order, so, there shuold be no need to sort here.
@@ -1220,25 +1225,28 @@ impl Timeline {
         // (this is a requirement, not a bug). Skip updating the metric in these cases
         // to avoid infinite results.
         if !results.is_empty() {
-            let avg = layers_visited as f64 / results.len() as f64;
-            if avg >= Self::VEC_GET_LAYERS_VISITED_WARN_THRESH {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<RateLimit>> =
+            // Record the total number of layers visited towards each key in the batch. While some
+            // layers may not intersect with a given read, and the cost of layer visits are
+            // amortized across the batch, each visited layer contributes directly to the observed
+            // latency for every read in the batch, which is what we care about.
+            if layers_visited >= Self::LAYERS_VISITED_WARN_THRESHOLD {
+                static LOG_PACER: Lazy<Mutex<RateLimit>> =
                     Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(60))));
-                let mut rate_limit = LOGGED.lock().unwrap();
-                rate_limit.call(|| {
+                LOG_PACER.lock().unwrap().call(|| {
+                    let num_keys = keyspace.total_raw_size();
+                    let num_pages = results.len();
                     tracing::info!(
                       shard_id = %self.tenant_shard_id.shard_slug(),
                       lsn = %lsn,
-                      "Vectored read for {} visited {} layers on average per key and {} in total. {}/{} pages were returned",
-                      keyspace, avg, layers_visited, results.len(), keyspace.total_raw_size());
+                      "Vectored read for {keyspace} visited {layers_visited} layers. Returned {num_pages}/{num_keys} pages.",
+                    );
                 });
             }
 
-            // Note that this is an approximation. Tracking the exact number of layers visited
-            // per key requires virtually unbounded memory usage and is inefficient
-            // (i.e. segment tree tracking each range queried from a layer)
-            crate::metrics::VEC_READ_NUM_LAYERS_VISITED.observe(avg);
+            for _ in &results {
+                self.metrics.layers_per_read.observe(layers_visited as f64);
+                LAYERS_PER_READ_GLOBAL.observe(layers_visited as f64);
+            }
         }
 
         Ok(results)
@@ -1810,7 +1818,7 @@ impl Timeline {
         self.last_record_lsn.shutdown();
 
         if let ShutdownMode::FreezeAndFlush = mode {
-            if let Some((open, frozen)) = self
+            let do_flush = if let Some((open, frozen)) = self
                 .layers
                 .read()
                 .await
@@ -1819,43 +1827,54 @@ impl Timeline {
                 .ok()
                 .filter(|(open, frozen)| *open || *frozen > 0)
             {
-                tracing::info!(?open, frozen, "flushing and freezing on shutdown");
+                if self.remote_client.is_archived() == Some(true) {
+                    // No point flushing on shutdown for an archived timeline: it is not important
+                    // to have it nice and fresh after our restart, and trying to flush here might
+                    // race with trying to offload it (which also stops the flush loop)
+                    false
+                } else {
+                    tracing::info!(?open, frozen, "flushing and freezing on shutdown");
+                    true
+                }
             } else {
-                // this is double-shutdown, ignore it
-            }
+                // this is double-shutdown, it'll be a no-op
+                true
+            };
 
             // we shut down walreceiver above, so, we won't add anything more
             // to the InMemoryLayer; freeze it and wait for all frozen layers
             // to reach the disk & upload queue, then shut the upload queue and
             // wait for it to drain.
-            match self.freeze_and_flush().await {
-                Ok(_) => {
-                    // drain the upload queue
-                    // if we did not wait for completion here, it might be our shutdown process
-                    // didn't wait for remote uploads to complete at all, as new tasks can forever
-                    // be spawned.
-                    //
-                    // what is problematic is the shutting down of RemoteTimelineClient, because
-                    // obviously it does not make sense to stop while we wait for it, but what
-                    // about corner cases like s3 suddenly hanging up?
-                    self.remote_client.shutdown().await;
+            if do_flush {
+                match self.freeze_and_flush().await {
+                    Ok(_) => {
+                        // drain the upload queue
+                        // if we did not wait for completion here, it might be our shutdown process
+                        // didn't wait for remote uploads to complete at all, as new tasks can forever
+                        // be spawned.
+                        //
+                        // what is problematic is the shutting down of RemoteTimelineClient, because
+                        // obviously it does not make sense to stop while we wait for it, but what
+                        // about corner cases like s3 suddenly hanging up?
+                        self.remote_client.shutdown().await;
+                    }
+                    Err(FlushLayerError::Cancelled) => {
+                        // this is likely the second shutdown, ignore silently.
+                        // TODO: this can be removed once https://github.com/neondatabase/neon/issues/5080
+                        debug_assert!(self.cancel.is_cancelled());
+                    }
+                    Err(e) => {
+                        // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
+                        // we have some extra WAL replay to do next time the timeline starts.
+                        warn!("failed to freeze and flush: {e:#}");
+                    }
                 }
-                Err(FlushLayerError::Cancelled) => {
-                    // this is likely the second shutdown, ignore silently.
-                    // TODO: this can be removed once https://github.com/neondatabase/neon/issues/5080
-                    debug_assert!(self.cancel.is_cancelled());
-                }
-                Err(e) => {
-                    // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
-                    // we have some extra WAL replay to do next time the timeline starts.
-                    warn!("failed to freeze and flush: {e:#}");
-                }
-            }
 
-            // `self.remote_client.shutdown().await` above should have already flushed everything from the queue, but
-            // we also do a final check here to ensure that the queue is empty.
-            if !self.remote_client.no_pending_work() {
-                warn!("still have pending work in remote upload queue, but continuing shutting down anyways");
+                // `self.remote_client.shutdown().await` above should have already flushed everything from the queue, but
+                // we also do a final check here to ensure that the queue is empty.
+                if !self.remote_client.no_pending_work() {
+                    warn!("still have pending work in remote upload queue, but continuing shutting down anyways");
+                }
             }
         }
 
@@ -2020,8 +2039,16 @@ impl Timeline {
     pub(crate) async fn download_layer(
         &self,
         layer_file_name: &LayerName,
-    ) -> anyhow::Result<Option<bool>> {
-        let Some(layer) = self.find_layer(layer_file_name).await? else {
+    ) -> Result<Option<bool>, super::storage_layer::layer::DownloadError> {
+        let Some(layer) = self
+            .find_layer(layer_file_name)
+            .await
+            .map_err(|e| match e {
+                layer_manager::Shutdown => {
+                    super::storage_layer::layer::DownloadError::TimelineShutdown
+                }
+            })?
+        else {
             return Ok(None);
         };
 
@@ -2178,6 +2205,14 @@ impl Timeline {
             .tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
+    }
+
+    fn get_compaction_upper_limit(&self) -> usize {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .compaction_upper_limit
+            .unwrap_or(self.conf.default_tenant_conf.compaction_upper_limit)
     }
 
     fn get_l0_flush_delay_threshold(&self) -> Option<usize> {
@@ -2423,6 +2458,7 @@ impl Timeline {
                 shard_identity,
                 pg_version,
                 layers: Default::default(),
+                gc_compaction_layer_update_lock: tokio::sync::RwLock::new(()),
 
                 walredo_mgr,
                 walreceiver: Mutex::new(None),
@@ -3459,6 +3495,16 @@ impl Timeline {
         let mut completed_keyspace = KeySpace::default();
         let mut image_covered_keyspace = KeySpaceRandomAccum::new();
 
+        // Prevent GC from progressing while visiting the current timeline.
+        // If we are GC-ing because a new image layer was added while traversing
+        // the timeline, then it will remove layers that are required for fulfilling
+        // the current get request (read-path cannot "look back" and notice the new
+        // image layer).
+        let _gc_cutoff_holder = timeline.get_latest_gc_cutoff_lsn();
+
+        // See `compaction::compact_with_gc` for why we need this.
+        let _guard = timeline.gc_compaction_layer_update_lock.read().await;
+
         loop {
             if cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
@@ -3687,7 +3733,7 @@ impl Timeline {
             let mut guard = self.layers.write().await;
             guard
                 .open_mut()?
-                .try_freeze_in_memory_layer(at, &self.last_freeze_at, write_lock)
+                .try_freeze_in_memory_layer(at, &self.last_freeze_at, write_lock, &self.metrics)
                 .await
         };
 
@@ -4405,11 +4451,15 @@ impl Timeline {
         if wrote_keys {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
-            let (desc, path) = image_layer_writer.finish(ctx).await?;
-            let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
-            info!("created image layer for rel {}", image_layer.local_path());
+            info!(
+                "produced image layer for rel {}",
+                ImageLayerName {
+                    key_range: img_range.clone(),
+                    lsn
+                },
+            );
             Ok(ImageLayerCreationOutcome {
-                image: Some(image_layer),
+                unfinished_image_layer: Some(image_layer_writer),
                 next_start_key: img_range.end,
             })
         } else {
@@ -4419,7 +4469,7 @@ impl Timeline {
             // layer we write will cover the key range that we just scanned.
             tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
             Ok(ImageLayerCreationOutcome {
-                image: None,
+                unfinished_image_layer: None,
                 next_start_key: start,
             })
         }
@@ -4468,7 +4518,7 @@ impl Timeline {
 
         if !trigger_generation && mode == ImageLayerCreationMode::Try {
             return Ok(ImageLayerCreationOutcome {
-                image: None,
+                unfinished_image_layer: None,
                 next_start_key: img_range.end,
             });
         }
@@ -4494,14 +4544,15 @@ impl Timeline {
         if wrote_any_image {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
-            let (desc, path) = image_layer_writer.finish(ctx).await?;
-            let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
             info!(
                 "created image layer for metadata {}",
-                image_layer.local_path()
+                ImageLayerName {
+                    key_range: img_range.clone(),
+                    lsn
+                }
             );
             Ok(ImageLayerCreationOutcome {
-                image: Some(image_layer),
+                unfinished_image_layer: Some(image_layer_writer),
                 next_start_key: img_range.end,
             })
         } else {
@@ -4511,7 +4562,7 @@ impl Timeline {
             // layer we write will cover the key range that we just scanned.
             tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
             Ok(ImageLayerCreationOutcome {
-                image: None,
+                unfinished_image_layer: None,
                 next_start_key: start,
             })
         }
@@ -4578,7 +4629,6 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Vec<ResidentLayer>, CreateImageLayersError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
-        let mut image_layers = Vec::new();
 
         // We need to avoid holes between generated image layers.
         // Otherwise LayerMap::image_layer_exists will return false if key range of some layer is covered by more than one
@@ -4592,6 +4642,8 @@ impl Timeline {
         let mut start = Key::MIN;
 
         let check_for_image_layers = self.should_check_if_image_layers_required(lsn);
+
+        let mut batch_image_writer = BatchLayerWriter::new(self.conf).await?;
 
         for partition in partitioning.parts.iter() {
             if self.cancel.is_cancelled() {
@@ -4665,44 +4717,44 @@ impl Timeline {
                     .map_err(|_| CreateImageLayersError::Cancelled)?,
             );
 
-            if !compact_metadata {
-                let ImageLayerCreationOutcome {
-                    image,
-                    next_start_key,
-                } = self
-                    .create_image_layer_for_rel_blocks(
-                        partition,
-                        image_layer_writer,
-                        lsn,
-                        ctx,
-                        img_range,
-                        start,
-                        io_concurrency,
-                    )
-                    .await?;
-
-                start = next_start_key;
-                image_layers.extend(image);
+            let ImageLayerCreationOutcome {
+                unfinished_image_layer,
+                next_start_key,
+            } = if !compact_metadata {
+                self.create_image_layer_for_rel_blocks(
+                    partition,
+                    image_layer_writer,
+                    lsn,
+                    ctx,
+                    img_range.clone(),
+                    start,
+                    io_concurrency,
+                )
+                .await?
             } else {
-                let ImageLayerCreationOutcome {
-                    image,
-                    next_start_key,
-                } = self
-                    .create_image_layer_for_metadata_keys(
-                        partition,
-                        image_layer_writer,
-                        lsn,
-                        ctx,
-                        img_range,
-                        mode,
-                        start,
-                        io_concurrency,
-                    )
-                    .await?;
-                start = next_start_key;
-                image_layers.extend(image);
+                self.create_image_layer_for_metadata_keys(
+                    partition,
+                    image_layer_writer,
+                    lsn,
+                    ctx,
+                    img_range.clone(),
+                    mode,
+                    start,
+                    io_concurrency,
+                )
+                .await?
+            };
+            start = next_start_key;
+            if let Some(unfinished_image_layer) = unfinished_image_layer {
+                batch_image_writer.add_unfinished_image_writer(
+                    unfinished_image_layer,
+                    img_range,
+                    lsn,
+                );
             }
         }
+
+        let image_layers = batch_image_writer.finish(self, ctx).await?;
 
         let mut guard = self.layers.write().await;
 

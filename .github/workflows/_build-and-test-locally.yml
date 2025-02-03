@@ -267,6 +267,26 @@ jobs:
           path: /tmp/neon
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
+      - name: Check diesel schema
+        if: inputs.build-type == 'release' && inputs.arch == 'x64'
+        env:
+          DATABASE_URL: postgresql://localhost:1235/storage_controller
+          POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+        run: |
+          /tmp/neon/bin/neon_local init
+          /tmp/neon/bin/neon_local storage_controller start
+
+          diesel print-schema > storage_controller/src/schema.rs
+
+          if [ -n "$(git diff storage_controller/src/schema.rs)" ]; then
+            echo >&2 "Uncommitted changes in diesel schema"
+
+            git diff .
+            exit 1
+          fi
+
+          /tmp/neon/bin/neon_local storage_controller stop
+
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
         if: inputs.build-type == 'debug'
