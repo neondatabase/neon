@@ -455,7 +455,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         info!(status=?st, "pg_dump exited");
         if !st.success() {
             warn!(status=%st, "pg_dump failed, restore will likely fail as well");
-            return Err(anyhow::Error::msg("pg_dump failed"));
+            bail!("pg_dump failed");
         }
     }
 
@@ -489,7 +489,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         info!(status=?st, "pg_restore exited");
         if !st.success() {
             warn!(status=%st, "pg_restore failed, restore will likely fail as well");
-            return Err(anyhow::Error::msg("pg_restore failed"));
+            bail!("pg_restore failed");
         }
     }
 
