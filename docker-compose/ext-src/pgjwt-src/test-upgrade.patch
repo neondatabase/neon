@@ -1,0 +1,14 @@
+diff --git a/test.sql b/test.sql
+index d7a0ca8..eedd969 100644
+--- a/test.sql
++++ b/test.sql
+@@ -9,9 +9,7 @@
+ \set ON_ERROR_STOP true
+ \set QUIET 1
+ 
+-CREATE EXTENSION pgcrypto;
+ CREATE EXTENSION pgtap;
+-CREATE EXTENSION pgjwt;
+ 
+ BEGIN;
+ SELECT plan(23);
