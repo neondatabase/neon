@@ -11,6 +11,7 @@ use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::throttle::Stats;
+use crate::tenant::timeline::compaction::CompactionOutcome;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
 use rand::Rng;
@@ -206,10 +207,10 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                     .run(tenant.compaction_iteration(&cancel, &ctx))
                     .await;
                 match output {
-                    Ok(has_pending_task) => {
+                    Ok(outcome) => {
                         error_run_count = 0;
                         // schedule the next compaction immediately in case there is a pending compaction task
-                        sleep_duration = if has_pending_task {
+                        sleep_duration = if let CompactionOutcome::Pending = outcome {
                             Duration::ZERO
                         } else {
                             period
