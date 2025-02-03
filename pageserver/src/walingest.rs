@@ -21,7 +21,6 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
-use std::cmp::max;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -29,17 +28,9 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
-use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::fsm_logical_to_physical;
-use postgres_ffi::walrecord::*;
-use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
-use wal_decoder::models::*;
-
 use anyhow::{bail, Result};
 use bytes::{Buf, Bytes};
 use tracing::*;
-use utils::failpoint_support;
-use utils::rate_limit::RateLimit;
 
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
@@ -51,11 +42,18 @@ use crate::ZERO_PAGE;
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
+use pageserver_api::shard::ShardIdentity;
+use postgres_ffi::fsm_logical_to_physical;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi::walrecord::*;
 use postgres_ffi::TransactionId;
+use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
 use utils::bin_ser::SerializeError;
 use utils::lsn::Lsn;
+use utils::rate_limit::RateLimit;
+use utils::{critical, failpoint_support};
+use wal_decoder::models::*;
 
 enum_pgversion! {CheckPoint, pgv::CheckPoint}
 
@@ -325,23 +323,33 @@ impl WalIngest {
             vm_rel,
         } = clear_vm_bits;
         // Clear the VM bits if required.
-        let new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
-        let old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
+        let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
+        let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
+
+        // VM bits can only be cleared on the shard(s) owning the VM relation, and must be within
+        // its view of the VM relation size. Out of caution, error instead of failing WAL ingestion,
+        // as there has historically been cases where PostgreSQL has cleared spurious VM pages. See:
+        // https://github.com/neondatabase/neon/pull/10634.
+        let Some(vm_size) = get_relsize(modification, vm_rel, ctx).await? else {
+            critical!("clear_vm_bits for unknown VM relation {vm_rel}");
+            return Ok(());
+        };
+        if let Some(blknum) = new_vm_blk {
+            if blknum >= vm_size {
+                critical!("new_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
+                new_vm_blk = None;
+            }
+        }
+        if let Some(blknum) = old_vm_blk {
+            if blknum >= vm_size {
+                critical!("old_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
+                old_vm_blk = None;
+            }
+        }
 
         if new_vm_blk.is_none() && old_vm_blk.is_none() {
             return Ok(());
-        }
-
-        // VM bits can only be cleared on the shard(s) owning the VM relation, and must be within
-        // its view of the VM relation size.
-        let Some(vm_size) = get_relsize(modification, vm_rel, ctx).await? else {
-            bail!("clear_vm_bits for unknown VM relation {vm_rel}");
-        };
-        if max(new_vm_blk.unwrap_or(0), old_vm_blk.unwrap_or(0)) >= vm_size {
-            bail!("clear_vm_bits pages {new_vm_blk:?},{old_vm_blk:?} not in relation {vm_rel} (size {vm_size})");
-        }
-
-        if new_vm_blk == old_vm_blk {
+        } else if new_vm_blk == old_vm_blk {
             // An UPDATE record that needs to clear the bits for both old and the new page, both of
             // which reside on the same VM page.
             self.put_rel_wal_record(
