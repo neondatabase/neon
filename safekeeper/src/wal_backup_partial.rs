@@ -535,6 +535,10 @@ pub async fn main_task(
         // limit concurrent uploads
         let _upload_permit = tokio::select! {
             acq = limiter.acquire_partial_backup() => acq,
+            _ = backup.tli.cancel.cancelled() => {
+                info!("timeline canceled");
+                return None;
+            }
             _ = cancel.cancelled() => {
                 info!("task canceled");
                 return None;
