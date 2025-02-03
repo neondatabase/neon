@@ -27,7 +27,7 @@ use pageserver_api::shard::ShardConfigError;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::ShardStripeSize;
 use pageserver_api::shard::{ShardCount, ShardNumber, TenantShardId};
-use rustls::client::danger::ServerCertVerifier;
+use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
 use rustls::crypto::ring;
 use scoped_futures::ScopedBoxFuture;
@@ -1281,6 +1281,51 @@ pub(crate) fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {
     Ok(Arc::new(store))
 }
 
+#[derive(Debug)]
+/// A verifier that accepts all certificates (but logs an error still)
+struct AcceptAll(Arc<WebPkiServerVerifier>);
+impl ServerCertVerifier for AcceptAll {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let r =
+            self.0
+                .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now);
+        if let Err(err) = r {
+            tracing::info!(
+                ?server_name,
+                "ignoring db connection TLS validation error: {err:?}"
+            );
+            return Ok(ServerCertVerified::assertion());
+        }
+        r
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls12_signature(message, cert, dss)
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls13_signature(message, cert, dss)
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.supported_verify_schemes()
+    }
+}
+
 /// Loads the root certificates and constructs a client config suitable for connecting.
 /// This function is blocking.
 fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
@@ -1296,56 +1341,6 @@ fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
             .with_root_certificates(load_certs()?)
             .with_no_client_auth()
     } else {
-        use rustls::client::danger::ServerCertVerified;
-        #[derive(Debug)]
-        struct AcceptAll(Arc<WebPkiServerVerifier>);
-        impl ServerCertVerifier for AcceptAll {
-            fn verify_server_cert(
-                &self,
-                end_entity: &rustls::pki_types::CertificateDer<'_>,
-                intermediates: &[rustls::pki_types::CertificateDer<'_>],
-                server_name: &rustls::pki_types::ServerName<'_>,
-                ocsp_response: &[u8],
-                now: rustls::pki_types::UnixTime,
-            ) -> Result<ServerCertVerified, rustls::Error> {
-                let r = self.0.verify_server_cert(
-                    end_entity,
-                    intermediates,
-                    server_name,
-                    ocsp_response,
-                    now,
-                );
-                if let Err(err) = r {
-                    tracing::info!(
-                        ?server_name,
-                        "ignoring db connection TLS validation error: {err:?}"
-                    );
-                    return Ok(ServerCertVerified::assertion());
-                }
-                r
-            }
-            fn verify_tls12_signature(
-                &self,
-                message: &[u8],
-                cert: &rustls::pki_types::CertificateDer<'_>,
-                dss: &rustls::DigitallySignedStruct,
-            ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
-            {
-                self.0.verify_tls12_signature(message, cert, dss)
-            }
-            fn verify_tls13_signature(
-                &self,
-                message: &[u8],
-                cert: &rustls::pki_types::CertificateDer<'_>,
-                dss: &rustls::DigitallySignedStruct,
-            ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
-            {
-                self.0.verify_tls13_signature(message, cert, dss)
-            }
-            fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-                self.0.supported_verify_schemes()
-            }
-        }
         let verifier = AcceptAll(
             WebPkiServerVerifier::builder_with_provider(
                 load_certs()?,
