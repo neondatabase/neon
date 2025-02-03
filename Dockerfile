@@ -23,8 +23,7 @@ COPY --chown=nonroot Makefile Makefile
 COPY --chown=nonroot scripts/ninstall.sh scripts/ninstall.sh
 
 ENV BUILD_TYPE=release
-RUN set -e \
-    && mold -run make -j $(nproc) -s neon-pg-ext \
+RUN mold -run make -j $(nproc) -s neon-pg-ext \
     && rm -rf pg_install/build \
     && tar -C pg_install -czf /home/nonroot/postgres_install.tar.gz .
 
@@ -44,8 +43,7 @@ COPY --from=pg-build /home/nonroot/pg_install/v17/lib                       pg_i
 COPY --chown=nonroot . .
 
 ARG ADDITIONAL_RUSTFLAGS
-RUN set -e \
-    && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment -Cforce-frame-pointers=yes ${ADDITIONAL_RUSTFLAGS}" cargo build \
+RUN RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment -Cforce-frame-pointers=yes ${ADDITIONAL_RUSTFLAGS}" cargo build \
       --bin pg_sni_router  \
       --bin pageserver  \
       --bin pagectl  \
@@ -60,11 +58,11 @@ RUN set -e \
 # Build final image
 #
 FROM debian:${DEBIAN_FLAVOR}
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG DEFAULT_PG_VERSION
 WORKDIR /data
 
-RUN set -e \
-    && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
     && apt update \
     && apt install -y \
         libreadline-dev \

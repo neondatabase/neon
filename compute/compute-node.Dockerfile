@@ -19,7 +19,7 @@ ARG DEBIAN_VERSION
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc && \
     echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
 
 RUN case $DEBIAN_VERSION in \
@@ -842,7 +842,7 @@ ENV PATH="/home/nonroot/.cargo/bin:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 
-RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
+RUN echo "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
 
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
@@ -1244,8 +1244,8 @@ RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin c
 #########################################################################################
 
 FROM debian:$DEBIAN_FLAVOR AS pgbouncer
-RUN set -e \
-    && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
     && apt update \
     && apt install --no-install-suggests --no-install-recommends -y \
         build-essential \
@@ -1260,8 +1260,7 @@ RUN set -e \
 
 # Use `dist_man_MANS=` to skip manpage generation (which requires python3/pandoc)
 ENV PGBOUNCER_TAG=pgbouncer_1_22_1
-RUN set -e \
-    && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
+RUN git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
     && cd pgbouncer \
     && ./autogen.sh \
     && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
@@ -1277,7 +1276,7 @@ FROM alpine/curl:${ALPINE_CURL_VERSION} AS exporters
 ARG TARGETARCH
 # Keep sql_exporter version same as in build-tools.Dockerfile and
 # test_runner/regress/test_compute_metrics.py
-RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc; \
+RUN echo "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc; \
     if [ "$TARGETARCH" = "amd64" ]; then\
         postgres_exporter_sha256='027e75dda7af621237ff8f5ac66b78a40b0093595f06768612b92b1374bd3105';\
         pgbouncer_exporter_sha256='c9f7cf8dcff44f0472057e9bf52613d93f3ffbc381ad7547a959daa63c5e84ac';\
@@ -1399,6 +1398,7 @@ ENV PGDATABASE=postgres
 #
 #########################################################################################
 FROM debian:$DEBIAN_FLAVOR
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG DEBIAN_VERSION
 # Add user postgres
 RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
@@ -1450,7 +1450,7 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 # ca-certificates for communicating with s3 by compute_ctl
 
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
+    echo "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
 
 RUN apt update && \
     case $DEBIAN_VERSION in \
@@ -1497,8 +1497,7 @@ RUN apt update && \
 
 # aws cli is used by fast_import (curl and unzip above are at this time only used for this installation step)
 ARG TARGETARCH
-RUN set -ex; \
-    if [ "${TARGETARCH}" = "amd64" ]; then \
+RUN if [ "${TARGETARCH}" = "amd64" ]; then \
         TARGETARCH_ALT="x86_64"; \
         CHECKSUM="c9a9df3770a3ff9259cb469b6179e02829687a464e0824d5c32d378820b53a00"; \
     elif [ "${TARGETARCH}" = "arm64" ]; then \
