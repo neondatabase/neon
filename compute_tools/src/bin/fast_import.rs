@@ -25,7 +25,7 @@
 //! docker push localhost:3030/localregistry/compute-node-v14:latest
 //! ```
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use aws_config::BehaviorVersion;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
