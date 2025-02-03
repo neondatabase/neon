@@ -95,7 +95,6 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
-use crate::is_uninit_mark;
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::CONCURRENT_INITDBS;
 use crate::metrics::INITDB_RUN_TIME;
@@ -1793,11 +1792,7 @@ impl Tenant {
             let entry = entry.context("read timeline dir entry")?;
             let entry_path = entry.path();
 
-            let purge = if crate::is_temporary(entry_path)
-                // TODO: remove uninit mark code (https://github.com/neondatabase/neon/issues/5718)
-                || is_uninit_mark(entry_path)
-                || crate::is_delete_mark(entry_path)
-            {
+            let purge = if crate::is_temporary(entry_path) {
                 true
             } else {
                 match TimelineId::try_from(entry_path.file_name()) {
@@ -5490,6 +5485,9 @@ pub(crate) mod harness {
                 timeline_get_throttle: Some(tenant_conf.timeline_get_throttle),
                 image_layer_creation_check_threshold: Some(
                     tenant_conf.image_layer_creation_check_threshold,
+                ),
+                image_creation_preempt_threshold: Some(
+                    tenant_conf.image_creation_preempt_threshold,
                 ),
                 lsn_lease_length: Some(tenant_conf.lsn_lease_length),
                 lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),
