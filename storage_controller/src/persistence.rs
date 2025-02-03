@@ -1296,7 +1296,7 @@ fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
             .with_root_certificates(load_certs()?)
             .with_no_client_auth()
     } else {
-        use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified};
+        use rustls::client::danger::ServerCertVerified;
         #[derive(Debug)]
         struct AcceptAll(Arc<WebPkiServerVerifier>);
         impl ServerCertVerifier for AcceptAll {
@@ -1331,14 +1331,7 @@ fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
                 dss: &rustls::DigitallySignedStruct,
             ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
             {
-                let r = self.0.verify_tls12_signature(message, cert, dss);
-                if let Err(err) = r {
-                    tracing::info!(
-                        "ignoring db connection 1.2 signature TLS validation error: {err:?}"
-                    );
-                    return Ok(HandshakeSignatureValid::assertion());
-                }
-                r
+                self.0.verify_tls12_signature(message, cert, dss)
             }
             fn verify_tls13_signature(
                 &self,
@@ -1347,14 +1340,7 @@ fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
                 dss: &rustls::DigitallySignedStruct,
             ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
             {
-                let r = self.0.verify_tls13_signature(message, cert, dss);
-                if let Err(err) = r {
-                    tracing::info!(
-                        "ignoring db connection 1.3 signature TLS validation error: {err:?}"
-                    );
-                    return Ok(HandshakeSignatureValid::assertion());
-                }
-                r
+                self.0.verify_tls13_signature(message, cert, dss)
             }
             fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
                 self.0.supported_verify_schemes()
