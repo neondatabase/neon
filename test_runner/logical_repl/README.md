@@ -2,6 +2,7 @@
 
 > [!NOTE]
 > Neon project should have logical replication enabled:
+>
 > https://neon.tech/docs/guides/logical-replication-postgres#enable-logical-replication-in-the-source-neon-project
 
 ## Clickhouse

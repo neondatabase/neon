@@ -41,10 +41,10 @@ inputs:
     description: 'Path to directory containing libpq library - it is caller responsibility to provision the libpq library'
     required: false
     default: '/tmp/neon/pg_install/v16/lib'
-  enable_logical_replication:
-    description: 'Enable logical replication (true/false)'
+  project_settings:
+    description: 'A JSON object with project settings'
     required: false
-    default: 'false'
+    default: '{}'
 
 outputs:
   dsn:
@@ -62,10 +62,6 @@ runs:
       # A shell without `set -x` to not to expose password/dsn in logs
       shell: bash -euo pipefail {0}
       run: |
-        project_settings="{
-          \"enable_logical_replication\": ${ENABLE_LOGICAL_REPLICATION}
-        }"
-
         project=$(curl \
           "https://${API_HOST}/api/v2/projects" \
           --fail \
@@ -80,7 +76,7 @@ runs:
               \"provisioner\": \"k8s-neonvm\",
               \"autoscaling_limit_min_cu\": ${MIN_CU},
               \"autoscaling_limit_max_cu\": ${MAX_CU},
-              \"settings\": ${project_settings}
+              \"settings\": ${PROJECT_SETTINGS}
             }
           }")
 
@@ -125,4 +121,4 @@ runs:
         STRIPE_SIZE: ${{ inputs.stripe_size }}
         PSQL: ${{ inputs.psql_path }}
         LD_LIBRARY_PATH: ${{ inputs.libpq_lib_path }}
-        ENABLE_LOGICAL_REPLICATION: ${{ inputs.enable_logical_replication }}
+        PROJECT_SETTINGS: ${{ inputs.project_settings }}

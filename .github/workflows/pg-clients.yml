@@ -12,8 +12,8 @@ on:
   pull_request:
     paths:
       - '.github/workflows/pg-clients.yml'
-      - 'test_runner/pg_clients/**'
-      - 'test_runner/logical_repl/**'
+      - 'test_runner/pg_clients/**/*.py'
+      - 'test_runner/logical_repl/**/*.py'
       - 'poetry.lock'
   workflow_dispatch:
 
@@ -104,7 +104,8 @@ jobs:
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           postgres_version: ${{ env.DEFAULT_PG_VERSION }}
-          enable_logical_replication: true
+          project_settings: >-
+            {"enable_logical_replication": true}
 
       - name: Run tests
         uses: ./.github/actions/run-python-test-set
