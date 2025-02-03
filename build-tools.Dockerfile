@@ -53,6 +53,8 @@ RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
 FROM debian:${DEBIAN_VERSION}-slim AS build_tools
 ARG DEBIAN_VERSION
 
+ARG TARGETARCH
+
 # Add nonroot user
 RUN useradd -ms /bin/bash nonroot -b /home
 SHELL ["/bin/bash", "-c"]
@@ -144,6 +146,12 @@ ENV S5CMD_VERSION=2.3.0
 RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-$(uname -m | sed 's/x86_64/64bit/g' | sed 's/aarch64/arm64/g').tar.gz" | tar zxvf - s5cmd \
     && chmod +x s5cmd \
     && mv s5cmd /usr/local/bin/s5cmd
+
+# actionlint
+ENV ACTIONLINT_VERSION=1.7.7
+RUN curl -sL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_${TARGETARCH}.tar.gz" | tar zxvf - actionlint \
+    && chmod +x actionlint \
+    && mv actionlint /usr/local/bin/actionlint
 
 # LLVM
 ENV LLVM_VERSION=19
@@ -262,6 +270,7 @@ ARG CARGO_DENY_VERSION=0.16.4
 ARG CARGO_HACK_VERSION=0.6.34
 ARG CARGO_NEXTEST_VERSION=0.9.88
 ARG DIESEL_CLI_VERSION=2.2.6
+ARG ZIZMOR_VERSION=1.3.0
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
 	chmod +x rustup-init && \
 	./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
@@ -277,6 +286,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     cargo install cargo-nextest       --version ${CARGO_NEXTEST_VERSION} && \
     cargo install diesel_cli          --version ${DIESEL_CLI_VERSION} \
                                       --features postgres-bundled --no-default-features && \
+    cargo install zizmor              --version ${ZIZMOR_VERSION} && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
 
