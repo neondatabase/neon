@@ -194,6 +194,8 @@ impl Persistence {
         timeout: Duration,
     ) -> Result<(), diesel::ConnectionError> {
         let started_at = Instant::now();
+        log_postgres_connstr_info(database_url)
+            .map_err(|e| diesel::ConnectionError::InvalidConnectionUrl(e.to_string()))?;
         loop {
             match establish_connection_rustls(database_url).await {
                 Ok(_) => {
@@ -1368,6 +1370,29 @@ fn establish_connection_rustls(config: &str) -> BoxFuture<ConnectionResult<Async
         AsyncPgConnection::try_from_client_and_connection(client, conn).await
     };
     fut.boxed()
+}
+
+#[cfg_attr(test, test)]
+fn test_config_debug_censors_password() {
+    let has_pw =
+        "host=/var/lib/postgresql,localhost port=1234 user=specialuser password='NOT ALLOWED TAG'";
+    let has_pw_cfg = has_pw.parse::<tokio_postgres::Config>().unwrap();
+    assert!(format!("{has_pw_cfg:?}").contains("specialuser"));
+    // Ensure that the password is not leaked by the debug impl
+    assert!(!format!("{has_pw_cfg:?}").contains("NOT ALLOWED TAG"));
+}
+
+fn log_postgres_connstr_info(config_str: &str) -> anyhow::Result<()> {
+    let config = config_str
+        .parse::<tokio_postgres::Config>()
+        .map_err(|_e| anyhow::anyhow!("Couldn't parse config str"))?;
+    // We use debug formatting here, and use a unit test to ensure that we don't leak the password.
+    // To make extra sure the test gets ran, run it every time the function is called
+    // (this is rather cold code, we can afford it).
+    #[cfg(not(test))]
+    let _ = test_config_debug_censors_password();
+    tracing::info!("database connection config: {config:?}");
+    Ok(())
 }
 
 /// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
