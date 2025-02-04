@@ -15,7 +15,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::error::SendError;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
-use tracing::{info_span, Instrument};
+use tracing::{error, info, info_span, Instrument};
+use utils::critical;
 use utils::lsn::Lsn;
 use utils::postgres_client::Compression;
 use utils::postgres_client::InterpretedFormat;
@@ -179,11 +180,10 @@ impl InterpretedWalReader {
                     metric.dec();
                 }
 
-                let res = reader.run_impl(start_pos).await;
-                if let Err(ref err) = res {
-                    tracing::error!("Task finished with error: {err}");
-                }
-                res
+                reader
+                    .run_impl(start_pos)
+                    .await
+                    .inspect_err(|err| critical!("failed to read WAL record: {err}"))
             }
             .instrument(info_span!("interpreted wal reader")),
         );
@@ -239,11 +239,10 @@ impl InterpretedWalReader {
             metric.dec();
         }
 
-        let res = self.run_impl(start_pos).await;
-        if let Err(err) = res {
-            tracing::error!("Interpreted wal reader encountered error: {err}");
+        if let Err(err) = self.run_impl(start_pos).await {
+            critical!("failed to read WAL record: {err}");
         } else {
-            tracing::info!("Interpreted wal reader exiting");
+            info!("interpreted wal reader exiting");
         }
 
         Err(CopyStreamHandlerEnd::Other(anyhow!(

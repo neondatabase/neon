@@ -13,14 +13,14 @@ use strum_macros::{EnumString, VariantNames};
 /// * In debug builds, panic the process.
 #[macro_export]
 macro_rules! critical {
-    ($($arg:tt)*) => {
+    ($($arg:tt)*) => {{
         if cfg!(debug_assertions) {
             panic!($($arg)*);
         }
         $crate::logging::TRACING_EVENT_COUNT_METRIC.inc_critical();
         let backtrace = std::backtrace::Backtrace::capture();
         tracing::error!("CRITICAL: {}\n{backtrace}", format!($($arg)*));
-    };
+    }};
 }
 
 #[derive(EnumString, strum_macros::Display, VariantNames, Eq, PartialEq, Debug, Clone, Copy)]
