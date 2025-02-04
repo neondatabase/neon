@@ -748,7 +748,7 @@ impl Timeline {
                     .store(Arc::new(outcome.clone()));
 
                 self.upload_new_image_layers(image_layers)?;
-                if let LastImageLayerCreationStatus::Incomplete = outcome {
+                if let LastImageLayerCreationStatus::Incomplete { .. } = outcome {
                     // Yield and do not do any other kind of compaction.
                     info!("skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction).");
                     return Ok(CompactionOutcome::Pending);
