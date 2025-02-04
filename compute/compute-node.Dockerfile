@@ -85,6 +85,10 @@ ARG DEBIAN_VERSION=bookworm
 ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
 ARG ALPINE_CURL_VERSION=8.11.1
 
+# By default, build all PostgreSQL extensions. For quick local testing when you don't
+# care about the extensions, pass EXTENSIONS=none
+ARG EXTENSIONS=all
+
 #########################################################################################
 #
 # Layer "build-deps"
@@ -1481,12 +1485,35 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
 
 #########################################################################################
 #
-# Layer "all-extensions"
+# Layer "extensions-none"
+#
+#########################################################################################
+FROM build-deps AS extensions-none
+
+RUN mkdir /usr/local/pgsql
+
+#########################################################################################
+#
+# Layer "extensions-minimal"
+#
+# This subset of extensions includes the extensions that we have in
+# shared_preload_libraries by default.
+#
+#########################################################################################
+FROM build-deps AS extensions-minimal
+
+COPY --from=pgrag-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=timescaledb-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_cron-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
+
+#########################################################################################
+#
+# Layer "extensions-all"
 # Bundle together all the extensions
 #
 #########################################################################################
-FROM build-deps AS all-extensions
-ARG PG_VERSION
+FROM build-deps AS extensions-all
 
 # Public extensions
 COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1528,7 +1555,13 @@ COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 
-COPY --from=neon-ext-build /usr/local/pgsql/ /usr/local/pgsql/
+#########################################################################################
+#
+# Layer "neon-pg-ext-build"
+# Includes Postgres and all the extensions chosen by EXTENSIONS arg.
+#
+#########################################################################################
+FROM extensions-${EXTENSIONS} AS neon-pg-ext-build
 
 #########################################################################################
 #
@@ -1610,7 +1643,8 @@ RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 30
 #
 #########################################################################################
 FROM neon-ext-build AS postgres-cleanup-layer
-COPY --from=all-extensions /usr/local/pgsql /usr/local/pgsql
+
+COPY --from=neon-pg-ext-build /usr/local/pgsql /usr/local/pgsql
 
 # Remove binaries from /bin/ that we won't use (or would manually copy & install otherwise)
 RUN cd /usr/local/pgsql/bin && rm -f ecpg raster2pgsql shp2pgsql pgtopo_export pgtopo_import pgsql2shp
