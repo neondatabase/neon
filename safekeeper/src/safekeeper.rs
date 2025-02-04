@@ -785,13 +785,13 @@ impl AcceptorProposerMessage {
         if proto_version == SK_PROTO_VERSION_3 {
             match self {
                 AcceptorProposerMessage::Greeting(msg) => {
-                    buf.put_u8('g' as u8);
+                    buf.put_u8(b'g');
                     buf.put_u64(msg.node_id.0);
                     Self::serialize_mconf(buf, &msg.mconf);
                     buf.put_u64(msg.term)
                 }
                 AcceptorProposerMessage::VoteResponse(msg) => {
-                    buf.put_u8('v' as u8);
+                    buf.put_u8(b'v');
                     buf.put_u32(msg.generation);
                     buf.put_u64(msg.term);
                     buf.put_u8(msg.vote_given as u8);
@@ -804,7 +804,7 @@ impl AcceptorProposerMessage {
                     }
                 }
                 AcceptorProposerMessage::AppendResponse(msg) => {
-                    buf.put_u8('a' as u8);
+                    buf.put_u8(b'a');
                     buf.put_u32(msg.generation);
                     buf.put_u64(msg.term);
                     buf.put_u64(msg.flush_lsn.into());
@@ -1465,10 +1465,13 @@ mod tests {
         let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         // check voting for 1 is ok
-        let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
+        let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest {
+            generation: 0,
+            term: 1,
+        });
         let mut vote_resp = sk.process_msg(&vote_request).await;
         match vote_resp.unwrap() {
-            Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(resp.vote_given != 0),
+            Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(resp.vote_given),
             r => panic!("unexpected response: {:?}", r),
         }
 
@@ -1483,7 +1486,7 @@ mod tests {
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request).await;
         match vote_resp.unwrap() {
-            Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(resp.vote_given == 0),
+            Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(!resp.vote_given),
             r => panic!("unexpected response: {:?}", r),
         }
     }
@@ -1498,13 +1501,12 @@ mod tests {
         let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
+            generation: 0,
             term: 2,
-            term_start_lsn: Lsn(3),
             begin_lsn: Lsn(1),
             end_lsn: Lsn(2),
             commit_lsn: Lsn(0),
             truncate_lsn: Lsn(0),
-            proposer_uuid: [0; 16],
         };
         let mut append_request = AppendRequest {
             h: ar_hdr.clone(),
@@ -1512,6 +1514,7 @@ mod tests {
         };
 
         let pem = ProposerElected {
+            generation: 0,
             term: 2,
             start_streaming_at: Lsn(1),
             term_history: TermHistory(vec![
@@ -1524,7 +1527,6 @@ mod tests {
                     lsn: Lsn(3),
                 },
             ]),
-            timeline_start_lsn: Lsn(1),
         };
         sk.process_msg(&ProposerAcceptorMessage::Elected(pem))
             .await
@@ -1559,26 +1561,25 @@ mod tests {
         let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         let pem = ProposerElected {
+            generation: 0,
             term: 1,
             start_streaming_at: Lsn(1),
             term_history: TermHistory(vec![TermLsn {
                 term: 1,
                 lsn: Lsn(1),
             }]),
-            timeline_start_lsn: Lsn(1),
         };
         sk.process_msg(&ProposerAcceptorMessage::Elected(pem))
             .await
             .unwrap();
 
         let ar_hdr = AppendRequestHeader {
+            generation: 0,
             term: 1,
-            term_start_lsn: Lsn(3),
             begin_lsn: Lsn(1),
             end_lsn: Lsn(2),
             commit_lsn: Lsn(0),
             truncate_lsn: Lsn(0),
-            proposer_uuid: [0; 16],
         };
         let append_request = AppendRequest {
             h: ar_hdr.clone(),

@@ -1489,7 +1489,7 @@ ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, Pagese
 
 	for (i = 0; i < nkeys; i++)
 	{
-		const char *key = pq_getmsgstring(reply_message);
+		const char *key = pq_getmsgrawstring(reply_message);
 		unsigned int value_len = pq_getmsgint(reply_message, sizeof(int32));
 
 		if (strcmp(key, "current_timeline_size") == 0)
@@ -2157,6 +2157,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 		}
 	}
 	wp_log(FATAL, "unsupported proto_version %d", wp->config->proto_version);
+	return false; /* keep the compiler quiet */
 }
 
 /*
