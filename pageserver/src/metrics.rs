@@ -2379,7 +2379,6 @@ pub(crate) struct WalIngestMetrics {
     pub(crate) records_committed: IntCounter,
     pub(crate) records_filtered: IntCounter,
     pub(crate) gap_blocks_zeroed_on_rel_extend: IntCounter,
-    pub(crate) clear_vm_bits_unknown: IntCounterVec,
 }
 
 pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
@@ -2412,12 +2411,6 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
     gap_blocks_zeroed_on_rel_extend: register_int_counter!(
         "pageserver_gap_blocks_zeroed_on_rel_extend",
         "Total number of zero gap blocks written on relation extends"
-    )
-    .expect("failed to define a metric"),
-    clear_vm_bits_unknown: register_int_counter_vec!(
-        "pageserver_wal_ingest_clear_vm_bits_unknown",
-        "Number of ignored ClearVmBits operations due to unknown pages/relations",
-        &["entity"],
     )
     .expect("failed to define a metric"),
 }
