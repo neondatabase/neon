@@ -46,8 +46,6 @@ def post_checks(env: NeonEnv, test_output_dir: Path, db_name: str, endpoint: End
     data properly.
     """
 
-    ignored_files: list[str] | None = None
-
     # Neon handles unlogged relations in a special manner. During a
     # basebackup, we ship the init fork as the main fork. This presents a
     # problem in that the endpoint's data directory and the basebackup will
@@ -258,7 +256,7 @@ def test_isolation(
     with capsys.disabled():
         pg_bin.run(pg_isolation_regress_command, env=env_vars, cwd=runpath)
 
-    # This fails with a mismatch on `pg_multixact/offsets/0000`
+    # Flush and check all that we wrote is compactable
     post_checks(env, test_output_dir, DBNAME, endpoint)
 
 
