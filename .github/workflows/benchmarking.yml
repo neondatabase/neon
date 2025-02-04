@@ -340,7 +340,7 @@ jobs:
           ],
           "pg_version" : [
             16,17
-          ],
+          ]
         }'
 
         if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
@@ -810,7 +810,7 @@ jobs:
     # We might change it after https://github.com/neondatabase/neon/issues/2900.
     #
     # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
-    if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
+    # if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
     permissions:
       contents: write
       statuses: write
@@ -929,7 +929,7 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   user-examples-compare:
-    if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
+    # if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
     permissions:
       contents: write
       statuses: write

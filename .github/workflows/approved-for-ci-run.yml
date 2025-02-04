@@ -94,7 +94,9 @@ jobs:
           echo "LABELS_TO_ADD=${LABELS_TO_ADD}" >> ${GITHUB_OUTPUT}
           echo "LABELS_TO_REMOVE=${LABELS_TO_REMOVE}" >> ${GITHUB_OUTPUT}
 
-      - run: gh pr checkout "${PR_NUMBER}"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - run: git checkout -b "${BRANCH}"
 

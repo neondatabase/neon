@@ -24,7 +24,7 @@ function wait_for_ready {
 }
 function create_extensions() {
   for ext in ${1}; do
-    docker compose exec neon-test-extensions psql -X -v ON_ERROR_STOP=1 -d contrib_regression -c "CREATE EXTENSION IF NOT EXISTS ${ext}"
+    docker compose exec neon-test-extensions psql -X -v ON_ERROR_STOP=1 -d contrib_regression -c "CREATE EXTENSION IF NOT EXISTS ${ext} CASCADE"
   done
 }
 EXTENSIONS='[
@@ -41,6 +41,7 @@ EXTENSIONS='[
 {"extname": "roaringbitmap", "extdir": "pg_roaringbitmap-src"},
 {"extname": "semver", "extdir": "pg_semver-src"},
 {"extname": "pg_ivm", "extdir": "pg_ivm-src"},
+{"extname": "pgjwt", "extdir": "pgjwt-src"},
 {"extname": "pgtap", "extdir": "pgtap-src"}
 ]'
 EXTNAMES=$(echo ${EXTENSIONS} | jq -r '.[].extname' | paste -sd ' ' -)
