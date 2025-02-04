@@ -7,10 +7,9 @@ use chrono::{DateTime, Utc};
 use opentelemetry::trace::TraceContextExt;
 use scopeguard::defer;
 use serde::ser::{SerializeMap, Serializer};
-use serde::Serialize;
 use tracing::span;
 use tracing::subscriber::Interest;
-use tracing::{callsite, Event, Level, Metadata, Span, Subscriber};
+use tracing::{callsite, Event, Metadata, Span, Subscriber};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::fmt::format::{Format, Full};
@@ -189,7 +188,7 @@ thread_local! {
     /// Thread-local instance with per-thread buffer for log writing.
     static EVENT_FORMATTER: RefCell<EventFormatter> = RefCell::new(EventFormatter::new());
     /// Cached OS thread ID.
-    static THREAD_ID: Cell<u64> = Cell::new(gettid::gettid());
+    static THREAD_ID: u64 = gettid::gettid();
 }
 
 /// Implements tracing layer to handle events specific to logging.
@@ -472,13 +471,13 @@ impl EventFormatter {
         let mut serialize = || {
             let mut serializer = serde_json::Serializer::new(&mut self.logline_buffer);
 
-            let mut serializer = serializer.serialize_map(Some(14))?;
+            let mut serializer = serializer.serialize_map(None)?;
 
             // Timestamp comes first, so raw lines can be sorted by timestamp.
             serializer.serialize_entry("timestamp", &timestamp)?;
 
             // Level next.
-            serializer.serialize_entry("level", &SerializeLevel(meta.level()))?;
+            serializer.serialize_entry("level", &meta.level().as_str())?;
 
             // Message next.
             serializer.serialize_key("message")?;
@@ -501,7 +500,7 @@ impl EventFormatter {
                 serializer.serialize_entry("process_id", &pid)?;
             }
 
-            serializer.serialize_entry("thread_id", &THREAD_ID.get())?;
+            THREAD_ID.with(|tid| serializer.serialize_entry("thread_id", tid))?;
 
             // TODO: tls cache? name could change
             if let Some(thread_name) = std::thread::current().name() {
@@ -550,31 +549,6 @@ impl EventFormatter {
         serialize().map_err(io::Error::other)?;
         self.logline_buffer.push(b'\n');
         Ok(())
-    }
-}
-
-/// Serializes the tracing lavel.
-struct SerializeLevel<'a>(&'a Level);
-
-impl Serialize for SerializeLevel<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        // This order was chosen to match log level probabilities in prod.
-        if self.0 == &Level::INFO {
-            serializer.serialize_str("INFO")
-        } else if self.0 == &Level::WARN {
-            serializer.serialize_str("WARN")
-        } else if self.0 == &Level::ERROR {
-            serializer.serialize_str("ERROR")
-        } else if self.0 == &Level::DEBUG {
-            serializer.serialize_str("DEBUG")
-        } else if self.0 == &Level::TRACE {
-            serializer.serialize_str("TRACE")
-        } else {
-            unreachable!("unknown log level: {}", self.0)
-        }
     }
 }
 
