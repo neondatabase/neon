@@ -2766,7 +2766,7 @@ class NeonPageserver(PgProtocol, LogUtils):
             log.error(f"Failed to decode LocationConf, raw content ({len(bytes)} bytes): {bytes}")
             raise
 
-    def heatmap_content(self, tenant_shard_id: TenantId | TenantShardId) -> dict[str, Any]:
+    def heatmap_content(self, tenant_shard_id: TenantId | TenantShardId) -> Any:
         path = self.tenant_dir(tenant_shard_id) / "heatmap-v1.json"
         with open(path) as f:
             return json.load(f)
