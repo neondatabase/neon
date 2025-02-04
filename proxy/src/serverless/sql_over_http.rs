@@ -249,6 +249,32 @@ pub(crate) async fn handle(
     let mut response = match result {
         Ok(r) => {
             ctx.set_success();
+
+            // Handling the error response from local proxy here
+            if config.authentication_config.is_auth_broker && r.status().is_server_error() {
+                let status = r.status();
+
+                let body_bytes = r
+                    .collect()
+                    .await
+                    .map_err(|e| {
+                        ApiError::InternalServerError(anyhow::Error::msg(format!(
+                            "could not collect http body: {e}"
+                        )))
+                    })?
+                    .to_bytes();
+
+                let body_str = std::str::from_utf8(&body_bytes).unwrap_or_default();
+                let json_value =
+                    serde_json::from_str::<serde_json::Value>(body_str).unwrap_or_default();
+                let message = json_value
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or_default();
+                error!("from local_proxy: {status} {message}");
+
+                return json_response(status, json!({ "message": message.to_string() }));
+            }
             r
         }
         Err(e @ SqlOverHttpError::Cancelled(_)) => {
@@ -618,8 +644,6 @@ async fn handle_db_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let is_local_proxy = matches!(backend.auth_backend, crate::auth::Backend::Local(_));
-
             let keys = match auth {
                 AuthData::Password(pw) => {
                     backend
@@ -634,7 +658,9 @@ async fn handle_db_inner(
             };
 
             let client = match keys.keys {
-                ComputeCredentialKeys::JwtPayload(payload) if is_local_proxy => {
+                ComputeCredentialKeys::JwtPayload(payload)
+                    if backend.auth_backend.is_local_proxy() =>
+                {
                     let mut client = backend.connect_to_local_postgres(ctx, conn_info).await?;
                     let (cli_inner, _dsc) = client.client_inner();
                     cli_inner.set_jwt_session(&payload).await?;
