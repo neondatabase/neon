@@ -149,16 +149,15 @@ use super::{
     config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
     MaybeOffloaded,
 };
-use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
+use super::{
+    debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf, HeatMapTimeline,
+};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{
     remote_timeline_client::RemoteTimelineClient, remote_timeline_client::WaitCompletionError,
     storage_layer::ReadableLayer,
 };
-use super::{
-    secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
-    GcError,
-};
+use super::{secondary::heatmap::HeatMapLayer, GcError};
 
 #[cfg(test)]
 use pageserver_api::value::Value;
@@ -441,7 +440,15 @@ pub struct Timeline {
     /// If Some, collects GetPage metadata for an ongoing PageTrace.
     pub(crate) page_trace: ArcSwapOption<Sender<PageTraceEvent>>,
 
-    heatmap: ArcSwapOption<HeatMapTimeline>,
+    previous_heatmap: ArcSwapOption<PreviousHeatmap>,
+}
+
+pub(crate) enum PreviousHeatmap {
+    Active {
+        heatmap: HeatMapTimeline,
+        read_at: std::time::Instant,
+    },
+    Obsolete,
 }
 
 pub type TimelineDeleteProgress = Arc<tokio::sync::Mutex<DeleteTimelineFlow>>;
@@ -2379,7 +2386,7 @@ impl Timeline {
         conf: &'static PageServerConf,
         tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
         metadata: &TimelineMetadata,
-        heatmap: Option<HeatMapTimeline>,
+        previous_heatmap: Option<PreviousHeatmap>,
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
@@ -2537,7 +2544,7 @@ impl Timeline {
 
                 page_trace: Default::default(),
 
-                heatmap: ArcSwapOption::from_pointee(heatmap),
+                previous_heatmap: ArcSwapOption::from_pointee(previous_heatmap),
             };
 
             result.repartition_threshold =
@@ -3277,28 +3284,39 @@ impl Timeline {
         let guard = self.layers.read().await;
 
         // Firstly, if there's any heatmap left over from when this location
-        // was a secondary, take that into account. Any layers that are present
-        // in the layer map, visible and non-resident will be kept.
+        // was a secondary, take that into account. Keep layers that are:
+        // * present in the layer map
+        // * visible
+        // * non-resident
+        // * not evicted since we read the heatmap
         //
         // Without this, a new cold, attached location would clobber the previous
         // heatamp.
-        let previous_heatmap = self.heatmap.load();
-        let visible_non_resident = previous_heatmap.as_ref().map(|h| {
-            h.layers.iter().filter_map(|hl| {
-                let desc: PersistentLayerDesc = hl.name.clone().into();
-                let layer = guard.try_get_from_key(&desc.key())?;
+        let previous_heatmap = self.previous_heatmap.load();
+        let visible_non_resident = match previous_heatmap.as_deref() {
+            Some(PreviousHeatmap::Active { heatmap, read_at }) => {
+                Some(heatmap.layers.iter().filter_map(|hl| {
+                    let desc: PersistentLayerDesc = hl.name.clone().into();
+                    let layer = guard.try_get_from_key(&desc.key())?;
 
-                if layer.visibility() == LayerVisibilityHint::Covered {
-                    return None;
-                }
+                    if layer.visibility() == LayerVisibilityHint::Covered {
+                        return None;
+                    }
 
-                if layer.is_likely_resident() {
-                    return None;
-                }
+                    if layer.is_likely_resident() {
+                        return None;
+                    }
 
-                Some((desc, hl.metadata.clone(), hl.access_time))
-            })
-        });
+                    if layer.last_evicted_at().happened_after(*read_at) {
+                        return None;
+                    }
+
+                    Some((desc, hl.metadata.clone(), hl.access_time))
+                }))
+            }
+            Some(PreviousHeatmap::Obsolete) => None,
+            None => None,
+        };
 
         // Secondly, all currently visible, resident layers are included.
         let resident = guard.likely_resident_layers().filter_map(|layer| {
@@ -3323,7 +3341,8 @@ impl Timeline {
             Some(non_resident) => {
                 let mut non_resident = non_resident.peekable();
                 if non_resident.peek().is_none() {
-                    self.heatmap.store(None);
+                    self.previous_heatmap
+                        .store(Some(PreviousHeatmap::Obsolete.into()));
                 }
 
                 non_resident.chain(resident).collect::<Vec<_>>()
@@ -6389,7 +6408,7 @@ mod tests {
         layer_map::LayerMap,
         storage_layer::{Layer, LayerName, LayerVisibilityHint},
         timeline::{DeltaLayerTestDesc, EvictionError},
-        Timeline,
+        PreviousHeatmap, Timeline,
     };
 
     use super::HeatMapTimeline;
@@ -6494,7 +6513,6 @@ mod tests {
 
         // Evict all the layers and stash the old heatmap in the timeline.
         // This simulates a migration to a cold secondary location.
-        timeline.heatmap.store(Some(Arc::new(heatmap.clone())));
 
         let guard = timeline.layers.read().await;
         let mut all_layers = Vec::new();
@@ -6504,6 +6522,13 @@ mod tests {
             layer.evict_and_wait(forever).await.unwrap();
         }
         drop(guard);
+
+        timeline
+            .previous_heatmap
+            .store(Some(Arc::new(PreviousHeatmap::Active {
+                heatmap: heatmap.clone(),
+                read_at: std::time::Instant::now(),
+            })));
 
         // Generate a new heatmap and assert that it contains the same layers as the old one.
         let post_migration_heatmap = timeline.generate_heatmap().await.unwrap();
@@ -6536,7 +6561,93 @@ mod tests {
 
         // Everything from the post-migration heatmap is now resident.
         // Check that we drop it from memory.
-        assert!(timeline.heatmap.load().is_none());
+        assert!(matches!(
+            timeline.previous_heatmap.load().as_deref(),
+            Some(PreviousHeatmap::Obsolete)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_previous_heatmap_obsoletion() {
+        let harness = TenantHarness::create("heatmap_previous_heatmap_obsoletion")
+            .await
+            .unwrap();
+
+        let l0_delta = DeltaLayerTestDesc::new(
+            Lsn(0x20)..Lsn(0x30),
+            Key::from_hex("000000000000000000000000000000000000").unwrap()
+                ..Key::from_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF").unwrap(),
+            vec![(
+                Key::from_hex("720000000033333333444444445500000000").unwrap(),
+                Lsn(0x25),
+                Value::Image(test_img("foo")),
+            )],
+        );
+
+        let image_layer = (
+            Lsn(0x40),
+            vec![(
+                Key::from_hex("620000000033333333444444445500000000").unwrap(),
+                test_img("bar"),
+            )],
+        );
+
+        let delta_layers = vec![l0_delta];
+        let image_layers = vec![image_layer];
+
+        let (tenant, ctx) = harness.load().await;
+        let timeline = tenant
+            .create_test_timeline_with_layers(
+                TimelineId::generate(),
+                Lsn(0x10),
+                14,
+                &ctx,
+                delta_layers,
+                image_layers,
+                Lsn(0x100),
+            )
+            .await
+            .unwrap();
+
+        // Layer visibility is an input to heatmap generation, so refresh it first
+        timeline.update_layer_visibility().await.unwrap();
+
+        let heatmap = timeline
+            .generate_heatmap()
+            .await
+            .expect("Infallible while timeline is not shut down");
+
+        // Both layers should be in the heatmap
+        assert!(!heatmap.layers.is_empty());
+
+        // Now simulate a migration.
+        timeline
+            .previous_heatmap
+            .store(Some(Arc::new(PreviousHeatmap::Active {
+                heatmap: heatmap.clone(),
+                read_at: std::time::Instant::now(),
+            })));
+
+        // Evict all the layers in the previous heatmap
+        let guard = timeline.layers.read().await;
+        let forever = std::time::Duration::from_secs(120);
+        for layer in guard.likely_resident_layers() {
+            layer.evict_and_wait(forever).await.unwrap();
+        }
+        drop(guard);
+
+        // Generate a new heatmap and check that the previous heatmap
+        // has been marked obsolete.
+        let post_eviction_heatmap = timeline
+            .generate_heatmap()
+            .await
+            .expect("Infallible while timeline is not shut down");
+
+        assert!(post_eviction_heatmap.layers.is_empty());
+        assert!(matches!(
+            timeline.previous_heatmap.load().as_deref(),
+            Some(PreviousHeatmap::Obsolete)
+        ));
     }
 
     #[tokio::test]

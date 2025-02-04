@@ -53,6 +53,7 @@ use timeline::import_pgdata;
 use timeline::offload::offload_timeline;
 use timeline::offload::OffloadError;
 use timeline::CompactOptions;
+use timeline::PreviousHeatmap;
 use timeline::ShutdownMode;
 use tokio::io::BufReader;
 use tokio::sync::watch;
@@ -260,7 +261,7 @@ struct TimelinePreload {
     timeline_id: TimelineId,
     client: RemoteTimelineClient,
     index_part: Result<MaybeDeletedIndexPart, DownloadError>,
-    heatmap: Option<HeatMapTimeline>,
+    previous_heatmap: Option<PreviousHeatmap>,
 }
 
 pub(crate) struct TenantPreload {
@@ -1124,7 +1125,7 @@ impl Tenant {
         resources: TimelineResources,
         mut index_part: IndexPart,
         metadata: TimelineMetadata,
-        heatmap: Option<HeatMapTimeline>,
+        previous_heatmap: Option<PreviousHeatmap>,
         ancestor: Option<Arc<Timeline>>,
         cause: LoadTimelineCause,
         ctx: &RequestContext,
@@ -1155,7 +1156,7 @@ impl Tenant {
         let timeline = self.create_timeline_struct(
             timeline_id,
             &metadata,
-            heatmap,
+            previous_heatmap,
             ancestor.clone(),
             resources,
             CreateTimelineCause::Load,
@@ -1558,10 +1559,15 @@ impl Tenant {
         // TODO(vlad): Could go to S3 if the secondary is freezing cold and hasn't even
         // pulled the first heatmap. Not entirely necessary since the storage controller
         // will kick the secondary in any case and cause a download.
-        let maybe_heatmap = self.read_on_disk_heatmap().await;
+        let maybe_heatmap_at = self.read_on_disk_heatmap().await;
 
         let timelines = self
-            .load_timelines_metadata(remote_timeline_ids, remote_storage, maybe_heatmap, cancel)
+            .load_timelines_metadata(
+                remote_timeline_ids,
+                remote_storage,
+                maybe_heatmap_at,
+                cancel,
+            )
             .await?;
 
         Ok(TenantPreload {
@@ -1574,11 +1580,11 @@ impl Tenant {
         })
     }
 
-    async fn read_on_disk_heatmap(&self) -> Option<HeatMapTenant> {
+    async fn read_on_disk_heatmap(&self) -> Option<(HeatMapTenant, std::time::Instant)> {
         let on_disk_heatmap_path = self.conf.tenant_heatmap_path(&self.tenant_shard_id);
         match tokio::fs::read_to_string(on_disk_heatmap_path).await {
             Ok(heatmap) => match serde_json::from_str::<HeatMapTenant>(&heatmap) {
-                Ok(heatmap) => Some(heatmap),
+                Ok(heatmap) => Some((heatmap, std::time::Instant::now())),
                 Err(err) => {
                     error!("Failed to deserialize old heatmap: {err}");
                     None
@@ -1681,8 +1687,10 @@ impl Tenant {
             match index_part {
                 MaybeDeletedIndexPart::IndexPart(index_part) => {
                     timeline_ancestors.insert(timeline_id, index_part.metadata.clone());
-                    remote_index_and_client
-                        .insert(timeline_id, (index_part, preload.client, preload.heatmap));
+                    remote_index_and_client.insert(
+                        timeline_id,
+                        (index_part, preload.client, preload.previous_heatmap),
+                    );
                 }
                 MaybeDeletedIndexPart::Deleted(index_part) => {
                     info!(
@@ -1701,7 +1709,7 @@ impl Tenant {
         // layer file.
         let sorted_timelines = tree_sort_timelines(timeline_ancestors, |m| m.ancestor_timeline())?;
         for (timeline_id, remote_metadata) in sorted_timelines {
-            let (index_part, remote_client, heatmap) = remote_index_and_client
+            let (index_part, remote_client, previous_heatmap) = remote_index_and_client
                 .remove(&timeline_id)
                 .expect("just put it in above");
 
@@ -1721,7 +1729,7 @@ impl Tenant {
                     timeline_id,
                     index_part,
                     remote_metadata,
-                    heatmap,
+                    previous_heatmap,
                     TimelineResources {
                         remote_client,
                         pagestream_throttle: self.pagestream_throttle.clone(),
@@ -1886,7 +1894,7 @@ impl Tenant {
         timeline_id: TimelineId,
         index_part: IndexPart,
         remote_metadata: TimelineMetadata,
-        heatmap: Option<HeatMapTimeline>,
+        previous_heatmap: Option<PreviousHeatmap>,
         resources: TimelineResources,
         cause: LoadTimelineCause,
         ctx: &RequestContext,
@@ -1916,7 +1924,7 @@ impl Tenant {
             resources,
             index_part,
             remote_metadata,
-            heatmap,
+            previous_heatmap,
             ancestor,
             cause,
             ctx,
@@ -1928,23 +1936,26 @@ impl Tenant {
         self: &Arc<Tenant>,
         timeline_ids: HashSet<TimelineId>,
         remote_storage: &GenericRemoteStorage,
-        heatmap: Option<HeatMapTenant>,
+        heatmap: Option<(HeatMapTenant, std::time::Instant)>,
         cancel: CancellationToken,
     ) -> anyhow::Result<HashMap<TimelineId, TimelinePreload>> {
-        let mut timeline_heatmaps = heatmap.map(|h| h.into_timelines_index());
+        let mut timeline_heatmaps = heatmap.map(|h| (h.0.into_timelines_index(), h.1));
 
         let mut part_downloads = JoinSet::new();
         for timeline_id in timeline_ids {
             let cancel_clone = cancel.clone();
 
-            let timeline_heatmap = timeline_heatmaps
-                .as_mut()
-                .and_then(|hs| hs.remove(&timeline_id));
+            let previous_timeline_heatmap = timeline_heatmaps.as_mut().and_then(|hs| {
+                hs.0.remove(&timeline_id).map(|h| PreviousHeatmap::Active {
+                    heatmap: h,
+                    read_at: hs.1,
+                })
+            });
             part_downloads.spawn(
                 self.load_timeline_metadata(
                     timeline_id,
                     remote_storage.clone(),
-                    timeline_heatmap,
+                    previous_timeline_heatmap,
                     cancel_clone,
                 )
                 .instrument(info_span!("download_index_part", %timeline_id)),
@@ -1995,7 +2006,7 @@ impl Tenant {
         self: &Arc<Tenant>,
         timeline_id: TimelineId,
         remote_storage: GenericRemoteStorage,
-        heatmap: Option<HeatMapTimeline>,
+        previous_heatmap: Option<PreviousHeatmap>,
         cancel: CancellationToken,
     ) -> impl Future<Output = TimelinePreload> {
         let client = self.build_timeline_client(timeline_id, remote_storage);
@@ -2011,7 +2022,7 @@ impl Tenant {
                 client,
                 timeline_id,
                 index_part,
-                heatmap,
+                previous_heatmap,
             }
         }
     }
@@ -4026,7 +4037,7 @@ impl Tenant {
         &self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
-        heatmap: Option<HeatMapTimeline>,
+        previous_heatmap: Option<PreviousHeatmap>,
         ancestor: Option<Arc<Timeline>>,
         resources: TimelineResources,
         cause: CreateTimelineCause,
@@ -4050,7 +4061,7 @@ impl Tenant {
             self.conf,
             Arc::clone(&self.tenant_conf),
             new_metadata,
-            heatmap,
+            previous_heatmap,
             ancestor,
             new_timeline_id,
             self.tenant_shard_id,
