@@ -37,9 +37,10 @@ PREEMPT_COMPACTION_TENANT_CONF = {
     # Compact small layers
     "compaction_target_size": 1024**2,
     "image_creation_threshold": 1,
-    "image_creation_preempt_threshold": 2,
+    "image_creation_preempt_threshold": 1,
     # compact more frequently
-    "compaction_threshold": 5,
+    "compaction_threshold": 3,
+    "compaction_upper_limit": 6,
     "lsn_lease_length": "0s",
 }
 
@@ -142,7 +143,7 @@ def test_pageserver_compaction_preempt(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    row_count = 100000
+    row_count = 200000
     churn_rounds = 10
 
     ps_http = env.pageserver.http_client()
@@ -155,10 +156,8 @@ def test_pageserver_compaction_preempt(
 
     for i in range(1, churn_rounds + 1):
         log.info(f"Running churn round {i}/{churn_rounds} ...")
-        workload.churn_rows(row_count, env.pageserver.id)
-        time.sleep(1)  # give some time for image layer creation to run
-    ps_http.timeline_compact(tenant_id, timeline_id, force_l0_compaction=True)
-
+        workload.churn_rows(row_count, env.pageserver.id, upload=False)
+    ps_http.timeline_compact(tenant_id, timeline_id, wait_until_uploaded=True)
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
     # ensure image layer creation gets preempted and then resumed

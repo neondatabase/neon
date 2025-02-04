@@ -4702,13 +4702,18 @@ impl Timeline {
         if let LastImageLayerCreationStatus::Incomplete { last_key } = last_status {
             // We need to skip the partitions that have already been processed.
             for (i, partition) in partition_parts.iter().enumerate() {
-                if last_key > partition.end().unwrap() {
-                    // Why `i` instead of `i-1`?
+                if last_key <= partition.end().unwrap() {
+                    // ```plain
+                    // |------|--------|----------|------|
+                    //              ^last_key
+                    //                    ^start from this partition
+                    // ```
+                    // Why `i+1` instead of `i`?
                     // It is possible that the user did some writes after the previous image layer creation attempt so that
                     // a relation grows in size, and the last_key is now in the middle of the partition. In this case, we
                     // still want to skip this partition, so that we can make progress and avoid generating image layers over
                     // the same partition.
-                    partition_parts.rotate_left(i);
+                    partition_parts.rotate_left((i + 1) % total_partitions);
                     // Update the start key to the partition start.
                     start = partition_parts[0].start().unwrap();
                     break;
