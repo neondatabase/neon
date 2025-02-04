@@ -157,6 +157,7 @@ def test_pageserver_compaction_preempt(
     for i in range(1, churn_rounds + 1):
         log.info(f"Running churn round {i}/{churn_rounds} ...")
         workload.churn_rows(row_count, env.pageserver.id, upload=False)
+        workload.validate(env.pageserver.id)
     ps_http.timeline_compact(tenant_id, timeline_id, wait_until_uploaded=True)
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
