@@ -262,6 +262,9 @@ where
         }
     }
 
+    /// Called (lazily) whenever a new log call is executed. We quickly check
+    /// for duplicate field names and record duplicates as skippable. Last one
+    /// wins.
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
         if !metadata.is_event() {
             // Must not be never because we wouldn't get trace and span data.
