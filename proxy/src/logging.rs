@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::{env, io};
 
@@ -119,6 +119,17 @@ where
     }
 }
 
+pub struct LoggingGuard;
+
+impl Drop for LoggingGuard {
+    fn drop(&mut self) {
+        // Shutdown trace pipeline gracefully, so that it has a chance to send any
+        // pending traces before we exit.
+        tracing::info!("shutting down the tracing machinery");
+        tracing_utils::shutdown_tracing();
+    }
+}
+
 // TODO: make JSON the default
 #[derive(Copy, Clone, PartialEq, Eq, Default, Debug)]
 enum LogFormat {
@@ -139,19 +150,8 @@ impl LogFormat {
     }
 }
 
-pub struct LoggingGuard;
-
-impl Drop for LoggingGuard {
-    fn drop(&mut self) {
-        // Shutdown trace pipeline gracefully, so that it has a chance to send any
-        // pending traces before we exit.
-        tracing::info!("shutting down the tracing machinery");
-        tracing_utils::shutdown_tracing();
-    }
-}
-
-pub trait MakeWriter {
-    fn make(&self) -> impl io::Write;
+trait MakeWriter {
+    fn make_writer(&self) -> impl io::Write;
 }
 
 struct StderrWriter {
@@ -160,13 +160,13 @@ struct StderrWriter {
 
 impl MakeWriter for StderrWriter {
     #[inline]
-    fn make(&self) -> impl io::Write {
+    fn make_writer(&self) -> impl io::Write {
         self.stderr.lock()
     }
 }
 
 // TODO: move into separate module or even separate crate.
-pub trait Clock {
+trait Clock {
     fn now(&self) -> DateTime<Utc>;
 }
 
@@ -183,12 +183,17 @@ impl Clock for RealClock {
 const MESSAGE_FIELD: &str = "message";
 
 thread_local! {
+    /// Protects against deadlocks and double panics during log writing.
+    /// The current panic handler will use tracing to log panic information.
     static REENTRANCY_GUARD: Cell<bool> = const { Cell::new(false) };
+    /// Thread-local instance with per-thread buffer for log writing.
     static EVENT_FORMATTER: RefCell<EventFormatter> = RefCell::new(EventFormatter::new());
+    /// Cached OS thread ID.
     static THREAD_ID: Cell<u64> = Cell::new(gettid::gettid());
 }
 
-pub struct JsonLoggingLayer<C: Clock, W: MakeWriter> {
+/// Implements tracing layer to handle events specific to logging.
+struct JsonLoggingLayer<C: Clock, W: MakeWriter> {
     clock: C,
     skipped_field_indices: papaya::HashMap<callsite::Identifier, SkippedFieldIndices>,
     writer: W,
@@ -209,7 +214,7 @@ where
             if entered.get() {
                 let mut formatter = EventFormatter::new();
                 formatter.format(now, event, &ctx, &self.skipped_field_indices)?;
-                self.writer.make().write_all(&formatter.logline_buffer)
+                self.writer.make_writer().write_all(formatter.buffer())
             } else {
                 entered.set(true);
                 defer!(entered.set(false););
@@ -217,12 +222,12 @@ where
                 EVENT_FORMATTER.with_borrow_mut(move |formatter| {
                     formatter.reset();
                     formatter.format(now, event, &ctx, &self.skipped_field_indices)?;
-                    self.writer.make().write_all(&formatter.logline_buffer)
+                    self.writer.make_writer().write_all(formatter.buffer())
                 })
             }
         });
 
-        // TODO: maybe simplify this
+        // In case logging fails we generate a simpler JSON object.
         if let Err(err) = res {
             if let Ok(mut line) = serde_json::to_vec(&serde_json::json!( {
                 "timestamp": now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
@@ -233,15 +238,19 @@ where
                 },
             })) {
                 line.push(b'\n');
-                self.writer.make().write_all(&line).ok();
+                self.writer.make_writer().write_all(&line).ok();
             }
         }
     }
 
+    /// Registers a SpanFields instance as span extension.
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("span must exist");
         let fields = SpanFields::default();
         fields.record_fields(attrs);
+        // This could deadlock when there's a panic somewhere in the tracing
+        // event handling and a read or write guard is still held. This includes
+        // the OTel subscriber.
         span.extensions_mut().insert(fields);
     }
 
@@ -287,9 +296,10 @@ where
     }
 }
 
+/// Stores span field values recorded during the spans lifetime.
 #[derive(Default)]
 struct SpanFields {
-    // TODO: Use bump allocator for strings
+    // TODO: Switch to custom enum with lasso::Spur for Strings?
     fields: papaya::HashMap<&'static str, serde_json::Value>,
 }
 
@@ -302,6 +312,7 @@ impl SpanFields {
     }
 }
 
+/// Implements a tracing field visitor to convert and store values.
 struct SpanFieldsRecorder<'m, S, G> {
     fields: papaya::HashMapRef<'m, &'static str, serde_json::Value, S, G>,
 }
@@ -382,34 +393,40 @@ impl<S: BuildHasher, G: papaya::Guard> tracing::field::Visit for SpanFieldsRecor
     }
 }
 
+/// List of field indices skipped during logging. Can list duplicate fields or
+/// metafields not meant to be logged.
 #[derive(Clone, Default)]
 struct SkippedFieldIndices {
-    indices: Vec<usize>,
+    bits: u64,
 }
 
 impl SkippedFieldIndices {
     #[inline]
     fn is_empty(&self) -> bool {
-        self.indices.is_empty()
+        self.bits == 0
     }
 
     #[inline]
     fn push(&mut self, index: usize) {
-        self.indices.push(index);
+        self.bits |= 1u64
+            .checked_shl(index as u32)
+            .expect("field index too large");
     }
 
     #[inline]
     fn contains(&self, index: usize) -> bool {
-        // TODO: For now we do a linear search as these index lists are assumed
-        //       to be short.
-        self.indices.contains(&index)
+        self.bits
+            & 1u64
+                .checked_shl(index as u32)
+                .expect("field index too large")
+            != 0
     }
 }
 
-// TODO: buffer capacity management
+/// Formats a tracing event and writes JSON to its internal buffer including a newline.
+// TODO: buffer capacity management, truncate if too large
 struct EventFormatter {
     logline_buffer: Vec<u8>,
-    field_tracker: HashSet<u32>,
 }
 
 impl EventFormatter {
@@ -417,14 +434,17 @@ impl EventFormatter {
     fn new() -> Self {
         EventFormatter {
             logline_buffer: Vec::new(),
-            field_tracker: HashSet::new(),
         }
+    }
+
+    #[inline]
+    fn buffer(&self) -> &[u8] {
+        &self.logline_buffer
     }
 
     #[inline]
     fn reset(&mut self) {
         self.logline_buffer.clear();
-        self.field_tracker.clear();
     }
 
     fn format<S>(
@@ -459,7 +479,8 @@ impl EventFormatter {
 
             // Message next.
             serializer.serialize_key("message")?;
-            let mut message_extractor = MessageExtractor::new(serializer, skipped_field_indices);
+            let mut message_extractor =
+                MessageFieldExtractor::new(serializer, skipped_field_indices);
             event.record(&mut message_extractor);
             let mut serializer = message_extractor.into_serializer()?;
 
@@ -515,8 +536,6 @@ impl EventFormatter {
                         "trace_id",
                         &format_args!("{}", span_context.trace_id()),
                     )?;
-                    // serializer
-                    //     .serialize_entry("span_id", &format_args!("{}", span_context.span_id()))?;
                 }
             }
 
@@ -531,6 +550,7 @@ impl EventFormatter {
     }
 }
 
+/// Serializes the tracing lavel.
 struct SerializeLevel<'a>(&'a Level);
 
 impl Serialize for SerializeLevel<'_> {
@@ -555,13 +575,14 @@ impl Serialize for SerializeLevel<'_> {
     }
 }
 
-pub struct MessageExtractor<'a, S: serde::ser::SerializeMap> {
+/// Extracts the message field that's mixed will other fields.
+struct MessageFieldExtractor<'a, S: serde::ser::SerializeMap> {
     serializer: S,
     skipped_field_indices: Option<&'a SkippedFieldIndices>,
     state: Option<Result<(), S::Error>>,
 }
 
-impl<'a, S: serde::ser::SerializeMap> MessageExtractor<'a, S> {
+impl<'a, S: serde::ser::SerializeMap> MessageFieldExtractor<'a, S> {
     #[inline]
     fn new(serializer: S, skipped_field_indices: Option<&'a SkippedFieldIndices>) -> Self {
         Self {
@@ -591,7 +612,7 @@ impl<'a, S: serde::ser::SerializeMap> MessageExtractor<'a, S> {
     }
 }
 
-impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageExtractor<'_, S> {
+impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldExtractor<'_, S> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
         if self.accept_field(field) {
@@ -667,8 +688,14 @@ impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageExtractor<'_,
     }
 }
 
+/// Checks if there's any fields and field values present. If not, the JSON subobject
+/// can be skipped.
+// This is entirely optional and only cosmetic, though maybe helps a
+// bit during log parsing in dashboards when there's no field with empty object.
 struct FieldsPresent<'a>(pub bool, Option<&'a SkippedFieldIndices>);
 
+// Even though some methods have an overhead (error, bytes) it is assumed the
+// compiler won't include this since we ignore the value entirely.
 impl tracing::field::Visit for FieldsPresent<'_> {
     #[inline]
     fn record_debug(&mut self, field: &tracing::field::Field, _: &dyn std::fmt::Debug) {
@@ -681,6 +708,7 @@ impl tracing::field::Visit for FieldsPresent<'_> {
     }
 }
 
+/// Serializes the fields directly supplied with a log event.
 struct SerializableEventFields<'a, 'event>(
     &'a tracing::Event<'event>,
     Option<&'a SkippedFieldIndices>,
@@ -693,20 +721,21 @@ impl serde::ser::Serialize for SerializableEventFields<'_, '_> {
     {
         use serde::ser::SerializeMap;
         let serializer = serializer.serialize_map(None)?;
-        let mut message_skipper = MessageSkipper::new(serializer, self.1);
+        let mut message_skipper = MessageFieldSkipper::new(serializer, self.1);
         self.0.record(&mut message_skipper);
         let serializer = message_skipper.into_serializer()?;
         serializer.end()
     }
 }
 
-pub struct MessageSkipper<'a, S: serde::ser::SerializeMap> {
+/// A tracing field visitor that skips the message field.
+struct MessageFieldSkipper<'a, S: serde::ser::SerializeMap> {
     serializer: S,
     skipped_field_indices: Option<&'a SkippedFieldIndices>,
     state: Result<(), S::Error>,
 }
 
-impl<'a, S: serde::ser::SerializeMap> MessageSkipper<'a, S> {
+impl<'a, S: serde::ser::SerializeMap> MessageFieldSkipper<'a, S> {
     #[inline]
     fn new(serializer: S, skipped_field_indices: Option<&'a SkippedFieldIndices>) -> Self {
         Self {
@@ -733,7 +762,7 @@ impl<'a, S: serde::ser::SerializeMap> MessageSkipper<'a, S> {
     }
 }
 
-impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageSkipper<'_, S> {
+impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldSkipper<'_, S> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
         if self.accept_field(field) {
@@ -813,6 +842,8 @@ impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageSkipper<'_, S
     }
 }
 
+/// Serializes the span stack from root to leaf (parent of event) as sequence.
+// TODO: Replace the sequence with something that Grafana Loki can handle.
 struct SerializableSpanStack<'a, 'b, Span>(&'b Context<'a, Span>)
 where
     Span: Subscriber + for<'lookup> LookupSpan<'lookup>;
@@ -838,6 +869,8 @@ where
     }
 }
 
+/// Serializes a single span. Include the span ID, name and its fields as
+/// recorded up to this point.
 struct SerializableSpan<'a, 'b, Span>(&'b SpanRef<'a, Span>)
 where
     Span: for<'lookup> LookupSpan<'lookup>;
@@ -851,7 +884,8 @@ where
         Ser: serde::ser::Serializer,
     {
         let mut serializer = serializer.serialize_map(None)?;
-        serializer.serialize_entry("span_id", &self.0.id().into_u64())?;
+        // TODO: the span ID is probably only useful for debugging tracing.
+        serializer.serialize_entry("span_id", &format_args!("{:016x}", self.0.id().into_u64()))?;
         serializer.serialize_entry("span_name", self.0.metadata().name())?;
 
         let ext = self.0.extensions();
@@ -866,6 +900,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -889,7 +924,7 @@ mod tests {
     }
 
     impl MakeWriter for Arc<Mutex<Vec<u8>>> {
-        fn make(&self) -> impl io::Write {
+        fn make_writer(&self) -> impl io::Write {
             VecWriter {
                 buffer: self.lock().expect("poisoned"),
             }
@@ -921,15 +956,17 @@ mod tests {
         let registry = tracing_subscriber::Registry::default().with(log_layer);
 
         tracing::subscriber::with_default(registry, || {
-            let _span1 = info_span!("span1", x = 40, x = 41, x = 42).entered();
-            let _span2 = info_span!("span2").entered();
-            tracing::error!(
-                a = 1,
-                a = 2,
-                a = 3,
-                message = "explicit message field",
-                "implicit message field"
-            );
+            info_span!("span1", x = 40, x = 41, x = 42).in_scope(|| {
+                info_span!("span2").in_scope(|| {
+                    tracing::error!(
+                        a = 1,
+                        a = 2,
+                        a = 3,
+                        message = "explicit message field",
+                        "implicit message field"
+                    );
+                });
+            });
         });
 
         let buffer = Arc::try_unwrap(buffer)
@@ -946,11 +983,11 @@ mod tests {
                     "a": 3,
                 },
                 "spans": [{
-                    "span_id": 1,
+                    "span_id": "0000000000000001",
                     "span_name": "span1",
                     "x": 42,
                 }, {
-                    "span_id": 2,
+                    "span_id": "0000000000000002",
                     "span_name": "span2",
                 }],
                 "src": actual.as_object().unwrap().get("src").unwrap().as_str().unwrap(),
