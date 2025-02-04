@@ -6,12 +6,8 @@ ARG DEBIAN_VERSION
 # Use strict mode for bash to catch errors early
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-# Some complexity with `echo`:
-# In Debian images for RUN used `/bin/sh`
-# and it treats `\n` as newline by default.
-# If you try it with `bash`, then you need `-e` flag.
-# For other images, like `alpine/curl` for example,
-# They use `bash` by default, so there we will use `-e` for echo.
+# By default, /bin/sh used in debian images will treat '\n' as eol,
+# but as we use bash as SHELL, and built-in echo in bash requires '-e' flag for that.
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc && \
     echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
@@ -75,7 +71,6 @@ RUN mkdir -p /pgcopydb/bin && \
 COPY --from=pgcopydb_builder /usr/lib/postgresql/16/bin/pgcopydb /pgcopydb/bin/pgcopydb
 COPY --from=pgcopydb_builder /pgcopydb/lib/libpq.so.5 /pgcopydb/lib/libpq.so.5
 
-# See comment on the top of the file regading `echo` and `\n`
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc && \
     echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
