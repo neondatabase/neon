@@ -1378,6 +1378,7 @@ COPY --from=pg-semver-pg-build /pg_semver.tar.gz /ext-src
 COPY --from=pg-ivm-build /pg_ivm.tar.gz /ext-src
 COPY --from=pg-partman-build /pg_partman.tar.gz /ext-src
 COPY --from=pg-repack-build /pg_repack.tar.gz /ext-src
+COPY compute/patches/pg_repack.patch /ext-src
 RUN cd /ext-src/ && for f in *.tar.gz; \
     do echo $f; dname=$(echo $f | sed 's/\.tar.*//')-src; \
     rm -rf $dname; mkdir $dname; tar xzf $f --strip-components=1 -C $dname \
@@ -1388,6 +1389,7 @@ RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan_${PG_VERSI
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN patch -p1 </ext-src/pg_cron.patch
 RUN cd /ext-src/pg_graphql-src && patch -p1 </ext-src/pg_graphql.patch
+RUN cd /ext-src/pg_repack-src && patch -p1 </ext-src/pg_repack.patch && rm -f /ext-src/pg_repack.patch
 ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
 ENV PGPORT=55433
