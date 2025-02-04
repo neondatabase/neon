@@ -86,7 +86,7 @@ ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
 ARG ALPINE_CURL_VERSION=8.11.1
 
 # By default, build all PostgreSQL extensions. For quick local testing when you don't
-# care about the extensions, pass EXTENSIONS=none
+# care about the extensions, pass EXTENSIONS=none or EXTENSIONS=minimal
 ARG EXTENSIONS=all
 
 #########################################################################################
