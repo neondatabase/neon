@@ -1390,6 +1390,7 @@ fn log_postgres_connstr_info(config_str: &str) -> anyhow::Result<()> {
     // To make extra sure the test gets ran, run it every time the function is called
     // (this is rather cold code, we can afford it).
     #[cfg(not(test))]
+    #[allow(clippy::let_unit_value)]
     let _ = test_config_debug_censors_password();
     tracing::info!("database connection config: {config:?}");
     Ok(())
