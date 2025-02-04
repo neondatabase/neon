@@ -31,7 +31,7 @@ $$
 begin
     raise notice 'neon event trigger is executed for %', current_user;
 end;
-$$;
+$$ security definer;
 
 -- Neon superuser should be able to create event triggers
 create event trigger on_ddl3 on ddl_command_end

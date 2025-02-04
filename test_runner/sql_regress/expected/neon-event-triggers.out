@@ -26,7 +26,7 @@ $$
 begin
     raise notice 'neon event trigger is executed for %', current_user;
 end;
-$$;
+$$ security definer;
 NOTICE:  admin event trigger is executed for neon_superuser
 -- Neon superuser should be able to create event triggers
 create event trigger on_ddl3 on ddl_command_end
@@ -34,18 +34,18 @@ execute procedure neon_proc();
 -- Check that event trigger is fired for neon_superuser
 create table t1(x integer);
 NOTICE:  admin event trigger is executed for neon_superuser
-NOTICE:  neon event trigger is executed for neon_superuser
+WARNING:  Skipping event trigger 40b0 for superuser
 set role cloud_admin;
 -- Check that event trigger is not fired for superuser
 create table t2(x integer);
-NOTICE:  admin event trigger is executed for cloud_admin
+WARNING:  Skipping event trigger 40ac for superuser
 WARNING:  Skipping event trigger 40b0 for superuser
 -- Now enaabe event triggers execution for superuser
 set neon.enable_event_triggers_for_superuser=on;
 -- Check that even trigger is fired in this case
 create table t3(x integer);
 NOTICE:  admin event trigger is executed for cloud_admin
-NOTICE:  neon event trigger is executed for cloud_admin
+NOTICE:  neon event trigger is executed for neon_superuser
 set role neon_superuser;
 -- Check that neon_superuser can drop it's event trigger
 drop event trigger on_ddl1;
