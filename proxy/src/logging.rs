@@ -845,8 +845,10 @@ impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldSkipper<
     }
 }
 
-/// Serializes the span stack from root to leaf (parent of event) as sequence.
-// TODO: Replace the sequence with something that Grafana Loki can handle.
+/// Serializes the span stack from root to leaf (parent of event) enumerated
+/// inside an object where the keys are just the number padded with zeroes
+/// to retain sorting order.
+// The object is necessary because Loki cannot flatten arrays.
 struct SerializableSpanStack<'a, 'b, Span>(&'b Context<'a, Span>)
 where
     Span: Subscriber + for<'lookup> LookupSpan<'lookup>;
@@ -859,12 +861,11 @@ where
     where
         Ser: serde::ser::Serializer,
     {
-        use serde::ser::SerializeSeq;
-        let mut serializer = serializer.serialize_seq(None)?;
+        let mut serializer = serializer.serialize_map(None)?;
 
         if let Some(leaf_span) = self.0.lookup_current() {
-            for span in leaf_span.scope().from_root() {
-                serializer.serialize_element(&SerializableSpan(&span))?;
+            for (i, span) in leaf_span.scope().from_root().enumerate() {
+                serializer.serialize_entry(&format_args!("{i:02}"), &SerializableSpan(&span))?;
             }
         }
 
@@ -985,14 +986,17 @@ mod tests {
                 "fields": {
                     "a": 3,
                 },
-                "spans": [{
-                    "span_id": "0000000000000001",
-                    "span_name": "span1",
-                    "x": 42,
-                }, {
-                    "span_id": "0000000000000002",
-                    "span_name": "span2",
-                }],
+                "spans": {
+                    "00":{
+                        "span_id": "0000000000000001",
+                        "span_name": "span1",
+                        "x": 42,
+                    },
+                    "01": {
+                        "span_id": "0000000000000002",
+                        "span_name": "span2",
+                    }
+                },
                 "src": actual.as_object().unwrap().get("src").unwrap().as_str().unwrap(),
                 "target": "proxy::logging::tests",
                 "process_id": actual.as_object().unwrap().get("process_id").unwrap().as_number().unwrap(),
