@@ -340,6 +340,9 @@ pub struct AppendRequestHeaderV2 {
 /// Report safekeeper state to proposer
 #[derive(Debug, Serialize, Clone)]
 pub struct AppendResponse {
+    // Membership conf generation. Not strictly required because on mismatch
+    // connection is reset, but let's sanity check it.
+    generation: Generation,
     // Current term of the safekeeper; if it is higher than proposer's, the
     // compute is out of date.
     pub term: Term,
@@ -356,8 +359,9 @@ pub struct AppendResponse {
 }
 
 impl AppendResponse {
-    fn term_only(term: Term) -> AppendResponse {
+    fn term_only(generation: Generation, term: Term) -> AppendResponse {
         AppendResponse {
+            generation,
             term,
             flush_lsn: Lsn(0),
             commit_lsn: Lsn(0),
@@ -778,11 +782,7 @@ impl AcceptorProposerMessage {
 
     /// Serialize acceptor -> proposer message.
     pub fn serialize(&self, buf: &mut BytesMut, proto_version: u32) -> Result<()> {
-        // TODO remove after converting all msgs
-        if proto_version == SK_PROTO_VERSION_3
-            && (matches!(self, AcceptorProposerMessage::Greeting(_))
-                || matches!(self, AcceptorProposerMessage::VoteResponse(_)))
-        {
+        if proto_version == SK_PROTO_VERSION_3 {
             match self {
                 AcceptorProposerMessage::Greeting(msg) => {
                     buf.put_u8('g' as u8);
@@ -803,11 +803,26 @@ impl AcceptorProposerMessage {
                         buf.put_u64(e.lsn.into());
                     }
                 }
-                _ => bail!("not impl"),
+                AcceptorProposerMessage::AppendResponse(msg) => {
+                    buf.put_u8('a' as u8);
+                    buf.put_u32(msg.generation);
+                    buf.put_u64(msg.term);
+                    buf.put_u64(msg.flush_lsn.into());
+                    buf.put_u64(msg.commit_lsn.into());
+                    buf.put_i64(msg.hs_feedback.ts);
+                    buf.put_u64(msg.hs_feedback.xmin);
+                    buf.put_u64(msg.hs_feedback.catalog_xmin);
+
+                    // AsyncReadMessage in walproposer.c will not try to decode pageserver_feedback
+                    // if it is not present.
+                    if let Some(ref msg) = msg.pageserver_feedback {
+                        msg.serialize(buf);
+                    }
+                }
             }
             Ok(())
         // TODO remove 3 after converting all msgs
-        } else if proto_version == SK_PROTO_VERSION_2 || proto_version == SK_PROTO_VERSION_3 {
+        } else if proto_version == SK_PROTO_VERSION_2 {
             match self {
                 AcceptorProposerMessage::Greeting(msg) => {
                     buf.put_u64_le('g' as u64);
@@ -831,6 +846,7 @@ impl AcceptorProposerMessage {
                     buf.put_u64_le(0);
                 }
                 AcceptorProposerMessage::AppendResponse(msg) => {
+                    // v2 didn't have generation
                     buf.put_u64_le('a' as u64);
                     buf.put_u64_le(msg.term);
                     buf.put_u64_le(msg.flush_lsn.into());
@@ -1053,6 +1069,7 @@ where
     /// Form AppendResponse from current state.
     fn append_response(&self) -> AppendResponse {
         let ar = AppendResponse {
+            generation: self.state.mconf.generation,
             term: self.state.acceptor_state.term,
             flush_lsn: self.flush_lsn(),
             commit_lsn: self.state.commit_lsn,
@@ -1246,7 +1263,10 @@ where
 
         // If our term is higher, immediately refuse the message.
         if self.state.acceptor_state.term > msg.h.term {
-            let resp = AppendResponse::term_only(self.state.acceptor_state.term);
+            let resp = AppendResponse::term_only(
+                self.state.mconf.generation,
+                self.state.acceptor_state.term,
+            );
             return Ok(Some(AcceptorProposerMessage::AppendResponse(resp)));
         }
 
