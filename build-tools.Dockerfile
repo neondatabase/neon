@@ -201,7 +201,11 @@ RUN set -e \
 # It includes several bug fixes on top on v2.0 release (https://github.com/linux-test-project/lcov/compare/v2.0...master)
 # And patches from us:
 # - Generates json file with code coverage summary (https://github.com/neondatabase/lcov/commit/426e7e7a22f669da54278e9b55e6d8caabd00af0.tar.gz)
-RUN for package in Capture::Tiny DateTime Devel::Cover Digest::MD5 File::Spec JSON::XS Memory::Process Time::HiRes JSON; do yes | perl -MCPAN -e "CPAN::Shell->notest('install', '$package')"; done
+RUN set +o pipefail && \
+	 for package in Capture::Tiny DateTime Devel::Cover Digest::MD5 File::Spec JSON::XS Memory::Process Time::HiRes JSON; do \
+		yes | perl -MCPAN -e "CPAN::Shell->notest('install', '$package')";\
+	 done && \
+	set -o pipefail
 # Split into separate step to debug flaky failures here
 RUN wget https://github.com/neondatabase/lcov/archive/426e7e7a22f669da54278e9b55e6d8caabd00af0.tar.gz -O lcov.tar.gz \
     && ls -laht lcov.tar.gz && sha256sum lcov.tar.gz \
