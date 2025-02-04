@@ -271,9 +271,9 @@ typedef struct VoteResponse
 	AcceptorProposerMessage apm;
 
 	/*
-	 * Membership conf generation. It's redundant because on mismatch
-	 * safekeeper is expected to ERROR the connection, but let's sanity check
-	 * it.
+	 * Membership conf generation. It's not strictly required because on
+	 * mismatch safekeeper is expected to ERROR the connection, but let's
+	 * sanity check it.
 	 */
 	Generation	generation;
 	term_t		term;
@@ -296,7 +296,7 @@ typedef struct VoteResponse
 typedef struct ProposerElected
 {
 	AcceptorProposerMessage apm;
-	Generation	generation; /* membership conf generation */
+	Generation	generation;		/* membership conf generation */
 	term_t		term;
 	/* proposer will send since this point */
 	XLogRecPtr	startStreamingAt;
@@ -310,7 +310,7 @@ typedef struct ProposerElected
 typedef struct AppendRequestHeader
 {
 	AcceptorProposerMessage apm;
-	Generation	generation; /* membership conf generation */
+	Generation	generation;		/* membership conf generation */
 	term_t		term;			/* term of the proposer */
 	XLogRecPtr	beginLsn;		/* start position of message in WAL */
 	XLogRecPtr	endLsn;			/* end position of message in WAL */
@@ -398,6 +398,13 @@ typedef struct WalproposerShmemState
 typedef struct AppendResponse
 {
 	AcceptorProposerMessage apm;
+
+	/*
+	 * Membership conf generation. It's not strictly required because on
+	 * mismatch safekeeper is expected to ERROR the connection, but let's
+	 * sanity check it.
+	 */
+	Generation	generation;
 
 	/*
 	 * Current term of the safekeeper; if it is higher than proposer's, the

@@ -1817,8 +1817,8 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 			case 'a':
 				{
 					/*
-					 * Note: this serializes only AppendRequestHeader, caller is
-					 * expected to append WAL data later.
+					 * Note: this serializes only AppendRequestHeader, caller
+					 * is expected to append WAL data later.
 					 */
 					AppendRequestHeader *m = (AppendRequestHeader *) msg;
 
@@ -1896,10 +1896,11 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 						pq_sendint64_le(buf, m->termHistory->entries[i].term);
 						pq_sendint64_le(buf, m->termHistory->entries[i].lsn);
 					}
-					pq_sendint64_le(buf, 0); /* removed timeline_start_lsn */
+					pq_sendint64_le(buf, 0);	/* removed timeline_start_lsn */
 					break;
 				}
 			case 'a':
+
 				/*
 				 * Note: this serializes only AppendRequestHeader, caller is
 				 * expected to append WAL data later.
@@ -1911,7 +1912,7 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 
 					appendRequestHeaderV2.tag = m->apm.tag;
 					appendRequestHeaderV2.term = m->term;
-					appendRequestHeaderV2.epochStartLsn = 0; /* removed field */
+					appendRequestHeaderV2.epochStartLsn = 0;	/* removed field */
 					appendRequestHeaderV2.beginLsn = m->beginLsn;
 					appendRequestHeaderV2.endLsn = m->endLsn;
 					appendRequestHeaderV2.commitLsn = m->commitLsn;
@@ -2022,8 +2023,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 	s.maxlen = buf_size;
 	s.cursor = 0;
 
-	/* removeme tag check after converting all msgs */
-	if (wp->config->proto_version == 3 && (anymsg->tag == 'g' || anymsg->tag == 'v'))
+	if (wp->config->proto_version == 3)
 	{
 		tag = pq_getmsgbyte(&s);
 		if (tag != anymsg->tag)
@@ -2064,6 +2064,24 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 					pq_getmsgend(&s);
 					return true;
 				}
+			case 'a':
+				{
+					AppendResponse *msg = (AppendResponse *) anymsg;
+
+					msg->generation = pq_getmsgint32(&s);
+					msg->term = pq_getmsgint64(&s);
+					msg->flushLsn = pq_getmsgint64(&s);
+					msg->commitLsn = pq_getmsgint64(&s);
+					msg->hs.ts = pq_getmsgint64(&s);
+					msg->hs.xmin.value = pq_getmsgint64(&s);
+					msg->hs.catalog_xmin.value = pq_getmsgint64(&s);
+					if (s.len > s.cursor)
+						ParsePageserverFeedbackMessage(wp, &s, &msg->ps_feedback);
+					else
+						msg->ps_feedback.present = false;
+					pq_getmsgend(&s);
+					return true;
+				}
 			default:
 				{
 					wp_log(FATAL, "unexpected message tag %c to read", (char) tag);
@@ -2071,8 +2089,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 				}
 		}
 	}
-	/* removeme tag check after converting all msgs */
-	else if (wp->config->proto_version == 2 || wp->config->proto_version == 3)
+	else if (wp->config->proto_version == 2)
 	{
 		tag = pq_getmsgint64_le(&s);
 		if (tag != anymsg->tag)
