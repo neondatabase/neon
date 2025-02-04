@@ -25,7 +25,7 @@
 //! docker push localhost:3030/localregistry/compute-node-v14:latest
 //! ```
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use aws_config::BehaviorVersion;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
@@ -455,6 +455,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         info!(status=?st, "pg_dump exited");
         if !st.success() {
             warn!(status=%st, "pg_dump failed, restore will likely fail as well");
+            bail!("pg_dump failed");
         }
     }
 
@@ -488,6 +489,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         info!(status=?st, "pg_restore exited");
         if !st.success() {
             warn!(status=%st, "pg_restore failed, restore will likely fail as well");
+            bail!("pg_restore failed");
         }
     }
 
