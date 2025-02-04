@@ -541,6 +541,25 @@ impl SerializedValueBatch {
         })
     }
 
+    /// Generates batch statistics for metrics.
+    pub fn stats(&self) -> SerializedValueStats {
+        let mut stats = SerializedValueStats::default();
+        for metadata in &self.metadata {
+            let ValueMeta::Serialized(valuemeta) = metadata else {
+                continue;
+            };
+            let is_block_key = Key::from_compact(valuemeta.key).is_block_key();
+            let will_init = valuemeta.will_init;
+            match (is_block_key, will_init) {
+                (true, true) => stats.page_images += 1,
+                (true, false) => stats.page_deltas += 1,
+                (false, true) => stats.metadata_images += 1,
+                (false, false) => stats.metadata_deltas += 1,
+            }
+        }
+        stats
+    }
+
     pub fn validate_lsn_order(&self) {
         use std::collections::HashMap;
 
@@ -561,6 +580,15 @@ impl SerializedValueBatch {
             }
         }
     }
+}
+
+/// Statistics for a SerializedValueBatch.
+#[derive(Default)]
+pub struct SerializedValueStats {
+    pub metadata_images: u64,
+    pub metadata_deltas: u64,
+    pub page_images: u64,
+    pub page_deltas: u64,
 }
 
 #[cfg(all(test, feature = "testing"))]
