@@ -832,39 +832,17 @@ force_noop(FmgrInfo *finfo)
 static void
 neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 {
-    if (event == FHET_START && !neon_enable_event_triggers_for_superuser && !RegressTestMode)
+    if (event == FHET_START
+		&& !neon_enable_event_triggers_for_superuser /* by default execution of event triggers is prohoboted for superuser */
+		&& !RegressTestMode /* still enable it to pass pg_regress tests */
+		&& GetSessionUserIsSuperuser() /* disable execution of security definer functions as well */
+		&& (flinfo->fn_oid == InvalidOid || get_func_rettype(flinfo->fn_oid) == EVENT_TRIGGEROID))
+		/* It can be other needs_fmgr_hook which cause our hook to be invoked for non-trigger function,
+		 * so recheck that is is trigger function */
 	{
-		bool skip = superuser();
-		if (skip && flinfo->fn_oid != InvalidOid && get_func_rettype(flinfo->fn_oid) != EVENT_TRIGGEROID)
-		{
-			/* It can be other needs_fmgr_hook which cause our hook to be invoked for non-trigger function */
-			skip = false;
-		}
-		else if (!skip && flinfo->fn_oid != InvalidOid)
-		{
-			/*
-			 * Even through event triggers are disabled for superuser, we still want to
-			 * allow firing of event triggers if procedures is owned by superuser.
-			 * It is needed to pass pg_regress tests and seems to be reasonable in any case.
-			 * If procedure was created by superuser, it should be safe to call it
-			 * with admin permissions.
-			 */
-			HeapTuple tuple = SearchSysCache1(PROCOID,
-											  ObjectIdGetDatum(flinfo->fn_oid));
-			if (HeapTupleIsValid(tuple))
-			{
-				Form_pg_proc procedureStruct = (Form_pg_proc) GETSTRUCT(tuple);
-				elog(LOG, "procedureStruct->prosecdef=%d,  procedureStruct->proowner=%d, current user=%d", procedureStruct->prosecdef, procedureStruct->proowner, GetUserId());
-				skip = procedureStruct->prosecdef;
-				ReleaseSysCache(tuple);
-			}
-		}
-		if (skip)
-		{
-			ereport(WARNING, (errmsg("Skipping event trigger %x for superuser", flinfo->fn_oid), errbacktrace()));
-			/* we can't skip execution directly inside the fmgr_hook so instead we change the event trigger function to a noop function */
-			force_noop(flinfo);
-		}
+		ereport(WARNING, (errmsg("Skipping event trigger %x for superuser", flinfo->fn_oid), errbacktrace()));
+		/* we can't skip execution directly inside the fmgr_hook so instead we change the event trigger function to a noop function */
+		force_noop(flinfo);
 	}
 	if (next_fmgr_hook)
 		(*next_fmgr_hook) (event, flinfo, private);
