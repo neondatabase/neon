@@ -832,10 +832,10 @@ force_noop(FmgrInfo *finfo)
 static void
 neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 {
-    if (event == FHET_START && !neon_enable_event_triggers_for_superuser && superuser())
+    if (event == FHET_START && !neon_enable_event_triggers_for_superuser && !RegressTestMode)
 	{
-		bool skip = true;
-		if (flinfo->fn_oid != InvalidOid)
+		bool skip = superuser();
+		if (!skip && flinfo->fn_oid != InvalidOid)
 		{
 			/*
 			 * Even through event triggers are disabled for superuser, we still want to
@@ -849,8 +849,8 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 			if (HeapTupleIsValid(tuple))
 			{
 				Form_pg_proc procedureStruct = (Form_pg_proc) GETSTRUCT(tuple);
-				elog(LOG, "procedureStruct->proowner=%d, current user=%d", procedureStruct->proowner, GetUserId());
-				skip = procedureStruct->proowner != GetUserId();
+				elog(LOG, "procedureStruct->prosecdef=%d,  procedureStruct->proowner=%d, current user=%d", procedureStruct->prosecdef, procedureStruct->proowner, GetUserId());
+				skip = procedureStruct->prosecdef;
 				ReleaseSysCache(tuple);
 			}
 		}
@@ -985,32 +985,39 @@ NeonProcessUtility(
 			break;
 	}
 
-	if (PreviousProcessUtilityHook)
+	PG_TRY();
 	{
-		PreviousProcessUtilityHook(
-								   pstmt,
-								   queryString,
-								   readOnlyTree,
-								   context,
-								   params,
-								   queryEnv,
-								   dest,
-								   qc);
+		if (PreviousProcessUtilityHook)
+		{
+			PreviousProcessUtilityHook(
+				pstmt,
+				queryString,
+				readOnlyTree,
+				context,
+				params,
+				queryEnv,
+				dest,
+				qc);
+		}
+		else
+		{
+			standard_ProcessUtility(
+				pstmt,
+				queryString,
+				readOnlyTree,
+				context,
+				params,
+				queryEnv,
+				dest,
+				qc);
+		}
 	}
-	else
+	PG_FINALLY();
 	{
-		standard_ProcessUtility(
-								pstmt,
-								queryString,
-								readOnlyTree,
-								context,
-								params,
-								queryEnv,
-								dest,
-								qc);
+		if (sudo)
+			switch_to_original_role();
 	}
-	if (sudo)
-		switch_to_original_role();
+	PG_END_TRY();
 }
 
 void
