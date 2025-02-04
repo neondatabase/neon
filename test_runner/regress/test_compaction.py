@@ -154,10 +154,9 @@ def test_pageserver_compaction_preempt(
     workload.write_rows(row_count, env.pageserver.id)
 
     for i in range(1, churn_rounds + 1):
-        if i % 10 == 0:
-            log.info(f"Running churn round {i}/{churn_rounds} ...")
+        log.info(f"Running churn round {i}/{churn_rounds} ...")
         workload.churn_rows(row_count, env.pageserver.id)
-        time.sleep(3)  # give some time for image layer creation to run
+        time.sleep(1)  # give some time for image layer creation to run
     ps_http.timeline_compact(tenant_id, timeline_id, force_l0_compaction=True)
 
     log.info("Validating at workload end ...")
