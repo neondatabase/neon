@@ -96,8 +96,10 @@ ARG DEBIAN_VERSION
 # Use strict mode for bash to catch errors early
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
+# By default, /bin/sh used in debian images will treat '\n' as eol,
+# but as we use bash as SHELL, and built-in echo in bash requires '-e' flag for that.
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc && \
     echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
 
 RUN case $DEBIAN_VERSION in \
@@ -1068,6 +1070,7 @@ ENV PATH="/home/nonroot/.cargo/bin:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 
+# See comment on the top of the file regading `echo` and `\n`
 RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
 
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
@@ -1584,6 +1587,7 @@ FROM alpine/curl:${ALPINE_CURL_VERSION} AS exporters
 ARG TARGETARCH
 # Keep sql_exporter version same as in build-tools.Dockerfile and
 # test_runner/regress/test_compute_metrics.py
+# See comment on the top of the file regading `echo`, `-e` and `\n`
 RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc; \
     if [ "$TARGETARCH" = "amd64" ]; then\
         postgres_exporter_sha256='027e75dda7af621237ff8f5ac66b78a40b0093595f06768612b92b1374bd3105';\
@@ -1700,6 +1704,10 @@ ENV PGDATABASE=postgres
 #########################################################################################
 FROM debian:$DEBIAN_FLAVOR
 ARG DEBIAN_VERSION
+
+# Use strict mode for bash to catch errors early
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
 # Add user postgres
 RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     echo "postgres:test_console_pass" | chpasswd && \

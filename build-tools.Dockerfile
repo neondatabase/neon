@@ -3,8 +3,13 @@ ARG DEBIAN_VERSION=bookworm
 FROM debian:bookworm-slim AS pgcopydb_builder
 ARG DEBIAN_VERSION
 
+# Use strict mode for bash to catch errors early
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+# By default, /bin/sh used in debian images will treat '\n' as eol,
+# but as we use bash as SHELL, and built-in echo in bash requires '-e' flag for that.
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc && \
     echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
 
 RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
@@ -55,7 +60,8 @@ ARG DEBIAN_VERSION
 
 # Add nonroot user
 RUN useradd -ms /bin/bash nonroot -b /home
-SHELL ["/bin/bash", "-c"]
+# Use strict mode for bash to catch errors early
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 RUN mkdir -p /pgcopydb/bin && \
     mkdir -p /pgcopydb/lib && \
@@ -66,7 +72,7 @@ COPY --from=pgcopydb_builder /usr/lib/postgresql/16/bin/pgcopydb /pgcopydb/bin/p
 COPY --from=pgcopydb_builder /pgcopydb/lib/libpq.so.5 /pgcopydb/lib/libpq.so.5
 
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc && \
     echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
 
 # System deps
@@ -190,8 +196,14 @@ RUN set -e \
 # It includes several bug fixes on top on v2.0 release (https://github.com/linux-test-project/lcov/compare/v2.0...master)
 # And patches from us:
 # - Generates json file with code coverage summary (https://github.com/neondatabase/lcov/commit/426e7e7a22f669da54278e9b55e6d8caabd00af0.tar.gz)
-RUN for package in Capture::Tiny DateTime Devel::Cover Digest::MD5 File::Spec JSON::XS Memory::Process Time::HiRes JSON; do yes | perl -MCPAN -e "CPAN::Shell->notest('install', '$package')"; done \
-    && wget https://github.com/neondatabase/lcov/archive/426e7e7a22f669da54278e9b55e6d8caabd00af0.tar.gz -O lcov.tar.gz \
+RUN set +o pipefail && \
+	 for package in Capture::Tiny DateTime Devel::Cover Digest::MD5 File::Spec JSON::XS Memory::Process Time::HiRes JSON; do \
+		yes | perl -MCPAN -e "CPAN::Shell->notest('install', '$package')";\
+	 done && \
+	set -o pipefail
+# Split into separate step to debug flaky failures here
+RUN wget https://github.com/neondatabase/lcov/archive/426e7e7a22f669da54278e9b55e6d8caabd00af0.tar.gz -O lcov.tar.gz \
+    && ls -laht lcov.tar.gz && sha256sum lcov.tar.gz \
     && echo "61a22a62e20908b8b9e27d890bd0ea31f567a7b9668065589266371dcbca0992  lcov.tar.gz" | sha256sum --check \
     && mkdir -p lcov && tar -xzf lcov.tar.gz -C lcov --strip-components=1 \
     && cd lcov \
