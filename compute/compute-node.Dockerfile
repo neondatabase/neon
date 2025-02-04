@@ -1684,6 +1684,7 @@ COPY --from=pg_ivm-src /ext-src/ /ext-src/
 COPY --from=pg_partman-src /ext-src/ /ext-src/
 #COPY --from=pg_mooncake-src /ext-src/ /ext-src/
 COPY --from=pg_repack-src /ext-src/ /ext-src/
+COPY --from=pg_repack-src /usr/local/pgsql/ /usr/local/pgsql/
 COPY compute/patches/pg_repack.patch /ext-src
 RUN cd /ext-src/pg_repack-src && patch -p1 </ext-src/pg_repack.patch && rm -f /ext-src/pg_repack.patch
 
