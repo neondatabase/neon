@@ -849,7 +849,7 @@ USER nonroot
 WORKDIR /home/nonroot
 
 # See comment on the top of the file regading `echo` and `\n`
-RUN echo "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
+RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
 
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
@@ -1408,6 +1408,10 @@ ENV PGDATABASE=postgres
 #########################################################################################
 FROM debian:$DEBIAN_FLAVOR
 ARG DEBIAN_VERSION
+
+# Use strict mode for bash to catch errors early
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
 # Add user postgres
 RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     echo "postgres:test_console_pass" | chpasswd && \
@@ -1458,7 +1462,7 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 # ca-certificates for communicating with s3 by compute_ctl
 
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
 
 RUN apt update && \
     case $DEBIAN_VERSION in \
