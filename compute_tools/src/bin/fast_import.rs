@@ -454,7 +454,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         let st = pg_dump.wait().await.context("wait for pg_dump")?;
         info!(status=?st, "pg_dump exited");
         if !st.success() {
-            warn!(status=%st, "pg_dump failed, restore will likely fail as well");
+            error!(status=%st, "pg_dump failed, restore will likely fail as well");
             bail!("pg_dump failed");
         }
     }
@@ -488,7 +488,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         let st = pg_restore.wait().await.context("wait for pg_restore")?;
         info!(status=?st, "pg_restore exited");
         if !st.success() {
-            warn!(status=%st, "pg_restore failed, restore will likely fail as well");
+            error!(status=%st, "pg_restore failed, restore will likely fail as well");
             bail!("pg_restore failed");
         }
     }
