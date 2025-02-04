@@ -835,7 +835,12 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
     if (event == FHET_START && !neon_enable_event_triggers_for_superuser && !RegressTestMode)
 	{
 		bool skip = superuser();
-		if (!skip && flinfo->fn_oid != InvalidOid)
+		if (skip && flinfo->fn_oid != InvalidOid && get_func_rettype(flinfo->fn_oid) != EVENT_TRIGGEROID)
+		{
+			/* It can be other needs_fmgr_hook which cause our hook to be invoked for non-trigger function */
+			skip = false;
+		}
+		else if (!skip && flinfo->fn_oid != InvalidOid)
 		{
 			/*
 			 * Even through event triggers are disabled for superuser, we still want to
