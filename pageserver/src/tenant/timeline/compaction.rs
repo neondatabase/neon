@@ -11,7 +11,7 @@ use std::sync::Arc;
 use super::layer_manager::LayerManager;
 use super::{
     CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, ImageLayerCreationMode,
-    RecordedDuration, Timeline,
+    LastImageLayerCreationStatus, RecordedDuration, Timeline,
 };
 
 use anyhow::{anyhow, bail, Context};
@@ -262,13 +262,13 @@ impl GcCompactionQueue {
         ctx: &RequestContext,
         gc_block: &GcBlock,
         timeline: &Arc<Timeline>,
-    ) -> Result<bool, CompactionError> {
+    ) -> Result<CompactionOutcome, CompactionError> {
         let _one_op_at_a_time_guard = self.consumer_lock.lock().await;
         let has_pending_tasks;
         let (id, item) = {
             let mut guard = self.inner.lock().unwrap();
             let Some((id, item)) = guard.queued.pop_front() else {
-                return Ok(false);
+                return Ok(CompactionOutcome::Done);
             };
             guard.running = Some((id, item.clone()));
             has_pending_tasks = !guard.queued.is_empty();
@@ -323,7 +323,11 @@ impl GcCompactionQueue {
             let mut guard = self.inner.lock().unwrap();
             guard.running = None;
         }
-        Ok(has_pending_tasks)
+        Ok(if has_pending_tasks {
+            CompactionOutcome::Pending
+        } else {
+            CompactionOutcome::Done
+        })
     }
 
     #[allow(clippy::type_complexity)]
@@ -589,6 +593,17 @@ impl CompactionStatistics {
     }
 }
 
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionOutcome {
+    #[default]
+    /// No layers need to be compacted after this round. Compaction doesn't need
+    /// to be immediately scheduled.
+    Done,
+    /// Still has pending layers to be compacted after this round. Ideally, the scheduler
+    /// should immediately schedule another compaction.
+    Pending,
+}
+
 impl Timeline {
     /// TODO: cancellation
     ///
@@ -598,7 +613,7 @@ impl Timeline {
         cancel: &CancellationToken,
         options: CompactOptions,
         ctx: &RequestContext,
-    ) -> Result<bool, CompactionError> {
+    ) -> Result<CompactionOutcome, CompactionError> {
         if options
             .flags
             .contains(CompactFlags::EnhancedGcBottomMostCompaction)
@@ -606,7 +621,7 @@ impl Timeline {
             self.compact_with_gc(cancel, options, ctx)
                 .await
                 .map_err(CompactionError::Other)?;
-            return Ok(false);
+            return Ok(CompactionOutcome::Done);
         }
 
         if options.flags.contains(CompactFlags::DryRun) {
@@ -666,9 +681,9 @@ impl Timeline {
         // Define partitioning schema if needed
 
         // 1. L0 Compact
-        let fully_compacted = {
+        let l0_compaction_outcome = {
             let timer = self.metrics.compact_time_histo.start_timer();
-            let fully_compacted = self
+            let l0_compaction_outcome = self
                 .compact_level0(
                     target_file_size,
                     options.flags.contains(CompactFlags::ForceL0Compaction),
@@ -676,15 +691,15 @@ impl Timeline {
                 )
                 .await?;
             timer.stop_and_record();
-            fully_compacted
+            l0_compaction_outcome
         };
 
-        if !fully_compacted {
+        if let CompactionOutcome::Pending = l0_compaction_outcome {
             // Yield and do not do any other kind of compaction. True means
             // that we have pending L0 compaction tasks and the compaction scheduler
             // will prioritize compacting this tenant/timeline again.
             info!("skipping image layer generation and shard ancestor compaction due to L0 compaction did not include all layers.");
-            return Ok(true);
+            return Ok(CompactionOutcome::Pending);
         }
 
         // 2. Repartition and create image layers if necessary
@@ -709,7 +724,7 @@ impl Timeline {
                     .extend(sparse_partitioning.into_dense().parts);
 
                 // 3. Create new image layers for partitions that have been modified "enough".
-                let image_layers = self
+                let (image_layers, outcome) = self
                     .create_image_layers(
                         &partitioning,
                         lsn,
@@ -722,10 +737,22 @@ impl Timeline {
                             ImageLayerCreationMode::Try
                         },
                         &image_ctx,
+                        self.last_image_layer_creation_status
+                            .load()
+                            .as_ref()
+                            .clone(),
                     )
                     .await?;
 
+                self.last_image_layer_creation_status
+                    .store(Arc::new(outcome.clone()));
+
                 self.upload_new_image_layers(image_layers)?;
+                if let LastImageLayerCreationStatus::Incomplete = outcome {
+                    // Yield and do not do any other kind of compaction.
+                    info!("skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction).");
+                    return Ok(CompactionOutcome::Pending);
+                }
                 partitioning.parts.len()
             }
             Err(err) => {
@@ -753,7 +780,7 @@ impl Timeline {
             self.compact_shard_ancestors(rewrite_max, ctx).await?;
         }
 
-        Ok(false)
+        Ok(CompactionOutcome::Done)
     }
 
     /// Check for layers that are elegible to be rewritten:
@@ -1010,11 +1037,11 @@ impl Timeline {
         target_file_size: u64,
         force_compaction_ignore_threshold: bool,
         ctx: &RequestContext,
-    ) -> Result<bool, CompactionError> {
+    ) -> Result<CompactionOutcome, CompactionError> {
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
-            fully_compacted,
+            outcome,
         } = {
             let phase1_span = info_span!("compact_level0_phase1");
             let ctx = ctx.attached_child();
@@ -1043,12 +1070,12 @@ impl Timeline {
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
-            return Ok(true);
+            return Ok(CompactionOutcome::Done);
         }
 
         self.finish_compact_batch(&new_layers, &Vec::new(), &deltas_to_compact)
             .await?;
-        Ok(fully_compacted)
+        Ok(outcome)
     }
 
     /// Level0 files first phase of compaction, explained in the [`Self::compact_legacy`] comment.
@@ -1590,7 +1617,11 @@ impl Timeline {
                 .into_iter()
                 .map(|x| x.drop_eviction_guard())
                 .collect::<Vec<_>>(),
-            fully_compacted,
+            outcome: if fully_compacted {
+                CompactionOutcome::Done
+            } else {
+                CompactionOutcome::Pending
+            },
         })
     }
 }
@@ -1601,7 +1632,7 @@ struct CompactLevel0Phase1Result {
     deltas_to_compact: Vec<Layer>,
     // Whether we have included all L0 layers, or selected only part of them due to the
     // L0 compaction size limit.
-    fully_compacted: bool,
+    outcome: CompactionOutcome,
 }
 
 #[derive(Default)]
@@ -3232,11 +3263,7 @@ impl TimelineAdaptor {
             ranges: self.get_keyspace(key_range, lsn, ctx).await?,
         };
         // TODO set proper (stateful) start. The create_image_layer_for_rel_blocks function mostly
-        let start = Key::MIN;
-        let ImageLayerCreationOutcome {
-            unfinished_image_layer,
-            next_start_key: _,
-        } = self
+        let outcome = self
             .timeline
             .create_image_layer_for_rel_blocks(
                 &keyspace,
@@ -3244,13 +3271,15 @@ impl TimelineAdaptor {
                 lsn,
                 ctx,
                 key_range.clone(),
-                start,
                 IoConcurrency::sequential(),
             )
             .await?;
 
-        if let Some(image_layer_writer) = unfinished_image_layer {
-            let (desc, path) = image_layer_writer.finish(ctx).await?;
+        if let ImageLayerCreationOutcome::Generated {
+            unfinished_image_layer,
+        } = outcome
+        {
+            let (desc, path) = unfinished_image_layer.finish(ctx).await?;
             let image_layer =
                 Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)?;
             self.new_images.push(image_layer);
