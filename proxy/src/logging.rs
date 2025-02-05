@@ -69,7 +69,12 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
         None
     };
 
+    let tokio_console = console_subscriber::ConsoleLayer::builder()
+        .enable_grpc_web(true)
+        .spawn();
+
     tracing_subscriber::registry()
+        .with(tokio_console)
         .with(env_filter)
         .with(otlp_layer)
         .with(json_log_layer)

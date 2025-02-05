@@ -27,6 +27,7 @@ chrono.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
 clashmap.workspace = true
 compute_api.workspace = true
+console-subscriber.workspace = true
 consumption_metrics.workspace = true
 env_logger.workspace = true
 framed-websockets.workspace = true
