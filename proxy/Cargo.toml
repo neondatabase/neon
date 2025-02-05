@@ -131,3 +131,6 @@ rstest.workspace = true
 walkdir.workspace = true
 rand_distr = "0.4"
 tokio-postgres.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
