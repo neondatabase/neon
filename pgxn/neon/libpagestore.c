@@ -37,6 +37,7 @@
 #include "walproposer.h"
 
 #ifdef __linux__
+#include <sys/ioctl.h>
 #include <linux/sockios.h>
 #endif
 
@@ -735,8 +736,6 @@ retry:
 			int sndbuf = -1;
 			int recvbuf = -1;
 #ifdef __linux__
-			socklen_t optlen;
-			int ioctl_err;
 			int socketfd;
 #endif
 
@@ -750,12 +749,11 @@ retry:
 			 */
 			socketfd = PQsocket(pageserver_conn);
 			if (socketfd != -1) {
-				optlen = sizeof(sndbuf);
+				int ioctl_err;
 				ioctl_err = ioctl(socketfd, SIOCOUTQ, &sndbuf);
-				if ioctl_err = ( != 0) {
+				if (ioctl_err!= 0) {
 					sndbuf = -errno;
 				}
-				optlen = sizeof(recvbuf);
 				ioctl_err = ioctl(socketfd, FIONREAD, &recvbuf);
 				if (ioctl_err != 0) {
 					recvbuf = -errno;
