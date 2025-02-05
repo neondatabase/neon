@@ -5749,10 +5749,10 @@ impl Timeline {
                 let img = match res {
                     Ok(img) => img,
                     Err(walredo::Error::Cancelled) => return Err(PageReconstructError::Cancelled),
-                    Err(walredo::Error::Other(e)) => {
-                        critical!("walredo failure during page reconstruction: {e}");
+                    Err(walredo::Error::Other(err)) => {
+                        critical!("walredo failure during page reconstruction: {err:?}");
                         return Err(PageReconstructError::WalRedo(
-                            e.context("reconstruct a page image"),
+                            err.context("reconstruct a page image"),
                         ));
                     }
                 };

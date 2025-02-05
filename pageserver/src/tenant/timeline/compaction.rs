@@ -749,7 +749,7 @@ impl Timeline {
                             GetVectoredError::MissingKey(_),
                         ) = err
                         {
-                            critical!("missing key during compaction: {err}");
+                            critical!("missing key during compaction: {err:?}");
                         }
                     })?;
 
