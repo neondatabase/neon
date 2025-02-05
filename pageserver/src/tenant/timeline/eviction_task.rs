@@ -30,8 +30,11 @@ use crate::{
     pgdatadir_mapping::CollectKeySpaceError,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
-        size::CalculateSyntheticSizeError, storage_layer::LayerVisibilityHint,
-        tasks::BackgroundLoopKind, timeline::EvictionError, LogicalSizeCalculationCause, Tenant,
+        size::CalculateSyntheticSizeError,
+        storage_layer::LayerVisibilityHint,
+        tasks::{BackgroundLoopKind, BackgroundLoopSemaphorePermit},
+        timeline::EvictionError,
+        LogicalSizeCalculationCause, Tenant,
     },
 };
 
@@ -330,7 +333,7 @@ impl Timeline {
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> ControlFlow<(), tokio::sync::SemaphorePermit<'static>> {
+    ) -> ControlFlow<(), BackgroundLoopSemaphorePermit<'static>> {
         let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
             BackgroundLoopKind::Eviction,
             ctx,
@@ -374,7 +377,7 @@ impl Timeline {
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
-        permit: tokio::sync::SemaphorePermit<'static>,
+        permit: BackgroundLoopSemaphorePermit<'static>,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         if !self.tenant_shard_id.is_shard_zero() {

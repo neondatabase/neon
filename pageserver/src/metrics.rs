@@ -2214,6 +2214,8 @@ pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
 pub struct BackgroundLoopSemaphoreMetrics {
     counters: EnumMap<BackgroundLoopKind, IntCounterPair>,
     durations: EnumMap<BackgroundLoopKind, Counter>,
+    running_tasks: EnumMap<BackgroundLoopKind, IntGauge>,
+    fired_tasks: EnumMap<BackgroundLoopKind, IntGauge>,
 }
 
 pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics> = Lazy::new(
@@ -2234,6 +2236,20 @@ pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics
         )
         .unwrap();
 
+        let running_tasks = register_int_gauge_vec!(
+            "pageserver_background_loop_semaphore_running_tasks",
+            "Number of background loop tasks running concurrently",
+            &["task"],
+        )
+        .unwrap();
+
+        let fired_tasks = register_int_gauge_vec!(
+            "pageserver_background_loop_semaphore_fired_tasks",
+            "Number of background loop tasks fired (maybe waiting on semaphore)",
+            &["task"],
+        )
+        .unwrap();
+
         BackgroundLoopSemaphoreMetrics {
             counters: enum_map::EnumMap::from_array(std::array::from_fn(|i| {
                 let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
@@ -2243,30 +2259,65 @@ pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics
                 let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
                 durations.with_label_values(&[kind.into()])
             })),
+            running_tasks: enum_map::EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+                running_tasks.with_label_values(&[kind.into()])
+            })),
+            fired_tasks: enum_map::EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+                fired_tasks.with_label_values(&[kind.into()])
+            })),
         }
     },
 );
 
+pub struct BackgroundLoopSemaphoreMetricsAcquireRecord<'a> {
+    metrics: &'a BackgroundLoopSemaphoreMetrics,
+    task: BackgroundLoopKind,
+    _counter_guard: metrics::IntCounterPairGuard,
+    start: Instant,
+}
+
+impl Drop for BackgroundLoopSemaphoreMetricsAcquireRecord<'_> {
+    fn drop(&mut self) {
+        let elapsed = self.start.elapsed().as_secs_f64();
+        self.metrics.durations[self.task].inc_by(elapsed);
+        self.metrics.running_tasks[self.task].inc();
+    }
+}
+
+pub struct BackgroundLoopSemaphoreMetricsRunningRecord<'a> {
+    metrics: &'a BackgroundLoopSemaphoreMetrics,
+    task: BackgroundLoopKind,
+}
+
+impl Drop for BackgroundLoopSemaphoreMetricsRunningRecord<'_> {
+    fn drop(&mut self) {
+        self.metrics.running_tasks[self.task].dec();
+        self.metrics.fired_tasks[self.task].dec();
+    }
+}
+
 impl BackgroundLoopSemaphoreMetrics {
-    pub(crate) fn measure_acquisition(&self, task: BackgroundLoopKind) -> impl Drop + '_ {
-        struct Record<'a> {
-            metrics: &'a BackgroundLoopSemaphoreMetrics,
-            task: BackgroundLoopKind,
-            _counter_guard: metrics::IntCounterPairGuard,
-            start: Instant,
-        }
-        impl Drop for Record<'_> {
-            fn drop(&mut self) {
-                let elapsed = self.start.elapsed().as_secs_f64();
-                self.metrics.durations[self.task].inc_by(elapsed);
-            }
-        }
-        Record {
+    pub(crate) fn measure(
+        &self,
+        task: BackgroundLoopKind,
+    ) -> (
+        BackgroundLoopSemaphoreMetricsAcquireRecord,
+        BackgroundLoopSemaphoreMetricsRunningRecord,
+    ) {
+        let acquire_record = BackgroundLoopSemaphoreMetricsAcquireRecord {
             metrics: self,
             task,
             _counter_guard: self.counters[task].guard(),
             start: Instant::now(),
-        }
+        };
+        self.fired_tasks[task].inc();
+        let running_record = BackgroundLoopSemaphoreMetricsRunningRecord {
+            metrics: self,
+            task,
+        };
+        (acquire_record, running_record)
     }
 }
 
