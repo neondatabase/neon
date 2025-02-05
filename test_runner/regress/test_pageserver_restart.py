@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 from contextlib import closing
 
+import psycopg2.errors as pgerr
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
@@ -226,3 +227,39 @@ def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder, shard_count: int | N
     # so instead, do a fast shutdown for this one test.
     # See https://github.com/neondatabase/neon/issues/8709
     env.stop(immediate=True)
+
+
+def test_pageserver_lost_and_transaction_aborted(neon_env_builder: NeonEnvBuilder):
+    """
+    If pageserver is unavailable during a transaction abort and target relation is
+    not present in cache, we abort the transaction in ABORT state which triggers a sigabrt.
+    This is _expected_ behavour
+    """
+    env = neon_env_builder.init_start()
+    endpoint = env.endpoints.create_start("main", config_lines=["neon.relsize_hash_size=0"])
+    with closing(endpoint.connect()) as conn, conn.cursor() as cur:
+        cur.execute("CREATE DATABASE test")
+    with pytest.raises((pgerr.InterfaceError, pgerr.InternalError)), \
+         endpoint.connect(dbname="test") as conn, \
+         conn.cursor() as cur:
+        cur.execute("create table t(b box)")
+        env.pageserver.stop()
+        cur.execute("create index ti on t using gist(b)")
+
+
+def test_pageserver_lost_and_transaction_committed(neon_env_builder: NeonEnvBuilder):
+    """
+    If pageserver is unavailable during a transaction commit and target relation is
+    not present in cache, we abort the transaction in COMMIT state which triggers a sigabrt.
+    This is _expected_ behavour
+    """
+    env = neon_env_builder.init_start()
+    endpoint = env.endpoints.create_start("main", config_lines=["neon.relsize_hash_size=0"])
+    with closing(endpoint.connect()) as conn, conn.cursor() as cur:
+        cur.execute("CREATE DATABASE test")
+    with pytest.raises((pgerr.InterfaceError, pgerr.InternalError)), \
+         endpoint.connect(dbname="test") as conn, \
+         conn.cursor() as cur:
+        cur.execute("create table t(t boolean)")
+        env.pageserver.stop()
+        cur.execute("drop table t")
