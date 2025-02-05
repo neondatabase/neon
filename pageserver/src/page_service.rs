@@ -1099,7 +1099,7 @@ impl PageServerHandler {
                 Ok(())
             }
             // and log the info! line inside the request span
-            .instrument(span.clone())
+            // .instrument(span.clone())
             .await?;
         }
         Ok(())
