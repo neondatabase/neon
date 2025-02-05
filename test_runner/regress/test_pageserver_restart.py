@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 from contextlib import closing
 
+import psycopg2.errors as pgerr
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
@@ -226,3 +227,20 @@ def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder, shard_count: int | N
     # so instead, do a fast shutdown for this one test.
     # See https://github.com/neondatabase/neon/issues/8709
     env.stop(immediate=True)
+
+
+def test_pageserver_stop_and_abort_transaction(neon_env_builder: NeonEnvBuilder):
+    """
+    Aborting a transaction due to pageserver unavailability should not trigger a segfault
+    """
+    env = neon_env_builder.init_start()
+    endpoint = env.endpoints.create_start("main", config_lines=["shared_buffers='1GB'"])
+
+    with closing(endpoint.connect()) as conn, conn.cursor() as cur:
+        cur.execute("CREATE DATABASE test")
+    with closing(endpoint.connect(dbname="test")) as conn, conn.cursor() as cur:
+        env.pageserver.stop()
+        with pytest.raises(pgerr.InternalError):  # pageserver is unavailable
+            cur.execute("create table t(b box);create index t_idx on t using gist(b);")
+
+    assert not endpoint.log_contains("AbortTransaction")
