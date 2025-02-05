@@ -1341,7 +1341,7 @@ impl DatadirModification<'_> {
     /// not readable until this modification is committed, whereas metadata keys are visible for read
     /// via [`Self::get`] as soon as their record has been ingested.
     fn is_data_key(key: &Key) -> bool {
-        key.is_block_key()
+        key.is_rel_block_key() || key.is_slru_block_key()
     }
 
     /// Initialize a completely new repository.

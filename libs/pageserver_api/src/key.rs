@@ -790,11 +790,6 @@ impl Key {
     }
 
     #[inline(always)]
-    pub fn is_block_key(&self) -> bool {
-        self.is_rel_block_key() || self.is_slru_block_key()
-    }
-
-    #[inline(always)]
     pub fn is_slru_block_key(&self) -> bool {
         self.field1 == 0x01                // SLRU-related
         && self.field3 == 0x00000001   // but not SlruDir
