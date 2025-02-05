@@ -3409,6 +3409,23 @@ impl Timeline {
 
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
+        fail::fail_point!(
+            "timeline:get_vectored_reconstruct_data:fake_missing_key",
+            |_| {
+                // fake it like we would fail on real missing keys
+                Err(GetVectoredError::MissingKey(MissingKeyError {
+                    key: keyspace.start().unwrap(), /* better if we can store the full keyspace */
+                    shard: self
+                        .shard_identity
+                        .get_shard_number(&keyspace.start().unwrap()),
+                    cont_lsn,
+                    request_lsn,
+                    ancestor_lsn: Some(timeline.ancestor_lsn),
+                    backtrace: None,
+                }))
+            }
+        );
+
         let missing_keyspace = loop {
             if self.cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
