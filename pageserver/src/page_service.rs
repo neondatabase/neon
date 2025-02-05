@@ -489,7 +489,6 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
         let timeline = tenant_shard
             .get_timeline(timeline_id, true)
             .map_err(GetActiveTimelineError::Timeline)?;
-        set_tracing_field_shard_id(&timeline);
         Ok(timeline)
     }
 }
@@ -774,11 +773,12 @@ impl PageServerHandler {
 
         let batched_msg = match neon_fe_msg {
             PagestreamFeMessage::Exists(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn);
+                let span = tracing::info_span!(parent: &parent_span, "handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                set_tracing_field_shard_id(&parent_span, &shard);
                 let timer = record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetRelExists,
@@ -793,11 +793,12 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::Nblocks(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn);
+                let span = tracing::info_span!(parent: &parent_span, "handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                set_tracing_field_shard_id(&parent_span, &shard);
                 let timer = record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetRelSize,
@@ -812,11 +813,12 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::DbSize(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.hdr.request_lsn);
+                let span = tracing::info_span!(parent: &parent_span, "handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                set_tracing_field_shard_id(&parent_span, &shard);
                 let timer = record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetDbSize,
@@ -831,11 +833,12 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::GetSlruSegment(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.hdr.request_lsn);
+                let span = tracing::info_span!(parent: &parent_span, "handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                set_tracing_field_shard_id(&parent_span, &shard);
                 let timer = record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetSlruSegment,
@@ -850,7 +853,7 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::GetPage(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_page_at_lsn_request_batched", req_lsn = %req.hdr.request_lsn);
+                let span = tracing::info_span!(parent: &parent_span, "handle_get_page_at_lsn_request_batched", req_lsn = %req.hdr.request_lsn);
 
                 macro_rules! respond_error {
                     ($error:expr) => {{
@@ -889,6 +892,7 @@ impl PageServerHandler {
                         return respond_error!(e.into());
                     }
                 };
+                set_tracing_field_shard_id(&parent_span, &shard);
 
                 let timer = record_op_start_and_throttle(
                     &shard,
@@ -922,11 +926,12 @@ impl PageServerHandler {
             }
             #[cfg(feature = "testing")]
             PagestreamFeMessage::Test(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_test_request");
+                let span = tracing::info_span!(parent: &parent_span, "handle_test_request");
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                set_tracing_field_shard_id(&parent_span, &shard);
                 let timer =
                     record_op_start_and_throttle(&shard, metrics::SmgrQueryType::Test, received_at)
                         .await?;
@@ -1751,7 +1756,7 @@ impl PageServerHandler {
                 ShardSelector::Known(tenant_shard_id.to_index()),
             )
             .await?;
-        set_tracing_field_shard_id(&timeline);
+        set_tracing_field_shard_id(&Span::current(), &timeline);
 
         let lease = timeline
             .renew_lsn_lease(lsn, timeline.get_lsn_lease_length(), ctx)
@@ -2615,13 +2620,11 @@ impl From<crate::tenant::timeline::handle::HandleUpgradeError> for QueryError {
     }
 }
 
-fn set_tracing_field_shard_id(timeline: &Timeline) {
-    debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
-    tracing::Span::current().record(
+fn set_tracing_field_shard_id(span: &tracing::Span, timeline: &Timeline) {
+    span.record(
         "shard_id",
         tracing::field::display(timeline.tenant_shard_id.shard_slug()),
     );
-    debug_assert_current_span_has_tenant_and_timeline_id();
 }
 
 struct WaitedForLsn(Lsn);
