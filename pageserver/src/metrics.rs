@@ -32,6 +32,7 @@ use utils::id::TimelineId;
 
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
+use crate::pgdatadir_mapping::DatadirModificationStats;
 use crate::task_mgr::TaskKind;
 use crate::tenant::layer_map::LayerMap;
 use crate::tenant::mgr::TenantSlot;
@@ -2378,10 +2379,40 @@ pub(crate) struct WalIngestMetrics {
     pub(crate) records_observed: IntCounter,
     pub(crate) records_committed: IntCounter,
     pub(crate) records_filtered: IntCounter,
+    pub(crate) values_committed_metadata_images: IntCounter,
+    pub(crate) values_committed_metadata_deltas: IntCounter,
+    pub(crate) values_committed_data_images: IntCounter,
+    pub(crate) values_committed_data_deltas: IntCounter,
     pub(crate) gap_blocks_zeroed_on_rel_extend: IntCounter,
 }
 
+impl WalIngestMetrics {
+    pub(crate) fn inc_values_committed(&self, stats: &DatadirModificationStats) {
+        if stats.metadata_images > 0 {
+            self.values_committed_metadata_images
+                .inc_by(stats.metadata_images);
+        }
+        if stats.metadata_deltas > 0 {
+            self.values_committed_metadata_deltas
+                .inc_by(stats.metadata_deltas);
+        }
+        if stats.data_images > 0 {
+            self.values_committed_data_images.inc_by(stats.data_images);
+        }
+        if stats.data_deltas > 0 {
+            self.values_committed_data_deltas.inc_by(stats.data_deltas);
+        }
+    }
+}
+
 pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
+    let values_committed = register_int_counter_vec!(
+        "pageserver_wal_ingest_values_committed",
+        "Number of values committed to pageserver storage from WAL records",
+        &["class", "kind"],
+    )
+    .expect("failed to define a metric");
+
     WalIngestMetrics {
     bytes_received: register_int_counter!(
         "pageserver_wal_ingest_bytes_received",
@@ -2408,6 +2439,10 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
         "Number of WAL records filtered out due to sharding"
     )
     .expect("failed to define a metric"),
+    values_committed_metadata_images: values_committed.with_label_values(&["metadata", "image"]),
+    values_committed_metadata_deltas: values_committed.with_label_values(&["metadata", "delta"]),
+    values_committed_data_images: values_committed.with_label_values(&["data", "image"]),
+    values_committed_data_deltas: values_committed.with_label_values(&["data", "delta"]),
     gap_blocks_zeroed_on_rel_extend: register_int_counter!(
         "pageserver_gap_blocks_zeroed_on_rel_extend",
         "Total number of zero gap blocks written on relation extends"
