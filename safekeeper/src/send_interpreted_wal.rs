@@ -120,6 +120,20 @@ pub enum InterpretedWalReaderError {
     WalStreamClosed,
 }
 
+enum CurrentPositionUpdate {
+    Reset(Lsn),
+    NotReset(Lsn),
+}
+
+impl CurrentPositionUpdate {
+    fn current_position(&self) -> Lsn {
+        match self {
+            CurrentPositionUpdate::Reset(lsn) => *lsn,
+            CurrentPositionUpdate::NotReset(lsn) => *lsn,
+        }
+    }
+}
+
 impl InterpretedWalReaderState {
     fn current_position(&self) -> Option<Lsn> {
         match self {
@@ -127,6 +141,26 @@ impl InterpretedWalReaderState {
                 current_position, ..
             } => Some(*current_position),
             InterpretedWalReaderState::Done => None,
+        }
+    }
+
+    // Reset the current position of the WAL reader if the requested starting position
+    // of the new shard is smaller than the current value.
+    fn maybe_reset(&mut self, new_shard_start_pos: Lsn) -> CurrentPositionUpdate {
+        match self {
+            InterpretedWalReaderState::Running {
+                current_position, ..
+            } => {
+                if new_shard_start_pos < *current_position {
+                    *current_position = new_shard_start_pos;
+                    CurrentPositionUpdate::Reset(*current_position)
+                } else {
+                    CurrentPositionUpdate::NotReset(*current_position)
+                }
+            }
+            InterpretedWalReaderState::Done => {
+                panic!("maybe_reset called on finished reader")
+            }
         }
     }
 }
@@ -410,15 +444,24 @@ impl InterpretedWalReader {
                         };
 
                         senders.push(ShardSenderState { sender_id: new_sender_id, tx: sender, next_record_lsn: start_pos});
-                        let current_pos = self.state.read().unwrap().current_position().unwrap();
-                        if start_pos < current_pos {
-                            self.wal_stream.reset(start_pos).await;
-                            wal_decoder = WalStreamDecoder::new(start_pos, self.pg_version);
-                        }
+
+                        // If the shard is subscribing below the current position the we need
+                        // to update the cursor that tracks where we are at in the WAL
+                        // ([`Self::state`]) and reset the WAL stream itself
+                        // (`[Self::wal_stream`]). This must be done atomically from the POV of
+                        // anything outside the select statement.
+                        let position_reset = self.state.write().unwrap().maybe_reset(start_pos);
+                        match position_reset {
+                            CurrentPositionUpdate::Reset(to) => {
+                                self.wal_stream.reset(to).await;
+                                wal_decoder = WalStreamDecoder::new(to, self.pg_version);
+                            },
+                            CurrentPositionUpdate::NotReset(_) => {}
+                        };
 
                         tracing::info!(
                             "Added shard sender {} with start_pos={} current_pos={}",
-                            ShardSenderId::new(shard_id, new_sender_id), start_pos, current_pos
+                            ShardSenderId::new(shard_id, new_sender_id), start_pos, position_reset.current_position()
                         );
                     }
                 }
