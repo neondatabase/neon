@@ -163,7 +163,6 @@ def test_pageserver_compaction_preempt(
     workload.validate(env.pageserver.id)
     # ensure image layer creation gets preempted and then resumed
     env.pageserver.assert_log_contains("resuming image layer creation")
-    env.pageserver.assert_log_contains("image layer creation wrapped around the keyspace")
 
 
 @skip_in_debug_build("only run with release build")

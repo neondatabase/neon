@@ -4695,7 +4695,7 @@ impl Timeline {
         let mut all_generated = true;
 
         let mut partition_processed = 0;
-        let total_partitions = partitioning.parts.len();
+        let mut total_partitions = partitioning.parts.len();
         let mut last_partition_processed = None;
         let mut partition_parts = partitioning.parts.clone();
 
@@ -4712,8 +4712,9 @@ impl Timeline {
                     // It is possible that the user did some writes after the previous image layer creation attempt so that
                     // a relation grows in size, and the last_key is now in the middle of the partition. In this case, we
                     // still want to skip this partition, so that we can make progress and avoid generating image layers over
-                    // the same partition.
-                    partition_parts.rotate_left((i + 1) % total_partitions);
+                    // the same partition. Doing a mod to ensure we don't end up with an empty vec.
+                    partition_parts = partition_parts.split_off((i + 1) % total_partitions); // Remove the first i + 1 elements
+                    total_partitions = partition_parts.len();
                     // Update the start key to the partition start.
                     start = partition_parts[0].start().unwrap();
                     break;
@@ -4724,13 +4725,6 @@ impl Timeline {
         for partition in partition_parts.iter() {
             if self.cancel.is_cancelled() {
                 return Err(CreateImageLayersError::Cancelled);
-            }
-            if start > partition.start().unwrap() {
-                // In case that we rotated the partition_parts, we need to consider the
-                // case that we wrapped around the keyspace. However, we might lose the
-                // opportunity to cover empty key ranges we processed before.
-                start = partition.start().unwrap();
-                info!("image layer creation wrapped around the keyspace");
             }
             partition_processed += 1;
             let img_range = start..partition.ranges.last().unwrap().end;
