@@ -220,10 +220,8 @@ lfc_maybe_disabled(void)
 static bool
 lfc_ensure_opened(void)
 {
-	bool		enabled = !lfc_maybe_disabled();
-
 	/* Open cache file if not done yet */
-	if (lfc_desc <= 0 && enabled)
+	if (lfc_desc <= 0)
 	{
 		lfc_desc = BasicOpenFile(lfc_path, O_RDWR);
 
@@ -233,7 +231,7 @@ lfc_ensure_opened(void)
 			return false;
 		}
 	}
-	return enabled;
+	return true;
 }
 
 static void
@@ -509,47 +507,44 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 
-	tag.blockNum = (blkno + i) & ~(BLOCKS_PER_CHUNK - 1);
+	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
 	hash = get_hash_value(lfc_hash, &tag);
-	chunk_offs = (blkno + i) & (BLOCKS_PER_CHUNK - 1);
+	chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
 
 	LWLockAcquire(lfc_lock, LW_SHARED);
 
+	if (!LFC_ENABLED())
+	{
+		LWLockRelease(lfc_lock);
+		return 0;
+	}
 	while (true)
 	{
-		int		this_chunk = Min(nblocks, BLOCKS_PER_CHUNK - chunk_offs);
-		if (LFC_ENABLED())
-		{
-			entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
+		int		this_chunk = Min(nblocks - i, BLOCKS_PER_CHUNK - chunk_offs);
+		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
 
-			if (entry != NULL)
+		if (entry != NULL)
+		{
+			for (; chunk_offs < BLOCKS_PER_CHUNK && i < nblocks; chunk_offs++, i++)
 			{
-				for (; chunk_offs < BLOCKS_PER_CHUNK && i < nblocks; chunk_offs++, i++)
+				if ((entry->bitmap[chunk_offs >> 5] & 
+					 ((uint32)1 << (chunk_offs & 31))) != 0)
 				{
-					if ((entry->bitmap[chunk_offs >> 5] & 
-						((uint32)1 << (chunk_offs & 31))) != 0)
-					{
-						BITMAP_SET(bitmap, i);
-						found++;
-					}
+					BITMAP_SET(bitmap, i);
+					found++;
 				}
-			}
-			else
-			{
-				i += this_chunk;
 			}
 		}
 		else
 		{
-			LWLockRelease(lfc_lock);
-			return found;
+			i += this_chunk;
 		}
 
 		/*
 		 * Break out of the iteration before doing expensive stuff for
 		 * a next iteration
 		 */
-		if (i + 1 >= nblocks)
+		if (i >= nblocks)
 			break;
 
 		/*
@@ -563,8 +558,8 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	LWLockRelease(lfc_lock);
 
-#if USE_ASSERT_CHECKING
-	do {
+#ifdef USE_ASSERT_CHECKING
+	{
 		int count = 0;
 
 		for (int j = 0; j < nblocks; j++)
@@ -574,7 +569,7 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		}
 
 		Assert(count == found);
-	} while (false);
+	}
 #endif
 
 	return found;

@@ -363,6 +363,7 @@ compact_prefetch_buffers(void)
 		target_slot->buftag = source_slot->buftag;
 		target_slot->shard_no = source_slot->shard_no;
 		target_slot->status = source_slot->status;
+		target_slot->flags = source_slot->flags;
 		target_slot->response = source_slot->response;
 		target_slot->reqid = source_slot->reqid;
 		target_slot->request_lsns = source_slot->request_lsns;
@@ -916,7 +917,7 @@ prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 {
 	uint64		min_ring_index;
 	PrefetchRequest hashkey;
-#if USE_ASSERT_CHECKING
+#ifdef USE_ASSERT_CHECKING
 	bool		any_hits = false;
 #endif
 	/* We will never read further ahead than our buffer can store. */
@@ -955,7 +956,7 @@ Retry:
 		else
 			lsns = NULL;
 
-#if USE_ASSERT_CHECKING
+#ifdef USE_ASSERT_CHECKING
 		any_hits = true;
 #endif
 
@@ -1117,6 +1118,7 @@ Retry:
 		slot->buftag = hashkey.buftag;
 		slot->shard_no = get_shard_number(&tag);
 		slot->my_ring_index = ring_index;
+		slot->flags = 0;
 
 		min_ring_index = Min(min_ring_index, ring_index);
 
@@ -2845,12 +2847,13 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		}
 
 		tag.blockNum = blocknum;
-		
+
 		for (int i = 0; i < PG_IOV_MAX / 8; i++)
 			lfc_present[i] = ~(lfc_present[i]);
 
 		ring_index = prefetch_register_bufferv(tag, NULL, iterblocks,
 											   lfc_present, true);
+
 		nblocks -= iterblocks;
 		blocknum += iterblocks;
 
