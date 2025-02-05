@@ -997,16 +997,15 @@ impl TenantShard {
                 // where its score can't be calculated), and drop the others.  This enables us to make progress in
                 // most cases, even if some nodes are offline or have scheduling=pause set.
 
-                // If we're in secondary mode, then we want to retain the secondary in our preferred AZ.  Otherwise
-                // we want to retain the secondary in a non-preferred AZ (a good failover location).
-                let want_preferred_az = matches!(self.policy, PlacementPolicy::Secondary);
-
+                debug_assert!(self.intent.attached.is_some()); // We should not make it here unless attached -- this
+                                                               // logic presumes we are in a mode where we want secondaries to be in non-home AZ
                 if let Some(retain_secondary) = self.intent.get_secondary().iter().find(|n| {
-                    (scheduler.get_node_az(n) != self.intent.preferred_az_id) ^ want_preferred_az
-                        && secondary_scores
-                            .get(n)
-                            .expect("Built from same list of nodes")
-                            .is_some()
+                    let in_home_az = scheduler.get_node_az(n) == self.intent.preferred_az_id;
+                    let is_available = secondary_scores
+                        .get(n)
+                        .expect("Built from same list of nodes")
+                        .is_some();
+                    is_available && !in_home_az
                 }) {
                     // Great, we found one to retain.  Pick some other to drop.
                     if let Some(victim) = self
