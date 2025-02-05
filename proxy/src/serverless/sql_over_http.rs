@@ -11,10 +11,12 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
 use hyper::{header, HeaderMap, Request, Response, StatusCode};
+use indexmap::IndexMap;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
 use postgres_client::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
 use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
+use serde_json::value::RawValue;
 use serde_json::Value;
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
@@ -264,16 +266,28 @@ pub(crate) async fn handle(
                     })?
                     .to_bytes();
 
-                let body_str = std::str::from_utf8(&body_bytes).unwrap_or_default();
-                let json_value =
-                    serde_json::from_str::<serde_json::Value>(body_str).unwrap_or_default();
-                let message = json_value
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or_default();
-                error!("from local_proxy: {status} {message}");
+                if let Ok(json_map) =
+                    serde_json::from_slice::<IndexMap<&str, &RawValue>>(&body_bytes)
+                {
+                    let message = json_map.get("message");
+                    if let Some(message) = message {
+                        let msg: String = match serde_json::from_str(message.get()) {
+                            Ok(msg) => msg,
+                            Err(_) => {
+                                "Unable to parse the response message from server".to_string()
+                            }
+                        };
 
-                return json_response(status, json!({ "message": message.to_string() }));
+                        error!("Error response from local_proxy: {status} {msg}");
+                        return json_response(status, json!({ "message": msg }));
+                    }
+                }
+
+                error!("Unable to parse the response message from local_proxy");
+                return json_response(
+                    status,
+                    json!({ "message": "Unable to parse the response message from server".to_string() }),
+                );
             }
             r
         }
