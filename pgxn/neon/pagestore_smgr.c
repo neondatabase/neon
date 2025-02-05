@@ -2428,8 +2428,8 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 		/*
 		 * We may get to this line while aborting the transaction if pageserger
 		 * can't be reached. If we create another pageserver request, it will abort,
-		 * causing an abort of already aborted transaction, which in turn yields
-		 * a segfault due to failed assertion.
+		 * causing an abort of already aborting transaction, which in turn yields
+		 * a sigabrt due to failed Assert.
 		 */
 		if (IsAbortedTransactionBlockState())
 			return false;
