@@ -273,7 +273,6 @@ impl WalIngest {
             }
         }
 
-        WAL_INGEST.inc_values_received(&interpreted.batch.stats());
         modification
             .ingest_batch(interpreted.batch, &self.shard, ctx)
             .await?;
