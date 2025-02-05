@@ -584,7 +584,7 @@ mod tests {
             .unwrap();
 
         let resident_tli = tli.wal_residence_guard().await.unwrap();
-        let end_watch = Env::write_wal(tli, start_lsn, SIZE, MSG_COUNT)
+        let end_watch = Env::write_wal(tli, start_lsn, SIZE, MSG_COUNT, None)
             .await
             .unwrap();
         let end_pos = end_watch.get();
@@ -715,7 +715,6 @@ mod tests {
         const MSG_COUNT: usize = 200;
         const PG_VERSION: u32 = 17;
         const SHARD_COUNT: u8 = 2;
-        const ATTACHED_SHARDS: u8 = 4;
 
         let start_lsn = Lsn::from_str("0/149FD18").unwrap();
         let env = Env::new(true).unwrap();
@@ -725,9 +724,11 @@ mod tests {
             .unwrap();
 
         let resident_tli = tli.wal_residence_guard().await.unwrap();
-        let end_watch = Env::write_wal(tli, start_lsn, SIZE, MSG_COUNT)
-            .await
-            .unwrap();
+        let mut next_record_lsns = Vec::default();
+        let end_watch =
+            Env::write_wal(tli, start_lsn, SIZE, MSG_COUNT, Some(&mut next_record_lsns))
+                .await
+                .unwrap();
         let end_pos = end_watch.get();
 
         let streaming_wal_reader = StreamingWalReader::new(
@@ -746,38 +747,71 @@ mod tests {
         )
         .unwrap();
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<Batch>(MSG_COUNT * 2);
-        let mut batch_receivers = vec![rx];
+        struct Sender {
+            tx: Option<tokio::sync::mpsc::Sender<Batch>>,
+            rx: tokio::sync::mpsc::Receiver<Batch>,
+            shard: ShardIdentity,
+            start_lsn: Lsn,
+            received_next_record_lsns: Vec<Lsn>,
+        }
 
+        impl Sender {
+            fn new(start_lsn: Lsn, shard: ShardIdentity) -> Self {
+                let (tx, rx) = tokio::sync::mpsc::channel::<Batch>(MSG_COUNT * 2);
+                Self {
+                    tx: Some(tx),
+                    rx,
+                    shard,
+                    start_lsn,
+                    received_next_record_lsns: Vec::default(),
+                }
+            }
+        }
+
+        assert!(next_record_lsns.len() > 7);
+        let start_lsns = vec![
+            next_record_lsns[5],
+            next_record_lsns[1],
+            next_record_lsns[3],
+        ];
+        let mut senders = start_lsns
+            .into_iter()
+            .map(|lsn| Sender::new(lsn, shard_0))
+            .collect::<Vec<_>>();
+
+        let first_sender = senders.first_mut().unwrap();
         let handle = InterpretedWalReader::spawn(
             streaming_wal_reader,
-            start_lsn,
-            tx,
-            shard_0,
+            first_sender.start_lsn,
+            first_sender.tx.take().unwrap(),
+            first_sender.shard,
             PG_VERSION,
             &Some("pageserver".to_string()),
         );
 
-        for _ in 0..(ATTACHED_SHARDS - 1) {
-            let (tx, rx) = tokio::sync::mpsc::channel::<Batch>(MSG_COUNT * 2);
-            handle.fanout(shard_0, tx, start_lsn).unwrap();
-            batch_receivers.push(rx);
+        for sender in senders.iter_mut().skip(1) {
+            handle
+                .fanout(sender.shard, sender.tx.take().unwrap(), sender.start_lsn)
+                .unwrap();
         }
 
-        loop {
-            let batch = batch_receivers.first_mut().unwrap().recv().await.unwrap();
-            for rx in batch_receivers.iter_mut().skip(1) {
-                let other_batch = rx.recv().await.unwrap();
-
-                assert_eq!(batch.wal_end_lsn, other_batch.wal_end_lsn);
-                assert_eq!(
-                    batch.available_wal_end_lsn,
-                    other_batch.available_wal_end_lsn
+        for sender in senders.iter_mut() {
+            loop {
+                let batch = sender.rx.recv().await.unwrap();
+                tracing::info!(
+                    "Sender with start_lsn={} received batch ending at {} with {} records",
+                    sender.start_lsn,
+                    batch.wal_end_lsn,
+                    batch.records.records.len()
                 );
-            }
 
-            if batch.wal_end_lsn == batch.available_wal_end_lsn {
-                break;
+                for rec in batch.records.records {
+                    sender.received_next_record_lsns.push(rec.next_record_lsn);
+                }
+
+                if batch.wal_end_lsn == batch.available_wal_end_lsn {
+                    break;
+                }
             }
         }
 
@@ -792,5 +826,20 @@ mod tests {
         }
 
         assert!(done);
+
+        for sender in senders {
+            tracing::info!(
+                "Validating records received by sender with start_lsn={}",
+                sender.start_lsn
+            );
+
+            assert!(sender.received_next_record_lsns.is_sorted());
+            let expected = next_record_lsns
+                .iter()
+                .filter(|lsn| **lsn > sender.start_lsn)
+                .copied()
+                .collect::<Vec<_>>();
+            assert_eq!(sender.received_next_record_lsns, expected);
+        }
     }
 }
