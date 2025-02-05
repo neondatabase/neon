@@ -33,6 +33,7 @@ use crate::page_cache;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::gc_block::GcBlock;
+use crate::tenant::layer_map::LayerMap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::batch_split_writer::{
     BatchWriterResult, SplitDeltaLayerWriter, SplitImageLayerWriter,
@@ -436,6 +437,11 @@ impl KeyHistoryRetention {
     /// `discard_key` will only be called when the writer reaches its target (instead of for every key), so it's fine to grab a lock inside.
     async fn discard_key(key: &PersistentLayerKey, tline: &Arc<Timeline>, dry_run: bool) -> bool {
         if dry_run {
+            return true;
+        }
+        if LayerMap::is_l0(&key.key_range, key.is_delta) {
+            // gc-compaction should not produce L0 deltas, otherwise it will break the layer order.
+            // We should ignore such layers.
             return true;
         }
         let layer_generation;
