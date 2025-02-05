@@ -382,7 +382,13 @@ pub(super) async fn handle_walreceiver_connection(
                         .with_context(|| {
                             format!("could not ingest record at {local_next_record_lsn}")
                         })
-                        .inspect_err(|err| critical!("{err}"))?;
+                        .inspect_err(|err| {
+                            // TODO: we can't differentiate cancellation errors with
+                            // anyhow::Error, so just ignore it if we're cancelled.
+                            if !cancellation.is_cancelled() {
+                                critical!("{err:?}")
+                            }
+                        })?;
 
                     uncommitted_records += 1;
 
@@ -508,6 +514,13 @@ pub(super) async fn handle_walreceiver_connection(
                             .await
                             .with_context(|| {
                                 format!("could not ingest record at {next_record_lsn}")
+                            })
+                            .inspect_err(|err| {
+                                // TODO: we can't differentiate cancellation errors with
+                                // anyhow::Error, so just ignore it if we're cancelled.
+                                if !cancellation.is_cancelled() {
+                                    critical!("{err:?}")
+                                }
                             })?;
                         if !ingested {
                             tracing::debug!("ingest: filtered out record @ LSN {next_record_lsn}");
