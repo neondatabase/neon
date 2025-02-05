@@ -4701,6 +4701,7 @@ impl Timeline {
 
         if let LastImageLayerCreationStatus::Incomplete { last_key } = last_status {
             // We need to skip the partitions that have already been processed.
+            let mut found: bool = false;
             for (i, partition) in partition_parts.iter().enumerate() {
                 if last_key <= partition.end().unwrap() {
                     // ```plain
@@ -4713,12 +4714,22 @@ impl Timeline {
                     // a relation grows in size, and the last_key is now in the middle of the partition. In this case, we
                     // still want to skip this partition, so that we can make progress and avoid generating image layers over
                     // the same partition. Doing a mod to ensure we don't end up with an empty vec.
-                    partition_parts = partition_parts.split_off((i + 1) % total_partitions); // Remove the first i + 1 elements
+                    if i + 1 >= total_partitions {
+                        // In general, this case should not happen -- if last_key is on the last partition, the previous
+                        // iteration of image layer creation should return a complete status.
+                        break; // with found=false
+                    }
+                    partition_parts = partition_parts.split_off(i + 1); // Remove the first i + 1 elements
                     total_partitions = partition_parts.len();
                     // Update the start key to the partition start.
                     start = partition_parts[0].start().unwrap();
+                    found = true;
                     break;
                 }
+            }
+            if !found {
+                // Last key is within the last partition, or larger than all partitions.
+                return Ok((vec![], LastImageLayerCreationStatus::Complete));
             }
         }
 
