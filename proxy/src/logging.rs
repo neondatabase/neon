@@ -15,7 +15,7 @@ use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::fmt::format::{Format, Full};
 use tracing_subscriber::fmt::time::SystemTime;
 use tracing_subscriber::fmt::{FormatEvent, FormatFields};
-use tracing_subscriber::layer::{Context, Layer};
+use tracing_subscriber::layer::{Context, Identity, Layer};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::{LookupSpan, SpanRef};
 
@@ -69,20 +69,23 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
         None
     };
 
-    let reg = tracing_subscriber::registry();
+    let export_layer = Identity::new()
+        .and_then(otlp_layer)
+        .and_then(json_log_layer)
+        .and_then(text_log_layer)
+        .with_filter(env_filter);
 
+    #[cfg(not(tokio_unstable))]
+    let tokio_console_layer = Identity::new();
     #[cfg(tokio_unstable)]
-    let reg = reg.with(
-        console_subscriber::ConsoleLayer::builder()
-            .with_default_env()
-            .enable_grpc_web(true)
-            .spawn(),
-    );
+    let tokio_console_layer = console_subscriber::ConsoleLayer::builder()
+        .with_default_env()
+        .enable_grpc_web(true)
+        .spawn();
 
-    reg.with(env_filter)
-        .with(otlp_layer)
-        .with(json_log_layer)
-        .with(text_log_layer)
+    tracing_subscriber::registry()
+        .with(export_layer)
+        .with(tokio_console_layer)
         .try_init()?;
 
     Ok(LoggingGuard)
