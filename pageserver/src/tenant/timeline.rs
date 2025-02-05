@@ -4701,7 +4701,7 @@ impl Timeline {
 
         if let LastImageLayerCreationStatus::Incomplete { last_key } = last_status {
             // We need to skip the partitions that have already been processed.
-            let mut found: bool = false;
+            let mut found = false;
             for (i, partition) in partition_parts.iter().enumerate() {
                 if last_key <= partition.end().unwrap() {
                     // ```plain
