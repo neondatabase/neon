@@ -744,8 +744,8 @@ retry:
 
 #ifdef __linux__
 			/*
-			 * get kernel's send and recv queue size via sockopt
-			 * https://elixir.bootlin.com/linux/v6.13.1/source/include/uapi/linux/sockios.h#L26-L27
+			 * get kernel's send and recv queue size via ioctl
+			 * https://elixir.bootlin.com/linux/v6.1.128/source/include/uapi/linux/sockios.h#L25-L27
 			 */
 			socketfd = PQsocket(pageserver_conn);
 			if (socketfd != -1) {
