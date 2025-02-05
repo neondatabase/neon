@@ -336,10 +336,11 @@ lfc_change_limit_hook(int newval, void *extra)
 {
 	uint32		new_size = SIZE_MB_TO_CHUNKS(newval);
 
-	if (!is_normal_backend())
+	if (!lfc_ctl || !is_normal_backend())
 		return;
 
-	if (!lfc_ensure_opened())
+	/* Open LFC file only if LFC was  enabled or we are going to reenable it */
+	if ((newval > 0 || LFC_ENABLED()) && !lfc_ensure_opened())
 		return;
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
