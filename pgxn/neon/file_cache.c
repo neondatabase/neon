@@ -255,10 +255,8 @@ lfc_maybe_disabled(void)
 static bool
 lfc_ensure_opened(void)
 {
-	bool		enabled = !lfc_maybe_disabled();
-
 	/* Open cache file if not done yet */
-	if (lfc_desc <= 0 && enabled)
+	if (lfc_desc <= 0)
 	{
 		lfc_desc = BasicOpenFile(lfc_path, O_RDWR);
 
@@ -268,7 +266,7 @@ lfc_ensure_opened(void)
 			return false;
 		}
 	}
-	return enabled;
+	return true;
 }
 
 static void
@@ -557,46 +555,40 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 
-	tag.blockNum = (blkno + i) & ~(BLOCKS_PER_CHUNK - 1);
+	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
 	hash = get_hash_value(lfc_hash, &tag);
-	chunk_offs = (blkno + i) & (BLOCKS_PER_CHUNK - 1);
+	chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
 
 	LWLockAcquire(lfc_lock, LW_SHARED);
-
+	if (!LFC_ENABLED())
+	{
+		LWLockRelease(lfc_lock);
+		return 0;
+	}
 	while (true)
 	{
-		int		this_chunk = Min(nblocks, BLOCKS_PER_CHUNK - chunk_offs);
-		if (LFC_ENABLED())
+		int		this_chunk = Min(nblocks - i, BLOCKS_PER_CHUNK - chunk_offs);
+		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
+		if (entry != NULL)
 		{
-			entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
-
-			if (entry != NULL)
+			for (; chunk_offs < BLOCKS_PER_CHUNK && i < nblocks; chunk_offs++, i++)
 			{
-				for (; chunk_offs < BLOCKS_PER_CHUNK && i < nblocks; chunk_offs++, i++)
+				if (GET_STATE(entry, chunk_offs) != UNAVAILABLE)
 				{
-					if (GET_STATE(entry, chunk_offs) != UNAVAILABLE)
-					{
-						BITMAP_SET(bitmap, i);
-						found++;
-					}
+					BITMAP_SET(bitmap, i);
+					found++;
 				}
-			}
-			else
-			{
-				i += this_chunk;
 			}
 		}
 		else
 		{
-			LWLockRelease(lfc_lock);
-			return found;
+			i += this_chunk;
 		}
-
 		/*
 		 * Break out of the iteration before doing expensive stuff for
 		 * a next iteration
 		 */
-		if (i + 1 >= nblocks)
+		if (i >= nblocks)
 			break;
 
 		/*
@@ -610,8 +602,8 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	LWLockRelease(lfc_lock);
 
-#if USE_ASSERT_CHECKING
-	do {
+#ifdef USE_ASSERT_CHECKING
+	{
 		int count = 0;
 
 		for (int j = 0; j < nblocks; j++)
@@ -621,7 +613,7 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		}
 
 		Assert(count == found);
-	} while (false);
+	}
 #endif
 
 	return found;
@@ -949,6 +941,8 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 	instr_time io_start, io_end;
 	ConditionVariable* cv;
 	FileCacheBlockState state;
+	XLogRecPtr lwlsn;
+
 	int		chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
@@ -973,8 +967,11 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 		LWLockRelease(lfc_lock);
 		return false;
 	}
-	if (GetLastWrittenLSN(rinfo, forknum, blkno) > lsn)
+	lwlsn = GetLastWrittenLSN(rinfo, forknum, blkno);
+	if (lwlsn > lsn)
 	{
+		elog(DEBUG1, "Skip LFC write for %d because LwLSN=%X/%X is greater than not_nodified_since LSN %X/%X",
+			 blkno, LSN_FORMAT_ARGS(lwlsn), LSN_FORMAT_ARGS(lsn));
 		LWLockRelease(lfc_lock);
 		return false;
 	}
