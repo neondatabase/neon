@@ -360,9 +360,9 @@ pub(super) async fn handle_walreceiver_connection(
                     ctx: &RequestContext,
                     uncommitted: &mut u64,
                 ) -> anyhow::Result<()> {
-                    WAL_INGEST.records_committed.inc_by(*uncommitted);
                     let stats = modification.stats();
                     modification.commit(ctx).await?;
+                    WAL_INGEST.records_committed.inc_by(*uncommitted);
                     WAL_INGEST.inc_values_committed(&stats);
                     *uncommitted = 0;
                     Ok(())
@@ -453,11 +453,11 @@ pub(super) async fn handle_walreceiver_connection(
                     filtered: &mut u64,
                     ctx: &RequestContext,
                 ) -> anyhow::Result<()> {
+                    let stats = modification.stats();
+                    modification.commit(ctx).await?;
                     WAL_INGEST
                         .records_committed
                         .inc_by(*uncommitted - *filtered);
-                    let stats = modification.stats();
-                    modification.commit(ctx).await?;
                     WAL_INGEST.inc_values_committed(&stats);
                     *uncommitted = 0;
                     *filtered = 0;
