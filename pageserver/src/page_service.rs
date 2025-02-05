@@ -1077,12 +1077,12 @@ impl PageServerHandler {
             // what we want to do
             let flush_fut = pgb_writer.flush();
             // metric for how long flushing takes
-            // let flush_fut = match flushing_timer {
-            //     Some(flushing_timer) => {
-            //         futures::future::Either::Left(flushing_timer.measure(flush_fut))
-            //     }
-            //     None => futures::future::Either::Right(flush_fut),
-            // };
+            let flush_fut = match flushing_timer {
+                Some(flushing_timer) => {
+                    futures::future::Either::Left(flushing_timer.measure(flush_fut))
+                }
+                None => futures::future::Either::Right(flush_fut),
+            };
             // do it while respecting cancellation
             let _: () = async move {
                 tokio::select! {
