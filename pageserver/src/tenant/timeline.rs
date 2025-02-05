@@ -531,6 +531,9 @@ impl GcInfo {
     pub(super) fn remove_child_offloaded(&mut self, child_id: TimelineId) -> bool {
         self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes)
     }
+    pub(crate) fn lsn_covered_by_lease(&self, lsn: Lsn) -> bool {
+        self.leases.contains_key(&lsn)
+    }
 }
 
 /// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this

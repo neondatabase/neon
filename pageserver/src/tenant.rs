@@ -4642,22 +4642,26 @@ impl Tenant {
 
         // check against last actual 'latest_gc_cutoff' first
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
-        src_timeline
-            .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
-            .context(format!(
-                "invalid branch start lsn: less than latest GC cutoff {}",
-                *latest_gc_cutoff_lsn,
-            ))
-            .map_err(CreateTimelineError::AncestorLsn)?;
-
-        // and then the planned GC cutoff
         {
             let gc_info = src_timeline.gc_info.read().unwrap();
-            let cutoff = gc_info.min_cutoff();
-            if start_lsn < cutoff {
-                return Err(CreateTimelineError::AncestorLsn(anyhow::anyhow!(
-                    "invalid branch start lsn: less than planned GC cutoff {cutoff}"
-                )));
+            let planned_cutoff = gc_info.min_cutoff();
+            if gc_info.lsn_covered_by_lease(start_lsn) {
+                tracing::info!("skipping comparison of {start_lsn} with gc cutoff {} and planned gc cutoff {planned_cutoff} due to lsn lease", *latest_gc_cutoff_lsn);
+            } else {
+                src_timeline
+                    .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
+                    .context(format!(
+                        "invalid branch start lsn: less than latest GC cutoff {}",
+                        *latest_gc_cutoff_lsn,
+                    ))
+                    .map_err(CreateTimelineError::AncestorLsn)?;
+
+                // and then the planned GC cutoff
+                if start_lsn < planned_cutoff {
+                    return Err(CreateTimelineError::AncestorLsn(anyhow::anyhow!(
+                        "invalid branch start lsn: less than planned GC cutoff {planned_cutoff}"
+                    )));
+                }
             }
         }
 
