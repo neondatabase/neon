@@ -437,8 +437,7 @@ impl RemoteTimelineClient {
             .conf
             .remote_storage_config
             .as_ref()
-            .and_then(|r| r.concurrency_limit())
-            .unwrap_or(0);
+            .map_or(0, |r| r.concurrency_limit());
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.initialize_with_current_remote_index_part(index_part, inprogress_limit)?;
         self.update_remote_physical_size_gauge(Some(index_part));
@@ -461,8 +460,7 @@ impl RemoteTimelineClient {
             .conf
             .remote_storage_config
             .as_ref()
-            .and_then(|r| r.concurrency_limit())
-            .unwrap_or(0);
+            .map_or(0, |r| r.concurrency_limit());
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.initialize_empty_remote(local_metadata, inprogress_limit)?;
         self.update_remote_physical_size_gauge(None);
@@ -484,8 +482,7 @@ impl RemoteTimelineClient {
             .conf
             .remote_storage_config
             .as_ref()
-            .and_then(|r| r.concurrency_limit())
-            .unwrap_or(0);
+            .map_or(0, |r| r.concurrency_limit());
 
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.initialize_with_current_remote_index_part(index_part, inprogress_limit)?;
