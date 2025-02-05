@@ -728,11 +728,33 @@ retry:
 		INSTR_TIME_SUBTRACT(since_last_log, last_log_ts);
 		if (INSTR_TIME_GET_MILLISEC(since_last_log) >= LOG_INTERVAL_MS)
 		{
+			int sndbuf = -1;
+			int recvbuf = -1;
+			socklen_t optlen;
+			int sockopt_err;
+			int socketfd;
+
 			since_start = now;
 			INSTR_TIME_SUBTRACT(since_start, start_ts);
-			neon_shard_log(shard_no, LOG, "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses)",
+
+			/* get kernel's send and recv queue size via sockopt */
+			socketfd = PQsocket(pageserver_conn);
+			if (socketfd != -1) {
+				optlen = sizeof(sndbuf);
+				sockopt_err = getsockopt(socketfd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &optlen);
+				if (sockopt_err != 0) {
+					sndbuf = -errno;
+				}
+				optlen = sizeof(recvbuf);
+				sockopt_err = getsockopt(socketfd, SOL_SOCKET, SO_RCVBUF, &recvbuf, &optlen);
+				if (sockopt_err != 0) {
+					recvbuf = -errno;
+				}
+			}
+
+			neon_shard_log(shard_no, LOG, "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses) (socket sndbuf=%d recvbuf=%d)",
 						   INSTR_TIME_GET_DOUBLE(since_start),
-						   shard->nrequests_sent, shard->nresponses_received);
+						   shard->nrequests_sent, shard->nresponses_received, sndbuf, recvbuf);
 			last_log_ts = now;
 			logged = true;
 		}
