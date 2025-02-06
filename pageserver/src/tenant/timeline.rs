@@ -1262,6 +1262,13 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        let read_path = if cfg!(feature = "testing") || cfg!(debug_assertions) {
+            Some(ReadPath::new(keyspace.clone(), lsn))
+        } else {
+            None
+        };
+        reconstruct_state.read_path = read_path;
+
         let traversal_res: Result<(), _> = self
             .get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
             .await;
@@ -3480,12 +3487,6 @@ impl Timeline {
 
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
-        let mut read_path = if cfg!(feature = "testing") || cfg!(debug_assertions) {
-            Some(ReadPath::new(keyspace.clone(), request_lsn))
-        } else {
-            None
-        };
-
         let missing_keyspace = loop {
             if self.cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
@@ -3501,7 +3502,6 @@ impl Timeline {
                 reconstruct_state,
                 &self.cancel,
                 ctx,
-                &mut read_path,
             )
             .await?;
 
@@ -3576,7 +3576,7 @@ impl Timeline {
                 request_lsn,
                 ancestor_lsn: Some(timeline.ancestor_lsn),
                 backtrace: None,
-                read_path,
+                read_path: std::mem::take(&mut reconstruct_state.read_path),
             }));
         }
 
@@ -3606,7 +3606,6 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-        read_path: &mut Option<ReadPath>,
     ) -> Result<TimelineVisitOutcome, GetVectoredError> {
         let mut unmapped_keyspace = keyspace.clone();
         let mut fringe = LayerFringe::new();
@@ -3696,7 +3695,7 @@ impl Timeline {
             }
 
             if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
-                if let Some(read_path) = read_path {
+                if let Some(ref mut read_path) = reconstruct_state.read_path {
                     read_path.record_read_op(&layer_to_read, &keyspace_to_read, &lsn_range);
                 }
                 let next_cont_lsn = lsn_range.start;
