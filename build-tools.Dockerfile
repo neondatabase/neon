@@ -12,6 +12,8 @@ RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc && \
     echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
 
+COPY build_tools/patches/pgcopydbv017.patch /pgcopydbv017.patch
+
 RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         set -e && \
         apt update && \
@@ -44,6 +46,7 @@ RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         mkdir /tmp/pgcopydb && \
         tar -xzf /tmp/pgcopydb.tar.gz -C /tmp/pgcopydb --strip-components=1 && \
         cd /tmp/pgcopydb && \
+        patch -p1 < /pgcopydbv017.patch && \
         make -s clean && \
         make -s -j12 install && \
         libpq_path=$(find /lib /usr/lib -name "libpq.so.5" | head -n 1) && \
