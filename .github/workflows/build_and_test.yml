@@ -862,7 +862,7 @@ jobs:
         run: |
           docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml logs || true
           docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml down
-
+      # Test of upgrade
       - name: Test extension upgrade
         timeout-minutes: 20
         if: ${{ needs.tag.outputs.build-tag == github.run_id }}
