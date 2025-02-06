@@ -341,6 +341,13 @@ impl DeleteTimelineFlow {
         let tenant_shard_id = timeline.tenant_shard_id();
         let timeline_id = timeline.timeline_id();
 
+        // Take a tenant gate guard, because timeline deletion needs access to the tenant to update its manifest.
+        let Ok(tenant_guard) = tenant.gate.enter() else {
+            // It is safe to simply skip here, because we only schedule background work once the timeline is durably marked for deletion.
+            info!("Tenant is shutting down, timeline deletion will be resumed when it next starts");
+            return;
+        };
+
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             TaskKind::TimelineDeletionWorker,
@@ -348,6 +355,8 @@ impl DeleteTimelineFlow {
             Some(timeline_id),
             "timeline_delete",
             async move {
+                let _guard = tenant_guard;
+
                 if let Err(err) = Self::background(guard, conf, &tenant, &timeline, remote_client).await {
                     // Only log as an error if it's not a cancellation.
                     if matches!(err, DeleteTimelineError::Cancelled) {
