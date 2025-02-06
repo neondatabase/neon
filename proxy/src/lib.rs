@@ -93,7 +93,7 @@ mod ext;
 mod http;
 mod intern;
 mod jemalloc;
-mod logging;
+pub mod logging;
 mod metrics;
 mod parse;
 mod pglb;

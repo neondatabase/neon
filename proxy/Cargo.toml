@@ -120,6 +120,7 @@ workspace_hack.workspace = true
 [dev-dependencies]
 assert-json-diff.workspace = true
 camino-tempfile.workspace = true
+criterion.workspace = true
 fallible-iterator.workspace = true
 flate2.workspace = true
 tokio-tungstenite.workspace = true
@@ -130,3 +131,8 @@ walkdir.workspace = true
 rand_distr = "0.4"
 tokio-postgres.workspace = true
 tracing-test = "0.2"
+
+[[bench]]
+name = "logging"
+harness = false
+

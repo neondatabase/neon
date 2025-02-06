@@ -148,11 +148,11 @@ impl LogFormat {
     }
 }
 
-trait MakeWriter {
+pub trait MakeWriter {
     fn make_writer(&self) -> impl io::Write;
 }
 
-struct StderrWriter {
+pub struct StderrWriter {
     stderr: io::Stderr,
 }
 
@@ -164,11 +164,11 @@ impl MakeWriter for StderrWriter {
 }
 
 // TODO: move into separate module or even separate crate.
-trait Clock {
+pub trait Clock {
     fn now(&self) -> DateTime<Utc>;
 }
 
-struct RealClock;
+pub struct RealClock;
 
 impl Clock for RealClock {
     #[inline]
@@ -203,7 +203,7 @@ type CallsiteMap<T> =
     papaya::HashMap<callsite::Identifier, T, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
 /// Implements tracing layer to handle events specific to logging.
-struct JsonLoggingLayer<C: Clock, W: MakeWriter> {
+pub struct JsonLoggingLayer<C: Clock, W: MakeWriter> {
     clock: C,
     writer: W,
 
@@ -217,7 +217,7 @@ struct JsonLoggingLayer<C: Clock, W: MakeWriter> {
 }
 
 impl<C: Clock, W: MakeWriter> JsonLoggingLayer<C, W> {
-    fn new(clock: C, writer: W, extract_fields: &'static [&'static str]) -> Self {
+    pub fn new(clock: C, writer: W, extract_fields: &'static [&'static str]) -> Self {
         JsonLoggingLayer {
             clock,
             skipped_field_indices: CallsiteMap::default(),
