@@ -11,10 +11,30 @@ index d730b03..69a9be9 100644
  };
  
 diff --git a/src/bin/pgcopydb/pgsql.c b/src/bin/pgcopydb/pgsql.c
-index 94f2f46..86b9448 100644
+index 94f2f46..e051ba8 100644
 --- a/src/bin/pgcopydb/pgsql.c
 +++ b/src/bin/pgcopydb/pgsql.c
-@@ -3174,11 +3174,18 @@ pgcopy_log_error(PGSQL *pgsql, PGresult *res, const char *context)
+@@ -2319,6 +2319,11 @@ pgsql_execute_log_error(PGSQL *pgsql,
+ 
+ 	LinesBuffer lbuf = { 0 };
+ 
++	if (message != NULL){
++		// make sure message is writable by splitLines
++		message = strdup(message);
++	}
++
+ 	if (!splitLines(&lbuf, message))
+ 	{
+ 		/* errors have already been logged */
+@@ -2332,6 +2337,7 @@ pgsql_execute_log_error(PGSQL *pgsql,
+ 				  PQbackendPID(pgsql->connection),
+ 				  lbuf.lines[lineNumber]);
+ 	}
++        free(message); // free copy of message we created above
+ 
+ 	if (pgsql->logSQL)
+ 	{
+@@ -3174,11 +3180,18 @@ pgcopy_log_error(PGSQL *pgsql, PGresult *res, const char *context)
  		/* errors have already been logged */
  		return;
  	}
