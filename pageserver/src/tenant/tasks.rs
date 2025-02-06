@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::metrics::TENANT_TASK_EVENTS;
+use crate::metrics::{BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::throttle::Stats;
@@ -61,21 +61,32 @@ impl BackgroundLoopKind {
     }
 }
 
+pub struct BackgroundLoopSemaphorePermit<'a> {
+    _permit: tokio::sync::SemaphorePermit<'static>,
+    _recorder: BackgroundLoopSemaphoreMetricsRecorder<'a>,
+}
+
 /// Cancellation safe.
 pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
     loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
-) -> tokio::sync::SemaphorePermit<'static> {
-    let _guard = crate::metrics::BACKGROUND_LOOP_SEMAPHORE.measure_acquisition(loop_kind);
+) -> BackgroundLoopSemaphorePermit<'static> {
+    let mut recorder = crate::metrics::BACKGROUND_LOOP_SEMAPHORE.record(loop_kind);
 
     if loop_kind == BackgroundLoopKind::InitialLogicalSizeCalculation {
         pausable_failpoint!("initial-size-calculation-permit-pause");
     }
 
     // TODO: assert that we run on BACKGROUND_RUNTIME; requires tokio_unstable Handle::id();
-    match CONCURRENT_BACKGROUND_TASKS.acquire().await {
-        Ok(permit) => permit,
-        Err(_closed) => unreachable!("we never close the semaphore"),
+    let permit = CONCURRENT_BACKGROUND_TASKS
+        .acquire()
+        .await
+        .expect("should never close");
+    recorder.acquired();
+
+    BackgroundLoopSemaphorePermit {
+        _permit: permit,
+        _recorder: recorder,
     }
 }
 
