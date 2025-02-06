@@ -883,16 +883,6 @@ switch_to_original_role(void)
     switched_to_superuser = false;
 }
 
-/*
- * TODO: replcate with is_neon_superuser() once https://github.com/neondatabase/neon/pull/10625 is merged
- */
-static bool
-neon_superuser(void)
-{
-	Oid neon_superuser_oid = get_role_oid("neon_superuser", true /*missing_ok*/);
-	return neon_superuser_oid != InvalidOid && has_privs_of_role(GetUserId(), neon_superuser_oid);
-}
-
 static void
 NeonProcessUtility(
 				   PlannedStmt *pstmt,
@@ -940,14 +930,14 @@ NeonProcessUtility(
    			break;
 		case T_CreateEventTrigStmt:
 		case T_AlterEventTrigStmt:
-			if (IsTransactionState() && neon_superuser())
+			if (IsTransactionState() && is_neon_superuser())
 			{
 				/* Allow neon_superuser to drop event trigger. */
 				sudo = switch_to_superuser();
 			}
 			break;
 		case T_DropStmt:
-			if (neon_superuser())
+			if (is_neon_superuser())
 			{
 				DropStmt *stmt = (DropStmt *)parseTree;
 				if (stmt->removeType == OBJECT_EVENT_TRIGGER)
