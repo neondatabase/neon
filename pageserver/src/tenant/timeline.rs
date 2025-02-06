@@ -1262,7 +1262,7 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let read_path = if cfg!(feature = "testing") || cfg!(debug_assertions) {
+        let read_path = if self.conf.enable_read_path_debugging {
             Some(ReadPath::new(keyspace.clone(), lsn))
         } else {
             None
