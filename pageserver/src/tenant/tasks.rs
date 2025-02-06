@@ -3,7 +3,7 @@
 
 use std::ops::ControlFlow;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::context::{DownloadBehavior, RequestContext};
@@ -14,9 +14,11 @@ use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::compaction::CompactionOutcome;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
+use once_cell::sync::Lazy;
 use rand::Rng;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::rate_limit::RateLimit;
 use utils::{backoff, completion, pausable_failpoint};
 
 static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
@@ -41,7 +43,16 @@ static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore
         tokio::sync::Semaphore::new(permits)
     });
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, strum_macros::IntoStaticStr, enum_map::Enum)]
+#[derive(
+    Debug,
+    PartialEq,
+    Eq,
+    Clone,
+    Copy,
+    strum_macros::IntoStaticStr,
+    strum_macros::Display,
+    enum_map::Enum,
+)]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum BackgroundLoopKind {
     Compaction,
@@ -55,12 +66,6 @@ pub(crate) enum BackgroundLoopKind {
     SecondaryDownload,
 }
 
-impl BackgroundLoopKind {
-    fn as_static_str(&self) -> &'static str {
-        self.into()
-    }
-}
-
 pub struct BackgroundLoopSemaphorePermit<'a> {
     _permit: tokio::sync::SemaphorePermit<'static>,
     _recorder: BackgroundLoopSemaphoreMetricsRecorder<'a>,
@@ -71,6 +76,11 @@ pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
     loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
 ) -> BackgroundLoopSemaphorePermit<'static> {
+    // TODO: use a lower threshold and remove the pacer once we resolve some blockage.
+    const WARN_THRESHOLD: Duration = Duration::from_secs(600);
+    static WARN_PACER: Lazy<Mutex<RateLimit>> =
+        Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+
     let mut recorder = crate::metrics::BACKGROUND_LOOP_SEMAPHORE.record(loop_kind);
 
     if loop_kind == BackgroundLoopKind::InitialLogicalSizeCalculation {
@@ -82,7 +92,15 @@ pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
         .acquire()
         .await
         .expect("should never close");
-    recorder.acquired();
+
+    let waited = recorder.acquired();
+    if waited >= WARN_THRESHOLD {
+        let waited = waited.as_secs_f64();
+        WARN_PACER
+            .lock()
+            .unwrap()
+            .call(|| warn!("{loop_kind} task waited {waited:.3}s for semaphore permit"));
+    }
 
     BackgroundLoopSemaphorePermit {
         _permit: permit,
@@ -628,7 +646,7 @@ pub(crate) fn warn_when_period_overrun(
             "task iteration took longer than the configured period"
         );
         crate::metrics::BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT
-            .with_label_values(&[task.as_static_str(), &format!("{}", period.as_secs())])
+            .with_label_values(&[task.into(), &format!("{}", period.as_secs())])
             .inc();
     }
 }

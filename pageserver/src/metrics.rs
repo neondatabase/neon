@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use enum_map::EnumMap;
+use enum_map::{Enum as _, EnumMap};
 use futures::Future;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
@@ -104,7 +104,7 @@ pub(crate) static STORAGE_TIME_COUNT_PER_TIMELINE: Lazy<IntCounterVec> = Lazy::n
     .expect("failed to define a metric")
 });
 
-// Buckets for background operations like compaction, GC, size calculation
+// Buckets for background operation duration in seconds, like compaction, GC, size calculation.
 const STORAGE_OP_BUCKETS: &[f64] = &[0.010, 0.100, 1.0, 10.0, 100.0, 1000.0];
 
 pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
@@ -236,7 +236,7 @@ pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| 
 
     GetVectoredLatency {
         map: EnumMap::from_array(std::array::from_fn(|task_kind_idx| {
-            let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
+            let task_kind = TaskKind::from_usize(task_kind_idx);
 
             if GetVectoredLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
                 let task_kind = task_kind.into();
@@ -259,7 +259,7 @@ pub(crate) static SCAN_LATENCY: Lazy<ScanLatency> = Lazy::new(|| {
 
     ScanLatency {
         map: EnumMap::from_array(std::array::from_fn(|task_kind_idx| {
-            let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
+            let task_kind = TaskKind::from_usize(task_kind_idx);
 
             if ScanLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
                 let task_kind = task_kind.into();
@@ -300,10 +300,10 @@ static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
 
 pub(crate) static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
     map: EnumMap::from_array(std::array::from_fn(|task_kind| {
-        let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind);
+        let task_kind = TaskKind::from_usize(task_kind);
         let task_kind: &'static str = task_kind.into();
         EnumMap::from_array(std::array::from_fn(|content_kind| {
-            let content_kind = <PageContentKind as enum_map::Enum>::from_usize(content_kind);
+            let content_kind = PageContentKind::from_usize(content_kind);
             let content_kind: &'static str = content_kind.into();
             PageCacheMetricsForTaskKind {
                 read_accesses_immutable: {
@@ -1913,7 +1913,7 @@ pub(crate) static COMPUTE_COMMANDS_COUNTERS: Lazy<ComputeCommandCounters> = Lazy
 
     ComputeCommandCounters {
         map: EnumMap::from_array(std::array::from_fn(|i| {
-            let command = <ComputeCommandKind as enum_map::Enum>::from_usize(i);
+            let command = ComputeCommandKind::from_usize(i);
             let command_str: &'static str = command.into();
             inner.with_label_values(&[command_str])
         })),
@@ -2213,13 +2213,13 @@ pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
 
 pub struct BackgroundLoopSemaphoreMetrics {
     counters: EnumMap<BackgroundLoopKind, IntCounterPair>,
-    durations: EnumMap<BackgroundLoopKind, Counter>,
+    durations: EnumMap<BackgroundLoopKind, Histogram>,
     waiting_tasks: EnumMap<BackgroundLoopKind, IntGauge>,
     running_tasks: EnumMap<BackgroundLoopKind, IntGauge>,
 }
 
-pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics> = Lazy::new(
-    || {
+pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics> =
+    Lazy::new(|| {
         let counters = register_int_counter_pair_vec!(
             "pageserver_background_loop_semaphore_wait_start_count",
             "Counter for background loop concurrency-limiting semaphore acquire calls started",
@@ -2229,10 +2229,11 @@ pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics
         )
         .unwrap();
 
-        let durations = register_counter_vec!(
-            "pageserver_background_loop_semaphore_wait_duration_seconds",
-            "Sum of wall clock time spent waiting on the background loop concurrency-limiting semaphore acquire calls",
+        let durations = register_histogram_vec!(
+            "pageserver_background_loop_semaphore_wait_seconds",
+            "Seconds spent waiting on background loop semaphore acquisition",
             &["task"],
+            vec![0.01, 1.0, 5.0, 10.0, 30.0, 60.0, 180.0, 300.0, 600.0],
         )
         .unwrap();
 
@@ -2251,25 +2252,24 @@ pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics
         .unwrap();
 
         BackgroundLoopSemaphoreMetrics {
-            counters: enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-                let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+            counters: EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = BackgroundLoopKind::from_usize(i);
                 counters.with_label_values(&[kind.into()])
             })),
-            durations: enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-                let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+            durations: EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = BackgroundLoopKind::from_usize(i);
                 durations.with_label_values(&[kind.into()])
             })),
-            waiting_tasks: enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-                let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+            waiting_tasks: EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = BackgroundLoopKind::from_usize(i);
                 waiting_tasks.with_label_values(&[kind.into()])
             })),
-            running_tasks: enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-                let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+            running_tasks: EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = BackgroundLoopKind::from_usize(i);
                 running_tasks.with_label_values(&[kind.into()])
             })),
         }
-    },
-);
+    });
 
 impl BackgroundLoopSemaphoreMetrics {
     /// Starts recording semaphore metrics. Call `acquired()` on the returned recorder when the
@@ -2304,11 +2304,13 @@ impl<'a> BackgroundLoopSemaphoreMetricsRecorder<'a> {
     }
 
     /// Signals that the semaphore has been acquired, and updates relevant metrics.
-    pub fn acquired(&mut self) {
+    pub fn acquired(&mut self) -> Duration {
+        let waited = self.start.elapsed();
         self.wait_counter_guard.take().expect("already acquired");
-        self.metrics.durations[self.task].inc_by(self.start.elapsed().as_secs_f64());
+        self.metrics.durations[self.task].observe(waited.as_secs_f64());
         self.metrics.waiting_tasks[self.task].dec();
         self.metrics.running_tasks[self.task].inc();
+        waited
     }
 }
 
@@ -2317,7 +2319,7 @@ impl Drop for BackgroundLoopSemaphoreMetricsRecorder<'_> {
     fn drop(&mut self) {
         if self.wait_counter_guard.take().is_some() {
             // Waiting.
-            self.metrics.durations[self.task].inc_by(self.start.elapsed().as_secs_f64());
+            self.metrics.durations[self.task].observe(self.start.elapsed().as_secs_f64());
             self.metrics.waiting_tasks[self.task].dec();
         } else {
             // Running.
@@ -2570,7 +2572,7 @@ pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = 
 
 pub(crate) struct WalRedoProcessCounters {
     pub(crate) started: IntCounter,
-    pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
+    pub(crate) killed_by_cause: EnumMap<WalRedoKillCause, IntCounter>,
     pub(crate) active_stderr_logger_tasks_started: IntCounter,
     pub(crate) active_stderr_logger_tasks_finished: IntCounter,
 }
@@ -2612,7 +2614,7 @@ impl Default for WalRedoProcessCounters {
         Self {
             started,
             killed_by_cause: EnumMap::from_array(std::array::from_fn(|i| {
-                let cause = <WalRedoKillCause as enum_map::Enum>::from_usize(i);
+                let cause = WalRedoKillCause::from_usize(i);
                 let cause_str: &'static str = cause.into();
                 killed.with_label_values(&[cause_str])
             })),
