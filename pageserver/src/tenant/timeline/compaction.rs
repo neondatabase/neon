@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use super::layer_manager::LayerManager;
 use super::{
-    CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, ImageLayerCreationMode,
-    LastImageLayerCreationStatus, RecordedDuration, Timeline,
+    CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, GetVectoredError,
+    ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration, Timeline,
 };
 
 use anyhow::{anyhow, bail, Context};
@@ -26,6 +26,7 @@ use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, trace, warn, Instrument};
+use utils::critical;
 use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
@@ -748,7 +749,15 @@ impl Timeline {
                             .as_ref()
                             .clone(),
                     )
-                    .await?;
+                    .await
+                    .inspect_err(|err| {
+                        if let CreateImageLayersError::GetVectoredError(
+                            GetVectoredError::MissingKey(_),
+                        ) = err
+                        {
+                            critical!("missing key during compaction: {err:?}");
+                        }
+                    })?;
 
                 self.last_image_layer_creation_status
                     .store(Arc::new(outcome.clone()));

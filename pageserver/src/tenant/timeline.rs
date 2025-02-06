@@ -52,6 +52,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::critical;
 use utils::rate_limit::RateLimit;
 use utils::{
     fs_ext,
@@ -5807,10 +5808,11 @@ impl Timeline {
                 let img = match res {
                     Ok(img) => img,
                     Err(walredo::Error::Cancelled) => return Err(PageReconstructError::Cancelled),
-                    Err(walredo::Error::Other(e)) => {
+                    Err(walredo::Error::Other(err)) => {
+                        critical!("walredo failure during page reconstruction: {err:?}");
                         return Err(PageReconstructError::WalRedo(
-                            e.context("reconstruct a page image"),
-                        ))
+                            err.context("reconstruct a page image"),
+                        ));
                     }
                 };
                 Ok(img)

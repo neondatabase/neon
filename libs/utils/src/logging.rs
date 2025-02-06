@@ -8,19 +8,22 @@ use strum_macros::{EnumString, VariantNames};
 /// Logs a critical error, similarly to `tracing::error!`. This will:
 ///
 /// * Emit an ERROR log message with prefix "CRITICAL:" and a backtrace.
+/// * Trigger a pageable alert (via the metric below).
 /// * Increment libmetrics_tracing_event_count{level="critical"}, and indirectly level="error".
-/// * Trigger a pageable alert (via the metric above).
 /// * In debug builds, panic the process.
+///
+/// When including errors in the message, please use {err:?} to include the error cause and original
+/// backtrace.
 #[macro_export]
 macro_rules! critical {
-    ($($arg:tt)*) => {
+    ($($arg:tt)*) => {{
         if cfg!(debug_assertions) {
             panic!($($arg)*);
         }
         $crate::logging::TRACING_EVENT_COUNT_METRIC.inc_critical();
         let backtrace = std::backtrace::Backtrace::capture();
         tracing::error!("CRITICAL: {}\n{backtrace}", format!($($arg)*));
-    };
+    }};
 }
 
 #[derive(EnumString, strum_macros::Display, VariantNames, Eq, PartialEq, Debug, Clone, Copy)]
