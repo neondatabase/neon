@@ -207,11 +207,11 @@ impl RemoteExtSpec {
         if !self
             .public_extensions
             .as_ref()
-            .is_some_and(|exts| exts.iter().any(|e| e == ext_name))
+            .is_some_and(|exts| exts.iter().any(|e| e == real_ext_name))
             && !self
                 .custom_extensions
                 .as_ref()
-                .is_some_and(|exts| exts.iter().any(|e| e == ext_name))
+                .is_some_and(|exts| exts.iter().any(|e| e == real_ext_name))
         {
             return Err(anyhow::anyhow!("extension {} is not found", real_ext_name));
         }
@@ -414,7 +414,7 @@ mod tests {
             "public_extensions": ["ext"],
             "custom_extensions": [],
             "library_index": {
-                "ext": "ext"
+                "extlib": "ext",
             },
             "extension_data": {
                 "ext": {
@@ -430,6 +430,12 @@ mod tests {
         rspec
             .get_ext("ext", false, "latest", "v17")
             .expect("Extension should be found");
+
+        // test library index for the case when library name
+        // doesn't match the extension name
+        rspec
+            .get_ext("extlib", true, "latest", "v17")
+            .expect("Library should be found");
     }
 
     #[test]
