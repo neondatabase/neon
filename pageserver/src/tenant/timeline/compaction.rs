@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use super::layer_manager::LayerManager;
 use super::{
-    CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, ImageLayerCreationMode,
-    LastImageLayerCreationStatus, RecordedDuration, Timeline,
+    CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, GetVectoredError,
+    ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration, Timeline,
 };
 
 use anyhow::{anyhow, bail, Context};
@@ -26,6 +26,7 @@ use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, trace, warn, Instrument};
+use utils::critical;
 use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
@@ -33,6 +34,7 @@ use crate::page_cache;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::gc_block::GcBlock;
+use crate::tenant::layer_map::LayerMap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::batch_split_writer::{
     BatchWriterResult, SplitDeltaLayerWriter, SplitImageLayerWriter,
@@ -438,6 +440,11 @@ impl KeyHistoryRetention {
         if dry_run {
             return true;
         }
+        if LayerMap::is_l0(&key.key_range, key.is_delta) {
+            // gc-compaction should not produce L0 deltas, otherwise it will break the layer order.
+            // We should ignore such layers.
+            return true;
+        }
         let layer_generation;
         {
             let guard = tline.layers.read().await;
@@ -742,13 +749,21 @@ impl Timeline {
                             .as_ref()
                             .clone(),
                     )
-                    .await?;
+                    .await
+                    .inspect_err(|err| {
+                        if let CreateImageLayersError::GetVectoredError(
+                            GetVectoredError::MissingKey(_),
+                        ) = err
+                        {
+                            critical!("missing key during compaction: {err:?}");
+                        }
+                    })?;
 
                 self.last_image_layer_creation_status
                     .store(Arc::new(outcome.clone()));
 
                 self.upload_new_image_layers(image_layers)?;
-                if let LastImageLayerCreationStatus::Incomplete = outcome {
+                if let LastImageLayerCreationStatus::Incomplete { .. } = outcome {
                     // Yield and do not do any other kind of compaction.
                     info!("skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction).");
                     return Ok(CompactionOutcome::Pending);

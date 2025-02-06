@@ -211,7 +211,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                         error_run_count = 0;
                         // schedule the next compaction immediately in case there is a pending compaction task
                         sleep_duration = if let CompactionOutcome::Pending = outcome {
-                            Duration::ZERO
+                            Duration::from_secs(1)
                         } else {
                             period
                         };

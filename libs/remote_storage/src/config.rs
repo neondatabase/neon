@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT,
-    DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
+    DEFAULT_REMOTE_STORAGE_LOCALFS_CONCURRENCY_LIMIT, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
 };
 
 /// External backup storage configuration, enough for creating a client for that storage.
@@ -45,11 +45,11 @@ impl RemoteStorageKind {
 
 impl RemoteStorageConfig {
     /// Helper to fetch the configured concurrency limit.
-    pub fn concurrency_limit(&self) -> Option<usize> {
+    pub fn concurrency_limit(&self) -> usize {
         match &self.storage {
-            RemoteStorageKind::LocalFs { .. } => None,
-            RemoteStorageKind::AwsS3(c) => Some(c.concurrency_limit.into()),
-            RemoteStorageKind::AzureContainer(c) => Some(c.concurrency_limit.into()),
+            RemoteStorageKind::LocalFs { .. } => DEFAULT_REMOTE_STORAGE_LOCALFS_CONCURRENCY_LIMIT,
+            RemoteStorageKind::AwsS3(c) => c.concurrency_limit.into(),
+            RemoteStorageKind::AzureContainer(c) => c.concurrency_limit.into(),
         }
     }
 }

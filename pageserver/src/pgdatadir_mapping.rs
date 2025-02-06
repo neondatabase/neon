@@ -612,11 +612,18 @@ impl Timeline {
         pausable_failpoint!("find-lsn-for-timestamp-pausable");
 
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
+        let gc_cutoff_planned = {
+            let gc_info = self.gc_info.read().unwrap();
+            gc_info.min_cutoff()
+        };
+        // Usually the planned cutoff is newer than the cutoff of the last gc run,
+        // but let's be defensive.
+        let gc_cutoff = gc_cutoff_planned.max(*gc_cutoff_lsn_guard);
         // We use this method to figure out the branching LSN for the new branch, but the
         // GC cutoff could be before the branching point and we cannot create a new branch
         // with LSN < `ancestor_lsn`. Thus, pick the maximum of these two to be
         // on the safe side.
-        let min_lsn = std::cmp::max(*gc_cutoff_lsn_guard, self.get_ancestor_lsn());
+        let min_lsn = std::cmp::max(gc_cutoff, self.get_ancestor_lsn());
         let max_lsn = self.get_last_record_lsn();
 
         // LSNs are always 8-byte aligned. low/mid/high represent the
