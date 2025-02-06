@@ -67,9 +67,9 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.event.pull_request.head.sha }}
           token: ${{ secrets.CI_ACCESS_TOKEN }}
-      
+
       - name: Look for existing PR
         id: get-pr
         env:
@@ -77,7 +77,7 @@ jobs:
         run: |
           ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
           echo "ALREADY_CREATED=${ALREADY_CREATED}" >> ${GITHUB_OUTPUT}
-      
+
       - name: Get changed labels
         id: get-labels
         if: steps.get-pr.outputs.ALREADY_CREATED != ''
@@ -94,11 +94,6 @@ jobs:
           echo "LABELS_TO_ADD=${LABELS_TO_ADD}" >> ${GITHUB_OUTPUT}
           echo "LABELS_TO_REMOVE=${LABELS_TO_REMOVE}" >> ${GITHUB_OUTPUT}
 
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          token: ${{ secrets.CI_ACCESS_TOKEN }}
-
       - run: git checkout -b "${BRANCH}"
 
       - run: git push --force origin "${BRANCH}"
@@ -106,7 +101,7 @@ jobs:
 
       - name: Create a Pull Request for CI run (if required)
         if: steps.get-pr.outputs.ALREADY_CREATED == ''
-        env: 
+        env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
           cat << EOF > body.md
@@ -143,7 +138,7 @@ jobs:
 
       - run: git push --force origin "${BRANCH}"
         if: steps.get-pr.outputs.ALREADY_CREATED != ''
-             
+
   cleanup:
     # Close PRs and delete branchs if the original PR is closed.
 
