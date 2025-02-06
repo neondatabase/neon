@@ -76,6 +76,8 @@ def test_ingest_logical_message(
             log.info("Waiting for Pageserver to catch up")
             wait_for_last_record_lsn(client, env.initial_tenant, env.initial_timeline, end_lsn)
 
+    endpoint.stop()
+
     # Now that all data is ingested, delete and recreate the tenant in the pageserver. This will
     # reingest all the WAL from the safekeeper without any other constraints. This gives us a
     # baseline of how fast the pageserver can ingest this WAL in isolation.
