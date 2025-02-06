@@ -1400,26 +1400,27 @@ impl ComputeNode {
         let postgresql_conf_path = pgdata_path.join("postgresql.conf");
         config::write_postgres_conf(&postgresql_conf_path, &spec, self.internal_http_port)?;
 
-        let max_concurrent_connections = spec.reconfigure_concurrency;
+        if !spec.skip_pg_catalog_updates {
+            let max_concurrent_connections = spec.reconfigure_concurrency;
+            // Temporarily reset max_cluster_size in config
+            // to avoid the possibility of hitting the limit, while we are reconfiguring:
+            // creating new extensions, roles, etc.
+            config::with_compute_ctl_tmp_override(pgdata_path, "neon.max_cluster_size=-1", || {
+                self.pg_reload_conf()?;
 
-        // Temporarily reset max_cluster_size in config
-        // to avoid the possibility of hitting the limit, while we are reconfiguring:
-        // creating new extensions, roles, etc.
-        config::with_compute_ctl_tmp_override(pgdata_path, "neon.max_cluster_size=-1", || {
-            self.pg_reload_conf()?;
+                if spec.mode == ComputeMode::Primary {
+                    let mut conf = tokio_postgres::Config::from_str(self.connstr.as_str()).unwrap();
+                    conf.application_name("apply_config");
+                    let conf = Arc::new(conf);
 
-            if spec.mode == ComputeMode::Primary {
-                let mut conf = tokio_postgres::Config::from_str(self.connstr.as_str()).unwrap();
-                conf.application_name("apply_config");
-                let conf = Arc::new(conf);
+                    let spec = Arc::new(spec.clone());
 
-                let spec = Arc::new(spec.clone());
+                    self.apply_spec_sql(spec, conf, max_concurrent_connections)?;
+                }
 
-                self.apply_spec_sql(spec, conf, max_concurrent_connections)?;
-            }
-
-            Ok(())
-        })?;
+                Ok(())
+            })?;
+        }
 
         self.pg_reload_conf()?;
 
