@@ -65,6 +65,12 @@ pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 /// Here, a limit of max 20k concurrent connections was noted.
 /// <https://learn.microsoft.com/en-us/answers/questions/1301863/is-there-any-limitation-to-concurrent-connections>
 pub const DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT: usize = 100;
+/// Set this limit analogously to the S3 limit.
+///
+/// The local filesystem backend doesn't enforce a concurrency limit itself, but this also bounds
+/// the upload queue concurrency. Some tests create thousands of uploads, which slows down the
+/// quadratic scheduling of the upload queue, and there is no point spawning so many Tokio tasks.
+pub const DEFAULT_REMOTE_STORAGE_LOCALFS_CONCURRENCY_LIMIT: usize = 100;
 /// No limits on the client side, which currenltly means 1000 for AWS S3.
 /// <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax>
 pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
