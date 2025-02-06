@@ -616,7 +616,10 @@ impl Timeline {
         // GC cutoff could be before the branching point and we cannot create a new branch
         // with LSN < `ancestor_lsn`. Thus, pick the maximum of these two to be
         // on the safe side.
-        let min_lsn = std::cmp::max(*gc_cutoff_lsn_guard, self.get_ancestor_lsn());
+        let min_lsn = std::cmp::max(
+            std::cmp::max(*gc_cutoff_lsn_guard, self.get_gc_cutoff_lsn()),
+            self.get_ancestor_lsn(),
+        );
         let max_lsn = self.get_last_record_lsn();
 
         // LSNs are always 8-byte aligned. low/mid/high represent the
