@@ -2035,6 +2035,12 @@ impl PageServerHandler {
             .get(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
 
+        if timeline.is_archived() == Some(true) {
+            // TODO after a grace period, turn this log line into a hard error
+            tracing::warn!("timeline {tenant_id}/{timeline_id} is archived, but got basebackup request for it.");
+            //return Err(QueryError::NotFound("timeline is archived".into()))
+        }
+
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
