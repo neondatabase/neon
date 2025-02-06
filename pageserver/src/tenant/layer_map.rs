@@ -1368,6 +1368,32 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
     }
 
+    fn helper_layer_name_to_layer_desc(
+        layer_name: LayerName,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        file_size: u64,
+    ) -> PersistentLayerDesc {
+        match layer_name {
+            LayerName::Image(layer_name) => PersistentLayerDesc {
+                key_range: layer_name.key_range.clone(),
+                lsn_range: layer_name.lsn_as_range(),
+                tenant_shard_id,
+                timeline_id,
+                is_delta: false,
+                file_size,
+            },
+            LayerName::Delta(layer_name) => PersistentLayerDesc {
+                key_range: layer_name.key_range,
+                lsn_range: layer_name.lsn_range,
+                tenant_shard_id,
+                timeline_id,
+                is_delta: true,
+                file_size,
+            },
+        }
+    }
+
     #[test]
     fn layer_visibility_realistic() {
         // Load a large example layermap
@@ -1384,24 +1410,12 @@ mod tests {
         let mut layer_map = LayerMap::default();
         let mut updates = layer_map.batch_update();
         for (layer_name, layer_metadata) in index.layer_metadata {
-            let layer_desc = match layer_name {
-                LayerName::Image(layer_name) => PersistentLayerDesc {
-                    key_range: layer_name.key_range.clone(),
-                    lsn_range: layer_name.lsn_as_range(),
-                    tenant_shard_id,
-                    timeline_id,
-                    is_delta: false,
-                    file_size: layer_metadata.file_size,
-                },
-                LayerName::Delta(layer_name) => PersistentLayerDesc {
-                    key_range: layer_name.key_range,
-                    lsn_range: layer_name.lsn_range,
-                    tenant_shard_id,
-                    timeline_id,
-                    is_delta: true,
-                    file_size: layer_metadata.file_size,
-                },
-            };
+            let layer_desc = helper_layer_name_to_layer_desc(
+                layer_name,
+                tenant_shard_id,
+                timeline_id,
+                layer_metadata.file_size,
+            );
             updates.insert_historic(layer_desc);
         }
         updates.flush();
@@ -1496,5 +1510,61 @@ mod tests {
             layer_visibilities.get(&dbdir_layer.layer).unwrap(),
             LayerVisibilityHint::Visible
         ));
+    }
+
+    #[test]
+    fn test_layer_map_with_key_max() {
+        // Mock a layer map update sequence that could happen with gc-compaction.
+
+        let layer1 = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000014E8F08-00000000014E8F81".parse::<LayerName>().unwrap();
+        let layer2 = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000014E8F81-000000000153C459".parse::<LayerName>().unwrap();
+        let layer3 = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__000000000153C459-00000000016EDA11".parse::<LayerName>().unwrap();
+        // A special image layer that covers the entire keyspace
+        let layer4 = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016EDA10".parse::<LayerName>().unwrap();
+        let tenant_id = TenantId::generate();
+        let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+        let timeline_id = TimelineId::generate();
+        let layer1 = helper_layer_name_to_layer_desc(layer1, tenant_shard_id, timeline_id, 100);
+        let layer2 = helper_layer_name_to_layer_desc(layer2, tenant_shard_id, timeline_id, 100);
+        let layer3 = helper_layer_name_to_layer_desc(layer3, tenant_shard_id, timeline_id, 100);
+        let layer4 = helper_layer_name_to_layer_desc(layer4, tenant_shard_id, timeline_id, 100);
+
+        let mut layer_map = LayerMap::default();
+        let mut updates = layer_map.batch_update();
+        updates.insert_historic(layer1.clone());
+        updates.insert_historic(layer2.clone());
+        updates.insert_historic(layer3.clone());
+        updates.flush();
+
+        // Serach `000000067F0000000500000A380000000001` at LSN `0/1FB6439` in the layer map
+        let key = Key::from_hex("000000067F0000000500000A380000000001").unwrap();
+        let request_lsn = "0/1FB6439".parse::<Lsn>().unwrap();
+        let res = layer_map.search(key, Lsn(request_lsn.0 + 1)).unwrap();
+        assert_eq!(res.layer.key(), layer3.key());
+        let res = layer_map.search(key, res.lsn_floor).unwrap();
+        assert_eq!(res.layer.key(), layer2.key());
+        let res = layer_map.search(key, res.lsn_floor).unwrap();
+        assert_eq!(res.layer.key(), layer1.key());
+
+        // Vectored search
+        let res = layer_map.range_search(key..key.next(), Lsn(request_lsn.0 + 1));
+        assert_eq!(res.found.len(), 1);
+        assert_eq!(res.found.keys().next().unwrap().layer.key(), layer3.key());
+
+        let mut updates = layer_map.batch_update();
+        updates.remove_historic(&layer1);
+        updates.remove_historic(&layer2);
+        updates.remove_historic(&layer3);
+        updates.insert_historic(layer4.clone());
+        updates.flush();
+
+        // Search `000000067F0000000500000A380000000001` in the layer map
+        let layer = layer_map.search(key, Lsn(request_lsn.0 + 1)).unwrap();
+        assert_eq!(layer.layer.key(), layer4.key());
+
+        // Vectored search
+        let res = layer_map.range_search(key..key.next(), Lsn(request_lsn.0 + 1));
+        assert_eq!(res.found.len(), 1);
+        assert_eq!(res.found.keys().next().unwrap().layer.key(), layer4.key());
     }
 }
