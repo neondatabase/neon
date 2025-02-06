@@ -1690,7 +1690,7 @@ impl PageServerHandler {
         // to distinguish a misbehaving client (asking for old LSN) from a storage issue (data missing at a legitimate LSN).
         if request_lsn < **latest_gc_cutoff_lsn && !timeline.is_gc_blocked_by_lsn_lease_deadline() {
             let gc_info = &timeline.gc_info.read().unwrap();
-            if !gc_info.leases.contains_key(&request_lsn) {
+            if !gc_info.lsn_covered_by_lease(request_lsn) {
                 return Err(
                     PageStreamError::BadRequest(format!(
                         "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
