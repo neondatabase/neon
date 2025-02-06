@@ -1073,9 +1073,15 @@ impl Timeline {
         (history, gc_info.within_ancestor_pitr)
     }
 
-    /// Lock and get timeline's GC cutoff
+    /// Read timeline's GC cutoff: this is the LSN at which GC has started to happen
     pub(crate) fn get_latest_gc_cutoff_lsn(&self) -> RcuReadGuard<Lsn> {
         self.latest_gc_cutoff_lsn.read()
+    }
+
+    /// Read timeline's planned GC cutoff: this is the logical end of history that users
+    /// are allowed to read (based on configured PITR), even if physically we have more history.
+    pub(crate) fn get_gc_cutoff_lsn(&self) -> Lsn {
+        self.gc_info.read().unwrap().cutoffs.time
     }
 
     /// Look up given page version.
