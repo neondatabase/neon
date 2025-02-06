@@ -32,6 +32,7 @@ use utils::id::TimelineId;
 
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
+use crate::pgdatadir_mapping::DatadirModificationStats;
 use crate::task_mgr::TaskKind;
 use crate::tenant::layer_map::LayerMap;
 use crate::tenant::mgr::TenantSlot;
@@ -116,11 +117,38 @@ pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
+/// Measures layers visited per read (i.e. read amplification).
+///
+/// NB: for a batch, we count all visited layers towards each read. While the cost of layer visits
+/// are amortized across the batch, and some layers may not intersect with a given key, each visited
+/// layer contributes directly to the observed latency for every read in the batch, which is what we
+/// care about.
+pub(crate) static LAYERS_PER_READ: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_layers_per_read",
+        "Layers visited to serve a single read (read amplification). In a batch, all visited layers count towards every read.",
+        &["tenant_id", "shard_id", "timeline_id"],
+        // Low resolution to reduce cardinality.
+        vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static LAYERS_PER_READ_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
-        "pageserver_layers_visited_per_vectored_read_global",
-        "Average number of layers visited to reconstruct one key",
-        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+        "pageserver_layers_per_read_global",
+        "Layers visited to serve a single read (read amplification). In a batch, all visited layers count towards every read.",
+        vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static DELTAS_PER_READ_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
+    // We expect this to be low because of Postgres checkpoints. Let's see if that holds.
+    register_histogram!(
+        "pageserver_deltas_per_read_global",
+        "Number of delta pages applied to image page per read",
+        vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0],
     )
     .expect("failed to define a metric")
 });
@@ -2351,11 +2379,40 @@ pub(crate) struct WalIngestMetrics {
     pub(crate) records_observed: IntCounter,
     pub(crate) records_committed: IntCounter,
     pub(crate) records_filtered: IntCounter,
+    pub(crate) values_committed_metadata_images: IntCounter,
+    pub(crate) values_committed_metadata_deltas: IntCounter,
+    pub(crate) values_committed_data_images: IntCounter,
+    pub(crate) values_committed_data_deltas: IntCounter,
     pub(crate) gap_blocks_zeroed_on_rel_extend: IntCounter,
-    pub(crate) clear_vm_bits_unknown: IntCounterVec,
+}
+
+impl WalIngestMetrics {
+    pub(crate) fn inc_values_committed(&self, stats: &DatadirModificationStats) {
+        if stats.metadata_images > 0 {
+            self.values_committed_metadata_images
+                .inc_by(stats.metadata_images);
+        }
+        if stats.metadata_deltas > 0 {
+            self.values_committed_metadata_deltas
+                .inc_by(stats.metadata_deltas);
+        }
+        if stats.data_images > 0 {
+            self.values_committed_data_images.inc_by(stats.data_images);
+        }
+        if stats.data_deltas > 0 {
+            self.values_committed_data_deltas.inc_by(stats.data_deltas);
+        }
+    }
 }
 
 pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
+    let values_committed = register_int_counter_vec!(
+        "pageserver_wal_ingest_values_committed",
+        "Number of values committed to pageserver storage from WAL records",
+        &["class", "kind"],
+    )
+    .expect("failed to define a metric");
+
     WalIngestMetrics {
     bytes_received: register_int_counter!(
         "pageserver_wal_ingest_bytes_received",
@@ -2382,15 +2439,13 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
         "Number of WAL records filtered out due to sharding"
     )
     .expect("failed to define a metric"),
+    values_committed_metadata_images: values_committed.with_label_values(&["metadata", "image"]),
+    values_committed_metadata_deltas: values_committed.with_label_values(&["metadata", "delta"]),
+    values_committed_data_images: values_committed.with_label_values(&["data", "image"]),
+    values_committed_data_deltas: values_committed.with_label_values(&["data", "delta"]),
     gap_blocks_zeroed_on_rel_extend: register_int_counter!(
         "pageserver_gap_blocks_zeroed_on_rel_extend",
         "Total number of zero gap blocks written on relation extends"
-    )
-    .expect("failed to define a metric"),
-    clear_vm_bits_unknown: register_int_counter_vec!(
-        "pageserver_wal_ingest_clear_vm_bits_unknown",
-        "Number of ignored ClearVmBits operations due to unknown pages/relations",
-        &["entity"],
     )
     .expect("failed to define a metric"),
 }
@@ -2632,6 +2687,7 @@ pub(crate) struct TimelineMetrics {
     pub disk_consistent_lsn_gauge: IntGauge,
     pub pitr_history_size: UIntGauge,
     pub archival_size: UIntGauge,
+    pub layers_per_read: Histogram,
     pub standby_horizon_gauge: IntGauge,
     pub resident_physical_size_gauge: UIntGauge,
     pub visible_physical_size_gauge: UIntGauge,
@@ -2729,6 +2785,10 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
+        let layers_per_read = LAYERS_PER_READ
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
         let standby_horizon_gauge = STANDBY_HORIZON
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -2793,6 +2853,7 @@ impl TimelineMetrics {
             disk_consistent_lsn_gauge,
             pitr_history_size,
             archival_size,
+            layers_per_read,
             standby_horizon_gauge,
             resident_physical_size_gauge,
             visible_physical_size_gauge,
@@ -2961,6 +3022,8 @@ impl TimelineMetrics {
                 let _ = TIMELINE_LAYER_COUNT.remove_label_values(&labels);
             }
         }
+
+        let _ = LAYERS_PER_READ.remove_label_values(&[tenant_id, shard_id, timeline_id]);
 
         let _ = EVICTIONS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = AUX_FILE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
@@ -3912,7 +3975,8 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
 
     // histograms
     [
-        &VEC_READ_NUM_LAYERS_VISITED,
+        &LAYERS_PER_READ_GLOBAL,
+        &DELTAS_PER_READ_GLOBAL,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,

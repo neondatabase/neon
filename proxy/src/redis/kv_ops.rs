@@ -1,7 +1,6 @@
 use redis::{AsyncCommands, ToRedisArgs};
 
 use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
-
 use crate::rate_limiter::{GlobalRateLimiter, RateBucketInfo};
 
 pub struct RedisKVClient {

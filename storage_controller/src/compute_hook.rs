@@ -225,7 +225,7 @@ pub(crate) enum NotifyError {
     // We shutdown while sending
     #[error("Shutting down")]
     ShuttingDown,
-    // A response indicates we will never succeed, such as 400 or 404
+    // A response indicates we will never succeed, such as 400 or 403
     #[error("Non-retryable error {0}")]
     Fatal(StatusCode),
 
