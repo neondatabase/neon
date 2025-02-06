@@ -31,7 +31,7 @@ begin
     raise notice 'neon event trigger is executed for %', current_user;
 end;
 $$;
-WARNING:  Skipping event trigger 40ac for superuser
+WARNING:  Skipping event trigger for superuser
 create event trigger on_ddl2 on ddl_command_end
 execute procedure neon_proc();
 \c neondb neon_admin
@@ -63,8 +63,8 @@ NOTICE:  neondb secdef event trigger is executed for neon_admin
 \c regression cloud_admin
 -- Check that event triggers are not fired for superuser
 create table t2(x integer);
-WARNING:  Skipping event trigger 40ac for superuser
-WARNING:  Skipping event trigger 40b3 for superuser
+WARNING:  Skipping event trigger for superuser
+WARNING:  Skipping event trigger for superuser
 -- Now enable event triggers execution for superuser
 set neon.enable_event_triggers_for_superuser=on;
 -- Check that even trigger is fired in this case
@@ -74,8 +74,8 @@ NOTICE:  neon event trigger is executed for cloud_admin
 \c neondb cloud_admin
 -- Check that event triggers are not fired for superuser
 create table t4(x integer);
-WARNING:  Skipping event trigger 40b5 for superuser
-WARNING:  Skipping event trigger 40b6 for superuser
+WARNING:  Skipping event trigger for superuser
+WARNING:  Skipping event trigger for superuser
 -- Now enable event triggers execution for superuser
 set neon.enable_event_triggers_for_superuser=on;
 -- Check that even trigger is fired in this case

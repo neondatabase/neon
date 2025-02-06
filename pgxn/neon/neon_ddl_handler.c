@@ -840,7 +840,7 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 		/* It can be other needs_fmgr_hook which cause our hook to be invoked for non-trigger function,
 		 * so recheck that is is trigger function */
 	{
-		ereport(WARNING, (errmsg("Skipping event trigger %x for superuser", flinfo->fn_oid), errbacktrace()));
+		elog(WARNING, "Skipping event trigger for superuser");
 		/* we can't skip execution directly inside the fmgr_hook so instead we change the event trigger function to a noop function */
 		force_noop(flinfo);
 	}
