@@ -4963,12 +4963,17 @@ def check_restored_datadir_content(
     restored_files = list_files_to_compare(restored_dir_path)
 
     if pgdata_files != restored_files:
-        # filter pg_xact and multixact files which are downloaded on demand
-        pgdata_files = [
-            f
-            for f in pgdata_files
-            if not f.startswith("pg_xact") and not f.startswith("pg_multixact")
-        ]
+
+        def ignored_file(filename: str) -> bool:
+            # filter pg_xact and multixact files which are downloaded on demand, and pg_notify files which are not expected to match
+            return (
+                filename.startswith("pg_xact")
+                or filename.startswith("pg_multixact")
+                or filename.startswith("pg_notify")
+            )
+
+        pgdata_files = [f for f in pgdata_files if not ignored_file(f)]
+        restored_files = [f for f in restored_files if not ignored_file(f)]
 
     if ignored_files:
         pgdata_files = [f for f in pgdata_files if f not in ignored_files]
