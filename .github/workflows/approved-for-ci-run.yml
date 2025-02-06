@@ -97,6 +97,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          token: ${{ secrets.CI_ACCESS_TOKEN }}
 
       - run: git checkout -b "${BRANCH}"
 
