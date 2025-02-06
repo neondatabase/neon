@@ -2271,53 +2271,58 @@ pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics
     },
 );
 
-pub struct BackgroundLoopSemaphoreMetricsAcquireRecord<'a> {
-    metrics: &'a BackgroundLoopSemaphoreMetrics,
-    task: BackgroundLoopKind,
-    _counter_guard: metrics::IntCounterPairGuard,
-    start: Instant,
+impl BackgroundLoopSemaphoreMetrics {
+    /// Starts recording semaphore metrics. Call `acquired()` on the returned recorder when the
+    /// semaphore is acquired, and drop it when the task completes or is cancelled.
+    pub(crate) fn record(
+        &self,
+        task: BackgroundLoopKind,
+    ) -> BackgroundLoopSemaphoreMetricsRecorder {
+        BackgroundLoopSemaphoreMetricsRecorder::start(self, task)
+    }
 }
 
-impl Drop for BackgroundLoopSemaphoreMetricsAcquireRecord<'_> {
-    fn drop(&mut self) {
-        let elapsed = self.start.elapsed().as_secs_f64();
-        self.metrics.durations[self.task].inc_by(elapsed);
-        self.metrics.waiting_tasks[self.task].inc();
+/// Records metrics for a background task.
+pub struct BackgroundLoopSemaphoreMetricsRecorder<'a> {
+    metrics: &'a BackgroundLoopSemaphoreMetrics,
+    task: BackgroundLoopKind,
+    start: Instant,
+    wait_counter_guard: Option<metrics::IntCounterPairGuard>,
+}
+
+impl<'a> BackgroundLoopSemaphoreMetricsRecorder<'a> {
+    /// Starts recording semaphore metrics, by recording wait time and incrementing
+    /// `wait_start_count` and `waiting_tasks`.
+    fn start(metrics: &'a BackgroundLoopSemaphoreMetrics, task: BackgroundLoopKind) -> Self {
+        metrics.waiting_tasks[task].inc();
+        Self {
+            metrics,
+            task,
+            start: Instant::now(),
+            wait_counter_guard: Some(metrics.counters[task].guard()),
+        }
+    }
+
+    /// Signals that the semaphore has been acquired, and updates relevant metrics.
+    pub fn acquired(&mut self) {
+        self.wait_counter_guard.take().expect("already acquired");
+        self.metrics.durations[self.task].inc_by(self.start.elapsed().as_secs_f64());
+        self.metrics.waiting_tasks[self.task].dec();
         self.metrics.running_tasks[self.task].inc();
     }
 }
 
-pub struct BackgroundLoopSemaphoreMetricsRunningRecord<'a> {
-    metrics: &'a BackgroundLoopSemaphoreMetrics,
-    task: BackgroundLoopKind,
-}
-
-impl Drop for BackgroundLoopSemaphoreMetricsRunningRecord<'_> {
+impl Drop for BackgroundLoopSemaphoreMetricsRecorder<'_> {
+    /// The task either completed or was cancelled.
     fn drop(&mut self) {
-        self.metrics.running_tasks[self.task].dec();
-    }
-}
-
-impl BackgroundLoopSemaphoreMetrics {
-    pub(crate) fn measure(
-        &self,
-        task: BackgroundLoopKind,
-    ) -> (
-        BackgroundLoopSemaphoreMetricsAcquireRecord,
-        BackgroundLoopSemaphoreMetricsRunningRecord,
-    ) {
-        let acquire_record = BackgroundLoopSemaphoreMetricsAcquireRecord {
-            metrics: self,
-            task,
-            _counter_guard: self.counters[task].guard(),
-            start: Instant::now(),
-        };
-        self.waiting_tasks[task].inc();
-        let running_record = BackgroundLoopSemaphoreMetricsRunningRecord {
-            metrics: self,
-            task,
-        };
-        (acquire_record, running_record)
+        if self.wait_counter_guard.take().is_some() {
+            // Waiting.
+            self.metrics.durations[self.task].inc_by(self.start.elapsed().as_secs_f64());
+            self.metrics.waiting_tasks[self.task].dec();
+        } else {
+            // Running.
+            self.metrics.running_tasks[self.task].dec();
+        }
     }
 }
 
