@@ -233,6 +233,7 @@ extern char *neon_timeline;
 extern char *neon_tenant;
 extern int32 max_cluster_size;
 extern int  neon_protocol_version;
+extern bool lfc_store_prefetch_result;
 
 extern shardno_t get_shard_number(BufferTag* tag);
 
@@ -301,8 +302,10 @@ extern bool lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum,
 							   BlockNumber blkno);
 extern int lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum,
 							   BlockNumber blkno, int nblocks, bits8 *bitmap);
-extern void lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno);
 extern void lfc_init(void);
+extern bool lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
+						 const void* buffer, XLogRecPtr lsn);
+
 
 static inline bool
 lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
