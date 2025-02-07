@@ -474,6 +474,14 @@ HISTORIC_DATA_SETS = [
         PgVersion.V16,
         "https://neon-github-public-dev.s3.eu-central-1.amazonaws.com/compatibility-data-snapshots/2024-07-18-pgv16.tar.zst",
     ),
+    # This dataset created on a pageserver running modern code at time of capture, but configured with no generation.  This
+    # is our regression test that we can load data written without generations in layer file names & indices
+    HistoricDataSet(
+        "2025-02-07-nogenerations",
+        TenantId("e1411ca6562d6ff62419f693a5695d67"),
+        PgVersion.V17,
+        "https://neon-github-public-dev.s3.eu-central-1.amazonaws.com/compatibility-data-snapshots/2025-02-07-pgv17-nogenerations.tar.zst",
+    ),
 ]
 
 
