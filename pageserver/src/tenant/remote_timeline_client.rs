@@ -517,7 +517,7 @@ impl RemoteTimelineClient {
             if let Ok(queue) = queue_locked.initialized_mut() {
                 let blocked_deletions = std::mem::take(&mut queue.blocked_deletions);
                 for d in blocked_deletions {
-                    if let Err(e) = self.deletion_queue_client.push_layers_sync(
+                    if let Err(e) = self.deletion_queue_client.push_layers(
                         self.tenant_shard_id,
                         self.timeline_id,
                         self.generation,
@@ -2151,7 +2151,6 @@ impl RemoteTimelineClient {
                                 self.generation,
                                 delete.layers.clone(),
                             )
-                            .await
                             .map_err(|e| anyhow::anyhow!(e))
                     }
                 }
