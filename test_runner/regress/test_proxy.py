@@ -57,9 +57,7 @@ def test_proxy_select_1(static_proxy: NeonProxy):
     assert out[0][0] == 1
 
     # with SNI
-    out = static_proxy.safe_psql(
-        "select 42", host="generic-project-name.local.neon.build"
-    )
+    out = static_proxy.safe_psql("select 42", host="generic-project-name.local.neon.build")
     assert out[0][0] == 42
 
 

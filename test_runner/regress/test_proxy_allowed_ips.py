@@ -46,9 +46,7 @@ async def test_proxy_psql_allowed_ips(static_proxy: NeonProxy, vanilla_pg: Vanil
     assert out[0][0] == 1
 
     # with SNI
-    out = static_proxy.safe_psql(
-        query="select 1", host="generic-project.local.neon.build"
-    )
+    out = static_proxy.safe_psql(query="select 1", host="generic-project.local.neon.build")
     assert out[0][0] == 1
 
 
