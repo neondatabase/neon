@@ -1718,10 +1718,10 @@ impl Timeline {
         let prepare = async move {
             let guard = self.compaction_lock.lock().await;
 
-            let permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
-                ctx,
+            let permit = super::tasks::acquire_concurrency_permit(
                 BackgroundLoopKind::Compaction,
                 self.conf.use_compaction_semaphore,
+                ctx,
             )
             .await;
 
@@ -3057,10 +3057,10 @@ impl Timeline {
             let self_ref = &self;
             let skip_concurrency_limiter = &skip_concurrency_limiter;
             async move {
-                let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
-                    background_ctx,
+                let wait_for_permit = super::tasks::acquire_concurrency_permit(
                     BackgroundLoopKind::InitialLogicalSizeCalculation,
                     false,
+                    background_ctx,
                 );
 
                 use crate::metrics::initial_logical_size::StartCircumstances;
