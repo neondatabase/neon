@@ -1,47 +1,56 @@
 //! This module contains functions to serve per-tenant background processes,
 //! such as compaction and GC
 
+use std::cmp::max;
 use std::ops::ControlFlow;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use once_cell::sync::Lazy;
+use rand::Rng;
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
+use tracing::*;
+
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
-use crate::task_mgr;
-use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
+use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS};
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::compaction::CompactionOutcome;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
-use once_cell::sync::Lazy;
-use rand::Rng;
-use tokio_util::sync::CancellationToken;
-use tracing::*;
 use utils::rate_limit::RateLimit;
 use utils::{backoff, completion, pausable_failpoint};
 
-static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
-    once_cell::sync::Lazy::new(|| {
-        let total_threads = task_mgr::TOKIO_WORKER_THREADS.get();
-        let permits = usize::max(
-            1,
-            // while a lot of the work is done on spawn_blocking, we still do
-            // repartitioning in the async context. this should give leave us some workers
-            // unblocked to be blocked on other work, hopefully easing any outside visible
-            // effects of restarts.
-            //
-            // 6/8 is a guess; previously we ran with unlimited 8 and more from
-            // spawn_blocking.
-            (total_threads * 3).checked_div(4).unwrap_or(0),
-        );
-        assert_ne!(permits, 0, "we will not be adding in permits later");
-        assert!(
-            permits < total_threads,
-            "need threads avail for shorter work"
-        );
-        tokio::sync::Semaphore::new(permits)
-    });
+/// Semaphore limiting concurrent background tasks (across all tenants).
+///
+/// We use 3/4 Tokio threads, to avoid blocking all threads in case we do any CPU-heavy work.
+static CONCURRENT_BACKGROUND_TASKS: Lazy<Semaphore> = Lazy::new(|| {
+    let total_threads = TOKIO_WORKER_THREADS.get();
+    let permits = max(1, (total_threads * 3).checked_div(4).unwrap_or(0));
+    assert_ne!(permits, 0, "we will not be adding in permits later");
+    assert!(permits < total_threads, "need threads for other work");
+    Semaphore::new(permits)
+});
+
+/// Semaphore limiting concurrent compaction tasks (across all tenants). This is disabled by
+/// default, see `use_compaction_semaphore`.
+///
+/// We use 3/4 Tokio threads, to avoid blocking all threads in case we do any CPU-heavy work.
+///
+/// This is a separate semaphore from background tasks, because L0 compaction needs to be responsive
+/// to avoid high read amp during heavy write workloads.
+///
+/// TODO: split image compaction and L0 compaction, and move image compaction to background tasks.
+/// Only L0 compaction needs to be responsive, and it shouldn't block on image compaction.
+static CONCURRENT_COMPACTION_TASKS: Lazy<Semaphore> = Lazy::new(|| {
+    let total_threads = TOKIO_WORKER_THREADS.get();
+    let permits = max(1, (total_threads * 3).checked_div(4).unwrap_or(0));
+    assert_ne!(permits, 0, "we will not be adding in permits later");
+    assert!(permits < total_threads, "need threads for other work");
+    Semaphore::new(permits)
+});
 
 #[derive(
     Debug,
@@ -73,8 +82,9 @@ pub struct BackgroundLoopSemaphorePermit<'a> {
 
 /// Cancellation safe.
 pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
-    loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
+    loop_kind: BackgroundLoopKind,
+    use_compaction_semaphore: bool,
 ) -> BackgroundLoopSemaphorePermit<'static> {
     // TODO: use a lower threshold and remove the pacer once we resolve some blockage.
     const WARN_THRESHOLD: Duration = Duration::from_secs(600);
@@ -88,10 +98,13 @@ pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
     }
 
     // TODO: assert that we run on BACKGROUND_RUNTIME; requires tokio_unstable Handle::id();
-    let permit = CONCURRENT_BACKGROUND_TASKS
-        .acquire()
-        .await
-        .expect("should never close");
+    let permit = if loop_kind == BackgroundLoopKind::Compaction && use_compaction_semaphore {
+        CONCURRENT_COMPACTION_TASKS.acquire().await
+    } else {
+        assert!(!use_compaction_semaphore);
+        CONCURRENT_BACKGROUND_TASKS.acquire().await
+    }
+    .expect("should never close");
 
     let waited = recorder.acquired();
     if waited >= WARN_THRESHOLD {

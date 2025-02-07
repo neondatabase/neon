@@ -140,6 +140,10 @@ pub struct PageServerConf {
     /// not terrible.
     pub background_task_maximum_delay: Duration,
 
+    /// If true, use a separate semaphore for compaction tasks instead of the common background task
+    /// semaphore. Defaults to false.
+    pub use_compaction_semaphore: bool,
+
     pub control_plane_api: Option<Url>,
 
     /// JWT token for use with the control plane API.
@@ -332,6 +336,7 @@ impl PageServerConf {
             test_remote_failures,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
+            use_compaction_semaphore,
             control_plane_api,
             control_plane_api_token,
             control_plane_emergency_mode,
@@ -385,6 +390,7 @@ impl PageServerConf {
             test_remote_failures,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
+            use_compaction_semaphore,
             control_plane_api,
             control_plane_emergency_mode,
             heatmap_upload_concurrency,

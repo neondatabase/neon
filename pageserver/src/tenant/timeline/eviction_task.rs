@@ -335,8 +335,9 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> ControlFlow<(), BackgroundLoopSemaphorePermit<'static>> {
         let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
-            BackgroundLoopKind::Eviction,
             ctx,
+            BackgroundLoopKind::Eviction,
+            false,
         );
 
         tokio::select! {
