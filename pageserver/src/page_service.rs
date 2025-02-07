@@ -1087,7 +1087,7 @@ impl PageServerHandler {
                                 info!("shutdown request received in page handler");
                                 return Err(QueryError::Shutdown)
                             }
-                            res = flushing_timer.measure(flush_fut) => {
+                            res = flush_fut => {
                                 res?;
                             }
                         }
