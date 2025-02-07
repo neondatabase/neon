@@ -1327,10 +1327,10 @@ impl SmgrOpFlushInProgress {
         let mut observe_guard = scopeguard::guard(
             || {
                 let elapsed = now - self.base;
-                self.global_micros
-                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-                self.per_timeline_micros
-                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
+                // self.global_micros
+                //     .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
+                // self.per_timeline_micros
+                //     .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
                 self.base = now;
             },
             |mut observe| {
