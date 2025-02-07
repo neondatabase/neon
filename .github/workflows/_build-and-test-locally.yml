@@ -287,6 +287,7 @@ jobs:
           DATABASE_URL: postgresql://localhost:1235/storage_controller
           POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
         run: |
+          export ASAN_OPTIONS=detect_leaks=0
           /tmp/neon/bin/neon_local init
           /tmp/neon/bin/neon_local storage_controller start
 
