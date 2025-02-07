@@ -13,12 +13,12 @@
 # postgres -D data -p3000
 #
 # ## Launch proxy with WSS enabled:
-# openssl req -new -x509 -days 365 -nodes -text -out server.crt -keyout server.key -subj '/CN=*.neon.localtest.me'
+# openssl req -new -x509 -days 365 -nodes -text -out server.crt -keyout server.key -subj '/CN=*.neon.local.neon.build'
 # ./target/debug/proxy --wss 127.0.0.1:40433 --http 127.0.0.1:28080 --mgmt 127.0.0.1:9099 --proxy 127.0.0.1:4433 --tls-key server.key --tls-cert server.crt --auth-backend postgres
 #
 # ## Launch the tunnel:
 #
-# poetry run ./test_runner/websocket_tunnel.py --ws-port 40433 --ws-url "wss://ep-test.neon.localtest.me"
+# poetry run ./test_runner/websocket_tunnel.py --ws-port 40433 --ws-url "wss://ep-test.neon.local.neon.build"
 #
 # ## Now you can connect with psql:
 # psql "postgresql://heikki@localhost:40433/postgres"

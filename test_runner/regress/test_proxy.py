@@ -57,7 +57,9 @@ def test_proxy_select_1(static_proxy: NeonProxy):
     assert out[0][0] == 1
 
     # with SNI
-    out = static_proxy.safe_psql("select 42", host="generic-project-name.localtest.me")
+    out = static_proxy.safe_psql(
+        "select 42", host="generic-project-name.local.neon.build"
+    )
     assert out[0][0] == 42
 
 
@@ -234,7 +236,7 @@ def test_sql_over_http_serverless_driver(static_proxy: NeonProxy):
 
     connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
     response = requests.post(
-        f"https://api.localtest.me:{static_proxy.external_http_port}/sql",
+        f"https://api.local.neon.build:{static_proxy.external_http_port}/sql",
         data=json.dumps({"query": "select 42 as answer", "params": []}),
         headers={"Content-Type": "application/sql", "Neon-Connection-String": connstr},
         verify=str(static_proxy.test_output_dir / "proxy.crt"),
