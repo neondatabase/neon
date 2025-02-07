@@ -585,7 +585,7 @@ impl DeletionQueue {
     /// we don't spawn those inside new() so that the caller can use their runtime/spans of choice.
     pub fn new<C>(
         remote_storage: GenericRemoteStorage,
-        controller_upcall_client: Option<C>,
+        controller_upcall_client: C,
         conf: &'static PageServerConf,
     ) -> (Self, DeletionQueueWorkers<C>)
     where
