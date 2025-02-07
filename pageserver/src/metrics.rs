@@ -1223,8 +1223,7 @@ pub(crate) mod virtual_file_io_engine {
     });
 }
 
-pub(crate) struct SmgrOpTimer(Option<SmgrOpTimerInner>);
-pub(crate) struct SmgrOpTimerInner {
+pub(crate) struct SmgrOpTimer {
     global_latency_histo: Histogram,
 
     // Optional because not all op types are tracked per-timeline
@@ -1240,19 +1239,13 @@ impl SmgrOpTimer {
         let Some(throttle) = throttle else {
             return;
         };
-        let inner = self.0.as_mut().expect("other public methods consume self");
-        inner.throttled += *throttle;
+        self.throttled += *throttle;
     }
+}
 
-    pub(crate) fn observe_smgr_op_completion_and_start_flushing(mut self) {
-        let (flush_start, inner) = self
-            .smgr_op_end()
-            .expect("this method consume self, and the only other caller is drop handler");
-    }
-
-    /// Returns `None`` if this method has already been called, `Some` otherwise.
-    fn smgr_op_end(&mut self) -> Option<(Instant, SmgrOpTimerInner)> {
-        let inner = self.0.take()?;
+impl Drop for SmgrOpTimer {
+    fn drop(&mut self) {
+        let inner = self;
 
         let now = Instant::now();
         let elapsed = now - inner.start;
@@ -1282,14 +1275,6 @@ impl SmgrOpTimer {
         if let Some(per_timeline_getpage_histo) = &inner.per_timeline_latency_histo {
             per_timeline_getpage_histo.observe(elapsed);
         }
-
-        Some((now, inner))
-    }
-}
-
-impl Drop for SmgrOpTimer {
-    fn drop(&mut self) {
-        self.smgr_op_end();
     }
 }
 
@@ -1571,13 +1556,13 @@ impl SmgrQueryTimePerTimeline {
             None
         };
 
-        SmgrOpTimer(Some(SmgrOpTimerInner {
+        SmgrOpTimer {
             global_latency_histo: self.global_latency[op as usize].clone(),
             per_timeline_latency_histo,
             start: started_at,
             op,
             throttled: Duration::ZERO,
-        }))
+        }
     }
 
     pub(crate) fn observe_getpage_batch_start(&self, batch_size: usize) {
