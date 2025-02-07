@@ -1230,9 +1230,6 @@ pub(crate) struct SmgrOpTimerInner {
     // Optional because not all op types are tracked per-timeline
     per_timeline_latency_histo: Option<Histogram>,
 
-    global_flush_in_progress_micros: IntCounter,
-    per_timeline_flush_in_progress_micros: IntCounter,
-
     start: Instant,
     throttled: Duration,
     op: SmgrQueryType,
@@ -1580,10 +1577,6 @@ impl SmgrQueryTimePerTimeline {
             start: started_at,
             op,
             throttled: Duration::ZERO,
-            global_flush_in_progress_micros: self.global_flush_in_progress_micros.clone(),
-            per_timeline_flush_in_progress_micros: self
-                .per_timeline_flush_in_progress_micros
-                .clone(),
         }))
     }
 
