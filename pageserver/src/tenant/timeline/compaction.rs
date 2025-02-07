@@ -2238,8 +2238,11 @@ impl Timeline {
             split_key_ranges.push((start, end));
         }
         split_key_ranges.sort();
-        let guard = self.layers.read().await;
-        let layer_map = guard.layer_map()?;
+        let all_layers = {
+            let guard = self.layers.read().await;
+            let layer_map = guard.layer_map()?;
+            layer_map.iter_historic_layers().collect_vec()
+        };
         let mut current_start = None;
         let ranges_num = split_key_ranges.len();
         for (idx, (start, end)) in split_key_ranges.into_iter().enumerate() {
@@ -2251,14 +2254,23 @@ impl Timeline {
                 // We have already processed this partition.
                 continue;
             }
-            let res = layer_map.range_search(start..end, compact_below_lsn);
-            let total_size = res.found.keys().map(|x| x.layer.file_size()).sum::<u64>();
+            let overlapping_layers = {
+                let mut desc = Vec::new();
+                for layer in all_layers.iter() {
+                    if overlaps_with(&layer.get_key_range(), &(start..end))
+                        && layer.get_lsn_range().start <= compact_below_lsn
+                    {
+                        desc.push(layer.clone());
+                    }
+                }
+                desc
+            };
+            let total_size = overlapping_layers.iter().map(|x| x.file_size).sum::<u64>();
             if total_size > sub_compaction_max_job_size_mb * 1024 * 1024 || ranges_num == idx + 1 {
                 // Try to extend the compaction range so that we include at least one full layer file.
-                let extended_end = res
-                    .found
-                    .keys()
-                    .map(|layer| layer.layer.key_range.end)
+                let extended_end = overlapping_layers
+                    .iter()
+                    .map(|layer| layer.key_range.end)
                     .min();
                 // It is possible that the search range does not contain any layer files when we reach the end of the loop.
                 // In this case, we simply use the specified key range end.
@@ -2285,7 +2297,6 @@ impl Timeline {
                 current_start = Some(end);
             }
         }
-        drop(guard);
         Ok(compact_jobs)
     }
 
