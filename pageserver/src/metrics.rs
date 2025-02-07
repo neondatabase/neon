@@ -1337,14 +1337,7 @@ impl SmgrOpFlushInProgress {
             },
         );
 
-        loop {
-            match tokio::time::timeout(Duration::from_secs(10), &mut fut).await {
-                Ok(v) => return v,
-                Err(_timeout) => {
-                    (*observe_guard)();
-                }
-            }
-        }
+        fut.await
     }
 }
 
