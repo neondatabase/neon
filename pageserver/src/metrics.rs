@@ -1320,30 +1320,31 @@ impl SmgrOpFlushInProgress {
         let mut fut = std::pin::pin!(fut);
 
         let now = Instant::now();
+        // Whenever observe_guard gets called, or dropped,
+        // it adds the time elapsed since its last call to metrics.
+        // Last call is tracked in `now`.
+        let mut observe_guard = scopeguard::guard(
+            || {
+                let elapsed = now - self.base;
+                // self.global_micros
+                //     .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
+                // self.per_timeline_micros
+                //     .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
+                self.base = now;
+            },
+            |mut observe| {
+                observe();
+            },
+        );
 
-        let v = loop {
+        loop {
             match tokio::time::timeout(Duration::from_secs(10), &mut fut).await {
-                Ok(v) => break v,
+                Ok(v) => return v,
                 Err(_timeout) => {
-                    let elapsed = now - self.base;
-                    self.global_micros
-                        .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-                    self.per_timeline_micros
-                        .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-                    self.base = now;
-                    /* bug with `now` not renewing isn't fixed */
+                    (*observe_guard)();
                 }
             }
-        };
-
-        let elapsed = now - self.base;
-        self.global_micros
-            .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-        self.per_timeline_micros
-            .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-        self.base = now;
-
-        v
+        }
     }
 }
 
