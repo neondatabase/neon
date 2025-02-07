@@ -913,8 +913,9 @@ impl PageServerHandler {
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
         // invoke handler function
-        let (handler_results, span): (
+        let (handler_results, span, shard): (
             Vec<Result<(PagestreamBeMessage, SmgrOpTimer), PageStreamError>>,
+            _,
             _,
         ) = match batch {
             BatchedFeMessage::Exists {
@@ -931,6 +932,7 @@ impl PageServerHandler {
                         .await
                         .map(|msg| (msg, timer))],
                     span,
+                    Some(shard),
                 )
             }
             BatchedFeMessage::Nblocks {
@@ -947,6 +949,7 @@ impl PageServerHandler {
                         .await
                         .map(|msg| (msg, timer))],
                     span,
+                    Some(shard),
                 )
             }
             BatchedFeMessage::GetPage {
@@ -973,6 +976,7 @@ impl PageServerHandler {
                         res
                     },
                     span,
+                    Some(shard),
                 )
             }
             BatchedFeMessage::DbSize {
@@ -989,6 +993,7 @@ impl PageServerHandler {
                         .await
                         .map(|msg| (msg, timer))],
                     span,
+                    Some(shard),
                 )
             }
             BatchedFeMessage::GetSlruSegment {
@@ -1005,12 +1010,13 @@ impl PageServerHandler {
                         .await
                         .map(|msg| (msg, timer))],
                     span,
+                    Some(shard),
                 )
             }
             BatchedFeMessage::RespondError { span, error } => {
                 // We've already decided to respond with an error, so we don't need to
                 // call the handler.
-                (vec![Err(error)], span)
+                (vec![Err(error)], span, None)
             }
         };
 
