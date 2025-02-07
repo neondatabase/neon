@@ -150,7 +150,7 @@ pub struct PageServerConf {
     /// not terrible.
     pub background_task_maximum_delay: Duration,
 
-    pub control_plane_api: Option<Url>,
+    pub control_plane_api: Url,
 
     /// JWT token for use with the control plane API.
     pub control_plane_api_token: Option<SecretString>,
@@ -438,7 +438,8 @@ impl PageServerConf {
             test_remote_failures,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
-            control_plane_api,
+            control_plane_api: control_plane_api
+                .ok_or_else(|| anyhow::anyhow!("`control_plane_api` must be set"))?,
             control_plane_emergency_mode,
             heatmap_upload_concurrency,
             secondary_download_concurrency,

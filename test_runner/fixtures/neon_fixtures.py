@@ -1194,8 +1194,7 @@ class NeonEnv:
         else:
             cfg["broker"]["listen_addr"] = self.broker.listen_addr()
 
-        if self.control_plane_api is not None:
-            cfg["control_plane_api"] = self.control_plane_api
+        cfg["control_plane_api"] = self.control_plane_api
 
         if self.control_plane_hooks_api is not None:
             cfg["control_plane_hooks_api"] = self.control_plane_hooks_api
