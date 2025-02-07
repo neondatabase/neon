@@ -607,8 +607,7 @@ impl ProposerAcceptorMessage {
                 }
                 _ => bail!("unknown proposer-acceptor message tag: {}", tag),
             }
-        // TODO remove proto_version == 3 after converting all msgs
-        } else if proto_version == SK_PROTO_VERSION_2 || proto_version == SK_PROTO_VERSION_3 {
+        } else if proto_version == SK_PROTO_VERSION_2 {
             // xxx using Reader is inefficient but easy to work with bincode
             let mut stream = msg_bytes.reader();
             // u64 is here to avoid padding; it will be removed once we stop packing C structs into the wire as is
