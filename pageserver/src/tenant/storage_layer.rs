@@ -603,13 +603,6 @@ impl Drop for ValuesReconstructState {
 
 impl ValuesReconstructState {
     pub(crate) fn new(io_concurrency: IoConcurrency) -> Self {
-        Self::new_with_read_path(io_concurrency, None)
-    }
-
-    pub(crate) fn new_with_read_path(
-        io_concurrency: IoConcurrency,
-        read_path: Option<ReadPath>,
-    ) -> Self {
         Self {
             keys: HashMap::new(),
             keys_done: KeySpaceRandomAccum::new(),
@@ -618,7 +611,7 @@ impl ValuesReconstructState {
             delta_layers_visited: 0,
             io_concurrency,
             num_active_ios: Arc::new(AtomicUsize::new(0)),
-            read_path,
+            read_path: None,
         }
     }
 
@@ -718,15 +711,6 @@ impl ValuesReconstructState {
 pub(crate) enum LayerId {
     PersitentLayerId(PersistentLayerKey),
     InMemoryLayerId(InMemoryLayerFileId),
-}
-
-impl std::fmt::Display for LayerId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LayerId::PersitentLayerId(key) => write!(f, "{}", key),
-            LayerId::InMemoryLayerId(_) => write!(f, "<in-memory layer>"),
-        }
-    }
 }
 
 /// Uniquely identify a layer visit by the layer

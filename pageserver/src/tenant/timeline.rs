@@ -622,6 +622,8 @@ impl From<layer_manager::Shutdown> for GetVectoredError {
     }
 }
 
+/// A layer identifier when used in the [`ReadPath`] structure. This enum is for observability purposes
+/// only and not used by the "real read path".
 pub enum ReadPathLayerId {
     PersistentLayer(PersistentLayerKey),
     InMemoryLayer(Range<Lsn>),
@@ -652,7 +654,7 @@ impl ReadPath {
         }
     }
 
-    pub fn record_read_op(
+    pub fn record_layer_visit(
         &mut self,
         layer_to_read: &ReadableLayer,
         keyspace_to_read: &KeySpace,
@@ -3696,7 +3698,7 @@ impl Timeline {
 
             if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
                 if let Some(ref mut read_path) = reconstruct_state.read_path {
-                    read_path.record_read_op(&layer_to_read, &keyspace_to_read, &lsn_range);
+                    read_path.record_layer_visit(&layer_to_read, &keyspace_to_read, &lsn_range);
                 }
                 let next_cont_lsn = lsn_range.start;
                 layer_to_read
