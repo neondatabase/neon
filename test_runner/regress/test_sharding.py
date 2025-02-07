@@ -93,6 +93,7 @@ def test_sharding_smoke(
     sizes_before = get_sizes()
     workload.write_rows(256)
 
+    env.pageserver.http_client().timeline_checkpoint(tenant_id, timeline_b)
     # Test that we can read data back from a sharded tenant
     workload.validate()
 
