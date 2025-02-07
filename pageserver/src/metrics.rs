@@ -1253,9 +1253,6 @@ pub(crate) struct SmgrOpTimerInner {
     global_batch_wait_time: Histogram,
     per_timeline_batch_wait_time: Histogram,
 
-    global_flush_in_progress_micros: IntCounter,
-    per_timeline_flush_in_progress_micros: IntCounter,
-
     throttling: Arc<tenant_throttling::Pagestream>,
 
     timings: SmgrOpTimerState,
@@ -1366,20 +1363,18 @@ impl SmgrOpTimer {
     /// The first callers receives Some, subsequent ones None.
     ///
     /// See [`SmgrOpTimerState`] for more context.
-    pub(crate) fn observe_execution_end_flush_start(
-        &mut self,
-        at: Instant,
-    ) -> Option<SmgrOpFlushInProgress> {
+    pub(crate) fn observe_execution_end_flush_start(&mut self, at: Instant) {
         // NB: unlike the other observe_* methods, this one take()s.
         #[allow(clippy::question_mark)] // maintain similar code pattern.
         let Some(mut inner) = self.0.take() else {
-            return None;
+            // NB: this take() isn't needed anymore, maybe we can simplify
+            return;
         };
         let SmgrOpTimerState::Executing {
             execution_started_at,
         } = &inner.timings
         else {
-            return None;
+            return;
         };
         // update metrics
         let execution = at - *execution_started_at;
@@ -1394,34 +1389,7 @@ impl SmgrOpTimer {
 
         // state transition
         inner.timings = SmgrOpTimerState::Flushing;
-
-        // return the flush in progress object which
-        // will do the remaining metrics updates
-        let SmgrOpTimerInner {
-            global_flush_in_progress_micros,
-            per_timeline_flush_in_progress_micros,
-            ..
-        } = inner;
-        Some(SmgrOpFlushInProgress {
-            flush_started_at: at,
-            global_micros: global_flush_in_progress_micros,
-            per_timeline_micros: per_timeline_flush_in_progress_micros,
-        })
     }
-}
-
-/// The last stage of request processing is serializing and flushing the request
-/// into the TCP connection. We want to make slow flushes observable
-/// _while they are occuring_, so this struct provides a wrapper method [`Self::measure`]
-/// to periodically bump the metric.
-///
-/// If in the future we decide that we're not interested in live updates, we can
-/// add another `observe_*` method to [`SmgrOpTimer`], follow the existing pattern there,
-/// and remove this struct from the code base.
-pub(crate) struct SmgrOpFlushInProgress {
-    flush_started_at: Instant,
-    global_micros: IntCounter,
-    per_timeline_micros: IntCounter,
 }
 
 impl Drop for SmgrOpTimer {
@@ -1439,42 +1407,6 @@ impl Drop for SmgrOpTimer {
         self.observe_throttle_done(ThrottleResult::NotThrottled { end: now });
         self.observe_execution_start(now);
         self.observe_execution_end_flush_start(now);
-    }
-}
-
-impl SmgrOpFlushInProgress {
-    pub(crate) async fn measure<Fut, O>(mut self, mut fut: Fut) -> O
-    where
-        Fut: std::future::Future<Output = O>,
-    {
-        let mut fut = std::pin::pin!(fut);
-
-        // Whenever observe_guard gets called, or dropped,
-        // it adds the time elapsed since its last call to metrics.
-        // Last call is tracked in `now`.
-        let mut observe_guard = scopeguard::guard(
-            || {
-                let now = Instant::now();
-                let elapsed = now - self.flush_started_at;
-                self.global_micros
-                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-                self.per_timeline_micros
-                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-                self.flush_started_at = now;
-            },
-            |mut observe| {
-                observe();
-            },
-        );
-
-        loop {
-            match tokio::time::timeout(Duration::from_secs(10), &mut fut).await {
-                Ok(v) => return v,
-                Err(_timeout) => {
-                    (*observe_guard)();
-                }
-            }
-        }
     }
 }
 
@@ -1511,6 +1443,56 @@ pub(crate) struct SmgrQueryTimePerTimeline {
     global_batch_wait_time: Histogram,
     per_timeline_batch_wait_time: Histogram,
     throttling: Arc<tenant_throttling::Pagestream>,
+}
+
+impl SmgrQueryTimePerTimeline {
+    pub(crate) async fn record_flush_in_progress<Fut, O>(
+        shard: &crate::tenant::timeline::handle::WeakHandle<
+            crate::page_service::TenantManagerTypes,
+        >,
+        start_at: Instant,
+        mut fut: Fut,
+    ) -> O
+    where
+        Fut: std::future::Future<Output = O>,
+    {
+        let mut fut = std::pin::pin!(fut);
+
+        // Whenever observe_guard gets called, or dropped,
+        // it adds the time elapsed since its last call to metrics.
+        // Last call is tracked in `now`.
+        let mut base = start_at;
+        let mut observe_guard = scopeguard::guard(
+            || {
+                let Ok(upgraded) = shard.upgrade() else {
+                    return;
+                };
+                let now = Instant::now();
+                let elapsed = now - base;
+                upgraded
+                    .query_metrics
+                    .global_flush_in_progress_micros
+                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
+                upgraded
+                    .query_metrics
+                    .per_timeline_flush_in_progress_micros
+                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
+                base = now;
+            },
+            |mut observe| {
+                observe();
+            },
+        );
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(10), &mut fut).await {
+                Ok(v) => return v,
+                Err(_timeout) => {
+                    (*observe_guard)();
+                }
+            }
+        }
+    }
 }
 
 static SMGR_QUERY_STARTED_GLOBAL: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -1797,10 +1779,6 @@ impl SmgrQueryTimePerTimeline {
         SmgrOpTimer(Some(SmgrOpTimerInner {
             global_execution_latency_histo: self.global_latency[op as usize].clone(),
             per_timeline_execution_latency_histo: per_timeline_latency_histo,
-            global_flush_in_progress_micros: self.global_flush_in_progress_micros.clone(),
-            per_timeline_flush_in_progress_micros: self
-                .per_timeline_flush_in_progress_micros
-                .clone(),
             global_batch_wait_time: self.global_batch_wait_time.clone(),
             per_timeline_batch_wait_time: self.per_timeline_batch_wait_time.clone(),
             throttling: self.throttling.clone(),

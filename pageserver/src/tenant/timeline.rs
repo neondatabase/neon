@@ -326,7 +326,7 @@ pub struct Timeline {
 
     // `Timeline` doesn't write these metrics itself, but it manages the lifetime.  Code
     // in `crate::page_service` writes these metrics.
-    pub(crate) query_metrics: crate::metrics::SmgrQueryTimePerTimeline,
+    pub(crate) query_metrics: Arc<crate::metrics::SmgrQueryTimePerTimeline>,
 
     directory_metrics: [AtomicU64; DirectoryKind::KINDS_NUM],
 
@@ -2517,11 +2517,11 @@ impl Timeline {
 
                 metrics,
 
-                query_metrics: crate::metrics::SmgrQueryTimePerTimeline::new(
+                query_metrics: Arc::new(crate::metrics::SmgrQueryTimePerTimeline::new(
                     &tenant_shard_id,
                     &timeline_id,
                     resources.pagestream_throttle_metrics,
-                ),
+                )),
 
                 directory_metrics: array::from_fn(|_| AtomicU64::new(0)),
 

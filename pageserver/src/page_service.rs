@@ -1063,8 +1063,9 @@ impl PageServerHandler {
         };
 
         // invoke handler function
-        let (handler_results, span): (
+        let (handler_results, span, shard): (
             Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>>,
+            _,
             _,
         ) = match batch {
             BatchedFeMessage::Exists {
@@ -1082,6 +1083,7 @@ impl PageServerHandler {
                         .map(|msg| (msg, timer))
                         .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
                     span,
+                    Some(shard),
                 )
             }
             BatchedFeMessage::Nblocks {
@@ -1099,6 +1101,7 @@ impl PageServerHandler {
                         .map(|msg| (msg, timer))
                         .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
                     span,
+                    Some(shard),
                 )
             }
             BatchedFeMessage::GetPage {
@@ -1126,6 +1129,7 @@ impl PageServerHandler {
                         res
                     },
                     span,
+                    Some(shard),
                 )
             }
             BatchedFeMessage::DbSize {
@@ -1143,6 +1147,7 @@ impl PageServerHandler {
                         .map(|msg| (msg, timer))
                         .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
                     span,
+                    Some(shard),
                 )
             }
             BatchedFeMessage::GetSlruSegment {
@@ -1160,6 +1165,7 @@ impl PageServerHandler {
                         .map(|msg| (msg, timer))
                         .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
                     span,
+                    Some(shard),
                 )
             }
             #[cfg(feature = "testing")]
@@ -1181,12 +1187,13 @@ impl PageServerHandler {
                         res
                     },
                     span,
+                    Some(shard),
                 )
             }
             BatchedFeMessage::RespondError { span, error } => {
                 // We've already decided to respond with an error, so we don't need to
                 // call the handler.
-                (vec![Err(error)], span)
+                (vec![Err(error)], span, None)
             }
         };
 
@@ -1194,7 +1201,7 @@ impl PageServerHandler {
         // Some handler errors cause exit from pagestream protocol.
         // Other handler errors are sent back as an error message and we stay in pagestream protocol.
         for handler_result in handler_results {
-            let (response_msg, timer) = match handler_result {
+            let (response_msg, mut timer) = match handler_result {
                 Err(e) => match &e.err {
                     PageStreamError::Shutdown => {
                         // If we fail to fulfil a request during shutdown, which may be _because_ of
@@ -1250,20 +1257,24 @@ impl PageServerHandler {
             // The timer's underlying metric is used for a storage-internal latency SLO and
             // we don't want to include latency in it that we can't control.
             // And as pointed out above, in this case, we don't control the time that flush will take.
-            let flushing_timer = timer.map(|mut timer| {
-                timer
-                    .observe_execution_end_flush_start(Instant::now())
-                    .expect("we are the first caller")
-            });
+            let start_flushing_at = Instant::now();
+            if let Some(timer) = &mut timer {
+                timer.observe_execution_end_flush_start(start_flushing_at);
+            }
 
             // what we want to do
             let flush_fut = pgb_writer.flush();
-            // metric for how long flushing takes
-            let flush_fut = match flushing_timer {
-                Some(flushing_timer) => {
-                    futures::future::Either::Left(flushing_timer.measure(flush_fut))
-                }
-                None => futures::future::Either::Right(flush_fut),
+            let flush_fut = if let Some(shard) = &shard {
+                // don't hold upgraded handle while flushing!
+                futures::future::Either::Left(
+                    metrics::SmgrQueryTimePerTimeline::record_flush_in_progress(
+                        shard,
+                        start_flushing_at,
+                        flush_fut,
+                    ),
+                )
+            } else {
+                futures::future::Either::Right(flush_fut)
             };
             // do it while respecting cancellation
             let _: () = async move {
