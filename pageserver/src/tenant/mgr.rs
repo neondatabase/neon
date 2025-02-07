@@ -1145,9 +1145,6 @@ impl TenantManager {
                 let attached_conf = if cfg!(feature = "testing") {
                     let mut conf = AttachedTenantConf::try_from(new_location_config)
                         .map_err(UpsertLocationError::BadRequest)?;
-                    if self.conf.control_plane_api.is_none() {
-                        conf.location.generation = Generation::none();
-                    }
                     conf
                 } else {
                     AttachedTenantConf::try_from(new_location_config)
