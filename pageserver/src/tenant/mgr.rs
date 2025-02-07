@@ -44,7 +44,7 @@ use crate::controller_upcall_client::{
 use crate::deletion_queue::DeletionQueueClient;
 use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
 use crate::metrics::{LOCAL_DATA_LOSS_SUSPECTED, TENANT, TENANT_MANAGER as METRICS};
-use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
+use crate::task_mgr::{BACKGROUND_RUNTIME, TaskKind};
 use crate::tenant::config::{
     AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, SecondaryLocationConfig,
 };
@@ -547,7 +547,9 @@ pub async fn init_tenant_mgr(
         false
     };
     if data_loss_suspected {
-        tracing::error!("Local data loss suspected: no tenants found on local filesystem, but re-attach request returned tenants");
+        tracing::error!(
+            "Local data loss suspected: no tenants found on local filesystem, but re-attach request returned tenants"
+        );
     }
     LOCAL_DATA_LOSS_SUSPECTED.set(if data_loss_suspected { 1 } else { 0 });
 

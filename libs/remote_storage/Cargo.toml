@@ -41,6 +41,8 @@ http-body-util.workspace = true
 itertools.workspace = true
 sync_wrapper = { workspace = true, features = ["futures"] }
 
+byteorder = "1.4"
+
 [dev-dependencies]
 camino-tempfile.workspace = true
 test-context.workspace = true

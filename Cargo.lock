@@ -5647,6 +5647,8 @@ dependencies = [
  "azure_identity",
  "azure_storage",
  "azure_storage_blobs",
+ "base64 0.13.1",
+ "byteorder",
  "bytes",
  "camino",
  "camino-tempfile",
