@@ -1244,10 +1244,11 @@ impl SmgrOpTimer {
         inner.throttled += *throttle;
     }
 
-    pub(crate) fn observe_smgr_op_completion_and_start_flushing(mut self) {
+    pub(crate) fn observe_smgr_op_completion_and_start_flushing(mut self) -> Instant {
         let (flush_start, inner) = self
             .smgr_op_end()
             .expect("this method consume self, and the only other caller is drop handler");
+        flush_start
     }
 
     /// Returns `None`` if this method has already been called, `Some` otherwise.
@@ -1322,6 +1323,47 @@ pub(crate) struct SmgrQueryTimePerTimeline {
     per_timeline_batch_size: Histogram,
     global_flush_in_progress_micros: IntCounter,
     per_timeline_flush_in_progress_micros: IntCounter,
+}
+
+impl SmgrQueryTimePerTimeline {
+    pub(crate) async fn record_flush_in_progress<Fut, O>(
+        &self,
+        start_at: Instant,
+        mut fut: Fut,
+    ) -> O
+    where
+        Fut: std::future::Future<Output = O>,
+    {
+        let mut fut = std::pin::pin!(fut);
+
+        // Whenever observe_guard gets called, or dropped,
+        // it adds the time elapsed since its last call to metrics.
+        // Last call is tracked in `now`.
+        let mut base = start_at;
+        let mut observe_guard = scopeguard::guard(
+            || {
+                let now = Instant::now();
+                let elapsed = now - base;
+                self.global_flush_in_progress_micros
+                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
+                self.per_timeline_flush_in_progress_micros
+                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
+                base = now;
+            },
+            |mut observe| {
+                observe();
+            },
+        );
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(10), &mut fut).await {
+                Ok(v) => return v,
+                Err(_timeout) => {
+                    (*observe_guard)();
+                }
+            }
+        }
+    }
 }
 
 static SMGR_QUERY_STARTED_GLOBAL: Lazy<IntCounterVec> = Lazy::new(|| {

@@ -1077,11 +1077,22 @@ impl PageServerHandler {
             // The timer's underlying metric is used for a storage-internal latency SLO and
             // we don't want to include latency in it that we can't control.
             // And as pointed out above, in this case, we don't control the time that flush will take.
-            let flushing_timer =
-                timer.map(|timer| timer.observe_smgr_op_completion_and_start_flushing());
+            let start_flushing_at = match timer {
+                Some(timer) => timer.observe_smgr_op_completion_and_start_flushing(),
+                None => Instant::now(),
+            };
 
             // what we want to do
             let flush_fut = pgb_writer.flush();
+            let flush_fut = if let Some(handle) = &shard {
+                futures::future::Either::Left(
+                    handle
+                        .query_metrics
+                        .record_flush_in_progress(start_flushing_at, flush_fut),
+                )
+            } else {
+                futures::future::Either::Right(flush_fut)
+            };
             // do it while respecting cancellation
             let _: () = async move {
                 tokio::select! {
