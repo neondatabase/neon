@@ -5,7 +5,7 @@ use std::sync::atomic::{self, AtomicUsize};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use dashmap::DashMap;
+use clashmap::ClashMap;
 use parking_lot::RwLock;
 use postgres_client::ReadyForQueryStatus;
 use rand::Rng;
@@ -351,11 +351,11 @@ where
     //
     // That should be a fairly conteded map, so return reference to the per-endpoint
     // pool as early as possible and release the lock.
-    pub(crate) global_pool: DashMap<EndpointCacheKey, Arc<RwLock<P>>>,
+    pub(crate) global_pool: ClashMap<EndpointCacheKey, Arc<RwLock<P>>>,
 
     /// Number of endpoint-connection pools
     ///
-    /// [`DashMap::len`] iterates over all inner pools and acquires a read lock on each.
+    /// [`ClashMap::len`] iterates over all inner pools and acquires a read lock on each.
     /// That seems like far too much effort, so we're using a relaxed increment counter instead.
     /// It's only used for diagnostics.
     pub(crate) global_pool_size: AtomicUsize,
@@ -396,7 +396,7 @@ where
     pub(crate) fn new(config: &'static crate::config::HttpConfig) -> Arc<Self> {
         let shards = config.pool_options.pool_shards;
         Arc::new(Self {
-            global_pool: DashMap::with_shard_amount(shards),
+            global_pool: ClashMap::with_shard_amount(shards),
             global_pool_size: AtomicUsize::new(0),
             config,
             global_connections_count: Arc::new(AtomicUsize::new(0)),
@@ -442,10 +442,10 @@ where
             .start_timer();
         let current_len = shard.len();
         let mut clients_removed = 0;
-        shard.retain(|endpoint, x| {
+        shard.retain(|(endpoint, x)| {
             // if the current endpoint pool is unique (no other strong or weak references)
             // then it is currently not in use by any connections.
-            if let Some(pool) = Arc::get_mut(x.get_mut()) {
+            if let Some(pool) = Arc::get_mut(x) {
                 let endpoints = pool.get_mut();
                 clients_removed = endpoints.clear_closed();
 

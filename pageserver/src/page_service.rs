@@ -1280,8 +1280,6 @@ impl PageServerHandler {
                 }
                 Ok(())
             }
-            // and log the info! line inside the request span
-            .instrument(span.clone())
             .await?;
         }
         Ok(())
@@ -1692,7 +1690,7 @@ impl PageServerHandler {
         // to distinguish a misbehaving client (asking for old LSN) from a storage issue (data missing at a legitimate LSN).
         if request_lsn < **latest_gc_cutoff_lsn && !timeline.is_gc_blocked_by_lsn_lease_deadline() {
             let gc_info = &timeline.gc_info.read().unwrap();
-            if !gc_info.leases.contains_key(&request_lsn) {
+            if !gc_info.lsn_covered_by_lease(request_lsn) {
                 return Err(
                     PageStreamError::BadRequest(format!(
                         "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
@@ -2036,6 +2034,12 @@ impl PageServerHandler {
             .unwrap()
             .get(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
+
+        if timeline.is_archived() == Some(true) {
+            // TODO after a grace period, turn this log line into a hard error
+            tracing::warn!("timeline {tenant_id}/{timeline_id} is archived, but got basebackup request for it.");
+            //return Err(QueryError::NotFound("timeline is archived".into()))
+        }
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {

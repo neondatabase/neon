@@ -36,6 +36,11 @@
 #include "pagestore_client.h"
 #include "walproposer.h"
 
+#ifdef __linux__
+#include <sys/ioctl.h>
+#include <linux/sockios.h>
+#endif
+
 #define PageStoreTrace DEBUG5
 
 #define MIN_RECONNECT_INTERVAL_USEC 1000
@@ -728,11 +733,36 @@ retry:
 		INSTR_TIME_SUBTRACT(since_last_log, last_log_ts);
 		if (INSTR_TIME_GET_MILLISEC(since_last_log) >= LOG_INTERVAL_MS)
 		{
+			int sndbuf = -1;
+			int recvbuf = -1;
+#ifdef __linux__
+			int socketfd;
+#endif
+
 			since_start = now;
 			INSTR_TIME_SUBTRACT(since_start, start_ts);
-			neon_shard_log(shard_no, LOG, "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses)",
+
+#ifdef __linux__
+			/*
+			 * get kernel's send and recv queue size via ioctl
+			 * https://elixir.bootlin.com/linux/v6.1.128/source/include/uapi/linux/sockios.h#L25-L27
+			 */
+			socketfd = PQsocket(pageserver_conn);
+			if (socketfd != -1) {
+				int ioctl_err;
+				ioctl_err = ioctl(socketfd, SIOCOUTQ, &sndbuf);
+				if (ioctl_err!= 0) {
+					sndbuf = -errno;
+				}
+				ioctl_err = ioctl(socketfd, FIONREAD, &recvbuf);
+				if (ioctl_err != 0) {
+					recvbuf = -errno;
+				}
+			}
+#endif
+			neon_shard_log(shard_no, LOG, "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses) (socket sndbuf=%d recvbuf=%d)",
 						   INSTR_TIME_GET_DOUBLE(since_start),
-						   shard->nrequests_sent, shard->nresponses_received);
+						   shard->nrequests_sent, shard->nresponses_received, sndbuf, recvbuf);
 			last_log_ts = now;
 			logged = true;
 		}

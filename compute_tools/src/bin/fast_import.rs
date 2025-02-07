@@ -231,6 +231,14 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         ])
         .env_clear()
         .env("LD_LIBRARY_PATH", &pg_lib_dir)
+        .env(
+            "ASAN_OPTIONS",
+            std::env::var("ASAN_OPTIONS").unwrap_or_default(),
+        )
+        .env(
+            "UBSAN_OPTIONS",
+            std::env::var("UBSAN_OPTIONS").unwrap_or_default(),
+        )
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
