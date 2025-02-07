@@ -1313,6 +1313,7 @@ impl Drop for SmgrOpTimer {
 }
 
 impl SmgrOpFlushInProgress {
+    #[inline(always)]
     pub(crate) async fn measure<Fut, O>(mut self, mut fut: Fut) -> O
     where
         Fut: std::future::Future<Output = O>,
