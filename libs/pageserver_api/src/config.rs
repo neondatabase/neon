@@ -94,6 +94,7 @@ pub struct ConfigToml {
     pub ondemand_download_behavior_treat_error_as_warn: bool,
     #[serde(with = "humantime_serde")]
     pub background_task_maximum_delay: Duration,
+    pub use_compaction_semaphore: bool,
     pub control_plane_api: Option<reqwest::Url>,
     pub control_plane_api_token: Option<String>,
     pub control_plane_emergency_mode: bool,
@@ -470,6 +471,7 @@ impl Default for ConfigToml {
                 DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY,
             )
             .unwrap()),
+            use_compaction_semaphore: false,
 
             control_plane_api: (None),
             control_plane_api_token: (None),
