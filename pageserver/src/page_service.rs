@@ -1077,6 +1077,8 @@ impl PageServerHandler {
             // The timer's underlying metric is used for a storage-internal latency SLO and
             // we don't want to include latency in it that we can't control.
             // And as pointed out above, in this case, we don't control the time that flush will take.
+            let flushing_timer =
+                timer.map(|timer| timer.observe_smgr_op_completion_and_start_flushing());
 
             // what we want to do
             let flush_fut = pgb_writer.flush();
@@ -1098,8 +1100,6 @@ impl PageServerHandler {
             // and log the info! line inside the request span
             // .instrument(span.clone())
             .await?;
-
-            drop(timer);
         }
         Ok(())
     }
