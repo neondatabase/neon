@@ -701,7 +701,7 @@ mod test {
         async fn restart(&mut self) {
             let (deletion_queue, workers) = DeletionQueue::new(
                 self.storage.clone(),
-                Some(self.mock_control_plane.clone()),
+                self.mock_control_plane.clone(),
                 self.harness.conf,
             );
 
@@ -821,11 +821,8 @@ mod test {
 
         let mock_control_plane = MockStorageController::new();
 
-        let (deletion_queue, worker) = DeletionQueue::new(
-            storage.clone(),
-            Some(mock_control_plane.clone()),
-            harness.conf,
-        );
+        let (deletion_queue, worker) =
+            DeletionQueue::new(storage.clone(), mock_control_plane.clone(), harness.conf);
 
         let worker_join = worker.spawn_with(&tokio::runtime::Handle::current());
 
