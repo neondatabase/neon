@@ -3345,7 +3345,7 @@ class NeonProxy(PgProtocol):
         metric_collection_interval: str | None = None,
     ):
         host = "127.0.0.1"
-        domain = "proxy.localtest.me"  # resolves to 127.0.0.1
+        domain = "proxy.local.neon.build"  # resolves to 127.0.0.1
         super().__init__(dsn=auth_backend.default_conn_url, host=domain, port=proxy_port)
 
         self.domain = domain
@@ -3368,7 +3368,7 @@ class NeonProxy(PgProtocol):
         # generate key of it doesn't exist
         crt_path = self.test_output_dir / "proxy.crt"
         key_path = self.test_output_dir / "proxy.key"
-        generate_proxy_tls_certs("*.localtest.me", key_path, crt_path)
+        generate_proxy_tls_certs("*.local.neon.build", key_path, crt_path)
 
         args = [
             str(self.neon_binpath / "proxy"),
@@ -3569,7 +3569,7 @@ class NeonAuthBroker:
         external_http_port: int,
         auth_backend: NeonAuthBroker.ProxyV1,
     ):
-        self.domain = "apiauth.localtest.me"  # resolves to 127.0.0.1
+        self.domain = "apiauth.local.neon.build"  # resolves to 127.0.0.1
         self.host = "127.0.0.1"
         self.http_port = http_port
         self.external_http_port = external_http_port
@@ -3586,7 +3586,7 @@ class NeonAuthBroker:
         # generate key of it doesn't exist
         crt_path = self.test_output_dir / "proxy.crt"
         key_path = self.test_output_dir / "proxy.key"
-        generate_proxy_tls_certs("apiauth.localtest.me", key_path, crt_path)
+        generate_proxy_tls_certs("apiauth.local.neon.build", key_path, crt_path)
 
         args = [
             str(self.neon_binpath / "proxy"),
