@@ -1245,7 +1245,7 @@ pub(crate) mod virtual_file_io_engine {
     });
 }
 
-pub(crate) struct SmgrOpTimer(Option<SmgrOpTimerInner>);
+pub(crate) struct SmgrOpTimer(Option<Box<SmgrOpTimerInner>>);
 pub(crate) struct SmgrOpTimerInner {
     global_execution_latency_histo: Histogram,
     per_timeline_execution_latency_histo: Option<Histogram>,
@@ -1401,7 +1401,7 @@ impl SmgrOpTimer {
             global_flush_in_progress_micros,
             per_timeline_flush_in_progress_micros,
             ..
-        } = inner;
+        } = *inner;
         Some(SmgrOpFlushInProgress {
             flush_started_at: at,
             global_micros: global_flush_in_progress_micros,
@@ -1794,7 +1794,7 @@ impl SmgrQueryTimePerTimeline {
             None
         };
 
-        SmgrOpTimer(Some(SmgrOpTimerInner {
+        SmgrOpTimer(Some(Box::new(SmgrOpTimerInner {
             global_execution_latency_histo: self.global_latency[op as usize].clone(),
             per_timeline_execution_latency_histo: per_timeline_latency_histo,
             global_flush_in_progress_micros: self.global_flush_in_progress_micros.clone(),
@@ -1805,7 +1805,7 @@ impl SmgrQueryTimePerTimeline {
             per_timeline_batch_wait_time: self.per_timeline_batch_wait_time.clone(),
             throttling: self.throttling.clone(),
             timings: SmgrOpTimerState::Received { received_at },
-        }))
+        })))
     }
 
     /// TODO: do something about this? seems odd, we have a similar call on SmgrOpTimer
