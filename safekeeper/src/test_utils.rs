@@ -122,6 +122,7 @@ impl Env {
         start_lsn: Lsn,
         msg_size: usize,
         msg_count: usize,
+        mut next_record_lsns: Option<&mut Vec<Lsn>>,
     ) -> anyhow::Result<EndWatch> {
         let (msg_tx, msg_rx) = tokio::sync::mpsc::channel(receive_wal::MSG_QUEUE_SIZE);
         let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(receive_wal::REPLY_QUEUE_SIZE);
@@ -130,7 +131,7 @@ impl Env {
 
         WalAcceptor::spawn(tli.wal_residence_guard().await?, msg_rx, reply_tx, Some(0));
 
-        let prefix = c"p";
+        let prefix = c"neon-file:";
         let prefixlen = prefix.to_bytes_with_nul().len();
         assert!(msg_size >= prefixlen);
         let message = vec![0; msg_size - prefixlen];
@@ -139,6 +140,9 @@ impl Env {
             &mut WalGenerator::new(LogicalMessageGenerator::new(prefix, &message), start_lsn);
         for _ in 0..msg_count {
             let (lsn, record) = walgen.next().unwrap();
+            if let Some(ref mut lsns) = next_record_lsns {
+                lsns.push(lsn);
+            }
 
             let req = AppendRequest {
                 h: AppendRequestHeader {

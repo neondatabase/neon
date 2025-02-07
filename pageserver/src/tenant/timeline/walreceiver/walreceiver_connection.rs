@@ -39,7 +39,7 @@ use crate::{
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use utils::{id::NodeId, lsn::Lsn, postgres_client::PostgresClientProtocol};
+use utils::{critical, id::NodeId, lsn::Lsn, postgres_client::PostgresClientProtocol};
 use utils::{pageserver_feedback::PageserverFeedback, sync::gate::GateError};
 
 /// Status of the connection.
@@ -355,6 +355,19 @@ pub(super) async fn handle_walreceiver_connection(
                 // advances it to its end LSN. 0 is just an initialization placeholder.
                 let mut modification = timeline.begin_modification(Lsn(0));
 
+                async fn commit(
+                    modification: &mut DatadirModification<'_>,
+                    ctx: &RequestContext,
+                    uncommitted: &mut u64,
+                ) -> anyhow::Result<()> {
+                    let stats = modification.stats();
+                    modification.commit(ctx).await?;
+                    WAL_INGEST.records_committed.inc_by(*uncommitted);
+                    WAL_INGEST.inc_values_committed(&stats);
+                    *uncommitted = 0;
+                    Ok(())
+                }
+
                 if !records.is_empty() {
                     timeline
                         .metrics
@@ -366,8 +379,7 @@ pub(super) async fn handle_walreceiver_connection(
                     if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes)
                         && uncommitted_records > 0
                     {
-                        modification.commit(&ctx).await?;
-                        uncommitted_records = 0;
+                        commit(&mut modification, &ctx, &mut uncommitted_records).await?;
                     }
 
                     let local_next_record_lsn = interpreted.next_record_lsn;
@@ -381,6 +393,13 @@ pub(super) async fn handle_walreceiver_connection(
                         .await
                         .with_context(|| {
                             format!("could not ingest record at {local_next_record_lsn}")
+                        })
+                        .inspect_err(|err| {
+                            // TODO: we can't differentiate cancellation errors with
+                            // anyhow::Error, so just ignore it if we're cancelled.
+                            if !cancellation.is_cancelled() {
+                                critical!("{err:?}")
+                            }
                         })?;
 
                     uncommitted_records += 1;
@@ -396,8 +415,7 @@ pub(super) async fn handle_walreceiver_connection(
                         || modification.approx_pending_bytes()
                             > DatadirModification::MAX_PENDING_BYTES
                     {
-                        modification.commit(&ctx).await?;
-                        uncommitted_records = 0;
+                        commit(&mut modification, &ctx, &mut uncommitted_records).await?;
                     }
                 }
 
@@ -415,7 +433,7 @@ pub(super) async fn handle_walreceiver_connection(
 
                 if uncommitted_records > 0 || needs_last_record_lsn_advance {
                     // Commit any uncommitted records
-                    modification.commit(&ctx).await?;
+                    commit(&mut modification, &ctx, &mut uncommitted_records).await?;
                 }
 
                 if !caught_up && streaming_lsn >= end_of_wal {
@@ -442,10 +460,12 @@ pub(super) async fn handle_walreceiver_connection(
                     filtered: &mut u64,
                     ctx: &RequestContext,
                 ) -> anyhow::Result<()> {
+                    let stats = modification.stats();
+                    modification.commit(ctx).await?;
                     WAL_INGEST
                         .records_committed
                         .inc_by(*uncommitted - *filtered);
-                    modification.commit(ctx).await?;
+                    WAL_INGEST.inc_values_committed(&stats);
                     *uncommitted = 0;
                     *filtered = 0;
                     Ok(())
@@ -507,6 +527,13 @@ pub(super) async fn handle_walreceiver_connection(
                             .await
                             .with_context(|| {
                                 format!("could not ingest record at {next_record_lsn}")
+                            })
+                            .inspect_err(|err| {
+                                // TODO: we can't differentiate cancellation errors with
+                                // anyhow::Error, so just ignore it if we're cancelled.
+                                if !cancellation.is_cancelled() {
+                                    critical!("{err:?}")
+                                }
                             })?;
                         if !ingested {
                             tracing::debug!("ingest: filtered out record @ LSN {next_record_lsn}");

@@ -46,6 +46,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
+use timeline::compaction::CompactionOutcome;
 use timeline::compaction::GcCompactionQueue;
 use timeline::import_pgdata;
 use timeline::offload::offload_timeline;
@@ -95,7 +96,6 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
-use crate::is_uninit_mark;
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::CONCURRENT_INITDBS;
 use crate::metrics::INITDB_RUN_TIME;
@@ -1793,11 +1793,7 @@ impl Tenant {
             let entry = entry.context("read timeline dir entry")?;
             let entry_path = entry.path();
 
-            let purge = if crate::is_temporary(entry_path)
-                // TODO: remove uninit mark code (https://github.com/neondatabase/neon/issues/5718)
-                || is_uninit_mark(entry_path)
-                || crate::is_delete_mark(entry_path)
-            {
+            let purge = if crate::is_temporary(entry_path) {
                 true
             } else {
                 match TimelineId::try_from(entry_path.file_name()) {
@@ -2912,10 +2908,10 @@ impl Tenant {
         self: &Arc<Self>,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> Result<bool, timeline::CompactionError> {
+    ) -> Result<CompactionOutcome, timeline::CompactionError> {
         // Don't start doing work during shutdown, or when broken, we do not need those in the logs
         if !self.is_active() {
-            return Ok(false);
+            return Ok(CompactionOutcome::Done);
         }
 
         {
@@ -2929,7 +2925,7 @@ impl Tenant {
             // to AttachedSingle state.
             if !conf.location.may_upload_layers_hint() {
                 info!("Skipping compaction in location state {:?}", conf.location);
-                return Ok(false);
+                return Ok(CompactionOutcome::Done);
             }
         }
 
@@ -2972,7 +2968,7 @@ impl Tenant {
         // Before doing any I/O work, check our circuit breaker
         if self.compaction_circuit_breaker.lock().unwrap().is_broken() {
             info!("Skipping compaction due to previous failures");
-            return Ok(false);
+            return Ok(CompactionOutcome::Done);
         }
 
         let mut has_pending_task = false;
@@ -2980,10 +2976,10 @@ impl Tenant {
         for (timeline_id, timeline, (can_compact, can_offload)) in &timelines_to_compact_or_offload
         {
             // pending_task_left == None: cannot compact, maybe still pending tasks
-            // pending_task_left == Some(true): compaction task left
-            // pending_task_left == Some(false): no compaction task left
+            // pending_task_left == Some(Pending): compaction task left
+            // pending_task_left == Some(Done): no compaction task left
             let pending_task_left = if *can_compact {
-                let has_pending_l0_compaction_task = timeline
+                let compaction_outcome = timeline
                     .compact(cancel, EnumSet::empty(), ctx)
                     .instrument(info_span!("compact_timeline", %timeline_id))
                     .await
@@ -3001,27 +2997,27 @@ impl Tenant {
                                 .fail(&CIRCUIT_BREAKERS_BROKEN, e);
                         }
                     })?;
-                if has_pending_l0_compaction_task {
-                    Some(true)
+                if let CompactionOutcome::Pending = compaction_outcome {
+                    Some(CompactionOutcome::Pending)
                 } else {
                     let queue = {
                         let guard = self.scheduled_compaction_tasks.lock().unwrap();
                         guard.get(timeline_id).cloned()
                     };
                     if let Some(queue) = queue {
-                        let has_pending_tasks = queue
+                        let outcome = queue
                             .iteration(cancel, ctx, &self.gc_block, timeline)
                             .await?;
-                        Some(has_pending_tasks)
+                        Some(outcome)
                     } else {
-                        Some(false)
+                        Some(CompactionOutcome::Done)
                     }
                 }
             } else {
                 None
             };
-            has_pending_task |= pending_task_left.unwrap_or(false);
-            if pending_task_left == Some(false) && *can_offload {
+            has_pending_task |= pending_task_left == Some(CompactionOutcome::Pending);
+            if pending_task_left == Some(CompactionOutcome::Done) && *can_offload {
                 pausable_failpoint!("before-timeline-auto-offload");
                 match offload_timeline(self, timeline)
                     .instrument(info_span!("offload_timeline", %timeline_id))
@@ -3041,7 +3037,11 @@ impl Tenant {
             .unwrap()
             .success(&CIRCUIT_BREAKERS_UNBROKEN);
 
-        Ok(has_pending_task)
+        Ok(if has_pending_task {
+            CompactionOutcome::Pending
+        } else {
+            CompactionOutcome::Done
+        })
     }
 
     /// Cancel scheduled compaction tasks
@@ -4642,22 +4642,26 @@ impl Tenant {
 
         // check against last actual 'latest_gc_cutoff' first
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
-        src_timeline
-            .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
-            .context(format!(
-                "invalid branch start lsn: less than latest GC cutoff {}",
-                *latest_gc_cutoff_lsn,
-            ))
-            .map_err(CreateTimelineError::AncestorLsn)?;
-
-        // and then the planned GC cutoff
         {
             let gc_info = src_timeline.gc_info.read().unwrap();
-            let cutoff = gc_info.min_cutoff();
-            if start_lsn < cutoff {
-                return Err(CreateTimelineError::AncestorLsn(anyhow::anyhow!(
-                    "invalid branch start lsn: less than planned GC cutoff {cutoff}"
-                )));
+            let planned_cutoff = gc_info.min_cutoff();
+            if gc_info.lsn_covered_by_lease(start_lsn) {
+                tracing::info!("skipping comparison of {start_lsn} with gc cutoff {} and planned gc cutoff {planned_cutoff} due to lsn lease", *latest_gc_cutoff_lsn);
+            } else {
+                src_timeline
+                    .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
+                    .context(format!(
+                        "invalid branch start lsn: less than latest GC cutoff {}",
+                        *latest_gc_cutoff_lsn,
+                    ))
+                    .map_err(CreateTimelineError::AncestorLsn)?;
+
+                // and then the planned GC cutoff
+                if start_lsn < planned_cutoff {
+                    return Err(CreateTimelineError::AncestorLsn(anyhow::anyhow!(
+                        "invalid branch start lsn: less than planned GC cutoff {planned_cutoff}"
+                    )));
+                }
             }
         }
 
@@ -5490,6 +5494,9 @@ pub(crate) mod harness {
                 timeline_get_throttle: Some(tenant_conf.timeline_get_throttle),
                 image_layer_creation_check_threshold: Some(
                     tenant_conf.image_layer_creation_check_threshold,
+                ),
+                image_creation_preempt_threshold: Some(
+                    tenant_conf.image_creation_preempt_threshold,
                 ),
                 lsn_lease_length: Some(tenant_conf.lsn_lease_length),
                 lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),

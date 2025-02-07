@@ -95,6 +95,8 @@ def test_remote_extensions(
 
     # mock remote_extensions spec
     spec: dict[str, Any] = {
+        "public_extensions": ["anon"],
+        "custom_extensions": None,
         "library_index": {
             "anon": "anon",
         },
