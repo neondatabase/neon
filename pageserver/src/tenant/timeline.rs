@@ -2633,7 +2633,7 @@ impl Timeline {
                 return;
             }
             FlushLoopState::Exited => {
-                warn!(
+                info!(
                     "ignoring attempt to restart exited flush_loop {}/{}",
                     self.tenant_shard_id, self.timeline_id
                 );
