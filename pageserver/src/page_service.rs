@@ -1078,31 +1078,16 @@ impl PageServerHandler {
             let flush_fut = pgb_writer.flush();
             // do it while respecting cancellation
             let _: () = async move {
-                match flushing_timer {
-                    Some(flushing_timer) => {
-                        tokio::select! {
-                            biased;
-                            _ = cancel.cancelled() => {
-                                // We were requested to shut down.
-                                info!("shutdown request received in page handler");
-                                return Err(QueryError::Shutdown)
-                            }
-                            res = flush_fut => {
-                                res?;
-                            }
-                        }
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        // We were requested to shut down.
+                        info!("shutdown request received in page handler");
+                        return Err(QueryError::Shutdown)
                     }
-                    None => tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => {
-                            // We were requested to shut down.
-                            info!("shutdown request received in page handler");
-                            return Err(QueryError::Shutdown)
-                        }
-                        res = flush_fut => {
-                            res?;
-                        }
-                    },
+                    res = flush_fut => {
+                        res?;
+                    }
                 }
                 Ok(())
             }
