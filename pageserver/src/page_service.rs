@@ -1076,25 +1076,33 @@ impl PageServerHandler {
 
             // what we want to do
             let flush_fut = pgb_writer.flush();
-            // metric for how long flushing takes
-            let flush_fut = match flushing_timer {
-                Some(flushing_timer) => {
-                    futures::future::Either::Left(flushing_timer.measure(flush_fut))
-                }
-                None => futures::future::Either::Right(flush_fut),
-            };
             // do it while respecting cancellation
             let _: () = async move {
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        // We were requested to shut down.
-                        info!("shutdown request received in page handler");
-                        return Err(QueryError::Shutdown)
+                match flushing_timer {
+                    Some(flushing_timer) => {
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => {
+                                // We were requested to shut down.
+                                info!("shutdown request received in page handler");
+                                return Err(QueryError::Shutdown)
+                            }
+                            res = flushing_timer.measure(flush_fut) => {
+                                res?;
+                            }
+                        }
                     }
-                    res = flush_fut => {
-                        res?;
-                    }
+                    None => tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            // We were requested to shut down.
+                            info!("shutdown request received in page handler");
+                            return Err(QueryError::Shutdown)
+                        }
+                        res = flush_fut => {
+                            res?;
+                        }
+                    },
                 }
                 Ok(())
             }
