@@ -1238,12 +1238,6 @@ pub(crate) struct SmgrOpTimerInner {
     op: SmgrQueryType,
 }
 
-pub(crate) struct SmgrOpFlushInProgress {
-    base: Instant,
-    global_micros: IntCounter,
-    per_timeline_micros: IntCounter,
-}
-
 impl SmgrOpTimer {
     pub(crate) fn deduct_throttle(&mut self, throttle: &Option<Duration>) {
         let Some(throttle) = throttle else {
@@ -1253,20 +1247,10 @@ impl SmgrOpTimer {
         inner.throttled += *throttle;
     }
 
-    pub(crate) fn observe_smgr_op_completion_and_start_flushing(mut self) -> SmgrOpFlushInProgress {
+    pub(crate) fn observe_smgr_op_completion_and_start_flushing(mut self) {
         let (flush_start, inner) = self
             .smgr_op_end()
             .expect("this method consume self, and the only other caller is drop handler");
-        let SmgrOpTimerInner {
-            global_flush_in_progress_micros,
-            per_timeline_flush_in_progress_micros,
-            ..
-        } = inner;
-        SmgrOpFlushInProgress {
-            base: flush_start,
-            global_micros: global_flush_in_progress_micros,
-            per_timeline_micros: per_timeline_flush_in_progress_micros,
-        }
     }
 
     /// Returns `None`` if this method has already been called, `Some` otherwise.
@@ -1309,42 +1293,6 @@ impl SmgrOpTimer {
 impl Drop for SmgrOpTimer {
     fn drop(&mut self) {
         self.smgr_op_end();
-    }
-}
-
-impl SmgrOpFlushInProgress {
-    pub(crate) async fn measure<Fut, O>(mut self, mut fut: Fut) -> O
-    where
-        Fut: std::future::Future<Output = O>,
-    {
-        let mut fut = std::pin::pin!(fut);
-
-        let now = Instant::now();
-        // Whenever observe_guard gets called, or dropped,
-        // it adds the time elapsed since its last call to metrics.
-        // Last call is tracked in `now`.
-        let mut observe_guard = scopeguard::guard(
-            || {
-                let elapsed = now - self.base;
-                self.global_micros
-                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-                self.per_timeline_micros
-                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-                self.base = now;
-            },
-            |mut observe| {
-                observe();
-            },
-        );
-
-        loop {
-            match tokio::time::timeout(Duration::from_secs(10), &mut fut).await {
-                Ok(v) => return v,
-                Err(_timeout) => {
-                    (*observe_guard)();
-                }
-            }
-        }
     }
 }
 
