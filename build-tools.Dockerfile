@@ -144,7 +144,8 @@ RUN curl -fsSL \
     --output sql_exporter.tar.gz \
     && mkdir /tmp/sql_exporter \
     && tar xzvf sql_exporter.tar.gz -C /tmp/sql_exporter --strip-components=1 \
-    && mv /tmp/sql_exporter/sql_exporter /usr/local/bin/sql_exporter
+    && mv /tmp/sql_exporter/sql_exporter /usr/local/bin/sql_exporter \
+    && rm sql_exporter.tar.gz
 
 # protobuf-compiler (protoc)
 ENV PROTOC_VERSION=25.1
