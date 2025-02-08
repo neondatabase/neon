@@ -662,7 +662,7 @@ jobs:
           push: true
           pull: true
           file: compute/compute-node.Dockerfile
-          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:pr-10730-cache-${{ matrix.version_debian }}-${{ matrix.arch }}
+          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:pr-10730-cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           cache-to: ${{ format('type=registry,ref=cache.neon.build/compute-node-{0}:pr-10730-cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) }}
           tags: |
             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
