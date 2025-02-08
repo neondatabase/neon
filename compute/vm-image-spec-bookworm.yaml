@@ -75,7 +75,7 @@ build: |
   # and it _probably_ can be used as-is. However, we'll build it ourselves to minimise the changeset
   # for debian version migration.
   ARG BOOKWORM_SLIM_SHA=sha256:40b107342c492725bc7aacbe93a49945445191ae364184a6d24fedb28172f6f7#
-  FROM debian@${BOOKWORM_SLIM_SHA} as libcgroup-builder
+  FROM debian@$BOOKWORM_SLIM_SHA as libcgroup-builder
   ENV LIBCGROUP_VERSION=v2.0.3
 
   RUN set -exu \
