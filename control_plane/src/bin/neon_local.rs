@@ -974,7 +974,7 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                     }
                 })
                 .collect(),
-            pg_version: args.pg_version,
+            pg_version: Some(args.pg_version),
             pg_distrib_dir: None,
             neon_distrib_dir: None,
             default_tenant_id: TenantId::from_array(std::array::from_fn(|_| 0)),

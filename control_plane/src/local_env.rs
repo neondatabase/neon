@@ -127,7 +127,7 @@ where
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NeonLocalInitConf {
-    pub pg_version: u32,
+    pub pg_version: Option<u32>,
     // TODO: do we need this? Seems unused
     pub pg_distrib_dir: Option<PathBuf>,
     // TODO: do we need this? Seems unused
@@ -731,6 +731,8 @@ impl LocalEnv {
             control_plane_api,
             control_plane_compute_hook_api,
         } = conf;
+
+        let pg_version = pg_version.unwrap_or(DEFAULT_PG_VERSION);
 
         // Find postgres binaries.
         // Follow POSTGRES_DISTRIB_DIR if set, otherwise look in "pg_install".
