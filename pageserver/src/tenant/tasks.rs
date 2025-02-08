@@ -4,7 +4,6 @@ use std::cmp::max;
 use std::future::Future;
 use std::ops::{ControlFlow, RangeInclusive};
 use std::pin::pin;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -75,7 +74,7 @@ pub(crate) enum BackgroundLoopKind {
     Compaction,
     Gc,
     Eviction,
-    IngestHouseKeeping,
+    TenantHouseKeeping,
     ConsumptionMetricsCollectMetrics,
     ConsumptionMetricsSyntheticSizeWorker,
     InitialLogicalSizeCalculation,
@@ -186,10 +185,10 @@ pub fn start_background_loops(tenant: &Arc<Tenant>, can_start: Option<&Barrier>)
 
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
-        TaskKind::IngestHousekeeping,
+        TaskKind::TenantHousekeeping,
         tenant_shard_id,
         None,
-        &format!("ingest housekeeping for tenant {tenant_shard_id}"),
+        &format!("housekeeping for tenant {tenant_shard_id}"),
         {
             let tenant = Arc::clone(tenant);
             let can_start = can_start.cloned();
@@ -201,8 +200,8 @@ pub fn start_background_loops(tenant: &Arc<Tenant>, can_start: Option<&Barrier>)
                 };
                 TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
                 defer!(TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc());
-                ingest_housekeeping_loop(tenant, cancel)
-                    .instrument(info_span!("ingest_housekeeping_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
+                tenant_housekeeping_loop(tenant, cancel)
+                    .instrument(info_span!("tenant_housekeeping_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
                 Ok(())
             }
@@ -280,14 +279,6 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 "compaction iteration complete"
             );
         };
-
-        // Perhaps we did no work and the walredo process has been idle for some time:
-        // give it a chance to shut down to avoid leaving walredo process running indefinitely.
-        // TODO: move this to a separate task (housekeeping loop) that isn't affected by the back-off,
-        // so we get some upper bound guarantee on when walredo quiesce / this throttling reporting here happens.
-        if let Some(walredo_mgr) = &tenant.walredo_mgr {
-            walredo_mgr.maybe_quiesce(period * 10);
-        }
 
         // Sleep
         if tokio::time::timeout(sleep_duration, cancel.cancelled())
@@ -431,42 +422,34 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     }
 }
 
-/// Ingest housekeeping's main loop.
-async fn ingest_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
+/// Tenant housekeeping's main loop.
+async fn tenant_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     let mut last_throttle_flag_reset_at = Instant::now();
     loop {
         if wait_for_active_tenant(&tenant, &cancel).await.is_break() {
             return;
         }
 
-        // We run ingest housekeeping with the same frequency as compaction: it is not worth
-        // having a distinct setting.  But we don't run it in the same task, because compaction
-        // blocks on acquiring the background job semaphore.
-        let mut period = tenant.get_compaction_period();
+        // Use the same period as compaction; it's not worth a separate setting. But if it's set to
+        // zero (to disable compaction), then use a reasonable default. Jitter it by 5%.
+        let period = match tenant.get_compaction_period() {
+            Duration::ZERO => humantime::parse_duration(DEFAULT_COMPACTION_PERIOD).unwrap(),
+            period => period,
+        };
 
-        // If compaction period is set to zero (to disable it), then we will use a reasonable default
-        if period == Duration::ZERO {
-            period = humantime::Duration::from_str(DEFAULT_COMPACTION_PERIOD)
-                .unwrap()
-                .into()
-        }
-
-        // Always sleep first: we do not need to do ingest housekeeping early in the lifetime of
-        // a tenant, since it won't have started writing any ephemeral files yet. Jitter the
-        // period by ±5%.
         let Ok(period) = sleep_jitter(period, period * 5 / 100, &cancel).await else {
             break;
         };
 
+        // Do tenant housekeeping.
         let iteration = Iteration {
             started_at: Instant::now(),
             period,
-            kind: BackgroundLoopKind::IngestHouseKeeping,
+            kind: BackgroundLoopKind::TenantHouseKeeping,
         };
-        iteration.run(tenant.ingest_housekeeping()).await;
+        iteration.run(tenant.housekeeping()).await;
 
-        // TODO: rename the background loop kind to something more generic, like, tenant housekeeping.
-        // Or just spawn another background loop for this throttle, it's not like it's super costly.
+        // Log any getpage throttling.
         info_span!(parent: None, "pagestream_throttle", tenant_id=%tenant.tenant_shard_id, shard_id=%tenant.tenant_shard_id.shard_slug()).in_scope(|| {
             let now = Instant::now();
             let prev = std::mem::replace(&mut last_throttle_flag_reset_at, now);
