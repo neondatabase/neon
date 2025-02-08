@@ -1758,33 +1758,6 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     # create folder for file cache
     mkdir -p -m 777 /neon/cache
 
-COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
-
-# pgbouncer and its config
-COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
-COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
-
-# local_proxy and its config
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local_proxy
-RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
-
-# Metrics exporter binaries and configuration files
-COPY --from=exporters ./postgres_exporter /bin/postgres_exporter
-COPY --from=exporters ./pgbouncer_exporter /bin/pgbouncer_exporter
-COPY --from=exporters ./sql_exporter /bin/sql_exporter
-
-COPY --chown=postgres compute/etc/postgres_exporter.yml /etc/postgres_exporter.yml
-
-COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter.yml               /etc/sql_exporter.yml
-COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector.yml             /etc/neon_collector.yml
-COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
-COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
-
-# Create remote extension download directory
-RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/local/download_extensions
-
 # Install:
 # libreadline8 for psql
 # liblz4-1 for lz4
@@ -1859,6 +1832,33 @@ RUN set -ex; \
     /tmp/awscliv2/aws/install; \
     rm -rf /tmp/awscliv2.zip /tmp/awscliv2; \
     true
+
+# Create remote extension download directory
+RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/local/download_extensions
+
+# local_proxy and its config
+RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
+COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local_proxy
+
+COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
+COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
+
+# pgbouncer and its config
+COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
+COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
+
+# Metrics exporter binaries and configuration files
+COPY --from=exporters ./postgres_exporter /bin/postgres_exporter
+COPY --from=exporters ./pgbouncer_exporter /bin/pgbouncer_exporter
+COPY --from=exporters ./sql_exporter /bin/sql_exporter
+
+COPY --chown=postgres compute/etc/postgres_exporter.yml /etc/postgres_exporter.yml
+
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter.yml               /etc/sql_exporter.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector.yml             /etc/neon_collector.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
 
 ENV LANG=en_US.utf8
 USER postgres
