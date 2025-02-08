@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 use rand::Rng;
+use scopeguard::defer;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -148,11 +149,11 @@ pub fn start_background_loops(tenant: &Arc<Tenant>, can_start: Option<&Barrier>)
                     _ = Barrier::maybe_wait(can_start) => {}
                 };
                 TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
+                defer!(TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc());
                 compaction_loop(tenant, cancel)
                     // If you rename this span, change the RUST_LOG env variable in test_runner/performance/test_branch_creation.py
                     .instrument(info_span!("compaction_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
-                TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
                 Ok(())
             }
         },
@@ -174,10 +175,10 @@ pub fn start_background_loops(tenant: &Arc<Tenant>, can_start: Option<&Barrier>)
                     _ = Barrier::maybe_wait(can_start) => {}
                 };
                 TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
+                defer!(TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc());
                 gc_loop(tenant, cancel)
                     .instrument(info_span!("gc_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
-                TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
                 Ok(())
             }
         },
@@ -199,10 +200,10 @@ pub fn start_background_loops(tenant: &Arc<Tenant>, can_start: Option<&Barrier>)
                     _ = Barrier::maybe_wait(can_start) => {}
                 };
                 TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
+                defer!(TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc());
                 ingest_housekeeping_loop(tenant, cancel)
                     .instrument(info_span!("ingest_housekeeping_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
-                TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
                 Ok(())
             }
         },
