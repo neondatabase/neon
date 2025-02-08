@@ -83,7 +83,6 @@ ARG TAG=pinned
 ARG BUILD_TAG
 ARG DEBIAN_VERSION=bookworm
 ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
-ARG ALPINE_CURL_VERSION=8.11.1
 
 ARG BOOKWORM_SLIM_SHA=sha256:40b107342c492725bc7aacbe93a49945445191ae364184a6d24fedb28172f6f7
 ARG BULLSEYE_SLIM_SHA=sha256:e831d9a884d63734fe3dd9c491ed9a5a3d4c6a6d32c5b14f2067357c49b0b7e1
@@ -109,7 +108,7 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 # By default, /bin/sh used in debian images will treat '\n' as eol,
 # but as we use bash as SHELL, and built-in echo in bash requires '-e' flag for that.
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc && \
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\nretry-on-host-error=on\n" > /root/.wgetrc && \
     echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
 
 RUN case $DEBIAN_VERSION in \
@@ -145,7 +144,7 @@ RUN case $DEBIAN_VERSION in \
 #########################################################################################
 FROM build-deps AS pg-build
 ARG PG_VERSION
-COPY vendor/postgres-${PG_VERSION} postgres
+COPY vendor/postgres-${PG_VERSION:?} postgres
 RUN cd postgres && \
     export CONFIGURE_CMD="./configure CFLAGS='-O2 -g3' --enable-debug --with-openssl --with-uuid=ossp \
     --with-icu --with-libxml --with-libxslt --with-lz4" && \
@@ -1622,13 +1621,12 @@ RUN set -e \
 # Layer "exporters"
 #
 #########################################################################################
-FROM alpine/curl:${ALPINE_CURL_VERSION} AS exporters
+FROM build-deps AS exporters
 ARG TARGETARCH
 # Keep sql_exporter version same as in build-tools.Dockerfile and
 # test_runner/regress/test_compute_metrics.py
 # See comment on the top of the file regading `echo`, `-e` and `\n`
-RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc; \
-    if [ "$TARGETARCH" = "amd64" ]; then\
+RUN if [ "$TARGETARCH" = "amd64" ]; then\
         postgres_exporter_sha256='027e75dda7af621237ff8f5ac66b78a40b0093595f06768612b92b1374bd3105';\
         pgbouncer_exporter_sha256='c9f7cf8dcff44f0472057e9bf52613d93f3ffbc381ad7547a959daa63c5e84ac';\
         sql_exporter_sha256='38e439732bbf6e28ca4a94d7bc3686d3fa1abdb0050773d5617a9efdb9e64d08';\
@@ -1637,11 +1635,11 @@ RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 30
         pgbouncer_exporter_sha256='217c4afd7e6492ae904055bc14fe603552cf9bac458c063407e991d68c519da3';\
         sql_exporter_sha256='11918b00be6e2c3a67564adfdb2414fdcbb15a5db76ea17d1d1a944237a893c6';\
     fi\
-    && curl -sL https://github.com/prometheus-community/postgres_exporter/releases/download/v0.16.0/postgres_exporter-0.16.0.linux-${TARGETARCH}.tar.gz\
+    && wget -O - https://github.com/prometheus-community/postgres_exporter/releases/download/v0.16.0/postgres_exporter-0.16.0.linux-${TARGETARCH}.tar.gz\
      | tar xzf - --strip-components=1 -C.\
-    && curl -sL https://github.com/prometheus-community/pgbouncer_exporter/releases/download/v0.10.2/pgbouncer_exporter-0.10.2.linux-${TARGETARCH}.tar.gz\
+    && wget -O - https://github.com/prometheus-community/pgbouncer_exporter/releases/download/v0.10.2/pgbouncer_exporter-0.10.2.linux-${TARGETARCH}.tar.gz\
      | tar xzf - --strip-components=1 -C.\
-    && curl -sL https://github.com/burningalchemist/sql_exporter/releases/download/0.17.0/sql_exporter-0.17.0.linux-${TARGETARCH}.tar.gz\
+    && wget -O - https://github.com/burningalchemist/sql_exporter/releases/download/0.17.0/sql_exporter-0.17.0.linux-${TARGETARCH}.tar.gz\
      | tar xzf - --strip-components=1 -C.\
     && echo "${postgres_exporter_sha256} postgres_exporter" | sha256sum -c -\
     && echo "${pgbouncer_exporter_sha256} pgbouncer_exporter" | sha256sum -c -\
