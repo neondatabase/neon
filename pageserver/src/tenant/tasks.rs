@@ -313,19 +313,16 @@ fn log_compaction_error(
         ShuttingDown => return,
         Offload(_) => Level::ERROR,
         _ if task_cancelled => Level::INFO,
-        Other(e) => {
-            let is_stopping = {
-                let root_cause = e.root_cause();
-                let upload_queue = root_cause
-                    .downcast_ref::<NotInitialized>()
-                    .is_some_and(|e| e.is_stopping());
+        Other(err) => {
+            let root_cause = err.root_cause();
 
-                let timeline = root_cause
-                    .downcast_ref::<PageReconstructError>()
-                    .is_some_and(|e| e.is_stopping());
-
-                upload_queue || timeline
-            };
+            let upload_queue = root_cause
+                .downcast_ref::<NotInitialized>()
+                .is_some_and(|e| e.is_stopping());
+            let timeline = root_cause
+                .downcast_ref::<PageReconstructError>()
+                .is_some_and(|e| e.is_stopping());
+            let is_stopping = upload_queue || timeline;
 
             if is_stopping {
                 Level::INFO
@@ -525,6 +522,9 @@ async fn wait_for_active_tenant(
 pub(crate) struct Cancelled;
 
 /// Sleeps for a random interval up to the given max value.
+///
+/// This delay prevents a thundering herd of background tasks and will likely keep them running on
+/// different periods for more stable load.
 pub(crate) async fn sleep_random(
     max: Duration,
     cancel: &CancellationToken,
@@ -533,9 +533,6 @@ pub(crate) async fn sleep_random(
 }
 
 /// Sleeps for a random interval in the given range. Returns the duration.
-///
-/// This delay prevents a thundering herd of background tasks and will likely keep them running on
-/// different periods for more stable load.
 pub(crate) async fn sleep_random_range(
     interval: RangeInclusive<Duration>,
     cancel: &CancellationToken,
