@@ -1190,6 +1190,29 @@ impl PageServerHandler {
             }
         };
 
+        // We purposefully don't count flush time into the smgr operaiton timer.
+        //
+        // The reason is that current compute client will not perform protocol processing
+        // if the postgres backend process is doing things other than `->smgr_read()`.
+        // This is especially the case for prefetch.
+        //
+        // If the compute doesn't read from the connection, eventually TCP will backpressure
+        // all the way into our flush call below.
+        //
+        // The timer's underlying metric is used for a storage-internal latency SLO and
+        // we don't want to include latency in it that we can't control.
+        // And as pointed out above, in this case, we don't control the time that flush will take.
+        //
+        // We put each response in the batch onto the wire in a separate pgb_writer.flush()
+        // call, which (all unmeasured) adds syscall overhead but reduces time to first byte
+        // and avoids building up a "giant" contiguous userspace buffer to hold the entire response.
+        // TODO: vectored socket IO would be great, but pgb_writer doesn't support that.
+        //
+        // Since we're flushing multiple times in the loop, but only have access to the per-op
+        // timers inside the loop, we capture the flush start time here and reuse it to finish
+        // each op timer.
+        let flushing_start_time = Instant::now();
+
         // Map handler result to protocol behavior.
         // Some handler errors cause exit from pagestream protocol.
         // Other handler errors are sent back as an error message and we stay in pagestream protocol.
@@ -1238,21 +1261,9 @@ impl PageServerHandler {
                 &response_msg.serialize(protocol_version),
             ))?;
 
-            // We purposefully don't count flush time into the timer.
-            //
-            // The reason is that current compute client will not perform protocol processing
-            // if the postgres backend process is doing things other than `->smgr_read()`.
-            // This is especially the case for prefetch.
-            //
-            // If the compute doesn't read from the connection, eventually TCP will backpressure
-            // all the way into our flush call below.
-            //
-            // The timer's underlying metric is used for a storage-internal latency SLO and
-            // we don't want to include latency in it that we can't control.
-            // And as pointed out above, in this case, we don't control the time that flush will take.
             let flushing_timer = timer.map(|mut timer| {
                 timer
-                    .observe_execution_end_flush_start(Instant::now())
+                    .observe_execution_end_flush_start(flushing_start_time)
                     .expect("we are the first caller")
             });
 
