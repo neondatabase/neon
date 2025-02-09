@@ -1773,48 +1773,6 @@ ARG DEBIAN_VERSION
 # Use strict mode for bash to catch errors early
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-# Add user postgres
-RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
-    echo "postgres:test_console_pass" | chpasswd && \
-    mkdir /var/db/postgres/compute && mkdir /var/db/postgres/specs && \
-    mkdir /var/db/postgres/pgbouncer && \
-    chown -R postgres:postgres /var/db/postgres && \
-    chmod 0750 /var/db/postgres/compute && \
-    chmod 0750 /var/db/postgres/pgbouncer && \
-    echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig && \
-    # create folder for file cache
-    mkdir -p -m 777 /neon/cache
-
-# aws cli is used by fast_import
-COPY --from=awscli /usr/local/aws-cli /usr/local/aws-cli
-
-COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
-COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/compute_ctl /usr/local/bin/compute_ctl
-COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/fast_import /usr/local/bin/fast_import
-
-# pgbouncer and its config
-COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
-COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
-
-# local_proxy and its config
-COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/local_proxy /usr/local/bin/local_proxy
-RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
-
-# Metrics exporter binaries and configuration files
-COPY --from=exporters ./postgres_exporter /bin/postgres_exporter
-COPY --from=exporters ./pgbouncer_exporter /bin/pgbouncer_exporter
-COPY --from=exporters ./sql_exporter /bin/sql_exporter
-
-COPY --chown=postgres compute/etc/postgres_exporter.yml /etc/postgres_exporter.yml
-
-COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter.yml               /etc/sql_exporter.yml
-COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector.yml             /etc/neon_collector.yml
-COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
-COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
-
-# Create remote extension download directory
-RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/local/download_extensions
-
 # Install:
 # libreadline8 for psql
 # liblz4-1 for lz4
@@ -1825,10 +1783,8 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 # libboost* for rdkit
 # ca-certificates for communicating with s3 by compute_ctl
 # libevent for pgbouncer
-
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
-
 RUN apt update && \
     case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):
@@ -1870,6 +1826,48 @@ RUN apt update && \
         $VERSION_INSTALLS && \
     apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
+
+# Add user postgres
+RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
+    echo "postgres:test_console_pass" | chpasswd && \
+    mkdir /var/db/postgres/compute && mkdir /var/db/postgres/specs && \
+    mkdir /var/db/postgres/pgbouncer && \
+    chown -R postgres:postgres /var/db/postgres && \
+    chmod 0750 /var/db/postgres/compute && \
+    chmod 0750 /var/db/postgres/pgbouncer && \
+    echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig && \
+    # create folder for file cache
+    mkdir -p -m 777 /neon/cache && \
+    # Create remote extension download directory
+    mkdir /usr/local/download_extensions && \
+    chown -R postgres:postgres /usr/local/download_extensions
+
+# aws cli is used by fast_import
+COPY --from=awscli /usr/local/aws-cli /usr/local/aws-cli
+
+# pgbouncer and its config
+COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
+COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
+
+COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/fast_import /usr/local/bin/fast_import
+
+# local_proxy and its config
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/local_proxy /usr/local/bin/local_proxy
+RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
+
+# Metrics exporter binaries and configuration files
+COPY --from=exporters ./postgres_exporter /bin/postgres_exporter
+COPY --from=exporters ./pgbouncer_exporter /bin/pgbouncer_exporter
+COPY --from=exporters ./sql_exporter /bin/sql_exporter
+
+COPY --chown=postgres compute/etc/postgres_exporter.yml /etc/postgres_exporter.yml
+
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter.yml               /etc/sql_exporter.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector.yml             /etc/neon_collector.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
 
 ENV LANG=en_US.utf8
 USER postgres
