@@ -1643,6 +1643,29 @@ RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 30
 
 #########################################################################################
 #
+# Layer "awscli"
+#
+#########################################################################################
+FROM alpine/curl:${ALPINE_CURL_VERSION} AS awscli
+ARG TARGETARCH
+RUN set -ex; \
+    if [ "${TARGETARCH}" = "amd64" ]; then \
+        TARGETARCH_ALT="x86_64"; \
+        CHECKSUM="c9a9df3770a3ff9259cb469b6179e02829687a464e0824d5c32d378820b53a00"; \
+    elif [ "${TARGETARCH}" = "arm64" ]; then \
+        TARGETARCH_ALT="aarch64"; \
+        CHECKSUM="8181730be7891582b38b028112e81b4899ca817e8c616aad807c9e9d1289223a"; \
+    else \
+        echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
+    fi; \
+    curl --retry 5 -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
+    echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
+    unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
+    /tmp/awscliv2/aws/install; \
+    rm -rf /tmp/awscliv2.zip /tmp/awscliv2
+
+#########################################################################################
+#
 # Clean up postgres folder before inclusion
 #
 #########################################################################################
@@ -1831,30 +1854,12 @@ RUN apt update && \
         locales \
         procps \
         ca-certificates \
-        curl \
-        unzip \
         $VERSION_INSTALLS && \
     apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 
-# aws cli is used by fast_import (curl and unzip above are at this time only used for this installation step)
-ARG TARGETARCH
-RUN set -ex; \
-    if [ "${TARGETARCH}" = "amd64" ]; then \
-        TARGETARCH_ALT="x86_64"; \
-        CHECKSUM="c9a9df3770a3ff9259cb469b6179e02829687a464e0824d5c32d378820b53a00"; \
-    elif [ "${TARGETARCH}" = "arm64" ]; then \
-        TARGETARCH_ALT="aarch64"; \
-        CHECKSUM="8181730be7891582b38b028112e81b4899ca817e8c616aad807c9e9d1289223a"; \
-    else \
-        echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
-    fi; \
-    curl --retry 5 -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
-    echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
-    unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
-    /tmp/awscliv2/aws/install; \
-    rm -rf /tmp/awscliv2.zip /tmp/awscliv2; \
-    true
+# aws cli is used by fast_import
+COPY --from=awscli /usr/local/aws-cli /usr/local/aws-cli
 
 ENV LANG=en_US.utf8
 USER postgres
