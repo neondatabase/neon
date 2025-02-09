@@ -128,6 +128,8 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = CliOpts::parse();
 
+	println!("Trigger rebuild");
+
     match cli.command {
         Commands::Layer(cmd) => {
             layers::main(&cmd).await?;
