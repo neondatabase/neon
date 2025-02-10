@@ -1,6 +1,12 @@
 ARG DEBIAN_VERSION=bookworm
+ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
+ARG BOOKWORM_SLIM_SHA=sha256:40b107342c492725bc7aacbe93a49945445191ae364184a6d24fedb28172f6f7
+ARG BULLSEYE_SLIM_SHA=sha256:e831d9a884d63734fe3dd9c491ed9a5a3d4c6a6d32c5b14f2067357c49b0b7e1
+ARG BASE_IMAGE_SHA=debian:${DEBIAN_FLAVOR}
+ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bookworm-slim/debian@$BOOKWORM_SLIM_SHA}
+ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bullseye-slim/debian@$BULLSEYE_SLIM_SHA}
 
-FROM debian:bookworm-slim AS pgcopydb_builder
+FROM $BASE_IMAGE_SHA AS pgcopydb_builder
 ARG DEBIAN_VERSION
 
 # Use strict mode for bash to catch errors early
@@ -9,7 +15,7 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 # By default, /bin/sh used in debian images will treat '\n' as eol,
 # but as we use bash as SHELL, and built-in echo in bash requires '-e' flag for that.
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc && \
+    echo -e "retry_connrefused=on\ntimeout=15\ntries=5\nretry-on-host-error=on\n" > /root/.wgetrc && \
     echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
 
 COPY build_tools/patches/pgcopydbv017.patch /pgcopydbv017.patch
@@ -58,7 +64,7 @@ RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         mkdir -p mkdir -p /pgcopydb/lib && touch /pgcopydb/lib/libpq.so.5; \
     fi
 
-FROM debian:${DEBIAN_VERSION}-slim AS build_tools
+FROM $BASE_IMAGE_SHA AS build_tools
 ARG DEBIAN_VERSION
 
 # Add nonroot user
@@ -75,7 +81,7 @@ COPY --from=pgcopydb_builder /usr/lib/postgresql/16/bin/pgcopydb /pgcopydb/bin/p
 COPY --from=pgcopydb_builder /pgcopydb/lib/libpq.so.5 /pgcopydb/lib/libpq.so.5
 
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc && \
+    echo -e "retry_connrefused=on\ntimeout=15\ntries=5\nretry-on-host-error=on\n" > /root/.wgetrc && \
     echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
 
 # System deps
@@ -138,7 +144,8 @@ RUN curl -fsSL \
     --output sql_exporter.tar.gz \
     && mkdir /tmp/sql_exporter \
     && tar xzvf sql_exporter.tar.gz -C /tmp/sql_exporter --strip-components=1 \
-    && mv /tmp/sql_exporter/sql_exporter /usr/local/bin/sql_exporter
+    && mv /tmp/sql_exporter/sql_exporter /usr/local/bin/sql_exporter \
+    && rm sql_exporter.tar.gz
 
 # protobuf-compiler (protoc)
 ENV PROTOC_VERSION=25.1
