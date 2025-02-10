@@ -353,7 +353,6 @@ impl Layer {
     /// while the guard exists.
     ///
     /// Returns None if the layer is currently evicted or becoming evicted.
-    #[cfg(test)]
     pub(crate) async fn keep_resident(&self) -> Option<ResidentLayer> {
         let downloaded = self.0.inner.get().and_then(|rowe| rowe.get())?;
 
@@ -530,7 +529,6 @@ impl ResidentOrWantedEvicted {
     /// This is not used on the read path (anything that calls
     /// [`LayerInner::get_or_maybe_download`]) because it was decided that reads always win
     /// evictions, and part of that winning is using [`ResidentOrWantedEvicted::get_and_upgrade`].
-    #[cfg(test)]
     fn get(&self) -> Option<Arc<DownloadedLayer>> {
         match self {
             ResidentOrWantedEvicted::Resident(strong) => Some(strong.clone()),

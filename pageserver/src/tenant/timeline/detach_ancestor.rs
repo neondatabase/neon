@@ -6,7 +6,9 @@ use crate::{
     task_mgr::TaskKind,
     tenant::{
         remote_timeline_client::index::GcBlockingReason::DetachAncestor,
-        storage_layer::{AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer},
+        storage_layer::{
+            layer::local_layer_path, AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer,
+        },
         Tenant,
     },
     virtual_file::{MaybeFatalIo, VirtualFile},
@@ -629,8 +631,8 @@ async fn copy_lsn_prefix(
     }
 }
 
-/// Creates a new Layer instance for the adopted layer, and ensures it is found from the remote
-/// storage on successful return without the adopted layer being added to `index_part.json`.
+/// Creates a new Layer instance for the adopted layer, and ensures it is found in the remote
+/// storage on successful return. without the adopted layer being added to `index_part.json`.
 async fn remote_copy(
     adopted: &Layer,
     adoptee: &Arc<Timeline>,
@@ -638,19 +640,30 @@ async fn remote_copy(
     shard_identity: ShardIdentity,
     cancel: &CancellationToken,
 ) -> Result<Layer, Error> {
-    // depending if Layer::keep_resident we could hardlink
-
     let mut metadata = adopted.metadata();
     debug_assert!(metadata.generation <= generation);
     metadata.generation = generation;
     metadata.shard = shard_identity.shard_index();
 
-    let owned = crate::tenant::storage_layer::Layer::for_evicted(
-        adoptee.conf,
-        adoptee,
-        adopted.layer_desc().layer_name(),
-        metadata,
-    );
+    let conf = adoptee.conf;
+    let file_name = adopted.layer_desc().layer_name();
+
+    // depending if Layer::keep_resident, do a hardlink
+    let owned = if let Some(adopted_resident) = adopted.keep_resident().await {
+        let adopted_path = adopted_resident.local_path();
+        let adoptee_path = local_layer_path(
+            conf,
+            &adoptee.tenant_shard_id,
+            &adoptee.timeline_id,
+            &file_name,
+            &metadata.generation,
+        );
+        std::fs::hard_link(adopted_path, &adoptee_path)
+            .map_err(|e| Error::launder(e.into(), Error::Prepare))?;
+        Layer::for_resident(conf, adoptee, adoptee_path, file_name, metadata).drop_eviction_guard()
+    } else {
+        Layer::for_evicted(conf, adoptee, file_name, metadata)
+    };
 
     adoptee
         .remote_client
