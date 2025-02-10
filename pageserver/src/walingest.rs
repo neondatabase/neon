@@ -1157,6 +1157,7 @@ impl WalIngest {
                 // See also the neon code changes in the InitWalRecovery() function.
                 if xlog_checkpoint.oldestActiveXid == pg_constants::INVALID_TRANSACTION_ID
                     && info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
+                    && self.shard.is_shard_zero()
                 {
                     let oldest_active_xid = if pg_version >= 17 {
                         let mut oldest_active_full_xid = cp.nextXid.value;
