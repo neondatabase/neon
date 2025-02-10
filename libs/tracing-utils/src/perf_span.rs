@@ -28,7 +28,7 @@ use core::{
     task::{Context, Poll},
 };
 use pin_project_lite::pin_project;
-use tracing::{field, span::Span, Dispatch};
+use tracing::{Dispatch, field, span::Span};
 
 #[derive(Debug, Clone)]
 pub struct PerfSpan {
