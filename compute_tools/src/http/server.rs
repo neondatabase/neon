@@ -1,11 +1,9 @@
 use std::{
     net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::Arc,
-    thread,
     time::Duration,
 };
 
-use anyhow::Result;
 use axum::{
     extract::Request,
     middleware::{self, Next},
@@ -46,7 +44,6 @@ async fn maybe_add_request_id_header(mut request: Request, next: Next) -> Respon
 }
 
 /// Run the HTTP server and wait on it forever.
-#[tokio::main]
 async fn serve(port: u16, compute: Arc<ComputeNode>) {
     let mut app = Router::new()
         .route("/check_writability", post(check_writability::is_writable))
@@ -139,11 +136,9 @@ async fn serve(port: u16, compute: Arc<ComputeNode>) {
     }
 }
 
-/// Launch a separate HTTP server thread and return its `JoinHandle`.
-pub fn launch_http_server(port: u16, state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
+/// Launch HTTP server in a new task and return its `JoinHandle`.
+pub fn launch_http_server(port: u16, state: &Arc<ComputeNode>) -> tokio::task::JoinHandle<()> {
     let state = Arc::clone(state);
 
-    Ok(thread::Builder::new()
-        .name("http-server".into())
-        .spawn(move || serve(port, state))?)
+    tokio::spawn(serve(port, state))
 }

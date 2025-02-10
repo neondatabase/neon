@@ -1,8 +1,8 @@
 use anyhow::{anyhow, bail, Result};
-use postgres::Client;
 use reqwest::StatusCode;
 use std::fs::File;
 use std::path::Path;
+use tokio_postgres::Client;
 use tracing::{error, info, instrument, warn};
 
 use crate::config;
@@ -166,17 +166,17 @@ pub fn add_standby_signal(pgdata_path: &Path) -> Result<()> {
 }
 
 #[instrument(skip_all)]
-pub fn handle_neon_extension_upgrade(client: &mut Client) -> Result<()> {
+pub async fn handle_neon_extension_upgrade(client: &mut Client) -> Result<()> {
     info!("handle neon extension upgrade");
     let query = "ALTER EXTENSION neon UPDATE";
     info!("update neon extension version with query: {}", query);
-    client.simple_query(query)?;
+    client.simple_query(query).await?;
 
     Ok(())
 }
 
 #[instrument(skip_all)]
-pub fn handle_migrations(client: &mut Client) -> Result<()> {
+pub async fn handle_migrations(client: &mut Client) -> Result<()> {
     info!("handle migrations");
 
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -206,7 +206,9 @@ pub fn handle_migrations(client: &mut Client) -> Result<()> {
         ),
     ];
 
-    MigrationRunner::new(client, &migrations).run_migrations()?;
+    MigrationRunner::new(client, &migrations)
+        .run_migrations()
+        .await?;
 
     Ok(())
 }
@@ -214,7 +216,7 @@ pub fn handle_migrations(client: &mut Client) -> Result<()> {
 /// Connect to the database as superuser and pre-create anon extension
 /// if it is present in shared_preload_libraries
 #[instrument(skip_all)]
-pub fn handle_extension_anon(
+pub async fn handle_extension_anon(
     spec: &ComputeSpec,
     db_owner: &str,
     db_client: &mut Client,
@@ -227,7 +229,7 @@ pub fn handle_extension_anon(
             if !grants_only {
                 // check if extension is already initialized using anon.is_initialized()
                 let query = "SELECT anon.is_initialized()";
-                match db_client.query(query, &[]) {
+                match db_client.query(query, &[]).await {
                     Ok(rows) => {
                         if !rows.is_empty() {
                             let is_initialized: bool = rows[0].get(0);
@@ -249,7 +251,7 @@ pub fn handle_extension_anon(
                 // Users cannot create it themselves, because superuser is required.
                 let mut query = "CREATE EXTENSION IF NOT EXISTS anon CASCADE";
                 info!("creating anon extension with query: {}", query);
-                match db_client.query(query, &[]) {
+                match db_client.query(query, &[]).await {
                     Ok(_) => {}
                     Err(e) => {
                         error!("anon extension creation failed with error: {}", e);
@@ -259,7 +261,7 @@ pub fn handle_extension_anon(
 
                 // check that extension is installed
                 query = "SELECT extname FROM pg_extension WHERE extname = 'anon'";
-                let rows = db_client.query(query, &[])?;
+                let rows = db_client.query(query, &[]).await?;
                 if rows.is_empty() {
                     error!("anon extension is not installed");
                     return Ok(());
@@ -268,7 +270,7 @@ pub fn handle_extension_anon(
                 // Initialize anon extension
                 // This also requires superuser privileges, so users cannot do it themselves.
                 query = "SELECT anon.init()";
-                match db_client.query(query, &[]) {
+                match db_client.query(query, &[]).await {
                     Ok(_) => {}
                     Err(e) => {
                         error!("anon.init() failed with error: {}", e);
@@ -279,7 +281,7 @@ pub fn handle_extension_anon(
 
             // check that extension is installed, if not bail early
             let query = "SELECT extname FROM pg_extension WHERE extname = 'anon'";
-            match db_client.query(query, &[]) {
+            match db_client.query(query, &[]).await {
                 Ok(rows) => {
                     if rows.is_empty() {
                         error!("anon extension is not installed");
@@ -294,12 +296,12 @@ pub fn handle_extension_anon(
 
             let query = format!("GRANT ALL ON SCHEMA anon TO {}", db_owner);
             info!("granting anon extension permissions with query: {}", query);
-            db_client.simple_query(&query)?;
+            db_client.simple_query(&query).await?;
 
             // Grant permissions to db_owner to use anon extension functions
             let query = format!("GRANT ALL ON ALL FUNCTIONS IN SCHEMA anon TO {}", db_owner);
             info!("granting anon extension permissions with query: {}", query);
-            db_client.simple_query(&query)?;
+            db_client.simple_query(&query).await?;
 
             // This is needed, because some functions are defined as SECURITY DEFINER.
             // In Postgres SECURITY DEFINER functions are executed with the privileges
@@ -314,16 +316,16 @@ pub fn handle_extension_anon(
                 where nsp.nspname = 'anon';", db_owner);
 
             info!("change anon extension functions owner to db owner");
-            db_client.simple_query(&query)?;
+            db_client.simple_query(&query).await?;
 
             //  affects views as well
             let query = format!("GRANT ALL ON ALL TABLES IN SCHEMA anon TO {}", db_owner);
             info!("granting anon extension permissions with query: {}", query);
-            db_client.simple_query(&query)?;
+            db_client.simple_query(&query).await?;
 
             let query = format!("GRANT ALL ON ALL SEQUENCES IN SCHEMA anon TO {}", db_owner);
             info!("granting anon extension permissions with query: {}", query);
-            db_client.simple_query(&query)?;
+            db_client.simple_query(&query).await?;
         }
     }
 
