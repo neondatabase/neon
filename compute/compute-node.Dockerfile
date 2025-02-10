@@ -1588,7 +1588,15 @@ ENV BUILD_TAG=$BUILD_TAG
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
-RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy
+RUN --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/registry \
+    --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/git \
+    --mount=type=cache,uid=1000,target=/home/nonroot/target \
+    mold -run cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy && \
+    mkdir target-bin && \
+    cp target/release-line-debug-size-lto/compute_ctl \
+       target/release-line-debug-size-lto/fast_import \
+       target/release-line-debug-size-lto/local_proxy \
+       target-bin
 
 #########################################################################################
 #
@@ -1649,6 +1657,29 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then\
     && echo "${postgres_exporter_sha256} postgres_exporter" | sha256sum -c -\
     && echo "${pgbouncer_exporter_sha256} pgbouncer_exporter" | sha256sum -c -\
     && echo "${sql_exporter_sha256} sql_exporter" | sha256sum -c -
+
+#########################################################################################
+#
+# Layer "awscli"
+#
+#########################################################################################
+FROM alpine/curl:${ALPINE_CURL_VERSION} AS awscli
+ARG TARGETARCH
+RUN set -ex; \
+    if [ "${TARGETARCH}" = "amd64" ]; then \
+        TARGETARCH_ALT="x86_64"; \
+        CHECKSUM="c9a9df3770a3ff9259cb469b6179e02829687a464e0824d5c32d378820b53a00"; \
+    elif [ "${TARGETARCH}" = "arm64" ]; then \
+        TARGETARCH_ALT="aarch64"; \
+        CHECKSUM="8181730be7891582b38b028112e81b4899ca817e8c616aad807c9e9d1289223a"; \
+    else \
+        echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
+    fi; \
+    curl --retry 5 -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
+    echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
+    unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
+    /tmp/awscliv2/aws/install; \
+    rm -rf /tmp/awscliv2.zip /tmp/awscliv2
 
 #########################################################################################
 #
@@ -1813,8 +1844,6 @@ RUN apt update && \
         locales \
         procps \
         ca-certificates \
-        curl \
-        unzip \
         $VERSION_INSTALLS && \
     apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
@@ -1864,6 +1893,7 @@ COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql
 COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector.yml             /etc/neon_collector.yml
 COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
 COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
+
 
 ENV LANG=en_US.utf8
 USER postgres

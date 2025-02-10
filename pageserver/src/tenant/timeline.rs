@@ -45,11 +45,9 @@ use rand::Rng;
 use remote_storage::DownloadError;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc::Sender;
-use tokio::{
-    runtime::Handle,
-    sync::{oneshot, watch},
-};
+use tokio::sync::{oneshot, watch, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::critical;
@@ -227,6 +225,7 @@ pub struct TimelineResources {
     pub remote_client: RemoteTimelineClient,
     pub pagestream_throttle: Arc<crate::tenant::throttle::Throttle>,
     pub pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
+    pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
@@ -425,6 +424,9 @@ pub struct Timeline {
 
     /// If true, the last compaction failed.
     compaction_failed: AtomicBool,
+
+    /// Notifies the tenant compaction loop that there is pending L0 compaction work.
+    l0_compaction_trigger: Arc<Notify>,
 
     /// Make sure we only have one running gc at a time.
     ///
@@ -626,6 +628,71 @@ impl From<layer_manager::Shutdown> for GetVectoredError {
     }
 }
 
+/// A layer identifier when used in the [`ReadPath`] structure. This enum is for observability purposes
+/// only and not used by the "real read path".
+pub enum ReadPathLayerId {
+    PersistentLayer(PersistentLayerKey),
+    InMemoryLayer(Range<Lsn>),
+}
+
+impl std::fmt::Display for ReadPathLayerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadPathLayerId::PersistentLayer(key) => write!(f, "{}", key),
+            ReadPathLayerId::InMemoryLayer(range) => {
+                write!(f, "in-mem {}..{}", range.start, range.end)
+            }
+        }
+    }
+}
+pub struct ReadPath {
+    keyspace: KeySpace,
+    lsn: Lsn,
+    path: Vec<(ReadPathLayerId, KeySpace, Range<Lsn>)>,
+}
+
+impl ReadPath {
+    pub fn new(keyspace: KeySpace, lsn: Lsn) -> Self {
+        Self {
+            keyspace,
+            lsn,
+            path: Vec::new(),
+        }
+    }
+
+    pub fn record_layer_visit(
+        &mut self,
+        layer_to_read: &ReadableLayer,
+        keyspace_to_read: &KeySpace,
+        lsn_range: &Range<Lsn>,
+    ) {
+        let id = match layer_to_read {
+            ReadableLayer::PersistentLayer(layer) => {
+                ReadPathLayerId::PersistentLayer(layer.layer_desc().key())
+            }
+            ReadableLayer::InMemoryLayer(layer) => {
+                ReadPathLayerId::InMemoryLayer(layer.get_lsn_range())
+            }
+        };
+        self.path
+            .push((id, keyspace_to_read.clone(), lsn_range.clone()));
+    }
+}
+
+impl std::fmt::Display for ReadPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Read path for {} at lsn {}:", self.keyspace, self.lsn)?;
+        for (idx, (layer_id, keyspace, lsn_range)) in self.path.iter().enumerate() {
+            writeln!(
+                f,
+                "{}: {} {}..{} {}",
+                idx, layer_id, lsn_range.start, lsn_range.end, keyspace
+            )?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(thiserror::Error)]
 pub struct MissingKeyError {
     key: Key,
@@ -633,6 +700,8 @@ pub struct MissingKeyError {
     cont_lsn: Lsn,
     request_lsn: Lsn,
     ancestor_lsn: Option<Lsn>,
+    /// Debug information about the read path if there's an error
+    read_path: Option<ReadPath>,
     backtrace: Option<std::backtrace::Backtrace>,
 }
 
@@ -649,8 +718,13 @@ impl std::fmt::Display for MissingKeyError {
             "could not find data for key {} (shard {:?}) at LSN {}, request LSN {}",
             self.key, self.shard, self.cont_lsn, self.request_lsn
         )?;
+
         if let Some(ref ancestor_lsn) = self.ancestor_lsn {
             write!(f, ", ancestor {}", ancestor_lsn)?;
+        }
+
+        if let Some(ref read_path) = self.read_path {
+            write!(f, "\n{}", read_path)?;
         }
 
         if let Some(ref backtrace) = self.backtrace {
@@ -1069,6 +1143,7 @@ impl Timeline {
                 request_lsn: lsn,
                 ancestor_lsn: None,
                 backtrace: None,
+                read_path: None,
             })),
         }
     }
@@ -1195,6 +1270,13 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        let read_path = if self.conf.enable_read_path_debugging {
+            Some(ReadPath::new(keyspace.clone(), lsn))
+        } else {
+            None
+        };
+        reconstruct_state.read_path = read_path;
+
         let traversal_res: Result<(), _> = self
             .get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
             .await;
@@ -2584,6 +2666,7 @@ impl Timeline {
 
                 compaction_lock: tokio::sync::Mutex::default(),
                 compaction_failed: AtomicBool::default(),
+                l0_compaction_trigger: resources.l0_compaction_trigger,
                 gc_lock: tokio::sync::Mutex::default(),
 
                 standby_horizon: AtomicLsn::new(0),
@@ -3504,6 +3587,7 @@ impl Timeline {
                 request_lsn,
                 ancestor_lsn: Some(timeline.ancestor_lsn),
                 backtrace: None,
+                read_path: std::mem::take(&mut reconstruct_state.read_path),
             }));
         }
 
@@ -3622,6 +3706,9 @@ impl Timeline {
             }
 
             if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
+                if let Some(ref mut read_path) = reconstruct_state.read_path {
+                    read_path.record_layer_visit(&layer_to_read, &keyspace_to_read, &lsn_range);
+                }
                 let next_cont_lsn = lsn_range.start;
                 layer_to_read
                     .get_values_reconstruct_data(
@@ -3921,6 +4008,12 @@ impl Timeline {
                     }
                 }
                 let flush_duration = flush_timer.stop_and_record();
+
+                // Notify the tenant compaction loop if L0 compaction is needed.
+                let l0_count = *watch_l0.borrow();
+                if l0_count >= self.get_compaction_threshold() {
+                    self.l0_compaction_trigger.notify_one();
+                }
 
                 // Delay the next flush to backpressure if compaction can't keep up. We delay by the
                 // flush duration such that the flush takes 2x as long. This is propagated up to WAL

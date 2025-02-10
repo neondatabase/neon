@@ -197,6 +197,10 @@ pub struct PageServerConf {
     pub page_service_pipelining: pageserver_api::config::PageServicePipeliningConfig,
 
     pub get_vectored_concurrent_io: pageserver_api::config::GetVectoredConcurrentIo,
+
+    /// Enable read path debugging. If enabled, read key errors will print a backtrace of the layer
+    /// files read.
+    pub enable_read_path_debugging: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -360,6 +364,7 @@ impl PageServerConf {
             wal_receiver_protocol,
             page_service_pipelining,
             get_vectored_concurrent_io,
+            enable_read_path_debugging,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -446,6 +451,7 @@ impl PageServerConf {
                 .unwrap_or_default(),
             virtual_file_io_mode: virtual_file_io_mode.unwrap_or(virtual_file::IoMode::preferred()),
             no_sync: no_sync.unwrap_or(false),
+            enable_read_path_debugging: enable_read_path_debugging.unwrap_or(false),
         };
 
         // ------------------------------------------------------------
