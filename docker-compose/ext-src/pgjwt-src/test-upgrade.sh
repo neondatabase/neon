@@ -2,4 +2,4 @@
 set -ex
 cd "$(dirname ${0})"
 patch -p1 <test-upgrade.patch
-pg_prove test.sql
+pg_prove -d contrib_regression test.sql
