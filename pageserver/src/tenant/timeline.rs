@@ -1261,7 +1261,7 @@ impl Timeline {
         vectored_res
     }
 
-    pub(super) async fn get_vectored_impl(
+    pub(crate) async fn get_vectored_impl(
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
