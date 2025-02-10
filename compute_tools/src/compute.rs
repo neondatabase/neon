@@ -9,7 +9,6 @@ use std::str::FromStr;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -548,11 +547,7 @@ impl ComputeNode {
     pub fn check_safekeepers_synced(&self, compute_state: &ComputeState) -> Result<Option<Lsn>> {
         let start_time = Utc::now();
 
-        // Run actual work with new tokio runtime
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create rt");
+        let rt = tokio::runtime::Handle::current();
         let result = rt.block_on(self.check_safekeepers_synced_async(compute_state));
 
         // Record runtime
@@ -599,9 +594,9 @@ impl ComputeNode {
         SYNC_SAFEKEEPERS_PID.store(0, Ordering::SeqCst);
 
         // Process has exited, so we can join the logs thread.
-        let _ = logs_handle
-            .join()
-            .map_err(|e| tracing::error!("log thread panicked: {:?}", e));
+        let _ = tokio::runtime::Handle::current()
+            .block_on(logs_handle)
+            .map_err(|e| tracing::error!("log task panicked: {:?}", e));
 
         if !sync_output.status.success() {
             anyhow::bail!(
@@ -786,7 +781,7 @@ impl ComputeNode {
     pub fn start_postgres(
         &self,
         storage_auth_token: Option<String>,
-    ) -> Result<(std::process::Child, std::thread::JoinHandle<()>)> {
+    ) -> Result<(std::process::Child, tokio::task::JoinHandle<Result<()>>)> {
         let pgdata_path = Path::new(&self.pgdata);
 
         // Run postgres as a child process.
@@ -802,7 +797,7 @@ impl ComputeNode {
             .expect("cannot start postgres process");
         PG_PID.store(pg.id(), Ordering::SeqCst);
 
-        // Start a thread to collect logs from stderr.
+        // Start a task to collect logs from stderr.
         let stderr = pg.stderr.take().expect("stderr should be captured");
         let logs_handle = handle_postgres_logs(stderr);
 
@@ -811,20 +806,28 @@ impl ComputeNode {
         Ok((pg, logs_handle))
     }
 
-    /// Do post configuration of the already started Postgres. This function spawns a background thread to
+    /// Do post configuration of the already started Postgres. This function spawns a background task to
     /// configure the database after applying the compute spec. Currently, it upgrades the neon extension
     /// version. In the future, it may upgrade all 3rd-party extensions.
     #[instrument(skip_all)]
     pub fn post_apply_config(&self) -> Result<()> {
-        let conf = self.get_conn_conf(Some("compute_ctl:post_apply_config"));
-        thread::spawn(move || {
-            let func = || {
-                let mut client = conf.connect(NoTls)?;
+        let conf = self.get_tokio_conn_conf(Some("compute_ctl:post_apply_config"));
+        tokio::spawn(async move {
+            let res = async {
+                let (mut client, connection) = conf.connect(NoTls).await?;
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        eprintln!("connection error: {}", e);
+                    }
+                });
+
                 handle_neon_extension_upgrade(&mut client)
+                    .await
                     .context("handle_neon_extension_upgrade")?;
                 Ok::<_, anyhow::Error>(())
-            };
-            if let Err(err) = func() {
+            }
+            .await;
+            if let Err(err) = res {
                 error!("error while post_apply_config: {err:#}");
             }
         });
@@ -921,13 +924,10 @@ impl ComputeNode {
         conf: Arc<tokio_postgres::Config>,
         concurrency: usize,
     ) -> Result<()> {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
-
         info!("Applying config with max {} concurrency", concurrency);
         debug!("Config: {:?}", spec);
 
+        let rt = tokio::runtime::Handle::current();
         rt.block_on(async {
             // Proceed with post-startup configuration. Note, that order of operations is important.
             let client = Self::get_maintenance_client(&conf).await?;
@@ -1321,14 +1321,18 @@ impl ComputeNode {
         }
 
         // Run migrations separately to not hold up cold starts
-        thread::spawn(move || {
-            let conf = conf.as_ref().clone();
-            let mut conf = postgres::config::Config::from(conf);
+        tokio::spawn(async move {
+            let mut conf = conf.as_ref().clone();
             conf.application_name("compute_ctl:migrations");
 
-            match conf.connect(NoTls) {
-                Ok(mut client) => {
-                    if let Err(e) = handle_migrations(&mut client) {
+            match conf.connect(NoTls).await {
+                Ok((mut client, connection)) => {
+                    tokio::spawn(async move {
+                        if let Err(e) = connection.await {
+                            eprintln!("connection error: {}", e);
+                        }
+                    });
+                    if let Err(e) = handle_migrations(&mut client).await {
                         error!("Failed to run migrations: {}", e);
                     }
                 }
@@ -1365,16 +1369,11 @@ impl ComputeNode {
         if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
             info!("tuning pgbouncer");
 
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to create rt");
-
-            // Spawn a thread to do the tuning,
+            // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
             let pgbouncer_settings = pgbouncer_settings.clone();
-            let _handle = thread::spawn(move || {
-                let res = rt.block_on(tune_pgbouncer(pgbouncer_settings));
+            tokio::spawn(async move {
+                let res = tune_pgbouncer(pgbouncer_settings).await;
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
                 }
@@ -1384,14 +1383,14 @@ impl ComputeNode {
         if let Some(ref local_proxy) = spec.local_proxy_config {
             info!("configuring local_proxy");
 
-            // Spawn a thread to do the configuration,
+            // Spawn a background task to do the configuration,
             // so that we don't block the main thread that starts Postgres.
             let local_proxy = local_proxy.clone();
-            let _handle = Some(thread::spawn(move || {
+            tokio::spawn(async move {
                 if let Err(err) = local_proxy::configure(&local_proxy) {
                     error!("error while configuring local_proxy: {err:?}");
                 }
-            }));
+            });
         }
 
         // Write new config
@@ -1433,7 +1432,9 @@ impl ComputeNode {
     }
 
     #[instrument(skip_all)]
-    pub fn start_compute(&self) -> Result<(std::process::Child, std::thread::JoinHandle<()>)> {
+    pub fn start_compute(
+        &self,
+    ) -> Result<(std::process::Child, tokio::task::JoinHandle<Result<()>>)> {
         let compute_state = self.state.lock().unwrap().clone();
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
@@ -1448,16 +1449,11 @@ impl ComputeNode {
         if let Some(pgbouncer_settings) = &pspec.spec.pgbouncer_settings {
             info!("tuning pgbouncer");
 
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to create rt");
-
-            // Spawn a thread to do the tuning,
+            // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
             let pgbouncer_settings = pgbouncer_settings.clone();
-            let _handle = thread::spawn(move || {
-                let res = rt.block_on(tune_pgbouncer(pgbouncer_settings));
+            let _handle = tokio::spawn(async move {
+                let res = tune_pgbouncer(pgbouncer_settings).await;
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
                 }
@@ -1467,10 +1463,10 @@ impl ComputeNode {
         if let Some(local_proxy) = &pspec.spec.local_proxy_config {
             info!("configuring local_proxy");
 
-            // Spawn a thread to do the configuration,
+            // Spawn a background task to do the configuration,
             // so that we don't block the main thread that starts Postgres.
             let local_proxy = local_proxy.clone();
-            let _handle = thread::spawn(move || {
+            let _handle = tokio::spawn(async move {
                 if let Err(err) = local_proxy::configure(&local_proxy) {
                     error!("error while configuring local_proxy: {err:?}");
                 }
@@ -1489,7 +1485,8 @@ impl ComputeNode {
             extension_server::create_control_files(remote_extensions, &self.pgbin);
 
             let library_load_start_time = Utc::now();
-            let remote_ext_metrics = self.prepare_preload_libraries(&pspec.spec)?;
+            let rt = tokio::runtime::Handle::current();
+            let remote_ext_metrics = rt.block_on(self.prepare_preload_libraries(&pspec.spec))?;
 
             let library_load_time = Utc::now()
                 .signed_duration_since(library_load_start_time)
@@ -1544,7 +1541,7 @@ impl ComputeNode {
             self.post_apply_config()?;
 
             let conf = self.get_conn_conf(None);
-            thread::spawn(move || {
+            tokio::task::spawn_blocking(|| {
                 let res = get_installed_extensions(conf);
                 match res {
                     Ok(extensions) => {
@@ -1893,7 +1890,6 @@ LIMIT 100",
         Ok(ext_version)
     }
 
-    #[tokio::main]
     pub async fn prepare_preload_libraries(
         &self,
         spec: &ComputeSpec,
