@@ -1860,7 +1860,7 @@ RUN set -ex; \
     else \
         echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
     fi; \
-    curl --retry 5 -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
+    wget "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -O /tmp/awscliv2.zip; \
     echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
     unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
     /tmp/awscliv2/aws/install; \
