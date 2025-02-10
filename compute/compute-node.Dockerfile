@@ -1666,6 +1666,8 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then\
 FROM build-deps AS awscli
 ARG TARGETARCH
 RUN set -ex; \
+    apt update; \
+    apt install --no-install-recommends -y unzip; \
     if [ "${TARGETARCH}" = "amd64" ]; then \
         TARGETARCH_ALT="x86_64"; \
         CHECKSUM="c9a9df3770a3ff9259cb469b6179e02829687a464e0824d5c32d378820b53a00"; \
@@ -1679,7 +1681,8 @@ RUN set -ex; \
     echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
     unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
     /tmp/awscliv2/aws/install; \
-    rm -rf /tmp/awscliv2.zip /tmp/awscliv2
+    rm -rf /tmp/awscliv2.zip /tmp/awscliv2; \
+    apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 #########################################################################################
 #
