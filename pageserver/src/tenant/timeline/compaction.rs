@@ -709,6 +709,10 @@ impl Timeline {
             return Ok(CompactionOutcome::Pending);
         }
 
+        if options.flags.contains(CompactFlags::OnlyL0Compaction) {
+            return Ok(CompactionOutcome::Done);
+        }
+
         // 2. Repartition and create image layers if necessary
         let partition_count = match self
             .repartition(
