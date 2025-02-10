@@ -229,6 +229,11 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     }
 
     loop {
+        // Recheck that we're still active.
+        if wait_for_active_tenant(&tenant, &cancel).await.is_break() {
+            return;
+        }
+
         // Refresh the period. If compaction is disabled, check again in a bit.
         period = tenant.get_compaction_period();
         if period == Duration::ZERO {
