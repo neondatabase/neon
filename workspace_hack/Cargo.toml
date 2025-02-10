@@ -92,6 +92,7 @@ tonic = { version = "0.12", default-features = false, features = ["codegen", "pr
 tower = { version = "0.4", default-features = false, features = ["balance", "buffer", "limit", "util"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
+tracing-log = { version = "0.2" }
 url = { version = "2", features = ["serde"] }
 zerocopy = { version = "0.7", features = ["derive", "simd"] }
 zeroize = { version = "1", features = ["derive", "serde"] }

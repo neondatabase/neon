@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use enum_map::EnumMap;
+use enum_map::{Enum as _, EnumMap};
 use futures::Future;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
@@ -32,6 +32,7 @@ use utils::id::TimelineId;
 
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
+use crate::pgdatadir_mapping::DatadirModificationStats;
 use crate::task_mgr::TaskKind;
 use crate::tenant::layer_map::LayerMap;
 use crate::tenant::mgr::TenantSlot;
@@ -103,7 +104,7 @@ pub(crate) static STORAGE_TIME_COUNT_PER_TIMELINE: Lazy<IntCounterVec> = Lazy::n
     .expect("failed to define a metric")
 });
 
-// Buckets for background operations like compaction, GC, size calculation
+// Buckets for background operation duration in seconds, like compaction, GC, size calculation.
 const STORAGE_OP_BUCKETS: &[f64] = &[0.010, 0.100, 1.0, 10.0, 100.0, 1000.0];
 
 pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
@@ -235,7 +236,7 @@ pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| 
 
     GetVectoredLatency {
         map: EnumMap::from_array(std::array::from_fn(|task_kind_idx| {
-            let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
+            let task_kind = TaskKind::from_usize(task_kind_idx);
 
             if GetVectoredLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
                 let task_kind = task_kind.into();
@@ -258,7 +259,7 @@ pub(crate) static SCAN_LATENCY: Lazy<ScanLatency> = Lazy::new(|| {
 
     ScanLatency {
         map: EnumMap::from_array(std::array::from_fn(|task_kind_idx| {
-            let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
+            let task_kind = TaskKind::from_usize(task_kind_idx);
 
             if ScanLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
                 let task_kind = task_kind.into();
@@ -299,10 +300,10 @@ static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
 
 pub(crate) static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
     map: EnumMap::from_array(std::array::from_fn(|task_kind| {
-        let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind);
+        let task_kind = TaskKind::from_usize(task_kind);
         let task_kind: &'static str = task_kind.into();
         EnumMap::from_array(std::array::from_fn(|content_kind| {
-            let content_kind = <PageContentKind as enum_map::Enum>::from_usize(content_kind);
+            let content_kind = PageContentKind::from_usize(content_kind);
             let content_kind: &'static str = content_kind.into();
             PageCacheMetricsForTaskKind {
                 read_accesses_immutable: {
@@ -1912,7 +1913,7 @@ pub(crate) static COMPUTE_COMMANDS_COUNTERS: Lazy<ComputeCommandCounters> = Lazy
 
     ComputeCommandCounters {
         map: EnumMap::from_array(std::array::from_fn(|i| {
-            let command = <ComputeCommandKind as enum_map::Enum>::from_usize(i);
+            let command = ComputeCommandKind::from_usize(i);
             let command_str: &'static str = command.into();
             inner.with_label_values(&[command_str])
         })),
@@ -2212,11 +2213,13 @@ pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
 
 pub struct BackgroundLoopSemaphoreMetrics {
     counters: EnumMap<BackgroundLoopKind, IntCounterPair>,
-    durations: EnumMap<BackgroundLoopKind, Counter>,
+    durations: EnumMap<BackgroundLoopKind, Histogram>,
+    waiting_tasks: EnumMap<BackgroundLoopKind, IntGauge>,
+    running_tasks: EnumMap<BackgroundLoopKind, IntGauge>,
 }
 
-pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics> = Lazy::new(
-    || {
+pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics> =
+    Lazy::new(|| {
         let counters = register_int_counter_pair_vec!(
             "pageserver_background_loop_semaphore_wait_start_count",
             "Counter for background loop concurrency-limiting semaphore acquire calls started",
@@ -2226,45 +2229,101 @@ pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics
         )
         .unwrap();
 
-        let durations = register_counter_vec!(
-            "pageserver_background_loop_semaphore_wait_duration_seconds",
-            "Sum of wall clock time spent waiting on the background loop concurrency-limiting semaphore acquire calls",
+        let durations = register_histogram_vec!(
+            "pageserver_background_loop_semaphore_wait_seconds",
+            "Seconds spent waiting on background loop semaphore acquisition",
+            &["task"],
+            vec![0.01, 1.0, 5.0, 10.0, 30.0, 60.0, 180.0, 300.0, 600.0],
+        )
+        .unwrap();
+
+        let waiting_tasks = register_int_gauge_vec!(
+            "pageserver_background_loop_semaphore_waiting_tasks",
+            "Number of background loop tasks waiting for semaphore",
+            &["task"],
+        )
+        .unwrap();
+
+        let running_tasks = register_int_gauge_vec!(
+            "pageserver_background_loop_semaphore_running_tasks",
+            "Number of background loop tasks running concurrently",
             &["task"],
         )
         .unwrap();
 
         BackgroundLoopSemaphoreMetrics {
-            counters: enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-                let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+            counters: EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = BackgroundLoopKind::from_usize(i);
                 counters.with_label_values(&[kind.into()])
             })),
-            durations: enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-                let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+            durations: EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = BackgroundLoopKind::from_usize(i);
                 durations.with_label_values(&[kind.into()])
             })),
+            waiting_tasks: EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = BackgroundLoopKind::from_usize(i);
+                waiting_tasks.with_label_values(&[kind.into()])
+            })),
+            running_tasks: EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = BackgroundLoopKind::from_usize(i);
+                running_tasks.with_label_values(&[kind.into()])
+            })),
         }
-    },
-);
+    });
 
 impl BackgroundLoopSemaphoreMetrics {
-    pub(crate) fn measure_acquisition(&self, task: BackgroundLoopKind) -> impl Drop + '_ {
-        struct Record<'a> {
-            metrics: &'a BackgroundLoopSemaphoreMetrics,
-            task: BackgroundLoopKind,
-            _counter_guard: metrics::IntCounterPairGuard,
-            start: Instant,
-        }
-        impl Drop for Record<'_> {
-            fn drop(&mut self) {
-                let elapsed = self.start.elapsed().as_secs_f64();
-                self.metrics.durations[self.task].inc_by(elapsed);
-            }
-        }
-        Record {
-            metrics: self,
+    /// Starts recording semaphore metrics. Call `acquired()` on the returned recorder when the
+    /// semaphore is acquired, and drop it when the task completes or is cancelled.
+    pub(crate) fn record(
+        &self,
+        task: BackgroundLoopKind,
+    ) -> BackgroundLoopSemaphoreMetricsRecorder {
+        BackgroundLoopSemaphoreMetricsRecorder::start(self, task)
+    }
+}
+
+/// Records metrics for a background task.
+pub struct BackgroundLoopSemaphoreMetricsRecorder<'a> {
+    metrics: &'a BackgroundLoopSemaphoreMetrics,
+    task: BackgroundLoopKind,
+    start: Instant,
+    wait_counter_guard: Option<metrics::IntCounterPairGuard>,
+}
+
+impl<'a> BackgroundLoopSemaphoreMetricsRecorder<'a> {
+    /// Starts recording semaphore metrics, by recording wait time and incrementing
+    /// `wait_start_count` and `waiting_tasks`.
+    fn start(metrics: &'a BackgroundLoopSemaphoreMetrics, task: BackgroundLoopKind) -> Self {
+        metrics.waiting_tasks[task].inc();
+        Self {
+            metrics,
             task,
-            _counter_guard: self.counters[task].guard(),
             start: Instant::now(),
+            wait_counter_guard: Some(metrics.counters[task].guard()),
+        }
+    }
+
+    /// Signals that the semaphore has been acquired, and updates relevant metrics.
+    pub fn acquired(&mut self) -> Duration {
+        let waited = self.start.elapsed();
+        self.wait_counter_guard.take().expect("already acquired");
+        self.metrics.durations[self.task].observe(waited.as_secs_f64());
+        self.metrics.waiting_tasks[self.task].dec();
+        self.metrics.running_tasks[self.task].inc();
+        waited
+    }
+}
+
+impl Drop for BackgroundLoopSemaphoreMetricsRecorder<'_> {
+    /// The task either completed or was cancelled.
+    fn drop(&mut self) {
+        if self.wait_counter_guard.take().is_some() {
+            // Waiting.
+            self.metrics.durations[self.task].observe(self.start.elapsed().as_secs_f64());
+            self.metrics.waiting_tasks[self.task].dec();
+        } else {
+            // Running.
+            self.metrics.running_tasks[self.task].dec();
         }
     }
 }
@@ -2378,11 +2437,40 @@ pub(crate) struct WalIngestMetrics {
     pub(crate) records_observed: IntCounter,
     pub(crate) records_committed: IntCounter,
     pub(crate) records_filtered: IntCounter,
+    pub(crate) values_committed_metadata_images: IntCounter,
+    pub(crate) values_committed_metadata_deltas: IntCounter,
+    pub(crate) values_committed_data_images: IntCounter,
+    pub(crate) values_committed_data_deltas: IntCounter,
     pub(crate) gap_blocks_zeroed_on_rel_extend: IntCounter,
-    pub(crate) clear_vm_bits_unknown: IntCounterVec,
+}
+
+impl WalIngestMetrics {
+    pub(crate) fn inc_values_committed(&self, stats: &DatadirModificationStats) {
+        if stats.metadata_images > 0 {
+            self.values_committed_metadata_images
+                .inc_by(stats.metadata_images);
+        }
+        if stats.metadata_deltas > 0 {
+            self.values_committed_metadata_deltas
+                .inc_by(stats.metadata_deltas);
+        }
+        if stats.data_images > 0 {
+            self.values_committed_data_images.inc_by(stats.data_images);
+        }
+        if stats.data_deltas > 0 {
+            self.values_committed_data_deltas.inc_by(stats.data_deltas);
+        }
+    }
 }
 
 pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
+    let values_committed = register_int_counter_vec!(
+        "pageserver_wal_ingest_values_committed",
+        "Number of values committed to pageserver storage from WAL records",
+        &["class", "kind"],
+    )
+    .expect("failed to define a metric");
+
     WalIngestMetrics {
     bytes_received: register_int_counter!(
         "pageserver_wal_ingest_bytes_received",
@@ -2409,15 +2497,13 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
         "Number of WAL records filtered out due to sharding"
     )
     .expect("failed to define a metric"),
+    values_committed_metadata_images: values_committed.with_label_values(&["metadata", "image"]),
+    values_committed_metadata_deltas: values_committed.with_label_values(&["metadata", "delta"]),
+    values_committed_data_images: values_committed.with_label_values(&["data", "image"]),
+    values_committed_data_deltas: values_committed.with_label_values(&["data", "delta"]),
     gap_blocks_zeroed_on_rel_extend: register_int_counter!(
         "pageserver_gap_blocks_zeroed_on_rel_extend",
         "Total number of zero gap blocks written on relation extends"
-    )
-    .expect("failed to define a metric"),
-    clear_vm_bits_unknown: register_int_counter_vec!(
-        "pageserver_wal_ingest_clear_vm_bits_unknown",
-        "Number of ignored ClearVmBits operations due to unknown pages/relations",
-        &["entity"],
     )
     .expect("failed to define a metric"),
 }
@@ -2486,7 +2572,7 @@ pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = 
 
 pub(crate) struct WalRedoProcessCounters {
     pub(crate) started: IntCounter,
-    pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
+    pub(crate) killed_by_cause: EnumMap<WalRedoKillCause, IntCounter>,
     pub(crate) active_stderr_logger_tasks_started: IntCounter,
     pub(crate) active_stderr_logger_tasks_finished: IntCounter,
 }
@@ -2528,7 +2614,7 @@ impl Default for WalRedoProcessCounters {
         Self {
             started,
             killed_by_cause: EnumMap::from_array(std::array::from_fn(|i| {
-                let cause = <WalRedoKillCause as enum_map::Enum>::from_usize(i);
+                let cause = WalRedoKillCause::from_usize(i);
                 let cause_str: &'static str = cause.into();
                 killed.with_label_values(&[cause_str])
             })),

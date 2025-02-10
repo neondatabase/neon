@@ -1,7 +1,8 @@
+use std::io::ErrorKind;
+
 use anyhow::Ok;
 use pq_proto::{id_to_cancel_key, CancelKeyData};
 use serde::{Deserialize, Serialize};
-use std::io::ErrorKind;
 
 pub mod keyspace {
     pub const CANCEL_PREFIX: &str = "cancel";

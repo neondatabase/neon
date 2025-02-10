@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use anyhow::bail;
-use dashmap::DashMap;
+use clashmap::ClashMap;
 use itertools::Itertools;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -62,7 +62,7 @@ impl GlobalRateLimiter {
 pub type WakeComputeRateLimiter = BucketRateLimiter<EndpointIdInt, StdRng, RandomState>;
 
 pub struct BucketRateLimiter<Key, Rand = StdRng, Hasher = RandomState> {
-    map: DashMap<Key, Vec<RateBucket>, Hasher>,
+    map: ClashMap<Key, Vec<RateBucket>, Hasher>,
     info: Cow<'static, [RateBucketInfo]>,
     access_count: AtomicUsize,
     rand: Mutex<Rand>,
@@ -202,7 +202,7 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         info!(buckets = ?info, "endpoint rate limiter");
         Self {
             info,
-            map: DashMap::with_hasher_and_shard_amount(hasher, 64),
+            map: ClashMap::with_hasher_and_shard_amount(hasher, 64),
             access_count: AtomicUsize::new(1), // start from 1 to avoid GC on the first request
             rand: Mutex::new(rand),
         }
