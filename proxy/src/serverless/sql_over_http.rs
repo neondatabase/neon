@@ -11,10 +11,12 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
 use hyper::{header, HeaderMap, Request, Response, StatusCode};
+use indexmap::IndexMap;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
 use postgres_client::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
 use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
+use serde_json::value::RawValue;
 use serde_json::Value;
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
@@ -249,6 +251,50 @@ pub(crate) async fn handle(
     let mut response = match result {
         Ok(r) => {
             ctx.set_success();
+
+            // Handling the error response from local proxy here
+            if config.authentication_config.is_auth_broker && r.status().is_server_error() {
+                let status = r.status();
+
+                let body_bytes = r
+                    .collect()
+                    .await
+                    .map_err(|e| {
+                        ApiError::InternalServerError(anyhow::Error::msg(format!(
+                            "could not collect http body: {e}"
+                        )))
+                    })?
+                    .to_bytes();
+
+                if let Ok(mut json_map) =
+                    serde_json::from_slice::<IndexMap<&str, &RawValue>>(&body_bytes)
+                {
+                    let message = json_map.get("message");
+                    if let Some(message) = message {
+                        let msg: String = match serde_json::from_str(message.get()) {
+                            Ok(msg) => msg,
+                            Err(_) => {
+                                "Unable to parse the response message from server".to_string()
+                            }
+                        };
+
+                        error!("Error response from local_proxy: {status} {msg}");
+
+                        json_map.retain(|key, _| !key.starts_with("neon:")); // remove all the neon-related keys
+
+                        let resp_json = serde_json::to_string(&json_map)
+                            .unwrap_or("failed to serialize the response message".to_string());
+
+                        return json_response(status, resp_json);
+                    }
+                }
+
+                error!("Unable to parse the response message from local_proxy");
+                return json_response(
+                    status,
+                    json!({ "message": "Unable to parse the response message from server".to_string() }),
+                );
+            }
             r
         }
         Err(e @ SqlOverHttpError::Cancelled(_)) => {
@@ -618,8 +664,6 @@ async fn handle_db_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let is_local_proxy = matches!(backend.auth_backend, crate::auth::Backend::Local(_));
-
             let keys = match auth {
                 AuthData::Password(pw) => {
                     backend
@@ -634,7 +678,9 @@ async fn handle_db_inner(
             };
 
             let client = match keys.keys {
-                ComputeCredentialKeys::JwtPayload(payload) if is_local_proxy => {
+                ComputeCredentialKeys::JwtPayload(payload)
+                    if backend.auth_backend.is_local_proxy() =>
+                {
                     let mut client = backend.connect_to_local_postgres(ctx, conn_info).await?;
                     let (cli_inner, _dsc) = client.client_inner();
                     cli_inner.set_jwt_session(&payload).await?;
