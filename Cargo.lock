@@ -7599,6 +7599,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
+ "pin-project-lite",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
