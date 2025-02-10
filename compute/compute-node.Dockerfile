@@ -1777,6 +1777,9 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     # create folder for file cache
     mkdir -p -m 777 /neon/cache
 
+# aws cli is used by fast_import
+COPY --from=awscli /usr/local/aws-cli /usr/local/aws-cli
+
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
 COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
 COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
@@ -1857,9 +1860,6 @@ RUN apt update && \
         $VERSION_INSTALLS && \
     apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
-
-# aws cli is used by fast_import
-COPY --from=awscli /usr/local/aws-cli /usr/local/aws-cli
 
 ENV LANG=en_US.utf8
 USER postgres
