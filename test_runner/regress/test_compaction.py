@@ -692,6 +692,7 @@ def test_pageserver_compaction_circuit_breaker(neon_env_builder: NeonEnvBuilder)
     workload.write_rows(1024, upload=False)
     workload.write_rows(1024, upload=False)
     workload.write_rows(1024, upload=False)
+    env.pageserver.http_client().timeline_checkpoint(env.initial_tenant, env.initial_timeline)
 
     def assert_broken():
         env.pageserver.assert_log_contains(BROKEN_LOG)

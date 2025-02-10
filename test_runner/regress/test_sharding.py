@@ -93,6 +93,7 @@ def test_sharding_smoke(
     sizes_before = get_sizes()
     workload.write_rows(256)
 
+    env.pageserver.http_client().timeline_checkpoint(tenant_id, timeline_b)
     # Test that we can read data back from a sharded tenant
     workload.validate()
 
@@ -1546,6 +1547,9 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
                 # Tip: set to 100MB to make the test fail
                 "max_replication_write_lag=1MB",
             ],
+            # We need `neon` extension for calling backpressure functions,
+            # this flag instructs `compute_ctl` to pre-install it.
+            "update_catalog": True,
         },
     )
     workload.init()
