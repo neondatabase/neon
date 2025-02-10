@@ -2043,7 +2043,9 @@ RUN systemctl enable \
     postgres_exporter sql_exporter sql_exporter-autoscaling \
     local_proxy \
     compute_ctl \
-    chown-pgdata
+    chown-pgdata \
+    make-cgroup-procs-writable \
+    load-cgconfig.service
 
 ENTRYPOINT ["/sbin/init"]
 
