@@ -1,3 +1,0 @@
-# Do not need to rebuild compute image on changes in vm-image specs.
-
-vm-image-spec-*.yaml

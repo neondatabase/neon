@@ -123,8 +123,8 @@ jobs:
           pull: true
           build-args: |
             DEBIAN_VERSION=${{ matrix.debian }}
-          cache-from: type=registry,ref=cache.neon.build/build-tools:pr-10730-cache-${{ matrix.debian }}-${{ matrix.arch }}
-          cache-to: ${{ format('type=registry,ref=cache.neon.build/build-tools:pr-10730-cache-{0}-{1},mode=max', matrix.debian, matrix.arch) }}
+          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.debian }}-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.debian, matrix.arch) || '' }}
           tags: |
             neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
 
