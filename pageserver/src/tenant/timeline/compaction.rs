@@ -723,6 +723,10 @@ impl Timeline {
             return Ok(CompactionOutcome::Pending);
         }
 
+        if options.flags.contains(CompactFlags::OnlyL0Compaction) {
+            return Ok(CompactionOutcome::Done);
+        }
+
         if l0_l1_boundary_lsn < self.partitioning.read().1 {
             // We never go backwards when repartition and create image layers.
             info!("skipping image layer generation because repartition LSN is greater than L0-L1 boundary LSN.");
