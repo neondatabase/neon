@@ -266,7 +266,7 @@ pub(crate) async fn handle(
                     })?
                     .to_bytes();
 
-                if let Ok(json_map) =
+                if let Ok(mut json_map) =
                     serde_json::from_slice::<IndexMap<&str, &RawValue>>(&body_bytes)
                 {
                     let message = json_map.get("message");
@@ -279,7 +279,13 @@ pub(crate) async fn handle(
                         };
 
                         error!("Error response from local_proxy: {status} {msg}");
-                        return json_response(status, json!({ "message": msg }));
+
+                        json_map.retain(|key, _| !key.starts_with("neon:")); // remove all the neon-related keys
+
+                        let resp_json = serde_json::to_string(&json_map)
+                            .unwrap_or("failed to serialize the response message".to_string());
+
+                        return json_response(status, resp_json);
                     }
                 }
 
