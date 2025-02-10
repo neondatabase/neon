@@ -1576,8 +1576,31 @@ ARG BUILD_TAG
 ENV BUILD_TAG=$BUILD_TAG
 
 USER nonroot
-# Copy entire project to get Cargo.* files with proper dependencies for the whole project
-COPY --chown=nonroot . .
+
+# Copy the parts of the project that are needed to compile the Rust binaries. This
+# includes all the storage components too even though we only compile the compute
+# binaries, because they're part of the same cargo workspace.
+#
+# It's annoying to list all these individually, but compared to just including everything
+# with "COPY --chown=nonroot . ."  this avoids lots of spurious rebuilds when you modify
+# this Dockerfile or some other parts that are not needed to build the rust binaries.
+# (Dockerfile version 1.7 includes a "COPY --exclude" option which we could use here, but
+# as of this writing that's still too new to rely on; we don't want to require all
+# developers to have it installed yet.)
+COPY Cargo.lock Cargo.toml rust-toolchain.toml .
+COPY .cargo .cargo
+COPY .config .config
+COPY compute_tools compute_tools
+COPY control_plane control_plane
+COPY libs libs
+COPY pageserver pageserver
+COPY proxy proxy
+COPY storage_scrubber storage_scrubber
+COPY safekeeper safekeeper
+COPY storage_broker storage_broker
+COPY storage_controller storage_controller
+COPY workspace_hack  workspace_hack
+
 RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy
 
 #########################################################################################
