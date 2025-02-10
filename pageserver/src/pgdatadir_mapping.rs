@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, hash_map};
 use std::ops::{ControlFlow, Range};
 
+use crate::PERF_TRACE_TARGET;
 use anyhow::{Context, ensure};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
@@ -31,7 +32,7 @@ use postgres_ffi::{BLCKSZ, Oid, RepOriginId, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, info_span, trace, warn};
 use utils::bin_ser::{BeSer, DeserializeError};
 use utils::lsn::Lsn;
 use utils::pausable_failpoint;
@@ -39,7 +40,7 @@ use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use super::tenant::{PageReconstructError, Timeline};
 use crate::aux_file;
-use crate::context::RequestContext;
+use crate::context::{RequestContext, RequestContextBuilder};
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::metrics::{
     RELSIZE_CACHE_ENTRIES, RELSIZE_CACHE_HITS, RELSIZE_CACHE_MISSES, RELSIZE_CACHE_MISSES_OLD,
@@ -209,7 +210,9 @@ impl Timeline {
                 let pages: smallvec::SmallVec<[_; 1]> = smallvec::smallvec![(tag, blknum)];
                 let res = self
                     .get_rel_page_at_lsn_batched(
-                        pages.iter().map(|(tag, blknum)| (tag, blknum)),
+                        pages
+                            .iter()
+                            .map(|(tag, blknum)| (tag, blknum, ctx.attached_child())),
                         effective_lsn,
                         io_concurrency.clone(),
                         ctx,
@@ -248,7 +251,7 @@ impl Timeline {
     /// The ordering of the returned vec corresponds to the ordering of `pages`.
     pub(crate) async fn get_rel_page_at_lsn_batched(
         &self,
-        pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber)>,
+        pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber, RequestContext)>,
         effective_lsn: Lsn,
         io_concurrency: IoConcurrency,
         ctx: &RequestContext,
@@ -262,8 +265,11 @@ impl Timeline {
         let mut result = Vec::with_capacity(pages.len());
         let result_slots = result.spare_capacity_mut();
 
-        let mut keys_slots: BTreeMap<Key, smallvec::SmallVec<[usize; 1]>> = BTreeMap::default();
-        for (response_slot_idx, (tag, blknum)) in pages.enumerate() {
+        let mut keys_slots: BTreeMap<Key, smallvec::SmallVec<[(usize, RequestContext); 1]>> =
+            BTreeMap::default();
+
+        let mut perf_instrument = false;
+        for (response_slot_idx, (tag, blknum, req_ctx)) in pages.enumerate() {
             if tag.relnode == 0 {
                 result_slots[response_slot_idx].write(Err(PageReconstructError::Other(
                     RelationError::InvalidRelnode.into(),
@@ -273,6 +279,7 @@ impl Timeline {
                 continue;
             }
 
+            // TODO: perf span
             let nblocks = match self
                 .get_rel_size(*tag, Version::Lsn(effective_lsn), ctx)
                 .await
@@ -297,8 +304,12 @@ impl Timeline {
 
             let key = rel_block_to_key(*tag, *blknum);
 
+            if req_ctx.has_perf_span() {
+                perf_instrument = true;
+            }
+
             let key_slots = keys_slots.entry(key).or_default();
-            key_slots.push(response_slot_idx);
+            key_slots.push((response_slot_idx, req_ctx));
         }
 
         let keyspace = {
@@ -314,16 +325,36 @@ impl Timeline {
             acc.to_keyspace()
         };
 
-        match self
-            .get_vectored(keyspace, effective_lsn, io_concurrency, ctx)
-            .await
-        {
+        let get_vectored_ctx = match perf_instrument {
+            true => RequestContextBuilder::from(ctx)
+                .root_perf_span(|| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        "GET_VECTORED",
+                        tenant_id = %self.tenant_shard_id.tenant_id,
+                        timeline_id = %self.timeline_id,
+                        lsn = %effective_lsn,
+                        shard = %self.tenant_shard_id.shard_slug(),
+                    )
+                })
+                .attached_child(),
+            false => ctx.attached_child(),
+        };
+
+        let res = get_vectored_ctx
+            .maybe_instrument(
+                self.get_vectored(keyspace, effective_lsn, io_concurrency, &get_vectored_ctx),
+                |current_perf_span| current_perf_span.clone(),
+            )
+            .await;
+
+        match res {
             Ok(results) => {
                 for (key, res) in results {
                     let mut key_slots = keys_slots.remove(&key).unwrap().into_iter();
-                    let first_slot = key_slots.next().unwrap();
+                    let (first_slot, first_req_ctx) = key_slots.next().unwrap();
 
-                    for slot in key_slots {
+                    for (slot, req_ctx) in key_slots {
                         let clone = match &res {
                             Ok(buf) => Ok(buf.clone()),
                             Err(err) => Err(match err {
@@ -341,17 +372,19 @@ impl Timeline {
                         };
 
                         result_slots[slot].write(clone);
+                        req_ctx.perf_follows_from(&get_vectored_ctx);
                         slots_filled += 1;
                     }
 
                     result_slots[first_slot].write(res);
+                    first_req_ctx.perf_follows_from(&get_vectored_ctx);
                     slots_filled += 1;
                 }
             }
             Err(err) => {
                 // this cannot really happen because get_vectored only errors globally on invalid LSN or too large batch size
                 // (We enforce the max batch size outside of this function, in the code that constructs the batch request.)
-                for slot in keys_slots.values().flatten() {
+                for (slot, req_ctx) in keys_slots.values().flatten() {
                     // this whole `match` is a lot like `From<GetVectoredError> for PageReconstructError`
                     // but without taking ownership of the GetVectoredError
                     let err = match &err {
@@ -383,6 +416,7 @@ impl Timeline {
                         }
                     };
 
+                    req_ctx.perf_follows_from(&get_vectored_ctx);
                     result_slots[*slot].write(err);
                 }
 
