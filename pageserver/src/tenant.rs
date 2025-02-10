@@ -20,6 +20,7 @@ use chrono::NaiveDateTime;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use itertools::Itertools as _;
 use pageserver_api::models;
 use pageserver_api::models::CompactInfoResponse;
 use pageserver_api::models::LsnLease;
@@ -3088,31 +3089,27 @@ impl Tenant {
         Ok(rx)
     }
 
-    // Call through to all timelines to freeze ephemeral layers if needed.  Usually
-    // this happens during ingest: this background housekeeping is for freezing layers
-    // that are open but haven't been written to for some time.
-    async fn ingest_housekeeping(&self) {
-        // Scan through the hashmap and collect a list of all the timelines,
-        // while holding the lock. Then drop the lock and actually perform the
-        // compactions.  We don't want to block everything else while the
-        // compaction runs.
-        let timelines = {
-            self.timelines
-                .lock()
-                .unwrap()
-                .values()
-                .filter_map(|timeline| {
-                    if timeline.is_active() {
-                        Some(timeline.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
+    /// Performs periodic housekeeping, via the tenant housekeeping background task.
+    async fn housekeeping(&self) {
+        // Call through to all timelines to freeze ephemeral layers as needed. This usually happens
+        // during ingest, but we don't want idle timelines to hold open layers for too long.
+        let timelines = self
+            .timelines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|tli| tli.is_active())
+            .cloned()
+            .collect_vec();
 
-        for timeline in &timelines {
+        for timeline in timelines {
             timeline.maybe_freeze_ephemeral_layer().await;
+        }
+
+        // Shut down walredo if idle.
+        const WALREDO_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+        if let Some(ref walredo_mgr) = self.walredo_mgr {
+            walredo_mgr.maybe_quiesce(WALREDO_IDLE_TIMEOUT);
         }
     }
 

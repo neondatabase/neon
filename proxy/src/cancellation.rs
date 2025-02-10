@@ -69,17 +69,35 @@ pub async fn handle_cancel_messages(
                     value,
                     resp_tx,
                     _guard,
-                    expire: _,
+                    expire,
                 } => {
+                    let res = client.hset(&key, field, value).await;
                     if let Some(resp_tx) = resp_tx {
-                        resp_tx
-                            .send(client.hset(key, field, value).await)
-                            .inspect_err(|e| {
-                                tracing::debug!("failed to send StoreCancelKey response: {:?}", e);
-                            })
-                            .ok();
+                        if res.is_ok() {
+                            resp_tx
+                                .send(client.expire(key, expire).await)
+                                .inspect_err(|e| {
+                                    tracing::debug!(
+                                        "failed to send StoreCancelKey response: {:?}",
+                                        e
+                                    );
+                                })
+                                .ok();
+                        } else {
+                            resp_tx
+                                .send(res)
+                                .inspect_err(|e| {
+                                    tracing::debug!(
+                                        "failed to send StoreCancelKey response: {:?}",
+                                        e
+                                    );
+                                })
+                                .ok();
+                        }
+                    } else if res.is_ok() {
+                        drop(client.expire(key, expire).await);
                     } else {
-                        drop(client.hset(key, field, value).await);
+                        tracing::warn!("failed to store cancel key: {:?}", res);
                     }
                 }
                 CancelKeyOp::GetCancelData {
@@ -436,7 +454,7 @@ impl Session {
         &self.key
     }
 
-    // Send the store key op to the cancellation handler
+    // Send the store key op to the cancellation handler and set TTL for the key
     pub(crate) async fn write_cancel_key(
         &self,
         cancel_closure: CancelClosure,
