@@ -1856,11 +1856,11 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 
 # local_proxy and its config
 RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local_proxy
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/local_proxy /usr/local/bin/local_proxy
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/fast_import /usr/local/bin/fast_import
 
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
 
 # pgbouncer and its config
 COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
