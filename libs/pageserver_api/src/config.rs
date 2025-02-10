@@ -122,6 +122,7 @@ pub struct ConfigToml {
     pub wal_receiver_protocol: PostgresClientProtocol,
     pub page_service_pipelining: PageServicePipeliningConfig,
     pub get_vectored_concurrent_io: GetVectoredConcurrentIo,
+    pub enable_read_path_debugging: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -511,6 +512,11 @@ impl Default for ConfigToml {
                 GetVectoredConcurrentIo::Sequential
             } else {
                 GetVectoredConcurrentIo::SidecarTask
+            },
+            enable_read_path_debugging: if cfg!(test) || cfg!(feature = "testing") {
+                Some(true)
+            } else {
+                None
             },
         }
     }
