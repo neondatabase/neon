@@ -4301,6 +4301,7 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
+ "tracing-utils",
  "url",
  "utils",
  "wal_decoder",
@@ -7808,6 +7809,7 @@ dependencies = [
  "tracing",
  "tracing-error",
  "tracing-subscriber",
+ "tracing-utils",
  "walkdir",
 ]
 

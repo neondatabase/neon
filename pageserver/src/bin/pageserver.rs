@@ -21,7 +21,8 @@ use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::{
-    BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
+    BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, OTEL_RUNTIME,
+    WALRECEIVER_RUNTIME,
 };
 use pageserver::tenant::{TenantSharedResources, mgr, secondary};
 use pageserver::{
@@ -36,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::crashsafe::syncfs;
-use utils::logging::TracingErrorLayerEnablement;
+use utils::logging::{OtelGuard, TracingErrorLayerEnablement};
 use utils::sentry_init::init_sentry;
 use utils::{failpoint_support, logging, project_build_tag, project_git_version, tcp_listener};
 
@@ -110,11 +111,26 @@ fn main() -> anyhow::Result<()> {
     } else {
         TracingErrorLayerEnablement::Disabled
     };
-    logging::init(
+
+    let otel_enablement = match &conf.tracing {
+        Some(cfg) => utils::logging::OtelEnablement::Enabled {
+            service_name: "pageserver".to_string(),
+            export_config: (&cfg.export_config).into(),
+            runtime: *OTEL_RUNTIME,
+        },
+        None => utils::logging::OtelEnablement::Disabled,
+    };
+
+    let otel_guard = logging::init(
         conf.log_format,
         tracing_error_layer_enablement,
+        otel_enablement,
         logging::Output::Stdout,
     )?;
+
+    if otel_guard.is_some() {
+        info!(?conf.tracing, "starting with OTEL tracing enabled");
+    }
 
     // mind the order required here: 1. logging, 2. panic_hook, 3. sentry.
     // disarming this hook on pageserver, because we never tear down tracing.
