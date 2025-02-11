@@ -94,6 +94,7 @@ pub struct ConfigToml {
     pub ondemand_download_behavior_treat_error_as_warn: bool,
     #[serde(with = "humantime_serde")]
     pub background_task_maximum_delay: Duration,
+    pub use_compaction_semaphore: bool,
     pub control_plane_api: Option<reqwest::Url>,
     pub control_plane_api_token: Option<String>,
     pub control_plane_emergency_mode: bool,
@@ -121,6 +122,7 @@ pub struct ConfigToml {
     pub wal_receiver_protocol: PostgresClientProtocol,
     pub page_service_pipelining: PageServicePipeliningConfig,
     pub get_vectored_concurrent_io: GetVectoredConcurrentIo,
+    pub enable_read_path_debugging: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -323,6 +325,10 @@ pub struct TenantConfigToml {
     // Expresed in multiples of checkpoint distance.
     pub image_layer_creation_check_threshold: u8,
 
+    // How many multiples of L0 `compaction_threshold` will preempt image layer creation and do L0 compaction.
+    // Set to 0 to disable preemption.
+    pub image_creation_preempt_threshold: usize,
+
     /// The length for an explicit LSN lease request.
     /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
     #[serde(with = "humantime_serde")]
@@ -466,6 +472,7 @@ impl Default for ConfigToml {
                 DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY,
             )
             .unwrap()),
+            use_compaction_semaphore: false,
 
             control_plane_api: (None),
             control_plane_api_token: (None),
@@ -505,6 +512,11 @@ impl Default for ConfigToml {
                 GetVectoredConcurrentIo::Sequential
             } else {
                 GetVectoredConcurrentIo::SidecarTask
+            },
+            enable_read_path_debugging: if cfg!(test) || cfg!(feature = "testing") {
+                Some(true)
+            } else {
+                None
             },
         }
     }
@@ -547,6 +559,10 @@ pub mod tenant_conf_defaults {
     // Relevant: https://github.com/neondatabase/neon/issues/3394
     pub const DEFAULT_GC_PERIOD: &str = "1 hr";
     pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
+    // If there are more than threshold * compaction_threshold (that is 3 * 10 in the default config) L0 layers, image
+    // layer creation will end immediately. Set to 0 to disable. The target default will be 3 once we
+    // want to enable this feature.
+    pub const DEFAULT_IMAGE_CREATION_PREEMPT_THRESHOLD: usize = 0;
     pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "10 seconds";
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
@@ -605,6 +621,7 @@ impl Default for TenantConfigToml {
             lazy_slru_download: false,
             timeline_get_throttle: crate::models::ThrottleConfig::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
+            image_creation_preempt_threshold: DEFAULT_IMAGE_CREATION_PREEMPT_THRESHOLD,
             lsn_lease_length: LsnLease::DEFAULT_LENGTH,
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
             timeline_offloading: false,

@@ -115,6 +115,15 @@ impl ReconcilerConfigBuilder {
         }
     }
 
+    pub(crate) fn tenant_creation_hint(self, hint: bool) -> Self {
+        Self {
+            config: ReconcilerConfig {
+                tenant_creation_hint: hint,
+                ..self.config
+            },
+        }
+    }
+
     pub(crate) fn build(self) -> ReconcilerConfig {
         self.config
     }
@@ -129,6 +138,10 @@ pub(crate) struct ReconcilerConfig {
     // During live migrations this is the amount of time that
     // the pagserver will hold our poll.
     secondary_download_request_timeout: Option<Duration>,
+
+    // A hint indicating whether this reconciliation is done on the
+    // creation of a new tenant. This only informs logging behaviour.
+    tenant_creation_hint: bool,
 }
 
 impl ReconcilerConfig {
@@ -142,6 +155,10 @@ impl ReconcilerConfig {
         const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT_DEFAULT: Duration = Duration::from_secs(20);
         self.secondary_download_request_timeout
             .unwrap_or(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT_DEFAULT)
+    }
+
+    pub(crate) fn tenant_creation_hint(&self) -> bool {
+        self.tenant_creation_hint
     }
 }
 
@@ -950,16 +967,35 @@ impl Reconciler {
                 )
                 .await;
             if let Err(e) = &result {
-                // It is up to the caller whether they want to drop out on this error, but they don't have to:
-                // in general we should avoid letting unavailability of the cloud control plane stop us from
-                // making progress.
-                if !matches!(e, NotifyError::ShuttingDown) {
-                    tracing::warn!("Failed to notify compute of attached pageserver {node}: {e}");
-                }
-
                 // Set this flag so that in our ReconcileResult we will set the flag on the shard that it
                 // needs to retry at some point.
                 self.compute_notify_failure = true;
+
+                // It is up to the caller whether they want to drop out on this error, but they don't have to:
+                // in general we should avoid letting unavailability of the cloud control plane stop us from
+                // making progress.
+                match e {
+                    // 404s from cplane during tenant creation are expected.
+                    // Cplane only persists the shards to the database after
+                    // creating the tenant and the timeline. If we notify before
+                    // that, we'll get a 404.
+                    //
+                    // This is fine because tenant creations happen via /location_config
+                    // and that returns the list of locations in the response. Hence, we
+                    // silence the error and return Ok(()) here. Reconciliation will still
+                    // be retried because we set [`Reconciler::compute_notify_failure`] above.
+                    NotifyError::Unexpected(hyper::StatusCode::NOT_FOUND)
+                        if self.reconciler_config.tenant_creation_hint() =>
+                    {
+                        return Ok(());
+                    }
+                    NotifyError::ShuttingDown => {}
+                    _ => {
+                        tracing::warn!(
+                            "Failed to notify compute of attached pageserver {node}: {e}"
+                        );
+                    }
+                }
             }
             result
         } else {

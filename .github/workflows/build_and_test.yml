@@ -45,6 +45,26 @@ jobs:
             run cancel-previous-in-concurrency-group.yml \
               --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
 
+  files-changed:
+    needs: [ check-permissions ]
+    runs-on: [ self-hosted, small ]
+    timeout-minutes: 3
+    outputs:
+      check-rust-dependencies: ${{ steps.files-changed.outputs.rust_dependencies }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Check for file changes
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
+        id: files-changed
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          filters: .github/file-filters.yaml
+
   tag:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, small ]
@@ -168,6 +188,14 @@ jobs:
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       archs: '["x64", "arm64"]'
+    secrets: inherit
+
+  check-dependencies-rust:
+    needs: [ files-changed, build-build-tools-image ]
+    if: ${{ needs.files-changed.outputs.check-rust-dependencies == 'true' }}
+    uses: ./.github/workflows/cargo-deny.yml
+    with:
+      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
     secrets: inherit
 
   build-and-test-locally:
@@ -654,7 +682,7 @@ jobs:
           push: true
           pull: true
           file: compute/compute-node.Dockerfile
-          target: neon-pg-ext-test
+          target: extension-tests
           cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           tags: |
             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
@@ -1332,6 +1360,8 @@ jobs:
       - build-and-test-locally
       - check-codestyle-python
       - check-codestyle-rust
+      - check-dependencies-rust
+      - files-changed
       - promote-images-dev
       - test-images
       - trigger-custom-extensions-build-and-wait
@@ -1344,4 +1374,11 @@ jobs:
         if: |
           contains(needs.*.result, 'failure')
           || contains(needs.*.result, 'cancelled')
-          || contains(needs.*.result, 'skipped')
+          || (needs.check-dependencies-rust.result == 'skipped' && needs.files-changed.outputs.check-rust-dependencies == 'true')
+          || needs.build-and-test-locally.result == 'skipped'
+          || needs.check-codestyle-python.result == 'skipped'
+          || needs.check-codestyle-rust.result == 'skipped'
+          || needs.files-changed.result == 'skipped'
+          || needs.promote-images-dev.result == 'skipped'
+          || needs.test-images.result == 'skipped'
+          || needs.trigger-custom-extensions-build-and-wait.result == 'skipped'

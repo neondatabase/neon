@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use arc_swap::ArcSwapOption;
-use dashmap::DashMap;
+use clashmap::ClashMap;
 use jose_jwk::crypto::KeyInfo;
 use reqwest::{redirect, Client};
 use reqwest_retry::policies::ExponentialBackoff;
@@ -64,7 +64,7 @@ pub(crate) struct AuthRule {
 pub struct JwkCache {
     client: reqwest_middleware::ClientWithMiddleware,
 
-    map: DashMap<(EndpointId, RoleName), Arc<JwkCacheEntryLock>>,
+    map: ClashMap<(EndpointId, RoleName), Arc<JwkCacheEntryLock>>,
 }
 
 pub(crate) struct JwkCacheEntry {
@@ -469,7 +469,7 @@ impl Default for JwkCache {
 
         JwkCache {
             client,
-            map: DashMap::default(),
+            map: ClashMap::default(),
         }
     }
 }

@@ -665,6 +665,22 @@ impl Endpoint {
                     .to_str()
                     .unwrap(),
             ])
+            // TODO: It would be nice if we generated compute IDs with the same
+            // algorithm as the real control plane.
+            //
+            // TODO: Add this back when
+            // https://github.com/neondatabase/neon/pull/10747 is merged.
+            //
+            //.args([
+            //    "--compute-id",
+            //    &format!(
+            //        "compute-{}",
+            //        SystemTime::now()
+            //            .duration_since(UNIX_EPOCH)
+            //            .unwrap()
+            //            .as_secs()
+            //    ),
+            //])
             .stdin(std::process::Stdio::null())
             .stderr(logfile.try_clone()?)
             .stdout(logfile);

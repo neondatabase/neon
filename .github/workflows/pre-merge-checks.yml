@@ -59,7 +59,10 @@ jobs:
           echo "${RUST_CHANGED_FILES}"
 
   build-build-tools-image:
-    if: needs.get-changed-files.outputs.python-changed == 'true'
+    if: |
+      false
+      || needs.get-changed-files.outputs.python-changed == 'true'
+      || needs.get-changed-files.outputs.rust-changed == 'true'
     needs: [ get-changed-files ]
     uses: ./.github/workflows/build-build-tools-image.yml
     with:
@@ -92,7 +95,8 @@ jobs:
   # - conclusion
   # - neon-cloud-e2e
   conclusion:
-    if: always()
+    # Do not run job on Pull Requests as it interferes with the `conclusion` job from the `build_and_test` workflow
+    if: always() && github.event_name == 'merge_group'
     permissions:
       statuses: write # for `github.repos.createCommitStatus(...)`
       contents: write
@@ -124,6 +128,8 @@ jobs:
       - name: Fail the job if any of the dependencies do not succeed or skipped
         run: exit 1
         if: |
-          (contains(needs.check-codestyle-python.result, 'skipped') && needs.get-changed-files.outputs.python-changed == 'true')
+          false
+          || (needs.check-codestyle-python.result == 'skipped' && needs.get-changed-files.outputs.python-changed == 'true')
+          || (needs.check-codestyle-rust.result   == 'skipped' && needs.get-changed-files.outputs.rust-changed   == 'true')
           || contains(needs.*.result, 'failure')
           || contains(needs.*.result, 'cancelled')

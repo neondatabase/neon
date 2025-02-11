@@ -247,7 +247,7 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         log.info(f"{shard_zero_id} timeline: {timeline_info}")
 
     # Run compaction for all tenants, restart endpoint so that on subsequent reads we will
-    # definitely hit pageserver for reads.  This compaction passis expected to drop unwanted
+    # definitely hit pageserver for reads.  This compaction pass is expected to drop unwanted
     # layers but not do any rewrites (we're still in the same generation)
     for tenant_id, tenant_state in tenants.items():
         tenant_state.endpoint.stop()
@@ -295,6 +295,16 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         log.info("Waiting for pgbench read pass")
         for fut in pgbench_futs:
             fut.result()
+
+    # Run a full forced compaction, to detect any data corruption.
+    for tenant_id, tenant_state in tenants.items():
+        for shard_id, shard_ps in tenant_get_shards(env, tenant_id):
+            shard_ps.http_client().timeline_compact(
+                shard_id,
+                tenant_state.timeline_id,
+                force_image_layer_creation=True,
+                force_l0_compaction=True,
+            )
 
     # Assert that some rewrites happened
     # TODO: uncomment this after https://github.com/neondatabase/neon/pull/7531 is merged

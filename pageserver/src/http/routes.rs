@@ -1472,7 +1472,13 @@ async fn layer_download_handler(
     let downloaded = timeline
         .download_layer(&layer_name)
         .await
-        .map_err(ApiError::InternalServerError)?;
+        .map_err(|e| match e {
+            tenant::storage_layer::layer::DownloadError::TimelineShutdown
+            | tenant::storage_layer::layer::DownloadError::DownloadCancelled => {
+                ApiError::ShuttingDown
+            }
+            other => ApiError::InternalServerError(other.into()),
+        })?;
 
     match downloaded {
         Some(true) => json_response(StatusCode::OK, ()),
@@ -3169,12 +3175,16 @@ async fn put_tenant_timeline_import_basebackup(
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
-    let span = info_span!("import_basebackup", tenant_id=%tenant_id, timeline_id=%timeline_id, base_lsn=%base_lsn, end_lsn=%end_lsn, pg_version=%pg_version);
+    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+
+    let span = info_span!("import_basebackup",
+        tenant_id=%tenant_id, timeline_id=%timeline_id, shard_id=%tenant_shard_id.shard_slug(),
+        base_lsn=%base_lsn, end_lsn=%end_lsn, pg_version=%pg_version);
     async move {
         let state = get_state(&request);
         let tenant = state
             .tenant_manager
-            .get_attached_tenant_shard(TenantShardId::unsharded(tenant_id))?;
+            .get_attached_tenant_shard(tenant_shard_id)?;
 
         let broker_client = state.broker_client.clone();
 
@@ -3383,7 +3393,17 @@ where
                             let status = response.status();
                             info!(%status, "Cancelled request finished successfully")
                         }
-                        Err(e) => error!("Cancelled request finished with an error: {e:?}"),
+                        Err(e) => match e {
+                            ApiError::ShuttingDown | ApiError::ResourceUnavailable(_) => {
+                                // Don't log this at error severity: they are normal during lifecycle of tenants/process
+                                info!("Cancelled request aborted for shutdown")
+                            }
+                            _ => {
+                                // Log these in a highly visible way, because we have no client to send the response to, but
+                                // would like to know that something went wrong.
+                                error!("Cancelled request finished with an error: {e:?}")
+                            }
+                        },
                     }
                 }
                 // only logging for cancelled panicked request handlers is the tracing_panic_hook,
