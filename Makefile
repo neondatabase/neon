@@ -10,16 +10,27 @@ ICU_PREFIX_DIR := /usr/local/icu
 # environment variable.
 #
 BUILD_TYPE ?= debug
+WITH_SANITIZERS ?= no
 ifeq ($(BUILD_TYPE),release)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl
 	PG_CFLAGS = -O2 -g3 $(CFLAGS)
+	PG_LDFLAGS = $(LDFLAGS)
 	# Unfortunately, `--profile=...` is a nightly feature
 	CARGO_BUILD_FLAGS += --release
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS = -O0 -g3 $(CFLAGS)
+	PG_LDFLAGS = $(LDFLAGS)
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
+endif
+
+ifeq ($(WITH_SANITIZERS),yes)
+	PG_CFLAGS += -fsanitize=address -fsanitize=undefined -fno-sanitize-recover
+	COPT += -Wno-error # to avoid failing on warnings induced by sanitizers
+	PG_LDFLAGS = -fsanitize=address -fsanitize=undefined -static-libasan -static-libubsan $(LDFLAGS)
+	export CC := gcc
+	export ASAN_OPTIONS := detect_leaks=0
 endif
 
 ifeq ($(shell test -e /home/nonroot/.docker_build && echo -n yes),yes)
@@ -33,7 +44,9 @@ endif
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
 	# Seccomp BPF is only available for Linux
-	PG_CONFIGURE_OPTS += --with-libseccomp
+	ifneq ($(WITH_SANITIZERS),yes)
+		PG_CONFIGURE_OPTS += --with-libseccomp
+	endif
 else ifeq ($(UNAME_S),Darwin)
 	PG_CFLAGS += -DUSE_PREFETCH
 	ifndef DISABLE_HOMEBREW
@@ -64,8 +77,6 @@ CARGO_BUILD_FLAGS += $(filter -j1,$(MAKEFLAGS))
 CARGO_CMD_PREFIX += $(if $(filter n,$(MAKEFLAGS)),,+)
 # Force cargo not to print progress bar
 CARGO_CMD_PREFIX += CARGO_TERM_PROGRESS_WHEN=never CI=1
-# Set PQ_LIB_DIR to make sure `storage_controller` get linked with bundled libpq (through diesel)
-CARGO_CMD_PREFIX += PQ_LIB_DIR=$(POSTGRES_INSTALL_DIR)/v16/lib
 
 CACHEDIR_TAG_CONTENTS := "Signature: 8a477f597d28d172789f06886806bc55"
 
@@ -108,7 +119,7 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 	EXTRA_VERSION=$$(cd $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION && git rev-parse HEAD); \
 	(cd $(POSTGRES_INSTALL_DIR)/build/$$VERSION && \
 	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION/configure \
-		CFLAGS='$(PG_CFLAGS)' \
+		CFLAGS='$(PG_CFLAGS)' LDFLAGS='$(PG_LDFLAGS)' \
 		$(PG_CONFIGURE_OPTS) --with-extra-version=" ($$EXTRA_VERSION)" \
 		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/$$VERSION > configure.log)
 

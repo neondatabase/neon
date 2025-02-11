@@ -82,7 +82,7 @@ def test_compute_catalog(neon_simple_env: NeonEnv):
         ddl = client.database_schema(database=test_db["name"])
 
         # Check that it looks like a valid PostgreSQL dump
-        assert "-- PostgreSQL database dump" in ddl
+        assert "-- PostgreSQL database dump complete" in ddl
 
         # Check that it doesn't contain health_check and migration traces.
         # They are only created in system `postgres` database, so by checking
@@ -183,6 +183,7 @@ def test_dropdb_with_subscription(neon_simple_env: NeonEnv):
         cursor.execute("select pg_catalog.pg_create_logical_replication_slot('mysub', 'pgoutput');")
         cursor.execute("CREATE TABLE t(a int)")
         cursor.execute("INSERT INTO t VALUES (1)")
+        cursor.execute("CHECKPOINT")
 
     # connect to the subscriber_db and create a subscription
     # Note that we need to create subscription with
@@ -195,7 +196,11 @@ def test_dropdb_with_subscription(neon_simple_env: NeonEnv):
 
     # wait for the subscription to be active
     logical_replication_sync(
-        endpoint, endpoint, sub_dbname="subscriber_db", pub_dbname="publisher_db"
+        endpoint,
+        endpoint,
+        "mysub",
+        sub_dbname="subscriber_db",
+        pub_dbname="publisher_db",
     )
 
     # Check that replication is working

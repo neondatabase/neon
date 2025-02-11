@@ -12,13 +12,15 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
-use crate::auth::backend::{BackendIpAllowlist, ComputeUserInfo};
+use crate::auth::backend::ComputeUserInfo;
 use crate::auth::{check_peer_addr_is_in_list, AuthError};
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
+use crate::control_plane::ControlPlaneApi;
 use crate::error::ReportableError;
 use crate::ext::LockExt;
 use crate::metrics::{CancelChannelSizeGuard, CancellationRequest, Metrics, RedisMsgKind};
+use crate::protocol2::ConnectionInfoExtra;
 use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::keys::KeyPrefix;
 use crate::redis::kv_ops::RedisKVClient;
@@ -67,17 +69,35 @@ pub async fn handle_cancel_messages(
                     value,
                     resp_tx,
                     _guard,
-                    expire: _,
+                    expire,
                 } => {
+                    let res = client.hset(&key, field, value).await;
                     if let Some(resp_tx) = resp_tx {
-                        resp_tx
-                            .send(client.hset(key, field, value).await)
-                            .inspect_err(|e| {
-                                tracing::debug!("failed to send StoreCancelKey response: {:?}", e);
-                            })
-                            .ok();
+                        if res.is_ok() {
+                            resp_tx
+                                .send(client.expire(key, expire).await)
+                                .inspect_err(|e| {
+                                    tracing::debug!(
+                                        "failed to send StoreCancelKey response: {:?}",
+                                        e
+                                    );
+                                })
+                                .ok();
+                        } else {
+                            resp_tx
+                                .send(res)
+                                .inspect_err(|e| {
+                                    tracing::debug!(
+                                        "failed to send StoreCancelKey response: {:?}",
+                                        e
+                                    );
+                                })
+                                .ok();
+                        }
+                    } else if res.is_ok() {
+                        drop(client.expire(key, expire).await);
                     } else {
-                        drop(client.hset(key, field, value).await);
+                        tracing::warn!("failed to store cancel key: {:?}", res);
                     }
                 }
                 CancelKeyOp::GetCancelData {
@@ -133,6 +153,9 @@ pub(crate) enum CancelError {
     #[error("IP is not allowed")]
     IpNotAllowed,
 
+    #[error("VPC endpoint id is not allowed to connect")]
+    VpcEndpointIdNotAllowed,
+
     #[error("Authentication backend error")]
     AuthError(#[from] AuthError),
 
@@ -152,8 +175,9 @@ impl ReportableError for CancelError {
             }
             CancelError::Postgres(_) => crate::error::ErrorKind::Compute,
             CancelError::RateLimit => crate::error::ErrorKind::RateLimit,
-            CancelError::IpNotAllowed => crate::error::ErrorKind::User,
-            CancelError::NotFound => crate::error::ErrorKind::User,
+            CancelError::IpNotAllowed
+            | CancelError::VpcEndpointIdNotAllowed
+            | CancelError::NotFound => crate::error::ErrorKind::User,
             CancelError::AuthError(_) => crate::error::ErrorKind::ControlPlane,
             CancelError::InternalError => crate::error::ErrorKind::Service,
         }
@@ -265,11 +289,12 @@ impl CancellationHandler {
     /// Will fetch IP allowlist internally.
     ///
     /// return Result primarily for tests
-    pub(crate) async fn cancel_session<T: BackendIpAllowlist>(
+    pub(crate) async fn cancel_session<T: ControlPlaneApi>(
         &self,
         key: CancelKeyData,
         ctx: RequestContext,
-        check_allowed: bool,
+        check_ip_allowed: bool,
+        check_vpc_allowed: bool,
         auth_backend: &T,
     ) -> Result<(), CancelError> {
         let subnet_key = match ctx.peer_addr() {
@@ -304,11 +329,11 @@ impl CancellationHandler {
             return Err(CancelError::NotFound);
         };
 
-        if check_allowed {
+        if check_ip_allowed {
             let ip_allowlist = auth_backend
                 .get_allowed_ips(&ctx, &cancel_closure.user_info)
                 .await
-                .map_err(CancelError::AuthError)?;
+                .map_err(|e| CancelError::AuthError(e.into()))?;
 
             if !check_peer_addr_is_in_list(&ctx.peer_addr(), &ip_allowlist) {
                 // log it here since cancel_session could be spawned in a task
@@ -318,6 +343,40 @@ impl CancellationHandler {
                 );
                 return Err(CancelError::IpNotAllowed);
             }
+        }
+
+        // check if a VPC endpoint ID is coming in and if yes, if it's allowed
+        let access_blocks = auth_backend
+            .get_block_public_or_vpc_access(&ctx, &cancel_closure.user_info)
+            .await
+            .map_err(|e| CancelError::AuthError(e.into()))?;
+
+        if check_vpc_allowed {
+            if access_blocks.vpc_access_blocked {
+                return Err(CancelError::AuthError(AuthError::NetworkNotAllowed));
+            }
+
+            let incoming_vpc_endpoint_id = match ctx.extra() {
+                None => return Err(CancelError::AuthError(AuthError::MissingVPCEndpointId)),
+                Some(ConnectionInfoExtra::Aws { vpce_id }) => {
+                    // Convert the vcpe_id to a string
+                    String::from_utf8(vpce_id.to_vec()).unwrap_or_default()
+                }
+                Some(ConnectionInfoExtra::Azure { link_id }) => link_id.to_string(),
+            };
+
+            let allowed_vpc_endpoint_ids = auth_backend
+                .get_allowed_vpc_endpoint_ids(&ctx, &cancel_closure.user_info)
+                .await
+                .map_err(|e| CancelError::AuthError(e.into()))?;
+            // TODO: For now an empty VPC endpoint ID list means all are allowed. We should replace that.
+            if !allowed_vpc_endpoint_ids.is_empty()
+                && !allowed_vpc_endpoint_ids.contains(&incoming_vpc_endpoint_id)
+            {
+                return Err(CancelError::VpcEndpointIdNotAllowed);
+            }
+        } else if access_blocks.public_access_blocked {
+            return Err(CancelError::VpcEndpointIdNotAllowed);
         }
 
         Metrics::get()
@@ -395,7 +454,7 @@ impl Session {
         &self.key
     }
 
-    // Send the store key op to the cancellation handler
+    // Send the store key op to the cancellation handler and set TTL for the key
     pub(crate) async fn write_cancel_key(
         &self,
         cancel_closure: CancelClosure,

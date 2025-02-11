@@ -140,6 +140,10 @@ pub struct PageServerConf {
     /// not terrible.
     pub background_task_maximum_delay: Duration,
 
+    /// If true, use a separate semaphore for compaction tasks instead of the common background task
+    /// semaphore. Defaults to false.
+    pub use_compaction_semaphore: bool,
+
     pub control_plane_api: Option<Url>,
 
     /// JWT token for use with the control plane API.
@@ -193,6 +197,10 @@ pub struct PageServerConf {
     pub page_service_pipelining: pageserver_api::config::PageServicePipeliningConfig,
 
     pub get_vectored_concurrent_io: pageserver_api::config::GetVectoredConcurrentIo,
+
+    /// Enable read path debugging. If enabled, read key errors will print a backtrace of the layer
+    /// files read.
+    pub enable_read_path_debugging: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -332,6 +340,7 @@ impl PageServerConf {
             test_remote_failures,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
+            use_compaction_semaphore,
             control_plane_api,
             control_plane_api_token,
             control_plane_emergency_mode,
@@ -355,6 +364,7 @@ impl PageServerConf {
             wal_receiver_protocol,
             page_service_pipelining,
             get_vectored_concurrent_io,
+            enable_read_path_debugging,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -385,6 +395,7 @@ impl PageServerConf {
             test_remote_failures,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
+            use_compaction_semaphore,
             control_plane_api,
             control_plane_emergency_mode,
             heatmap_upload_concurrency,
@@ -440,6 +451,7 @@ impl PageServerConf {
                 .unwrap_or_default(),
             virtual_file_io_mode: virtual_file_io_mode.unwrap_or(virtual_file::IoMode::preferred()),
             no_sync: no_sync.unwrap_or(false),
+            enable_read_path_debugging: enable_read_path_debugging.unwrap_or(false),
         };
 
         // ------------------------------------------------------------

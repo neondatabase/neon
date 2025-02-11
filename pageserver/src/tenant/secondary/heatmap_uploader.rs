@@ -9,13 +9,14 @@ use crate::{
     metrics::SECONDARY_MODE,
     tenant::{
         config::AttachmentMode,
-        mgr::GetTenantError,
-        mgr::TenantManager,
+        mgr::{GetTenantError, TenantManager},
         remote_timeline_client::remote_heatmap_path,
         span::debug_assert_current_span_has_tenant_id,
         tasks::{warn_when_period_overrun, BackgroundLoopKind},
         Tenant,
     },
+    virtual_file::VirtualFile,
+    TEMP_FILE_SUFFIX,
 };
 
 use futures::Future;
@@ -32,7 +33,10 @@ use super::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, Instrument};
-use utils::{backoff, completion::Barrier, yielding_loop::yielding_loop};
+use utils::{
+    backoff, completion::Barrier, crashsafe::path_with_suffix_extension,
+    yielding_loop::yielding_loop,
+};
 
 pub(super) async fn heatmap_uploader_task(
     tenant_manager: Arc<TenantManager>,
@@ -459,6 +463,18 @@ async fn upload_tenant_heatmap(
         } else {
             return Err(e.into());
         }
+    }
+
+    // After a successful upload persist the fresh heatmap to disk.
+    // When restarting, the tenant will read the heatmap from disk
+    // and additively generate a new heatmap (see [`Timeline::generate_heatmap`]).
+    // If the heatmap is stale, the additive generation can lead to keeping previously
+    // evicted timelines on the secondarie's disk.
+    let tenant_shard_id = tenant.get_tenant_shard_id();
+    let heatmap_path = tenant.conf.tenant_heatmap_path(tenant_shard_id);
+    let temp_path = path_with_suffix_extension(&heatmap_path, TEMP_FILE_SUFFIX);
+    if let Err(err) = VirtualFile::crashsafe_overwrite(heatmap_path, temp_path, bytes).await {
+        tracing::warn!("Non fatal IO error writing to disk after heatmap upload: {err}");
     }
 
     tracing::info!("Successfully uploaded {size} byte heatmap to {path}");

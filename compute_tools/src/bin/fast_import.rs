@@ -181,6 +181,14 @@ impl PostgresProcess {
             .args(["-c", "effective_io_concurrency=100"])
             .env_clear()
             .env("LD_LIBRARY_PATH", &self.pg_lib_dir)
+            .env(
+                "ASAN_OPTIONS",
+                std::env::var("ASAN_OPTIONS").unwrap_or_default(),
+            )
+            .env(
+                "UBSAN_OPTIONS",
+                std::env::var("UBSAN_OPTIONS").unwrap_or_default(),
+            )
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()

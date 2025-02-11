@@ -1,0 +1,57 @@
+diff --git a/src/bin/pgcopydb/copydb.c b/src/bin/pgcopydb/copydb.c
+index d730b03..69a9be9 100644
+--- a/src/bin/pgcopydb/copydb.c
++++ b/src/bin/pgcopydb/copydb.c
+@@ -44,6 +44,7 @@ GUC dstSettings[] = {
+ 	{ "synchronous_commit", "'off'" },
+ 	{ "statement_timeout", "0" },
+ 	{ "lock_timeout", "0" },
++	{ "idle_in_transaction_session_timeout", "0" },
+ 	{ NULL, NULL },
+ };
+ 
+diff --git a/src/bin/pgcopydb/pgsql.c b/src/bin/pgcopydb/pgsql.c
+index 94f2f46..e051ba8 100644
+--- a/src/bin/pgcopydb/pgsql.c
++++ b/src/bin/pgcopydb/pgsql.c
+@@ -2319,6 +2319,11 @@ pgsql_execute_log_error(PGSQL *pgsql,
+ 
+ 	LinesBuffer lbuf = { 0 };
+ 
++	if (message != NULL){
++		// make sure message is writable by splitLines
++		message = strdup(message);
++	}
++
+ 	if (!splitLines(&lbuf, message))
+ 	{
+ 		/* errors have already been logged */
+@@ -2332,6 +2337,7 @@ pgsql_execute_log_error(PGSQL *pgsql,
+ 				  PQbackendPID(pgsql->connection),
+ 				  lbuf.lines[lineNumber]);
+ 	}
++        free(message); // free copy of message we created above
+ 
+ 	if (pgsql->logSQL)
+ 	{
+@@ -3174,11 +3180,18 @@ pgcopy_log_error(PGSQL *pgsql, PGresult *res, const char *context)
+ 		/* errors have already been logged */
+ 		return;
+ 	}
+-
+ 	if (res != NULL)
+ 	{
+ 		char *sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+-		strlcpy(pgsql->sqlstate, sqlstate, sizeof(pgsql->sqlstate));
++		if (sqlstate == NULL)
++		{
++			// PQresultErrorField returned NULL!
++			pgsql->sqlstate[0] = '\0';  // Set to an empty string to avoid segfault
++		}
++		else
++		{
++			strlcpy(pgsql->sqlstate, sqlstate, sizeof(pgsql->sqlstate));
++		}
+ 	}
+ 
+ 	char *endpoint =

@@ -44,7 +44,7 @@ pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
 
 use self::inmemory_layer::InMemoryLayerFileId;
 
-use super::timeline::GetVectoredError;
+use super::timeline::{GetVectoredError, ReadPath};
 use super::PageReconstructError;
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
@@ -262,6 +262,8 @@ pub(crate) struct ValuesReconstructState {
 
     pub(crate) io_concurrency: IoConcurrency,
     num_active_ios: Arc<AtomicUsize>,
+
+    pub(crate) read_path: Option<ReadPath>,
 }
 
 /// The level of IO concurrency to be used on the read path
@@ -609,6 +611,7 @@ impl ValuesReconstructState {
             delta_layers_visited: 0,
             io_concurrency,
             num_active_ios: Arc::new(AtomicUsize::new(0)),
+            read_path: None,
         }
     }
 

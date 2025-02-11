@@ -30,8 +30,11 @@ use crate::{
     pgdatadir_mapping::CollectKeySpaceError,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
-        size::CalculateSyntheticSizeError, storage_layer::LayerVisibilityHint,
-        tasks::BackgroundLoopKind, timeline::EvictionError, LogicalSizeCalculationCause, Tenant,
+        size::CalculateSyntheticSizeError,
+        storage_layer::LayerVisibilityHint,
+        tasks::{sleep_random, BackgroundLoopKind, BackgroundLoopSemaphorePermit},
+        timeline::EvictionError,
+        LogicalSizeCalculationCause, Tenant,
     },
 };
 
@@ -80,8 +83,6 @@ impl Timeline {
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
     async fn eviction_task(self: Arc<Self>, tenant: Arc<Tenant>) {
-        use crate::tenant::tasks::random_init_delay;
-
         // acquire the gate guard only once within a useful span
         let Ok(guard) = self.gate.enter() else {
             return;
@@ -94,7 +95,7 @@ impl Timeline {
                 EvictionPolicy::OnlyImitiate(lat) => lat.period,
                 EvictionPolicy::NoEviction => Duration::from_secs(10),
             };
-            if random_init_delay(period, &self.cancel).await.is_err() {
+            if sleep_random(period, &self.cancel).await.is_err() {
                 return;
             }
         }
@@ -330,9 +331,10 @@ impl Timeline {
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> ControlFlow<(), tokio::sync::SemaphorePermit<'static>> {
-        let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
+    ) -> ControlFlow<(), BackgroundLoopSemaphorePermit<'static>> {
+        let acquire_permit = crate::tenant::tasks::acquire_concurrency_permit(
             BackgroundLoopKind::Eviction,
+            false,
             ctx,
         );
 
@@ -374,7 +376,7 @@ impl Timeline {
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
-        permit: tokio::sync::SemaphorePermit<'static>,
+        permit: BackgroundLoopSemaphorePermit<'static>,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         if !self.tenant_shard_id.is_shard_zero() {

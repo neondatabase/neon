@@ -20,6 +20,7 @@ use chrono::NaiveDateTime;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use itertools::Itertools as _;
 use pageserver_api::models;
 use pageserver_api::models::CompactInfoResponse;
 use pageserver_api::models::LsnLease;
@@ -46,6 +47,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
+use timeline::compaction::CompactionOutcome;
 use timeline::compaction::GcCompactionQueue;
 use timeline::import_pgdata;
 use timeline::offload::offload_timeline;
@@ -54,6 +56,7 @@ use timeline::CompactOptions;
 use timeline::ShutdownMode;
 use tokio::io::BufReader;
 use tokio::sync::watch;
+use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -95,7 +98,6 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
-use crate::is_uninit_mark;
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::CONCURRENT_INITDBS;
 use crate::metrics::INITDB_RUN_TIME;
@@ -348,6 +350,9 @@ pub struct Tenant {
     /// Track repeated failures to compact, so that we can back off.
     /// Overhead of mutex is acceptable because compaction is done with a multi-second period.
     compaction_circuit_breaker: std::sync::Mutex<CircuitBreaker>,
+
+    /// Signals the tenant compaction loop that there is L0 compaction work to be done.
+    pub(crate) l0_compaction_trigger: Arc<Notify>,
 
     /// Scheduled gc-compaction tasks.
     scheduled_compaction_tasks: std::sync::Mutex<HashMap<TimelineId, Arc<GcCompactionQueue>>>,
@@ -1690,12 +1695,7 @@ impl Tenant {
                     timeline_id,
                     index_part,
                     remote_metadata,
-                    TimelineResources {
-                        remote_client,
-                        pagestream_throttle: self.pagestream_throttle.clone(),
-                        pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
-                        l0_flush_global_state: self.l0_flush_global_state.clone(),
-                    },
+                    self.get_timeline_resources_for(remote_client),
                     LoadTimelineCause::Attach,
                     ctx,
                 )
@@ -1793,11 +1793,7 @@ impl Tenant {
             let entry = entry.context("read timeline dir entry")?;
             let entry_path = entry.path();
 
-            let purge = if crate::is_temporary(entry_path)
-                // TODO: remove uninit mark code (https://github.com/neondatabase/neon/issues/5718)
-                || is_uninit_mark(entry_path)
-                || crate::is_delete_mark(entry_path)
-            {
+            let purge = if crate::is_temporary(entry_path) {
                 true
             } else {
                 match TimelineId::try_from(entry_path.file_name()) {
@@ -2912,10 +2908,10 @@ impl Tenant {
         self: &Arc<Self>,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> Result<bool, timeline::CompactionError> {
+    ) -> Result<CompactionOutcome, timeline::CompactionError> {
         // Don't start doing work during shutdown, or when broken, we do not need those in the logs
         if !self.is_active() {
-            return Ok(false);
+            return Ok(CompactionOutcome::Done);
         }
 
         {
@@ -2929,7 +2925,7 @@ impl Tenant {
             // to AttachedSingle state.
             if !conf.location.may_upload_layers_hint() {
                 info!("Skipping compaction in location state {:?}", conf.location);
-                return Ok(false);
+                return Ok(CompactionOutcome::Done);
             }
         }
 
@@ -2972,7 +2968,7 @@ impl Tenant {
         // Before doing any I/O work, check our circuit breaker
         if self.compaction_circuit_breaker.lock().unwrap().is_broken() {
             info!("Skipping compaction due to previous failures");
-            return Ok(false);
+            return Ok(CompactionOutcome::Done);
         }
 
         let mut has_pending_task = false;
@@ -2980,10 +2976,10 @@ impl Tenant {
         for (timeline_id, timeline, (can_compact, can_offload)) in &timelines_to_compact_or_offload
         {
             // pending_task_left == None: cannot compact, maybe still pending tasks
-            // pending_task_left == Some(true): compaction task left
-            // pending_task_left == Some(false): no compaction task left
+            // pending_task_left == Some(Pending): compaction task left
+            // pending_task_left == Some(Done): no compaction task left
             let pending_task_left = if *can_compact {
-                let has_pending_l0_compaction_task = timeline
+                let compaction_outcome = timeline
                     .compact(cancel, EnumSet::empty(), ctx)
                     .instrument(info_span!("compact_timeline", %timeline_id))
                     .await
@@ -3001,27 +2997,27 @@ impl Tenant {
                                 .fail(&CIRCUIT_BREAKERS_BROKEN, e);
                         }
                     })?;
-                if has_pending_l0_compaction_task {
-                    Some(true)
+                if let CompactionOutcome::Pending = compaction_outcome {
+                    Some(CompactionOutcome::Pending)
                 } else {
                     let queue = {
                         let guard = self.scheduled_compaction_tasks.lock().unwrap();
                         guard.get(timeline_id).cloned()
                     };
                     if let Some(queue) = queue {
-                        let has_pending_tasks = queue
+                        let outcome = queue
                             .iteration(cancel, ctx, &self.gc_block, timeline)
                             .await?;
-                        Some(has_pending_tasks)
+                        Some(outcome)
                     } else {
-                        Some(false)
+                        Some(CompactionOutcome::Done)
                     }
                 }
             } else {
                 None
             };
-            has_pending_task |= pending_task_left.unwrap_or(false);
-            if pending_task_left == Some(false) && *can_offload {
+            has_pending_task |= pending_task_left == Some(CompactionOutcome::Pending);
+            if pending_task_left == Some(CompactionOutcome::Done) && *can_offload {
                 pausable_failpoint!("before-timeline-auto-offload");
                 match offload_timeline(self, timeline)
                     .instrument(info_span!("offload_timeline", %timeline_id))
@@ -3041,7 +3037,11 @@ impl Tenant {
             .unwrap()
             .success(&CIRCUIT_BREAKERS_UNBROKEN);
 
-        Ok(has_pending_task)
+        Ok(if has_pending_task {
+            CompactionOutcome::Pending
+        } else {
+            CompactionOutcome::Done
+        })
     }
 
     /// Cancel scheduled compaction tasks
@@ -3088,31 +3088,27 @@ impl Tenant {
         Ok(rx)
     }
 
-    // Call through to all timelines to freeze ephemeral layers if needed.  Usually
-    // this happens during ingest: this background housekeeping is for freezing layers
-    // that are open but haven't been written to for some time.
-    async fn ingest_housekeeping(&self) {
-        // Scan through the hashmap and collect a list of all the timelines,
-        // while holding the lock. Then drop the lock and actually perform the
-        // compactions.  We don't want to block everything else while the
-        // compaction runs.
-        let timelines = {
-            self.timelines
-                .lock()
-                .unwrap()
-                .values()
-                .filter_map(|timeline| {
-                    if timeline.is_active() {
-                        Some(timeline.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
+    /// Performs periodic housekeeping, via the tenant housekeeping background task.
+    async fn housekeeping(&self) {
+        // Call through to all timelines to freeze ephemeral layers as needed. This usually happens
+        // during ingest, but we don't want idle timelines to hold open layers for too long.
+        let timelines = self
+            .timelines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|tli| tli.is_active())
+            .cloned()
+            .collect_vec();
 
-        for timeline in &timelines {
+        for timeline in timelines {
             timeline.maybe_freeze_ephemeral_layer().await;
+        }
+
+        // Shut down walredo if idle.
+        const WALREDO_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+        if let Some(ref walredo_mgr) = self.walredo_mgr {
+            walredo_mgr.maybe_quiesce(WALREDO_IDLE_TIMEOUT);
         }
     }
 
@@ -4115,6 +4111,7 @@ impl Tenant {
                 // use an extremely long backoff.
                 Some(Duration::from_secs(3600 * 24)),
             )),
+            l0_compaction_trigger: Arc::new(Notify::new()),
             scheduled_compaction_tasks: Mutex::new(Default::default()),
             activate_now_sem: tokio::sync::Semaphore::new(0),
             attach_wal_lag_cooldown: Arc::new(std::sync::OnceLock::new()),
@@ -4642,22 +4639,26 @@ impl Tenant {
 
         // check against last actual 'latest_gc_cutoff' first
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
-        src_timeline
-            .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
-            .context(format!(
-                "invalid branch start lsn: less than latest GC cutoff {}",
-                *latest_gc_cutoff_lsn,
-            ))
-            .map_err(CreateTimelineError::AncestorLsn)?;
-
-        // and then the planned GC cutoff
         {
             let gc_info = src_timeline.gc_info.read().unwrap();
-            let cutoff = gc_info.min_cutoff();
-            if start_lsn < cutoff {
-                return Err(CreateTimelineError::AncestorLsn(anyhow::anyhow!(
-                    "invalid branch start lsn: less than planned GC cutoff {cutoff}"
-                )));
+            let planned_cutoff = gc_info.min_cutoff();
+            if gc_info.lsn_covered_by_lease(start_lsn) {
+                tracing::info!("skipping comparison of {start_lsn} with gc cutoff {} and planned gc cutoff {planned_cutoff} due to lsn lease", *latest_gc_cutoff_lsn);
+            } else {
+                src_timeline
+                    .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
+                    .context(format!(
+                        "invalid branch start lsn: less than latest GC cutoff {}",
+                        *latest_gc_cutoff_lsn,
+                    ))
+                    .map_err(CreateTimelineError::AncestorLsn)?;
+
+                // and then the planned GC cutoff
+                if start_lsn < planned_cutoff {
+                    return Err(CreateTimelineError::AncestorLsn(anyhow::anyhow!(
+                        "invalid branch start lsn: less than planned GC cutoff {planned_cutoff}"
+                    )));
+                }
             }
         }
 
@@ -5019,12 +5020,19 @@ impl Tenant {
         )
     }
 
-    /// Call this before constructing a timeline, to build its required structures
+    /// Builds required resources for a new timeline.
     fn build_timeline_resources(&self, timeline_id: TimelineId) -> TimelineResources {
+        let remote_client = self.build_timeline_remote_client(timeline_id);
+        self.get_timeline_resources_for(remote_client)
+    }
+
+    /// Builds timeline resources for the given remote client.
+    fn get_timeline_resources_for(&self, remote_client: RemoteTimelineClient) -> TimelineResources {
         TimelineResources {
-            remote_client: self.build_timeline_remote_client(timeline_id),
+            remote_client,
             pagestream_throttle: self.pagestream_throttle.clone(),
             pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
+            l0_compaction_trigger: self.l0_compaction_trigger.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
         }
     }
@@ -5490,6 +5498,9 @@ pub(crate) mod harness {
                 timeline_get_throttle: Some(tenant_conf.timeline_get_throttle),
                 image_layer_creation_check_threshold: Some(
                     tenant_conf.image_layer_creation_check_threshold,
+                ),
+                image_creation_preempt_threshold: Some(
+                    tenant_conf.image_creation_preempt_threshold,
                 ),
                 lsn_lease_length: Some(tenant_conf.lsn_lease_length),
                 lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),
@@ -7694,6 +7705,18 @@ mod tests {
             }
 
             tline.freeze_and_flush().await?;
+            // Force layers to L1
+            tline
+                .compact(
+                    &cancel,
+                    {
+                        let mut flags = EnumSet::new();
+                        flags.insert(CompactFlags::ForceL0Compaction);
+                        flags
+                    },
+                    &ctx,
+                )
+                .await?;
 
             if iter % 5 == 0 {
                 let (_, before_delta_file_accessed) =
@@ -7706,6 +7729,7 @@ mod tests {
                             let mut flags = EnumSet::new();
                             flags.insert(CompactFlags::ForceImageLayerCreation);
                             flags.insert(CompactFlags::ForceRepartition);
+                            flags.insert(CompactFlags::ForceL0Compaction);
                             flags
                         },
                         &ctx,
@@ -8152,6 +8176,8 @@ mod tests {
 
         let cancel = CancellationToken::new();
 
+        // Image layer creation happens on the disk_consistent_lsn so we need to force set it now.
+        tline.force_set_disk_consistent_lsn(Lsn(0x40));
         tline
             .compact(
                 &cancel,
@@ -8165,8 +8191,7 @@ mod tests {
             )
             .await
             .unwrap();
-
-        // Image layers are created at last_record_lsn
+        // Image layers are created at repartition LSN
         let images = tline
             .inspect_image_layers(Lsn(0x40), &ctx, io_concurrency.clone())
             .await
