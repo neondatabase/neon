@@ -2938,9 +2938,6 @@ impl Tenant {
             let timelines = self.timelines.lock().unwrap();
             for (&timeline_id, timeline) in timelines.iter() {
                 // Skip inactive timelines.
-                //
-                // TODO(review): this will skip offloading of inactive timelines. Is this the
-                // indented behavior? The old code also did this.
                 if !timeline.is_active() {
                     continue;
                 }
@@ -2961,7 +2958,7 @@ impl Tenant {
         } // release timelines lock
 
         for timeline in &compact {
-            // Can't await while holding lock above.
+            // Collect L0 counts. Can't await while holding lock above.
             if let Ok(lm) = timeline.layers.read().await.layer_map() {
                 l0_counts.insert(timeline.timeline_id, lm.level0_deltas().len());
             }
