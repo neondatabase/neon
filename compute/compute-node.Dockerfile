@@ -137,7 +137,7 @@ RUN case $DEBIAN_VERSION in \
     apt install --no-install-recommends --no-install-suggests -y \
     ninja-build git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
-    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd \
+    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip \
     $VERSION_INSTALLS \
     && apt clean && rm -rf /var/lib/apt/lists/*
 
@@ -1648,11 +1648,11 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then\
         pgbouncer_exporter_sha256='217c4afd7e6492ae904055bc14fe603552cf9bac458c063407e991d68c519da3';\
         sql_exporter_sha256='11918b00be6e2c3a67564adfdb2414fdcbb15a5db76ea17d1d1a944237a893c6';\
     fi\
-    && wget -O - https://github.com/prometheus-community/postgres_exporter/releases/download/v0.16.0/postgres_exporter-0.16.0.linux-${TARGETARCH}.tar.gz\
+    && curl -sL https://github.com/prometheus-community/postgres_exporter/releases/download/v0.16.0/postgres_exporter-0.16.0.linux-${TARGETARCH}.tar.gz\
      | tar xzf - --strip-components=1 -C.\
-    && wget -O - https://github.com/prometheus-community/pgbouncer_exporter/releases/download/v0.10.2/pgbouncer_exporter-0.10.2.linux-${TARGETARCH}.tar.gz\
+    && curl -sL https://github.com/prometheus-community/pgbouncer_exporter/releases/download/v0.10.2/pgbouncer_exporter-0.10.2.linux-${TARGETARCH}.tar.gz\
      | tar xzf - --strip-components=1 -C.\
-    && wget -O - https://github.com/burningalchemist/sql_exporter/releases/download/0.17.0/sql_exporter-0.17.0.linux-${TARGETARCH}.tar.gz\
+    && curl -sL https://github.com/burningalchemist/sql_exporter/releases/download/0.17.0/sql_exporter-0.17.0.linux-${TARGETARCH}.tar.gz\
      | tar xzf - --strip-components=1 -C.\
     && echo "${postgres_exporter_sha256} postgres_exporter" | sha256sum -c -\
     && echo "${pgbouncer_exporter_sha256} pgbouncer_exporter" | sha256sum -c -\
@@ -1666,8 +1666,6 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then\
 FROM build-deps AS awscli
 ARG TARGETARCH
 RUN set -ex; \
-    apt update; \
-    apt install --no-install-recommends -y unzip; \
     if [ "${TARGETARCH}" = "amd64" ]; then \
         TARGETARCH_ALT="x86_64"; \
         CHECKSUM="c9a9df3770a3ff9259cb469b6179e02829687a464e0824d5c32d378820b53a00"; \
@@ -1677,12 +1675,11 @@ RUN set -ex; \
     else \
         echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
     fi; \
-    wget "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -O /tmp/awscliv2.zip; \
+    curl --retry 5 -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
     echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
     unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
     /tmp/awscliv2/aws/install; \
-    rm -rf /tmp/awscliv2.zip /tmp/awscliv2; \
-    apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    rm -rf /tmp/awscliv2.zip /tmp/awscliv2
 
 #########################################################################################
 #
