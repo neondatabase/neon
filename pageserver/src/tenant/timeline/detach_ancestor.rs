@@ -353,7 +353,7 @@ pub(super) async fn prepare(
 
         // FIXME: the fsync should be mandatory, after both rewrites and copies
         if wrote_any {
-            fsync_timeline_dir(&detached, ctx).await;
+            fsync_timeline_dir(detached, ctx).await;
         }
     }
 
@@ -400,7 +400,7 @@ pub(super) async fn prepare(
 
     // fsync directory again if we hardlinked something
     if should_fsync {
-        fsync_timeline_dir(&detached, ctx).await;
+        fsync_timeline_dir(detached, ctx).await;
     }
 
     let prepared = PreparedTimelineDetach { layers: new_layers };
