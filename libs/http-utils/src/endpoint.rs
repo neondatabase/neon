@@ -1,7 +1,6 @@
-use crate::auth::{AuthError, Claims, SwappableJwtAuth};
-use crate::http::error::{api_error_handler, route_error_handler, ApiError};
-use crate::http::request::{get_query_param, parse_query_param};
+use crate::error::{api_error_handler, route_error_handler, ApiError};
 use crate::pprof;
+use crate::request::{get_query_param, parse_query_param};
 use ::pprof::protos::Message as _;
 use ::pprof::ProfilerGuardBuilder;
 use anyhow::{anyhow, Context};
@@ -19,6 +18,7 @@ use tokio::sync::{mpsc, Mutex, Notify};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, info_span, warn, Instrument};
+use utils::auth::{AuthError, Claims, SwappableJwtAuth};
 
 use std::future::Future;
 use std::io::Write as _;
@@ -718,9 +718,9 @@ pub fn check_permission_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::future::poll_fn;
     use hyper::service::Service;
     use routerify::RequestServiceBuilder;
+    use std::future::poll_fn;
     use std::net::{IpAddr, SocketAddr};
 
     #[tokio::test]
