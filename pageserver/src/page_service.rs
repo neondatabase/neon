@@ -1063,7 +1063,7 @@ impl PageServerHandler {
         };
 
         // invoke handler function
-        let (handler_results, span): (
+        let (mut handler_results, span): (
             Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>>,
             _,
         ) = match batch {
@@ -1190,7 +1190,7 @@ impl PageServerHandler {
             }
         };
 
-        // We purposefully don't count flush time into the smgr operaiton timer.
+        // We purposefully don't count flush time into the smgr operation timer.
         //
         // The reason is that current compute client will not perform protocol processing
         // if the postgres backend process is doing things other than `->smgr_read()`.
@@ -1207,17 +1207,32 @@ impl PageServerHandler {
         // call, which (all unmeasured) adds syscall overhead but reduces time to first byte
         // and avoids building up a "giant" contiguous userspace buffer to hold the entire response.
         // TODO: vectored socket IO would be great, but pgb_writer doesn't support that.
-        //
-        // Since we're flushing multiple times in the loop, but only have access to the per-op
-        // timers inside the loop, we capture the flush start time here and reuse it to finish
-        // each op timer.
-        let flushing_start_time = Instant::now();
+        let flush_timers = {
+            let flushing_start_time = Instant::now();
+            let mut flush_timers = Vec::with_capacity(handler_results.len());
+            for handler_result in &mut handler_results {
+                let flush_timer = match handler_result {
+                    Ok((_, timer)) => Some(
+                        timer
+                            .observe_execution_end(flushing_start_time)
+                            .expect("we are the first caller"),
+                    ),
+                    Err(_) => {
+                        // TODO: measure errors
+                        None
+                    }
+                };
+                flush_timers.push(flush_timer);
+            }
+            assert_eq!(flush_timers.len(), handler_results.len());
+            flush_timers
+        };
 
         // Map handler result to protocol behavior.
         // Some handler errors cause exit from pagestream protocol.
         // Other handler errors are sent back as an error message and we stay in pagestream protocol.
-        for handler_result in handler_results {
-            let (response_msg, timer) = match handler_result {
+        for (handler_result, flushing_timer) in handler_results.into_iter().zip(flush_timers) {
+            let response_msg = match handler_result {
                 Err(e) => match &e.err {
                     PageStreamError::Shutdown => {
                         // If we fail to fulfil a request during shutdown, which may be _because_ of
@@ -1241,16 +1256,14 @@ impl PageServerHandler {
                         span.in_scope(|| {
                             error!("error reading relation or page version: {full:#}")
                         });
-                        (
-                            PagestreamBeMessage::Error(PagestreamErrorResponse {
-                                req: e.req,
-                                message: e.err.to_string(),
-                            }),
-                            None, // TODO: measure errors
-                        )
+
+                        PagestreamBeMessage::Error(PagestreamErrorResponse {
+                            req: e.req,
+                            message: e.err.to_string(),
+                        })
                     }
                 },
-                Ok((response_msg, timer)) => (response_msg, Some(timer)),
+                Ok((response_msg, _op_timer_already_observed)) => response_msg,
             };
 
             //
@@ -1261,18 +1274,12 @@ impl PageServerHandler {
                 &response_msg.serialize(protocol_version),
             ))?;
 
-            let flushing_timer = timer.map(|mut timer| {
-                timer
-                    .observe_execution_end_flush_start(flushing_start_time)
-                    .expect("we are the first caller")
-            });
-
             // what we want to do
             let flush_fut = pgb_writer.flush();
             // metric for how long flushing takes
             let flush_fut = match flushing_timer {
                 Some(flushing_timer) => {
-                    futures::future::Either::Left(flushing_timer.measure(flush_fut))
+                    futures::future::Either::Left(flushing_timer.measure(Instant::now(), flush_fut))
                 }
                 None => futures::future::Either::Right(flush_fut),
             };
