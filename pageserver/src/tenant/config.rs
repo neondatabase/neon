@@ -466,7 +466,7 @@ impl TenantConfOpt {
                 .lsn_lease_length_for_ts
                 .unwrap_or(global_conf.lsn_lease_length_for_ts),
             timeline_offloading: self
-                .lazy_slru_download
+                .timeline_offloading
                 .unwrap_or(global_conf.timeline_offloading),
             wal_receiver_protocol_override: self
                 .wal_receiver_protocol_override

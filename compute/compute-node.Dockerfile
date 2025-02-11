@@ -1625,7 +1625,7 @@ RUN set -e \
     && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
     && cd pgbouncer \
     && ./autogen.sh \
-    && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
+    && ./configure --prefix=/usr/local/pgbouncer --without-openssl \
     && make -j $(nproc) dist_man_MANS= \
     && make install dist_man_MANS=
 
@@ -1785,17 +1785,6 @@ ARG DEBIAN_VERSION
 # Use strict mode for bash to catch errors early
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-# Add user postgres
-RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
-    echo "postgres:test_console_pass" | chpasswd && \
-    mkdir /var/db/postgres/compute && mkdir /var/db/postgres/specs && \
-    mkdir /var/db/postgres/pgbouncer && \
-    chown -R postgres:postgres /var/db/postgres && \
-    chmod 0750 /var/db/postgres/compute && \
-    chmod 0750 /var/db/postgres/pgbouncer && \
-    # create folder for file cache
-    mkdir -p -m 777 /neon/cache
-
 # Install:
 # libreadline8 for psql
 # liblz4-1 for lz4
@@ -1805,10 +1794,9 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
 # libzstd1 for zstd
 # libboost* for rdkit
 # ca-certificates for communicating with s3 by compute_ctl
-
+# libevent for pgbouncer
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
-
 RUN apt update && \
     case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):
@@ -1843,6 +1831,7 @@ RUN apt update && \
         libxslt1.1 \
         libzstd1 \
         libcurl4 \
+        libevent-2.1-7 \
         locales \
         procps \
         ca-certificates \
@@ -1850,20 +1839,34 @@ RUN apt update && \
     apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 
-# Create remote extension download directory
-RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/local/download_extensions
+# Add user postgres
+RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
+    echo "postgres:test_console_pass" | chpasswd && \
+    mkdir /var/db/postgres/compute && mkdir /var/db/postgres/specs && \
+    mkdir /var/db/postgres/pgbouncer && \
+    chown -R postgres:postgres /var/db/postgres && \
+    chmod 0750 /var/db/postgres/compute && \
+    chmod 0750 /var/db/postgres/pgbouncer && \
+    # create folder for file cache
+    mkdir -p -m 777 /neon/cache && \
+    # Create remote extension download directory
+    mkdir /usr/local/download_extensions && \
+    chown -R postgres:postgres /usr/local/download_extensions
 
-# local_proxy and its config
-RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
-COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/local_proxy /usr/local/bin/local_proxy
-COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/compute_ctl /usr/local/bin/compute_ctl
-COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/fast_import /usr/local/bin/fast_import
-
-COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
+# aws cli is used by fast_import
+COPY --from=awscli /usr/local/aws-cli /usr/local/aws-cli
 
 # pgbouncer and its config
 COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
 COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
+
+COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/fast_import /usr/local/bin/fast_import
+
+# local_proxy and its config
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/local_proxy /usr/local/bin/local_proxy
+RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 
 # Metrics exporter binaries and configuration files
 COPY --from=exporters ./postgres_exporter /bin/postgres_exporter
@@ -1877,8 +1880,7 @@ COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neo
 COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
 COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
 
-COPY --from=awscli /usr/local/aws-cli /usr/local/aws-cli
-
+# Make the libraries we built available
 RUN echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
 
 ENV LANG=en_US.utf8
