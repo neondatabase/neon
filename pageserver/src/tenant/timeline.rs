@@ -45,13 +45,12 @@ use rand::Rng;
 use remote_storage::DownloadError;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc::Sender;
-use tokio::{
-    runtime::Handle,
-    sync::{oneshot, watch},
-};
+use tokio::sync::{oneshot, watch, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::critical;
 use utils::rate_limit::RateLimit;
 use utils::{
     fs_ext,
@@ -192,7 +191,12 @@ pub enum ImageLayerCreationMode {
 
 #[derive(Clone, Debug, Default)]
 pub enum LastImageLayerCreationStatus {
-    Incomplete, // TODO: record the last key being processed
+    Incomplete {
+        /// The last key of the partition (exclusive) that was processed in the last
+        /// image layer creation attempt. We will continue from this key in the next
+        /// attempt.
+        last_key: Key,
+    },
     Complete,
     #[default]
     Initial,
@@ -221,6 +225,7 @@ pub struct TimelineResources {
     pub remote_client: RemoteTimelineClient,
     pub pagestream_throttle: Arc<crate::tenant::throttle::Throttle>,
     pub pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
+    pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
@@ -420,6 +425,9 @@ pub struct Timeline {
     /// If true, the last compaction failed.
     compaction_failed: AtomicBool,
 
+    /// Notifies the tenant compaction loop that there is pending L0 compaction work.
+    l0_compaction_trigger: Arc<Notify>,
+
     /// Make sure we only have one running gc at a time.
     ///
     /// Must only be taken in two places:
@@ -526,6 +534,9 @@ impl GcInfo {
     pub(super) fn remove_child_offloaded(&mut self, child_id: TimelineId) -> bool {
         self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes)
     }
+    pub(crate) fn lsn_covered_by_lease(&self, lsn: Lsn) -> bool {
+        self.leases.contains_key(&lsn)
+    }
 }
 
 /// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this
@@ -617,6 +628,71 @@ impl From<layer_manager::Shutdown> for GetVectoredError {
     }
 }
 
+/// A layer identifier when used in the [`ReadPath`] structure. This enum is for observability purposes
+/// only and not used by the "real read path".
+pub enum ReadPathLayerId {
+    PersistentLayer(PersistentLayerKey),
+    InMemoryLayer(Range<Lsn>),
+}
+
+impl std::fmt::Display for ReadPathLayerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadPathLayerId::PersistentLayer(key) => write!(f, "{}", key),
+            ReadPathLayerId::InMemoryLayer(range) => {
+                write!(f, "in-mem {}..{}", range.start, range.end)
+            }
+        }
+    }
+}
+pub struct ReadPath {
+    keyspace: KeySpace,
+    lsn: Lsn,
+    path: Vec<(ReadPathLayerId, KeySpace, Range<Lsn>)>,
+}
+
+impl ReadPath {
+    pub fn new(keyspace: KeySpace, lsn: Lsn) -> Self {
+        Self {
+            keyspace,
+            lsn,
+            path: Vec::new(),
+        }
+    }
+
+    pub fn record_layer_visit(
+        &mut self,
+        layer_to_read: &ReadableLayer,
+        keyspace_to_read: &KeySpace,
+        lsn_range: &Range<Lsn>,
+    ) {
+        let id = match layer_to_read {
+            ReadableLayer::PersistentLayer(layer) => {
+                ReadPathLayerId::PersistentLayer(layer.layer_desc().key())
+            }
+            ReadableLayer::InMemoryLayer(layer) => {
+                ReadPathLayerId::InMemoryLayer(layer.get_lsn_range())
+            }
+        };
+        self.path
+            .push((id, keyspace_to_read.clone(), lsn_range.clone()));
+    }
+}
+
+impl std::fmt::Display for ReadPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Read path for {} at lsn {}:", self.keyspace, self.lsn)?;
+        for (idx, (layer_id, keyspace, lsn_range)) in self.path.iter().enumerate() {
+            writeln!(
+                f,
+                "{}: {} {}..{} {}",
+                idx, layer_id, lsn_range.start, lsn_range.end, keyspace
+            )?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(thiserror::Error)]
 pub struct MissingKeyError {
     key: Key,
@@ -624,6 +700,8 @@ pub struct MissingKeyError {
     cont_lsn: Lsn,
     request_lsn: Lsn,
     ancestor_lsn: Option<Lsn>,
+    /// Debug information about the read path if there's an error
+    read_path: Option<ReadPath>,
     backtrace: Option<std::backtrace::Backtrace>,
 }
 
@@ -640,8 +718,13 @@ impl std::fmt::Display for MissingKeyError {
             "could not find data for key {} (shard {:?}) at LSN {}, request LSN {}",
             self.key, self.shard, self.cont_lsn, self.request_lsn
         )?;
+
         if let Some(ref ancestor_lsn) = self.ancestor_lsn {
             write!(f, ", ancestor {}", ancestor_lsn)?;
+        }
+
+        if let Some(ref read_path) = self.read_path {
+            write!(f, "\n{}", read_path)?;
         }
 
         if let Some(ref backtrace) = self.backtrace {
@@ -1060,6 +1143,7 @@ impl Timeline {
                 request_lsn: lsn,
                 ancestor_lsn: None,
                 backtrace: None,
+                read_path: None,
             })),
         }
     }
@@ -1186,6 +1270,13 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        let read_path = if self.conf.enable_read_path_debugging {
+            Some(ReadPath::new(keyspace.clone(), lsn))
+        } else {
+            None
+        };
+        reconstruct_state.read_path = read_path;
+
         let traversal_res: Result<(), _> = self
             .get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
             .await;
@@ -1709,8 +1800,9 @@ impl Timeline {
         let prepare = async move {
             let guard = self.compaction_lock.lock().await;
 
-            let permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
+            let permit = super::tasks::acquire_concurrency_permit(
                 BackgroundLoopKind::Compaction,
+                self.conf.use_compaction_semaphore,
                 ctx,
             )
             .await;
@@ -2574,6 +2666,7 @@ impl Timeline {
 
                 compaction_lock: tokio::sync::Mutex::default(),
                 compaction_failed: AtomicBool::default(),
+                l0_compaction_trigger: resources.l0_compaction_trigger,
                 gc_lock: tokio::sync::Mutex::default(),
 
                 standby_horizon: AtomicLsn::new(0),
@@ -2623,7 +2716,7 @@ impl Timeline {
                 return;
             }
             FlushLoopState::Exited => {
-                warn!(
+                info!(
                     "ignoring attempt to restart exited flush_loop {}/{}",
                     self.tenant_shard_id, self.timeline_id
                 );
@@ -3047,8 +3140,9 @@ impl Timeline {
             let self_ref = &self;
             let skip_concurrency_limiter = &skip_concurrency_limiter;
             async move {
-                let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
+                let wait_for_permit = super::tasks::acquire_concurrency_permit(
                     BackgroundLoopKind::InitialLogicalSizeCalculation,
+                    false,
                     background_ctx,
                 );
 
@@ -3493,6 +3587,7 @@ impl Timeline {
                 request_lsn,
                 ancestor_lsn: Some(timeline.ancestor_lsn),
                 backtrace: None,
+                read_path: std::mem::take(&mut reconstruct_state.read_path),
             }));
         }
 
@@ -3611,6 +3706,9 @@ impl Timeline {
             }
 
             if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
+                if let Some(ref mut read_path) = reconstruct_state.read_path {
+                    read_path.record_layer_visit(&layer_to_read, &keyspace_to_read, &lsn_range);
+                }
                 let next_cont_lsn = lsn_range.start;
                 layer_to_read
                     .get_values_reconstruct_data(
@@ -3910,6 +4008,12 @@ impl Timeline {
                     }
                 }
                 let flush_duration = flush_timer.stop_and_record();
+
+                // Notify the tenant compaction loop if L0 compaction is needed.
+                let l0_count = *watch_l0.borrow();
+                if l0_count >= self.get_compaction_threshold() {
+                    self.l0_compaction_trigger.notify_one();
+                }
 
                 // Delay the next flush to backpressure if compaction can't keep up. We delay by the
                 // flush duration such that the flush takes 2x as long. This is propagated up to WAL
@@ -4346,7 +4450,7 @@ impl Timeline {
         Ok(result)
     }
 
-    // Is it time to create a new image layer for the given partition?
+    // Is it time to create a new image layer for the given partition? True if we want to generate.
     async fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> bool {
         let threshold = self.get_image_creation_threshold();
 
@@ -4658,6 +4762,11 @@ impl Timeline {
     ) -> Result<(Vec<ResidentLayer>, LastImageLayerCreationStatus), CreateImageLayersError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
 
+        if partitioning.parts.is_empty() {
+            warn!("no partitions to create image layers for");
+            return Ok((vec![], LastImageLayerCreationStatus::Complete));
+        }
+
         // We need to avoid holes between generated image layers.
         // Otherwise LayerMap::image_layer_exists will return false if key range of some layer is covered by more than one
         // image layer with hole between them. In this case such layer can not be utilized by GC.
@@ -4669,28 +4778,65 @@ impl Timeline {
         // image layers  <100000000..100000099> and <200000000..200000199> are not completely covering it.
         let mut start = Key::MIN;
 
-        let check_for_image_layers = if let LastImageLayerCreationStatus::Incomplete = last_status {
-            info!(
-                "resuming image layer creation: last_status={:?}",
-                last_status
-            );
-            true
-        } else {
-            self.should_check_if_image_layers_required(lsn)
-        };
+        let check_for_image_layers =
+            if let LastImageLayerCreationStatus::Incomplete { last_key } = last_status {
+                info!(
+                    "resuming image layer creation: last_status=incomplete, continue from {}",
+                    last_key
+                );
+                true
+            } else {
+                self.should_check_if_image_layers_required(lsn)
+            };
 
         let mut batch_image_writer = BatchLayerWriter::new(self.conf).await?;
 
         let mut all_generated = true;
 
         let mut partition_processed = 0;
-        let total_partitions = partitioning.parts.len();
+        let mut total_partitions = partitioning.parts.len();
+        let mut last_partition_processed = None;
+        let mut partition_parts = partitioning.parts.clone();
 
-        for partition in partitioning.parts.iter() {
+        if let LastImageLayerCreationStatus::Incomplete { last_key } = last_status {
+            // We need to skip the partitions that have already been processed.
+            let mut found = false;
+            for (i, partition) in partition_parts.iter().enumerate() {
+                if last_key <= partition.end().unwrap() {
+                    // ```plain
+                    // |------|--------|----------|------|
+                    //              ^last_key
+                    //                    ^start from this partition
+                    // ```
+                    // Why `i+1` instead of `i`?
+                    // It is possible that the user did some writes after the previous image layer creation attempt so that
+                    // a relation grows in size, and the last_key is now in the middle of the partition. In this case, we
+                    // still want to skip this partition, so that we can make progress and avoid generating image layers over
+                    // the same partition. Doing a mod to ensure we don't end up with an empty vec.
+                    if i + 1 >= total_partitions {
+                        // In general, this case should not happen -- if last_key is on the last partition, the previous
+                        // iteration of image layer creation should return a complete status.
+                        break; // with found=false
+                    }
+                    partition_parts = partition_parts.split_off(i + 1); // Remove the first i + 1 elements
+                    total_partitions = partition_parts.len();
+                    // Update the start key to the partition start.
+                    start = partition_parts[0].start().unwrap();
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                // Last key is within the last partition, or larger than all partitions.
+                return Ok((vec![], LastImageLayerCreationStatus::Complete));
+            }
+        }
+
+        for partition in partition_parts.iter() {
             if self.cancel.is_cancelled() {
                 return Err(CreateImageLayersError::Cancelled);
             }
-
+            partition_processed += 1;
             let img_range = start..partition.ranges.last().unwrap().end;
             let compact_metadata = partition.overlaps(&Key::metadata_key_range());
             if compact_metadata {
@@ -4725,6 +4871,8 @@ impl Timeline {
                     lsn_range: PersistentLayerDesc::image_layer_lsn_range(lsn),
                     is_delta: false,
                 }) {
+                    // TODO: this can be processed with the BatchLayerWriter::finish_with_discard
+                    // in the future.
                     tracing::info!(
                         "Skipping image layer at {lsn} {}..{}, already exists",
                         img_range.start,
@@ -4805,8 +4953,6 @@ impl Timeline {
                 }
             }
 
-            partition_processed += 1;
-
             if let ImageLayerCreationMode::Try = mode {
                 // We have at least made some progress
                 if batch_image_writer.pending_layer_num() >= 1 {
@@ -4822,8 +4968,10 @@ impl Timeline {
                         * self.get_compaction_threshold();
                     if image_preempt_threshold != 0 && num_of_l0_layers >= image_preempt_threshold {
                         tracing::info!(
-                        "preempt image layer generation at {start} at {lsn}: too many L0 layers {num_of_l0_layers}",
+                        "preempt image layer generation at {lsn} when processing partition {}..{}: too many L0 layers {}",
+                        partition.start().unwrap(), partition.end().unwrap(), num_of_l0_layers
                     );
+                        last_partition_processed = Some(partition.clone());
                         all_generated = false;
                         break;
                     }
@@ -4868,7 +5016,14 @@ impl Timeline {
             if all_generated {
                 LastImageLayerCreationStatus::Complete
             } else {
-                LastImageLayerCreationStatus::Incomplete
+                LastImageLayerCreationStatus::Incomplete {
+                    last_key: if let Some(last_partition_processed) = last_partition_processed {
+                        last_partition_processed.end().unwrap_or(Key::MIN)
+                    } else {
+                        // This branch should be unreachable, but in case it happens, we can just return the start key.
+                        Key::MIN
+                    },
+                }
             },
         ))
     }
@@ -5748,10 +5903,11 @@ impl Timeline {
                 let img = match res {
                     Ok(img) => img,
                     Err(walredo::Error::Cancelled) => return Err(PageReconstructError::Cancelled),
-                    Err(walredo::Error::Other(e)) => {
+                    Err(walredo::Error::Other(err)) => {
+                        critical!("walredo failure during page reconstruction: {err:?}");
                         return Err(PageReconstructError::WalRedo(
-                            e.context("reconstruct a page image"),
-                        ))
+                            err.context("reconstruct a page image"),
+                        ));
                     }
                 };
                 Ok(img)

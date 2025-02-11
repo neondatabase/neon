@@ -94,6 +94,7 @@ pub struct ConfigToml {
     pub ondemand_download_behavior_treat_error_as_warn: bool,
     #[serde(with = "humantime_serde")]
     pub background_task_maximum_delay: Duration,
+    pub use_compaction_semaphore: bool,
     pub control_plane_api: Option<reqwest::Url>,
     pub control_plane_api_token: Option<String>,
     pub control_plane_emergency_mode: bool,
@@ -121,6 +122,7 @@ pub struct ConfigToml {
     pub wal_receiver_protocol: PostgresClientProtocol,
     pub page_service_pipelining: PageServicePipeliningConfig,
     pub get_vectored_concurrent_io: GetVectoredConcurrentIo,
+    pub enable_read_path_debugging: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -470,6 +472,7 @@ impl Default for ConfigToml {
                 DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY,
             )
             .unwrap()),
+            use_compaction_semaphore: false,
 
             control_plane_api: (None),
             control_plane_api_token: (None),
@@ -509,6 +512,11 @@ impl Default for ConfigToml {
                 GetVectoredConcurrentIo::Sequential
             } else {
                 GetVectoredConcurrentIo::SidecarTask
+            },
+            enable_read_path_debugging: if cfg!(test) || cfg!(feature = "testing") {
+                Some(true)
+            } else {
+                None
             },
         }
     }

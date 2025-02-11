@@ -85,6 +85,10 @@ ARG DEBIAN_VERSION=bookworm
 ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
 ARG ALPINE_CURL_VERSION=8.11.1
 
+# By default, build all PostgreSQL extensions. For quick local testing when you don't
+# care about the extensions, pass EXTENSIONS=none or EXTENSIONS=minimal
+ARG EXTENSIONS=all
+
 #########################################################################################
 #
 # Layer "build-deps"
@@ -1484,12 +1488,35 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
 
 #########################################################################################
 #
-# Layer "all-extensions"
+# Layer "extensions-none"
+#
+#########################################################################################
+FROM build-deps AS extensions-none
+
+RUN mkdir /usr/local/pgsql
+
+#########################################################################################
+#
+# Layer "extensions-minimal"
+#
+# This subset of extensions includes the extensions that we have in
+# shared_preload_libraries by default.
+#
+#########################################################################################
+FROM build-deps AS extensions-minimal
+
+COPY --from=pgrag-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=timescaledb-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_cron-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
+
+#########################################################################################
+#
+# Layer "extensions-all"
 # Bundle together all the extensions
 #
 #########################################################################################
-FROM build-deps AS all-extensions
-ARG PG_VERSION
+FROM build-deps AS extensions-all
 
 # Public extensions
 COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1531,7 +1558,13 @@ COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 
-COPY --from=neon-ext-build /usr/local/pgsql/ /usr/local/pgsql/
+#########################################################################################
+#
+# Layer "neon-pg-ext-build"
+# Includes Postgres and all the extensions chosen by EXTENSIONS arg.
+#
+#########################################################################################
+FROM extensions-${EXTENSIONS} AS neon-pg-ext-build
 
 #########################################################################################
 #
@@ -1545,7 +1578,15 @@ ENV BUILD_TAG=$BUILD_TAG
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
-RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy
+RUN --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/registry \
+    --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/git \
+    --mount=type=cache,uid=1000,target=/home/nonroot/target \
+    mold -run cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy && \
+    mkdir target-bin && \
+    cp target/release-line-debug-size-lto/compute_ctl \
+       target/release-line-debug-size-lto/fast_import \
+       target/release-line-debug-size-lto/local_proxy \
+       target-bin
 
 #########################################################################################
 #
@@ -1574,7 +1615,7 @@ RUN set -e \
     && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
     && cd pgbouncer \
     && ./autogen.sh \
-    && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
+    && ./configure --prefix=/usr/local/pgbouncer --without-openssl \
     && make -j $(nproc) dist_man_MANS= \
     && make install dist_man_MANS=
 
@@ -1610,11 +1651,35 @@ RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 30
 
 #########################################################################################
 #
+# Layer "awscli"
+#
+#########################################################################################
+FROM alpine/curl:${ALPINE_CURL_VERSION} AS awscli
+ARG TARGETARCH
+RUN set -ex; \
+    if [ "${TARGETARCH}" = "amd64" ]; then \
+        TARGETARCH_ALT="x86_64"; \
+        CHECKSUM="c9a9df3770a3ff9259cb469b6179e02829687a464e0824d5c32d378820b53a00"; \
+    elif [ "${TARGETARCH}" = "arm64" ]; then \
+        TARGETARCH_ALT="aarch64"; \
+        CHECKSUM="8181730be7891582b38b028112e81b4899ca817e8c616aad807c9e9d1289223a"; \
+    else \
+        echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
+    fi; \
+    curl --retry 5 -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
+    echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
+    unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
+    /tmp/awscliv2/aws/install; \
+    rm -rf /tmp/awscliv2.zip /tmp/awscliv2
+
+#########################################################################################
+#
 # Clean up postgres folder before inclusion
 #
 #########################################################################################
 FROM neon-ext-build AS postgres-cleanup-layer
-COPY --from=all-extensions /usr/local/pgsql /usr/local/pgsql
+
+COPY --from=neon-pg-ext-build /usr/local/pgsql /usr/local/pgsql
 
 # Remove binaries from /bin/ that we won't use (or would manually copy & install otherwise)
 RUN cd /usr/local/pgsql/bin && rm -f ecpg raster2pgsql shp2pgsql pgtopo_export pgtopo_import pgsql2shp
@@ -1720,16 +1785,19 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     # create folder for file cache
     mkdir -p -m 777 /neon/cache
 
+# aws cli is used by fast_import
+COPY --from=awscli /usr/local/aws-cli /usr/local/aws-cli
+
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/fast_import /usr/local/bin/fast_import
 
 # pgbouncer and its config
 COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
 COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
 
 # local_proxy and its config
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local_proxy
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/local_proxy /usr/local/bin/local_proxy
 RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 
 # Metrics exporter binaries and configuration files
@@ -1756,6 +1824,7 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 # libzstd1 for zstd
 # libboost* for rdkit
 # ca-certificates for communicating with s3 by compute_ctl
+# libevent for pgbouncer
 
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
@@ -1794,33 +1863,13 @@ RUN apt update && \
         libxslt1.1 \
         libzstd1 \
         libcurl4 \
+        libevent-2.1-7 \
         locales \
         procps \
         ca-certificates \
-        curl \
-        unzip \
         $VERSION_INSTALLS && \
     apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
-
-# aws cli is used by fast_import (curl and unzip above are at this time only used for this installation step)
-ARG TARGETARCH
-RUN set -ex; \
-    if [ "${TARGETARCH}" = "amd64" ]; then \
-        TARGETARCH_ALT="x86_64"; \
-        CHECKSUM="c9a9df3770a3ff9259cb469b6179e02829687a464e0824d5c32d378820b53a00"; \
-    elif [ "${TARGETARCH}" = "arm64" ]; then \
-        TARGETARCH_ALT="aarch64"; \
-        CHECKSUM="8181730be7891582b38b028112e81b4899ca817e8c616aad807c9e9d1289223a"; \
-    else \
-        echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
-    fi; \
-    curl --retry 5 -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
-    echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
-    unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
-    /tmp/awscliv2/aws/install; \
-    rm -rf /tmp/awscliv2.zip /tmp/awscliv2; \
-    true
 
 ENV LANG=en_US.utf8
 USER postgres

@@ -35,7 +35,7 @@ async def test_proxy_psql_allowed_ips(static_proxy: NeonProxy, vanilla_pg: Vanil
     check_cannot_connect(query="select 1", sslsni=0, options="endpoint=private-project")
 
     # with SNI
-    check_cannot_connect(query="select 1", host="private-project.localtest.me")
+    check_cannot_connect(query="select 1", host="private-project.local.neon.build")
 
     # no SNI, deprecated `options=project` syntax (before we had several endpoint in project)
     out = static_proxy.safe_psql(query="select 1", sslsni=0, options="project=generic-project")
@@ -46,7 +46,7 @@ async def test_proxy_psql_allowed_ips(static_proxy: NeonProxy, vanilla_pg: Vanil
     assert out[0][0] == 1
 
     # with SNI
-    out = static_proxy.safe_psql(query="select 1", host="generic-project.localtest.me")
+    out = static_proxy.safe_psql(query="select 1", host="generic-project.local.neon.build")
     assert out[0][0] == 1
 
 

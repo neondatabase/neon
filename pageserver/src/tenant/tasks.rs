@@ -1,53 +1,81 @@
-//! This module contains functions to serve per-tenant background processes,
-//! such as compaction and GC
+//! This module contains per-tenant background processes, e.g. compaction and GC.
 
-use std::ops::ControlFlow;
-use std::str::FromStr;
-use std::sync::Arc;
+use std::cmp::max;
+use std::future::Future;
+use std::ops::{ControlFlow, RangeInclusive};
+use std::pin::pin;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use once_cell::sync::Lazy;
+use rand::Rng;
+use scopeguard::defer;
+use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio_util::sync::CancellationToken;
+use tracing::*;
+
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::metrics::TENANT_TASK_EVENTS;
-use crate::task_mgr;
-use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
+use crate::metrics::{BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
+use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS};
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::compaction::CompactionOutcome;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
-use rand::Rng;
-use tokio_util::sync::CancellationToken;
-use tracing::*;
-use utils::{backoff, completion, pausable_failpoint};
+use pageserver_api::config::tenant_conf_defaults::DEFAULT_COMPACTION_PERIOD;
+use utils::backoff::exponential_backoff_duration;
+use utils::completion::Barrier;
+use utils::pausable_failpoint;
+use utils::rate_limit::RateLimit;
 
-static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
-    once_cell::sync::Lazy::new(|| {
-        let total_threads = task_mgr::TOKIO_WORKER_THREADS.get();
-        let permits = usize::max(
-            1,
-            // while a lot of the work is done on spawn_blocking, we still do
-            // repartitioning in the async context. this should give leave us some workers
-            // unblocked to be blocked on other work, hopefully easing any outside visible
-            // effects of restarts.
-            //
-            // 6/8 is a guess; previously we ran with unlimited 8 and more from
-            // spawn_blocking.
-            (total_threads * 3).checked_div(4).unwrap_or(0),
-        );
-        assert_ne!(permits, 0, "we will not be adding in permits later");
-        assert!(
-            permits < total_threads,
-            "need threads avail for shorter work"
-        );
-        tokio::sync::Semaphore::new(permits)
-    });
+/// Semaphore limiting concurrent background tasks (across all tenants).
+///
+/// We use 3/4 Tokio threads, to avoid blocking all threads in case we do any CPU-heavy work.
+static CONCURRENT_BACKGROUND_TASKS: Lazy<Semaphore> = Lazy::new(|| {
+    let total_threads = TOKIO_WORKER_THREADS.get();
+    let permits = max(1, (total_threads * 3).checked_div(4).unwrap_or(0));
+    assert_ne!(permits, 0, "we will not be adding in permits later");
+    assert!(permits < total_threads, "need threads for other work");
+    Semaphore::new(permits)
+});
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, strum_macros::IntoStaticStr, enum_map::Enum)]
+/// Semaphore limiting concurrent compaction tasks (across all tenants). This is disabled by
+/// default, see `use_compaction_semaphore`.
+///
+/// We use 3/4 Tokio threads, to avoid blocking all threads in case we do any CPU-heavy work.
+///
+/// This is a separate semaphore from background tasks, because L0 compaction needs to be responsive
+/// to avoid high read amp during heavy write workloads.
+///
+/// TODO: split image compaction and L0 compaction, and move image compaction to background tasks.
+/// Only L0 compaction needs to be responsive, and it shouldn't block on image compaction.
+static CONCURRENT_COMPACTION_TASKS: Lazy<Semaphore> = Lazy::new(|| {
+    let total_threads = TOKIO_WORKER_THREADS.get();
+    let permits = max(1, (total_threads * 3).checked_div(4).unwrap_or(0));
+    assert_ne!(permits, 0, "we will not be adding in permits later");
+    assert!(permits < total_threads, "need threads for other work");
+    Semaphore::new(permits)
+});
+
+/// Background jobs.
+///
+/// NB: not all of these acquire a CONCURRENT_BACKGROUND_TASKS semaphore permit, only the ones that
+/// do any significant IO.
+#[derive(
+    Debug,
+    PartialEq,
+    Eq,
+    Clone,
+    Copy,
+    strum_macros::IntoStaticStr,
+    strum_macros::Display,
+    enum_map::Enum,
+)]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum BackgroundLoopKind {
     Compaction,
     Gc,
     Eviction,
-    IngestHouseKeeping,
+    TenantHouseKeeping,
     ConsumptionMetricsCollectMetrics,
     ConsumptionMetricsSyntheticSizeWorker,
     InitialLogicalSizeCalculation,
@@ -55,36 +83,56 @@ pub(crate) enum BackgroundLoopKind {
     SecondaryDownload,
 }
 
-impl BackgroundLoopKind {
-    fn as_static_str(&self) -> &'static str {
-        self.into()
-    }
+pub struct BackgroundLoopSemaphorePermit<'a> {
+    _permit: SemaphorePermit<'static>,
+    _recorder: BackgroundLoopSemaphoreMetricsRecorder<'a>,
 }
 
-/// Cancellation safe.
-pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
+/// Acquires a semaphore permit, to limit concurrent background jobs.
+pub(crate) async fn acquire_concurrency_permit(
     loop_kind: BackgroundLoopKind,
+    use_compaction_semaphore: bool,
     _ctx: &RequestContext,
-) -> tokio::sync::SemaphorePermit<'static> {
-    let _guard = crate::metrics::BACKGROUND_LOOP_SEMAPHORE.measure_acquisition(loop_kind);
+) -> BackgroundLoopSemaphorePermit<'static> {
+    // TODO: use a lower threshold and remove the pacer once we resolve some blockage.
+    const WARN_THRESHOLD: Duration = Duration::from_secs(600);
+    static WARN_PACER: Lazy<Mutex<RateLimit>> =
+        Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+
+    let mut recorder = crate::metrics::BACKGROUND_LOOP_SEMAPHORE.record(loop_kind);
 
     if loop_kind == BackgroundLoopKind::InitialLogicalSizeCalculation {
         pausable_failpoint!("initial-size-calculation-permit-pause");
     }
 
     // TODO: assert that we run on BACKGROUND_RUNTIME; requires tokio_unstable Handle::id();
-    match CONCURRENT_BACKGROUND_TASKS.acquire().await {
-        Ok(permit) => permit,
-        Err(_closed) => unreachable!("we never close the semaphore"),
+    let permit = if loop_kind == BackgroundLoopKind::Compaction && use_compaction_semaphore {
+        CONCURRENT_COMPACTION_TASKS.acquire().await
+    } else {
+        assert!(!use_compaction_semaphore);
+        CONCURRENT_BACKGROUND_TASKS.acquire().await
+    }
+    .expect("should never close");
+
+    let waited = recorder.acquired();
+    if waited >= WARN_THRESHOLD {
+        let waited = waited.as_secs_f64();
+        WARN_PACER
+            .lock()
+            .unwrap()
+            .call(|| warn!("{loop_kind} task waited {waited:.3}s for semaphore permit"));
+    }
+
+    BackgroundLoopSemaphorePermit {
+        _permit: permit,
+        _recorder: recorder,
     }
 }
 
-/// Start per tenant background loops: compaction and gc.
-pub fn start_background_loops(
-    tenant: &Arc<Tenant>,
-    background_jobs_can_start: Option<&completion::Barrier>,
-) {
+/// Start per tenant background loops: compaction, GC, and ingest housekeeping.
+pub fn start_background_loops(tenant: &Arc<Tenant>, can_start: Option<&Barrier>) {
     let tenant_shard_id = tenant.tenant_shard_id;
+
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::Compaction,
@@ -93,13 +141,15 @@ pub fn start_background_loops(
         &format!("compactor for tenant {tenant_shard_id}"),
         {
             let tenant = Arc::clone(tenant);
-            let background_jobs_can_start = background_jobs_can_start.cloned();
+            let can_start = can_start.cloned();
             async move {
-                let cancel = task_mgr::shutdown_token();
+                let cancel = task_mgr::shutdown_token(); // NB: must be in async context
                 tokio::select! {
-                    _ = cancel.cancelled() => { return Ok(()) },
-                    _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = Barrier::maybe_wait(can_start) => {}
                 };
+                TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
+                defer!(TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc());
                 compaction_loop(tenant, cancel)
                     // If you rename this span, change the RUST_LOG env variable in test_runner/performance/test_branch_creation.py
                     .instrument(info_span!("compaction_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
@@ -108,6 +158,7 @@ pub fn start_background_loops(
             }
         },
     );
+
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::GarbageCollector,
@@ -116,13 +167,15 @@ pub fn start_background_loops(
         &format!("garbage collector for tenant {tenant_shard_id}"),
         {
             let tenant = Arc::clone(tenant);
-            let background_jobs_can_start = background_jobs_can_start.cloned();
+            let can_start = can_start.cloned();
             async move {
-                let cancel = task_mgr::shutdown_token();
+                let cancel = task_mgr::shutdown_token(); // NB: must be in async context
                 tokio::select! {
-                    _ = cancel.cancelled() => { return Ok(()) },
-                    _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = Barrier::maybe_wait(can_start) => {}
                 };
+                TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
+                defer!(TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc());
                 gc_loop(tenant, cancel)
                     .instrument(info_span!("gc_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
@@ -133,21 +186,23 @@ pub fn start_background_loops(
 
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
-        TaskKind::IngestHousekeeping,
+        TaskKind::TenantHousekeeping,
         tenant_shard_id,
         None,
-        &format!("ingest housekeeping for tenant {tenant_shard_id}"),
+        &format!("housekeeping for tenant {tenant_shard_id}"),
         {
             let tenant = Arc::clone(tenant);
-            let background_jobs_can_start = background_jobs_can_start.cloned();
+            let can_start = can_start.cloned();
             async move {
-                let cancel = task_mgr::shutdown_token();
+                let cancel = task_mgr::shutdown_token(); // NB: must be in async context
                 tokio::select! {
-                    _ = cancel.cancelled() => { return Ok(()) },
-                    _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = Barrier::maybe_wait(can_start) => {}
                 };
-                ingest_housekeeping_loop(tenant, cancel)
-                    .instrument(info_span!("ingest_housekeeping_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
+                TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
+                defer!(TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc());
+                tenant_housekeeping_loop(tenant, cancel)
+                    .instrument(info_span!("tenant_housekeeping_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
                 Ok(())
             }
@@ -155,372 +210,293 @@ pub fn start_background_loops(
     );
 }
 
-///
-/// Compaction task's main loop
-///
+/// Compaction task's main loop.
 async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
+    const BASE_BACKOFF_SECS: f64 = 1.0;
     const MAX_BACKOFF_SECS: f64 = 300.0;
-    // How many errors we have seen consequtively
-    let mut error_run_count = 0;
+    const RECHECK_CONFIG_INTERVAL: Duration = Duration::from_secs(10);
 
-    TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
-    async {
-        let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
-        let mut first = true;
-        loop {
+    let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
+    let mut period = tenant.get_compaction_period();
+    let mut error_run = 0; // consecutive errors
+
+    // Stagger the compaction loop across tenants.
+    if wait_for_active_tenant(&tenant, &cancel).await.is_break() {
+        return;
+    }
+    if sleep_random(period, &cancel).await.is_err() {
+        return;
+    }
+
+    loop {
+        // Recheck that we're still active.
+        if wait_for_active_tenant(&tenant, &cancel).await.is_break() {
+            return;
+        }
+
+        // Refresh the period. If compaction is disabled, check again in a bit.
+        period = tenant.get_compaction_period();
+        if period == Duration::ZERO {
+            #[cfg(not(feature = "testing"))]
+            info!("automatic compaction is disabled");
             tokio::select! {
-                _ = cancel.cancelled() => {
-                    return;
-                },
-                tenant_wait_result = wait_for_active_tenant(&tenant) => match tenant_wait_result {
-                    ControlFlow::Break(()) => return,
-                    ControlFlow::Continue(()) => (),
-                },
+                _ = tokio::time::sleep(RECHECK_CONFIG_INTERVAL) => {},
+                _ = cancel.cancelled() => return,
             }
+            continue;
+        }
 
-            let period = tenant.get_compaction_period();
+        // Wait for the next compaction run.
+        let backoff = exponential_backoff_duration(error_run, BASE_BACKOFF_SECS, MAX_BACKOFF_SECS);
+        tokio::select! {
+            _ = tokio::time::sleep(backoff), if error_run > 0 => {},
+            _ = tokio::time::sleep(period), if error_run == 0 => {},
+            _ = tenant.l0_compaction_trigger.notified(), if error_run == 0 => {},
+            _ = cancel.cancelled() => return,
+        }
 
-            // TODO: we shouldn't need to await to find tenant and this could be moved outside of
-            // loop, #3501. There are also additional "allowed_errors" in tests.
-            if first {
-                first = false;
-                if random_init_delay(period, &cancel).await.is_err() {
-                    break;
+        // Run compaction.
+        let iteration = Iteration {
+            started_at: Instant::now(),
+            period,
+            kind: BackgroundLoopKind::Compaction,
+        };
+        let IterationResult { output, elapsed } = iteration
+            .run(tenant.compaction_iteration(&cancel, &ctx))
+            .await;
+
+        match output {
+            Ok(outcome) => {
+                error_run = 0;
+                // If there's more compaction work pending, reschedule immediately. This isn't
+                // necessarily L0 compaction, but that's fine for now.
+                //
+                // TODO: differentiate between L0 compaction and other compaction. The former needs
+                // to be responsive, the latter doesn't.
+                if outcome == CompactionOutcome::Pending {
+                    tenant.l0_compaction_trigger.notify_one();
                 }
             }
 
-            let sleep_duration;
-            if period == Duration::ZERO {
-                #[cfg(not(feature = "testing"))]
-                info!("automatic compaction is disabled");
-                // check again in 10 seconds, in case it's been enabled again.
-                sleep_duration = Duration::from_secs(10)
-            } else {
-                let iteration = Iteration {
-                    started_at: Instant::now(),
-                    period,
-                    kind: BackgroundLoopKind::Compaction,
-                };
-
-                // Run compaction
-                let IterationResult { output, elapsed } = iteration
-                    .run(tenant.compaction_iteration(&cancel, &ctx))
-                    .await;
-                match output {
-                    Ok(outcome) => {
-                        error_run_count = 0;
-                        // schedule the next compaction immediately in case there is a pending compaction task
-                        sleep_duration = if let CompactionOutcome::Pending = outcome {
-                            Duration::ZERO
-                        } else {
-                            period
-                        };
-                    }
-                    Err(e) => {
-                        let wait_duration = backoff::exponential_backoff_duration_seconds(
-                            error_run_count + 1,
-                            1.0,
-                            MAX_BACKOFF_SECS,
-                        );
-                        error_run_count += 1;
-                        let wait_duration = Duration::from_secs_f64(wait_duration);
-                        log_compaction_error(
-                            &e,
-                            error_run_count,
-                            &wait_duration,
-                            cancel.is_cancelled(),
-                        );
-                        sleep_duration = wait_duration;
-                    }
-                }
-
-                // the duration is recorded by performance tests by enabling debug in this function
-                tracing::debug!(
-                    elapsed_ms = elapsed.as_millis(),
-                    "compaction iteration complete"
-                );
-            };
-
-            // Perhaps we did no work and the walredo process has been idle for some time:
-            // give it a chance to shut down to avoid leaving walredo process running indefinitely.
-            // TODO: move this to a separate task (housekeeping loop) that isn't affected by the back-off,
-            // so we get some upper bound guarantee on when walredo quiesce / this throttling reporting here happens.
-            if let Some(walredo_mgr) = &tenant.walredo_mgr {
-                walredo_mgr.maybe_quiesce(period * 10);
-            }
-
-            // Sleep
-            if tokio::time::timeout(sleep_duration, cancel.cancelled())
-                .await
-                .is_ok()
-            {
-                break;
+            Err(err) => {
+                error_run += 1;
+                let backoff =
+                    exponential_backoff_duration(error_run, BASE_BACKOFF_SECS, MAX_BACKOFF_SECS);
+                log_compaction_error(&err, error_run, backoff, cancel.is_cancelled());
+                continue;
             }
         }
+
+        // NB: this log entry is recorded by performance tests.
+        debug!(
+            elapsed_ms = elapsed.as_millis(),
+            "compaction iteration complete"
+        );
     }
-    .await;
-    TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
 }
 
 fn log_compaction_error(
-    e: &CompactionError,
-    error_run_count: u32,
-    sleep_duration: &std::time::Duration,
+    err: &CompactionError,
+    error_count: u32,
+    sleep_duration: Duration,
     task_cancelled: bool,
 ) {
     use crate::tenant::upload_queue::NotInitialized;
     use crate::tenant::PageReconstructError;
     use CompactionError::*;
 
-    enum LooksLike {
-        Info,
-        Error,
-    }
+    let level = match err {
+        ShuttingDown => return,
+        Offload(_) => Level::ERROR,
+        _ if task_cancelled => Level::INFO,
+        Other(err) => {
+            let root_cause = err.root_cause();
 
-    let decision = match e {
-        ShuttingDown => None,
-        Offload(_) => Some(LooksLike::Error),
-        _ if task_cancelled => Some(LooksLike::Info),
-        Other(e) => {
-            let root_cause = e.root_cause();
-
-            let is_stopping = {
-                let upload_queue = root_cause
-                    .downcast_ref::<NotInitialized>()
-                    .is_some_and(|e| e.is_stopping());
-
-                let timeline = root_cause
-                    .downcast_ref::<PageReconstructError>()
-                    .is_some_and(|e| e.is_stopping());
-
-                upload_queue || timeline
-            };
+            let upload_queue = root_cause
+                .downcast_ref::<NotInitialized>()
+                .is_some_and(|e| e.is_stopping());
+            let timeline = root_cause
+                .downcast_ref::<PageReconstructError>()
+                .is_some_and(|e| e.is_stopping());
+            let is_stopping = upload_queue || timeline;
 
             if is_stopping {
-                Some(LooksLike::Info)
+                Level::INFO
             } else {
-                Some(LooksLike::Error)
+                Level::ERROR
             }
         }
     };
 
-    match decision {
-        Some(LooksLike::Info) => info!(
-            "Compaction failed {error_run_count} times, retrying in {sleep_duration:?}: {e:#}",
-        ),
-        Some(LooksLike::Error) => error!(
-            "Compaction failed {error_run_count} times, retrying in {sleep_duration:?}: {e:?}",
-        ),
-        None => {}
+    match level {
+        Level::ERROR => {
+            error!("Compaction failed {error_count} times, retrying in {sleep_duration:?}: {err:#}")
+        }
+        Level::INFO => {
+            info!("Compaction failed {error_count} times, retrying in {sleep_duration:?}: {err:#}")
+        }
+        level => unimplemented!("unexpected level {level:?}"),
     }
 }
 
-///
-/// GC task's main loop
-///
+/// GC task's main loop.
 async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     const MAX_BACKOFF_SECS: f64 = 300.0;
-    // How many errors we have seen consequtively
-    let mut error_run_count = 0;
+    let mut error_run = 0; // consecutive errors
 
-    TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
-    async {
-        // GC might require downloading, to find the cutoff LSN that corresponds to the
-        // cutoff specified as time.
-        let ctx =
-            RequestContext::todo_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
+    // GC might require downloading, to find the cutoff LSN that corresponds to the
+    // cutoff specified as time.
+    let ctx = RequestContext::todo_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
+    let mut first = true;
 
-        let mut first = true;
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    return;
-                },
-                tenant_wait_result = wait_for_active_tenant(&tenant) => match tenant_wait_result {
-                    ControlFlow::Break(()) => return,
-                    ControlFlow::Continue(()) => (),
-                },
-            }
+    loop {
+        if wait_for_active_tenant(&tenant, &cancel).await.is_break() {
+            return;
+        }
 
-            let period = tenant.get_gc_period();
+        let period = tenant.get_gc_period();
 
-            if first {
-                first = false;
-
-                let delays = async {
-                    random_init_delay(period, &cancel).await?;
-                    Ok::<_, Cancelled>(())
-                };
-
-                if delays.await.is_err() {
-                    break;
-                }
-            }
-
-            let gc_horizon = tenant.get_gc_horizon();
-            let sleep_duration;
-            if period == Duration::ZERO || gc_horizon == 0 {
-                #[cfg(not(feature = "testing"))]
-                info!("automatic GC is disabled");
-                // check again in 10 seconds, in case it's been enabled again.
-                sleep_duration = Duration::from_secs(10);
-            } else {
-                let iteration = Iteration {
-                    started_at: Instant::now(),
-                    period,
-                    kind: BackgroundLoopKind::Gc,
-                };
-                // Run gc
-                let IterationResult { output, elapsed: _ } =
-                    iteration.run(tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &cancel, &ctx))
-                    .await;
-                match output {
-                    Ok(_) => {
-                        error_run_count = 0;
-                        sleep_duration = period;
-                    }
-                    Err(crate::tenant::GcError::TenantCancelled) => {
-                        return;
-                    }
-                    Err(e) => {
-                        let wait_duration = backoff::exponential_backoff_duration_seconds(
-                            error_run_count + 1,
-                            1.0,
-                            MAX_BACKOFF_SECS,
-                        );
-                        error_run_count += 1;
-                        let wait_duration = Duration::from_secs_f64(wait_duration);
-
-                        if matches!(e, crate::tenant::GcError::TimelineCancelled) {
-                            // Timeline was cancelled during gc. We might either be in an event
-                            // that affects the entire tenant (tenant deletion, pageserver shutdown),
-                            // or in one that affects the timeline only (timeline deletion).
-                            // Therefore, don't exit the loop.
-                            info!("Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}");
-                        } else {
-                            error!("Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}");
-                        }
-
-                        sleep_duration = wait_duration;
-                    }
-                }
-            };
-
-            if tokio::time::timeout(sleep_duration, cancel.cancelled())
-                .await
-                .is_ok()
-            {
+        if first {
+            first = false;
+            if sleep_random(period, &cancel).await.is_err() {
                 break;
             }
         }
-    }
-    .await;
-    TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
-}
 
-async fn ingest_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
-    TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
-    async {
-    let mut last_throttle_flag_reset_at = Instant::now();
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    return;
-                },
-                tenant_wait_result = wait_for_active_tenant(&tenant) => match tenant_wait_result {
-                    ControlFlow::Break(()) => return,
-                    ControlFlow::Continue(()) => (),
-                },
-            }
-
-            // We run ingest housekeeping with the same frequency as compaction: it is not worth
-            // having a distinct setting.  But we don't run it in the same task, because compaction
-            // blocks on acquiring the background job semaphore.
-            let period = tenant.get_compaction_period();
-
-            // If compaction period is set to zero (to disable it), then we will use a reasonable default
-            let period = if period == Duration::ZERO {
-                humantime::Duration::from_str(
-                    pageserver_api::config::tenant_conf_defaults::DEFAULT_COMPACTION_PERIOD,
-                )
-                .unwrap()
-                .into()
-            } else {
-                period
-            };
-
-            // Jitter the period by +/- 5%
-            let period =
-                rand::thread_rng().gen_range((period * (95)) / 100..(period * (105)) / 100);
-
-            // Always sleep first: we do not need to do ingest housekeeping early in the lifetime of
-            // a tenant, since it won't have started writing any ephemeral files yet.
-            if tokio::time::timeout(period, cancel.cancelled())
-                .await
-                .is_ok()
-            {
-                break;
-            }
-
+        let gc_horizon = tenant.get_gc_horizon();
+        let sleep_duration;
+        if period == Duration::ZERO || gc_horizon == 0 {
+            #[cfg(not(feature = "testing"))]
+            info!("automatic GC is disabled");
+            // check again in 10 seconds, in case it's been enabled again.
+            sleep_duration = Duration::from_secs(10);
+        } else {
             let iteration = Iteration {
                 started_at: Instant::now(),
                 period,
-                kind: BackgroundLoopKind::IngestHouseKeeping,
+                kind: BackgroundLoopKind::Gc,
             };
-            iteration.run(tenant.ingest_housekeeping()).await;
-
-            // TODO: rename the background loop kind to something more generic, like, tenant housekeeping.
-            // Or just spawn another background loop for this throttle, it's not like it's super costly.
-            info_span!(parent: None, "pagestream_throttle", tenant_id=%tenant.tenant_shard_id, shard_id=%tenant.tenant_shard_id.shard_slug()).in_scope(|| {
-                let now = Instant::now();
-                let prev = std::mem::replace(&mut last_throttle_flag_reset_at, now);
-                let Stats { count_accounted_start, count_accounted_finish, count_throttled, sum_throttled_usecs} = tenant.pagestream_throttle.reset_stats();
-                if count_throttled == 0 {
+            // Run gc
+            let IterationResult { output, elapsed: _ } = iteration
+                .run(tenant.gc_iteration(
+                    None,
+                    gc_horizon,
+                    tenant.get_pitr_interval(),
+                    &cancel,
+                    &ctx,
+                ))
+                .await;
+            match output {
+                Ok(_) => {
+                    error_run = 0;
+                    sleep_duration = period;
+                }
+                Err(crate::tenant::GcError::TenantCancelled) => {
                     return;
                 }
-                let allowed_rps = tenant.pagestream_throttle.steady_rps();
-                let delta = now - prev;
-                info!(
-                    n_seconds=%format_args!("{:.3}", delta.as_secs_f64()),
-                    count_accounted = count_accounted_finish,  // don't break existing log scraping
-                    count_throttled,
-                    sum_throttled_usecs,
-                    count_accounted_start, // log after pre-existing fields to not break existing log scraping
-                    allowed_rps=%format_args!("{allowed_rps:.0}"),
-                    "shard was throttled in the last n_seconds"
-                );
-            });
-        }
-    }
-    .await;
-    TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
-}
+                Err(e) => {
+                    error_run += 1;
+                    let wait_duration =
+                        exponential_backoff_duration(error_run, 1.0, MAX_BACKOFF_SECS);
 
-async fn wait_for_active_tenant(tenant: &Arc<Tenant>) -> ControlFlow<()> {
-    // if the tenant has a proper status already, no need to wait for anything
-    if tenant.current_state() == TenantState::Active {
-        ControlFlow::Continue(())
-    } else {
-        let mut tenant_state_updates = tenant.subscribe_for_state_updates();
-        loop {
-            match tenant_state_updates.changed().await {
-                Ok(()) => {
-                    let new_state = &*tenant_state_updates.borrow();
-                    match new_state {
-                        TenantState::Active => {
-                            debug!("Tenant state changed to active, continuing the task loop");
-                            return ControlFlow::Continue(());
-                        }
-                        state => {
-                            debug!("Not running the task loop, tenant is not active: {state:?}");
-                            continue;
-                        }
+                    if matches!(e, crate::tenant::GcError::TimelineCancelled) {
+                        // Timeline was cancelled during gc. We might either be in an event
+                        // that affects the entire tenant (tenant deletion, pageserver shutdown),
+                        // or in one that affects the timeline only (timeline deletion).
+                        // Therefore, don't exit the loop.
+                        info!("Gc failed {error_run} times, retrying in {wait_duration:?}: {e:?}");
+                    } else {
+                        error!("Gc failed {error_run} times, retrying in {wait_duration:?}: {e:?}");
                     }
-                }
-                Err(_sender_dropped_error) => {
-                    return ControlFlow::Break(());
+
+                    sleep_duration = wait_duration;
                 }
             }
+        };
+
+        if tokio::time::timeout(sleep_duration, cancel.cancelled())
+            .await
+            .is_ok()
+        {
+            break;
+        }
+    }
+}
+
+/// Tenant housekeeping's main loop.
+async fn tenant_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
+    let mut last_throttle_flag_reset_at = Instant::now();
+    loop {
+        if wait_for_active_tenant(&tenant, &cancel).await.is_break() {
+            return;
+        }
+
+        // Use the same period as compaction; it's not worth a separate setting. But if it's set to
+        // zero (to disable compaction), then use a reasonable default. Jitter it by 5%.
+        let period = match tenant.get_compaction_period() {
+            Duration::ZERO => humantime::parse_duration(DEFAULT_COMPACTION_PERIOD).unwrap(),
+            period => period,
+        };
+
+        let Ok(period) = sleep_jitter(period, period * 5 / 100, &cancel).await else {
+            break;
+        };
+
+        // Do tenant housekeeping.
+        let iteration = Iteration {
+            started_at: Instant::now(),
+            period,
+            kind: BackgroundLoopKind::TenantHouseKeeping,
+        };
+        iteration.run(tenant.housekeeping()).await;
+
+        // Log any getpage throttling.
+        info_span!(parent: None, "pagestream_throttle", tenant_id=%tenant.tenant_shard_id, shard_id=%tenant.tenant_shard_id.shard_slug()).in_scope(|| {
+            let now = Instant::now();
+            let prev = std::mem::replace(&mut last_throttle_flag_reset_at, now);
+            let Stats { count_accounted_start, count_accounted_finish, count_throttled, sum_throttled_usecs} = tenant.pagestream_throttle.reset_stats();
+            if count_throttled == 0 {
+                return;
+            }
+            let allowed_rps = tenant.pagestream_throttle.steady_rps();
+            let delta = now - prev;
+            info!(
+                n_seconds=%format_args!("{:.3}", delta.as_secs_f64()),
+                count_accounted = count_accounted_finish,  // don't break existing log scraping
+                count_throttled,
+                sum_throttled_usecs,
+                count_accounted_start, // log after pre-existing fields to not break existing log scraping
+                allowed_rps=%format_args!("{allowed_rps:.0}"),
+                "shard was throttled in the last n_seconds"
+            );
+        });
+    }
+}
+
+/// Waits until the tenant becomes active, or returns `ControlFlow::Break()` to shut down.
+async fn wait_for_active_tenant(
+    tenant: &Arc<Tenant>,
+    cancel: &CancellationToken,
+) -> ControlFlow<()> {
+    if tenant.current_state() == TenantState::Active {
+        return ControlFlow::Continue(());
+    }
+
+    let mut update_rx = tenant.subscribe_for_state_updates();
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return ControlFlow::Break(()),
+            result = update_rx.changed() => if result.is_err() {
+                return ControlFlow::Break(());
+            }
+        }
+
+        match &*update_rx.borrow() {
+            TenantState::Active => {
+                debug!("Tenant state changed to active, continuing the task loop");
+                return ControlFlow::Continue(());
+            }
+            state => debug!("Not running the task loop, tenant is not active: {state:?}"),
         }
     }
 }
@@ -529,26 +505,41 @@ async fn wait_for_active_tenant(tenant: &Arc<Tenant>) -> ControlFlow<()> {
 #[error("cancelled")]
 pub(crate) struct Cancelled;
 
-/// Provide a random delay for background task initialization.
+/// Sleeps for a random interval up to the given max value.
 ///
 /// This delay prevents a thundering herd of background tasks and will likely keep them running on
 /// different periods for more stable load.
-pub(crate) async fn random_init_delay(
-    period: Duration,
+pub(crate) async fn sleep_random(
+    max: Duration,
     cancel: &CancellationToken,
-) -> Result<(), Cancelled> {
-    if period == Duration::ZERO {
-        return Ok(());
-    }
+) -> Result<Duration, Cancelled> {
+    sleep_random_range(Duration::ZERO..=max, cancel).await
+}
 
-    let d = {
-        let mut rng = rand::thread_rng();
-        rng.gen_range(Duration::ZERO..=period)
-    };
-    match tokio::time::timeout(d, cancel.cancelled()).await {
-        Ok(_) => Err(Cancelled),
-        Err(_) => Ok(()),
+/// Sleeps for a random interval in the given range. Returns the duration.
+pub(crate) async fn sleep_random_range(
+    interval: RangeInclusive<Duration>,
+    cancel: &CancellationToken,
+) -> Result<Duration, Cancelled> {
+    let delay = rand::thread_rng().gen_range(interval);
+    if delay == Duration::ZERO {
+        return Ok(delay);
     }
+    tokio::select! {
+        _ = cancel.cancelled() => Err(Cancelled),
+        _ = tokio::time::sleep(delay) => Ok(delay),
+    }
+}
+
+/// Sleeps for an interval with a random jitter.
+pub(crate) async fn sleep_jitter(
+    duration: Duration,
+    jitter: Duration,
+    cancel: &CancellationToken,
+) -> Result<Duration, Cancelled> {
+    let from = duration.saturating_sub(jitter);
+    let to = duration.saturating_add(jitter);
+    sleep_random_range(from..=to, cancel).await
 }
 
 struct Iteration {
@@ -564,42 +555,25 @@ struct IterationResult<O> {
 
 impl Iteration {
     #[instrument(skip_all)]
-    pub(crate) async fn run<Fut, O>(self, fut: Fut) -> IterationResult<O>
-    where
-        Fut: std::future::Future<Output = O>,
-    {
-        let Self {
-            started_at,
-            period,
-            kind,
-        } = self;
-
-        let mut fut = std::pin::pin!(fut);
+    pub(crate) async fn run<F: Future<Output = O>, O>(self, fut: F) -> IterationResult<O> {
+        let mut fut = pin!(fut);
 
         // Wrap `fut` into a future that logs a message every `period` so that we get a
         // very obvious breadcrumb in the logs _while_ a slow iteration is happening.
-        let liveness_logger = async move {
-            loop {
-                match tokio::time::timeout(period, &mut fut).await {
-                    Ok(x) => return x,
-                    Err(_) => {
-                        // info level as per the same rationale why warn_when_period_overrun is info
-                        // =>  https://github.com/neondatabase/neon/pull/5724
-                        info!("still running");
-                    }
-                }
+        let output = loop {
+            match tokio::time::timeout(self.period, &mut fut).await {
+                Ok(r) => break r,
+                Err(_) => info!("still running"),
             }
         };
-
-        let output = liveness_logger.await;
-
-        let elapsed = started_at.elapsed();
-        warn_when_period_overrun(elapsed, period, kind);
+        let elapsed = self.started_at.elapsed();
+        warn_when_period_overrun(elapsed, self.period, self.kind);
 
         IterationResult { output, elapsed }
     }
 }
-/// Attention: the `task` and `period` beocme labels of a pageserver-wide prometheus metric.
+
+// NB: the `task` and `period` are used for metrics labels.
 pub(crate) fn warn_when_period_overrun(
     elapsed: Duration,
     period: Duration,
@@ -617,7 +591,7 @@ pub(crate) fn warn_when_period_overrun(
             "task iteration took longer than the configured period"
         );
         crate::metrics::BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT
-            .with_label_values(&[task.as_static_str(), &format!("{}", period.as_secs())])
+            .with_label_values(&[task.into(), &format!("{}", period.as_secs())])
             .inc();
     }
 }

@@ -41,6 +41,7 @@ use std::process::exit;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
+use std::time::SystemTime;
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
@@ -83,6 +84,19 @@ fn parse_remote_ext_config(arg: &str) -> Result<String> {
     } else {
         Ok("http://pg-ext-s3-gateway".to_string())
     }
+}
+
+/// Generate a compute ID if one is not supplied. This exists to keep forward
+/// compatibility tests working, but will be removed in a future iteration.
+fn generate_compute_id() -> String {
+    let now = SystemTime::now();
+
+    format!(
+        "compute-{}",
+        now.duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    )
 }
 
 #[derive(Parser)]
@@ -130,17 +144,26 @@ struct Cli {
     #[arg(short = 'S', long, group = "spec-path")]
     pub spec_path: Option<OsString>,
 
-    #[arg(short = 'i', long, group = "compute-id", conflicts_with_all = ["spec", "spec-path"])]
-    pub compute_id: Option<String>,
+    #[arg(short = 'i', long, group = "compute-id", default_value = generate_compute_id())]
+    pub compute_id: String,
 
-    #[arg(short = 'p', long, conflicts_with_all = ["spec", "spec-path"], requires = "compute-id", value_name = "CONTROL_PLANE_API_BASE_URL")]
+    #[arg(short = 'p', long, conflicts_with_all = ["spec", "spec-path"], value_name = "CONTROL_PLANE_API_BASE_URL")]
     pub control_plane_uri: Option<String>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let build_tag = init()?;
+    // For historical reasons, the main thread that processes the spec and launches postgres
+    // is synchronous, but we always have this tokio runtime available and we "enter" it so
+    // that you can use tokio::spawn() and tokio::runtime::Handle::current().block_on(...)
+    // from all parts of compute_ctl.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let _rt_guard = runtime.enter();
+
+    let build_tag = runtime.block_on(init())?;
 
     let scenario = failpoint_support::init();
 
@@ -172,8 +195,8 @@ fn main() -> Result<()> {
     deinit_and_exit(wait_pg_result);
 }
 
-fn init() -> Result<String> {
-    init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
+async fn init() -> Result<String> {
+    init_tracing_and_logging(DEFAULT_LOG_LEVEL).await?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
     thread::spawn(move || {
@@ -259,20 +282,11 @@ fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {
         });
     }
 
-    if cli.compute_id.is_none() {
-        panic!(
-            "compute spec should be provided by one of the following ways: \
-                --spec OR --spec-path OR --control-plane-uri and --compute-id"
-        );
-    };
     if cli.control_plane_uri.is_none() {
-        panic!("must specify both --control-plane-uri and --compute-id or none");
+        panic!("must specify --control-plane-uri");
     };
 
-    match get_spec_from_control_plane(
-        cli.control_plane_uri.as_ref().unwrap(),
-        cli.compute_id.as_ref().unwrap(),
-    ) {
+    match get_spec_from_control_plane(cli.control_plane_uri.as_ref().unwrap(), &cli.compute_id) {
         Ok(spec) => Ok(CliSpecParams {
             spec,
             live_config_allowed: true,
@@ -319,6 +333,7 @@ fn wait_spec(
     let tokio_conn_conf = tokio_postgres::config::Config::from_str(connstr.as_str())
         .context("cannot build tokio postgres config from connstr")?;
     let compute_node = ComputeNode {
+        compute_id: cli.compute_id.clone(),
         connstr,
         conn_conf,
         tokio_conn_conf,
@@ -345,8 +360,7 @@ fn wait_spec(
 
     // Launch http service first, so that we can serve control-plane requests
     // while configuration is still in progress.
-    let _http_handle =
-        launch_http_server(cli.http_port, &compute).expect("cannot launch http endpoint thread");
+    let _http_handle = launch_http_server(cli.http_port, &compute);
 
     if !spec_set {
         // No spec provided, hang waiting for it.
@@ -484,21 +498,6 @@ fn start_postgres(
             use std::env;
             use tokio_util::sync::CancellationToken;
 
-            // Note: it seems like you can make a runtime in an inner scope and
-            // if you start a task in it it won't be dropped. However, make it
-            // in the outermost scope just to be safe.
-            let rt = if env::var_os("AUTOSCALING").is_some() {
-                Some(
-                    tokio::runtime::Builder::new_multi_thread()
-                        .worker_threads(4)
-                        .enable_all()
-                        .build()
-                        .expect("failed to create tokio runtime for monitor")
-                )
-            } else {
-                None
-            };
-
             // This token is used internally by the monitor to clean up all threads
             let token = CancellationToken::new();
 
@@ -509,16 +508,19 @@ fn start_postgres(
                 Some(cli.filecache_connstr.clone())
             };
 
-            let vm_monitor = rt.as_ref().map(|rt| {
-                rt.spawn(vm_monitor::start(
+            let vm_monitor = if env::var_os("AUTOSCALING").is_some() {
+                let vm_monitor = tokio::spawn(vm_monitor::start(
                     Box::leak(Box::new(vm_monitor::Args {
                         cgroup: Some(cli.cgroup.clone()),
                         pgconnstr,
                         addr: cli.vm_monitor_addr.clone(),
                     })),
                     token.clone(),
-                ))
-            });
+                ));
+                Some(vm_monitor)
+            } else {
+                None
+            };
         }
     }
 
@@ -528,8 +530,6 @@ fn start_postgres(
             delay_exit,
             compute,
             #[cfg(target_os = "linux")]
-            rt,
-            #[cfg(target_os = "linux")]
             token,
             #[cfg(target_os = "linux")]
             vm_monitor,
@@ -537,15 +537,13 @@ fn start_postgres(
     ))
 }
 
-type PostgresHandle = (std::process::Child, std::thread::JoinHandle<()>);
+type PostgresHandle = (std::process::Child, tokio::task::JoinHandle<Result<()>>);
 
 struct StartPostgresResult {
     delay_exit: bool,
     // passed through from WaitSpecResult
     compute: Arc<ComputeNode>,
 
-    #[cfg(target_os = "linux")]
-    rt: Option<tokio::runtime::Runtime>,
     #[cfg(target_os = "linux")]
     token: tokio_util::sync::CancellationToken,
     #[cfg(target_os = "linux")]
@@ -564,10 +562,10 @@ fn wait_postgres(pg: Option<PostgresHandle>) -> Result<WaitPostgresResult> {
             .expect("failed to start waiting on Postgres process");
         PG_PID.store(0, Ordering::SeqCst);
 
-        // Process has exited, so we can join the logs thread.
-        let _ = logs_handle
-            .join()
-            .map_err(|e| tracing::error!("log thread panicked: {:?}", e));
+        // Process has exited. Wait for the log collecting task to finish.
+        let _ = tokio::runtime::Handle::current()
+            .block_on(logs_handle)
+            .map_err(|e| tracing::error!("log task panicked: {:?}", e));
 
         info!("Postgres exited with code {}, shutting down", ecode);
         exit_code = ecode.code()
@@ -588,8 +586,6 @@ fn cleanup_after_postgres_exit(
         vm_monitor,
         #[cfg(target_os = "linux")]
         token,
-        #[cfg(target_os = "linux")]
-        rt,
     }: StartPostgresResult,
 ) -> Result<bool> {
     // Terminate the vm_monitor so it releases the file watcher on
@@ -602,10 +598,6 @@ fn cleanup_after_postgres_exit(
                 token.cancel();
                 // Kills the actual task running the monitor
                 handle.abort();
-
-                // If handle is some, rt must have been used to produce it, and
-                // hence is also some
-                rt.unwrap().shutdown_timeout(Duration::from_secs(2));
             }
         }
     }

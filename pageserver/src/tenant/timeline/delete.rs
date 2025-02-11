@@ -17,12 +17,10 @@ use crate::{
         metadata::TimelineMetadata,
         remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
         CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant,
-        TenantManifestError, TimelineOrOffloaded,
+        TenantManifestError, Timeline, TimelineOrOffloaded,
     },
     virtual_file::MaybeFatalIo,
 };
-
-use super::{Timeline, TimelineResources};
 
 /// Mark timeline as deleted in S3 so we won't pick it up next time
 /// during attach or pageserver restart.
@@ -296,12 +294,7 @@ impl DeleteTimelineFlow {
                 timeline_id,
                 local_metadata,
                 None, // Ancestor is not needed for deletion.
-                TimelineResources {
-                    remote_client,
-                    pagestream_throttle: tenant.pagestream_throttle.clone(),
-                    pagestream_throttle_metrics: tenant.pagestream_throttle_metrics.clone(),
-                    l0_flush_global_state: tenant.l0_flush_global_state.clone(),
-                },
+                tenant.get_timeline_resources_for(remote_client),
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.
                 CreateTimelineCause::Delete,
@@ -341,6 +334,13 @@ impl DeleteTimelineFlow {
         let tenant_shard_id = timeline.tenant_shard_id();
         let timeline_id = timeline.timeline_id();
 
+        // Take a tenant gate guard, because timeline deletion needs access to the tenant to update its manifest.
+        let Ok(tenant_guard) = tenant.gate.enter() else {
+            // It is safe to simply skip here, because we only schedule background work once the timeline is durably marked for deletion.
+            info!("Tenant is shutting down, timeline deletion will be resumed when it next starts");
+            return;
+        };
+
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             TaskKind::TimelineDeletionWorker,
@@ -348,6 +348,8 @@ impl DeleteTimelineFlow {
             Some(timeline_id),
             "timeline_delete",
             async move {
+                let _guard = tenant_guard;
+
                 if let Err(err) = Self::background(guard, conf, &tenant, &timeline, remote_client).await {
                     // Only log as an error if it's not a cancellation.
                     if matches!(err, DeleteTimelineError::Cancelled) {
