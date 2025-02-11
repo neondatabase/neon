@@ -609,6 +609,8 @@ pub enum CompactionOutcome {
     /// Still has pending layers to be compacted after this round. Ideally, the scheduler
     /// should immediately schedule another compaction.
     Pending,
+    // TODO: add a skipped variant for cases where we didn't attempt compaction. These currently
+    // return Done, which can lead the caller to believe there is no compaction debt.
 }
 
 impl Timeline {

@@ -2966,6 +2966,10 @@ impl Tenant {
 
         // Pass 1: L0 compaction across all timelines, in order of L0 count. We prioritize this to
         // bound read amplification.
+        //
+        // TODO: this may spin on one or more ingest-heavy timelines, starving out image/GC
+        // compaction and offloading. We leave that as a potential problem to solve later. Consider
+        // splitting L0 and image/GC compaction to separate background jobs.
         if self.get_compaction_l0_first() {
             let compaction_threshold = self.get_compaction_threshold();
             let compact_l0 = compact
@@ -2999,6 +3003,9 @@ impl Tenant {
         // TODO: it will only yield if there is pending L0 compaction on the same timeline. If a
         // different timeline needs compaction, it won't. It should check `l0_compaction_trigger`.
         // We leave this for a later PR.
+        //
+        // TODO: consider ordering timelines by some priority, e.g. time since last full compaction,
+        // amount of L1 delta debt or garbage, offload-eligible timelines first, etc.
         let mut has_pending = false;
         for timeline in compact {
             if !timeline.is_active() {
