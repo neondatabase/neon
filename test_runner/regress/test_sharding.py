@@ -91,7 +91,7 @@ def test_sharding_smoke(
     workload.init()
 
     sizes_before = get_sizes()
-    workload.write_rows(32768)
+    workload.write_rows(65536)
 
     # Test that we can read data back from a sharded tenant
     workload.validate()
