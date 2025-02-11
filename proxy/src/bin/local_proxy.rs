@@ -7,12 +7,11 @@ use std::time::Duration;
 use anyhow::{bail, ensure, Context};
 use camino::{Utf8Path, Utf8PathBuf};
 use compute_api::spec::LocalProxySpec;
-use dashmap::DashMap;
 use futures::future::Either;
 use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::local::{LocalBackend, JWKS_ROLE_MAP};
 use proxy::auth::{self};
-use proxy::cancellation::CancellationHandlerMain;
+use proxy::cancellation::CancellationHandler;
 use proxy::config::{
     self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig,
 };
@@ -86,8 +85,8 @@ struct LocalProxyCliArgs {
     /// Address of the postgres server
     #[clap(long, default_value = "127.0.0.1:5432")]
     postgres: SocketAddr,
-    /// Address of the compute-ctl api service
-    #[clap(long, default_value = "http://127.0.0.1:3080/")]
+    /// Address of the internal compute-ctl api service
+    #[clap(long, default_value = "http://127.0.0.1:3081/")]
     compute_ctl: ApiUrl,
     /// Path of the local proxy config file
     #[clap(long, default_value = "./local_proxy.json")]
@@ -211,12 +210,7 @@ async fn main() -> anyhow::Result<()> {
         auth_backend,
         http_listener,
         shutdown.clone(),
-        Arc::new(CancellationHandlerMain::new(
-            &config.connect_to_compute,
-            Arc::new(DashMap::new()),
-            None,
-            proxy::metrics::CancellationSource::Local,
-        )),
+        Arc::new(CancellationHandler::new(&config.connect_to_compute, None)),
         endpoint_rate_limiter,
     );
 
@@ -290,6 +284,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             rate_limiter: BucketRateLimiter::new(vec![]),
             rate_limit_ip_subnet: 64,
             ip_allowlist_check_enabled: true,
+            is_vpc_acccess_proxy: false,
             is_auth_broker: false,
             accept_jwts: true,
             console_redirect_confirmation_timeout: Duration::ZERO,

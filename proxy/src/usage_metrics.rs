@@ -10,9 +10,9 @@ use anyhow::{bail, Context};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Timelike, Utc};
+use clashmap::mapref::entry::Entry;
+use clashmap::ClashMap;
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
-use dashmap::mapref::entry::Entry;
-use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use serde::{Deserialize, Serialize};
@@ -137,7 +137,7 @@ type FastHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
 #[derive(Default)]
 pub(crate) struct Metrics {
-    endpoints: DashMap<Ids, Arc<MetricCounter>, FastHasher>,
+    endpoints: ClashMap<Ids, Arc<MetricCounter>, FastHasher>,
 }
 
 impl Metrics {
@@ -213,7 +213,7 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
 }
 
 fn collect_and_clear_metrics<C: Clearable>(
-    endpoints: &DashMap<Ids, Arc<C>, FastHasher>,
+    endpoints: &ClashMap<Ids, Arc<C>, FastHasher>,
 ) -> Vec<(Ids, u64)> {
     let mut metrics_to_clear = Vec::new();
 
@@ -271,7 +271,7 @@ fn create_event_chunks<'a>(
 #[expect(clippy::too_many_arguments)]
 #[instrument(skip_all)]
 async fn collect_metrics_iteration(
-    endpoints: &DashMap<Ids, Arc<MetricCounter>, FastHasher>,
+    endpoints: &ClashMap<Ids, Arc<MetricCounter>, FastHasher>,
     client: &http::ClientWithMiddleware,
     metric_collection_endpoint: &reqwest::Url,
     storage: Option<&GenericRemoteStorage>,
@@ -396,13 +396,13 @@ async fn upload_backup_events(
         TimeoutOrCancel::caused_by_cancel,
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_UPLOAD_MAX_RETRIES,
-        "request_data_upload",
+        "usage_metrics_upload",
         cancel,
     )
     .await
     .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
     .and_then(|x| x)
-    .context("request_data_upload")?;
+    .with_context(|| format!("usage_metrics_upload: path={remote_path}"))?;
     Ok(())
 }
 

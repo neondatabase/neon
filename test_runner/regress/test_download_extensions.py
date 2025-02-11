@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
+from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
@@ -94,6 +95,8 @@ def test_remote_extensions(
 
     # mock remote_extensions spec
     spec: dict[str, Any] = {
+        "public_extensions": ["anon"],
+        "custom_extensions": None,
         "library_index": {
             "anon": "anon",
         },
@@ -128,6 +131,17 @@ def test_remote_extensions(
 
     httpserver.check()
 
+    # Check that we properly recorded downloads in the metrics
+    client = endpoint.http_client()
+    raw_metrics = client.metrics()
+    metrics = parse_metrics(raw_metrics)
+    remote_ext_requests = metrics.query_all(
+        "compute_ctl_remote_ext_requests_total",
+    )
+    assert len(remote_ext_requests) == 1
+    for sample in remote_ext_requests:
+        assert sample.value == 1
+
 
 # TODO
 # 1. Test downloading remote library.
@@ -137,7 +151,7 @@ def test_remote_extensions(
 #
 # 3.Test that extension is downloaded after endpoint restart,
 # when the library is used in the query.
-# Run the test with mutliple simultaneous connections to an endpoint.
+# Run the test with multiple simultaneous connections to an endpoint.
 # to ensure that the extension is downloaded only once.
 #
 # 4. Test that private extensions are only downloaded when they are present in the spec.

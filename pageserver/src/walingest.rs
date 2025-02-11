@@ -28,17 +28,9 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
-use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::fsm_logical_to_physical;
-use postgres_ffi::walrecord::*;
-use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
-use wal_decoder::models::*;
-
 use anyhow::{bail, Result};
 use bytes::{Buf, Bytes};
 use tracing::*;
-use utils::failpoint_support;
-use utils::rate_limit::RateLimit;
 
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
@@ -50,11 +42,18 @@ use crate::ZERO_PAGE;
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
+use pageserver_api::shard::ShardIdentity;
+use postgres_ffi::fsm_logical_to_physical;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi::walrecord::*;
 use postgres_ffi::TransactionId;
+use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
 use utils::bin_ser::SerializeError;
 use utils::lsn::Lsn;
+use utils::rate_limit::RateLimit;
+use utils::{critical, failpoint_support};
+use wal_decoder::models::*;
 
 enum_pgversion! {CheckPoint, pgv::CheckPoint}
 
@@ -327,93 +326,75 @@ impl WalIngest {
         let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
         let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
 
-        // Sometimes, Postgres seems to create heap WAL records with the
-        // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
-        // not set. In fact, it's possible that the VM page does not exist at all.
-        // In that case, we don't want to store a record to clear the VM bit;
-        // replaying it would fail to find the previous image of the page, because
-        // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
-        // record if it doesn't.
-        //
-        // TODO: analyze the metrics and tighten this up accordingly. This logic
-        // implicitly assumes that VM pages see explicit WAL writes before
-        // implicit ClearVmBits, and will otherwise silently drop updates.
+        // VM bits can only be cleared on the shard(s) owning the VM relation, and must be within
+        // its view of the VM relation size. Out of caution, error instead of failing WAL ingestion,
+        // as there has historically been cases where PostgreSQL has cleared spurious VM pages. See:
+        // https://github.com/neondatabase/neon/pull/10634.
         let Some(vm_size) = get_relsize(modification, vm_rel, ctx).await? else {
-            WAL_INGEST
-                .clear_vm_bits_unknown
-                .with_label_values(&["relation"])
-                .inc();
+            critical!("clear_vm_bits for unknown VM relation {vm_rel}");
             return Ok(());
         };
         if let Some(blknum) = new_vm_blk {
             if blknum >= vm_size {
-                WAL_INGEST
-                    .clear_vm_bits_unknown
-                    .with_label_values(&["new_page"])
-                    .inc();
+                critical!("new_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
                 new_vm_blk = None;
             }
         }
         if let Some(blknum) = old_vm_blk {
             if blknum >= vm_size {
-                WAL_INGEST
-                    .clear_vm_bits_unknown
-                    .with_label_values(&["old_page"])
-                    .inc();
+                critical!("old_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
                 old_vm_blk = None;
             }
         }
 
-        if new_vm_blk.is_some() || old_vm_blk.is_some() {
-            if new_vm_blk == old_vm_blk {
-                // An UPDATE record that needs to clear the bits for both old and the
-                // new page, both of which reside on the same VM page.
+        if new_vm_blk.is_none() && old_vm_blk.is_none() {
+            return Ok(());
+        } else if new_vm_blk == old_vm_blk {
+            // An UPDATE record that needs to clear the bits for both old and the new page, both of
+            // which reside on the same VM page.
+            self.put_rel_wal_record(
+                modification,
+                vm_rel,
+                new_vm_blk.unwrap(),
+                NeonWalRecord::ClearVisibilityMapFlags {
+                    new_heap_blkno,
+                    old_heap_blkno,
+                    flags,
+                },
+                ctx,
+            )
+            .await?;
+        } else {
+            // Clear VM bits for one heap page, or for two pages that reside on different VM pages.
+            if let Some(new_vm_blk) = new_vm_blk {
                 self.put_rel_wal_record(
                     modification,
                     vm_rel,
-                    new_vm_blk.unwrap(),
+                    new_vm_blk,
                     NeonWalRecord::ClearVisibilityMapFlags {
                         new_heap_blkno,
+                        old_heap_blkno: None,
+                        flags,
+                    },
+                    ctx,
+                )
+                .await?;
+            }
+            if let Some(old_vm_blk) = old_vm_blk {
+                self.put_rel_wal_record(
+                    modification,
+                    vm_rel,
+                    old_vm_blk,
+                    NeonWalRecord::ClearVisibilityMapFlags {
+                        new_heap_blkno: None,
                         old_heap_blkno,
                         flags,
                     },
                     ctx,
                 )
                 .await?;
-            } else {
-                // Clear VM bits for one heap page, or for two pages that reside on
-                // different VM pages.
-                if let Some(new_vm_blk) = new_vm_blk {
-                    self.put_rel_wal_record(
-                        modification,
-                        vm_rel,
-                        new_vm_blk,
-                        NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno,
-                            old_heap_blkno: None,
-                            flags,
-                        },
-                        ctx,
-                    )
-                    .await?;
-                }
-                if let Some(old_vm_blk) = old_vm_blk {
-                    self.put_rel_wal_record(
-                        modification,
-                        vm_rel,
-                        old_vm_blk,
-                        NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno: None,
-                            old_heap_blkno,
-                            flags,
-                        },
-                        ctx,
-                    )
-                    .await?;
-                }
             }
         }
-
         Ok(())
     }
 
@@ -499,7 +480,13 @@ impl WalIngest {
 
                 let content = modification
                     .tline
-                    .get_rel_page_at_lsn(src_rel, blknum, Version::Modified(modification), ctx)
+                    .get_rel_page_at_lsn(
+                        src_rel,
+                        blknum,
+                        Version::Modified(modification),
+                        ctx,
+                        crate::tenant::storage_layer::IoConcurrency::sequential(),
+                    )
                     .await?;
                 modification.put_rel_page_image(dst_rel, blknum, content)?;
                 num_blocks_copied += 1;
@@ -1489,6 +1476,7 @@ mod tests {
     use super::*;
     use crate::tenant::harness::*;
     use crate::tenant::remote_timeline_client::{remote_initdb_archive_path, INITDB_PATH};
+    use crate::tenant::storage_layer::IoConcurrency;
     use postgres_ffi::RELSEG_SIZE;
 
     use crate::DEFAULT_PG_VERSION;
@@ -1532,6 +1520,7 @@ mod tests {
     #[tokio::test]
     async fn test_relsize() -> Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_relsize").await?.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -1599,7 +1588,13 @@ mod tests {
         // Check page contents at each LSN
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x20)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x20)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 2")
@@ -1607,7 +1602,13 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x30)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x30)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
@@ -1615,14 +1616,26 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x40)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x40)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x40)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x40)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
@@ -1630,21 +1643,39 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    2,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 2 at 5")
@@ -1667,14 +1698,26 @@ mod tests {
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x60)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x60)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x60)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x60)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
@@ -1689,7 +1732,13 @@ mod tests {
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    2,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 2 at 5")
@@ -1722,14 +1771,26 @@ mod tests {
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x70)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x70)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             ZERO_PAGE
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x70)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x70)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1")
@@ -1750,7 +1811,13 @@ mod tests {
         for blk in 2..1500 {
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blk, Version::Lsn(Lsn(0x80)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blk,
+                        Version::Lsn(Lsn(0x80)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 ZERO_PAGE
@@ -1758,7 +1825,13 @@ mod tests {
         }
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1500, Version::Lsn(Lsn(0x80)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1500,
+                    Version::Lsn(Lsn(0x80)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1500")
@@ -1851,6 +1924,7 @@ mod tests {
             .await?
             .load()
             .await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -1903,7 +1977,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(lsn), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(lsn),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -1931,7 +2011,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x60)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x60)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -1950,7 +2036,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x50)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x50)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -1987,7 +2079,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x80)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x80)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)

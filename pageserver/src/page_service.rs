@@ -39,6 +39,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 use utils::{
     auth::{Claims, Scope, SwappableJwtAuth},
@@ -61,6 +62,7 @@ use crate::task_mgr::{self, COMPUTE_REQUEST_RUNTIME};
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::mgr::TenantManager;
 use crate::tenant::mgr::{GetActiveTenantError, GetTenantError, ShardResolveResult};
+use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
@@ -90,6 +92,7 @@ pub struct Listener {
 pub struct Connections {
     cancel: CancellationToken,
     tasks: tokio::task::JoinSet<ConnectionHandlerResult>,
+    gate: Gate,
 }
 
 pub fn spawn(
@@ -110,6 +113,7 @@ pub fn spawn(
     let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
         "libpq listener",
         libpq_listener_main(
+            conf,
             tenant_manager,
             pg_auth,
             tcp_listener,
@@ -134,11 +138,16 @@ impl Listener {
 }
 impl Connections {
     pub(crate) async fn shutdown(self) {
-        let Self { cancel, mut tasks } = self;
+        let Self {
+            cancel,
+            mut tasks,
+            gate,
+        } = self;
         cancel.cancel();
         while let Some(res) = tasks.join_next().await {
             Self::handle_connection_completion(res);
         }
+        gate.close().await;
     }
 
     fn handle_connection_completion(res: Result<anyhow::Result<()>, tokio::task::JoinError>) {
@@ -158,7 +167,9 @@ impl Connections {
 /// Returns Ok(()) upon cancellation via `cancel`, returning the set of
 /// open connections.
 ///
+#[allow(clippy::too_many_arguments)]
 pub async fn libpq_listener_main(
+    conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
     listener: tokio::net::TcpListener,
@@ -168,9 +179,15 @@ pub async fn libpq_listener_main(
     listener_cancel: CancellationToken,
 ) -> Connections {
     let connections_cancel = CancellationToken::new();
+    let connections_gate = Gate::default();
     let mut connection_handler_tasks = tokio::task::JoinSet::default();
 
     loop {
+        let gate_guard = match connections_gate.enter() {
+            Ok(guard) => guard,
+            Err(_) => break,
+        };
+
         let accepted = tokio::select! {
             biased;
             _ = listener_cancel.cancelled() => break,
@@ -190,6 +207,7 @@ pub async fn libpq_listener_main(
                 let connection_ctx = listener_ctx
                     .detached_child(TaskKind::PageRequestHandler, DownloadBehavior::Download);
                 connection_handler_tasks.spawn(page_service_conn_main(
+                    conf,
                     tenant_manager.clone(),
                     local_auth,
                     socket,
@@ -197,6 +215,7 @@ pub async fn libpq_listener_main(
                     pipelining_config.clone(),
                     connection_ctx,
                     connections_cancel.child_token(),
+                    gate_guard,
                 ));
             }
             Err(err) => {
@@ -211,13 +230,16 @@ pub async fn libpq_listener_main(
     Connections {
         cancel: connections_cancel,
         tasks: connection_handler_tasks,
+        gate: connections_gate,
     }
 }
 
 type ConnectionHandlerResult = anyhow::Result<()>;
 
 #[instrument(skip_all, fields(peer_addr))]
+#[allow(clippy::too_many_arguments)]
 async fn page_service_conn_main(
+    conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
@@ -225,6 +247,7 @@ async fn page_service_conn_main(
     pipelining_config: PageServicePipeliningConfig,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
+    gate_guard: GateGuard,
 ) -> ConnectionHandlerResult {
     let _guard = LIVE_CONNECTIONS
         .with_label_values(&["page_service"])
@@ -274,11 +297,13 @@ async fn page_service_conn_main(
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
     let mut conn_handler = PageServerHandler::new(
+        conf,
         tenant_manager,
         auth,
         pipelining_config,
         connection_ctx,
         cancel.clone(),
+        gate_guard,
     );
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
@@ -310,6 +335,7 @@ async fn page_service_conn_main(
 }
 
 struct PageServerHandler {
+    conf: &'static PageServerConf,
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
 
@@ -325,6 +351,8 @@ struct PageServerHandler {
     timeline_handles: Option<TimelineHandles>,
 
     pipelining_config: PageServicePipeliningConfig,
+
+    gate_guard: GateGuard,
 }
 
 struct TimelineHandles {
@@ -461,7 +489,6 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
         let timeline = tenant_shard
             .get_timeline(timeline_id, true)
             .map_err(GetActiveTimelineError::Timeline)?;
-        set_tracing_field_shard_id(&timeline);
         Ok(timeline)
     }
 }
@@ -634,19 +661,23 @@ impl BatchedFeMessage {
 
 impl PageServerHandler {
     pub fn new(
+        conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
         pipelining_config: PageServicePipeliningConfig,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
+        gate_guard: GateGuard,
     ) -> Self {
         PageServerHandler {
+            conf,
             auth,
             claims: None,
             connection_ctx,
             timeline_handles: Some(TimelineHandles::new(tenant_manager)),
             cancel,
             pipelining_config,
+            gate_guard,
         }
     }
 
@@ -742,11 +773,11 @@ impl PageServerHandler {
 
         let batched_msg = match neon_fe_msg {
             PagestreamFeMessage::Exists(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
-                    .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
+                let span = tracing::info_span!(parent: &parent_span, "handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
                 let timer = record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetRelExists,
@@ -761,11 +792,10 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::Nblocks(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
-                    .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                let span = tracing::info_span!(parent: &parent_span, "handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
                 let timer = record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetRelSize,
@@ -780,11 +810,10 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::DbSize(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
-                    .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                let span = tracing::info_span!(parent: &parent_span, "handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
                 let timer = record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetDbSize,
@@ -799,11 +828,10 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::GetSlruSegment(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
-                    .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                let span = tracing::info_span!(parent: &parent_span, "handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
                 let timer = record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetSlruSegment,
@@ -818,12 +846,20 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::GetPage(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_page_at_lsn_request_batched", req_lsn = %req.hdr.request_lsn);
+                // avoid a somewhat costly Span::record() by constructing the entire span in one go.
+                macro_rules! mkspan {
+                    (before shard routing) => {{
+                        tracing::info_span!(parent: &parent_span, "handle_get_page_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.hdr.request_lsn)
+                    }};
+                    ($shard_id:expr) => {{
+                        tracing::info_span!(parent: &parent_span, "handle_get_page_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.hdr.request_lsn, shard_id = %$shard_id)
+                    }};
+                }
 
                 macro_rules! respond_error {
-                    ($error:expr) => {{
+                    ($span:expr, $error:expr) => {{
                         let error = BatchedFeMessage::RespondError {
-                            span,
+                            span: $span,
                             error: BatchedPageStreamError {
                                 req: req.hdr,
                                 err: $error,
@@ -836,27 +872,35 @@ impl PageServerHandler {
                 let key = rel_block_to_key(req.rel, req.blkno);
                 let shard = match timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Page(key))
-                    .instrument(span.clone()) // sets `shard_id` field
                     .await
                 {
                     Ok(tl) => tl,
-                    Err(GetActiveTimelineError::Tenant(GetActiveTenantError::NotFound(_))) => {
-                        // We already know this tenant exists in general, because we resolved it at
-                        // start of connection.  Getting a NotFound here indicates that the shard containing
-                        // the requested page is not present on this node: the client's knowledge of shard->pageserver
-                        // mapping is out of date.
-                        //
-                        // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
-                        // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
-                        // and talk to a different pageserver.
-                        return respond_error!(PageStreamError::Reconnect(
-                            "getpage@lsn request routed to wrong shard".into()
-                        ));
-                    }
                     Err(e) => {
-                        return respond_error!(e.into());
+                        let span = mkspan!(before shard routing);
+                        match e {
+                            GetActiveTimelineError::Tenant(GetActiveTenantError::NotFound(_)) => {
+                                // We already know this tenant exists in general, because we resolved it at
+                                // start of connection.  Getting a NotFound here indicates that the shard containing
+                                // the requested page is not present on this node: the client's knowledge of shard->pageserver
+                                // mapping is out of date.
+                                //
+                                // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
+                                // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
+                                // and talk to a different pageserver.
+                                return respond_error!(
+                                    span,
+                                    PageStreamError::Reconnect(
+                                        "getpage@lsn request routed to wrong shard".into()
+                                    )
+                                );
+                            }
+                            e => {
+                                return respond_error!(span, e.into());
+                            }
+                        }
                     }
                 };
+                let span = mkspan!(shard.tenant_shard_id.shard_slug());
 
                 let timer = record_op_start_and_throttle(
                     &shard,
@@ -878,7 +922,7 @@ impl PageServerHandler {
                 {
                     Ok(lsn) => lsn,
                     Err(e) => {
-                        return respond_error!(e);
+                        return respond_error!(span, e);
                     }
                 };
                 BatchedFeMessage::GetPage {
@@ -890,11 +934,10 @@ impl PageServerHandler {
             }
             #[cfg(feature = "testing")]
             PagestreamFeMessage::Test(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_test_request");
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
-                    .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                let span = tracing::info_span!(parent: &parent_span, "handle_test_request", shard_id = %shard.tenant_shard_id.shard_slug());
                 let timer =
                     record_op_start_and_throttle(&shard, metrics::SmgrQueryType::Test, received_at)
                         .await?;
@@ -1015,6 +1058,7 @@ impl PageServerHandler {
         &mut self,
         pgb_writer: &mut PostgresBackend<IO>,
         batch: BatchedFeMessage,
+        io_concurrency: IoConcurrency,
         cancel: &CancellationToken,
         protocol_version: PagestreamProtocolVersion,
         ctx: &RequestContext,
@@ -1030,7 +1074,7 @@ impl PageServerHandler {
         };
 
         // invoke handler function
-        let (handler_results, span): (
+        let (mut handler_results, span): (
             Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>>,
             _,
         ) = match batch {
@@ -1084,6 +1128,7 @@ impl PageServerHandler {
                                 &*shard.upgrade()?,
                                 effective_request_lsn,
                                 pages,
+                                io_concurrency,
                                 ctx,
                             )
                             .instrument(span.clone())
@@ -1156,11 +1201,49 @@ impl PageServerHandler {
             }
         };
 
+        // We purposefully don't count flush time into the smgr operation timer.
+        //
+        // The reason is that current compute client will not perform protocol processing
+        // if the postgres backend process is doing things other than `->smgr_read()`.
+        // This is especially the case for prefetch.
+        //
+        // If the compute doesn't read from the connection, eventually TCP will backpressure
+        // all the way into our flush call below.
+        //
+        // The timer's underlying metric is used for a storage-internal latency SLO and
+        // we don't want to include latency in it that we can't control.
+        // And as pointed out above, in this case, we don't control the time that flush will take.
+        //
+        // We put each response in the batch onto the wire in a separate pgb_writer.flush()
+        // call, which (all unmeasured) adds syscall overhead but reduces time to first byte
+        // and avoids building up a "giant" contiguous userspace buffer to hold the entire response.
+        // TODO: vectored socket IO would be great, but pgb_writer doesn't support that.
+        let flush_timers = {
+            let flushing_start_time = Instant::now();
+            let mut flush_timers = Vec::with_capacity(handler_results.len());
+            for handler_result in &mut handler_results {
+                let flush_timer = match handler_result {
+                    Ok((_, timer)) => Some(
+                        timer
+                            .observe_execution_end(flushing_start_time)
+                            .expect("we are the first caller"),
+                    ),
+                    Err(_) => {
+                        // TODO: measure errors
+                        None
+                    }
+                };
+                flush_timers.push(flush_timer);
+            }
+            assert_eq!(flush_timers.len(), handler_results.len());
+            flush_timers
+        };
+
         // Map handler result to protocol behavior.
         // Some handler errors cause exit from pagestream protocol.
         // Other handler errors are sent back as an error message and we stay in pagestream protocol.
-        for handler_result in handler_results {
-            let (response_msg, timer) = match handler_result {
+        for (handler_result, flushing_timer) in handler_results.into_iter().zip(flush_timers) {
+            let response_msg = match handler_result {
                 Err(e) => match &e.err {
                     PageStreamError::Shutdown => {
                         // If we fail to fulfil a request during shutdown, which may be _because_ of
@@ -1184,16 +1267,14 @@ impl PageServerHandler {
                         span.in_scope(|| {
                             error!("error reading relation or page version: {full:#}")
                         });
-                        (
-                            PagestreamBeMessage::Error(PagestreamErrorResponse {
-                                req: e.req,
-                                message: e.err.to_string(),
-                            }),
-                            None, // TODO: measure errors
-                        )
+
+                        PagestreamBeMessage::Error(PagestreamErrorResponse {
+                            req: e.req,
+                            message: e.err.to_string(),
+                        })
                     }
                 },
-                Ok((response_msg, timer)) => (response_msg, Some(timer)),
+                Ok((response_msg, _op_timer_already_observed)) => response_msg,
             };
 
             //
@@ -1204,30 +1285,12 @@ impl PageServerHandler {
                 &response_msg.serialize(protocol_version),
             ))?;
 
-            // We purposefully don't count flush time into the timer.
-            //
-            // The reason is that current compute client will not perform protocol processing
-            // if the postgres backend process is doing things other than `->smgr_read()`.
-            // This is especially the case for prefetch.
-            //
-            // If the compute doesn't read from the connection, eventually TCP will backpressure
-            // all the way into our flush call below.
-            //
-            // The timer's underlying metric is used for a storage-internal latency SLO and
-            // we don't want to include latency in it that we can't control.
-            // And as pointed out above, in this case, we don't control the time that flush will take.
-            let flushing_timer = timer.map(|mut timer| {
-                timer
-                    .observe_execution_end_flush_start(Instant::now())
-                    .expect("we are the first caller")
-            });
-
             // what we want to do
             let flush_fut = pgb_writer.flush();
             // metric for how long flushing takes
             let flush_fut = match flushing_timer {
                 Some(flushing_timer) => {
-                    futures::future::Either::Left(flushing_timer.measure(flush_fut))
+                    futures::future::Either::Left(flushing_timer.measure(Instant::now(), flush_fut))
                 }
                 None => futures::future::Either::Right(flush_fut),
             };
@@ -1246,8 +1309,6 @@ impl PageServerHandler {
                 }
                 Ok(())
             }
-            // and log the info! line inside the request span
-            .instrument(span.clone())
             .await?;
         }
         Ok(())
@@ -1288,6 +1349,17 @@ impl PageServerHandler {
             }
         }
 
+        let io_concurrency = IoConcurrency::spawn_from_conf(
+            self.conf,
+            match self.gate_guard.try_clone() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    info!("shutdown request received in page handler");
+                    return Err(QueryError::Shutdown);
+                }
+            },
+        );
+
         let pgb_reader = pgb
             .split()
             .context("implementation error: split pgb into reader and writer")?;
@@ -1297,7 +1369,7 @@ impl PageServerHandler {
             .take()
             .expect("implementation error: timeline_handles should not be locked");
 
-        let request_span = info_span!("request", shard_id = tracing::field::Empty);
+        let request_span = info_span!("request");
         let ((pgb_reader, timeline_handles), result) = match self.pipelining_config.clone() {
             PageServicePipeliningConfig::Pipelined(pipelining_config) => {
                 self.handle_pagerequests_pipelined(
@@ -1309,6 +1381,7 @@ impl PageServerHandler {
                     request_span,
                     pipelining_config,
                     protocol_version,
+                    io_concurrency,
                     &ctx,
                 )
                 .await
@@ -1322,6 +1395,7 @@ impl PageServerHandler {
                     timeline_handles,
                     request_span,
                     protocol_version,
+                    io_concurrency,
                     &ctx,
                 )
                 .await
@@ -1349,6 +1423,7 @@ impl PageServerHandler {
         mut timeline_handles: TimelineHandles,
         request_span: Span,
         protocol_version: PagestreamProtocolVersion,
+        io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> (
         (PostgresBackendReader<IO>, TimelineHandles),
@@ -1383,7 +1458,14 @@ impl PageServerHandler {
             };
 
             let err = self
-                .pagesteam_handle_batched_message(pgb_writer, msg, &cancel, protocol_version, ctx)
+                .pagesteam_handle_batched_message(
+                    pgb_writer,
+                    msg,
+                    io_concurrency.clone(),
+                    &cancel,
+                    protocol_version,
+                    ctx,
+                )
                 .await;
             match err {
                 Ok(()) => {}
@@ -1407,6 +1489,7 @@ impl PageServerHandler {
         request_span: Span,
         pipelining_config: PageServicePipeliningConfigPipelined,
         protocol_version: PagestreamProtocolVersion,
+        io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> (
         (PostgresBackendReader<IO>, TimelineHandles),
@@ -1550,6 +1633,7 @@ impl PageServerHandler {
                     self.pagesteam_handle_batched_message(
                         pgb_writer,
                         batch,
+                        io_concurrency.clone(),
                         &cancel,
                         protocol_version,
                         &ctx,
@@ -1635,7 +1719,7 @@ impl PageServerHandler {
         // to distinguish a misbehaving client (asking for old LSN) from a storage issue (data missing at a legitimate LSN).
         if request_lsn < **latest_gc_cutoff_lsn && !timeline.is_gc_blocked_by_lsn_lease_deadline() {
             let gc_info = &timeline.gc_info.read().unwrap();
-            if !gc_info.leases.contains_key(&request_lsn) {
+            if !gc_info.lsn_covered_by_lease(request_lsn) {
                 return Err(
                     PageStreamError::BadRequest(format!(
                         "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
@@ -1651,6 +1735,7 @@ impl PageServerHandler {
                 .wait_lsn(
                     not_modified_since,
                     crate::tenant::timeline::WaitLsnWaiter::PageService,
+                    timeline::WaitLsnTimeout::Default,
                     ctx,
                 )
                 .await?;
@@ -1806,6 +1891,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         effective_lsn: Lsn,
         requests: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
+        io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
@@ -1832,6 +1918,7 @@ impl PageServerHandler {
             .get_rel_page_at_lsn_batched(
                 requests.iter().map(|p| (&p.req.rel, &p.req.blkno)),
                 effective_lsn,
+                io_concurrency,
                 ctx,
             )
             .await;
@@ -1976,6 +2063,13 @@ impl PageServerHandler {
             .unwrap()
             .get(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
+        set_tracing_field_shard_id(&timeline);
+
+        if timeline.is_archived() == Some(true) {
+            // TODO after a grace period, turn this log line into a hard error
+            tracing::warn!("timeline {tenant_id}/{timeline_id} is archived, but got basebackup request for it.");
+            //return Err(QueryError::NotFound("timeline is archived".into()))
+        }
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
@@ -1985,6 +2079,7 @@ impl PageServerHandler {
                 .wait_lsn(
                     lsn,
                     crate::tenant::timeline::WaitLsnWaiter::PageService,
+                    crate::tenant::timeline::WaitLsnTimeout::Default,
                     ctx,
                 )
                 .await?;

@@ -480,7 +480,7 @@ lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	if (LFC_ENABLED())
 	{
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
-		found = entry != NULL && (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) != 0;
+		found = entry != NULL && (entry->bitmap[chunk_offs >> 5] & ((uint32)1 << (chunk_offs & 31))) != 0;
 	}
 	LWLockRelease(lfc_lock);
 	return found;
@@ -509,47 +509,44 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 
-	tag.blockNum = (blkno + i) & ~(BLOCKS_PER_CHUNK - 1);
+	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
 	hash = get_hash_value(lfc_hash, &tag);
-	chunk_offs = (blkno + i) & (BLOCKS_PER_CHUNK - 1);
+	chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
 
 	LWLockAcquire(lfc_lock, LW_SHARED);
 
+	if (!LFC_ENABLED())
+	{
+		LWLockRelease(lfc_lock);
+		return 0;
+	}
 	while (true)
 	{
-		int		this_chunk = Min(nblocks, BLOCKS_PER_CHUNK - chunk_offs);
-		if (LFC_ENABLED())
-		{
-			entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
+		int		this_chunk = Min(nblocks - i, BLOCKS_PER_CHUNK - chunk_offs);
+		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
 
-			if (entry != NULL)
+		if (entry != NULL)
+		{
+			for (; chunk_offs < BLOCKS_PER_CHUNK && i < nblocks; chunk_offs++, i++)
 			{
-				for (; chunk_offs < BLOCKS_PER_CHUNK && i < nblocks; chunk_offs++, i++)
+				if ((entry->bitmap[chunk_offs >> 5] & 
+					 ((uint32)1 << (chunk_offs & 31))) != 0)
 				{
-					if ((entry->bitmap[chunk_offs >> 5] & 
-						(1 << (chunk_offs & 31))) != 0)
-					{
-						BITMAP_SET(bitmap, i);
-						found++;
-					}
+					BITMAP_SET(bitmap, i);
+					found++;
 				}
-			}
-			else
-			{
-				i += this_chunk;
 			}
 		}
 		else
 		{
-			LWLockRelease(lfc_lock);
-			return found;
+			i += this_chunk;
 		}
 
 		/*
 		 * Break out of the iteration before doing expensive stuff for
 		 * a next iteration
 		 */
-		if (i + 1 >= nblocks)
+		if (i >= nblocks)
 			break;
 
 		/*
@@ -563,8 +560,8 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	LWLockRelease(lfc_lock);
 
-#if USE_ASSERT_CHECKING
-	do {
+#ifdef USE_ASSERT_CHECKING
+	{
 		int count = 0;
 
 		for (int j = 0; j < nblocks; j++)
@@ -574,7 +571,7 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		}
 
 		Assert(count == found);
-	} while (false);
+	}
 #endif
 
 	return found;
@@ -620,7 +617,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	}
 
 	/* remove the page from the cache */
-	entry->bitmap[chunk_offs >> 5] &= ~(1 << (chunk_offs & (32 - 1)));
+	entry->bitmap[chunk_offs >> 5] &= ~((uint32)1 << (chunk_offs & (32 - 1)));
 
 	if (entry->access_count == 0)
 	{
@@ -774,7 +771,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			 * If the page is valid, we consider it "read".
 			 * All other pages will be fetched separately by the next cache
 			 */
-			if (entry->bitmap[(chunk_offs + i) / 32] & (1 << ((chunk_offs + i) % 32)))
+			if (entry->bitmap[(chunk_offs + i) / 32] & ((uint32)1 << ((chunk_offs + i) % 32)))
 			{
 				BITMAP_SET(mask, buf_offset + i);
 				iteration_hits++;
@@ -911,57 +908,85 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			if (entry->access_count++ == 0)
 				dlist_delete(&entry->list_node);
 		}
-		else
+		/*-----------
+		 * If the chunk wasn't already in the LFC then we have these
+		 * options, in order of preference:
+		 *
+		 * Unless there is no space available, we can:
+		 *  1. Use an entry from the `holes` list, and
+		 *  2. Create a new entry.
+		 * We can always, regardless of space in the LFC:
+		 *  3. evict an entry from LRU, and
+		 *  4. ignore the write operation (the least favorite option)
+		 */
+		else if (lfc_ctl->used < lfc_ctl->limit)
 		{
-			/*
-			 * We have two choices if all cache pages are pinned (i.e. used in IO
-			 * operations):
-			 *
-			 * 1) Wait until some of this operation is completed and pages is
-			 * unpinned.
-			 *
-			 * 2) Allocate one more chunk, so that specified cache size is more
-			 * recommendation than hard limit.
-			 *
-			 * As far as probability of such event (that all pages are pinned) is
-			 * considered to be very very small: there are should be very large
-			 * number of concurrent IO operations and them are limited by
-			 * max_connections, we prefer not to complicate code and use second
-			 * approach.
-			 */
-			if (lfc_ctl->used >= lfc_ctl->limit && !dlist_is_empty(&lfc_ctl->lru))
-			{
-				/* Cache overflow: evict least recently used chunk */
-				FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->lru));
-	
-				for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
-				{
-					lfc_ctl->used_pages -= (victim->bitmap[i >> 5] >> (i & 31)) & 1;
-				}
-				CriticalAssert(victim->access_count == 0);
-				entry->offset = victim->offset; /* grab victim's chunk */
-				hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
-				neon_log(DEBUG2, "Swap file cache page");
-			}
-			else if (!dlist_is_empty(&lfc_ctl->holes))
+			if (!dlist_is_empty(&lfc_ctl->holes))
 			{
 				/* We can reuse a hole that was left behind when the LFC was shrunk previously */
-				FileCacheEntry *hole = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->holes));
-				uint32		offset = hole->offset;
-				bool		hole_found;
-	
-				hash_search_with_hash_value(lfc_hash, &hole->key, hole->hash, HASH_REMOVE, &hole_found);
+				FileCacheEntry *hole = dlist_container(FileCacheEntry, list_node,
+													   dlist_pop_head_node(&lfc_ctl->holes));
+				uint32 offset = hole->offset;
+				bool hole_found;
+
+				hash_search_with_hash_value(lfc_hash, &hole->key,
+											hole->hash, HASH_REMOVE, &hole_found);
 				CriticalAssert(hole_found);
-	
+
 				lfc_ctl->used += 1;
-				entry->offset = offset;	/* reuse the hole */
+				entry->offset = offset;			/* reuse the hole */
 			}
 			else
 			{
 				lfc_ctl->used += 1;
-				entry->offset = lfc_ctl->size++;	/* allocate new chunk at end
-													 * of file */
+				entry->offset = lfc_ctl->size++;/* allocate new chunk at end
+												 * of file */
 			}
+		}
+		/*
+		 * We've already used up all allocated LFC entries.
+		 *
+		 * If we can clear an entry from the LRU, do that.
+		 * If we can't (e.g. because all other slots are being accessed)
+		 * then we will remove this entry from the hash and continue
+		 * on to the next chunk, as we may not exceed the limit.
+		 */
+		else if (!dlist_is_empty(&lfc_ctl->lru))
+		{
+			/* Cache overflow: evict least recently used chunk */
+			FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node,
+													 dlist_pop_head_node(&lfc_ctl->lru));
+
+			for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
+			{
+				lfc_ctl->used_pages -= (victim->bitmap[i >> 5] >> (i & 31)) & 1;
+			}
+
+			CriticalAssert(victim->access_count == 0);
+			entry->offset = victim->offset; /* grab victim's chunk */
+			hash_search_with_hash_value(lfc_hash, &victim->key,
+										victim->hash, HASH_REMOVE, NULL);
+			neon_log(DEBUG2, "Swap file cache page");
+		}
+		else
+		{
+			/* Can't add this chunk - we don't have the space for it */
+			hash_search_with_hash_value(lfc_hash, &entry->key, hash,
+										HASH_REMOVE, NULL);
+
+			/*
+			 * We can't process this chunk due to lack of space in LFC,
+			 * so skip to the next one
+			 */
+			LWLockRelease(lfc_lock);
+			blkno += blocks_in_chunk;
+			buf_offset += blocks_in_chunk;
+			nblocks -= blocks_in_chunk;
+			continue;
+		}
+
+		if (!found)
+		{
 			entry->access_count = 1;
 			entry->hash = hash;
 			memset(entry->bitmap, 0, sizeof entry->bitmap);
@@ -1006,7 +1031,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				{
 					lfc_ctl->used_pages += 1 - ((entry->bitmap[(chunk_offs + i) >> 5] >> ((chunk_offs + i) & 31)) & 1);
 					entry->bitmap[(chunk_offs + i) >> 5] |=
-						(1 << ((chunk_offs + i) & 31));
+						((uint32)1 << ((chunk_offs + i) & 31));
 				}
 			}
 
@@ -1254,7 +1279,7 @@ local_cache_pages(PG_FUNCTION_ARGS)
 			{
 				for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
 				{
-					if (entry->bitmap[i >> 5] & (1 << (i & 31)))
+					if (entry->bitmap[i >> 5] & ((uint32)1 << (i & 31)))
 					{
 						fctx->record[n].pageoffs = entry->offset * BLOCKS_PER_CHUNK + i;
 						fctx->record[n].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));

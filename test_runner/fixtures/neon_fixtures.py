@@ -313,6 +313,10 @@ class PgProtocol:
         """
         return self.safe_psql(query, log_query=log_query)[0][0]
 
+    def show_timeline_id(self) -> TimelineId:
+        """SHOW neon.timeline_id"""
+        return TimelineId(cast("str", self.safe_psql("show neon.timeline_id")[0][0]))
+
 
 class PageserverWalReceiverProtocol(StrEnum):
     VANILLA = "vanilla"
@@ -387,6 +391,7 @@ class NeonEnvBuilder:
         storage_controller_port_override: int | None = None,
         pageserver_virtual_file_io_mode: str | None = None,
         pageserver_wal_receiver_protocol: PageserverWalReceiverProtocol | None = None,
+        pageserver_get_vectored_concurrent_io: str | None = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -426,6 +431,9 @@ class NeonEnvBuilder:
         self.storage_controller_config: dict[Any, Any] | None = None
 
         self.pageserver_virtual_file_io_engine: str | None = pageserver_virtual_file_io_engine
+        self.pageserver_get_vectored_concurrent_io: str | None = (
+            pageserver_get_vectored_concurrent_io
+        )
 
         self.pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None = (
             pageserver_default_tenant_config_compaction_algorithm
@@ -452,6 +460,7 @@ class NeonEnvBuilder:
         self.test_name = test_name
         self.compatibility_neon_binpath = compatibility_neon_binpath
         self.compatibility_pg_distrib_dir = compatibility_pg_distrib_dir
+        self.test_may_use_compatibility_snapshot_binaries = False
         self.version_combination = combination
         self.mixdir = self.test_output_dir / "mixdir_neon"
         if self.version_combination is not None:
@@ -463,6 +472,7 @@ class NeonEnvBuilder:
             ), "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required when using mixed versions"
             self.mixdir.mkdir(mode=0o755, exist_ok=True)
             self._mix_versions()
+            self.test_may_use_compatibility_snapshot_binaries = True
 
     def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
         # Cannot create more than one environment from one builder
@@ -1062,6 +1072,7 @@ class NeonEnv:
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
         self.pageserver_wal_receiver_protocol = config.pageserver_wal_receiver_protocol
+        self.pageserver_get_vectored_concurrent_io = config.pageserver_get_vectored_concurrent_io
 
         # Create the neon_local's `NeonLocalInitConf`
         cfg: dict[str, Any] = {
@@ -1115,12 +1126,24 @@ class NeonEnv:
 
             # Batching (https://github.com/neondatabase/neon/issues/9377):
             # enable batching by default in tests and benchmarks.
+            ps_cfg["page_service_pipelining"] = {
+                "mode": "pipelined",
+                "execution": "concurrent-futures",
+                "max_batch_size": 32,
+            }
+
+            # Concurrent IO (https://github.com/neondatabase/neon/issues/9378):
+            # enable concurrent IO by default in tests and benchmarks.
             # Compat tests are exempt because old versions fail to parse the new config.
-            if not config.compatibility_neon_binpath:
-                ps_cfg["page_service_pipelining"] = {
-                    "mode": "pipelined",
-                    "execution": "concurrent-futures",
-                    "max_batch_size": 32,
+            get_vectored_concurrent_io = self.pageserver_get_vectored_concurrent_io
+            if config.test_may_use_compatibility_snapshot_binaries:
+                log.info(
+                    "Forcing use of binary-built-in default to avoid forward-compatibility related test failures"
+                )
+                get_vectored_concurrent_io = None
+            if get_vectored_concurrent_io is not None:
+                ps_cfg["get_vectored_concurrent_io"] = {
+                    "mode": self.pageserver_get_vectored_concurrent_io,
                 }
 
             if self.pageserver_virtual_file_io_engine is not None:
@@ -1457,6 +1480,7 @@ def neon_simple_env(
     pageserver_virtual_file_io_engine: str,
     pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None,
     pageserver_virtual_file_io_mode: str | None,
+    pageserver_get_vectored_concurrent_io: str | None,
 ) -> Iterator[NeonEnv]:
     """
     Simple Neon environment, with 1 safekeeper and 1 pageserver. No authentication, no fsync.
@@ -1489,6 +1513,7 @@ def neon_simple_env(
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
+        pageserver_get_vectored_concurrent_io=pageserver_get_vectored_concurrent_io,
         combination=combination,
     ) as builder:
         env = builder.init_start()
@@ -1515,6 +1540,7 @@ def neon_env_builder(
     pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None,
     record_property: Callable[[str, object], None],
     pageserver_virtual_file_io_mode: str | None,
+    pageserver_get_vectored_concurrent_io: str | None,
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1557,6 +1583,7 @@ def neon_env_builder(
         test_overlay_dir=test_overlay_dir,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
+        pageserver_get_vectored_concurrent_io=pageserver_get_vectored_concurrent_io,
     ) as builder:
         yield builder
         # Propogate `preserve_database_files` to make it possible to use in other fixtures,
@@ -2739,6 +2766,11 @@ class NeonPageserver(PgProtocol, LogUtils):
             log.error(f"Failed to decode LocationConf, raw content ({len(bytes)} bytes): {bytes}")
             raise
 
+    def heatmap_content(self, tenant_shard_id: TenantId | TenantShardId) -> Any:
+        path = self.tenant_dir(tenant_shard_id) / "heatmap-v1.json"
+        with open(path) as f:
+            return json.load(f)
+
     def tenant_create(
         self,
         tenant_id: TenantId,
@@ -3313,7 +3345,7 @@ class NeonProxy(PgProtocol):
         metric_collection_interval: str | None = None,
     ):
         host = "127.0.0.1"
-        domain = "proxy.localtest.me"  # resolves to 127.0.0.1
+        domain = "proxy.local.neon.build"  # resolves to 127.0.0.1
         super().__init__(dsn=auth_backend.default_conn_url, host=domain, port=proxy_port)
 
         self.domain = domain
@@ -3336,7 +3368,7 @@ class NeonProxy(PgProtocol):
         # generate key of it doesn't exist
         crt_path = self.test_output_dir / "proxy.crt"
         key_path = self.test_output_dir / "proxy.key"
-        generate_proxy_tls_certs("*.localtest.me", key_path, crt_path)
+        generate_proxy_tls_certs("*.local.neon.build", key_path, crt_path)
 
         args = [
             str(self.neon_binpath / "proxy"),
@@ -3537,7 +3569,7 @@ class NeonAuthBroker:
         external_http_port: int,
         auth_backend: NeonAuthBroker.ProxyV1,
     ):
-        self.domain = "apiauth.localtest.me"  # resolves to 127.0.0.1
+        self.domain = "apiauth.local.neon.build"  # resolves to 127.0.0.1
         self.host = "127.0.0.1"
         self.http_port = http_port
         self.external_http_port = external_http_port
@@ -3554,7 +3586,7 @@ class NeonAuthBroker:
         # generate key of it doesn't exist
         crt_path = self.test_output_dir / "proxy.crt"
         key_path = self.test_output_dir / "proxy.key"
-        generate_proxy_tls_certs("apiauth.localtest.me", key_path, crt_path)
+        generate_proxy_tls_certs("apiauth.local.neon.build", key_path, crt_path)
 
         args = [
             str(self.neon_binpath / "proxy"),
@@ -3775,7 +3807,8 @@ class Endpoint(PgProtocol, LogUtils):
         env: NeonEnv,
         tenant_id: TenantId,
         pg_port: int,
-        http_port: int,
+        external_http_port: int,
+        internal_http_port: int,
         check_stop_result: bool = True,
     ):
         super().__init__(host="localhost", port=pg_port, user="cloud_admin", dbname="postgres")
@@ -3785,7 +3818,8 @@ class Endpoint(PgProtocol, LogUtils):
         self.pgdata_dir: Path | None = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
         self.pg_port = pg_port
-        self.http_port = http_port
+        self.external_http_port = external_http_port
+        self.internal_http_port = internal_http_port
         self.check_stop_result = check_stop_result
         # passed to endpoint create and endpoint reconfigure
         self.active_safekeepers: list[int] = list(map(lambda sk: sk.id, env.safekeepers))
@@ -3802,7 +3836,8 @@ class Endpoint(PgProtocol, LogUtils):
         self, auth_token: str | None = None, retries: Retry | None = None
     ) -> EndpointHttpClient:
         return EndpointHttpClient(
-            port=self.http_port,
+            external_port=self.external_http_port,
+            internal_port=self.internal_http_port,
         )
 
     def create(
@@ -3834,7 +3869,8 @@ class Endpoint(PgProtocol, LogUtils):
             lsn=lsn,
             hot_standby=hot_standby,
             pg_port=self.pg_port,
-            http_port=self.http_port,
+            external_http_port=self.external_http_port,
+            internal_http_port=self.internal_http_port,
             pg_version=self.env.pg_version,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
@@ -3891,6 +3927,7 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: int | None = None,
         safekeepers: list[int] | None = None,
         allow_multiple: bool = False,
+        create_test_user: bool = False,
         basebackup_request_tries: int | None = None,
         env: dict[str, str] | None = None,
     ) -> Self:
@@ -3912,6 +3949,7 @@ class Endpoint(PgProtocol, LogUtils):
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            create_test_user=create_test_user,
             basebackup_request_tries=basebackup_request_tries,
             env=env,
         )
@@ -4224,7 +4262,8 @@ class EndpointFactory:
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
             pg_port=self.env.port_distributor.get_port(),
-            http_port=self.env.port_distributor.get_port(),
+            external_http_port=self.env.port_distributor.get_port(),
+            internal_http_port=self.env.port_distributor.get_port(),
         )
         self.num_instances += 1
         self.endpoints.append(ep)
@@ -4254,7 +4293,8 @@ class EndpointFactory:
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
             pg_port=self.env.port_distributor.get_port(),
-            http_port=self.env.port_distributor.get_port(),
+            external_http_port=self.env.port_distributor.get_port(),
+            internal_http_port=self.env.port_distributor.get_port(),
         )
 
         endpoint_id = endpoint_id or self.env.generate_endpoint_id()
@@ -4361,6 +4401,7 @@ class Safekeeper(LogUtils):
                 "1s",
                 "--eviction-min-resident",
                 "10s",
+                "--wal-reader-fanout",
             ]
 
         self.extra_opts = extra_opts
@@ -4966,13 +5007,35 @@ def check_restored_datadir_content(
     assert (mismatch, error) == ([], [])
 
 
+# wait for subscriber to catch up with publisher
 def logical_replication_sync(
     subscriber: PgProtocol,
     publisher: PgProtocol,
+    # pass subname explicitly to avoid confusion
+    # when multiple subscriptions are present
+    subname: str,
     sub_dbname: str | None = None,
     pub_dbname: str | None = None,
-) -> Lsn:
+):
     """Wait logical replication subscriber to sync with publisher."""
+
+    def initial_sync():
+        # first check if the subscription is active `s`=`synchronized`, `r` = `ready`
+        query = f"""SELECT 1 FROM pg_subscription_rel join pg_catalog.pg_subscription
+                    on pg_subscription_rel.srsubid = pg_subscription.oid
+                    WHERE srsubstate NOT IN ('r', 's') and subname='{subname}'"""
+
+        if sub_dbname is not None:
+            res = subscriber.safe_psql(query, dbname=sub_dbname)
+        else:
+            res = subscriber.safe_psql(query)
+
+        assert (res is None) or (len(res) == 0)
+
+    wait_until(initial_sync)
+
+    # wait for the subscription to catch up with current state of publisher
+    # caller is responsible to call checkpoint before calling this function
     if pub_dbname is not None:
         publisher_lsn = Lsn(
             publisher.safe_psql("SELECT pg_current_wal_flush_lsn()", dbname=pub_dbname)[0][0]
@@ -4980,23 +5043,23 @@ def logical_replication_sync(
     else:
         publisher_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
-    while True:
-        if sub_dbname is not None:
-            res = subscriber.safe_psql(
-                "select latest_end_lsn from pg_catalog.pg_stat_subscription", dbname=sub_dbname
-            )[0][0]
-        else:
-            res = subscriber.safe_psql(
-                "select latest_end_lsn from pg_catalog.pg_stat_subscription"
-            )[0][0]
+    def subscriber_catch_up():
+        query = f"select latest_end_lsn from pg_catalog.pg_stat_subscription where latest_end_lsn is NOT NULL and subname='{subname}'"
 
-        if res:
-            log.info(f"subscriber_lsn={res}")
-            subscriber_lsn = Lsn(res)
-            log.info(f"Subscriber LSN={subscriber_lsn}, publisher LSN={publisher_lsn}")
-            if subscriber_lsn >= publisher_lsn:
-                return subscriber_lsn
-        time.sleep(0.5)
+        if sub_dbname is not None:
+            res = subscriber.safe_psql(query, dbname=sub_dbname)
+        else:
+            res = subscriber.safe_psql(query)
+
+        assert res is not None
+
+        res_lsn = res[0][0]
+        log.info(f"subscriber_lsn={res_lsn}")
+        subscriber_lsn = Lsn(res_lsn)
+        log.info(f"Subscriber LSN={subscriber_lsn}, publisher LSN={publisher_lsn}")
+        assert subscriber_lsn >= publisher_lsn
+
+    wait_until(subscriber_catch_up)
 
 
 def tenant_get_shards(
@@ -5065,12 +5128,14 @@ def wait_for_last_flush_lsn(
     timeline: TimelineId,
     pageserver_id: int | None = None,
     auth_token: str | None = None,
+    last_flush_lsn: Lsn | None = None,
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
 
     shards = tenant_get_shards(env, tenant, pageserver_id)
 
-    last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    if last_flush_lsn is None:
+        last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
     results = []
     for tenant_shard_id, pageserver in shards:

@@ -38,12 +38,11 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
-use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
@@ -56,12 +55,13 @@ use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_api::value::Value;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::str::FromStr;
+use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 use tracing::*;
@@ -73,7 +73,10 @@ use utils::{
 };
 
 use super::layer_name::ImageLayerName;
-use super::{AsLayerDesc, LayerName, PersistentLayerDesc, ValuesReconstructState};
+use super::{
+    AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
+    ValuesReconstructState,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -164,7 +167,7 @@ pub struct ImageLayerInner {
     key_range: Range<Key>,
     lsn: Lsn,
 
-    file: VirtualFile,
+    file: Arc<VirtualFile>,
     file_id: FileId,
 
     max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
@@ -391,9 +394,11 @@ impl ImageLayerInner {
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
-        let file = VirtualFile::open_v2(path, ctx)
-            .await
-            .context("open layer file")?;
+        let file = Arc::new(
+            VirtualFile::open_v2(path, ctx)
+                .await
+                .context("open layer file")?,
+        );
         let file_id = page_cache::next_file_id();
         let block_reader = FileBlockReader::new(&file, file_id);
         let summary_blk = block_reader
@@ -439,6 +444,7 @@ impl ImageLayerInner {
     // the reconstruct state with whatever is found.
     pub(super) async fn get_values_reconstruct_data(
         &self,
+        this: ResidentLayer,
         keyspace: KeySpace,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
@@ -448,7 +454,7 @@ impl ImageLayerInner {
             .await
             .map_err(GetVectoredError::Other)?;
 
-        self.do_reads_and_update_state(reads, reconstruct_state, ctx)
+        self.do_reads_and_update_state(this, reads, reconstruct_state, ctx)
             .await;
 
         reconstruct_state.on_image_layer_visited(&self.key_range);
@@ -570,6 +576,7 @@ impl ImageLayerInner {
 
     async fn do_reads_and_update_state(
         &self,
+        this: ResidentLayer,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
@@ -580,8 +587,13 @@ impl ImageLayerInner {
             .0
             .into();
 
-        let vectored_blob_reader = VectoredBlobReader::new(&self.file);
         for read in reads.into_iter() {
+            let mut ios: HashMap<(Key, Lsn), OnDiskValueIo> = Default::default();
+            for (_, blob_meta) in read.blobs_at.as_slice() {
+                let io = reconstruct_state.update_key(&blob_meta.key, blob_meta.lsn, true);
+                ios.insert((blob_meta.key, blob_meta.lsn), io);
+            }
+
             let buf_size = read.size();
 
             if buf_size > max_vectored_read_bytes {
@@ -611,50 +623,51 @@ impl ImageLayerInner {
                 }
             }
 
-            let buf = IoBufferMut::with_capacity(buf_size);
-            let res = vectored_blob_reader.read_blobs(&read, buf, ctx).await;
+            let read_extend_residency = this.clone();
+            let read_from = self.file.clone();
+            let read_ctx = ctx.attached_child();
+            reconstruct_state
+                .spawn_io(async move {
+                    let buf = IoBufferMut::with_capacity(buf_size);
+                    let vectored_blob_reader = VectoredBlobReader::new(&read_from);
+                    let res = vectored_blob_reader.read_blobs(&read, buf, &read_ctx).await;
 
-            match res {
-                Ok(blobs_buf) => {
-                    let view = BufView::new_slice(&blobs_buf.buf);
-                    for meta in blobs_buf.blobs.iter() {
-                        let img_buf = meta.read(&view).await;
+                    match res {
+                        Ok(blobs_buf) => {
+                            let view = BufView::new_slice(&blobs_buf.buf);
+                            for meta in blobs_buf.blobs.iter() {
+                                let io: OnDiskValueIo =
+                                    ios.remove(&(meta.meta.key, meta.meta.lsn)).unwrap();
+                                let img_buf = meta.read(&view).await;
 
-                        let img_buf = match img_buf {
-                            Ok(img_buf) => img_buf,
-                            Err(e) => {
-                                reconstruct_state.on_key_error(
-                                    meta.meta.key,
-                                    PageReconstructError::Other(anyhow!(e).context(format!(
-                                        "Failed to decompress blob from virtual file {}",
-                                        self.file.path(),
-                                    ))),
-                                );
+                                let img_buf = match img_buf {
+                                    Ok(img_buf) => img_buf,
+                                    Err(e) => {
+                                        io.complete(Err(e));
+                                        continue;
+                                    }
+                                };
 
-                                continue;
+                                io.complete(Ok(OnDiskValue::RawImage(img_buf.into_bytes())));
                             }
-                        };
-                        reconstruct_state.update_key(
-                            &meta.meta.key,
-                            self.lsn,
-                            Value::Image(img_buf.into_bytes()),
-                        );
+
+                            assert!(ios.is_empty());
+                        }
+                        Err(err) => {
+                            for (_, io) in ios {
+                                io.complete(Err(std::io::Error::new(
+                                    err.kind(),
+                                    "vec read failed",
+                                )));
+                            }
+                        }
                     }
-                }
-                Err(err) => {
-                    let kind = err.kind();
-                    for (_, blob_meta) in read.blobs_at.as_slice() {
-                        reconstruct_state.on_key_error(
-                            blob_meta.key,
-                            PageReconstructError::from(anyhow!(
-                                "Failed to read blobs from virtual file {}: {}",
-                                self.file.path(),
-                                kind
-                            )),
-                        );
-                    }
-                }
-            };
+
+                    // keep layer resident until this IO is done; this spawned IO future generally outlives the
+                    // call to `self` / the `Arc<DownloadedLayer>` / the `ResidentLayer` that guarantees residency
+                    drop(read_extend_residency);
+                })
+                .await;
         }
     }
 
@@ -1069,6 +1082,7 @@ impl ImageLayerIterator<'_> {
                     Key::from_slice(&raw_key[..KEY_SIZE]),
                     self.image_layer.lsn,
                     offset,
+                    true,
                 ) {
                     break batch_plan;
                 }

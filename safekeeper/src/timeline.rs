@@ -592,6 +592,8 @@ impl Timeline {
         assert!(self.cancel.is_cancelled());
         assert!(self.gate.close_complete());
 
+        info!("deleting timeline {} from disk", self.ttid);
+
         // Close associated FDs. Nobody will be able to touch timeline data once
         // it is cancelled, so WAL storage won't be opened again.
         shared_state.sk.close_wal_store();

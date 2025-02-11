@@ -17,6 +17,7 @@ use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
 };
+use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::GetVectoredError;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
@@ -47,7 +48,7 @@ use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::pausable_failpoint;
 use utils::{bin_ser::BeSer, lsn::Lsn};
-use wal_decoder::serialized_batch::SerializedValueBatch;
+use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 /// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
 pub const MAX_AUX_FILE_DELTAS: usize = 1024;
@@ -200,6 +201,7 @@ impl Timeline {
         blknum: BlockNumber,
         version: Version<'_>,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<Bytes, PageReconstructError> {
         match version {
             Version::Lsn(effective_lsn) => {
@@ -208,6 +210,7 @@ impl Timeline {
                     .get_rel_page_at_lsn_batched(
                         pages.iter().map(|(tag, blknum)| (tag, blknum)),
                         effective_lsn,
+                        io_concurrency.clone(),
                         ctx,
                     )
                     .await;
@@ -246,6 +249,7 @@ impl Timeline {
         &self,
         pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber)>,
         effective_lsn: Lsn,
+        io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> Vec<Result<Bytes, PageReconstructError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
@@ -309,7 +313,10 @@ impl Timeline {
             acc.to_keyspace()
         };
 
-        match self.get_vectored(keyspace, effective_lsn, ctx).await {
+        match self
+            .get_vectored(keyspace, effective_lsn, io_concurrency, ctx)
+            .await
+        {
             Ok(results) => {
                 for (key, res) in results {
                     let mut key_slots = keys_slots.remove(&key).unwrap().into_iter();
@@ -605,11 +612,18 @@ impl Timeline {
         pausable_failpoint!("find-lsn-for-timestamp-pausable");
 
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
+        let gc_cutoff_planned = {
+            let gc_info = self.gc_info.read().unwrap();
+            gc_info.min_cutoff()
+        };
+        // Usually the planned cutoff is newer than the cutoff of the last gc run,
+        // but let's be defensive.
+        let gc_cutoff = gc_cutoff_planned.max(*gc_cutoff_lsn_guard);
         // We use this method to figure out the branching LSN for the new branch, but the
         // GC cutoff could be before the branching point and we cannot create a new branch
         // with LSN < `ancestor_lsn`. Thus, pick the maximum of these two to be
         // on the safe side.
-        let min_lsn = std::cmp::max(*gc_cutoff_lsn_guard, self.get_ancestor_lsn());
+        let min_lsn = std::cmp::max(gc_cutoff, self.get_ancestor_lsn());
         let max_lsn = self.get_last_record_lsn();
 
         // LSNs are always 8-byte aligned. low/mid/high represent the
@@ -889,9 +903,15 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         let kv = self
-            .scan(KeySpace::single(Key::metadata_aux_key_range()), lsn, ctx)
+            .scan(
+                KeySpace::single(Key::metadata_aux_key_range()),
+                lsn,
+                ctx,
+                io_concurrency,
+            )
             .await?;
         let mut result = HashMap::new();
         let mut sz = 0;
@@ -914,8 +934,9 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<(), PageReconstructError> {
-        self.list_aux_files_v2(lsn, ctx).await?;
+        self.list_aux_files_v2(lsn, ctx, io_concurrency).await?;
         Ok(())
     }
 
@@ -923,17 +944,24 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        self.list_aux_files_v2(lsn, ctx).await
+        self.list_aux_files_v2(lsn, ctx, io_concurrency).await
     }
 
     pub(crate) async fn get_replorigins(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
+        io_concurrency: IoConcurrency,
     ) -> Result<HashMap<RepOriginId, Lsn>, PageReconstructError> {
         let kv = self
-            .scan(KeySpace::single(repl_origin_key_range()), lsn, ctx)
+            .scan(
+                KeySpace::single(repl_origin_key_range()),
+                lsn,
+                ctx,
+                io_concurrency,
+            )
             .await?;
         let mut result = HashMap::new();
         for (k, v) in kv {
@@ -1274,6 +1302,26 @@ impl DatadirModification<'_> {
         self.pending_data_batch
             .as_ref()
             .is_some_and(|b| b.has_data())
+    }
+
+    /// Returns statistics about the currently pending modifications.
+    pub(crate) fn stats(&self) -> DatadirModificationStats {
+        let mut stats = DatadirModificationStats::default();
+        for (_, _, value) in self.pending_metadata_pages.values().flatten() {
+            match value {
+                Value::Image(_) => stats.metadata_images += 1,
+                Value::WalRecord(r) if r.will_init() => stats.metadata_images += 1,
+                Value::WalRecord(_) => stats.metadata_deltas += 1,
+            }
+        }
+        for valuemeta in self.pending_data_batch.iter().flat_map(|b| &b.metadata) {
+            match valuemeta {
+                ValueMeta::Serialized(s) if s.will_init => stats.data_images += 1,
+                ValueMeta::Serialized(_) => stats.data_deltas += 1,
+                ValueMeta::Observed(_) => {}
+            }
+        }
+        stats
     }
 
     /// Set the current lsn
@@ -2296,6 +2344,15 @@ impl DatadirModification<'_> {
     }
 }
 
+/// Statistics for a DatadirModification.
+#[derive(Default)]
+pub struct DatadirModificationStats {
+    pub metadata_images: u64,
+    pub metadata_deltas: u64,
+    pub data_images: u64,
+    pub data_deltas: u64,
+}
+
 /// This struct facilitates accessing either a committed key from the timeline at a
 /// specific LSN, or the latest uncommitted key from a pending modification.
 ///
@@ -2432,7 +2489,11 @@ mod tests {
             ("foo/bar2".to_string(), Bytes::from_static(b"content2")),
         ]);
 
-        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        let io_concurrency = IoConcurrency::spawn_for_test();
+
+        let readback = tline
+            .list_aux_files(Lsn(0x1008), &ctx, io_concurrency.clone())
+            .await?;
         assert_eq!(readback, expect_1008);
 
         // Second modification: update one key, remove the other
@@ -2444,11 +2505,15 @@ mod tests {
         let expect_2008 =
             HashMap::from([("foo/bar1".to_string(), Bytes::from_static(b"content3"))]);
 
-        let readback = tline.list_aux_files(Lsn(0x2008), &ctx).await?;
+        let readback = tline
+            .list_aux_files(Lsn(0x2008), &ctx, io_concurrency.clone())
+            .await?;
         assert_eq!(readback, expect_2008);
 
         // Reading back in time works
-        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        let readback = tline
+            .list_aux_files(Lsn(0x1008), &ctx, io_concurrency.clone())
+            .await?;
         assert_eq!(readback, expect_1008);
 
         Ok(())

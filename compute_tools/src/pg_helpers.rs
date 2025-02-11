@@ -7,7 +7,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Child;
 use std::str::FromStr;
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
@@ -16,6 +15,7 @@ use ini::Ini;
 use notify::{RecursiveMode, Watcher};
 use postgres::config::Config;
 use tokio::io::AsyncBufReadExt;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_postgres;
 use tokio_postgres::NoTls;
@@ -477,23 +477,13 @@ pub async fn tune_pgbouncer(pgbouncer_config: HashMap<String, String>) -> Result
     Ok(())
 }
 
-/// Spawn a thread that will read Postgres logs from `stderr`, join multiline logs
+/// Spawn a task that will read Postgres logs from `stderr`, join multiline logs
 /// and send them to the logger. In the future we may also want to add context to
 /// these logs.
-pub fn handle_postgres_logs(stderr: std::process::ChildStderr) -> JoinHandle<()> {
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build tokio runtime");
-
-        let res = runtime.block_on(async move {
-            let stderr = tokio::process::ChildStderr::from_std(stderr)?;
-            handle_postgres_logs_async(stderr).await
-        });
-        if let Err(e) = res {
-            tracing::error!("error while processing postgres logs: {}", e);
-        }
+pub fn handle_postgres_logs(stderr: std::process::ChildStderr) -> JoinHandle<Result<()>> {
+    tokio::spawn(async move {
+        let stderr = tokio::process::ChildStderr::from_std(stderr)?;
+        handle_postgres_logs_async(stderr).await
     })
 }
 

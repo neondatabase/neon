@@ -588,32 +588,40 @@ impl<T: Types> Drop for Cache<T> {
             let Some(handle_inner_arc) = handle_inner_weak.upgrade() else {
                 continue;
             };
-            let handle_timeline = handle_inner_arc
+            let Some(handle_timeline) = handle_inner_arc
                 // locking rules: drop lock before acquiring other lock below
                 .lock()
                 .expect("poisoned")
-                .shutdown();
+                .shutdown()
+            else {
+                // Concurrent PerTimelineState::shutdown.
+                continue;
+            };
+            // Clean up per_timeline_state so the HandleInner allocation can be dropped.
             let per_timeline_state = handle_timeline.per_timeline_state();
             let mut handles_lock_guard = per_timeline_state.handles.lock().expect("mutex poisoned");
             let Some(handles) = &mut *handles_lock_guard else {
                 continue;
             };
             let Some(removed_handle_inner_arc) = handles.remove(&self.id) else {
-                // There could have been a shutdown inbetween us upgrading the weak and locking the mutex.
+                // Concurrent PerTimelineState::shutdown.
                 continue;
             };
-            drop(handles_lock_guard); // locking rules: remember them when!
-            assert!(Arc::ptr_eq(&removed_handle_inner_arc, &handle_inner_arc,));
+            drop(handles_lock_guard); // locking rules!
+            assert!(Arc::ptr_eq(&removed_handle_inner_arc, &handle_inner_arc));
         }
     }
 }
 
 impl<T: Types> HandleInner<T> {
-    fn shutdown(&mut self) -> Arc<T::Timeline> {
+    fn shutdown(&mut self) -> Option<Arc<T::Timeline>> {
         match std::mem::replace(self, HandleInner::ShutDown) {
-            HandleInner::KeepingTimelineGateOpen { timeline, .. } => timeline,
+            HandleInner::KeepingTimelineGateOpen { timeline, .. } => Some(timeline),
             HandleInner::ShutDown => {
-                unreachable!("handles are only shut down once in their lifetime");
+                // Duplicate shutdowns are possible because both Cache::drop and PerTimelineState::shutdown
+                // may do it concurrently, but locking rules disallow holding per-timeline-state lock and
+                // the handle lock at the same time.
+                None
             }
         }
     }

@@ -138,6 +138,13 @@ pub struct ComputeSpec {
     /// enough spare connections for reconfiguration process to succeed.
     #[serde(default = "default_reconfigure_concurrency")]
     pub reconfigure_concurrency: usize,
+
+    /// If set to true, the compute_ctl will drop all subscriptions before starting the
+    /// compute. This is needed when we start an endpoint on a branch, so that child
+    /// would not compete with parent branch subscriptions
+    /// over the same replication content from publisher.
+    #[serde(default)] // Default false
+    pub drop_subscriptions_before_start: bool,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -197,14 +204,16 @@ impl RemoteExtSpec {
 
         // Check if extension is present in public or custom.
         // If not, then it is not allowed to be used by this compute.
-        if let Some(public_extensions) = &self.public_extensions {
-            if !public_extensions.contains(&real_ext_name.to_string()) {
-                if let Some(custom_extensions) = &self.custom_extensions {
-                    if !custom_extensions.contains(&real_ext_name.to_string()) {
-                        return Err(anyhow::anyhow!("extension {} is not found", real_ext_name));
-                    }
-                }
-            }
+        if !self
+            .public_extensions
+            .as_ref()
+            .is_some_and(|exts| exts.iter().any(|e| e == real_ext_name))
+            && !self
+                .custom_extensions
+                .as_ref()
+                .is_some_and(|exts| exts.iter().any(|e| e == real_ext_name))
+        {
+            return Err(anyhow::anyhow!("extension {} is not found", real_ext_name));
         }
 
         match self.extension_data.get(real_ext_name) {
@@ -332,6 +341,102 @@ pub struct JwksSettings {
 mod tests {
     use super::*;
     use std::fs::File;
+
+    #[test]
+    fn allow_installing_remote_extensions() {
+        let rspec: RemoteExtSpec = serde_json::from_value(serde_json::json!({
+            "public_extensions": null,
+            "custom_extensions": null,
+            "library_index": {},
+            "extension_data": {},
+        }))
+        .unwrap();
+
+        rspec
+            .get_ext("ext", false, "latest", "v17")
+            .expect_err("Extension should not be found");
+
+        let rspec: RemoteExtSpec = serde_json::from_value(serde_json::json!({
+            "public_extensions": [],
+            "custom_extensions": null,
+            "library_index": {},
+            "extension_data": {},
+        }))
+        .unwrap();
+
+        rspec
+            .get_ext("ext", false, "latest", "v17")
+            .expect_err("Extension should not be found");
+
+        let rspec: RemoteExtSpec = serde_json::from_value(serde_json::json!({
+            "public_extensions": [],
+            "custom_extensions": [],
+            "library_index": {
+                "ext": "ext"
+            },
+            "extension_data": {
+                "ext": {
+                    "control_data": {
+                        "ext.control": ""
+                    },
+                    "archive_path": ""
+                }
+            },
+        }))
+        .unwrap();
+
+        rspec
+            .get_ext("ext", false, "latest", "v17")
+            .expect_err("Extension should not be found");
+
+        let rspec: RemoteExtSpec = serde_json::from_value(serde_json::json!({
+            "public_extensions": [],
+            "custom_extensions": ["ext"],
+            "library_index": {
+                "ext": "ext"
+            },
+            "extension_data": {
+                "ext": {
+                    "control_data": {
+                        "ext.control": ""
+                    },
+                    "archive_path": ""
+                }
+            },
+        }))
+        .unwrap();
+
+        rspec
+            .get_ext("ext", false, "latest", "v17")
+            .expect("Extension should be found");
+
+        let rspec: RemoteExtSpec = serde_json::from_value(serde_json::json!({
+            "public_extensions": ["ext"],
+            "custom_extensions": [],
+            "library_index": {
+                "extlib": "ext",
+            },
+            "extension_data": {
+                "ext": {
+                    "control_data": {
+                        "ext.control": ""
+                    },
+                    "archive_path": ""
+                }
+            },
+        }))
+        .unwrap();
+
+        rspec
+            .get_ext("ext", false, "latest", "v17")
+            .expect("Extension should be found");
+
+        // test library index for the case when library name
+        // doesn't match the extension name
+        rspec
+            .get_ext("extlib", true, "latest", "v17")
+            .expect("Library should be found");
+    }
 
     #[test]
     fn parse_spec_file() {

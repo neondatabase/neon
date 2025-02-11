@@ -443,7 +443,7 @@ def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
     workload.write_rows(256, env.pageservers[0].id)
     env.pageserver.http_client().tenant_heatmap_upload(tenant_id)
 
-    def validate_heatmap(heatmap):
+    def validate_heatmap(heatmap, on_disk_heatmap):
         assert len(heatmap["timelines"]) == 1
         assert heatmap["timelines"][0]["timeline_id"] == str(timeline_id)
         assert len(heatmap["timelines"][0]["layers"]) > 0
@@ -452,10 +452,13 @@ def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
         # Each layer appears at most once
         assert len(set(layer["name"] for layer in layers)) == len(layers)
 
+        assert heatmap == on_disk_heatmap
+
     # Download and inspect the heatmap that the pageserver uploaded
     heatmap_first = env.pageserver_remote_storage.heatmap_content(tenant_id)
+    heatmap_first_on_disk = env.pageserver.heatmap_content(tenant_id)
     log.info(f"Read back heatmap: {heatmap_first}")
-    validate_heatmap(heatmap_first)
+    validate_heatmap(heatmap_first, heatmap_first_on_disk)
 
     # Do some more I/O to generate more layers
     workload.churn_rows(64, env.pageservers[0].id)
@@ -463,9 +466,10 @@ def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
 
     # Ensure that another heatmap upload includes the new layers
     heatmap_second = env.pageserver_remote_storage.heatmap_content(tenant_id)
+    heatmap_second_on_disk = env.pageserver.heatmap_content(tenant_id)
     log.info(f"Read back heatmap: {heatmap_second}")
     assert heatmap_second != heatmap_first
-    validate_heatmap(heatmap_second)
+    validate_heatmap(heatmap_second, heatmap_second_on_disk)
 
 
 def list_elegible_layers(

@@ -54,6 +54,7 @@ async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
 atomic-take = "1.1.0"
 backtrace = "0.3.74"
 flate2 = "1.0.26"
+assert-json-diff = "2"
 async-stream = "0.3"
 async-trait = "0.1"
 aws-config = { version = "1.5", default-features = false, features=["rustls", "sso"] }
@@ -65,7 +66,7 @@ aws-smithy-types = "1.2"
 aws-credential-types = "1.2.0"
 aws-sigv4 = { version = "1.2", features = ["sign-http"] }
 aws-types = "1.3"
-axum = { version = "0.7.9", features = ["ws"] }
+axum = { version = "0.8.1", features = ["ws"] }
 base64 = "0.13.0"
 bincode = "1.3"
 bindgen = "0.70"
@@ -77,10 +78,10 @@ camino = "1.1.6"
 cfg-if = "1.0.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.0", features = ["derive", "env"] }
+clashmap = { version = "1.0", features = ["raw-api"] }
 comfy-table = "7.1"
 const_format = "0.2"
 crc32c = "0.6"
-dashmap = { version = "5.5.0", features = ["raw-api"] }
 diatomic-waker = { version = "0.2.3" }
 either = "1.8"
 enum-map = "2.4.2"
@@ -123,7 +124,7 @@ measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
 memoffset = "0.9"
 nix = { version = "0.27", features = ["dir", "fs", "process", "socket", "signal", "poll"] }
-notify = "6.0.0"
+notify = "8.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.15"
 once_cell = "1.13"
@@ -177,7 +178,7 @@ test-context = "0.3"
 thiserror = "1.0"
 tikv-jemallocator = { version = "0.6", features = ["profiling", "stats", "unprefixed_malloc_on_supported_platforms"] }
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
-tokio = { version = "1.17", features = ["macros"] }
+tokio = { version = "1.41", features = ["macros"] }
 tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.12.0"
@@ -187,13 +188,15 @@ tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }
 toml = "0.8"
 toml_edit = "0.22"
-tonic = {version = "0.12.3", features = ["tls", "tls-roots"]}
+tonic = {version = "0.12.3", default-features = false, features = ["channel", "tls", "tls-roots"]}
 tower = { version = "0.5.2", default-features = false }
 tower-http = { version = "0.6.2", features = ["request-id", "trace"] }
 tower-service = "0.3.3"
 tracing = "0.1"
 tracing-error = "0.2"
+tracing-log = "0.2"
 tracing-opentelemetry = "0.28"
+tracing-serde = "0.2.0"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
 try-lock = "0.2.5"
 twox-hash = { version = "1.6.3", default-features = false }

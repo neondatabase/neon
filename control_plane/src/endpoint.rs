@@ -37,6 +37,8 @@
 //! ```
 //!
 use std::collections::BTreeMap;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -73,9 +75,11 @@ pub struct EndpointConf {
     timeline_id: TimelineId,
     mode: ComputeMode,
     pg_port: u16,
-    http_port: u16,
+    external_http_port: u16,
+    internal_http_port: u16,
     pg_version: u32,
     skip_pg_catalog_updates: bool,
+    drop_subscriptions_before_start: bool,
     features: Vec<ComputeFeature>,
 }
 
@@ -127,7 +131,7 @@ impl ComputeControlPlane {
         1 + self
             .endpoints
             .values()
-            .map(|ep| std::cmp::max(ep.pg_address.port(), ep.http_address.port()))
+            .map(|ep| std::cmp::max(ep.pg_address.port(), ep.external_http_address.port()))
             .max()
             .unwrap_or(self.base_port)
     }
@@ -139,17 +143,27 @@ impl ComputeControlPlane {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         pg_port: Option<u16>,
-        http_port: Option<u16>,
+        external_http_port: Option<u16>,
+        internal_http_port: Option<u16>,
         pg_version: u32,
         mode: ComputeMode,
         skip_pg_catalog_updates: bool,
+        drop_subscriptions_before_start: bool,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
-        let http_port = http_port.unwrap_or_else(|| self.get_port() + 1);
+        let external_http_port = external_http_port.unwrap_or_else(|| self.get_port() + 1);
+        let internal_http_port = internal_http_port.unwrap_or_else(|| external_http_port + 1);
         let ep = Arc::new(Endpoint {
             endpoint_id: endpoint_id.to_owned(),
-            pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), pg_port),
-            http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), http_port),
+            pg_address: SocketAddr::new(IpAddr::from(Ipv4Addr::LOCALHOST), pg_port),
+            external_http_address: SocketAddr::new(
+                IpAddr::from(Ipv4Addr::UNSPECIFIED),
+                external_http_port,
+            ),
+            internal_http_address: SocketAddr::new(
+                IpAddr::from(Ipv4Addr::LOCALHOST),
+                internal_http_port,
+            ),
             env: self.env.clone(),
             timeline_id,
             mode,
@@ -162,6 +176,7 @@ impl ComputeControlPlane {
             // with this we basically test a case of waking up an idle compute, where
             // we also skip catalog updates in the cloud.
             skip_pg_catalog_updates,
+            drop_subscriptions_before_start,
             features: vec![],
         });
 
@@ -173,10 +188,12 @@ impl ComputeControlPlane {
                 tenant_id,
                 timeline_id,
                 mode,
-                http_port,
+                external_http_port,
+                internal_http_port,
                 pg_port,
                 pg_version,
                 skip_pg_catalog_updates,
+                drop_subscriptions_before_start,
                 features: vec![],
             })?,
         )?;
@@ -226,9 +243,10 @@ pub struct Endpoint {
     pub timeline_id: TimelineId,
     pub mode: ComputeMode,
 
-    // port and address of the Postgres server and `compute_ctl`'s HTTP API
+    // port and address of the Postgres server and `compute_ctl`'s HTTP APIs
     pub pg_address: SocketAddr,
-    pub http_address: SocketAddr,
+    pub external_http_address: SocketAddr,
+    pub internal_http_address: SocketAddr,
 
     // postgres major version in the format: 14, 15, etc.
     pg_version: u32,
@@ -240,6 +258,7 @@ pub struct Endpoint {
     // Optimizations
     skip_pg_catalog_updates: bool,
 
+    drop_subscriptions_before_start: bool,
     // Feature flags
     features: Vec<ComputeFeature>,
 }
@@ -282,8 +301,15 @@ impl Endpoint {
             serde_json::from_slice(&std::fs::read(entry.path().join("endpoint.json"))?)?;
 
         Ok(Endpoint {
-            pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.pg_port),
-            http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.http_port),
+            pg_address: SocketAddr::new(IpAddr::from(Ipv4Addr::LOCALHOST), conf.pg_port),
+            external_http_address: SocketAddr::new(
+                IpAddr::from(Ipv4Addr::UNSPECIFIED),
+                conf.external_http_port,
+            ),
+            internal_http_address: SocketAddr::new(
+                IpAddr::from(Ipv4Addr::LOCALHOST),
+                conf.internal_http_port,
+            ),
             endpoint_id,
             env: env.clone(),
             timeline_id: conf.timeline_id,
@@ -291,6 +317,7 @@ impl Endpoint {
             tenant_id: conf.tenant_id,
             pg_version: conf.pg_version,
             skip_pg_catalog_updates: conf.skip_pg_catalog_updates,
+            drop_subscriptions_before_start: conf.drop_subscriptions_before_start,
             features: conf.features,
         })
     }
@@ -625,6 +652,7 @@ impl Endpoint {
             shard_stripe_size: Some(shard_stripe_size),
             local_proxy_config: None,
             reconfigure_concurrency: 1,
+            drop_subscriptions_before_start: self.drop_subscriptions_before_start,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
@@ -643,24 +671,51 @@ impl Endpoint {
             println!("Also at '{}'", conn_str);
         }
         let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
-        cmd.args(["--http-port", &self.http_address.port().to_string()])
-            .args(["--pgdata", self.pgdata().to_str().unwrap()])
-            .args(["--connstr", &conn_str])
-            .args([
-                "--spec-path",
-                self.endpoint_path().join("spec.json").to_str().unwrap(),
-            ])
-            .args([
-                "--pgbin",
-                self.env
-                    .pg_bin_dir(self.pg_version)?
-                    .join("postgres")
-                    .to_str()
-                    .unwrap(),
-            ])
-            .stdin(std::process::Stdio::null())
-            .stderr(logfile.try_clone()?)
-            .stdout(logfile);
+        //cmd.args([
+        //    "--external-http-port",
+        //    &self.external_http_address.port().to_string(),
+        //])
+        //.args([
+        //    "--internal-http-port",
+        //    &self.internal_http_address.port().to_string(),
+        //])
+        cmd.args([
+            "--http-port",
+            &self.external_http_address.port().to_string(),
+        ])
+        .args(["--pgdata", self.pgdata().to_str().unwrap()])
+        .args(["--connstr", &conn_str])
+        .args([
+            "--spec-path",
+            self.endpoint_path().join("spec.json").to_str().unwrap(),
+        ])
+        .args([
+            "--pgbin",
+            self.env
+                .pg_bin_dir(self.pg_version)?
+                .join("postgres")
+                .to_str()
+                .unwrap(),
+        ])
+        // TODO: It would be nice if we generated compute IDs with the same
+        // algorithm as the real control plane.
+        //
+        // TODO: Add this back when
+        // https://github.com/neondatabase/neon/pull/10747 is merged.
+        //
+        //.args([
+        //    "--compute-id",
+        //    &format!(
+        //        "compute-{}",
+        //        SystemTime::now()
+        //            .duration_since(UNIX_EPOCH)
+        //            .unwrap()
+        //            .as_secs()
+        //    ),
+        //])
+        .stdin(std::process::Stdio::null())
+        .stderr(logfile.try_clone()?)
+        .stdout(logfile);
 
         if let Some(remote_ext_config) = remote_ext_config {
             cmd.args(["--remote-ext-config", remote_ext_config]);
@@ -747,8 +802,8 @@ impl Endpoint {
                 reqwest::Method::GET,
                 format!(
                     "http://{}:{}/status",
-                    self.http_address.ip(),
-                    self.http_address.port()
+                    self.external_http_address.ip(),
+                    self.external_http_address.port()
                 ),
             )
             .send()
@@ -821,8 +876,8 @@ impl Endpoint {
         let response = client
             .post(format!(
                 "http://{}:{}/configure",
-                self.http_address.ip(),
-                self.http_address.port()
+                self.external_http_address.ip(),
+                self.external_http_address.port()
             ))
             .header(CONTENT_TYPE.as_str(), "application/json")
             .body(format!(

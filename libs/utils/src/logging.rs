@@ -5,6 +5,27 @@ use metrics::{IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, VariantNames};
 
+/// Logs a critical error, similarly to `tracing::error!`. This will:
+///
+/// * Emit an ERROR log message with prefix "CRITICAL:" and a backtrace.
+/// * Trigger a pageable alert (via the metric below).
+/// * Increment libmetrics_tracing_event_count{level="critical"}, and indirectly level="error".
+/// * In debug builds, panic the process.
+///
+/// When including errors in the message, please use {err:?} to include the error cause and original
+/// backtrace.
+#[macro_export]
+macro_rules! critical {
+    ($($arg:tt)*) => {{
+        if cfg!(debug_assertions) {
+            panic!($($arg)*);
+        }
+        $crate::logging::TRACING_EVENT_COUNT_METRIC.inc_critical();
+        let backtrace = std::backtrace::Backtrace::capture();
+        tracing::error!("CRITICAL: {}\n{backtrace}", format!($($arg)*));
+    }};
+}
+
 #[derive(EnumString, strum_macros::Display, VariantNames, Eq, PartialEq, Debug, Clone, Copy)]
 #[strum(serialize_all = "snake_case")]
 pub enum LogFormat {
@@ -25,7 +46,10 @@ impl LogFormat {
     }
 }
 
-struct TracingEventCountMetric {
+pub struct TracingEventCountMetric {
+    /// CRITICAL is not a `tracing` log level. Instead, we increment it in the `critical!` macro,
+    /// and also emit it as a regular error. These are thus double-counted, but that seems fine.
+    critical: IntCounter,
     error: IntCounter,
     warn: IntCounter,
     info: IntCounter,
@@ -33,7 +57,7 @@ struct TracingEventCountMetric {
     trace: IntCounter,
 }
 
-static TRACING_EVENT_COUNT_METRIC: Lazy<TracingEventCountMetric> = Lazy::new(|| {
+pub static TRACING_EVENT_COUNT_METRIC: Lazy<TracingEventCountMetric> = Lazy::new(|| {
     let vec = metrics::register_int_counter_vec!(
         "libmetrics_tracing_event_count",
         "Number of tracing events, by level",
@@ -46,12 +70,18 @@ static TRACING_EVENT_COUNT_METRIC: Lazy<TracingEventCountMetric> = Lazy::new(|| 
 impl TracingEventCountMetric {
     fn new(vec: IntCounterVec) -> Self {
         Self {
+            critical: vec.with_label_values(&["critical"]),
             error: vec.with_label_values(&["error"]),
             warn: vec.with_label_values(&["warn"]),
             info: vec.with_label_values(&["info"]),
             debug: vec.with_label_values(&["debug"]),
             trace: vec.with_label_values(&["trace"]),
         }
+    }
+
+    // Allow public access from `critical!` macro.
+    pub fn inc_critical(&self) {
+        self.critical.inc();
     }
 
     fn inc_for_level(&self, level: tracing::Level) {
