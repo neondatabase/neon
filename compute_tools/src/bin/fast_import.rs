@@ -60,8 +60,8 @@ struct Args {
     pg_bin_dir: Utf8PathBuf,
     #[clap(long)]
     pg_lib_dir: Utf8PathBuf,
-    #[clap(long)]
-    pg_port: Option<u16>, // port to run postgres on, 5432 is default
+    #[clap(long, default_value_t = 5432)]
+    pg_port: u16, // port to run postgres on, 5432 is default
 }
 
 #[serde_with::serde_as]
@@ -207,17 +207,15 @@ impl PostgresProcess {
     async fn shutdown(&mut self) -> Result<(), anyhow::Error> {
         let proc: &mut tokio::process::Child = self.postgres_proc.as_mut().unwrap();
         info!("shutdown postgres");
-        {
-            nix::sys::signal::kill(
-                Pid::from_raw(i32::try_from(proc.id().unwrap()).expect("convert child pid to i32")),
-                nix::sys::signal::SIGTERM,
-            )
-            .context("signal postgres to shut down")?;
-            proc.wait()
-                .await
-                .context("wait for postgres to shut down")?;
-        }
-        Ok(())
+        nix::sys::signal::kill(
+            Pid::from_raw(i32::try_from(proc.id().unwrap()).expect("convert child pid to i32")),
+            nix::sys::signal::SIGTERM,
+        )
+        .context("signal postgres to shut down")?;
+        proc.wait()
+            .await
+            .context("wait for postgres to shut down")
+            .map(|_| ())
     }
 }
 
@@ -312,12 +310,6 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     };
 
     let superuser = "cloud_admin";
-    let pg_port = || {
-        args.pg_port.unwrap_or_else(|| {
-            info!("pg_port not specified, using default 5432");
-            5432
-        })
-    };
 
     let mut run_postgres = true;
 
@@ -358,8 +350,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
                         // restoring to local postgres otherwise
                         format!(
                             "host=localhost port={} user={} dbname=neondb",
-                            pg_port(),
-                            superuser
+                            args.pg_port, superuser
                         )
                     };
 
@@ -375,14 +366,12 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             } else {
                 format!(
                     "host=localhost port={} user={} dbname=neondb",
-                    pg_port(),
-                    superuser
+                    args.pg_port, superuser
                 )
             },
         )
     };
 
-    // unused if run_postgres is false, but needed for shutdown
     match tokio::fs::create_dir(&working_directory).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -404,7 +393,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         let mut proc =
             PostgresProcess::new(pgdata_dir.clone(), pg_bin_dir.clone(), pg_lib_dir.clone());
         let nproc = num_cpus::get();
-        proc.start(superuser, pg_port(), nproc).await?;
+        proc.start(superuser, args.pg_port, nproc).await?;
         wait_until_ready(restore_connstring.clone(), "neondb".to_string()).await;
 
         Some(proc)

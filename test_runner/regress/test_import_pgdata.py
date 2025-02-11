@@ -384,13 +384,27 @@ def test_fast_import_restore_to_connstring(
         restore_vanilla_pg.configure(["shared_preload_libraries='neon_rmgr'"])
         restore_vanilla_pg.start()
 
+        # create another database & role and try to restore there
+        restore_vanilla_pg.safe_psql("""
+            CREATE ROLE testrole WITH
+                LOGIN
+                PASSWORD 'testpassword'
+                NOSUPERUSER
+                NOCREATEDB
+                NOCREATEROLE;
+        """)
+        restore_vanilla_pg.safe_psql("CREATE DATABASE testdb OWNER testrole;")
+
+        restore_connstring = restore_vanilla_pg.connstr(
+            dbname="testdb", user="testrole", password="testpassword"
+        )
         fast_import.run(
             source_connection_string=vanilla_pg.connstr(),
-            restore_connection_string=restore_vanilla_pg.connstr(),
+            restore_connection_string=restore_connstring,
         )
         vanilla_pg.stop()
-
-        res = restore_vanilla_pg.safe_psql("SELECT count(*) FROM foo;")
+        conn = PgProtocol(dsn=restore_connstring)
+        res = conn.safe_psql("SELECT count(*) FROM foo;")
         log.info(f"Result: {res}")
         assert res[0][0] == 10
 
