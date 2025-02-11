@@ -2901,7 +2901,8 @@ impl Tenant {
     }
 
     /// Performs one compaction iteration. Called periodically from the compaction loop. Returns
-    /// whether another compaction iteration is needed (if we yield), or
+    /// whether another compaction is needed, if we still have pending work or if we yield for
+    /// immediate L0 compaction.
     ///
     /// Compaction can also be explicitly requested for a timeline via the HTTP API.
     async fn compaction_iteration(
@@ -2911,7 +2912,7 @@ impl Tenant {
     ) -> Result<CompactionOutcome, CompactionError> {
         // Don't compact inactive tenants.
         if !self.is_active() {
-            return Ok(CompactionOutcome::Done);
+            return Ok(CompactionOutcome::Skipped);
         }
 
         // Don't compact tenants that can't upload layers. We don't check `may_delete_layers_hint`,
@@ -2919,13 +2920,13 @@ impl Tenant {
         let location = self.tenant_conf.load().location;
         if !location.may_upload_layers_hint() {
             info!("skipping compaction in location state {location:?}");
-            return Ok(CompactionOutcome::Done);
+            return Ok(CompactionOutcome::Skipped);
         }
 
         // Don't compact if the circuit breaker is tripped.
         if self.compaction_circuit_breaker.lock().unwrap().is_broken() {
             info!("skipping compaction due to previous failures");
-            return Ok(CompactionOutcome::Done);
+            return Ok(CompactionOutcome::Skipped);
         }
 
         // Collect all timelines to compact, along with offload instructions and L0 counts.
@@ -2988,10 +2989,15 @@ impl Tenant {
                     .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
                     .await
                     .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
-                has_pending_l0 |= outcome == CompactionOutcome::Pending;
+                match outcome {
+                    CompactionOutcome::Done => {}
+                    CompactionOutcome::Skipped => {}
+                    CompactionOutcome::Pending => has_pending_l0 = true,
+                    CompactionOutcome::YieldForL0 => has_pending_l0 = true,
+                }
             }
             if has_pending_l0 {
-                return Ok(CompactionOutcome::Pending); // do another pass
+                return Ok(CompactionOutcome::YieldForL0); // do another pass
             }
         }
 
@@ -3046,7 +3052,14 @@ impl Tenant {
                     })?;
             }
 
-            has_pending |= outcome == CompactionOutcome::Pending;
+            match outcome {
+                CompactionOutcome::Done => {}
+                CompactionOutcome::Skipped => {}
+                CompactionOutcome::Pending => has_pending = true,
+                // This mostly makes sense when the L0-only pass above is enabled, since there's
+                // otherwise no guarantee that we'll start with the timeline that has high L0.
+                CompactionOutcome::YieldForL0 => return Ok(CompactionOutcome::YieldForL0),
+            }
         }
 
         // Success! Untrip the breaker if necessary.

@@ -609,8 +609,11 @@ pub enum CompactionOutcome {
     /// Still has pending layers to be compacted after this round. Ideally, the scheduler
     /// should immediately schedule another compaction.
     Pending,
-    // TODO: add a skipped variant for cases where we didn't attempt compaction. These currently
-    // return Done, which can lead the caller to believe there is no compaction debt.
+    /// A timeline needs L0 compaction. Yield and schedule an immediate L0 compaction pass (only
+    /// guaranteed when `compaction_l0_first` is enabled).
+    YieldForL0,
+    /// Compaction was skipped, because the timeline is ineligible for compaction.
+    Skipped,
 }
 
 impl Timeline {
@@ -703,10 +706,11 @@ impl Timeline {
                 .unwrap_or(self.get_disk_consistent_lsn());
             l0_min_lsn.max(self.get_ancestor_lsn())
         };
+
         // 1. L0 Compact
-        let l0_compaction_outcome = {
+        let l0_outcome = {
             let timer = self.metrics.compact_time_histo.start_timer();
-            let l0_compaction_outcome = self
+            let l0_outcome = self
                 .compact_level0(
                     target_file_size,
                     options.flags.contains(CompactFlags::ForceL0Compaction),
@@ -714,17 +718,17 @@ impl Timeline {
                 )
                 .await?;
             timer.stop_and_record();
-            l0_compaction_outcome
+            l0_outcome
         };
 
         if options.flags.contains(CompactFlags::OnlyL0Compaction) {
-            return Ok(l0_compaction_outcome);
+            return Ok(l0_outcome);
         }
 
-        if l0_compaction_outcome == CompactionOutcome::Pending {
-            // Yield if we have pending L0 compaction. The scheduler will do another pass.
-            info!("skipping image layer generation and shard ancestor compaction due to L0 compaction did not include all layers.");
-            return Ok(CompactionOutcome::Pending);
+        // Yield if we have pending L0 compaction. The scheduler will do another pass.
+        if l0_outcome == CompactionOutcome::Pending || l0_outcome == CompactionOutcome::YieldForL0 {
+            info!("image/ancestor compaction yielding for L0 compaction");
+            return Ok(CompactionOutcome::YieldForL0);
         }
 
         if l0_l1_boundary_lsn < self.partitioning.read().1 {
@@ -788,7 +792,7 @@ impl Timeline {
                     if let LastImageLayerCreationStatus::Incomplete { .. } = outcome {
                         // Yield and do not do any other kind of compaction.
                         info!("skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction).");
-                        return Ok(CompactionOutcome::Pending);
+                        return Ok(CompactionOutcome::YieldForL0);
                     }
                 }
                 Err(err) => {
