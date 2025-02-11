@@ -2928,13 +2928,13 @@ impl Tenant {
             return Ok(CompactionOutcome::Done);
         }
 
-        // Collect all timelines to compact and/or offload. All timelines in `offload` are also in
-        // `compact`, and will be compacted first.
+        // Collect all timelines to compact, along with offload instructions and L0 counts.
         let mut compact: Vec<Arc<Timeline>> = Vec::new();
         let mut offload: HashSet<TimelineId> = HashSet::new();
-        let offload_enabled = self.get_timeline_offloading_enabled();
+        let mut l0_counts: HashMap<TimelineId, usize> = HashMap::new();
 
         {
+            let offload_enabled = self.get_timeline_offloading_enabled();
             let timelines = self.timelines.lock().unwrap();
             for (&timeline_id, timeline) in timelines.iter() {
                 // Skip inactive timelines.
@@ -2945,7 +2945,10 @@ impl Tenant {
                     continue;
                 }
 
-                // Schedule the timeline for offloading if appropriate.
+                // Schedule the timeline for compaction.
+                compact.push(timeline.clone());
+
+                // Schedule the timeline for offloading if eligible.
                 let can_offload = offload_enabled
                     && timeline.can_offload().0
                     && !timelines
@@ -2954,36 +2957,32 @@ impl Tenant {
                 if can_offload {
                     offload.insert(timeline_id);
                 }
-
-                // Schedule the timeline for compaction.
-                compact.push(timeline.clone());
             }
         } // release timelines lock
 
-        // Pass 1: L0 compaction across all timelines, in order of L0 count. We prioritize this to
-        // bound read amplification.
-        let mut compact_l0: Vec<(Arc<Timeline>, usize)> = Vec::new();
-        let compaction_threshold = self.get_compaction_threshold();
-
         for timeline in &compact {
+            // Can't await while holding lock above.
             if let Ok(lm) = timeline.layers.read().await.layer_map() {
-                let l0_count = lm.level0_deltas().len();
-                if l0_count >= compaction_threshold {
-                    compact_l0.push((timeline.clone(), l0_count));
-                }
+                l0_counts.insert(timeline.timeline_id, lm.level0_deltas().len());
             }
         }
-        let compact_l0 = compact_l0
-            .into_iter()
+
+        // Pass 1: L0 compaction across all timelines, in order of L0 count. We prioritize this to
+        // bound read amplification.
+        let compaction_threshold = self.get_compaction_threshold();
+        let compact_l0 = compact
+            .iter()
+            .map(|tli| (tli, l0_counts.get(&tli.timeline_id).copied().unwrap_or(0)))
+            .filter(|&(_, l0)| l0 >= compaction_threshold)
             .sorted_by_key(|&(_, l0)| l0)
-            .map(|(tli, _)| tli)
             .rev()
+            .map(|(tli, _)| tli.clone())
             .collect_vec();
 
         let mut has_pending_l0 = false;
         for timeline in compact_l0 {
             let outcome = timeline
-                .compact(cancel, EnumSet::only(CompactFlags::OnlyL0Compaction), ctx)
+                .compact(cancel, CompactFlags::OnlyL0Compaction.into(), ctx)
                 .instrument(info_span!("compact_timeline", %timeline.timeline_id))
                 .await
                 .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
