@@ -1135,6 +1135,9 @@ pub struct TimelineInfo {
     /// The upper bound of data which is either already GC'ed, or elegible to be GC'ed at any time based on PITR interval.
     /// This LSN represents the "end of history" for this timeline, and callers should use it to figure out the oldest
     /// LSN at which it is legal to create a branch or ephemeral endpoint.
+    ///
+    /// Note that holders of valid LSN leases may be able to create branches and read pages earlier
+    /// than this LSN.
     pub gc_cutoff_lsn: Lsn,
 
     pub disk_consistent_lsn: Lsn,
