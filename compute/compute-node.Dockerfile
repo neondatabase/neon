@@ -1835,7 +1835,6 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     chown -R postgres:postgres /var/db/postgres && \
     chmod 0750 /var/db/postgres/compute && \
     chmod 0750 /var/db/postgres/pgbouncer && \
-    echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig && \
     # create folder for file cache
     mkdir -p -m 777 /neon/cache && \
     # Create remote extension download directory
@@ -1868,6 +1867,9 @@ COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql
 COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector.yml             /etc/neon_collector.yml
 COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
 COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
+
+# Make the libraries we built available
+RUN echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
 
 ENV LANG=en_US.utf8
 USER postgres
