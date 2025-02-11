@@ -14,6 +14,7 @@ use crate::{
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
 use anyhow::Context;
+use camino::Utf8Path;
 use pageserver_api::{models::detach_ancestor::AncestorDetached, shard::ShardIdentity};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -353,18 +354,13 @@ pub(super) async fn prepare(
 
         // FIXME: the fsync should be mandatory, after both rewrites and copies
         if wrote_any {
-            let timeline_dir = VirtualFile::open(
+            fsync_timeline_dir(
                 &detached
                     .conf
                     .timeline_path(&detached.tenant_shard_id, &detached.timeline_id),
                 ctx,
             )
-            .await
-            .fatal_err("VirtualFile::open for timeline dir fsync");
-            timeline_dir
-                .sync_all()
-                .await
-                .fatal_err("VirtualFile::sync_all timeline dir");
+            .await;
         }
     }
 
@@ -378,7 +374,7 @@ pub(super) async fn prepare(
         tasks.spawn(
             async move {
                 let _permit = limiter.acquire().await;
-                let owned = remote_copy(
+                let (owned, did_hardlink) = remote_copy(
                     &adopted,
                     &timeline,
                     timeline.generation,
@@ -386,16 +382,20 @@ pub(super) async fn prepare(
                     &timeline.cancel,
                 )
                 .await?;
-                tracing::info!(layer=%owned, "remote copied");
-                Ok(owned)
+                tracing::info!(layer=%owned, did_hard_link=%did_hardlink, "remote copied");
+                Ok((owned, did_hardlink))
             }
             .in_current_span(),
         );
     }
 
+    let mut should_fsync = false;
     while let Some(res) = tasks.join_next().await {
         match res {
-            Ok(Ok(owned)) => {
+            Ok(Ok((owned, did_hardlink))) => {
+                if did_hardlink {
+                    should_fsync = true;
+                }
                 new_layers.push(owned);
             }
             Ok(Err(failed)) => {
@@ -405,7 +405,16 @@ pub(super) async fn prepare(
         }
     }
 
-    // TODO: fsync directory again if we hardlinked something
+    // fsync directory again if we hardlinked something
+    if should_fsync {
+        fsync_timeline_dir(
+            &detached
+                .conf
+                .timeline_path(&detached.tenant_shard_id, &detached.timeline_id),
+            ctx,
+        )
+        .await;
+    }
 
     let prepared = PreparedTimelineDetach { layers: new_layers };
 
@@ -633,13 +642,14 @@ async fn copy_lsn_prefix(
 
 /// Creates a new Layer instance for the adopted layer, and ensures it is found in the remote
 /// storage on successful return. without the adopted layer being added to `index_part.json`.
+/// Returns (Layer, did hardlink)
 async fn remote_copy(
     adopted: &Layer,
     adoptee: &Arc<Timeline>,
     generation: Generation,
     shard_identity: ShardIdentity,
     cancel: &CancellationToken,
-) -> Result<Layer, Error> {
+) -> Result<(Layer, bool), Error> {
     let mut metadata = adopted.metadata();
     debug_assert!(metadata.generation <= generation);
     metadata.generation = generation;
@@ -649,6 +659,7 @@ async fn remote_copy(
     let file_name = adopted.layer_desc().layer_name();
 
     // depending if Layer::keep_resident, do a hardlink
+    let did_hardlink;
     let owned = if let Some(adopted_resident) = adopted.keep_resident().await {
         let adopted_path = adopted_resident.local_path();
         let adoptee_path = local_layer_path(
@@ -660,17 +671,21 @@ async fn remote_copy(
         );
         std::fs::hard_link(adopted_path, &adoptee_path)
             .map_err(|e| Error::launder(e.into(), Error::Prepare))?;
+        did_hardlink = true;
         Layer::for_resident(conf, adoptee, adoptee_path, file_name, metadata).drop_eviction_guard()
     } else {
+        did_hardlink = false;
         Layer::for_evicted(conf, adoptee, file_name, metadata)
     };
 
-    adoptee
+    let layer = adoptee
         .remote_client
         .copy_timeline_layer(adopted, &owned, cancel)
         .await
         .map(move |()| owned)
-        .map_err(|e| Error::launder(e, Error::Prepare))
+        .map_err(|e| Error::launder(e, Error::Prepare))?;
+
+    Ok((layer, did_hardlink))
 }
 
 pub(crate) enum DetachingAndReparenting {
@@ -1013,4 +1028,14 @@ fn check_no_archived_children_of_ancestor(
         return Err(Error::Archived(timeline_offloaded.timeline_id));
     }
     Ok(())
+}
+
+async fn fsync_timeline_dir(path: impl AsRef<Utf8Path>, ctx: &RequestContext) {
+    let timeline_dir = VirtualFile::open(path, ctx)
+        .await
+        .fatal_err("VirtualFile::open for timeline dir fsync");
+    timeline_dir
+        .sync_all()
+        .await
+        .fatal_err("VirtualFile::sync_all timeline dir");
 }
