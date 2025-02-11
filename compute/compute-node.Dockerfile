@@ -1793,7 +1793,6 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     chown -R postgres:postgres /var/db/postgres && \
     chmod 0750 /var/db/postgres/compute && \
     chmod 0750 /var/db/postgres/pgbouncer && \
-    echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig && \
     # create folder for file cache
     mkdir -p -m 777 /neon/cache
 
@@ -1879,6 +1878,8 @@ COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql
 COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
 
 COPY --from=awscli /usr/local/aws-cli /usr/local/aws-cli
+
+RUN echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
 
 ENV LANG=en_US.utf8
 USER postgres
