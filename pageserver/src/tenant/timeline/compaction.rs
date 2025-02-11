@@ -609,6 +609,8 @@ pub enum CompactionOutcome {
     /// Still has pending layers to be compacted after this round. Ideally, the scheduler
     /// should immediately schedule another compaction.
     Pending,
+    // TODO: add a skipped variant for cases where we didn't attempt compaction. These currently
+    // return Done, which can lead the caller to believe there is no compaction debt.
 }
 
 impl Timeline {
@@ -715,10 +717,12 @@ impl Timeline {
             l0_compaction_outcome
         };
 
-        if let CompactionOutcome::Pending = l0_compaction_outcome {
-            // Yield and do not do any other kind of compaction. True means
-            // that we have pending L0 compaction tasks and the compaction scheduler
-            // will prioritize compacting this tenant/timeline again.
+        if options.flags.contains(CompactFlags::OnlyL0Compaction) {
+            return Ok(l0_compaction_outcome);
+        }
+
+        if l0_compaction_outcome == CompactionOutcome::Pending {
+            // Yield if we have pending L0 compaction. The scheduler will do another pass.
             info!("skipping image layer generation and shard ancestor compaction due to L0 compaction did not include all layers.");
             return Ok(CompactionOutcome::Pending);
         }
