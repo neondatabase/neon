@@ -547,7 +547,7 @@ pub mod tenant_conf_defaults {
     // most of our pageservers. Compaction ~50 layers requires about 2GB memory (could be reduced later by optimizing L0 hole
     // calculation to avoid loading all keys into the memory). So with this config, we can get a maximum peak compaction usage of 18GB.
     pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 50;
-    pub const DEFAULT_COMPACTION_L0_FIRST: bool = true; // TODO(merge): disable by default
+    pub const DEFAULT_COMPACTION_L0_FIRST: bool = false;
 
     pub const DEFAULT_COMPACTION_ALGORITHM: crate::models::CompactionAlgorithm =
         crate::models::CompactionAlgorithm::Legacy;
