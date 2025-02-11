@@ -352,8 +352,11 @@ pub struct Timeline {
     /// to be notified when layer flushing has finished, subscribe to the layer_flush_done channel
     layer_flush_done_tx: tokio::sync::watch::Sender<(u64, Result<(), FlushLayerError>)>,
 
-    // Needed to ensure that we can't create a branch at a point that was already garbage collected
-    pub latest_gc_cutoff_lsn: Rcu<Lsn>,
+    // The LSN at which we have executed GC: whereas [`Self::gc_info`] records the LSN at which
+    // we _intend_ to GC (i.e. the PITR cutoff), this LSN records where we actually last did it.
+    // Because PITR interval is mutable, it's possible for this LSN to be earlier or later than
+    // the planned GC cutoff.
+    pub applied_gc_cutoff_lsn: Rcu<Lsn>,
 
     pub(crate) gc_compaction_layer_update_lock: tokio::sync::RwLock<()>,
 
@@ -1074,8 +1077,8 @@ impl Timeline {
     }
 
     /// Read timeline's GC cutoff: this is the LSN at which GC has started to happen
-    pub(crate) fn get_latest_gc_cutoff_lsn(&self) -> RcuReadGuard<Lsn> {
-        self.latest_gc_cutoff_lsn.read()
+    pub(crate) fn get_applied_gc_cutoff_lsn(&self) -> RcuReadGuard<Lsn> {
+        self.applied_gc_cutoff_lsn.read()
     }
 
     /// Read timeline's planned GC cutoff: this is the logical end of history that users
@@ -1588,7 +1591,7 @@ impl Timeline {
                     };
 
                     if init || validate {
-                        let latest_gc_cutoff_lsn = self.get_latest_gc_cutoff_lsn();
+                        let latest_gc_cutoff_lsn = self.get_applied_gc_cutoff_lsn();
                         if lsn < *latest_gc_cutoff_lsn {
                             bail!("tried to request a page version that was garbage collected. requested at {} gc cutoff {}", lsn, *latest_gc_cutoff_lsn);
                         }
@@ -2631,7 +2634,7 @@ impl Timeline {
                     LastImageLayerCreationStatus::default(),
                 )),
 
-                latest_gc_cutoff_lsn: Rcu::new(metadata.latest_gc_cutoff_lsn()),
+                applied_gc_cutoff_lsn: Rcu::new(metadata.latest_gc_cutoff_lsn()),
                 initdb_lsn: metadata.initdb_lsn(),
 
                 current_logical_size: if disk_consistent_lsn.is_valid() {
@@ -3635,7 +3638,7 @@ impl Timeline {
         // the timeline, then it will remove layers that are required for fulfilling
         // the current get request (read-path cannot "look back" and notice the new
         // image layer).
-        let _gc_cutoff_holder = timeline.get_latest_gc_cutoff_lsn();
+        let _gc_cutoff_holder = timeline.get_applied_gc_cutoff_lsn();
 
         // See `compaction::compact_with_gc` for why we need this.
         let _guard = timeline.gc_compaction_layer_update_lock.read().await;
@@ -4321,7 +4324,7 @@ impl Timeline {
         let update = crate::tenant::metadata::MetadataUpdate::new(
             disk_consistent_lsn,
             ondisk_prev_record_lsn,
-            *self.latest_gc_cutoff_lsn.read(),
+            *self.applied_gc_cutoff_lsn.read(),
         );
 
         fail_point!("checkpoint-before-saving-metadata", |x| bail!(
@@ -5548,7 +5551,7 @@ impl Timeline {
                 // PITR interval is set & we didn't look up a timestamp successfully.  Conservatively assume PITR
                 // cannot advance beyond what was already GC'd, and respect space-based retention
                 GcCutoffs {
-                    time: *self.get_latest_gc_cutoff_lsn(),
+                    time: *self.get_applied_gc_cutoff_lsn(),
                     space: space_cutoff,
                 }
             }
@@ -5669,7 +5672,7 @@ impl Timeline {
         let mut result: GcResult = GcResult::default();
 
         // Nothing to GC. Return early.
-        let latest_gc_cutoff = *self.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff = *self.get_applied_gc_cutoff_lsn();
         if latest_gc_cutoff >= new_gc_cutoff {
             info!(
                 "Nothing to GC: new_gc_cutoff_lsn {new_gc_cutoff}, latest_gc_cutoff_lsn {latest_gc_cutoff}",
@@ -5683,7 +5686,7 @@ impl Timeline {
         //
         // The GC cutoff should only ever move forwards.
         let waitlist = {
-            let write_guard = self.latest_gc_cutoff_lsn.lock_for_write();
+            let write_guard = self.applied_gc_cutoff_lsn.lock_for_write();
             if *write_guard > new_gc_cutoff {
                 return Err(GcError::BadLsn {
                     why: format!(

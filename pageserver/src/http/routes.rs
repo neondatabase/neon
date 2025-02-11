@@ -485,7 +485,7 @@ async fn build_timeline_info_common(
 
     let gc_cutoff = std::cmp::max(
         timeline.get_gc_cutoff_lsn(),
-        *timeline.get_latest_gc_cutoff_lsn(),
+        *timeline.get_applied_gc_cutoff_lsn(),
     );
 
     let info = TimelineInfo {
@@ -504,7 +504,7 @@ async fn build_timeline_info_common(
         // actually trimmed data to), which can pass each other when PITR is changed.
         latest_gc_cutoff_lsn: gc_cutoff,
         gc_cutoff_lsn: gc_cutoff,
-        applied_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
+        applied_gc_cutoff_lsn: *timeline.get_applied_gc_cutoff_lsn(),
         current_logical_size: current_logical_size.size_dont_care_about_accuracy(),
         current_logical_size_is_accurate: match current_logical_size.accuracy() {
             tenant::timeline::logical_size::Accuracy::Approximate => false,
