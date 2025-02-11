@@ -3007,7 +3007,7 @@ impl Tenant {
             }
 
             let mut outcome = timeline
-                .compact(cancel, EnumSet::only(CompactFlags::OnlyL0Compaction), ctx)
+                .compact(cancel, EnumSet::default(), ctx)
                 .instrument(info_span!("compact_timeline", %timeline.timeline_id))
                 .await
                 .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
