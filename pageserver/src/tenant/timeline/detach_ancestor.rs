@@ -14,7 +14,6 @@ use crate::{
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
 use anyhow::Context;
-use camino::Utf8Path;
 use pageserver_api::{models::detach_ancestor::AncestorDetached, shard::ShardIdentity};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -354,13 +353,7 @@ pub(super) async fn prepare(
 
         // FIXME: the fsync should be mandatory, after both rewrites and copies
         if wrote_any {
-            fsync_timeline_dir(
-                &detached
-                    .conf
-                    .timeline_path(&detached.tenant_shard_id, &detached.timeline_id),
-                ctx,
-            )
-            .await;
+            fsync_timeline_dir(&detached, ctx).await;
         }
     }
 
@@ -407,13 +400,7 @@ pub(super) async fn prepare(
 
     // fsync directory again if we hardlinked something
     if should_fsync {
-        fsync_timeline_dir(
-            &detached
-                .conf
-                .timeline_path(&detached.tenant_shard_id, &detached.timeline_id),
-            ctx,
-        )
-        .await;
+        fsync_timeline_dir(&detached, ctx).await;
     }
 
     let prepared = PreparedTimelineDetach { layers: new_layers };
@@ -1030,8 +1017,11 @@ fn check_no_archived_children_of_ancestor(
     Ok(())
 }
 
-async fn fsync_timeline_dir(path: impl AsRef<Utf8Path>, ctx: &RequestContext) {
-    let timeline_dir = VirtualFile::open(path, ctx)
+async fn fsync_timeline_dir(timeline: &Timeline, ctx: &RequestContext) {
+    let path = &timeline
+        .conf
+        .timeline_path(&timeline.tenant_shard_id, &timeline.timeline_id);
+    let timeline_dir = VirtualFile::open(&path, ctx)
         .await
         .fatal_err("VirtualFile::open for timeline dir fsync");
     timeline_dir
