@@ -23,7 +23,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use typed_json::json;
 use url::Url;
-use urlencoding;
 use utils::http::error::ApiError;
 use uuid::Uuid;
 

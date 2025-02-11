@@ -212,15 +212,15 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         timeout: Duration,
         epoch: std::time::Duration,
         metrics: &'static ApiLockMetrics,
-    ) -> prometheus::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             name,
             node_locks: ClashMap::with_shard_amount(shards),
             config,
             timeout,
             epoch,
             metrics,
-        })
+        }
     }
 
     pub(crate) async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, ApiLockError> {
