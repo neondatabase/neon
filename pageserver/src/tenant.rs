@@ -2966,27 +2966,29 @@ impl Tenant {
 
         // Pass 1: L0 compaction across all timelines, in order of L0 count. We prioritize this to
         // bound read amplification.
-        let compaction_threshold = self.get_compaction_threshold();
-        let compact_l0 = compact
-            .iter()
-            .map(|tli| (tli, l0_counts.get(&tli.timeline_id).copied().unwrap_or(0)))
-            .filter(|&(_, l0)| l0 >= compaction_threshold)
-            .sorted_by_key(|&(_, l0)| l0)
-            .rev()
-            .map(|(tli, _)| tli.clone())
-            .collect_vec();
+        if self.get_compaction_l0_first() {
+            let compaction_threshold = self.get_compaction_threshold();
+            let compact_l0 = compact
+                .iter()
+                .map(|tli| (tli, l0_counts.get(&tli.timeline_id).copied().unwrap_or(0)))
+                .filter(|&(_, l0)| l0 >= compaction_threshold)
+                .sorted_by_key(|&(_, l0)| l0)
+                .rev()
+                .map(|(tli, _)| tli.clone())
+                .collect_vec();
 
-        let mut has_pending_l0 = false;
-        for timeline in compact_l0 {
-            let outcome = timeline
-                .compact(cancel, CompactFlags::OnlyL0Compaction.into(), ctx)
-                .instrument(info_span!("compact_timeline", %timeline.timeline_id))
-                .await
-                .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
-            has_pending_l0 |= outcome == CompactionOutcome::Pending;
-        }
-        if has_pending_l0 {
-            return Ok(CompactionOutcome::Pending); // do another pass
+            let mut has_pending_l0 = false;
+            for timeline in compact_l0 {
+                let outcome = timeline
+                    .compact(cancel, CompactFlags::OnlyL0Compaction.into(), ctx)
+                    .instrument(info_span!("compact_timeline", %timeline.timeline_id))
+                    .await
+                    .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
+                has_pending_l0 |= outcome == CompactionOutcome::Pending;
+            }
+            if has_pending_l0 {
+                return Ok(CompactionOutcome::Pending); // do another pass
+            }
         }
 
         // Pass 2: image compaction and timeline offloading. If any timelines have accumulated
@@ -3841,6 +3843,13 @@ impl Tenant {
         tenant_conf
             .compaction_upper_limit
             .unwrap_or(self.conf.default_tenant_conf.compaction_upper_limit)
+    }
+
+    pub fn get_compaction_l0_first(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .compaction_l0_first
+            .unwrap_or(self.conf.default_tenant_conf.compaction_l0_first)
     }
 
     pub fn get_gc_horizon(&self) -> u64 {
@@ -5512,6 +5521,7 @@ pub(crate) mod harness {
                 compaction_threshold: Some(tenant_conf.compaction_threshold),
                 compaction_upper_limit: Some(tenant_conf.compaction_upper_limit),
                 compaction_algorithm: Some(tenant_conf.compaction_algorithm),
+                compaction_l0_first: Some(tenant_conf.compaction_l0_first),
                 l0_flush_delay_threshold: tenant_conf.l0_flush_delay_threshold,
                 l0_flush_stall_threshold: tenant_conf.l0_flush_stall_threshold,
                 l0_flush_wait_upload: Some(tenant_conf.l0_flush_wait_upload),
