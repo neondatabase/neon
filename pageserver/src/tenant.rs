@@ -2985,7 +2985,7 @@ impl Tenant {
             for timeline in compact_l0 {
                 let outcome = timeline
                     .compact(cancel, CompactFlags::OnlyL0Compaction.into(), ctx)
-                    .instrument(info_span!("compact_timeline", %timeline.timeline_id))
+                    .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
                     .await
                     .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
                 has_pending_l0 |= outcome == CompactionOutcome::Pending;
@@ -3014,7 +3014,7 @@ impl Tenant {
 
             let mut outcome = timeline
                 .compact(cancel, EnumSet::default(), ctx)
-                .instrument(info_span!("compact_timeline", %timeline.timeline_id))
+                .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
                 .await
                 .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
 
@@ -3037,7 +3037,7 @@ impl Tenant {
             if outcome == CompactionOutcome::Done && offload.contains(&timeline.timeline_id) {
                 pausable_failpoint!("before-timeline-auto-offload");
                 offload_timeline(self, &timeline)
-                    .instrument(info_span!("offload_timeline", %timeline.timeline_id))
+                    .instrument(info_span!("offload_timeline", timeline_id = %timeline.timeline_id))
                     .await
                     .or_else(|err| match err {
                         // Ignore this, we likely raced with unarchival.
