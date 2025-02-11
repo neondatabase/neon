@@ -1368,6 +1368,7 @@ def test_sharding_split_failures(
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
     workload.write_rows(100)
+    compute_reconfigure_listener.register_workload(workload)
 
     # Put the environment into a failing state (exact meaning depends on `failure`)
     failure.apply(env)
