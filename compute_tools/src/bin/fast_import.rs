@@ -53,6 +53,16 @@ enum Command {
         interactive: bool,
         #[clap(long, default_value_t = 5432)]
         pg_port: u16, // port to run postgres on, 5432 is default
+
+        /// Number of CPUs in the system. This is used to configure # of
+        /// parallel worker processes, for index creation.
+        #[clap(long, env = "NEON_IMPORTER_NUM_CPUS")]
+        num_cpus: Option<usize>,
+
+        /// Amount of RAM in the system. This is used to configure shared_buffers
+        /// and maintenance_work_mem.
+        #[clap(long, env = "NEON_IMPORTER_MEMORY_MB")]
+        memory_mb: Option<usize>,
     },
 
     DumpRestore {
@@ -171,8 +181,15 @@ impl PostgresProcess {
         initdb_user: &str,
         port: u16,
         nproc: usize,
+        memory_mb: usize,
     ) -> Result<&tokio::process::Child, anyhow::Error> {
         self.prepare(initdb_user).await?;
+
+        // Somewhat arbitrarily, use 10 % of memory for shared buffer cache, 70% for
+        // maintenance_work_mem (i.e. for sorting during index creation), and leave the rest
+        // available for misc other stuff that PostgreSQL uses memory for.
+        let shared_buffers_mb = ((memory_mb as f32) * 0.10) as usize;
+        let maintenance_work_mem_mb = ((memory_mb as f32) * 0.70) as usize;
 
         //
         // Launch postgres process
@@ -182,12 +199,16 @@ impl PostgresProcess {
             .arg(&self.pgdata_dir)
             .args(["-p", &format!("{port}")])
             .args(["-c", "wal_level=minimal"])
+            .args(["-c", &format!("shared_buffers={shared_buffers_mb}MB")])
             .args(["-c", "shared_buffers=10GB"])
             .args(["-c", "max_wal_senders=0"])
             .args(["-c", "fsync=off"])
             .args(["-c", "full_page_writes=off"])
             .args(["-c", "synchronous_commit=off"])
-            .args(["-c", "maintenance_work_mem=8388608"])
+            .args([
+                "-c",
+                &format!("maintenance_work_mem={maintenance_work_mem_mb}MB"),
+            ])
             .args(["-c", &format!("max_parallel_maintenance_workers={nproc}")])
             .args(["-c", &format!("max_parallel_workers={nproc}")])
             .args(["-c", &format!("max_parallel_workers_per_gather={nproc}")])
@@ -398,6 +419,8 @@ async fn cmd_pgdata(
     workdir: Utf8PathBuf,
     pg_bin_dir: Utf8PathBuf,
     pg_lib_dir: Utf8PathBuf,
+    num_cpus: Option<usize>,
+    memory_mb: Option<usize>,
 ) -> Result<(), anyhow::Error> {
     if maybe_spec.is_none() && source_connection_string.is_none() {
         bail!("spec must be provided for pgdata command");
@@ -429,8 +452,9 @@ async fn cmd_pgdata(
 
     let pgdata_dir = workdir.join("pgdata");
     let mut proc = PostgresProcess::new(pgdata_dir.clone(), pg_bin_dir.clone(), pg_lib_dir.clone());
-    let nproc = num_cpus::get();
-    proc.start(superuser, pg_port, nproc).await?;
+    let nproc = num_cpus.unwrap_or_else(num_cpus::get);
+    let memory_mb = memory_mb.unwrap_or(256);
+    proc.start(superuser, pg_port, nproc, memory_mb).await?;
     wait_until_ready(destination_connstring.clone(), "neondb".to_string()).await;
 
     run_dump_restore(
@@ -585,6 +609,8 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             source_connection_string,
             interactive,
             pg_port,
+            num_cpus,
+            memory_mb,
         } => {
             cmd_pgdata(
                 kms_client,
@@ -596,6 +622,8 @@ pub(crate) async fn main() -> anyhow::Result<()> {
                 args.working_directory,
                 args.pg_bin_dir,
                 args.pg_lib_dir,
+                num_cpus,
+                memory_mb,
             )
             .await?;
         }

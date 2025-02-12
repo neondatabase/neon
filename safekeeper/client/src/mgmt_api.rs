@@ -3,11 +3,11 @@
 //! Partially copied from pageserver client; some parts might be better to be
 //! united.
 
+use http_utils::error::HttpErrorBody;
 use reqwest::{IntoUrl, Method, StatusCode};
 use safekeeper_api::models::{TimelineCreateRequest, TimelineStatus};
 use std::error::Error as _;
 use utils::{
-    http::error::HttpErrorBody,
     id::{NodeId, TenantId, TimelineId},
     logging::SecretString,
 };

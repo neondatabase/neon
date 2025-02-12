@@ -268,13 +268,12 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
         match output {
             Ok(outcome) => {
                 error_run = 0;
-                // If there's more compaction work pending, reschedule immediately. This isn't
-                // necessarily L0 compaction, but that's fine for now.
-                //
-                // TODO: differentiate between L0 compaction and other compaction. The former needs
-                // to be responsive, the latter doesn't.
-                if outcome == CompactionOutcome::Pending {
-                    tenant.l0_compaction_trigger.notify_one();
+                // If there's more compaction work, L0 or not, schedule an immediate run.
+                match outcome {
+                    CompactionOutcome::Done => {}
+                    CompactionOutcome::Skipped => {}
+                    CompactionOutcome::YieldForL0 => tenant.l0_compaction_trigger.notify_one(),
+                    CompactionOutcome::Pending => tenant.l0_compaction_trigger.notify_one(),
                 }
             }
 
