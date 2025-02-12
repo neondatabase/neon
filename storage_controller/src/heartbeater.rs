@@ -384,37 +384,37 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
 
         let mut deltas = Vec::new();
         let now = Instant::now();
-        for (node_id, ps_state) in new_state.iter_mut() {
+        for (node_id, sk_state) in new_state.iter_mut() {
             use std::collections::hash_map::Entry::*;
             let entry = self.state.entry(*node_id);
 
             let mut needs_update = false;
             match entry {
-                Occupied(ref occ) => match (occ.get(), &ps_state) {
+                Occupied(ref occ) => match (occ.get(), &sk_state) {
                     (SafekeeperState::Offline, SafekeeperState::Offline) => {}
                     (SafekeeperState::Available { last_seen_at, .. }, SafekeeperState::Offline) => {
                         if now - *last_seen_at >= self.max_offline_interval {
-                            deltas.push((*node_id, ps_state.clone()));
+                            deltas.push((*node_id, sk_state.clone()));
                             needs_update = true;
                         }
                     }
                     _ => {
-                        deltas.push((*node_id, ps_state.clone()));
+                        deltas.push((*node_id, sk_state.clone()));
                         needs_update = true;
                     }
                 },
                 Vacant(_) => {
                     // This is a new node. Don't generate a delta for it.
-                    deltas.push((*node_id, ps_state.clone()));
+                    deltas.push((*node_id, sk_state.clone()));
                 }
             }
 
             match entry {
                 Occupied(mut occ) if needs_update => {
-                    (*occ.get_mut()) = ps_state.clone();
+                    (*occ.get_mut()) = sk_state.clone();
                 }
                 Vacant(vac) => {
-                    vac.insert(ps_state.clone());
+                    vac.insert(sk_state.clone());
                 }
                 _ => {}
             }
