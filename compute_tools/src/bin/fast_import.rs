@@ -59,7 +59,7 @@ enum Command {
         #[clap(long)]
         source_connection_string: Option<String>,
         #[clap(long)]
-        restore_connection_string: Option<String>, // will not run postgres if specified, will do pg_restore to this connection string
+        destination_connection_string: Option<String>, // will not run postgres if specified, will do pg_restore to this connection string
     },
 }
 
@@ -85,7 +85,7 @@ struct Spec {
     #[serde_as(as = "serde_with::base64::Base64")]
     source_connstring_ciphertext_base64: Vec<u8>,
     #[serde_as(as = "Option<serde_with::base64::Base64>")]
-    restore_connstring_ciphertext_base64: Option<Vec<u8>>,
+    destination_connstring_ciphertext_base64: Option<Vec<u8>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -295,7 +295,7 @@ async fn run_dump_restore(
     pg_bin_dir: Utf8PathBuf,
     pg_lib_dir: Utf8PathBuf,
     source_connstring: String,
-    restore_connstring: String,
+    destination_connstring: String,
 ) -> Result<(), anyhow::Error> {
     let dumpdir = workdir.join("dumpdir");
 
@@ -357,7 +357,7 @@ async fn run_dump_restore(
         let mut pg_restore = tokio::process::Command::new(pg_bin_dir.join("pg_restore"))
             .args(&common_args)
             .arg("-d")
-            .arg(&restore_connstring)
+            .arg(&destination_connstring)
             // POSITIONAL args
             .arg(&dumpdir)
             // how we run it
@@ -422,7 +422,7 @@ async fn cmd_pgdata(
     };
 
     let superuser = "cloud_admin";
-    let restore_connstring = format!(
+    let destination_connstring = format!(
         "host=localhost port={} user={} dbname=neondb",
         pg_port, superuser
     );
@@ -431,14 +431,14 @@ async fn cmd_pgdata(
     let mut proc = PostgresProcess::new(pgdata_dir.clone(), pg_bin_dir.clone(), pg_lib_dir.clone());
     let nproc = num_cpus::get();
     proc.start(superuser, pg_port, nproc).await?;
-    wait_until_ready(restore_connstring.clone(), "neondb".to_string()).await;
+    wait_until_ready(destination_connstring.clone(), "neondb".to_string()).await;
 
     run_dump_restore(
         workdir.clone(),
         pg_bin_dir,
         pg_lib_dir,
         source_connection_string,
-        restore_connstring,
+        destination_connstring,
     )
     .await?;
 
@@ -477,12 +477,12 @@ async fn cmd_dumprestore(
     kms_client: Option<aws_sdk_kms::Client>,
     maybe_spec: Option<Spec>,
     source_connection_string: Option<String>,
-    restore_connection_string: Option<String>,
+    destination_connection_string: Option<String>,
     workdir: Utf8PathBuf,
     pg_bin_dir: Utf8PathBuf,
     pg_lib_dir: Utf8PathBuf,
 ) -> Result<(), anyhow::Error> {
-    let (source_connstring, restore_connstring) = if let Some(spec) = maybe_spec {
+    let (source_connstring, destination_connstring) = if let Some(spec) = maybe_spec {
         match spec.encryption_secret {
             EncryptionSecret::KMS { key_id } => {
                 let source = decode_connstring(
@@ -492,25 +492,25 @@ async fn cmd_dumprestore(
                 )
                 .await?;
 
-                let restore = if let Some(restore_ciphertext) =
-                    spec.restore_connstring_ciphertext_base64
+                let dest = if let Some(dest_ciphertext) =
+                    spec.destination_connstring_ciphertext_base64
                 {
-                    decode_connstring(kms_client.as_ref().unwrap(), &key_id, restore_ciphertext)
+                    decode_connstring(kms_client.as_ref().unwrap(), &key_id, dest_ciphertext)
                         .await?
                 } else {
-                    bail!("restore connection string must be provided in spec for dump_restore command");
+                    bail!("destination connection string must be provided in spec for dump_restore command");
                 };
 
-                (source, restore)
+                (source, dest)
             }
         }
     } else {
         (
             source_connection_string.unwrap(),
-            if let Some(val) = restore_connection_string {
+            if let Some(val) = destination_connection_string {
                 val
             } else {
-                bail!("restore connection string must be provided for dump_restore command");
+                bail!("destination connection string must be provided for dump_restore command");
             },
         )
     };
@@ -520,7 +520,7 @@ async fn cmd_dumprestore(
         pg_bin_dir,
         pg_lib_dir,
         source_connstring,
-        restore_connstring,
+        destination_connstring,
     )
     .await
 }
@@ -601,13 +601,13 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         }
         Command::DumpRestore {
             source_connection_string,
-            restore_connection_string,
+            destination_connection_string,
         } => {
             cmd_dumprestore(
                 kms_client,
                 spec,
                 source_connection_string,
-                restore_connection_string,
+                destination_connection_string,
                 args.working_directory,
                 args.pg_bin_dir,
                 args.pg_lib_dir,

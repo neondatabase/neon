@@ -67,13 +67,13 @@ class FastImport(AbstractNeonCli):
         self,
         s3prefix: str | None = None,
         source_connection_string: str | None = None,
-        restore_connection_string: str | None = None,
+        destination_connection_string: str | None = None,
     ):
         return self.run(
             "dump-restore",
             s3prefix=s3prefix,
             source_connection_string=source_connection_string,
-            restore_connection_string=restore_connection_string,
+            destination_connection_string=destination_connection_string,
         )
 
     def run(
@@ -82,7 +82,7 @@ class FastImport(AbstractNeonCli):
         s3prefix: str | None = None,
         pg_port: int | None = None,
         source_connection_string: str | None = None,
-        restore_connection_string: str | None = None,
+        destination_connection_string: str | None = None,
         interactive: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         if self.cmd is not None:
@@ -99,8 +99,8 @@ class FastImport(AbstractNeonCli):
             args.append(f"--pg-port={pg_port}")
         if source_connection_string is not None:
             args.append(f"--source-connection-string={source_connection_string}")
-        if restore_connection_string is not None:
-            args.append(f"--restore-connection-string={restore_connection_string}")
+        if destination_connection_string is not None:
+            args.append(f"--destination-connection-string={destination_connection_string}")
         if interactive:
             args.append("--interactive")
 

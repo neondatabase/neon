@@ -377,15 +377,15 @@ def test_fast_import_restore_to_connstring(
     vanilla_pg.start()
     vanilla_pg.safe_psql("CREATE TABLE foo (a int); INSERT INTO foo SELECT generate_series(1, 10);")
 
-    pgdatadir = test_output_dir / "restore-pgdata"
+    pgdatadir = test_output_dir / "destination-pgdata"
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
-    with VanillaPostgres(pgdatadir, pg_bin, port) as restore_vanilla_pg:
-        restore_vanilla_pg.configure(["shared_preload_libraries='neon_rmgr'"])
-        restore_vanilla_pg.start()
+    with VanillaPostgres(pgdatadir, pg_bin, port) as destination_vanilla_pg:
+        destination_vanilla_pg.configure(["shared_preload_libraries='neon_rmgr'"])
+        destination_vanilla_pg.start()
 
         # create another database & role and try to restore there
-        restore_vanilla_pg.safe_psql("""
+        destination_vanilla_pg.safe_psql("""
             CREATE ROLE testrole WITH
                 LOGIN
                 PASSWORD 'testpassword'
@@ -393,17 +393,17 @@ def test_fast_import_restore_to_connstring(
                 NOCREATEDB
                 NOCREATEROLE;
         """)
-        restore_vanilla_pg.safe_psql("CREATE DATABASE testdb OWNER testrole;")
+        destination_vanilla_pg.safe_psql("CREATE DATABASE testdb OWNER testrole;")
 
-        restore_connstring = restore_vanilla_pg.connstr(
+        destination_connstring = destination_vanilla_pg.connstr(
             dbname="testdb", user="testrole", password="testpassword"
         )
         fast_import.run_dump_restore(
             source_connection_string=vanilla_pg.connstr(),
-            restore_connection_string=restore_connstring,
+            destination_connection_string=destination_connstring,
         )
         vanilla_pg.stop()
-        conn = PgProtocol(dsn=restore_connstring)
+        conn = PgProtocol(dsn=destination_connstring)
         res = conn.safe_psql("SELECT count(*) FROM foo;")
         log.info(f"Result: {res}")
         assert res[0][0] == 10
@@ -436,23 +436,23 @@ def test_fast_import_restore_to_connstring_from_s3_spec(
     vanilla_pg.safe_psql("CREATE TABLE foo (a int); INSERT INTO foo SELECT generate_series(1, 10);")
 
     # Start target postgres
-    pgdatadir = test_output_dir / "restore-pgdata"
+    pgdatadir = test_output_dir / "destination-pgdata"
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
-    with VanillaPostgres(pgdatadir, pg_bin, port) as restore_vanilla_pg:
-        restore_vanilla_pg.configure(["shared_preload_libraries='neon_rmgr'"])
-        restore_vanilla_pg.start()
+    with VanillaPostgres(pgdatadir, pg_bin, port) as destination_vanilla_pg:
+        destination_vanilla_pg.configure(["shared_preload_libraries='neon_rmgr'"])
+        destination_vanilla_pg.start()
 
         # Encrypt connstrings and put spec into S3
         source_connstring_encrypted = encrypt(vanilla_pg.connstr())
-        restore_connstring_encrypted = encrypt(restore_vanilla_pg.connstr())
+        destination_connstring_encrypted = encrypt(destination_vanilla_pg.connstr())
         spec = {
             "encryption_secret": {"KMS": {"key_id": key_id}},
             "source_connstring_ciphertext_base64": base64.b64encode(
                 source_connstring_encrypted["CiphertextBlob"]
             ).decode("utf-8"),
-            "restore_connstring_ciphertext_base64": base64.b64encode(
-                restore_connstring_encrypted["CiphertextBlob"]
+            "destination_connstring_ciphertext_base64": base64.b64encode(
+                destination_connstring_encrypted["CiphertextBlob"]
             ).decode("utf-8"),
         }
 
@@ -473,7 +473,7 @@ def test_fast_import_restore_to_connstring_from_s3_spec(
         fast_import.run_dump_restore(s3prefix="s3://test-bucket/test-prefix")
         vanilla_pg.stop()
 
-        res = restore_vanilla_pg.safe_psql("SELECT count(*) FROM foo;")
+        res = destination_vanilla_pg.safe_psql("SELECT count(*) FROM foo;")
         log.info(f"Result: {res}")
         assert res[0][0] == 10
 
