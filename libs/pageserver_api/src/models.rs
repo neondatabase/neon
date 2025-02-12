@@ -1129,7 +1129,7 @@ pub struct TimelineInfo {
     pub last_record_lsn: Lsn,
     pub prev_record_lsn: Option<Lsn>,
 
-    /// Legacy field for compat with control plane.  Synonym of `gc_cutoff_lsn`.
+    /// Legacy field for compat with control plane.  Synonym of `min_readable_lsn`.
     /// TODO: remove once control plane no longer reads it.
     pub latest_gc_cutoff_lsn: Lsn,
 
