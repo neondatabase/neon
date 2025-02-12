@@ -4,8 +4,10 @@ import subprocess
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
+from _pytest.config import Config
 
 from fixtures.log_helper import log
 from fixtures.neon_cli import AbstractNeonCli
@@ -123,9 +125,17 @@ def fast_import(
     test_output_dir: Path,
     neon_binpath: Path,
     pg_distrib_dir: Path,
+    pytestconfig: Config,
 ) -> Iterator[FastImport]:
     workdir = Path(tempfile.mkdtemp(dir=test_output_dir, prefix="fast_import_"))
-    with FastImport(None, neon_binpath, pg_distrib_dir, pg_version, workdir, cleanup=False) as fi:
+    with FastImport(
+        None,
+        neon_binpath,
+        pg_distrib_dir,
+        pg_version,
+        workdir,
+        cleanup=cast(bool, pytestconfig.getoption("--preserve-database-files")),
+    ) as fi:
         yield fi
 
         if fi.cmd is None:
