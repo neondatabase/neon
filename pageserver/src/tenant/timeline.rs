@@ -4552,74 +4552,71 @@ impl Timeline {
         let mut wrote_keys = false;
 
         let mut key_request_accum = KeySpaceAccum::new();
-        for range in &partition.ranges {
-            let mut key = range.start;
-            while key < range.end {
-                // Decide whether to retain this key: usually we do, but sharded tenants may
-                // need to drop keys that don't belong to them.  If we retain the key, add it
-                // to `key_request_accum` for later issuing a vectored get
-                if self.shard_identity.is_key_disposable(&key) {
-                    debug!(
-                        "Dropping key {} during compaction (it belongs on shard {:?})",
-                        key,
-                        self.shard_identity.get_shard_number(&key)
-                    );
-                } else {
-                    key_request_accum.add_key(key);
+
+        for (key, range_end) in partition.iter() {
+            // Decide whether to retain this key: usually we do, but sharded tenants may
+            // need to drop keys that don't belong to them.  If we retain the key, add it
+            // to `key_request_accum` for later issuing a vectored get
+            if self.shard_identity.is_key_disposable(&key) {
+                debug!(
+                    "Dropping key {} during compaction (it belongs on shard {:?})",
+                    key,
+                    self.shard_identity.get_shard_number(&key)
+                );
+            } else {
+                key_request_accum.add_key(key);
+            }
+
+            let last_key_in_range = key.next() == range_end;
+
+            // Maybe flush `key_rest_accum`
+            if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
+                || (last_key_in_range && key_request_accum.raw_size() > 0)
+            {
+                let results = self
+                    .get_vectored(
+                        key_request_accum.consume_keyspace(),
+                        lsn,
+                        io_concurrency.clone(),
+                        ctx,
+                    )
+                    .await?;
+
+                if self.cancel.is_cancelled() {
+                    return Err(CreateImageLayersError::Cancelled);
                 }
 
-                let last_key_in_range = key.next() == range.end;
-                key = key.next();
-
-                // Maybe flush `key_rest_accum`
-                if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
-                    || (last_key_in_range && key_request_accum.raw_size() > 0)
-                {
-                    let results = self
-                        .get_vectored(
-                            key_request_accum.consume_keyspace(),
-                            lsn,
-                            io_concurrency.clone(),
-                            ctx,
-                        )
-                        .await?;
-
-                    if self.cancel.is_cancelled() {
-                        return Err(CreateImageLayersError::Cancelled);
-                    }
-
-                    for (img_key, img) in results {
-                        let img = match img {
-                            Ok(img) => img,
-                            Err(err) => {
-                                // If we fail to reconstruct a VM or FSM page, we can zero the
-                                // page without losing any actual user data. That seems better
-                                // than failing repeatedly and getting stuck.
-                                //
-                                // We had a bug at one point, where we truncated the FSM and VM
-                                // in the pageserver, but the Postgres didn't know about that
-                                // and continued to generate incremental WAL records for pages
-                                // that didn't exist in the pageserver. Trying to replay those
-                                // WAL records failed to find the previous image of the page.
-                                // This special case allows us to recover from that situation.
-                                // See https://github.com/neondatabase/neon/issues/2601.
-                                //
-                                // Unfortunately we cannot do this for the main fork, or for
-                                // any metadata keys, keys, as that would lead to actual data
-                                // loss.
-                                if img_key.is_rel_fsm_block_key() || img_key.is_rel_vm_block_key() {
-                                    warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
-                                    ZERO_PAGE.clone()
-                                } else {
-                                    return Err(CreateImageLayersError::from(err));
-                                }
+                for (img_key, img) in results {
+                    let img = match img {
+                        Ok(img) => img,
+                        Err(err) => {
+                            // If we fail to reconstruct a VM or FSM page, we can zero the
+                            // page without losing any actual user data. That seems better
+                            // than failing repeatedly and getting stuck.
+                            //
+                            // We had a bug at one point, where we truncated the FSM and VM
+                            // in the pageserver, but the Postgres didn't know about that
+                            // and continued to generate incremental WAL records for pages
+                            // that didn't exist in the pageserver. Trying to replay those
+                            // WAL records failed to find the previous image of the page.
+                            // This special case allows us to recover from that situation.
+                            // See https://github.com/neondatabase/neon/issues/2601.
+                            //
+                            // Unfortunately we cannot do this for the main fork, or for
+                            // any metadata keys, keys, as that would lead to actual data
+                            // loss.
+                            if img_key.is_rel_fsm_block_key() || img_key.is_rel_vm_block_key() {
+                                warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
+                                ZERO_PAGE.clone()
+                            } else {
+                                return Err(CreateImageLayersError::from(err));
                             }
-                        };
+                        }
+                    };
 
-                        // Write all the keys we just read into our new image layer.
-                        image_layer_writer.put_image(img_key, img, ctx).await?;
-                        wrote_keys = true;
-                    }
+                    // Write all the keys we just read into our new image layer.
+                    image_layer_writer.put_image(img_key, img, ctx).await?;
+                    wrote_keys = true;
                 }
             }
         }
