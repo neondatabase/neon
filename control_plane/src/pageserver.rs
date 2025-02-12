@@ -357,6 +357,11 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("Failed to parse 'compaction_algorithm' json")?,
+            compaction_l0_first: settings
+                .remove("compaction_l0_first")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'compaction_l0_first' as a bool")?,
             l0_flush_delay_threshold: settings
                 .remove("l0_flush_delay_threshold")
                 .map(|x| x.parse::<usize>())

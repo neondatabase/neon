@@ -91,7 +91,7 @@ def test_sharding_smoke(
     workload.init()
 
     sizes_before = get_sizes()
-    workload.write_rows(32768)
+    workload.write_rows(65536)
 
     # Test that we can read data back from a sharded tenant
     workload.validate()
@@ -1547,6 +1547,9 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
                 # Tip: set to 100MB to make the test fail
                 "max_replication_write_lag=1MB",
             ],
+            # We need `neon` extension for calling backpressure functions,
+            # this flag instructs `compute_ctl` to pre-install it.
+            "update_catalog": True,
         },
     )
     workload.init()
@@ -1811,3 +1814,14 @@ def test_sharding_gc(
         shard_gc_cutoff_lsn = Lsn(shard_index["metadata_bytes"]["latest_gc_cutoff_lsn"])
         log.info(f"Shard {shard_number} cutoff LSN: {shard_gc_cutoff_lsn}")
         assert shard_gc_cutoff_lsn == shard_0_gc_cutoff_lsn
+
+    for ps in env.pageservers:
+        # This is not okay, but it's not a scrubber bug: it's a pageserver issue that is exposed by
+        # the specific pattern of aggressive checkpointing+image layer generation + GC that this test does.
+        # TODO: remove when https://github.com/neondatabase/neon/issues/10720 is fixed
+        ps.allowed_errors.extend(
+            [
+                ".*could not find data for key 020000000000000000000000000000000000.*",
+                ".*could not ingest record.*",
+            ]
+        )

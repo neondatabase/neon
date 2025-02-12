@@ -53,6 +53,8 @@ class Workload:
         self._endpoint: Endpoint | None = None
         self._endpoint_opts = endpoint_opts or {}
 
+        self._configured_pageserver: int | None = None
+
     def branch(
         self,
         timeline_id: TimelineId,
@@ -92,8 +94,12 @@ class Workload:
                     **self._endpoint_opts,
                 )
                 self._endpoint.start(pageserver_id=pageserver_id)
+                self._configured_pageserver = pageserver_id
             else:
-                self._endpoint.reconfigure(pageserver_id=pageserver_id)
+                if self._configured_pageserver != pageserver_id:
+                    self._configured_pageserver = pageserver_id
+                    self._endpoint.reconfigure(pageserver_id=pageserver_id)
+                    self._endpoint_config = pageserver_id
 
         connstring = self._endpoint.safe_psql(
             "SELECT setting FROM pg_settings WHERE name='neon.pageserver_connstring'"
@@ -122,6 +128,7 @@ class Workload:
 
     def write_rows(self, n: int, pageserver_id: int | None = None, upload: bool = True):
         endpoint = self.endpoint(pageserver_id)
+
         start = self.expect_rows
         end = start + n - 1
         self.expect_rows += n

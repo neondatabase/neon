@@ -151,7 +151,6 @@ impl FromStr for EndpointCacheConfig {
 }
 #[derive(Debug)]
 pub struct MetricBackupCollectionConfig {
-    pub interval: Duration,
     pub remote_storage_config: Option<RemoteStorageConfig>,
     pub chunk_size: usize,
 }

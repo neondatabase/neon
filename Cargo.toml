@@ -18,6 +18,7 @@ members = [
     "storage_scrubber",
     "workspace_hack",
     "libs/compute_api",
+    "libs/http-utils",
     "libs/pageserver_api",
     "libs/postgres_ffi",
     "libs/safekeeper_api",
@@ -229,6 +230,7 @@ azure_storage_blobs = { git = "https://github.com/neondatabase/azure-sdk-for-rus
 ## Local libraries
 compute_api = { version = "0.1", path = "./libs/compute_api/" }
 consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
+http-utils = { version = "0.1", path = "./libs/http-utils/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
 pageserver = { path = "./pageserver" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
