@@ -371,6 +371,8 @@ def test_pageserver_gc_compaction_interrupt(neon_env_builder: NeonEnvBuilder):
         "pitr_interval": "0s",
         "gc_horizon": "1024",
         "lsn_lease_length": "0s",
+        # Do not generate image layers with create_image_layers
+        "image_layer_creation_check_threshold": "100",
     }
 
     env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
@@ -464,6 +466,59 @@ def test_pageserver_gc_compaction_interrupt(neon_env_builder: NeonEnvBuilder):
     # Run a legacy compaction+gc to ensure gc-compaction can coexist with legacy compaction.
     ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
     ps_http.timeline_gc(tenant_id, timeline_id, None)
+
+
+@skip_in_debug_build("only run with release build")
+def test_pageserver_gc_compaction_trigger(neon_env_builder: NeonEnvBuilder):
+    SMOKE_CONF = {
+        # Run both gc and gc-compaction.
+        "gc_period": "5s",
+        "compaction_period": "5s",
+        # No PiTR interval and small GC horizon
+        "pitr_interval": "0s",
+        "gc_horizon": f"{1024 * 16}",
+        "lsn_lease_length": "0s",
+        "gc_compaction_enabled": "true",
+        "gc_compaction_initial_threshold_kb": "16",
+        "gc_compaction_ratio_percent": "50",
+    }
+
+    env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    row_count = 10000
+    churn_rounds = 50
+
+    ps_http = env.pageserver.http_client()
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init(env.pageserver.id)
+
+    log.info("Writing initial data ...")
+    workload.write_rows(row_count, env.pageserver.id)
+
+    ps_http.timeline_gc(
+        tenant_id, timeline_id, None
+    )  # Force refresh gc info to have gc_cutoff generated
+
+    def compaction_finished():
+        queue_depth = len(ps_http.timeline_compact_info(tenant_id, timeline_id))
+        assert queue_depth == 0
+
+    for i in range(1, churn_rounds + 1):
+        log.info(f"Running churn round {i}/{churn_rounds} ...")
+        workload.churn_rows(row_count, env.pageserver.id, upload=True)
+        wait_until(compaction_finished, timeout=60)
+        workload.validate(env.pageserver.id)
+
+    # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
+    env.pageserver.assert_log_contains(
+        "scheduled_compact_timeline.*picked .* layers for compaction"
+    )
+
+    log.info("Validating at workload end ...")
+    workload.validate(env.pageserver.id)
 
 
 # Stripe sizes in number of pages.
