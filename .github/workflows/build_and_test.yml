@@ -51,7 +51,6 @@ jobs:
     timeout-minutes: 3
     outputs:
       check-rust-dependencies: ${{ steps.files-changed.outputs.rust_dependencies }}
-      check-upgrade-dependencies: ${{ steps.files-changed.outputs.test_upgrade_files }}
 
     steps:
       - name: Checkout
@@ -797,7 +796,7 @@ jobs:
           docker push neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
 
   test-images:
-    needs: [ check-permissions, tag, neon-image, compute-node-image, files-changed ]
+    needs: [ check-permissions, tag, neon-image, compute-node-image ]
     strategy:
       fail-fast: false
       matrix:
@@ -869,7 +868,6 @@ jobs:
         env:
           NEWTAG: ${{ needs.tag.outputs.build-tag }}
           OLDTAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
-          FORCE_ALL_UPGRADE_TESTS: ${{ needs.files-changed.outputs.check-upgrade-dependencies }}
         run: ./docker-compose/test_extensions_upgrade.sh
 
       - name: Print logs and clean up

@@ -11,5 +11,3 @@ rebuild_neon_extra:
 
 rebuild_macos:
     - .github/workflows/build-macos.yml
-
-test_upgrade_files: ['docker-compose/**', 'compute/patches/**', 'compute.Dockerfile']
