@@ -885,8 +885,12 @@ pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
     ForceL0Compaction,
+    OnlyL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
+    /// Disables compaction yielding e.g. due to high L0 count. This is set e.g. when requesting
+    /// compaction via HTTP API.
+    NoYield,
 }
 
 #[serde_with::serde_as]
@@ -1795,36 +1799,48 @@ impl Timeline {
         .await
     }
 
-    /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
-    /// compaction tasks.
+    /// Outermost timeline compaction operation; downloads needed layers.
+    ///
+    /// NB: the cancellation token is usually from a background task, but can also come from a
+    /// request task.
     pub(crate) async fn compact_with_options(
         self: &Arc<Self>,
         cancel: &CancellationToken,
         options: CompactOptions,
         ctx: &RequestContext,
     ) -> Result<CompactionOutcome, CompactionError> {
-        // most likely the cancellation token is from background task, but in tests it could be the
-        // request task as well.
+        // Acquire the compaction lock and task semaphore.
+        //
+        // L0-only compaction uses a separate semaphore (if enabled) to make sure it isn't starved
+        // out by other background tasks (including image compaction). We request this via
+        // `BackgroundLoopKind::L0Compaction`.
+        //
+        // If this is a regular compaction pass, and L0-only compaction is enabled in the config,
+        // then we should yield for immediate L0 compaction if necessary while we're waiting for the
+        // background task semaphore. There's no point yielding otherwise, since we'd just end up
+        // right back here.
+        let is_l0_only = options.flags.contains(CompactFlags::OnlyL0Compaction);
+        let semaphore_kind = match is_l0_only && self.get_compaction_l0_semaphore() {
+            true => BackgroundLoopKind::L0Compaction,
+            false => BackgroundLoopKind::Compaction,
+        };
+        let yield_for_l0 = !is_l0_only
+            && self.get_compaction_l0_first()
+            && !options.flags.contains(CompactFlags::NoYield);
 
-        let prepare = async move {
+        let acquire = async move {
             let guard = self.compaction_lock.lock().await;
-
-            let permit = super::tasks::acquire_concurrency_permit(
-                BackgroundLoopKind::Compaction,
-                self.conf.use_compaction_semaphore,
-                ctx,
-            )
-            .await;
-
+            let permit = super::tasks::acquire_concurrency_permit(semaphore_kind, ctx).await;
             (guard, permit)
         };
 
-        // this wait probably never needs any "long time spent" logging, because we already nag if
-        // compaction task goes over it's period (20s) which is quite often in production.
         let (_guard, _permit) = tokio::select! {
-            tuple = prepare => { tuple },
-            _ = self.cancel.cancelled() => return Ok(CompactionOutcome::Done),
-            _ = cancel.cancelled() => return Ok(CompactionOutcome::Done),
+            (guard, permit) = acquire => (guard, permit),
+            _ = self.l0_compaction_trigger.notified(), if yield_for_l0 => {
+                return Ok(CompactionOutcome::YieldForL0);
+            }
+            _ = self.cancel.cancelled() => return Ok(CompactionOutcome::Skipped),
+            _ = cancel.cancelled() => return Ok(CompactionOutcome::Skipped),
         };
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -1832,7 +1848,7 @@ impl Timeline {
         // Last record Lsn could be zero in case the timeline was just created
         if !last_record_lsn.is_valid() {
             warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
-            return Ok(CompactionOutcome::Done);
+            return Ok(CompactionOutcome::Skipped);
         }
 
         let result = match self.get_compaction_algorithm_settings().kind {
@@ -2332,6 +2348,20 @@ impl Timeline {
             .tenant_conf
             .compaction_upper_limit
             .unwrap_or(self.conf.default_tenant_conf.compaction_upper_limit)
+    }
+
+    pub fn get_compaction_l0_first(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .compaction_l0_first
+            .unwrap_or(self.conf.default_tenant_conf.compaction_l0_first)
+    }
+
+    pub fn get_compaction_l0_semaphore(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .compaction_l0_semaphore
+            .unwrap_or(self.conf.default_tenant_conf.compaction_l0_semaphore)
     }
 
     fn get_l0_flush_delay_threshold(&self) -> Option<usize> {
@@ -3154,7 +3184,6 @@ impl Timeline {
             async move {
                 let wait_for_permit = super::tasks::acquire_concurrency_permit(
                     BackgroundLoopKind::InitialLogicalSizeCalculation,
-                    false,
                     background_ctx,
                 );
 
@@ -4250,6 +4279,7 @@ impl Timeline {
                     ImageLayerCreationMode::Initial,
                     ctx,
                     LastImageLayerCreationStatus::Initial,
+                    false, // don't yield for L0, we're flushing L0
                 )
                 .await?;
             debug_assert!(
@@ -4822,6 +4852,7 @@ impl Timeline {
         mode: ImageLayerCreationMode,
         ctx: &RequestContext,
         last_status: LastImageLayerCreationStatus,
+        yield_for_l0: bool,
     ) -> Result<(Vec<ResidentLayer>, LastImageLayerCreationStatus), CreateImageLayersError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
 
@@ -5018,7 +5049,7 @@ impl Timeline {
 
             if let ImageLayerCreationMode::Try = mode {
                 // We have at least made some progress
-                if batch_image_writer.pending_layer_num() >= 1 {
+                if yield_for_l0 && batch_image_writer.pending_layer_num() >= 1 {
                     // The `Try` mode is currently only used on the compaction path. We want to avoid
                     // image layer generation taking too long time and blocking L0 compaction. So in this
                     // mode, we also inspect the current number of L0 layers and skip image layer generation

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+http-utils.workspace = true
 safekeeper_api.workspace = true
 thiserror.workspace = true
 reqwest = { workspace = true, features = [ "stream" ] }

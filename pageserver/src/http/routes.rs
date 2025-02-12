@@ -13,6 +13,12 @@ use enumset::EnumSet;
 use futures::future::join_all;
 use futures::StreamExt;
 use futures::TryFutureExt;
+use http_utils::endpoint::{
+    profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
+};
+use http_utils::failpoints::failpoints_handler;
+use http_utils::request::must_parse_query_param;
+use http_utils::request::{get_request_param, must_get_query_param, parse_query_param};
 use humantime::format_rfc3339;
 use hyper::header;
 use hyper::StatusCode;
@@ -60,13 +66,6 @@ use tokio::time::Instant;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::auth::JwtAuth;
-use utils::failpoint_support::failpoints_handler;
-use utils::http::endpoint::{
-    profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
-};
-use utils::http::request::must_parse_query_param;
-use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -104,6 +103,13 @@ use crate::tenant::OffloadedTimeline;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::DEFAULT_PG_VERSION;
 use crate::{disk_usage_eviction_task, tenant};
+use http_utils::{
+    endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
+    error::{ApiError, HttpErrorBody},
+    json::{json_request, json_request_maybe, json_response},
+    request::parse_request_param,
+    RequestExt, RouterBuilder,
+};
 use pageserver_api::models::{
     StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
     TimelineInfo,
@@ -111,13 +117,6 @@ use pageserver_api::models::{
 use utils::{
     auth::SwappableJwtAuth,
     generation::Generation,
-    http::{
-        endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
-        error::{ApiError, HttpErrorBody},
-        json::{json_request, json_request_maybe, json_response},
-        request::parse_request_param,
-        RequestExt, RouterBuilder,
-    },
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
@@ -561,7 +560,7 @@ async fn reload_auth_validation_keys_handler(
     let key_path = config.auth_validation_public_key_path.as_ref().unwrap();
     info!("Reloading public key(s) for verifying JWT tokens from {key_path:?}");
 
-    match JwtAuth::from_key_path(key_path) {
+    match utils::auth::JwtAuth::from_key_path(key_path) {
         Ok(new_auth) => {
             shared_auth.swap(new_auth);
             json_response(StatusCode::OK, ())
@@ -2152,6 +2151,7 @@ async fn timeline_compact_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
+    flags |= CompactFlags::NoYield; // run compaction to completion
 
     if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
         flags |= CompactFlags::ForceL0Compaction;

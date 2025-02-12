@@ -4,7 +4,7 @@ use std::cmp::max;
 use std::future::Future;
 use std::ops::{ControlFlow, RangeInclusive};
 use std::pin::pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::metrics::{BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
+use crate::metrics::{self, BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS};
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::compaction::CompactionOutcome;
@@ -25,7 +25,6 @@ use pageserver_api::config::tenant_conf_defaults::DEFAULT_COMPACTION_PERIOD;
 use utils::backoff::exponential_backoff_duration;
 use utils::completion::Barrier;
 use utils::pausable_failpoint;
-use utils::rate_limit::RateLimit;
 
 /// Semaphore limiting concurrent background tasks (across all tenants).
 ///
@@ -38,17 +37,17 @@ static CONCURRENT_BACKGROUND_TASKS: Lazy<Semaphore> = Lazy::new(|| {
     Semaphore::new(permits)
 });
 
-/// Semaphore limiting concurrent compaction tasks (across all tenants). This is disabled by
-/// default, see `use_compaction_semaphore`.
-///
-/// We use 3/4 Tokio threads, to avoid blocking all threads in case we do any CPU-heavy work.
+/// Semaphore limiting concurrent L0 compaction tasks (across all tenants). This is only used if
+/// both `compaction_l0_semaphore` and `compaction_l0_first` are enabled.
 ///
 /// This is a separate semaphore from background tasks, because L0 compaction needs to be responsive
-/// to avoid high read amp during heavy write workloads.
+/// to avoid high read amp during heavy write workloads. Regular image/GC compaction is less
+/// important (e.g. due to page images in delta layers) and can wait for other background tasks.
 ///
-/// TODO: split image compaction and L0 compaction, and move image compaction to background tasks.
-/// Only L0 compaction needs to be responsive, and it shouldn't block on image compaction.
-static CONCURRENT_COMPACTION_TASKS: Lazy<Semaphore> = Lazy::new(|| {
+/// We use 3/4 Tokio threads, to avoid blocking all threads in case we do any CPU-heavy work. Note
+/// that this runs on the same Tokio runtime as `CONCURRENT_BACKGROUND_TASKS`, and shares the same
+/// thread pool.
+static CONCURRENT_L0_COMPACTION_TASKS: Lazy<Semaphore> = Lazy::new(|| {
     let total_threads = TOKIO_WORKER_THREADS.get();
     let permits = max(1, (total_threads * 3).checked_div(4).unwrap_or(0));
     assert_ne!(permits, 0, "we will not be adding in permits later");
@@ -59,7 +58,7 @@ static CONCURRENT_COMPACTION_TASKS: Lazy<Semaphore> = Lazy::new(|| {
 /// Background jobs.
 ///
 /// NB: not all of these acquire a CONCURRENT_BACKGROUND_TASKS semaphore permit, only the ones that
-/// do any significant IO.
+/// do any significant IO or CPU work.
 #[derive(
     Debug,
     PartialEq,
@@ -72,6 +71,9 @@ static CONCURRENT_COMPACTION_TASKS: Lazy<Semaphore> = Lazy::new(|| {
 )]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum BackgroundLoopKind {
+    /// L0Compaction runs as a separate pass within the Compaction loop, not a separate loop. It is
+    /// used to request the `CONCURRENT_L0_COMPACTION_TASKS` semaphore and associated metrics.
+    L0Compaction,
     Compaction,
     Gc,
     Eviction,
@@ -91,37 +93,22 @@ pub struct BackgroundLoopSemaphorePermit<'a> {
 /// Acquires a semaphore permit, to limit concurrent background jobs.
 pub(crate) async fn acquire_concurrency_permit(
     loop_kind: BackgroundLoopKind,
-    use_compaction_semaphore: bool,
     _ctx: &RequestContext,
 ) -> BackgroundLoopSemaphorePermit<'static> {
-    // TODO: use a lower threshold and remove the pacer once we resolve some blockage.
-    const WARN_THRESHOLD: Duration = Duration::from_secs(600);
-    static WARN_PACER: Lazy<Mutex<RateLimit>> =
-        Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-
-    let mut recorder = crate::metrics::BACKGROUND_LOOP_SEMAPHORE.record(loop_kind);
+    let mut recorder = metrics::BACKGROUND_LOOP_SEMAPHORE.record(loop_kind);
 
     if loop_kind == BackgroundLoopKind::InitialLogicalSizeCalculation {
         pausable_failpoint!("initial-size-calculation-permit-pause");
     }
 
     // TODO: assert that we run on BACKGROUND_RUNTIME; requires tokio_unstable Handle::id();
-    let permit = if loop_kind == BackgroundLoopKind::Compaction && use_compaction_semaphore {
-        CONCURRENT_COMPACTION_TASKS.acquire().await
-    } else {
-        assert!(!use_compaction_semaphore);
-        CONCURRENT_BACKGROUND_TASKS.acquire().await
-    }
-    .expect("should never close");
+    let semaphore = match loop_kind {
+        BackgroundLoopKind::L0Compaction => &CONCURRENT_L0_COMPACTION_TASKS,
+        _ => &CONCURRENT_BACKGROUND_TASKS,
+    };
+    let permit = semaphore.acquire().await.expect("should never close");
 
-    let waited = recorder.acquired();
-    if waited >= WARN_THRESHOLD {
-        let waited = waited.as_secs_f64();
-        WARN_PACER
-            .lock()
-            .unwrap()
-            .call(|| warn!("{loop_kind} task waited {waited:.3}s for semaphore permit"));
-    }
+    recorder.acquired();
 
     BackgroundLoopSemaphorePermit {
         _permit: permit,
@@ -268,13 +255,12 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
         match output {
             Ok(outcome) => {
                 error_run = 0;
-                // If there's more compaction work pending, reschedule immediately. This isn't
-                // necessarily L0 compaction, but that's fine for now.
-                //
-                // TODO: differentiate between L0 compaction and other compaction. The former needs
-                // to be responsive, the latter doesn't.
-                if outcome == CompactionOutcome::Pending {
-                    tenant.l0_compaction_trigger.notify_one();
+                // If there's more compaction work, L0 or not, schedule an immediate run.
+                match outcome {
+                    CompactionOutcome::Done => {}
+                    CompactionOutcome::Skipped => {}
+                    CompactionOutcome::YieldForL0 => tenant.l0_compaction_trigger.notify_one(),
+                    CompactionOutcome::Pending => tenant.l0_compaction_trigger.notify_one(),
                 }
             }
 
@@ -590,7 +576,7 @@ pub(crate) fn warn_when_period_overrun(
             ?task,
             "task iteration took longer than the configured period"
         );
-        crate::metrics::BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT
+        metrics::BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT
             .with_label_values(&[task.into(), &format!("{}", period.as_secs())])
             .inc();
     }
