@@ -141,6 +141,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "compaction_threshold": 13,
         "compaction_upper_limit": 100,
         "compaction_l0_first": False,
+        "compaction_l0_semaphore": False,
         "l0_flush_delay_threshold": 25,
         "l0_flush_stall_threshold": 42,
         "l0_flush_wait_upload": False,

@@ -362,6 +362,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'compaction_l0_first' as a bool")?,
+            compaction_l0_semaphore: settings
+                .remove("compaction_l0_semaphore")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'compaction_l0_semaphore' as a bool")?,
             l0_flush_delay_threshold: settings
                 .remove("l0_flush_delay_threshold")
                 .map(|x| x.parse::<usize>())

@@ -726,7 +726,9 @@ impl Timeline {
         }
 
         // Yield if we have pending L0 compaction. The scheduler will do another pass.
-        if l0_outcome == CompactionOutcome::Pending || l0_outcome == CompactionOutcome::YieldForL0 {
+        if (l0_outcome == CompactionOutcome::Pending || l0_outcome == CompactionOutcome::YieldForL0)
+            && !options.flags.contains(CompactFlags::NoYield)
+        {
             info!("image/ancestor compaction yielding for L0 compaction");
             return Ok(CompactionOutcome::YieldForL0);
         }
@@ -774,6 +776,7 @@ impl Timeline {
                                 .load()
                                 .as_ref()
                                 .clone(),
+                            !options.flags.contains(CompactFlags::NoYield),
                         )
                         .await
                         .inspect_err(|err| {
