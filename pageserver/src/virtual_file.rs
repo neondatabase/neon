@@ -947,13 +947,18 @@ impl VirtualFileInner {
     where
         Buf: tokio_epoll_uring::IoBufMut + Send,
     {
-        let file_guard = match self.lock_file().await {
+        let file_guard = match self
+            .lock_file()
+            .await
+            .maybe_fatal_err("lock_file inside VirtualFileInner::read_at")
+        {
             Ok(file_guard) => file_guard,
             Err(e) => return (buf, Err(e)),
         };
 
         observe_duration!(StorageIoOperation::Read, {
             let ((_file_guard, buf), res) = io_engine::get().read_at(file_guard, offset, buf).await;
+            let res = res.maybe_fatal_err("io_engine read_at inside VirtualFileInner::read_at");
             if let Ok(size) = res {
                 STORAGE_IO_SIZE
                     .with_label_values(&[
