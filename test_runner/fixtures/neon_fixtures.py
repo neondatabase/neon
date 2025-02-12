@@ -3849,6 +3849,7 @@ class Endpoint(PgProtocol, LogUtils):
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
+        update_catalog: bool = False,
     ) -> Self:
         """
         Create a new Postgres endpoint.
@@ -3874,6 +3875,7 @@ class Endpoint(PgProtocol, LogUtils):
             pg_version=self.env.pg_version,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            update_catalog=update_catalog,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = self.env.repo_dir / path
@@ -4288,6 +4290,7 @@ class EndpointFactory:
         hot_standby: bool = False,
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
+        update_catalog: bool = False,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4309,6 +4312,7 @@ class EndpointFactory:
             hot_standby=hot_standby,
             config_lines=config_lines,
             pageserver_id=pageserver_id,
+            update_catalog=update_catalog,
         )
 
     def stop_all(self, fail_on_error=True) -> Self:

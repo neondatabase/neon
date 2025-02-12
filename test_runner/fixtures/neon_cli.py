@@ -487,6 +487,7 @@ class NeonLocalCli(AbstractNeonCli):
         lsn: Lsn | None = None,
         pageserver_id: int | None = None,
         allow_multiple=False,
+        update_catalog: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
@@ -514,6 +515,8 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--pageserver-id", str(pageserver_id)])
         if allow_multiple:
             args.extend(["--allow-multiple"])
+        if update_catalog:
+            args.extend(["--update-catalog"])
 
         res = self.raw_cli(args)
         res.check_returncode()
