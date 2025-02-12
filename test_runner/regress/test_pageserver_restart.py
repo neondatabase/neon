@@ -239,9 +239,11 @@ def test_pageserver_lost_and_transaction_aborted(neon_env_builder: NeonEnvBuilde
     endpoint = env.endpoints.create_start("main", config_lines=["neon.relsize_hash_size=0"])
     with closing(endpoint.connect()) as conn, conn.cursor() as cur:
         cur.execute("CREATE DATABASE test")
-    with pytest.raises((pgerr.InterfaceError, pgerr.InternalError)), \
-         endpoint.connect(dbname="test") as conn, \
-         conn.cursor() as cur:
+    with (
+        pytest.raises((pgerr.InterfaceError, pgerr.InternalError)),
+        endpoint.connect(dbname="test") as conn,
+        conn.cursor() as cur,
+    ):
         cur.execute("create table t(b box)")
         env.pageserver.stop()
         cur.execute("create index ti on t using gist(b)")
@@ -257,9 +259,11 @@ def test_pageserver_lost_and_transaction_committed(neon_env_builder: NeonEnvBuil
     endpoint = env.endpoints.create_start("main", config_lines=["neon.relsize_hash_size=0"])
     with closing(endpoint.connect()) as conn, conn.cursor() as cur:
         cur.execute("CREATE DATABASE test")
-    with pytest.raises((pgerr.InterfaceError, pgerr.InternalError)), \
-         endpoint.connect(dbname="test") as conn, \
-         conn.cursor() as cur:
+    with (
+        pytest.raises((pgerr.InterfaceError, pgerr.InternalError)),
+        endpoint.connect(dbname="test") as conn,
+        conn.cursor() as cur,
+    ):
         cur.execute("create table t(t boolean)")
         env.pageserver.stop()
         cur.execute("drop table t")
