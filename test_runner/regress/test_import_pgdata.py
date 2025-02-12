@@ -450,7 +450,7 @@ def test_fast_import_with_pageserver_ingest(
     fast_import.extra_env["AWS_ENDPOINT_URL"] = mock_s3_server.endpoint()
     fast_import.extra_env["RUST_LOG"] = "aws_config=debug,aws_sdk_kms=debug"
     pg_port = port_distributor.get_port()
-    fast_import.run(pg_port=pg_port, s3prefix=f"s3://{bucket}/{key_prefix}")
+    fast_import.run_pgdata(pg_port=pg_port, s3prefix=f"s3://{bucket}/{key_prefix}")
     vanilla_pg.stop()
 
     def validate_vanilla_equivalence(ep):
