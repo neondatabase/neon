@@ -3093,20 +3093,19 @@ impl Tenant {
 
             // If we're done compacting, check the scheduled GC compaction queue for more work.
             if outcome == CompactionOutcome::Done {
-                let queue = self
-                    .scheduled_compaction_tasks
-                    .lock()
-                    .unwrap()
-                    .get(&timeline.timeline_id)
-                    .cloned();
-                if let Some(queue) = queue {
-                    outcome = queue
-                        .iteration(cancel, ctx, &self.gc_block, &timeline)
+                let queue = {
+                    let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
+                    guard
+                        .entry(timeline.timeline_id)
+                        .or_insert_with(|| Arc::new(GcCompactionQueue::new()))
+                        .clone()
+                };
+                outcome = queue
+                    .iteration(cancel, ctx, &self.gc_block, &timeline)
                         .instrument(
                             info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id),
                         )
-                        .await?;
-                }
+                    .await?;
             }
 
             // If we're done compacting, offload the timeline if requested.

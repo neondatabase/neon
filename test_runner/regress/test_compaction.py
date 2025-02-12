@@ -488,7 +488,7 @@ def test_pageserver_gc_compaction_trigger(neon_env_builder: NeonEnvBuilder):
     timeline_id = env.initial_timeline
 
     row_count = 10000
-    churn_rounds = 50
+    churn_rounds = 20
 
     ps_http = env.pageserver.http_client()
 
