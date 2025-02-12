@@ -28,7 +28,7 @@
 use anyhow::{bail, Context};
 use aws_config::BehaviorVersion;
 use camino::{Utf8Path, Utf8PathBuf};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use compute_tools::extension_server::{get_pg_version, PostgresMajorVersion};
 use nix::unistd::Pid;
 use tracing::{error, info, info_span, warn, Instrument};
@@ -44,24 +44,38 @@ mod s3_uri;
 const PG_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const PG_WAIT_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    Pgdata {
+        #[clap(long)]
+        source_connection_string: Option<String>,
+        #[clap(short, long)]
+        interactive: bool,
+        #[clap(long, default_value_t = 5432)]
+        pg_port: u16, // port to run postgres on, 5432 is default
+    },
+
+    DumpRestore {
+        #[clap(long)]
+        source_connection_string: Option<String>,
+        #[clap(long)]
+        restore_connection_string: Option<String>, // will not run postgres if specified, will do pg_restore to this connection string
+    },
+}
+
 #[derive(clap::Parser)]
 struct Args {
-    #[clap(long)]
+    #[clap(long, env = "NEON_IMPORTER_WORKDIR")]
     working_directory: Utf8PathBuf,
     #[clap(long, env = "NEON_IMPORTER_S3_PREFIX")]
     s3_prefix: Option<s3_uri::S3Uri>,
-    #[clap(long)]
-    source_connection_string: Option<String>,
-    #[clap(long)]
-    restore_connection_string: Option<String>, // will not run postgres if specified, will do pg_restore to this connection string
-    #[clap(short, long)]
-    interactive: bool,
-    #[clap(long)]
+    #[clap(long, env = "NEON_IMPORTER_PG_BIN_DIR")]
     pg_bin_dir: Utf8PathBuf,
-    #[clap(long)]
+    #[clap(long, env = "NEON_IMPORTER_PG_LIB_DIR")]
     pg_lib_dir: Utf8PathBuf,
-    #[clap(long, default_value_t = 5432)]
-    pg_port: u16, // port to run postgres on, 5432 is default
+
+    #[clap(subcommand)]
+    command: Command,
 }
 
 #[serde_with::serde_as]
@@ -276,133 +290,14 @@ async fn wait_until_ready(connstring: String, create_dbname: String) {
     }
 }
 
-#[tokio::main]
-pub(crate) async fn main() -> anyhow::Result<()> {
-    utils::logging::init(
-        utils::logging::LogFormat::Json,
-        utils::logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
-        utils::logging::Output::Stdout,
-    )?;
-
-    info!("starting");
-
-    let args = Args::parse();
-
-    // Validate arguments
-    if args.s3_prefix.is_none() && args.source_connection_string.is_none() {
-        anyhow::bail!("either s3_prefix or source_connection_string must be specified");
-    }
-    if args.s3_prefix.is_some() && args.source_connection_string.is_some() {
-        anyhow::bail!("only one of s3_prefix or source_connection_string can be specified");
-    }
-
-    let working_directory = args.working_directory;
-    let pg_bin_dir = args.pg_bin_dir;
-    let pg_lib_dir = args.pg_lib_dir;
-
-    // Initialize AWS clients only if s3_prefix is specified
-    let (aws_config, kms_client) = if args.s3_prefix.is_some() {
-        let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
-        let kms = aws_sdk_kms::Client::new(&config);
-        (Some(config), Some(kms))
-    } else {
-        (None, None)
-    };
-
-    let superuser = "cloud_admin";
-
-    let mut run_postgres = true;
-
-    // Get connection strings either from S3 spec or direct arguments
-    let (source_connstring, restore_connstring) = if let Some(s3_prefix) = &args.s3_prefix {
-        let spec: Spec = {
-            let spec_key = s3_prefix.append("/spec.json");
-            let s3_client = aws_sdk_s3::Client::new(aws_config.as_ref().unwrap());
-            let object = s3_client
-                .get_object()
-                .bucket(&spec_key.bucket)
-                .key(spec_key.key)
-                .send()
-                .await
-                .context("get spec from s3")?
-                .body
-                .collect()
-                .await
-                .context("download spec body")?;
-            serde_json::from_slice(&object.into_bytes()).context("parse spec as json")?
-        };
-
-        match spec.encryption_secret {
-            EncryptionSecret::KMS { key_id } => {
-                let source = decode_connstring(
-                    kms_client.as_ref().unwrap(),
-                    &key_id,
-                    spec.source_connstring_ciphertext_base64,
-                )
-                .await?;
-
-                let restore =
-                    if let Some(restore_ciphertext) = spec.restore_connstring_ciphertext_base64 {
-                        run_postgres = false;
-                        decode_connstring(kms_client.as_ref().unwrap(), &key_id, restore_ciphertext)
-                            .await?
-                    } else {
-                        // restoring to local postgres otherwise
-                        format!(
-                            "host=localhost port={} user={} dbname=neondb",
-                            args.pg_port, superuser
-                        )
-                    };
-
-                (source, restore)
-            }
-        }
-    } else {
-        (
-            args.source_connection_string.unwrap(),
-            if let Some(val) = args.restore_connection_string {
-                run_postgres = false;
-                val
-            } else {
-                format!(
-                    "host=localhost port={} user={} dbname=neondb",
-                    args.pg_port, superuser
-                )
-            },
-        )
-    };
-
-    match tokio::fs::create_dir(&working_directory).await {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            if !is_directory_empty(&working_directory)
-                .await
-                .context("check if working directory is empty")?
-            {
-                anyhow::bail!("working directory is not empty");
-            } else {
-                // ok
-            }
-        }
-        Err(e) => return Err(anyhow::Error::new(e).context("create working directory")),
-    }
-    let pgdata_dir = working_directory.join("pgdata");
-
-    let postgres_proc = if run_postgres {
-        assert!(restore_connstring.contains("host=localhost"));
-        let mut proc =
-            PostgresProcess::new(pgdata_dir.clone(), pg_bin_dir.clone(), pg_lib_dir.clone());
-        let nproc = num_cpus::get();
-        proc.start(superuser, args.pg_port, nproc).await?;
-        wait_until_ready(restore_connstring.clone(), "neondb".to_string()).await;
-
-        Some(proc)
-    } else {
-        info!("restore_connection_string specified, not running postgres process");
-        None
-    };
-
-    let dumpdir = working_directory.join("dumpdir");
+async fn run_dump_restore(
+    workdir: Utf8PathBuf,
+    pg_bin_dir: Utf8PathBuf,
+    pg_lib_dir: Utf8PathBuf,
+    source_connstring: String,
+    restore_connstring: String,
+) -> Result<(), anyhow::Error> {
+    let dumpdir = workdir.join("dumpdir");
 
     let common_args = [
         // schema mapping (prob suffices to specify them on one side)
@@ -456,7 +351,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // TODO: do it in a streaming way, plenty of internal research done on this already
+    // TODO: maybe do it in a streaming way, plenty of internal research done on this already
     // TODO: do the unlogged table trick
     {
         let mut pg_restore = tokio::process::Command::new(pg_bin_dir.join("pg_restore"))
@@ -490,33 +385,234 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         }
     }
 
-    if let Some(mut proc) = postgres_proc {
-        // If interactive mode, wait for Ctrl+C
-        if args.interactive {
-            info!("Running in interactive mode. Press Ctrl+C to shut down.");
-            tokio::signal::ctrl_c().await.context("wait for ctrl-c")?;
-        }
+    Ok(())
+}
 
-        proc.shutdown().await?;
+async fn cmd_pgdata(
+    kms_client: Option<aws_sdk_kms::Client>,
+    maybe_s3_prefix: Option<s3_uri::S3Uri>,
+    maybe_spec: Option<Spec>,
+    source_connection_string: Option<String>,
+    interactive: bool,
+    pg_port: u16,
+    workdir: Utf8PathBuf,
+    pg_bin_dir: Utf8PathBuf,
+    pg_lib_dir: Utf8PathBuf,
+) -> Result<(), anyhow::Error> {
+    if maybe_spec.is_none() && source_connection_string.is_none() {
+        bail!("spec must be provided for pgdata command");
+    }
+    if maybe_spec.is_some() && source_connection_string.is_some() {
+        bail!("only one of spec or source_connection_string can be provided");
+    }
 
-        // Only sync if s3_prefix was specified
-        if let Some(s3_prefix) = args.s3_prefix {
-            info!("upload pgdata");
-            aws_s3_sync::sync(Utf8Path::new(&pgdata_dir), &s3_prefix.append("/pgdata/"))
-                .await
-                .context("sync dump directory to destination")?;
-
-            info!("write status");
-            {
-                let status_dir = working_directory.join("status");
-                std::fs::create_dir(&status_dir).context("create status directory")?;
-                let status_file = status_dir.join("pgdata");
-                std::fs::write(&status_file, serde_json::json!({"done": true}).to_string())
-                    .context("write status file")?;
-                aws_s3_sync::sync(&status_dir, &s3_prefix.append("/status/"))
-                    .await
-                    .context("sync status directory to destination")?;
+    let source_connection_string = if let Some(spec) = maybe_spec {
+        match spec.encryption_secret {
+            EncryptionSecret::KMS { key_id } => {
+                decode_connstring(
+                    kms_client.as_ref().unwrap(),
+                    &key_id,
+                    spec.source_connstring_ciphertext_base64,
+                )
+                .await?
             }
+        }
+    } else {
+        source_connection_string.unwrap()
+    };
+
+    let superuser = "cloud_admin";
+    let restore_connstring = format!(
+        "host=localhost port={} user={} dbname=neondb",
+        pg_port, superuser
+    );
+
+    let pgdata_dir = workdir.join("pgdata");
+    let mut proc = PostgresProcess::new(pgdata_dir.clone(), pg_bin_dir.clone(), pg_lib_dir.clone());
+    let nproc = num_cpus::get();
+    proc.start(superuser, pg_port, nproc).await?;
+    wait_until_ready(restore_connstring.clone(), "neondb".to_string()).await;
+
+    run_dump_restore(
+        workdir.clone(),
+        pg_bin_dir,
+        pg_lib_dir,
+        source_connection_string,
+        restore_connstring,
+    )
+    .await?;
+
+    // If interactive mode, wait for Ctrl+C
+    if interactive {
+        info!("Running in interactive mode. Press Ctrl+C to shut down.");
+        tokio::signal::ctrl_c().await.context("wait for ctrl-c")?;
+    }
+
+    proc.shutdown().await?;
+
+    // Only sync if s3_prefix was specified
+    if let Some(s3_prefix) = maybe_s3_prefix {
+        info!("upload pgdata");
+        aws_s3_sync::sync(Utf8Path::new(&pgdata_dir), &s3_prefix.append("/pgdata/"))
+            .await
+            .context("sync dump directory to destination")?;
+
+        info!("write status");
+        {
+            let status_dir = workdir.join("status");
+            std::fs::create_dir(&status_dir).context("create status directory")?;
+            let status_file = status_dir.join("pgdata");
+            std::fs::write(&status_file, serde_json::json!({"done": true}).to_string())
+                .context("write status file")?;
+            aws_s3_sync::sync(&status_dir, &s3_prefix.append("/status/"))
+                .await
+                .context("sync status directory to destination")?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_dumprestore(
+    kms_client: Option<aws_sdk_kms::Client>,
+    maybe_spec: Option<Spec>,
+    source_connection_string: Option<String>,
+    restore_connection_string: Option<String>,
+    workdir: Utf8PathBuf,
+    pg_bin_dir: Utf8PathBuf,
+    pg_lib_dir: Utf8PathBuf,
+) -> Result<(), anyhow::Error> {
+    let (source_connstring, restore_connstring) = if let Some(spec) = maybe_spec {
+        match spec.encryption_secret {
+            EncryptionSecret::KMS { key_id } => {
+                let source = decode_connstring(
+                    kms_client.as_ref().unwrap(),
+                    &key_id,
+                    spec.source_connstring_ciphertext_base64,
+                )
+                .await?;
+
+                let restore = if let Some(restore_ciphertext) =
+                    spec.restore_connstring_ciphertext_base64
+                {
+                    decode_connstring(kms_client.as_ref().unwrap(), &key_id, restore_ciphertext)
+                        .await?
+                } else {
+                    bail!("restore connection string must be provided in spec for dump_restore command");
+                };
+
+                (source, restore)
+            }
+        }
+    } else {
+        (
+            source_connection_string.unwrap(),
+            if let Some(val) = restore_connection_string {
+                val
+            } else {
+                bail!("restore connection string must be provided for dump_restore command");
+            },
+        )
+    };
+
+    run_dump_restore(
+        workdir,
+        pg_bin_dir,
+        pg_lib_dir,
+        source_connstring,
+        restore_connstring,
+    )
+    .await
+}
+
+#[tokio::main]
+pub(crate) async fn main() -> anyhow::Result<()> {
+    utils::logging::init(
+        utils::logging::LogFormat::Json,
+        utils::logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
+        utils::logging::Output::Stdout,
+    )?;
+
+    info!("starting");
+
+    let args = Args::parse();
+
+    // Initialize AWS clients only if s3_prefix is specified
+    let (aws_config, kms_client) = if args.s3_prefix.is_some() {
+        let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
+        let kms = aws_sdk_kms::Client::new(&config);
+        (Some(config), Some(kms))
+    } else {
+        (None, None)
+    };
+
+    let spec: Option<Spec> = if let Some(s3_prefix) = &args.s3_prefix {
+        let spec_key = s3_prefix.append("/spec.json");
+        let s3_client = aws_sdk_s3::Client::new(aws_config.as_ref().unwrap());
+        let object = s3_client
+            .get_object()
+            .bucket(&spec_key.bucket)
+            .key(spec_key.key)
+            .send()
+            .await
+            .context("get spec from s3")?
+            .body
+            .collect()
+            .await
+            .context("download spec body")?;
+        serde_json::from_slice(&object.into_bytes()).context("parse spec as json")?
+    } else {
+        None
+    };
+
+    match tokio::fs::create_dir(&args.working_directory).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !is_directory_empty(&args.working_directory)
+                .await
+                .context("check if working directory is empty")?
+            {
+                bail!("working directory is not empty");
+            } else {
+                // ok
+            }
+        }
+        Err(e) => return Err(anyhow::Error::new(e).context("create working directory")),
+    }
+
+    match args.command {
+        Command::Pgdata {
+            source_connection_string,
+            interactive,
+            pg_port,
+        } => {
+            cmd_pgdata(
+                kms_client,
+                args.s3_prefix,
+                spec,
+                source_connection_string,
+                interactive,
+                pg_port,
+                args.working_directory,
+                args.pg_bin_dir,
+                args.pg_lib_dir,
+            )
+            .await?;
+        }
+        Command::DumpRestore {
+            source_connection_string,
+            restore_connection_string,
+        } => {
+            cmd_dumprestore(
+                kms_client,
+                spec,
+                source_connection_string,
+                restore_connection_string,
+                args.working_directory,
+                args.pg_bin_dir,
+                args.pg_lib_dir,
+            )
+            .await?;
         }
     }
 

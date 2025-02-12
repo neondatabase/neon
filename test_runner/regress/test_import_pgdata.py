@@ -350,7 +350,7 @@ def test_fast_import_binary(
     vanilla_pg.safe_psql("CREATE TABLE foo (a int); INSERT INTO foo SELECT generate_series(1, 10);")
 
     pg_port = port_distributor.get_port()
-    fast_import.run(pg_port, vanilla_pg.connstr())
+    fast_import.run_pgdata(pg_port=pg_port, source_connection_string=vanilla_pg.connstr())
     vanilla_pg.stop()
 
     pgbin = PgBin(test_output_dir, fast_import.pg_distrib_dir, fast_import.pg_version)
@@ -398,7 +398,7 @@ def test_fast_import_restore_to_connstring(
         restore_connstring = restore_vanilla_pg.connstr(
             dbname="testdb", user="testrole", password="testpassword"
         )
-        fast_import.run(
+        fast_import.run_dump_restore(
             source_connection_string=vanilla_pg.connstr(),
             restore_connection_string=restore_connstring,
         )
@@ -470,7 +470,7 @@ def test_fast_import_restore_to_connstring_from_s3_spec(
         fast_import.extra_env["AWS_REGION"] = mock_s3_server.region()
         fast_import.extra_env["AWS_ENDPOINT_URL"] = mock_s3_server.endpoint()
         fast_import.extra_env["RUST_LOG"] = "aws_config=debug,aws_sdk_kms=debug"
-        fast_import.run(s3prefix="s3://test-bucket/test-prefix")
+        fast_import.run_dump_restore(s3prefix="s3://test-bucket/test-prefix")
         vanilla_pg.stop()
 
         res = restore_vanilla_pg.safe_psql("SELECT count(*) FROM foo;")
