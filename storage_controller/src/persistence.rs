@@ -1537,6 +1537,21 @@ pub(crate) struct SafekeeperPersistence {
 }
 
 impl SafekeeperPersistence {
+    pub(crate) fn from_upsert(
+        upsert: SafekeeperUpsert,
+        scheduling_policy: SkSchedulingPolicy,
+    ) -> Self {
+        crate::persistence::SafekeeperPersistence {
+            id: upsert.id,
+            region_id: upsert.region_id,
+            version: upsert.version,
+            host: upsert.host,
+            port: upsert.port,
+            http_port: upsert.http_port,
+            availability_zone_id: upsert.availability_zone_id,
+            scheduling_policy: String::from(scheduling_policy),
+        }
+    }
     pub(crate) fn as_describe_response(&self) -> Result<SafekeeperDescribeResponse, DatabaseError> {
         let scheduling_policy =
             SkSchedulingPolicy::from_str(&self.scheduling_policy).map_err(|e| {

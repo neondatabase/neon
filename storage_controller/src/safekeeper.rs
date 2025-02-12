@@ -1,6 +1,6 @@
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
-use pageserver_api::controller_api::SafekeeperDescribeResponse;
+use pageserver_api::controller_api::{SafekeeperDescribeResponse, SkSchedulingPolicy};
 use reqwest::StatusCode;
 use safekeeper_client::mgmt_api;
 use tokio_util::sync::CancellationToken;
@@ -109,5 +109,31 @@ impl Safekeeper {
         )
         .await
         .unwrap_or(Err(mgmt_api::Error::Cancelled))
+    }
+
+    pub(crate) fn update_from_record(&mut self, record: crate::persistence::SafekeeperUpsert) {
+        let crate::persistence::SafekeeperUpsert {
+            active: _,
+            availability_zone_id: _,
+            host,
+            http_port,
+            id,
+            port: _,
+            region_id: _,
+            version: _,
+        } = record.clone();
+        if id != self.id.0 as i64 {
+            // We catch the id being different in higher level code already. If we don't, it's a bug.
+            panic!(
+                "id can't be changed via update_from_record function: {id} != {}",
+                self.id.0
+            );
+        }
+        self.skp = crate::persistence::SafekeeperPersistence::from_upsert(
+            record,
+            SkSchedulingPolicy::from_str(&self.skp.scheduling_policy).unwrap(),
+        );
+        self.listen_http_port = http_port as u16;
+        self.listen_http_addr = host;
     }
 }

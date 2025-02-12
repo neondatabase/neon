@@ -7778,7 +7778,7 @@ impl Service {
         let sk = locked
             .safekeepers
             .get(&NodeId(id as u64))
-            .ok_or(DatabaseError::Logical("Not found".to_string()))?;
+            .ok_or(diesel::result::Error::NotFound)?;
         sk.describe_response()
     }
 
@@ -7792,25 +7792,15 @@ impl Service {
             let mut locked = self.inner.write().unwrap();
             let mut safekeepers = (*locked.safekeepers).clone();
             match safekeepers.entry(node_id) {
-                std::collections::hash_map::Entry::Occupied(_) => {
-                    // TODO support updates
-                    tracing::warn!(
-                        "Not updating in-memory safekeeper after upsert of existing safekeeper {}",
-                        record.host
-                    );
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().update_from_record(record);
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(Safekeeper::from_persistence(
-                        crate::persistence::SafekeeperPersistence {
-                            id: record.id,
-                            region_id: record.region_id,
-                            version: record.version,
-                            host: record.host,
-                            port: record.port,
-                            http_port: record.http_port,
-                            availability_zone_id: record.availability_zone_id,
-                            scheduling_policy: String::from(SkSchedulingPolicy::Pause),
-                        },
+                        crate::persistence::SafekeeperPersistence::from_upsert(
+                            record,
+                            SkSchedulingPolicy::Pause,
+                        ),
                         CancellationToken::new(),
                     ));
                 }
