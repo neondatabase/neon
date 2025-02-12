@@ -31,7 +31,7 @@ jobs:
       matrix:
         pg-version: [16, 17]
 
-    runs-on: small
+    runs-on: large
     container:
       image: neondatabase/build-tools:pinned-bookworm
       options: --init
