@@ -1134,7 +1134,7 @@ pub struct TimelineInfo {
     pub latest_gc_cutoff_lsn: Lsn,
 
     /// The LSN up to which GC has advanced: older data may still exist but it is not available for clients.
-    /// This LSN is not suitable for deciding where to create branches etc: use [`TimelineInfo::gc_cutoff_lsn`] instead,
+    /// This LSN is not suitable for deciding where to create branches etc: use [`TimelineInfo::min_readable_lsn`] instead,
     /// as it is easier to reason about.
     pub applied_gc_cutoff_lsn: Lsn,
 
