@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
 use utils::sync::gate::Gate;
 
+use http_utils::error::ApiError;
 use std::cmp::max;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -22,7 +23,6 @@ use std::time::Duration;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::{sync::watch, time::Instant};
 use tracing::*;
-use utils::http::error::ApiError;
 use utils::{
     id::{NodeId, TenantTimelineId},
     lsn::Lsn,

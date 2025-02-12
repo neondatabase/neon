@@ -14,11 +14,12 @@ use crate::{
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
 use anyhow::Context;
+use http_utils::error::ApiError;
 use pageserver_api::{models::detach_ancestor::AncestorDetached, shard::ShardIdentity};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use utils::{completion, generation::Generation, http::error::ApiError, id::TimelineId, lsn::Lsn};
+use utils::{completion, generation::Generation, id::TimelineId, lsn::Lsn};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {

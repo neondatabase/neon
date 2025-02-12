@@ -264,6 +264,8 @@ pub struct TenantConfigToml {
     /// size exceeds `compaction_upper_limit * checkpoint_distance`.
     pub compaction_upper_limit: usize,
     pub compaction_algorithm: crate::models::CompactionAlgorithmSettings,
+    /// If true, compact down L0 across all tenant timelines before doing regular compaction.
+    pub compaction_l0_first: bool,
     /// Level0 delta layer threshold at which to delay layer flushes for compaction backpressure,
     /// such that they take 2x as long, and start waiting for layer flushes during ephemeral layer
     /// rolls. This helps compaction keep up with WAL ingestion, and avoids read amplification
@@ -545,6 +547,7 @@ pub mod tenant_conf_defaults {
     // most of our pageservers. Compaction ~50 layers requires about 2GB memory (could be reduced later by optimizing L0 hole
     // calculation to avoid loading all keys into the memory). So with this config, we can get a maximum peak compaction usage of 18GB.
     pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 50;
+    pub const DEFAULT_COMPACTION_L0_FIRST: bool = false;
 
     pub const DEFAULT_COMPACTION_ALGORITHM: crate::models::CompactionAlgorithm =
         crate::models::CompactionAlgorithm::Legacy;
@@ -594,6 +597,7 @@ impl Default for TenantConfigToml {
             compaction_algorithm: crate::models::CompactionAlgorithmSettings {
                 kind: DEFAULT_COMPACTION_ALGORITHM,
             },
+            compaction_l0_first: DEFAULT_COMPACTION_L0_FIRST,
             l0_flush_delay_threshold: None,
             l0_flush_stall_threshold: None,
             l0_flush_wait_upload: DEFAULT_L0_FLUSH_WAIT_UPLOAD,

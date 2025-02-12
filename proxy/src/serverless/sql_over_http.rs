@@ -8,6 +8,7 @@ use http::header::AUTHORIZATION;
 use http::Method;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
+use http_utils::error::ApiError;
 use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
 use hyper::{header, HeaderMap, Request, Response, StatusCode};
@@ -23,7 +24,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use typed_json::json;
 use url::Url;
-use utils::http::error::ApiError;
 use uuid::Uuid;
 
 use super::backend::{LocalProxyConnError, PoolingBackend};

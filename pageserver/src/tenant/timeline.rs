@@ -876,6 +876,7 @@ pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
     ForceL0Compaction,
+    OnlyL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
 }
@@ -1814,8 +1815,8 @@ impl Timeline {
         // compaction task goes over it's period (20s) which is quite often in production.
         let (_guard, _permit) = tokio::select! {
             tuple = prepare => { tuple },
-            _ = self.cancel.cancelled() => return Ok(CompactionOutcome::Done),
-            _ = cancel.cancelled() => return Ok(CompactionOutcome::Done),
+            _ = self.cancel.cancelled() => return Ok(CompactionOutcome::Skipped),
+            _ = cancel.cancelled() => return Ok(CompactionOutcome::Skipped),
         };
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -1823,7 +1824,7 @@ impl Timeline {
         // Last record Lsn could be zero in case the timeline was just created
         if !last_record_lsn.is_valid() {
             warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
-            return Ok(CompactionOutcome::Done);
+            return Ok(CompactionOutcome::Skipped);
         }
 
         let result = match self.get_compaction_algorithm_settings().kind {
