@@ -1,5 +1,6 @@
 use futures::{stream::FuturesUnordered, StreamExt};
 use safekeeper_api::models::SafekeeperUtilization;
+use safekeeper_client::mgmt_api;
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -329,22 +330,17 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
                         )
                         .await;
 
-                    let response = match response {
-                        Some(r) => r,
-                        None => {
+                    let status = match response {
+                        Ok(utilization) => SafekeeperState::Available {
+                            last_seen_at: Instant::now(),
+                            utilization,
+                        },
+                        Err(mgmt_api::Error::Cancelled) => {
                             // This indicates cancellation of the request.
                             // We ignore the node in this case.
                             return None;
                         }
-                    };
-
-                    let status = if let Ok(utilization) = response {
-                        SafekeeperState::Available {
-                            last_seen_at: Instant::now(),
-                            utilization,
-                        }
-                    } else {
-                        SafekeeperState::Offline
+                        Err(_) => SafekeeperState::Offline,
                     };
 
                     Some((*node_id, status))

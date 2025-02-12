@@ -314,7 +314,12 @@ impl ServiceState {
         &mut BTreeMap<TenantShardId, TenantShard>,
         &mut Scheduler,
     ) {
-        (&mut self.nodes, &mut self.safekeepers, &mut self.tenants, &mut self.scheduler)
+        (
+            &mut self.nodes,
+            &mut self.safekeepers,
+            &mut self.tenants,
+            &mut self.scheduler,
+        )
     }
 
     fn get_leadership_status(&self) -> LeadershipStatus {
@@ -626,7 +631,8 @@ impl Service {
             let locked = self.inner.read().unwrap();
             locked.nodes.clone()
         };
-        let (mut nodes_online, mut sks_online) = self.initial_heartbeat_round(all_nodes.keys()).await;
+        let (mut nodes_online, mut sks_online) =
+            self.initial_heartbeat_round(all_nodes.keys()).await;
 
         // List of tenants for which we will attempt to notify compute of their location at startup
         let mut compute_notifications = Vec::new();

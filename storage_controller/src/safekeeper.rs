@@ -7,7 +7,9 @@ use tokio_util::sync::CancellationToken;
 use utils::{backoff, id::NodeId, logging::SecretString};
 
 use crate::{
-    heartbeater::SafekeeperState, persistence::{DatabaseError, SafekeeperPersistence}, safekeeper_client::SafekeeperClient
+    heartbeater::SafekeeperState,
+    persistence::{DatabaseError, SafekeeperPersistence},
+    safekeeper_client::SafekeeperClient,
 };
 
 #[derive(Clone)]
@@ -44,6 +46,7 @@ impl Safekeeper {
     pub(crate) fn set_availability(&mut self, availability: SafekeeperState) {
         self.availability = availability;
     }
+    /// Perform an operation (which is given a [`SafekeeperClient`]) with retries
     pub(crate) async fn with_client_retries<T, O, F>(
         &self,
         mut op: O,
@@ -52,7 +55,7 @@ impl Safekeeper {
         max_retries: u32,
         timeout: Duration,
         cancel: &CancellationToken,
-    ) -> Option<mgmt_api::Result<T>>
+    ) -> mgmt_api::Result<T>
     where
         O: FnMut(SafekeeperClient) -> F,
         F: std::future::Future<Output = mgmt_api::Result<T>>,
@@ -105,5 +108,6 @@ impl Safekeeper {
             cancel,
         )
         .await
+        .unwrap_or(Err(mgmt_api::Error::Cancelled))
     }
 }
