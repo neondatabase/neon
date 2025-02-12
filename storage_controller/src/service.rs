@@ -64,6 +64,7 @@ use reqwest::StatusCode;
 use tracing::{instrument, Instrument};
 
 use crate::pageserver_client::PageserverClient;
+use http_utils::error::ApiError;
 use pageserver_api::{
     models::{
         self, LocationConfig, LocationConfigListResponse, LocationConfigMode,
@@ -84,7 +85,6 @@ use utils::{
     completion::Barrier,
     failpoint_support,
     generation::Generation,
-    http::error::ApiError,
     id::{NodeId, TenantId, TimelineId},
     pausable_failpoint,
     sync::gate::Gate,
@@ -2330,9 +2330,14 @@ impl Service {
         let waiters = {
             let mut locked = self.inner.write().unwrap();
             let (nodes, tenants, _scheduler) = locked.parts_mut();
+            let config = ReconcilerConfigBuilder::new()
+                .tenant_creation_hint(true)
+                .build();
             tenants
                 .range_mut(TenantShardId::tenant_range(tenant_id))
-                .filter_map(|(_shard_id, shard)| self.maybe_reconcile_shard(shard, nodes))
+                .filter_map(|(_shard_id, shard)| {
+                    self.maybe_configured_reconcile_shard(shard, nodes, config)
+                })
                 .collect::<Vec<_>>()
         };
 

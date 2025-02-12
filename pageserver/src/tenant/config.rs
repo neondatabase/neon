@@ -279,7 +279,19 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    pub compaction_upper_limit: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub compaction_l0_first: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub compaction_l0_semaphore: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -288,6 +300,10 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub l0_flush_stall_threshold: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub l0_flush_wait_upload: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -350,6 +366,9 @@ pub struct TenantConfOpt {
     pub image_layer_creation_check_threshold: Option<u8>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_creation_preempt_threshold: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     #[serde(default)]
     pub lsn_lease_length: Option<Duration>,
@@ -397,17 +416,29 @@ impl TenantConfOpt {
             compaction_threshold: self
                 .compaction_threshold
                 .unwrap_or(global_conf.compaction_threshold),
+            compaction_upper_limit: self
+                .compaction_upper_limit
+                .unwrap_or(global_conf.compaction_upper_limit),
             compaction_algorithm: self
                 .compaction_algorithm
                 .as_ref()
                 .unwrap_or(&global_conf.compaction_algorithm)
                 .clone(),
+            compaction_l0_first: self
+                .compaction_l0_first
+                .unwrap_or(global_conf.compaction_l0_first),
+            compaction_l0_semaphore: self
+                .compaction_l0_semaphore
+                .unwrap_or(global_conf.compaction_l0_semaphore),
             l0_flush_delay_threshold: self
                 .l0_flush_delay_threshold
                 .or(global_conf.l0_flush_delay_threshold),
             l0_flush_stall_threshold: self
                 .l0_flush_stall_threshold
                 .or(global_conf.l0_flush_stall_threshold),
+            l0_flush_wait_upload: self
+                .l0_flush_wait_upload
+                .unwrap_or(global_conf.l0_flush_wait_upload),
             gc_horizon: self.gc_horizon.unwrap_or(global_conf.gc_horizon),
             gc_period: self.gc_period.unwrap_or(global_conf.gc_period),
             image_creation_threshold: self
@@ -439,6 +470,9 @@ impl TenantConfOpt {
             image_layer_creation_check_threshold: self
                 .image_layer_creation_check_threshold
                 .unwrap_or(global_conf.image_layer_creation_check_threshold),
+            image_creation_preempt_threshold: self
+                .image_creation_preempt_threshold
+                .unwrap_or(global_conf.image_creation_preempt_threshold),
             lsn_lease_length: self
                 .lsn_lease_length
                 .unwrap_or(global_conf.lsn_lease_length),
@@ -446,7 +480,7 @@ impl TenantConfOpt {
                 .lsn_lease_length_for_ts
                 .unwrap_or(global_conf.lsn_lease_length_for_ts),
             timeline_offloading: self
-                .lazy_slru_download
+                .timeline_offloading
                 .unwrap_or(global_conf.timeline_offloading),
             wal_receiver_protocol_override: self
                 .wal_receiver_protocol_override
@@ -471,9 +505,13 @@ impl TenantConfOpt {
             mut compaction_target_size,
             mut compaction_period,
             mut compaction_threshold,
+            mut compaction_upper_limit,
             mut compaction_algorithm,
+            mut compaction_l0_first,
+            mut compaction_l0_semaphore,
             mut l0_flush_delay_threshold,
             mut l0_flush_stall_threshold,
+            mut l0_flush_wait_upload,
             mut gc_horizon,
             mut gc_period,
             mut image_creation_threshold,
@@ -488,6 +526,7 @@ impl TenantConfOpt {
             mut lazy_slru_download,
             mut timeline_get_throttle,
             mut image_layer_creation_check_threshold,
+            mut image_creation_preempt_threshold,
             mut lsn_lease_length,
             mut lsn_lease_length_for_ts,
             mut timeline_offloading,
@@ -511,13 +550,21 @@ impl TenantConfOpt {
             .map(|v| humantime::parse_duration(&v))?
             .apply(&mut compaction_period);
         patch.compaction_threshold.apply(&mut compaction_threshold);
+        patch
+            .compaction_upper_limit
+            .apply(&mut compaction_upper_limit);
         patch.compaction_algorithm.apply(&mut compaction_algorithm);
+        patch.compaction_l0_first.apply(&mut compaction_l0_first);
+        patch
+            .compaction_l0_semaphore
+            .apply(&mut compaction_l0_semaphore);
         patch
             .l0_flush_delay_threshold
             .apply(&mut l0_flush_delay_threshold);
         patch
             .l0_flush_stall_threshold
             .apply(&mut l0_flush_stall_threshold);
+        patch.l0_flush_wait_upload.apply(&mut l0_flush_wait_upload);
         patch.gc_horizon.apply(&mut gc_horizon);
         patch
             .gc_period
@@ -559,6 +606,9 @@ impl TenantConfOpt {
             .image_layer_creation_check_threshold
             .apply(&mut image_layer_creation_check_threshold);
         patch
+            .image_creation_preempt_threshold
+            .apply(&mut image_creation_preempt_threshold);
+        patch
             .lsn_lease_length
             .map(|v| humantime::parse_duration(&v))?
             .apply(&mut lsn_lease_length);
@@ -587,9 +637,13 @@ impl TenantConfOpt {
             compaction_target_size,
             compaction_period,
             compaction_threshold,
+            compaction_upper_limit,
             compaction_algorithm,
+            compaction_l0_first,
+            compaction_l0_semaphore,
             l0_flush_delay_threshold,
             l0_flush_stall_threshold,
+            l0_flush_wait_upload,
             gc_horizon,
             gc_period,
             image_creation_threshold,
@@ -604,6 +658,7 @@ impl TenantConfOpt {
             lazy_slru_download,
             timeline_get_throttle,
             image_layer_creation_check_threshold,
+            image_creation_preempt_threshold,
             lsn_lease_length,
             lsn_lease_length_for_ts,
             timeline_offloading,
@@ -647,8 +702,12 @@ impl From<TenantConfOpt> for models::TenantConfig {
             compaction_target_size: value.compaction_target_size,
             compaction_period: value.compaction_period.map(humantime),
             compaction_threshold: value.compaction_threshold,
+            compaction_upper_limit: value.compaction_upper_limit,
+            compaction_l0_first: value.compaction_l0_first,
+            compaction_l0_semaphore: value.compaction_l0_semaphore,
             l0_flush_delay_threshold: value.l0_flush_delay_threshold,
             l0_flush_stall_threshold: value.l0_flush_stall_threshold,
+            l0_flush_wait_upload: value.l0_flush_wait_upload,
             gc_horizon: value.gc_horizon,
             gc_period: value.gc_period.map(humantime),
             image_creation_threshold: value.image_creation_threshold,
@@ -665,6 +724,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             lazy_slru_download: value.lazy_slru_download,
             timeline_get_throttle: value.timeline_get_throttle,
             image_layer_creation_check_threshold: value.image_layer_creation_check_threshold,
+            image_creation_preempt_threshold: value.image_creation_preempt_threshold,
             lsn_lease_length: value.lsn_lease_length.map(humantime),
             lsn_lease_length_for_ts: value.lsn_lease_length_for_ts.map(humantime),
             timeline_offloading: value.timeline_offloading,

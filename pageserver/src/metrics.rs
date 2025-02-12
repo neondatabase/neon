@@ -1,4 +1,13 @@
-use enum_map::EnumMap;
+use std::collections::HashMap;
+use std::num::NonZeroUsize;
+use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+
+use enum_map::{Enum as _, EnumMap};
+use futures::Future;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
@@ -11,12 +20,26 @@ use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
     PageServiceProtocolPipelinedExecutionStrategy,
 };
+use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
+use pin_project_lite::pin_project;
 use postgres_backend::{is_expected_io_error, QueryError};
 use pq_proto::framed::ConnectionError;
-use strum::{EnumCount, VariantNames};
+
+use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
 use utils::id::TimelineId;
+
+use crate::config::PageServerConf;
+use crate::context::{PageContentKind, RequestContext};
+use crate::pgdatadir_mapping::DatadirModificationStats;
+use crate::task_mgr::TaskKind;
+use crate::tenant::layer_map::LayerMap;
+use crate::tenant::mgr::TenantSlot;
+use crate::tenant::storage_layer::{InMemoryLayer, PersistentLayerDesc};
+use crate::tenant::tasks::BackgroundLoopKind;
+use crate::tenant::throttle::ThrottleResult;
+use crate::tenant::Timeline;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
 /// path. In other words, operations that directly affect that latency of user
@@ -81,7 +104,7 @@ pub(crate) static STORAGE_TIME_COUNT_PER_TIMELINE: Lazy<IntCounterVec> = Lazy::n
     .expect("failed to define a metric")
 });
 
-// Buckets for background operations like compaction, GC, size calculation
+// Buckets for background operation duration in seconds, like compaction, GC, size calculation.
 const STORAGE_OP_BUCKETS: &[f64] = &[0.010, 0.100, 1.0, 10.0, 100.0, 1000.0];
 
 pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
@@ -94,11 +117,38 @@ pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
+/// Measures layers visited per read (i.e. read amplification).
+///
+/// NB: for a batch, we count all visited layers towards each read. While the cost of layer visits
+/// are amortized across the batch, and some layers may not intersect with a given key, each visited
+/// layer contributes directly to the observed latency for every read in the batch, which is what we
+/// care about.
+pub(crate) static LAYERS_PER_READ: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_layers_per_read",
+        "Layers visited to serve a single read (read amplification). In a batch, all visited layers count towards every read.",
+        &["tenant_id", "shard_id", "timeline_id"],
+        // Low resolution to reduce cardinality.
+        vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static LAYERS_PER_READ_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
-        "pageserver_layers_visited_per_vectored_read_global",
-        "Average number of layers visited to reconstruct one key",
-        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+        "pageserver_layers_per_read_global",
+        "Layers visited to serve a single read (read amplification). In a batch, all visited layers count towards every read.",
+        vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static DELTAS_PER_READ_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
+    // We expect this to be low because of Postgres checkpoints. Let's see if that holds.
+    register_histogram!(
+        "pageserver_deltas_per_read_global",
+        "Number of delta pages applied to image page per read",
+        vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0],
     )
     .expect("failed to define a metric")
 });
@@ -186,7 +236,7 @@ pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| 
 
     GetVectoredLatency {
         map: EnumMap::from_array(std::array::from_fn(|task_kind_idx| {
-            let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
+            let task_kind = TaskKind::from_usize(task_kind_idx);
 
             if GetVectoredLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
                 let task_kind = task_kind.into();
@@ -209,7 +259,7 @@ pub(crate) static SCAN_LATENCY: Lazy<ScanLatency> = Lazy::new(|| {
 
     ScanLatency {
         map: EnumMap::from_array(std::array::from_fn(|task_kind_idx| {
-            let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
+            let task_kind = TaskKind::from_usize(task_kind_idx);
 
             if ScanLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
                 let task_kind = task_kind.into();
@@ -250,10 +300,10 @@ static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
 
 pub(crate) static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
     map: EnumMap::from_array(std::array::from_fn(|task_kind| {
-        let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind);
+        let task_kind = TaskKind::from_usize(task_kind);
         let task_kind: &'static str = task_kind.into();
         EnumMap::from_array(std::array::from_fn(|content_kind| {
-            let content_kind = <PageContentKind as enum_map::Enum>::from_usize(content_kind);
+            let content_kind = PageContentKind::from_usize(content_kind);
             let content_kind: &'static str = content_kind.into();
             PageCacheMetricsForTaskKind {
                 read_accesses_immutable: {
@@ -443,18 +493,38 @@ static PITR_HISTORY_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-#[derive(strum_macros::EnumString, strum_macros::Display, strum_macros::IntoStaticStr)]
+#[derive(
+    strum_macros::EnumIter,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    strum_macros::IntoStaticStr,
+)]
 #[strum(serialize_all = "kebab_case")]
-pub(crate) enum MetricLayerKind {
+pub(crate) enum LayerKind {
     Delta,
     Image,
+}
+
+#[derive(
+    strum_macros::EnumIter,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    strum_macros::IntoStaticStr,
+)]
+#[strum(serialize_all = "kebab_case")]
+pub(crate) enum LayerLevel {
+    // We don't track the currently open ephemeral layer, since there's always exactly 1 and its
+    // size changes. See `TIMELINE_EPHEMERAL_BYTES`.
+    Frozen,
+    L0,
+    L1,
 }
 
 static TIMELINE_LAYER_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_layer_bytes",
-        "Sum of layer physical sizes in bytes",
-        &["tenant_id", "shard_id", "timeline_id", "kind"]
+        "Sum of frozen, L0, and L1 layer physical sizes in bytes (excluding the open ephemeral layer)",
+        &["tenant_id", "shard_id", "timeline_id", "level", "kind"]
     )
     .expect("failed to define a metric")
 });
@@ -462,8 +532,8 @@ static TIMELINE_LAYER_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
 static TIMELINE_LAYER_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_layer_count",
-        "Number of layers that exist",
-        &["tenant_id", "shard_id", "timeline_id", "kind"]
+        "Number of frozen, L0, and L1 layers (excluding the open ephemeral layer)",
+        &["tenant_id", "shard_id", "timeline_id", "level", "kind"]
     )
     .expect("failed to define a metric")
 });
@@ -1296,10 +1366,7 @@ impl SmgrOpTimer {
     /// The first callers receives Some, subsequent ones None.
     ///
     /// See [`SmgrOpTimerState`] for more context.
-    pub(crate) fn observe_execution_end_flush_start(
-        &mut self,
-        at: Instant,
-    ) -> Option<SmgrOpFlushInProgress> {
+    pub(crate) fn observe_execution_end(&mut self, at: Instant) -> Option<SmgrOpFlushInProgress> {
         // NB: unlike the other observe_* methods, this one take()s.
         #[allow(clippy::question_mark)] // maintain similar code pattern.
         let Some(mut inner) = self.0.take() else {
@@ -1333,7 +1400,6 @@ impl SmgrOpTimer {
             ..
         } = inner;
         Some(SmgrOpFlushInProgress {
-            flush_started_at: at,
             global_micros: global_flush_in_progress_micros,
             per_timeline_micros: per_timeline_flush_in_progress_micros,
         })
@@ -1349,7 +1415,6 @@ impl SmgrOpTimer {
 /// add another `observe_*` method to [`SmgrOpTimer`], follow the existing pattern there,
 /// and remove this struct from the code base.
 pub(crate) struct SmgrOpFlushInProgress {
-    flush_started_at: Instant,
     global_micros: IntCounter,
     per_timeline_micros: IntCounter,
 }
@@ -1368,12 +1433,13 @@ impl Drop for SmgrOpTimer {
         self.observe_throttle_start(now);
         self.observe_throttle_done(ThrottleResult::NotThrottled { end: now });
         self.observe_execution_start(now);
-        self.observe_execution_end_flush_start(now);
+        let maybe_flush_timer = self.observe_execution_end(now);
+        drop(maybe_flush_timer);
     }
 }
 
 impl SmgrOpFlushInProgress {
-    pub(crate) async fn measure<Fut, O>(mut self, mut fut: Fut) -> O
+    pub(crate) async fn measure<Fut, O>(self, mut started_at: Instant, mut fut: Fut) -> O
     where
         Fut: std::future::Future<Output = O>,
     {
@@ -1385,12 +1451,12 @@ impl SmgrOpFlushInProgress {
         let mut observe_guard = scopeguard::guard(
             || {
                 let now = Instant::now();
-                let elapsed = now - self.flush_started_at;
+                let elapsed = now - started_at;
                 self.global_micros
                     .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
                 self.per_timeline_micros
                     .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-                self.flush_started_at = now;
+                started_at = now;
             },
             |mut observe| {
                 observe();
@@ -1843,7 +1909,7 @@ pub(crate) static COMPUTE_COMMANDS_COUNTERS: Lazy<ComputeCommandCounters> = Lazy
 
     ComputeCommandCounters {
         map: EnumMap::from_array(std::array::from_fn(|i| {
-            let command = <ComputeCommandKind as enum_map::Enum>::from_usize(i);
+            let command = ComputeCommandKind::from_usize(i);
             let command_str: &'static str = command.into();
             inner.with_label_values(&[command_str])
         })),
@@ -2143,11 +2209,13 @@ pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
 
 pub struct BackgroundLoopSemaphoreMetrics {
     counters: EnumMap<BackgroundLoopKind, IntCounterPair>,
-    durations: EnumMap<BackgroundLoopKind, Counter>,
+    durations: EnumMap<BackgroundLoopKind, Histogram>,
+    waiting_tasks: EnumMap<BackgroundLoopKind, IntGauge>,
+    running_tasks: EnumMap<BackgroundLoopKind, IntGauge>,
 }
 
-pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics> = Lazy::new(
-    || {
+pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics> =
+    Lazy::new(|| {
         let counters = register_int_counter_pair_vec!(
             "pageserver_background_loop_semaphore_wait_start_count",
             "Counter for background loop concurrency-limiting semaphore acquire calls started",
@@ -2157,45 +2225,101 @@ pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics
         )
         .unwrap();
 
-        let durations = register_counter_vec!(
-            "pageserver_background_loop_semaphore_wait_duration_seconds",
-            "Sum of wall clock time spent waiting on the background loop concurrency-limiting semaphore acquire calls",
+        let durations = register_histogram_vec!(
+            "pageserver_background_loop_semaphore_wait_seconds",
+            "Seconds spent waiting on background loop semaphore acquisition",
+            &["task"],
+            vec![0.01, 1.0, 5.0, 10.0, 30.0, 60.0, 180.0, 300.0, 600.0],
+        )
+        .unwrap();
+
+        let waiting_tasks = register_int_gauge_vec!(
+            "pageserver_background_loop_semaphore_waiting_tasks",
+            "Number of background loop tasks waiting for semaphore",
+            &["task"],
+        )
+        .unwrap();
+
+        let running_tasks = register_int_gauge_vec!(
+            "pageserver_background_loop_semaphore_running_tasks",
+            "Number of background loop tasks running concurrently",
             &["task"],
         )
         .unwrap();
 
         BackgroundLoopSemaphoreMetrics {
-            counters: enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-                let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+            counters: EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = BackgroundLoopKind::from_usize(i);
                 counters.with_label_values(&[kind.into()])
             })),
-            durations: enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-                let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+            durations: EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = BackgroundLoopKind::from_usize(i);
                 durations.with_label_values(&[kind.into()])
             })),
+            waiting_tasks: EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = BackgroundLoopKind::from_usize(i);
+                waiting_tasks.with_label_values(&[kind.into()])
+            })),
+            running_tasks: EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = BackgroundLoopKind::from_usize(i);
+                running_tasks.with_label_values(&[kind.into()])
+            })),
         }
-    },
-);
+    });
 
 impl BackgroundLoopSemaphoreMetrics {
-    pub(crate) fn measure_acquisition(&self, task: BackgroundLoopKind) -> impl Drop + '_ {
-        struct Record<'a> {
-            metrics: &'a BackgroundLoopSemaphoreMetrics,
-            task: BackgroundLoopKind,
-            _counter_guard: metrics::IntCounterPairGuard,
-            start: Instant,
-        }
-        impl Drop for Record<'_> {
-            fn drop(&mut self) {
-                let elapsed = self.start.elapsed().as_secs_f64();
-                self.metrics.durations[self.task].inc_by(elapsed);
-            }
-        }
-        Record {
-            metrics: self,
+    /// Starts recording semaphore metrics. Call `acquired()` on the returned recorder when the
+    /// semaphore is acquired, and drop it when the task completes or is cancelled.
+    pub(crate) fn record(
+        &self,
+        task: BackgroundLoopKind,
+    ) -> BackgroundLoopSemaphoreMetricsRecorder {
+        BackgroundLoopSemaphoreMetricsRecorder::start(self, task)
+    }
+}
+
+/// Records metrics for a background task.
+pub struct BackgroundLoopSemaphoreMetricsRecorder<'a> {
+    metrics: &'a BackgroundLoopSemaphoreMetrics,
+    task: BackgroundLoopKind,
+    start: Instant,
+    wait_counter_guard: Option<metrics::IntCounterPairGuard>,
+}
+
+impl<'a> BackgroundLoopSemaphoreMetricsRecorder<'a> {
+    /// Starts recording semaphore metrics, by recording wait time and incrementing
+    /// `wait_start_count` and `waiting_tasks`.
+    fn start(metrics: &'a BackgroundLoopSemaphoreMetrics, task: BackgroundLoopKind) -> Self {
+        metrics.waiting_tasks[task].inc();
+        Self {
+            metrics,
             task,
-            _counter_guard: self.counters[task].guard(),
             start: Instant::now(),
+            wait_counter_guard: Some(metrics.counters[task].guard()),
+        }
+    }
+
+    /// Signals that the semaphore has been acquired, and updates relevant metrics.
+    pub fn acquired(&mut self) -> Duration {
+        let waited = self.start.elapsed();
+        self.wait_counter_guard.take().expect("already acquired");
+        self.metrics.durations[self.task].observe(waited.as_secs_f64());
+        self.metrics.waiting_tasks[self.task].dec();
+        self.metrics.running_tasks[self.task].inc();
+        waited
+    }
+}
+
+impl Drop for BackgroundLoopSemaphoreMetricsRecorder<'_> {
+    /// The task either completed or was cancelled.
+    fn drop(&mut self) {
+        if self.wait_counter_guard.take().is_some() {
+            // Waiting.
+            self.metrics.durations[self.task].observe(self.start.elapsed().as_secs_f64());
+            self.metrics.waiting_tasks[self.task].dec();
+        } else {
+            // Running.
+            self.metrics.running_tasks[self.task].dec();
         }
     }
 }
@@ -2309,11 +2433,40 @@ pub(crate) struct WalIngestMetrics {
     pub(crate) records_observed: IntCounter,
     pub(crate) records_committed: IntCounter,
     pub(crate) records_filtered: IntCounter,
+    pub(crate) values_committed_metadata_images: IntCounter,
+    pub(crate) values_committed_metadata_deltas: IntCounter,
+    pub(crate) values_committed_data_images: IntCounter,
+    pub(crate) values_committed_data_deltas: IntCounter,
     pub(crate) gap_blocks_zeroed_on_rel_extend: IntCounter,
-    pub(crate) clear_vm_bits_unknown: IntCounterVec,
+}
+
+impl WalIngestMetrics {
+    pub(crate) fn inc_values_committed(&self, stats: &DatadirModificationStats) {
+        if stats.metadata_images > 0 {
+            self.values_committed_metadata_images
+                .inc_by(stats.metadata_images);
+        }
+        if stats.metadata_deltas > 0 {
+            self.values_committed_metadata_deltas
+                .inc_by(stats.metadata_deltas);
+        }
+        if stats.data_images > 0 {
+            self.values_committed_data_images.inc_by(stats.data_images);
+        }
+        if stats.data_deltas > 0 {
+            self.values_committed_data_deltas.inc_by(stats.data_deltas);
+        }
+    }
 }
 
 pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
+    let values_committed = register_int_counter_vec!(
+        "pageserver_wal_ingest_values_committed",
+        "Number of values committed to pageserver storage from WAL records",
+        &["class", "kind"],
+    )
+    .expect("failed to define a metric");
+
     WalIngestMetrics {
     bytes_received: register_int_counter!(
         "pageserver_wal_ingest_bytes_received",
@@ -2340,15 +2493,13 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
         "Number of WAL records filtered out due to sharding"
     )
     .expect("failed to define a metric"),
+    values_committed_metadata_images: values_committed.with_label_values(&["metadata", "image"]),
+    values_committed_metadata_deltas: values_committed.with_label_values(&["metadata", "delta"]),
+    values_committed_data_images: values_committed.with_label_values(&["data", "image"]),
+    values_committed_data_deltas: values_committed.with_label_values(&["data", "delta"]),
     gap_blocks_zeroed_on_rel_extend: register_int_counter!(
         "pageserver_gap_blocks_zeroed_on_rel_extend",
         "Total number of zero gap blocks written on relation extends"
-    )
-    .expect("failed to define a metric"),
-    clear_vm_bits_unknown: register_int_counter_vec!(
-        "pageserver_wal_ingest_clear_vm_bits_unknown",
-        "Number of ignored ClearVmBits operations due to unknown pages/relations",
-        &["entity"],
     )
     .expect("failed to define a metric"),
 }
@@ -2417,7 +2568,7 @@ pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = 
 
 pub(crate) struct WalRedoProcessCounters {
     pub(crate) started: IntCounter,
-    pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
+    pub(crate) killed_by_cause: EnumMap<WalRedoKillCause, IntCounter>,
     pub(crate) active_stderr_logger_tasks_started: IntCounter,
     pub(crate) active_stderr_logger_tasks_finished: IntCounter,
 }
@@ -2459,7 +2610,7 @@ impl Default for WalRedoProcessCounters {
         Self {
             started,
             killed_by_cause: EnumMap::from_array(std::array::from_fn(|i| {
-                let cause = <WalRedoKillCause as enum_map::Enum>::from_usize(i);
+                let cause = WalRedoKillCause::from_usize(i);
                 let cause_str: &'static str = cause.into();
                 killed.with_label_values(&[cause_str])
             })),
@@ -2590,10 +2741,7 @@ pub(crate) struct TimelineMetrics {
     pub disk_consistent_lsn_gauge: IntGauge,
     pub pitr_history_size: UIntGauge,
     pub archival_size: UIntGauge,
-    pub(crate) layer_size_image: UIntGauge,
-    pub(crate) layer_count_image: UIntGauge,
-    pub(crate) layer_size_delta: UIntGauge,
-    pub(crate) layer_count_delta: UIntGauge,
+    pub layers_per_read: Histogram,
     pub standby_horizon_gauge: IntGauge,
     pub resident_physical_size_gauge: UIntGauge,
     pub visible_physical_size_gauge: UIntGauge,
@@ -2691,40 +2839,8 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
-        let layer_size_image = TIMELINE_LAYER_SIZE
-            .get_metric_with_label_values(&[
-                &tenant_id,
-                &shard_id,
-                &timeline_id,
-                MetricLayerKind::Image.into(),
-            ])
-            .unwrap();
-
-        let layer_count_image = TIMELINE_LAYER_COUNT
-            .get_metric_with_label_values(&[
-                &tenant_id,
-                &shard_id,
-                &timeline_id,
-                MetricLayerKind::Image.into(),
-            ])
-            .unwrap();
-
-        let layer_size_delta = TIMELINE_LAYER_SIZE
-            .get_metric_with_label_values(&[
-                &tenant_id,
-                &shard_id,
-                &timeline_id,
-                MetricLayerKind::Delta.into(),
-            ])
-            .unwrap();
-
-        let layer_count_delta = TIMELINE_LAYER_COUNT
-            .get_metric_with_label_values(&[
-                &tenant_id,
-                &shard_id,
-                &timeline_id,
-                MetricLayerKind::Delta.into(),
-            ])
+        let layers_per_read = LAYERS_PER_READ
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
         let standby_horizon_gauge = STANDBY_HORIZON
@@ -2791,10 +2907,7 @@ impl TimelineMetrics {
             disk_consistent_lsn_gauge,
             pitr_history_size,
             archival_size,
-            layer_size_image,
-            layer_count_image,
-            layer_size_delta,
-            layer_count_delta,
+            layers_per_read,
             standby_horizon_gauge,
             resident_physical_size_gauge,
             visible_physical_size_gauge,
@@ -2837,6 +2950,92 @@ impl TimelineMetrics {
             .add(duration);
     }
 
+    /// Generates TIMELINE_LAYER labels for a persistent layer.
+    fn make_layer_labels(&self, layer_desc: &PersistentLayerDesc) -> [&str; 5] {
+        let level = match LayerMap::is_l0(&layer_desc.key_range, layer_desc.is_delta()) {
+            true => LayerLevel::L0,
+            false => LayerLevel::L1,
+        };
+        let kind = match layer_desc.is_delta() {
+            true => LayerKind::Delta,
+            false => LayerKind::Image,
+        };
+        [
+            &self.tenant_id,
+            &self.shard_id,
+            &self.timeline_id,
+            level.into(),
+            kind.into(),
+        ]
+    }
+
+    /// Generates TIMELINE_LAYER labels for a frozen ephemeral layer.
+    fn make_frozen_layer_labels(&self, _layer: &InMemoryLayer) -> [&str; 5] {
+        [
+            &self.tenant_id,
+            &self.shard_id,
+            &self.timeline_id,
+            LayerLevel::Frozen.into(),
+            LayerKind::Delta.into(), // by definition
+        ]
+    }
+
+    /// Removes a frozen ephemeral layer to TIMELINE_LAYER metrics.
+    pub fn dec_frozen_layer(&self, layer: &InMemoryLayer) {
+        assert!(matches!(layer.info(), InMemoryLayerInfo::Frozen { .. }));
+        let labels = self.make_frozen_layer_labels(layer);
+        let size = layer.try_len().expect("frozen layer should have no writer");
+        TIMELINE_LAYER_COUNT
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .dec();
+        TIMELINE_LAYER_SIZE
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .sub(size);
+    }
+
+    /// Adds a frozen ephemeral layer to TIMELINE_LAYER metrics.
+    pub fn inc_frozen_layer(&self, layer: &InMemoryLayer) {
+        assert!(matches!(layer.info(), InMemoryLayerInfo::Frozen { .. }));
+        let labels = self.make_frozen_layer_labels(layer);
+        let size = layer.try_len().expect("frozen layer should have no writer");
+        TIMELINE_LAYER_COUNT
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .inc();
+        TIMELINE_LAYER_SIZE
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .add(size);
+    }
+
+    /// Removes a persistent layer from TIMELINE_LAYER metrics.
+    pub fn dec_layer(&self, layer_desc: &PersistentLayerDesc) {
+        let labels = self.make_layer_labels(layer_desc);
+        TIMELINE_LAYER_COUNT
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .dec();
+        TIMELINE_LAYER_SIZE
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .sub(layer_desc.file_size);
+    }
+
+    /// Adds a persistent layer to TIMELINE_LAYER metrics.
+    pub fn inc_layer(&self, layer_desc: &PersistentLayerDesc) {
+        let labels = self.make_layer_labels(layer_desc);
+        TIMELINE_LAYER_COUNT
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .inc();
+        TIMELINE_LAYER_SIZE
+            .get_metric_with_label_values(&labels)
+            .unwrap()
+            .add(layer_desc.file_size);
+    }
+
     pub(crate) fn shutdown(&self) {
         let was_shutdown = self
             .shutdown
@@ -2869,30 +3068,16 @@ impl TimelineMetrics {
         let _ = TIMELINE_ARCHIVE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = PITR_HISTORY_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
 
-        let _ = TIMELINE_LAYER_SIZE.remove_label_values(&[
-            tenant_id,
-            shard_id,
-            timeline_id,
-            MetricLayerKind::Image.into(),
-        ]);
-        let _ = TIMELINE_LAYER_COUNT.remove_label_values(&[
-            tenant_id,
-            shard_id,
-            timeline_id,
-            MetricLayerKind::Image.into(),
-        ]);
-        let _ = TIMELINE_LAYER_SIZE.remove_label_values(&[
-            tenant_id,
-            shard_id,
-            timeline_id,
-            MetricLayerKind::Delta.into(),
-        ]);
-        let _ = TIMELINE_LAYER_COUNT.remove_label_values(&[
-            tenant_id,
-            shard_id,
-            timeline_id,
-            MetricLayerKind::Delta.into(),
-        ]);
+        for ref level in LayerLevel::iter() {
+            for ref kind in LayerKind::iter() {
+                let labels: [&str; 5] =
+                    [tenant_id, shard_id, timeline_id, level.into(), kind.into()];
+                let _ = TIMELINE_LAYER_SIZE.remove_label_values(&labels);
+                let _ = TIMELINE_LAYER_COUNT.remove_label_values(&labels);
+            }
+        }
+
+        let _ = LAYERS_PER_READ.remove_label_values(&[tenant_id, shard_id, timeline_id]);
 
         let _ = EVICTIONS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = AUX_FILE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
@@ -2973,24 +3158,6 @@ pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
 
     // we leave the BROKEN_TENANTS_SET entry if any
 }
-
-use futures::Future;
-use pin_project_lite::pin_project;
-use std::collections::HashMap;
-use std::num::NonZeroUsize;
-use std::pin::Pin;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
-
-use crate::config::PageServerConf;
-use crate::context::{PageContentKind, RequestContext};
-use crate::task_mgr::TaskKind;
-use crate::tenant::mgr::TenantSlot;
-use crate::tenant::tasks::BackgroundLoopKind;
-use crate::tenant::throttle::ThrottleResult;
-use crate::tenant::Timeline;
 
 /// Maintain a per timeline gauge in addition to the global gauge.
 pub(crate) struct PerTimelineRemotePhysicalSizeGauge {
@@ -3862,7 +4029,8 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
 
     // histograms
     [
-        &VEC_READ_NUM_LAYERS_VISITED,
+        &LAYERS_PER_READ_GLOBAL,
+        &DELTAS_PER_READ_GLOBAL,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,

@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use crate::controller_upcall_client::ControlPlaneGenerationsApi;
 use crate::metrics;
-use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::remote_timeline_client::remote_timeline_path;
 use crate::tenant::remote_timeline_client::LayerFileMetadata;
 use crate::virtual_file::MaybeFatalIo;
@@ -463,45 +462,18 @@ impl DeletionQueueClient {
     ///
     /// The `current_generation` is the generation of this pageserver's current attachment.  The
     /// generations in `layers` are the generations in which those layers were written.
-    pub(crate) async fn push_layers(
+    pub(crate) fn push_layers(
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         current_generation: Generation,
         layers: Vec<(LayerName, LayerFileMetadata)>,
     ) -> Result<(), DeletionQueueError> {
-        if current_generation.is_none() {
-            debug!("Enqueuing deletions in legacy mode, skipping queue");
+        // None generations are not valid for attached tenants: they must always be attached in
+        // a known generation.  None generations are still permitted for layers in the index because
+        // they may be historical.
+        assert!(!current_generation.is_none());
 
-            let mut layer_paths = Vec::new();
-            for (layer, meta) in layers {
-                layer_paths.push(remote_layer_path(
-                    &tenant_shard_id.tenant_id,
-                    &timeline_id,
-                    meta.shard,
-                    &layer,
-                    meta.generation,
-                ));
-            }
-            self.push_immediate(layer_paths).await?;
-            return self.flush_immediate().await;
-        }
-
-        self.push_layers_sync(tenant_shard_id, timeline_id, current_generation, layers)
-    }
-
-    /// When a Tenant has a generation, push_layers is always synchronous because
-    /// the ListValidator channel is an unbounded channel.
-    ///
-    /// This can be merged into push_layers when we remove the Generation-less mode
-    /// support (`<https://github.com/neondatabase/neon/issues/5395>`)
-    pub(crate) fn push_layers_sync(
-        &self,
-        tenant_shard_id: TenantShardId,
-        timeline_id: TimelineId,
-        current_generation: Generation,
-        layers: Vec<(LayerName, LayerFileMetadata)>,
-    ) -> Result<(), DeletionQueueError> {
         metrics::DELETION_QUEUE
             .keys_submitted
             .inc_by(layers.len() as u64);
@@ -957,14 +929,12 @@ mod test {
 
         // File should still be there after we push it to the queue (we haven't pushed enough to flush anything)
         info!("Pushing");
-        client
-            .push_layers(
-                tenant_shard_id,
-                TIMELINE_ID,
-                now_generation,
-                [(layer_file_name_1.clone(), layer_metadata)].to_vec(),
-            )
-            .await?;
+        client.push_layers(
+            tenant_shard_id,
+            TIMELINE_ID,
+            now_generation,
+            [(layer_file_name_1.clone(), layer_metadata)].to_vec(),
+        )?;
         assert_remote_files(&[&remote_layer_file_name_1], &remote_timeline_path);
 
         assert_local_files(&[], &deletion_prefix);
@@ -1017,14 +987,12 @@ mod test {
         assert_remote_files(&[&remote_layer_name], &remote_timeline_path);
 
         tracing::debug!("Pushing...");
-        client
-            .push_layers(
-                tenant_shard_id,
-                TIMELINE_ID,
-                stale_generation,
-                [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
-            )
-            .await?;
+        client.push_layers(
+            tenant_shard_id,
+            TIMELINE_ID,
+            stale_generation,
+            [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
+        )?;
 
         // We enqueued the operation in a stale generation: it should have failed validation
         tracing::debug!("Flushing...");
@@ -1032,14 +1000,12 @@ mod test {
         assert_remote_files(&[&remote_layer_name], &remote_timeline_path);
 
         tracing::debug!("Pushing...");
-        client
-            .push_layers(
-                tenant_shard_id,
-                TIMELINE_ID,
-                latest_generation,
-                [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
-            )
-            .await?;
+        client.push_layers(
+            tenant_shard_id,
+            TIMELINE_ID,
+            latest_generation,
+            [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
+        )?;
 
         // We enqueued the operation in a fresh generation: it should have passed validation
         tracing::debug!("Flushing...");
@@ -1074,28 +1040,24 @@ mod test {
         // generation gets that treatment)
         let remote_layer_file_name_historical =
             ctx.write_remote_layer(EXAMPLE_LAYER_NAME, layer_generation)?;
-        client
-            .push_layers(
-                tenant_shard_id,
-                TIMELINE_ID,
-                now_generation.previous(),
-                [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
-            )
-            .await?;
+        client.push_layers(
+            tenant_shard_id,
+            TIMELINE_ID,
+            now_generation.previous(),
+            [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
+        )?;
 
         // Inject a deletion in the generation before generation_now: after restart,
         // this deletion should get executed, because we execute deletions in the
         // immediately previous generation on the same node.
         let remote_layer_file_name_previous =
             ctx.write_remote_layer(EXAMPLE_LAYER_NAME_ALT, layer_generation)?;
-        client
-            .push_layers(
-                tenant_shard_id,
-                TIMELINE_ID,
-                now_generation,
-                [(EXAMPLE_LAYER_NAME_ALT.clone(), layer_metadata.clone())].to_vec(),
-            )
-            .await?;
+        client.push_layers(
+            tenant_shard_id,
+            TIMELINE_ID,
+            now_generation,
+            [(EXAMPLE_LAYER_NAME_ALT.clone(), layer_metadata.clone())].to_vec(),
+        )?;
 
         client.flush().await?;
         assert_remote_files(
@@ -1139,6 +1101,7 @@ pub(crate) mod mock {
     use tracing::info;
 
     use super::*;
+    use crate::tenant::remote_timeline_client::remote_layer_path;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub struct ConsumerState {

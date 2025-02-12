@@ -3,7 +3,7 @@ use crate::persistence::Persistence;
 use crate::{compute_hook, service};
 use pageserver_api::controller_api::{AvailabilityZone, PlacementPolicy};
 use pageserver_api::models::{
-    LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
+    LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig, TenantWaitLsnRequest,
 };
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_client::mgmt_api;
@@ -115,6 +115,15 @@ impl ReconcilerConfigBuilder {
         }
     }
 
+    pub(crate) fn tenant_creation_hint(self, hint: bool) -> Self {
+        Self {
+            config: ReconcilerConfig {
+                tenant_creation_hint: hint,
+                ..self.config
+            },
+        }
+    }
+
     pub(crate) fn build(self) -> ReconcilerConfig {
         self.config
     }
@@ -129,6 +138,10 @@ pub(crate) struct ReconcilerConfig {
     // During live migrations this is the amount of time that
     // the pagserver will hold our poll.
     secondary_download_request_timeout: Option<Duration>,
+
+    // A hint indicating whether this reconciliation is done on the
+    // creation of a new tenant. This only informs logging behaviour.
+    tenant_creation_hint: bool,
 }
 
 impl ReconcilerConfig {
@@ -142,6 +155,10 @@ impl ReconcilerConfig {
         const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT_DEFAULT: Duration = Duration::from_secs(20);
         self.secondary_download_request_timeout
             .unwrap_or(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT_DEFAULT)
+    }
+
+    pub(crate) fn tenant_creation_hint(&self) -> bool {
+        self.tenant_creation_hint
     }
 }
 
@@ -348,6 +365,32 @@ impl Reconciler {
         Ok(())
     }
 
+    async fn wait_lsn(
+        &self,
+        node: &Node,
+        tenant_shard_id: TenantShardId,
+        timelines: HashMap<TimelineId, Lsn>,
+    ) -> Result<StatusCode, ReconcileError> {
+        const TIMEOUT: Duration = Duration::from_secs(10);
+
+        let client = PageserverClient::new(
+            node.get_id(),
+            node.base_url(),
+            self.service_config.jwt_token.as_deref(),
+        );
+
+        client
+            .wait_lsn(
+                tenant_shard_id,
+                TenantWaitLsnRequest {
+                    timelines,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .map_err(|e| e.into())
+    }
+
     async fn get_lsns(
         &self,
         tenant_shard_id: TenantShardId,
@@ -461,6 +504,39 @@ impl Reconciler {
         node: &Node,
         baseline: HashMap<TimelineId, Lsn>,
     ) -> anyhow::Result<()> {
+        // Signal to the pageserver that it should ingest up to the baseline LSNs.
+        loop {
+            match self.wait_lsn(node, tenant_shard_id, baseline.clone()).await {
+                Ok(StatusCode::OK) => {
+                    // Everything is caught up
+                    return Ok(());
+                }
+                Ok(StatusCode::ACCEPTED) => {
+                    // Some timelines are not caught up yet.
+                    // They'll be polled below.
+                    break;
+                }
+                Ok(StatusCode::NOT_FOUND) => {
+                    // None of the timelines are present on the pageserver.
+                    // This is correct if they've all been deleted, but
+                    // let let the polling loop below cross check.
+                    break;
+                }
+                Ok(status_code) => {
+                    tracing::warn!(
+                        "Unexpected status code ({status_code}) returned by wait_lsn endpoint"
+                    );
+                    break;
+                }
+                Err(e) => {
+                    tracing::info!("🕑 Can't trigger LSN wait on {node} yet, waiting ({e})",);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+            }
+        }
+
+        // Poll the LSNs until they catch up
         loop {
             let latest = match self.get_lsns(tenant_shard_id, node).await {
                 Ok(l) => l,
@@ -875,16 +951,35 @@ impl Reconciler {
                 )
                 .await;
             if let Err(e) = &result {
-                // It is up to the caller whether they want to drop out on this error, but they don't have to:
-                // in general we should avoid letting unavailability of the cloud control plane stop us from
-                // making progress.
-                if !matches!(e, NotifyError::ShuttingDown) {
-                    tracing::warn!("Failed to notify compute of attached pageserver {node}: {e}");
-                }
-
                 // Set this flag so that in our ReconcileResult we will set the flag on the shard that it
                 // needs to retry at some point.
                 self.compute_notify_failure = true;
+
+                // It is up to the caller whether they want to drop out on this error, but they don't have to:
+                // in general we should avoid letting unavailability of the cloud control plane stop us from
+                // making progress.
+                match e {
+                    // 404s from cplane during tenant creation are expected.
+                    // Cplane only persists the shards to the database after
+                    // creating the tenant and the timeline. If we notify before
+                    // that, we'll get a 404.
+                    //
+                    // This is fine because tenant creations happen via /location_config
+                    // and that returns the list of locations in the response. Hence, we
+                    // silence the error and return Ok(()) here. Reconciliation will still
+                    // be retried because we set [`Reconciler::compute_notify_failure`] above.
+                    NotifyError::Unexpected(hyper::StatusCode::NOT_FOUND)
+                        if self.reconciler_config.tenant_creation_hint() =>
+                    {
+                        return Ok(());
+                    }
+                    NotifyError::ShuttingDown => {}
+                    _ => {
+                        tracing::warn!(
+                            "Failed to notify compute of attached pageserver {node}: {e}"
+                        );
+                    }
+                }
             }
             result
         } else {

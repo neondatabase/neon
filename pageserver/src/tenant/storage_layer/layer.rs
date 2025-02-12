@@ -340,7 +340,7 @@ impl Layer {
     /// Download the layer if evicted.
     ///
     /// Will not error when the layer is already downloaded.
-    pub(crate) async fn download(&self) -> anyhow::Result<()> {
+    pub(crate) async fn download(&self) -> Result<(), DownloadError> {
         self.0.get_or_maybe_download(true, None).await?;
         Ok(())
     }
@@ -353,7 +353,6 @@ impl Layer {
     /// while the guard exists.
     ///
     /// Returns None if the layer is currently evicted or becoming evicted.
-    #[cfg(test)]
     pub(crate) async fn keep_resident(&self) -> Option<ResidentLayer> {
         let downloaded = self.0.inner.get().and_then(|rowe| rowe.get())?;
 
@@ -530,7 +529,6 @@ impl ResidentOrWantedEvicted {
     /// This is not used on the read path (anything that calls
     /// [`LayerInner::get_or_maybe_download`]) because it was decided that reads always win
     /// evictions, and part of that winning is using [`ResidentOrWantedEvicted::get_and_upgrade`].
-    #[cfg(test)]
     fn get(&self) -> Option<Arc<DownloadedLayer>> {
         match self {
             ResidentOrWantedEvicted::Resident(strong) => Some(strong.clone()),
@@ -701,13 +699,7 @@ impl Drop for LayerInner {
         if let Some(timeline) = timeline.as_ref() {
             // Only need to decrement metrics if the timeline still exists: otherwise
             // it will have already de-registered these metrics via TimelineMetrics::shutdown
-            if self.desc.is_delta() {
-                timeline.metrics.layer_count_delta.dec();
-                timeline.metrics.layer_size_delta.sub(self.desc.file_size);
-            } else {
-                timeline.metrics.layer_count_image.dec();
-                timeline.metrics.layer_size_image.sub(self.desc.file_size);
-            }
+            timeline.metrics.dec_layer(&self.desc);
 
             if matches!(self.access_stats.visibility(), LayerVisibilityHint::Visible) {
                 debug_assert!(
@@ -817,13 +809,7 @@ impl LayerInner {
         };
 
         // This object acts as a RAII guard on these metrics: increment on construction
-        if desc.is_delta() {
-            timeline.metrics.layer_count_delta.inc();
-            timeline.metrics.layer_size_delta.add(desc.file_size);
-        } else {
-            timeline.metrics.layer_count_image.inc();
-            timeline.metrics.layer_size_image.add(desc.file_size);
-        }
+        timeline.metrics.inc_layer(&desc);
 
         // New layers are visible by default. This metric is later updated on drop or in set_visibility
         timeline

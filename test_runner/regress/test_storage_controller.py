@@ -373,6 +373,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     but imports the generation number.
     """
 
+    neon_env_builder.num_azs = 3
     env, origin_ps, tenant_id, generation = prepare_onboarding_env(neon_env_builder)
 
     virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
@@ -408,6 +409,9 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
         warm_up_ps = env.storage_controller.tenant_describe(tenant_id)["shards"][0][
             "node_secondary"
         ][0]
+
+        # Check that the secondary's scheduling is stable
+        assert env.storage_controller.reconcile_all() == 0
 
     # Call into storage controller to onboard the tenant
     generation += 1
@@ -459,6 +463,9 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
         },
     )
     assert len(r["shards"]) == 1
+
+    # Check that onboarding did not result in an unstable scheduling state
+    assert env.storage_controller.reconcile_all() == 0
 
     # We should see the tenant is now attached to the pageserver managed
     # by the sharding service
@@ -2132,12 +2139,18 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
         workload.validate()
 
 
-def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("num_azs", [1, 2])
+def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder, num_azs: int):
     """
     Graceful reststart of storage controller clusters use the drain and
     fill hooks in order to migrate attachments away from pageservers before
     restarting. In practice, Ansible will drive this process.
+
+    Test is parametrized on the number of AZs to exercise the AZ-driven behavior
+    of reliably moving shards back to their home AZ, and the behavior for AZ-agnostic
+    tenants where we fill based on a target shard count.
     """
+    neon_env_builder.num_azs = num_azs
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
     env.start()
@@ -2167,8 +2180,15 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         min_shard_count = min(shard_counts.values())
         max_shard_count = max(shard_counts.values())
 
-        flake_factor = 5 / 100
-        assert max_shard_count - min_shard_count <= int(total_shards * flake_factor)
+        if num_azs == 1:
+            # AZ-agnostic case: we expect all nodes to have the same number of shards, within some bound
+            flake_factor = 5 / 100
+            assert max_shard_count - min_shard_count <= int(total_shards * flake_factor)
+        else:
+            # AZ-driven case: we expect tenants to have been round-robin allocated to AZs,
+            # and after the restart they should all be back in their home AZ, so difference
+            # should be at most a single shard's tenants
+            assert max_shard_count - min_shard_count <= shard_count_per_tenant
 
     # Perform a graceful rolling restart
     for ps in env.pageservers:

@@ -28,6 +28,7 @@ use futures::TryFutureExt;
 use http::{Method, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty};
+use http_utils::error::ApiError;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
@@ -41,9 +42,8 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{info, warn, Instrument};
-use utils::http::error::ApiError;
 
-use crate::cancellation::CancellationHandlerMain;
+use crate::cancellation::CancellationHandler;
 use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::ext::TaskExt;
@@ -61,7 +61,7 @@ pub async fn task_main(
     auth_backend: &'static crate::auth::Backend<'static, ()>,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
-    cancellation_handler: Arc<CancellationHandlerMain>,
+    cancellation_handler: Arc<CancellationHandler>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
@@ -318,7 +318,7 @@ async fn connection_handler(
     backend: Arc<PoolingBackend>,
     connections: TaskTracker,
     cancellations: TaskTracker,
-    cancellation_handler: Arc<CancellationHandlerMain>,
+    cancellation_handler: Arc<CancellationHandler>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_token: CancellationToken,
     conn: AsyncRW,
@@ -412,7 +412,7 @@ async fn request_handler(
     config: &'static ProxyConfig,
     backend: Arc<PoolingBackend>,
     ws_connections: TaskTracker,
-    cancellation_handler: Arc<CancellationHandlerMain>,
+    cancellation_handler: Arc<CancellationHandler>,
     session_id: uuid::Uuid,
     conn_info: ConnectionInfo,
     // used to cancel in-flight HTTP requests. not used to cancel websockets

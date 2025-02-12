@@ -48,7 +48,7 @@ use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::pausable_failpoint;
 use utils::{bin_ser::BeSer, lsn::Lsn};
-use wal_decoder::serialized_batch::SerializedValueBatch;
+use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 /// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
 pub const MAX_AUX_FILE_DELTAS: usize = 1024;
@@ -612,11 +612,18 @@ impl Timeline {
         pausable_failpoint!("find-lsn-for-timestamp-pausable");
 
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
+        let gc_cutoff_planned = {
+            let gc_info = self.gc_info.read().unwrap();
+            gc_info.min_cutoff()
+        };
+        // Usually the planned cutoff is newer than the cutoff of the last gc run,
+        // but let's be defensive.
+        let gc_cutoff = gc_cutoff_planned.max(*gc_cutoff_lsn_guard);
         // We use this method to figure out the branching LSN for the new branch, but the
         // GC cutoff could be before the branching point and we cannot create a new branch
         // with LSN < `ancestor_lsn`. Thus, pick the maximum of these two to be
         // on the safe side.
-        let min_lsn = std::cmp::max(*gc_cutoff_lsn_guard, self.get_ancestor_lsn());
+        let min_lsn = std::cmp::max(gc_cutoff, self.get_ancestor_lsn());
         let max_lsn = self.get_last_record_lsn();
 
         // LSNs are always 8-byte aligned. low/mid/high represent the
@@ -1295,6 +1302,26 @@ impl DatadirModification<'_> {
         self.pending_data_batch
             .as_ref()
             .is_some_and(|b| b.has_data())
+    }
+
+    /// Returns statistics about the currently pending modifications.
+    pub(crate) fn stats(&self) -> DatadirModificationStats {
+        let mut stats = DatadirModificationStats::default();
+        for (_, _, value) in self.pending_metadata_pages.values().flatten() {
+            match value {
+                Value::Image(_) => stats.metadata_images += 1,
+                Value::WalRecord(r) if r.will_init() => stats.metadata_images += 1,
+                Value::WalRecord(_) => stats.metadata_deltas += 1,
+            }
+        }
+        for valuemeta in self.pending_data_batch.iter().flat_map(|b| &b.metadata) {
+            match valuemeta {
+                ValueMeta::Serialized(s) if s.will_init => stats.data_images += 1,
+                ValueMeta::Serialized(_) => stats.data_deltas += 1,
+                ValueMeta::Observed(_) => {}
+            }
+        }
+        stats
     }
 
     /// Set the current lsn
@@ -2315,6 +2342,15 @@ impl DatadirModification<'_> {
         trace!("DELETE {}-{}", key_range.start, key_range.end);
         self.pending_deletions.push((key_range, self.lsn));
     }
+}
+
+/// Statistics for a DatadirModification.
+#[derive(Default)]
+pub struct DatadirModificationStats {
+    pub metadata_images: u64,
+    pub metadata_deltas: u64,
+    pub data_images: u64,
+    pub data_deltas: u64,
 }
 
 /// This struct facilitates accessing either a committed key from the timeline at a

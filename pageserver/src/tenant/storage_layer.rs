@@ -33,6 +33,7 @@ use utils::sync::gate::GateGuard;
 
 use utils::lsn::Lsn;
 
+pub use batch_split_writer::{BatchLayerWriter, SplitDeltaLayerWriter, SplitImageLayerWriter};
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
@@ -43,7 +44,7 @@ pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
 
 use self::inmemory_layer::InMemoryLayerFileId;
 
-use super::timeline::GetVectoredError;
+use super::timeline::{GetVectoredError, ReadPath};
 use super::PageReconstructError;
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
@@ -77,6 +78,16 @@ where
 pub(crate) struct ValueReconstructState {
     pub(crate) records: Vec<(Lsn, NeonWalRecord)>,
     pub(crate) img: Option<(Lsn, Bytes)>,
+}
+
+impl ValueReconstructState {
+    /// Returns the number of page deltas applied to the page image.
+    pub fn num_deltas(&self) -> usize {
+        match self.img {
+            Some(_) => self.records.len(),
+            None => self.records.len() - 1, // omit will_init record
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -251,6 +262,8 @@ pub(crate) struct ValuesReconstructState {
 
     pub(crate) io_concurrency: IoConcurrency,
     num_active_ios: Arc<AtomicUsize>,
+
+    pub(crate) read_path: Option<ReadPath>,
 }
 
 /// The level of IO concurrency to be used on the read path
@@ -598,6 +611,7 @@ impl ValuesReconstructState {
             delta_layers_visited: 0,
             io_concurrency,
             num_active_ios: Arc::new(AtomicUsize::new(0)),
+            read_path: None,
         }
     }
 
