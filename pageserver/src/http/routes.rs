@@ -482,7 +482,7 @@ async fn build_timeline_info_common(
 
     let (pitr_history_size, within_ancestor_pitr) = timeline.get_pitr_history_stats();
 
-    let gc_cutoff = std::cmp::max(
+    let min_readable_lsn = std::cmp::max(
         timeline.get_gc_cutoff_lsn(),
         *timeline.get_applied_gc_cutoff_lsn(),
     );
@@ -501,8 +501,8 @@ async fn build_timeline_info_common(
         // Externally, expose the lowest LSN that can be used to create a branch as the "GC cutoff", although internally
         // we distinguish between the "planned" GC cutoff (PITR point) and the "latest" GC cutoff (where we
         // actually trimmed data to), which can pass each other when PITR is changed.
-        latest_gc_cutoff_lsn: gc_cutoff,
-        gc_cutoff_lsn: gc_cutoff,
+        latest_gc_cutoff_lsn: min_readable_lsn,
+        min_readable_lsn,
         applied_gc_cutoff_lsn: *timeline.get_applied_gc_cutoff_lsn(),
         current_logical_size: current_logical_size.size_dont_care_about_accuracy(),
         current_logical_size_is_accurate: match current_logical_size.accuracy() {

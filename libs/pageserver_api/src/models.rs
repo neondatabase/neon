@@ -1143,8 +1143,8 @@ pub struct TimelineInfo {
     /// LSN at which it is legal to create a branch or ephemeral endpoint.
     ///
     /// Note that holders of valid LSN leases may be able to create branches and read pages earlier
-    /// than this LSN.
-    pub gc_cutoff_lsn: Lsn,
+    /// than this LSN, but new leases may not be taken out earlier than this LSN.
+    pub min_readable_lsn: Lsn,
 
     pub disk_consistent_lsn: Lsn,
 
