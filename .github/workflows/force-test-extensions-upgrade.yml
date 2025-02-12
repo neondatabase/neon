@@ -51,3 +51,14 @@ jobs:
         run: |
           docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml logs || true
           docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml down
+
+      - name: Post to the Slack channel
+        if: ${{ github.event.schedule && failure() }}
+        uses: slackapi/slack-github-action@v1
+        with:
+          channel-id: ${{ vars.SLACK_ON_CALL_QA_STAGING_STREAM }}
+          slack-message: |
+            Test upgrading of extensions: ${{ job.status }}
+            <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
