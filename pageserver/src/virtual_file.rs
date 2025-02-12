@@ -29,6 +29,7 @@ use std::io::{Error, ErrorKind, Seek, SeekFrom};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
+use utils::critical;
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -496,7 +497,7 @@ pub(crate) fn is_fatal_io_error(e: &std::io::Error) -> bool {
 /// bad storage or bad configuration, and we can't fix that from inside
 /// a running process.
 pub(crate) fn on_fatal_io_error(e: &std::io::Error, context: &str) -> ! {
-    tracing::error!("Fatal I/O error: {e}: {context})");
+    critical!("Fatal I/O error: {e}: {context})");
     std::process::abort();
 }
 
