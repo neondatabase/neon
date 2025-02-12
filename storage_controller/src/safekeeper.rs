@@ -123,7 +123,7 @@ impl Safekeeper {
             version: _,
         } = record.clone();
         if id != self.id.0 as i64 {
-            // We catch the id being different in higher level code already. If we don't, it's a bug.
+            // The way the function is called ensures this. If we regress on that, it's a bug.
             panic!(
                 "id can't be changed via update_from_record function: {id} != {}",
                 self.id.0
