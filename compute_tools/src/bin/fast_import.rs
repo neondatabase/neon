@@ -409,6 +409,7 @@ async fn run_dump_restore(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_pgdata(
     kms_client: Option<aws_sdk_kms::Client>,
     maybe_s3_prefix: Option<s3_uri::S3Uri>,
