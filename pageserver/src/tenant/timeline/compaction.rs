@@ -253,12 +253,31 @@ impl GcCompactionQueue {
             gc_compaction_initial_threshold_kb: u64,
             gc_compaction_ratio_percent: u64,
         ) -> bool {
+            const AUTO_TRIGGER_LIMIT: u64 = 150 * 1024 * 1024 * 1024; // 150GB
+            if l1_size >= AUTO_TRIGGER_LIMIT || l2_size >= AUTO_TRIGGER_LIMIT {
+                // Do not auto-trigger when physical size >= 150GB
+                return false;
+            }
             // initial trigger
             if l2_size == 0 && l1_size >= gc_compaction_initial_threshold_kb * 1024 {
+                info!(
+                    "trigger auto-compaction because l1_size={} >= gc_compaction_initial_threshold_kb={}",
+                    l1_size,
+                    gc_compaction_initial_threshold_kb
+                );
                 return true;
             }
             // size ratio trigger
+            if l2_size == 0 {
+                return false;
+            }
             if l1_size as f64 / l2_size as f64 >= (gc_compaction_ratio_percent as f64 / 100.0) {
+                info!(
+                    "trigger auto-compaction because l1_size={} / l2_size={} > gc_compaction_ratio_percent={}",
+                    l1_size,
+                    l2_size,
+                    gc_compaction_ratio_percent
+                );
                 return true;
             }
             false
@@ -386,16 +405,21 @@ impl GcCompactionQueue {
     ) -> Result<CompactionOutcome, CompactionError> {
         let _one_op_at_a_time_guard = self.consumer_lock.lock().await;
         let has_pending_tasks;
-        let (id, item) = {
+        let Some((id, item)) = ({
             let mut guard = self.inner.lock().unwrap();
-            let Some((id, item)) = guard.queued.pop_front() else {
-                return Ok(CompactionOutcome::Done);
-            };
-            guard.running = Some((id, item.clone()));
-            has_pending_tasks = !guard.queued.is_empty();
-            (id, item)
+            if let Some((id, item)) = guard.queued.pop_front() {
+                guard.running = Some((id, item.clone()));
+                has_pending_tasks = !guard.queued.is_empty();
+                Some((id, item))
+            } else {
+                has_pending_tasks = false;
+                None
+            }
+        }) else {
+            self.trigger_auto_compaction(timeline).await;
+            // Always yield after triggering auto-compaction
+            return Ok(CompactionOutcome::Done);
         };
-
         match item {
             GcCompactionQueueItem::MetaJob { options, auto } => {
                 if !options
@@ -440,9 +464,12 @@ impl GcCompactionQueue {
             GcCompactionQueueItem::Notify(id, l2_lsn) => {
                 self.notify_and_unblock(id);
                 if let Some(l2_lsn) = l2_lsn {
-                    timeline
-                        .update_l2_lsn(l2_lsn)
-                        .map_err(CompactionError::Other)?;
+                    if l2_lsn >= timeline.get_l2_lsn() {
+                        info!("l2_lsn updated to {}", l2_lsn);
+                        timeline
+                            .update_l2_lsn(l2_lsn)
+                            .map_err(CompactionError::Other)?;
+                    }
                 }
             }
         }
@@ -450,11 +477,6 @@ impl GcCompactionQueue {
             let mut guard = self.inner.lock().unwrap();
             guard.running = None;
         }
-
-        if !has_pending_tasks {
-            self.trigger_auto_compaction(timeline).await;
-        }
-
         Ok(if has_pending_tasks {
             CompactionOutcome::Pending
         } else {

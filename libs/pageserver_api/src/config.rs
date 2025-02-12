@@ -575,7 +575,7 @@ pub mod tenant_conf_defaults {
     // image layers should be created.
     pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
     pub const DEFAULT_GC_COMPACTION_ENABLED: bool = false;
-    pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 10240000;
+    pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 5 * 1024 * 1024; // 5GB
     pub const DEFAULT_GC_COMPACTION_RATIO_PERCENT: u64 = 100;
 }
 
