@@ -84,6 +84,17 @@ ARG BUILD_TAG
 ARG DEBIAN_VERSION=bookworm
 ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
 
+# Here are the INDEX DIGESTS for the images we use.
+# You can get them following next steps for now:
+# 1. Get an authentication token from DockerHub:
+#    TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/debian:pull" | jq -r .token)
+# 2. Using that token, query index for the given tag:
+#    curl -s -H "Authorization: Bearer $TOKEN" \
+#       -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+#       "https://registry.hub.docker.com/v2/library/debian/manifests/bullseye-slim" \
+#       -I | grep -i docker-content-digest
+# 3. As a next step, TODO(fedordikarev): create script and schedule workflow to run these checks
+#    and updates on regular bases and in automated way.
 ARG BOOKWORM_SLIM_SHA=sha256:40b107342c492725bc7aacbe93a49945445191ae364184a6d24fedb28172f6f7
 ARG BULLSEYE_SLIM_SHA=sha256:e831d9a884d63734fe3dd9c491ed9a5a3d4c6a6d32c5b14f2067357c49b0b7e1
 
