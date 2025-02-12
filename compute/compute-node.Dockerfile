@@ -83,7 +83,28 @@ ARG TAG=pinned
 ARG BUILD_TAG
 ARG DEBIAN_VERSION=bookworm
 ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
-ARG ALPINE_CURL_VERSION=8.11.1
+
+# Here are the INDEX DIGESTS for the images we use.
+# You can get them following next steps for now:
+# 1. Get an authentication token from DockerHub:
+#    TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/debian:pull" | jq -r .token)
+# 2. Using that token, query index for the given tag:
+#    curl -s -H "Authorization: Bearer $TOKEN" \
+#       -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+#       "https://registry.hub.docker.com/v2/library/debian/manifests/bullseye-slim" \
+#       -I | grep -i docker-content-digest
+# 3. As a next step, TODO(fedordikarev): create script and schedule workflow to run these checks
+#    and updates on regular bases and in automated way.
+ARG BOOKWORM_SLIM_SHA=sha256:40b107342c492725bc7aacbe93a49945445191ae364184a6d24fedb28172f6f7
+ARG BULLSEYE_SLIM_SHA=sha256:e831d9a884d63734fe3dd9c491ed9a5a3d4c6a6d32c5b14f2067357c49b0b7e1
+
+# Here we use ${var/search/replace} syntax, to check
+# if base image is one of the images, we pin image index for.
+# If var will match one the known images, we will replace it with the known sha.
+# If no match, than value will be unaffected, and will process with no-pinned image.
+ARG BASE_IMAGE_SHA=debian:${DEBIAN_FLAVOR}
+ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bookworm-slim/debian@$BOOKWORM_SLIM_SHA}
+ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bullseye-slim/debian@$BULLSEYE_SLIM_SHA}
 
 # By default, build all PostgreSQL extensions. For quick local testing when you don't
 # care about the extensions, pass EXTENSIONS=none or EXTENSIONS=minimal
@@ -94,7 +115,7 @@ ARG EXTENSIONS=all
 # Layer "build-deps"
 #
 #########################################################################################
-FROM debian:$DEBIAN_FLAVOR AS build-deps
+FROM $BASE_IMAGE_SHA AS build-deps
 ARG DEBIAN_VERSION
 
 # Use strict mode for bash to catch errors early
@@ -103,7 +124,7 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 # By default, /bin/sh used in debian images will treat '\n' as eol,
 # but as we use bash as SHELL, and built-in echo in bash requires '-e' flag for that.
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc && \
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\nretry-on-host-error=on\n" > /root/.wgetrc && \
     echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
 
 RUN case $DEBIAN_VERSION in \
@@ -127,7 +148,7 @@ RUN case $DEBIAN_VERSION in \
     apt install --no-install-recommends --no-install-suggests -y \
     ninja-build git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
-    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd \
+    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip \
     $VERSION_INSTALLS \
     && apt clean && rm -rf /var/lib/apt/lists/*
 
@@ -139,11 +160,11 @@ RUN case $DEBIAN_VERSION in \
 #########################################################################################
 FROM build-deps AS pg-build
 ARG PG_VERSION
-COPY vendor/postgres-${PG_VERSION} postgres
+COPY vendor/postgres-${PG_VERSION:?} postgres
 RUN cd postgres && \
     export CONFIGURE_CMD="./configure CFLAGS='-O2 -g3' --enable-debug --with-openssl --with-uuid=ossp \
     --with-icu --with-libxml --with-libxslt --with-lz4" && \
-    if [ "${PG_VERSION}" != "v14" ]; then \
+    if [ "${PG_VERSION:?}" != "v14" ]; then \
         # zstd is available only from PG15
         export CONFIGURE_CMD="${CONFIGURE_CMD} --with-zstd"; \
     fi && \
@@ -237,7 +258,7 @@ RUN case "${DEBIAN_VERSION}" in \
 
 # Postgis 3.5.0 supports v17
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v17") \
         export POSTGIS_VERSION=3.5.0 \
         export POSTGIS_CHECKSUM=ca698a22cc2b2b3467ac4e063b43a28413f3004ddd505bdccdd74c56a647f510 \
@@ -312,7 +333,7 @@ FROM build-deps AS pgrouting-src
 ARG DEBIAN_VERSION
 ARG PG_VERSION
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v17") \
         export PGROUTING_VERSION=3.6.2 \
         export PGROUTING_CHECKSUM=f4a1ed79d6f714e52548eca3bb8e5593c6745f1bde92eb5fb858efd8984dffa2 \
@@ -358,7 +379,7 @@ COPY compute/patches/plv8-3.1.10.patch .
 #
 # Use new version only for v17
 # because since v3.2, plv8 doesn't include plcoffee and plls extensions
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v17") \
         export PLV8_TAG=v3.2.3 \
     ;; \
@@ -372,7 +393,7 @@ RUN case "${PG_VERSION}" in \
     git clone --recurse-submodules --depth 1 --branch ${PLV8_TAG} https://github.com/plv8/plv8.git plv8-src && \
     tar -czf plv8.tar.gz --exclude .git plv8-src && \
     cd plv8-src && \
-    if [[ "${PG_VERSION}" < "v17" ]]; then patch -p1 < /ext-src/plv8-3.1.10.patch; fi
+    if [[ "${PG_VERSION:?}" < "v17" ]]; then patch -p1 < /ext-src/plv8-3.1.10.patch; fi
 
 FROM pg-build AS plv8-build
 ARG PG_VERSION
@@ -392,7 +413,7 @@ RUN \
     find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
     # don't break computes with installed old version of plv8
     cd /usr/local/pgsql/lib/ && \
-    case "${PG_VERSION}" in \
+    case "${PG_VERSION:?}" in \
     "v17") \
         ln -s plv8-3.2.3.so plv8-3.1.8.so && \
         ln -s plv8-3.2.3.so plv8-3.1.5.so && \
@@ -729,7 +750,7 @@ FROM build-deps AS timescaledb-src
 ARG PG_VERSION
 
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
       "v14" | "v15") \
         export TIMESCALEDB_VERSION=2.10.1 \
         export TIMESCALEDB_CHECKSUM=6fca72a6ed0f6d32d2b3523951ede73dc5f9b0077b38450a029a5f411fdb8c73 \
@@ -767,7 +788,7 @@ ARG PG_VERSION
 
 # version-specific, has separate releases for each version
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
       "v14") \
         export PG_HINT_PLAN_VERSION=14_1_4_1 \
         export PG_HINT_PLAN_CHECKSUM=c3501becf70ead27f70626bce80ea401ceac6a77e2083ee5f3ff1f1444ec1ad1 \
@@ -843,7 +864,7 @@ ARG PG_VERSION
 # https://github.com/rdkit/rdkit/releases/tag/Release_2024_09_1
 
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v17") \
         export RDKIT_VERSION=Release_2024_09_1 \
         export RDKIT_CHECKSUM=034c00d6e9de323506834da03400761ed8c3721095114369d06805409747a60f \
@@ -970,7 +991,7 @@ ARG PG_VERSION
 #
 # last release v0.40.0 - Jul 22, 2024
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v17") \
         export SEMVER_VERSION=0.40.0 \
         export SEMVER_CHECKSUM=3e50bcc29a0e2e481e7b6d2bc937cadc5f5869f55d983b5a1aafeb49f5425cfc \
@@ -1006,7 +1027,7 @@ ARG PG_VERSION
 # This is our extension, support stopped in favor of pgvector
 # TODO: deprecate it
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
       "v14" | "v15") \
         export PG_EMBEDDING_VERSION=0.3.5 \
         export PG_EMBEDDING_CHECKSUM=0e95b27b8b6196e2cf0a0c9ec143fe2219b82e54c5bb4ee064e76398cbe69ae9 \
@@ -1039,7 +1060,7 @@ ARG PG_VERSION
 # This is an experimental extension, never got to real production.
 # !Do not remove! It can be present in shared_preload_libraries and compute will fail to start if library is not found.
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in "v17") \
+RUN case "${PG_VERSION:?}" in "v17") \
     echo "postgresql_anonymizer does not yet support PG17" && exit 0;; \
     esac && \
     wget  https://github.com/neondatabase/postgresql_anonymizer/archive/refs/tags/neon_1.1.1.tar.gz -O pg_anon.tar.gz && \
@@ -1091,7 +1112,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
 FROM pg-build-nonroot-with-cargo AS rust-extensions-build
 ARG PG_VERSION
 
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
         'v17') \
             echo 'v17 is not supported yet by pgrx. Quit' && exit 0;; \
     esac && \
@@ -1270,7 +1291,7 @@ FROM build-deps AS pgx_ulid-src
 ARG PG_VERSION
 
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v14" | "v15" | "v16") \
         ;; \
     *) \
@@ -1302,7 +1323,7 @@ FROM build-deps AS pgx_ulid-pgrx12-src
 ARG PG_VERSION
 
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v17") \
         ;; \
     *) \
@@ -1594,7 +1615,7 @@ RUN --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/registry \
 #
 #########################################################################################
 
-FROM debian:$DEBIAN_FLAVOR AS pgbouncer
+FROM $BASE_IMAGE_SHA AS pgbouncer
 RUN set -e \
     && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
     && apt update \
@@ -1624,13 +1645,12 @@ RUN set -e \
 # Layer "exporters"
 #
 #########################################################################################
-FROM alpine/curl:${ALPINE_CURL_VERSION} AS exporters
+FROM build-deps AS exporters
 ARG TARGETARCH
 # Keep sql_exporter version same as in build-tools.Dockerfile and
 # test_runner/regress/test_compute_metrics.py
 # See comment on the top of the file regading `echo`, `-e` and `\n`
-RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc; \
-    if [ "$TARGETARCH" = "amd64" ]; then\
+RUN if [ "$TARGETARCH" = "amd64" ]; then\
         postgres_exporter_sha256='027e75dda7af621237ff8f5ac66b78a40b0093595f06768612b92b1374bd3105';\
         pgbouncer_exporter_sha256='c9f7cf8dcff44f0472057e9bf52613d93f3ffbc381ad7547a959daa63c5e84ac';\
         sql_exporter_sha256='38e439732bbf6e28ca4a94d7bc3686d3fa1abdb0050773d5617a9efdb9e64d08';\
@@ -1654,7 +1674,7 @@ RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 30
 # Layer "awscli"
 #
 #########################################################################################
-FROM alpine/curl:${ALPINE_CURL_VERSION} AS awscli
+FROM build-deps AS awscli
 ARG TARGETARCH
 RUN set -ex; \
     if [ "${TARGETARCH}" = "amd64" ]; then \
@@ -1704,7 +1724,7 @@ USER nonroot
 
 COPY --chown=nonroot compute compute
 
-RUN make PG_VERSION="${PG_VERSION}" -C compute
+RUN make PG_VERSION="${PG_VERSION:?}" -C compute
 
 #########################################################################################
 #
@@ -1737,8 +1757,8 @@ COPY --from=hll-src /ext-src/ /ext-src/
 COPY --from=plpgsql_check-src /ext-src/ /ext-src/
 #COPY --from=timescaledb-src /ext-src/ /ext-src/
 COPY --from=pg_hint_plan-src /ext-src/ /ext-src/
-COPY compute/patches/pg_hint_plan_${PG_VERSION}.patch /ext-src
-RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan_${PG_VERSION}.patch
+COPY compute/patches/pg_hint_plan_${PG_VERSION:?}.patch /ext-src
+RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan_${PG_VERSION:?}.patch
 COPY --from=pg_cron-src /ext-src/ /ext-src/
 #COPY --from=pgx_ulid-src /ext-src/ /ext-src/
 #COPY --from=pgx_ulid-pgrx12-src /ext-src/ /ext-src/
@@ -1767,7 +1787,7 @@ ENV PGDATABASE=postgres
 # Put it all together into the final image
 #
 #########################################################################################
-FROM debian:$DEBIAN_FLAVOR
+FROM $BASE_IMAGE_SHA
 ARG DEBIAN_VERSION
 
 # Use strict mode for bash to catch errors early
