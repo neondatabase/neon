@@ -94,7 +94,6 @@ pub struct ConfigToml {
     pub ondemand_download_behavior_treat_error_as_warn: bool,
     #[serde(with = "humantime_serde")]
     pub background_task_maximum_delay: Duration,
-    pub use_compaction_semaphore: bool,
     pub control_plane_api: Option<reqwest::Url>,
     pub control_plane_api_token: Option<String>,
     pub control_plane_emergency_mode: bool,
@@ -266,6 +265,9 @@ pub struct TenantConfigToml {
     pub compaction_algorithm: crate::models::CompactionAlgorithmSettings,
     /// If true, compact down L0 across all tenant timelines before doing regular compaction.
     pub compaction_l0_first: bool,
+    /// If true, use a separate semaphore (i.e. concurrency limit) for the L0 compaction pass. Only
+    /// has an effect if `compaction_l0_first` is `true`.
+    pub compaction_l0_semaphore: bool,
     /// Level0 delta layer threshold at which to delay layer flushes for compaction backpressure,
     /// such that they take 2x as long, and start waiting for layer flushes during ephemeral layer
     /// rolls. This helps compaction keep up with WAL ingestion, and avoids read amplification
@@ -474,7 +476,6 @@ impl Default for ConfigToml {
                 DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY,
             )
             .unwrap()),
-            use_compaction_semaphore: false,
 
             control_plane_api: (None),
             control_plane_api_token: (None),
@@ -548,6 +549,7 @@ pub mod tenant_conf_defaults {
     // calculation to avoid loading all keys into the memory). So with this config, we can get a maximum peak compaction usage of 18GB.
     pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 50;
     pub const DEFAULT_COMPACTION_L0_FIRST: bool = false;
+    pub const DEFAULT_COMPACTION_L0_SEMAPHORE: bool = true;
 
     pub const DEFAULT_COMPACTION_ALGORITHM: crate::models::CompactionAlgorithm =
         crate::models::CompactionAlgorithm::Legacy;
@@ -598,6 +600,7 @@ impl Default for TenantConfigToml {
                 kind: DEFAULT_COMPACTION_ALGORITHM,
             },
             compaction_l0_first: DEFAULT_COMPACTION_L0_FIRST,
+            compaction_l0_semaphore: DEFAULT_COMPACTION_L0_SEMAPHORE,
             l0_flush_delay_threshold: None,
             l0_flush_stall_threshold: None,
             l0_flush_wait_upload: DEFAULT_L0_FLUSH_WAIT_UPLOAD,
