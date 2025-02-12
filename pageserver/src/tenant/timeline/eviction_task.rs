@@ -332,11 +332,8 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> ControlFlow<(), BackgroundLoopSemaphorePermit<'static>> {
-        let acquire_permit = crate::tenant::tasks::acquire_concurrency_permit(
-            BackgroundLoopKind::Eviction,
-            false,
-            ctx,
-        );
+        let acquire_permit =
+            crate::tenant::tasks::acquire_concurrency_permit(BackgroundLoopKind::Eviction, ctx);
 
         tokio::select! {
             permit = acquire_permit => ControlFlow::Continue(permit),

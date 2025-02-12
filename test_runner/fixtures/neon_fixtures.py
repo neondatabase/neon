@@ -3807,7 +3807,8 @@ class Endpoint(PgProtocol, LogUtils):
         env: NeonEnv,
         tenant_id: TenantId,
         pg_port: int,
-        http_port: int,
+        external_http_port: int,
+        internal_http_port: int,
         check_stop_result: bool = True,
     ):
         super().__init__(host="localhost", port=pg_port, user="cloud_admin", dbname="postgres")
@@ -3817,7 +3818,8 @@ class Endpoint(PgProtocol, LogUtils):
         self.pgdata_dir: Path | None = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
         self.pg_port = pg_port
-        self.http_port = http_port
+        self.external_http_port = external_http_port
+        self.internal_http_port = internal_http_port
         self.check_stop_result = check_stop_result
         # passed to endpoint create and endpoint reconfigure
         self.active_safekeepers: list[int] = list(map(lambda sk: sk.id, env.safekeepers))
@@ -3834,7 +3836,8 @@ class Endpoint(PgProtocol, LogUtils):
         self, auth_token: str | None = None, retries: Retry | None = None
     ) -> EndpointHttpClient:
         return EndpointHttpClient(
-            port=self.http_port,
+            external_port=self.external_http_port,
+            internal_port=self.internal_http_port,
         )
 
     def create(
@@ -3846,6 +3849,7 @@ class Endpoint(PgProtocol, LogUtils):
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
+        update_catalog: bool = False,
     ) -> Self:
         """
         Create a new Postgres endpoint.
@@ -3866,10 +3870,12 @@ class Endpoint(PgProtocol, LogUtils):
             lsn=lsn,
             hot_standby=hot_standby,
             pg_port=self.pg_port,
-            http_port=self.http_port,
+            external_http_port=self.external_http_port,
+            internal_http_port=self.internal_http_port,
             pg_version=self.env.pg_version,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            update_catalog=update_catalog,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = self.env.repo_dir / path
@@ -4258,7 +4264,8 @@ class EndpointFactory:
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
             pg_port=self.env.port_distributor.get_port(),
-            http_port=self.env.port_distributor.get_port(),
+            external_http_port=self.env.port_distributor.get_port(),
+            internal_http_port=self.env.port_distributor.get_port(),
         )
         self.num_instances += 1
         self.endpoints.append(ep)
@@ -4283,12 +4290,14 @@ class EndpointFactory:
         hot_standby: bool = False,
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
+        update_catalog: bool = False,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
             pg_port=self.env.port_distributor.get_port(),
-            http_port=self.env.port_distributor.get_port(),
+            external_http_port=self.env.port_distributor.get_port(),
+            internal_http_port=self.env.port_distributor.get_port(),
         )
 
         endpoint_id = endpoint_id or self.env.generate_endpoint_id()
@@ -4303,6 +4312,7 @@ class EndpointFactory:
             hot_standby=hot_standby,
             config_lines=config_lines,
             pageserver_id=pageserver_id,
+            update_catalog=update_catalog,
         )
 
     def stop_all(self, fail_on_error=True) -> Self:

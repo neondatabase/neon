@@ -139,9 +139,9 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
 
 @pytest.mark.parametrize("manual_offload", [False, True])
 def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: bool):
-    if not manual_offload:
-        # (automatic) timeline offloading defaults to false for now
-        neon_env_builder.pageserver_config_override = "timeline_offloading = true"
+    if manual_offload:
+        # (automatic) timeline offloading defaults to true
+        neon_env_builder.pageserver_config_override = "timeline_offloading = false"
 
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
@@ -396,8 +396,6 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
     with tenant migrations and timeline deletions.
     """
 
-    # Offloading is off by default at time of writing: remove this line when it's on by default
-    neon_env_builder.pageserver_config_override = "timeline_offloading = true"
     neon_env_builder.storage_controller_config = {"heartbeat_interval": "100msec"}
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
 
@@ -994,8 +992,6 @@ def test_timeline_offload_race_unarchive(
     Ensure that unarchive and timeline offload don't race each other
     """
     # Regression test for issue https://github.com/neondatabase/neon/issues/10220
-    # (automatic) timeline offloading defaults to false for now
-    neon_env_builder.pageserver_config_override = "timeline_offloading = true"
 
     failpoint = "before-timeline-auto-offload"
 

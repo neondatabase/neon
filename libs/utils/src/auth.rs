@@ -10,7 +10,7 @@ use jsonwebtoken::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{http::error::ApiError, id::TenantId};
+use crate::id::TenantId;
 
 /// Algorithm to use. We require EdDSA.
 const STORAGE_TOKEN_ALGORITHM: Algorithm = Algorithm::EdDSA;
@@ -87,15 +87,6 @@ pub struct AuthError(pub Cow<'static, str>);
 impl Display for AuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
-    }
-}
-
-impl From<AuthError> for ApiError {
-    fn from(_value: AuthError) -> Self {
-        // Don't pass on the value of the AuthError as a precautionary measure.
-        // Being intentionally vague in public error communication hurts debugability
-        // but it is more secure.
-        ApiError::Forbidden("JWT authentication error".to_string())
     }
 }
 
