@@ -306,6 +306,7 @@ impl ServiceState {
         (&mut self.nodes, &mut self.tenants, &mut self.scheduler)
     }
 
+    #[allow(clippy::type_complexity)]
     fn parts_mut_sk(
         &mut self,
     ) -> (
@@ -7778,7 +7779,7 @@ impl Service {
             .safekeepers
             .get(&NodeId(id as u64))
             .ok_or(DatabaseError::Logical("Not found".to_string()))?;
-        Ok(sk.describe_response()?)
+        sk.describe_response()
     }
 
     pub(crate) async fn upsert_safekeeper(
@@ -7790,10 +7791,16 @@ impl Service {
         {
             let mut locked = self.inner.write().unwrap();
             let mut safekeepers = (*locked.safekeepers).clone();
-            if !safekeepers.contains_key(&node_id) {
-                safekeepers.insert(
-                    node_id,
-                    Safekeeper::from_persistence(
+            match safekeepers.entry(node_id) {
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    // TODO support updates
+                    tracing::warn!(
+                        "Not updating in-memory safekeeper after upsert of existing safekeeper {}",
+                        record.host
+                    );
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Safekeeper::from_persistence(
                         crate::persistence::SafekeeperPersistence {
                             id: record.id,
                             region_id: record.region_id,
@@ -7805,14 +7812,8 @@ impl Service {
                             scheduling_policy: String::from(SkSchedulingPolicy::Pause),
                         },
                         CancellationToken::new(),
-                    ),
-                );
-            } else {
-                // TODO support updates
-                tracing::warn!(
-                    "Not updating in-memory safekeeper after upsert of existing safekeeper {}",
-                    record.host
-                );
+                    ));
+                }
             }
             locked.safekeepers = Arc::new(safekeepers);
         }
