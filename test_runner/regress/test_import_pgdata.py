@@ -44,7 +44,6 @@ smoke_params = [
 
 
 @pytest.mark.parametrize("shard_count,stripe_size,rel_block_size", smoke_params)
-@pytest.mark.timeout(10 * 60)
 def test_pgdata_import_smoke(
     vanilla_pg: VanillaPostgres,
     neon_env_builder: NeonEnvBuilder,
@@ -341,7 +340,6 @@ def test_pgdata_import_smoke(
         br_initdb_endpoint.safe_psql("select * from othertable")
 
 
-@pytest.mark.timeout(10 * 60)
 def test_fast_import_with_pageserver_ingest(
     test_output_dir,
     vanilla_pg: VanillaPostgres,
