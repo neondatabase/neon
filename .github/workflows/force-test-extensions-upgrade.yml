@@ -22,7 +22,7 @@ concurrency:
 permissions:
   id-token: write # aws-actions/configure-aws-credentials
   statuses: write
-  contents: write
+  contents: read
 
 jobs:
   regress:
