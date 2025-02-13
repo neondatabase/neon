@@ -43,7 +43,7 @@ jobs:
         env:
           NEWTAG: latest
           OLDTAG: latest
-          PG_VERSION: ${{ matrix.pg_version }}
+          PG_VERSION: ${{ matrix.pg-version }}
           FORCE_ALL_UPGRADE_TESTS: true
         run: ./docker-compose/test_extensions_upgrade.sh
 
