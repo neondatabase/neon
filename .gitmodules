@@ -1,16 +1,16 @@
 [submodule "vendor/postgres-v14"]
 	path = vendor/postgres-v14
 	url = https://github.com/neondatabase/postgres.git
-	branch = alexk/pg-14-16
+	branch = REL_14_STABLE_neon
 [submodule "vendor/postgres-v15"]
 	path = vendor/postgres-v15
 	url = https://github.com/neondatabase/postgres.git
-	branch = alexk/pg-15-11
+	branch = REL_15_STABLE_neon
 [submodule "vendor/postgres-v16"]
 	path = vendor/postgres-v16
 	url = https://github.com/neondatabase/postgres.git
-	branch = alexk/pg-16-7
+	branch = REL_16_STABLE_neon
 [submodule "vendor/postgres-v17"]
 	path = vendor/postgres-v17
 	url = https://github.com/neondatabase/postgres.git
-	branch = alexk/pg-17-3
+	branch = REL_17_STABLE_neon
