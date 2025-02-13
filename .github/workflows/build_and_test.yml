@@ -228,7 +228,8 @@ jobs:
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
   get-benchmarks-durations:
-    if: github.ref_name == 'main' || (contains(github.event.pull_request.labels.*.name, 'run-benchmarks') && needs.deploy.result == 'skipped')
+    # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `deploy` in PRs
+    if: github.ref_name == 'main' || (contains(github.event.pull_request.labels.*.name, 'run-benchmarks') && !failure() && !cancelled())
     outputs:
       json: ${{ steps.get-benchmark-durations.outputs.json }}
     needs: [ check-permissions, build-build-tools-image, deploy ]
