@@ -261,7 +261,6 @@ def test_multiple_subscription_branching(neon_simple_env: NeonEnv):
         ],
     )
 
-    # drop the subscriber_db from the list
     TEST_DB_NAMES = [
         {
             "name": "neondb",
