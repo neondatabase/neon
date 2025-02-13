@@ -24,7 +24,7 @@ fn test_node_metadata_v1_backward_compatibilty() {
 
 #[test]
 fn test_node_metadata_v2_backward_compatibilty() {
-    let v1 = serde_json::to_vec(&serde_json::json!({
+    let v2 = serde_json::to_vec(&serde_json::json!({
         "host": "localhost",
         "port": 23,
         "http_host": "localhost",
@@ -33,7 +33,7 @@ fn test_node_metadata_v2_backward_compatibilty() {
     }));
 
     assert_eq!(
-        serde_json::from_slice::<NodeMetadata>(&v1.unwrap()).unwrap(),
+        serde_json::from_slice::<NodeMetadata>(&v2.unwrap()).unwrap(),
         NodeMetadata {
             postgres_host: "localhost".to_string(),
             postgres_port: 23,

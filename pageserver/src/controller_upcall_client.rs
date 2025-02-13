@@ -140,7 +140,7 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
                     // Since we run one time at startup, be generous in our logging and
                     // dump all metadata.
                     tracing::info!(
-                        "Loaded node metadata: postgres {}:{}, http {}:{}, use_https:{} other fields: {:?}",
+                        "Loaded node metadata: postgres {}:{}, http {}:{}, use_https {}, other fields: {:?}",
                         m.postgres_host,
                         m.postgres_port,
                         m.http_host,
