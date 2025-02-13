@@ -95,6 +95,8 @@ pub struct LayerMap {
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
     ///
     /// NB: make sure to notify `watch_l0_deltas` on changes.
+    /// NB: this is not sorted by LSN, but by the order of insertion; always use the historic layer info to
+    /// retrieve L0 layers in order.
     l0_delta_layers: Vec<Arc<PersistentLayerDesc>>,
 
     /// Notifies about L0 delta layer changes, sending the current number of L0 layers.

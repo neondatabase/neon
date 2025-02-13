@@ -1199,11 +1199,13 @@ impl Timeline {
         //
         // In general, compaction_threshold should be <= compaction_upper_limit, but in case that
         // the constraint is not respected, we use the larger of the two.
+        let delta_target_size =
+            std::cmp::max(self.get_checkpoint_distance(), DEFAULT_CHECKPOINT_DISTANCE);
         let delta_size_limit = std::cmp::max(
             self.get_compaction_upper_limit(),
             self.get_compaction_threshold(),
         ) as u64
-            * std::cmp::max(self.get_checkpoint_distance(), DEFAULT_CHECKPOINT_DISTANCE);
+            * delta_target_size;
 
         let mut fully_compacted = true;
 
@@ -1241,12 +1243,21 @@ impl Timeline {
             end: deltas_to_compact.last().unwrap().layer_desc().lsn_range.end,
         };
 
+        // If the total size of the deltas to compact is less than the target size, we produce the newly-generated layers
+        // as L0 files. Otherwise, we produce L1 files.
+        let l0_to_l0_compaction = deltas_to_compact
+            .iter()
+            .map(|l| l.metadata().file_size)
+            .sum::<u64>()
+            <= delta_target_size;
+
         info!(
-            "Starting Level0 compaction in LSN range {}-{} for {} layers ({} deltas in total)",
+            "Starting Level0 compaction in LSN range {}-{} for {} layers ({} deltas in total), l0_to_l0_compaction={}",
             lsn_range.start,
             lsn_range.end,
             deltas_to_compact.len(),
-            level0_deltas.len()
+            level0_deltas.len(),
+            l0_to_l0_compaction
         );
 
         for l in deltas_to_compact.iter() {
@@ -1502,7 +1513,8 @@ impl Timeline {
                     dup_start_lsn = dup_end_lsn;
                     dup_end_lsn = lsn_range.end;
                 }
-                if writer.is_some() {
+                if writer.is_some() && !l0_to_l0_compaction {
+                    // L0-L0 compaction ONLY produces one layer.
                     let written_size = writer.as_mut().unwrap().size();
                     let contains_hole =
                         next_hole < holes.len() && key >= holes[next_hole].key_range.end;
@@ -1552,7 +1564,7 @@ impl Timeline {
                             self.conf,
                             self.timeline_id,
                             self.tenant_shard_id,
-                            key,
+                            if l0_to_l0_compaction { Key::MIN } else { key },
                             if dup_end_lsn.is_valid() {
                                 // this is a layer containing slice of values of the same key
                                 debug!("Create new dup layer {}..{}", dup_start_lsn, dup_end_lsn);
@@ -1591,7 +1603,14 @@ impl Timeline {
         }
         if let Some(writer) = writer {
             let (desc, path) = writer
-                .finish(prev_key.unwrap().next(), ctx)
+                .finish(
+                    if l0_to_l0_compaction {
+                        Key::MAX
+                    } else {
+                        prev_key.unwrap().next()
+                    },
+                    ctx,
+                )
                 .await
                 .map_err(CompactionError::Other)?;
             let new_delta = Layer::finish_creating(self.conf, self, desc, &path)
