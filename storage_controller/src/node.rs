@@ -57,7 +57,12 @@ pub(crate) enum AvailabilityTransition {
 
 impl Node {
     pub(crate) fn base_url(&self) -> String {
-        format!("{}://{}:{}", if self.use_https { "https" } else {"http"}, self.listen_http_addr, self.listen_http_port)
+        format!(
+            "{}://{}:{}",
+            if self.use_https { "https" } else { "http" },
+            self.listen_http_addr,
+            self.listen_http_port
+        )
     }
 
     pub(crate) fn get_id(&self) -> NodeId {
