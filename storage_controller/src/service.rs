@@ -5034,12 +5034,13 @@ impl Service {
 
         // If we failed any compute notifications, make a note to retry later.
         if !failed_notifications.is_empty() {
-            let mut locked = self.inner.write().unwrap();
-            for failed in failed_notifications {
-                if let Some(shard) = locked.tenants.get_mut(&failed) {
-                    shard.pending_compute_notification = true;
-                }
-            }
+            tracing::warn!("Failed to notify compute of {} shards, not enqueueing for retry to avoid blocking other work.  Some computes might miss updates.", failed_notifications.len());
+            // let mut locked = self.inner.write().unwrap();
+            // for failed in failed_notifications {
+            //     if let Some(shard) = locked.tenants.get_mut(&failed) {
+            //         shard.pending_compute_notification = true;
+            //     }
+            // }
         }
 
         Ok((response, waiters))
