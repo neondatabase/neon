@@ -20,6 +20,7 @@ chrono.workspace = true
 clap.workspace = true
 fail.workspace = true
 futures.workspace = true
+governor = { version = "0.8.0" }
 hex.workspace = true
 hyper0.workspace = true
 humantime.workspace = true
