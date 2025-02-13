@@ -6904,17 +6904,17 @@ impl Service {
             )
             .await
         {
-            Some(Err(e)) => {
-                tracing::info!(
-                    "Failed to upload heatmap from {attached_node} for {tenant_shard_id}: {e}"
-                );
-            }
-            None => {
+            Err(mgmt_api::Error::Cancelled) => {
                 tracing::info!(
                     "Cancelled while uploading heatmap from {attached_node} for {tenant_shard_id}"
                 );
             }
-            Some(Ok(_)) => {
+            Err(e) => {
+                tracing::info!(
+                    "Failed to upload heatmap from {attached_node} for {tenant_shard_id}: {e}"
+                );
+            }
+            Ok(_) => {
                 tracing::info!(
                     "Successfully uploaded heatmap from {attached_node} for {tenant_shard_id}"
                 );
@@ -6940,15 +6940,15 @@ impl Service {
                 )
                 .await
             {
-                Some(Err(e)) => {
-                    tracing::info!(
-                "Failed to download heatmap from {secondary_node} for {tenant_shard_id}: {e}"
-            );
-                }
-                None => {
+                Err(mgmt_api::Error::Cancelled) => {
                     tracing::info!("Cancelled while downloading heatmap from {secondary_node} for {tenant_shard_id}");
                 }
-                Some(Ok(progress)) => {
+                Err(e) => {
+                    tracing::info!(
+                        "Failed to download heatmap from {secondary_node} for {tenant_shard_id}: {e}"
+                    );
+                }
+                Ok(progress) => {
                     tracing::info!("Successfully downloaded heatmap from {secondary_node} for {tenant_shard_id}: {progress:?}");
                 }
             }
