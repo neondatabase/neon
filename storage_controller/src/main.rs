@@ -116,6 +116,9 @@ struct Cli {
 
     #[arg(long)]
     long_reconcile_threshold: Option<humantime::Duration>,
+
+    #[arg(long, default_value = "false")]
+    timelines_onto_safekeepers: bool,
 }
 
 enum StrictMode {
@@ -311,6 +314,7 @@ async fn async_main() -> anyhow::Result<()> {
         address_for_peers: args.address_for_peers,
         start_as_candidate: args.start_as_candidate,
         http_service_port: args.listen.port() as i32,
+        timelines_onto_safekeepers: args.timelines_onto_safekeepers,
     };
 
     // Validate that we can connect to the database

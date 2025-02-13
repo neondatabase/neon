@@ -398,6 +398,8 @@ pub struct Config {
     pub http_service_port: i32,
 
     pub long_reconcile_threshold: Duration,
+
+    pub timelines_onto_safekeepers: bool,
 }
 
 impl From<DatabaseError> for ApiError {
