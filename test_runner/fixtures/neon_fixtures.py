@@ -4964,7 +4964,7 @@ def check_restored_datadir_content(
 
     # pg_notify files are always ignored
     pgdata_files = [f for f in pgdata_files if not f.startswith("pg_notify")]
-    restored_files = [f for f in pgdata_files if not f.startswith("pg_notify")]
+    restored_files = [f for f in restored_files if not f.startswith("pg_notify")]
 
     # pg_xact and pg_multixact files are optional in basebackup: depending on our configuration they
     # may be omitted and loaded on demand.
