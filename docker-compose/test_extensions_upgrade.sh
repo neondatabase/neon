@@ -11,6 +11,7 @@ if [ -z ${OLDTAG+x} ] || [ -z ${NEWTAG+x} ] || [ -z "${OLDTAG}" ] || [ -z "${NEW
   exit 1
 fi
 export PG_VERSION=${PG_VERSION:-16}
+export PG_TEST_VERSION=${PG_VERSION}
 function wait_for_ready {
   TIME=0
   while ! docker compose logs compute_is_ready | grep -q "accepting connections" && [ ${TIME} -le 300 ] ; do
