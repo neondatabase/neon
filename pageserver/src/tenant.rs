@@ -283,6 +283,52 @@ pub(crate) enum SpawnMode {
     Lazy,
 }
 
+/// A notifier that can be used to trigger compaction shared by all timelines of a tenant.
+///
+/// It is used to notify the compaction loop that there is work to be done. It is also used
+/// to balance the load of compaction between timelines. If there are pending L0 compaction in
+/// one of the timeline, it could preempt long-running compaction jobs (e.g., image compaction)
+/// on other timelines.
+pub struct CompactionNotifier {
+    notify: Notify,
+    l0_count: std::sync::Mutex<HashMap<TimelineId, usize>>,
+}
+
+impl CompactionNotifier {
+    pub fn new() -> Self {
+        Self {
+            notify: Notify::new(),
+            l0_count: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn notify_one(&self) {
+        self.notify.notify_one();
+    }
+
+    pub fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.notify.notified()
+    }
+
+    pub fn on_l0_update(&self, timeline_id: TimelineId, l0_count: usize) {
+        let mut guard = self.l0_count.lock().unwrap();
+        guard.insert(timeline_id, l0_count);
+    }
+
+    pub fn on_shutdown(&self, timeline_id: TimelineId) {
+        let mut guard = self.l0_count.lock().unwrap();
+        guard.remove(&timeline_id);
+    }
+
+    pub fn get_max_l0_count(&self) -> Option<(usize, TimelineId)> {
+        let guard = self.l0_count.lock().unwrap();
+        guard
+            .iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(timeline_id, count)| (*count, *timeline_id))
+    }
+}
+
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
 ///
@@ -358,7 +404,7 @@ pub struct Tenant {
     compaction_circuit_breaker: std::sync::Mutex<CircuitBreaker>,
 
     /// Signals the tenant compaction loop that there is L0 compaction work to be done.
-    pub(crate) l0_compaction_trigger: Arc<Notify>,
+    pub(crate) l0_compaction_trigger: Arc<CompactionNotifier>,
 
     /// Scheduled gc-compaction tasks.
     scheduled_compaction_tasks: std::sync::Mutex<HashMap<TimelineId, Arc<GcCompactionQueue>>>,
@@ -4242,7 +4288,7 @@ impl Tenant {
                 // use an extremely long backoff.
                 Some(Duration::from_secs(3600 * 24)),
             )),
-            l0_compaction_trigger: Arc::new(Notify::new()),
+            l0_compaction_trigger: Arc::new(CompactionNotifier::new()),
             scheduled_compaction_tasks: Mutex::new(Default::default()),
             activate_now_sem: tokio::sync::Semaphore::new(0),
             attach_wal_lag_cooldown: Arc::new(std::sync::OnceLock::new()),
