@@ -1466,10 +1466,10 @@ pub(crate) struct NodePersistence {
     pub(crate) scheduling_policy: String,
     pub(crate) listen_http_addr: String,
     pub(crate) listen_http_port: i32,
-    pub(crate) use_https: bool,
     pub(crate) listen_pg_addr: String,
     pub(crate) listen_pg_port: i32,
     pub(crate) availability_zone_id: String,
+    pub(crate) use_https: bool,
 }
 
 /// Tenant metadata health status that are stored durably.
