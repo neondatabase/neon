@@ -138,6 +138,8 @@ pub struct CatalogObjects {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ComputeCtlConfig {
+    /// Set of JSON web keys that the compute can use to authenticate
+    /// communication from the control plane.
     pub jwks: JwkSet,
 }
 

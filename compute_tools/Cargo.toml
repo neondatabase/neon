@@ -16,6 +16,7 @@ aws-sdk-s3.workspace = true
 aws-sdk-kms.workspace = true
 anyhow.workspace = true
 axum = { workspace = true, features = [] }
+axum-extra.workspace = true
 camino.workspace = true
 chrono.workspace = true
 cfg-if.workspace = true
