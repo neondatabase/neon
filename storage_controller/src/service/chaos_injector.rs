@@ -88,7 +88,7 @@ impl ChaosInjector {
 
         shard.intent.demote_attached(scheduler, old_location);
         shard.intent.promote_attached(scheduler, new_location);
-        self.service.maybe_reconcile_shard(shard, nodes);
+        self.service.maybe_reconcile_shard(shard, nodes, false);
     }
 
     async fn inject_chaos(&mut self) {
