@@ -103,7 +103,7 @@ static uint64 pagestore_local_counter = 0;
 typedef enum PSConnectionState {
 	PS_Disconnected,			/* no connection yet */
 	PS_Connecting_Startup,		/* connection starting up */
-	PS_Connecting_PageStream,	/* negotiating pagestream */ 
+	PS_Connecting_PageStream,	/* negotiating pagestream */
 	PS_Connected,				/* connected, pagestream established */
 } PSConnectionState;
 
@@ -333,7 +333,7 @@ get_shard_number(BufferTag *tag)
 }
 
 static inline void
-CLEANUP_AND_DISCONNECT(PageServer *shard) 
+CLEANUP_AND_DISCONNECT(PageServer *shard)
 {
 	if (shard->wes_read)
 	{
@@ -355,7 +355,7 @@ CLEANUP_AND_DISCONNECT(PageServer *shard)
  * complete the connection (e.g. due to receiving an earlier cancellation
  * during connection start).
  * Returns true if successfully connected; false if the connection failed.
- * 
+ *
  * Throws errors in unrecoverable situations, or when this backend's query
  * is canceled.
  */
@@ -378,8 +378,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	{
 	case PS_Disconnected:
 	{
-		const char *keywords[3];
-		const char *values[3];
+		const char *keywords[4];
+		char *values[4];
 		int			n_pgsql_params;
 		TimestampTz	now;
 		int64		us_since_last_attempt;
@@ -424,14 +424,20 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		 * can override the password from the env variable. Seems useful, although
 		 * we don't currently use that capability anywhere.
 		 */
-		keywords[0] = "dbname";
-		values[0] = connstr;
-		n_pgsql_params = 1;
+		n_pgsql_params = 0;
+
+		keywords[n_pgsql_params] = "application_name";
+		values[n_pgsql_params] = "todo-pid-here";
+		n_pgsql_params++;
+
+		keywords[n_pgsql_params] = "dbname";
+		values[n_pgsql_params] = connstr;
+		n_pgsql_params++;
 
 		if (neon_auth_token)
 		{
-			keywords[1] = "password";
-			values[1] = neon_auth_token;
+			keywords[n_pgsql_params] = "password";
+			values[n_pgsql_params] = neon_auth_token;
 			n_pgsql_params++;
 		}
 
