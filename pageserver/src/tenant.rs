@@ -295,6 +295,7 @@ pub struct CompactionNotifier {
 }
 
 impl CompactionNotifier {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             notify: Notify::new(),
