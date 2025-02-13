@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import NeonEnv, logical_replication_sync
 from fixtures.utils import query_scalar, wait_until
 
 
@@ -239,3 +239,148 @@ def test_subscriber_branching(neon_simple_env: NeonEnv):
             res = scur_postgres.fetchall()
             assert len(res) == 1
             assert str(sub_child_2_timeline_id) == res[0][0]
+
+
+def test_multiple_subscription_branching(neon_simple_env: NeonEnv):
+    """
+    Test that compute_ctl can handle concurrent deletion of subscriptions in a multiple databases
+    """
+    env = neon_simple_env
+
+    # Create and start endpoint so that neon_local put all the generated
+    # stuff into the spec.json file.
+    endpoint = env.endpoints.create_start("main", config_lines=["max_replication_slots = 100"])
+
+    NUMBER_OF_DBS = 5
+    # drop the subscriber_db from the list
+    TEST_DB_NAMES = [
+        {
+            "name": "neondb",
+            "owner": "cloud_admin",
+        },
+        {
+            "name": "subscriber_db",
+            "owner": "cloud_admin",
+        },
+        {
+            "name": "publisher_db",
+            "owner": "cloud_admin",
+        },
+    ]
+
+    for i in range(NUMBER_OF_DBS):
+        TEST_DB_NAMES.append(
+            {
+                "name": f"db{i}",
+                "owner": "cloud_admin",
+            }
+        )
+
+    # Update the spec.json file to create the databases
+    # and reconfigure the endpoint to apply the changes.
+    endpoint.respec_deep(
+        **{
+            "skip_pg_catalog_updates": False,
+            "cluster": {
+                "databases": TEST_DB_NAMES,
+            },
+        }
+    )
+    endpoint.reconfigure()
+
+    # connect to the publisher_db and create a publication
+    with endpoint.cursor(dbname="publisher_db") as cursor:
+        cursor.execute("CREATE TABLE t(a int)")
+        cursor.execute("CREATE PUBLICATION mypub FOR TABLE t")
+        cursor.execute("select pg_catalog.pg_create_logical_replication_slot('mysub', 'pgoutput');")
+        cursor.execute("INSERT INTO t VALUES (1)")
+        cursor.execute("CHECKPOINT")
+
+    # connect to the subscriber_db and create a subscription
+    connstr = endpoint.connstr(dbname="publisher_db").replace("'", "''")
+    with endpoint.cursor(dbname="subscriber_db") as cursor:
+        cursor.execute("CREATE TABLE t(a int)")
+        cursor.execute(
+            f"CREATE SUBSCRIPTION mysub CONNECTION '{connstr}' PUBLICATION mypub  WITH (create_slot = false) "
+        )
+
+    # create table and subscription for each of the databases
+    with endpoint.cursor(dbname="publisher_db") as publisher_cursor:
+        for i in range(NUMBER_OF_DBS):
+            publisher_cursor.execute(f"CREATE TABLE t{i}(a int)")
+            publisher_cursor.execute(f"CREATE PUBLICATION mypub{i} FOR TABLE t{i}")
+            publisher_cursor.execute(
+                f"select pg_catalog.pg_create_logical_replication_slot('mysub{i}', 'pgoutput');"
+            )
+            publisher_cursor.execute(f"INSERT INTO t{i} VALUES ({i})")
+            publisher_cursor.execute("CHECKPOINT")
+
+            with endpoint.cursor(dbname=f"db{i}") as cursor:
+                cursor.execute(f"CREATE TABLE t{i}(a int)")
+                cursor.execute(
+                    f"CREATE SUBSCRIPTION mysub{i} CONNECTION '{connstr}' PUBLICATION mypub{i}  WITH (create_slot = false) "
+                )
+
+    # wait for the subscription to be active
+    logical_replication_sync(
+        endpoint,
+        endpoint,
+        "mysub",
+        sub_dbname="subscriber_db",
+        pub_dbname="publisher_db",
+    )
+
+    # Check that replication is working
+    with endpoint.cursor(dbname="subscriber_db") as cursor:
+        cursor.execute("SELECT * FROM t")
+        rows = cursor.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == 1
+
+        last_insert_lsn = query_scalar(cursor, "select pg_current_wal_insert_lsn();")
+        log.info(f"last_insert_lsn = {last_insert_lsn}")
+
+    # stop the parent subscriber so that it doesn't interfere with the test
+    endpoint.stop()
+
+    sub_child_1_timeline_id = env.create_branch(
+        "subscriber_child_1",
+        ancestor_branch_name="main",
+        ancestor_start_lsn=last_insert_lsn,
+    )
+
+    sub_child_1 = env.endpoints.create_start("subscriber_child_1")
+
+    # Respec the endpoint with drop_subscriptions_before_start=True
+    # and reconfigure_concurrency=5
+    #
+    # This is not excactly the same as real workflow,
+    # because in reality we apply the drop_subscriptions_before_start on the compute start,
+    # but this is enough for the test.
+    sub_child_1.respec_deep(
+        **{
+            "skip_pg_catalog_updates": False,
+            "reconfigure_concurrency": 5,
+            "create_test_user": True,
+            "drop_subscriptions_before_start": True,
+            "cluster": {
+                "databases": TEST_DB_NAMES,
+            },
+        }
+    )
+    sub_child_1.reconfigure()
+
+    # ensure that subscription deletion happened on this timeline
+    with sub_child_1.cursor() as scur_postgres:
+        scur_postgres.execute("SELECT timeline_id from neon.drop_subscriptions_done")
+        res = scur_postgres.fetchall()
+        log.info(f"res = {res}")
+        assert len(res) == 1
+        assert str(sub_child_1_timeline_id) == res[0][0]
+
+    # ensure that there are no subscriptions in the databases
+    for i in range(NUMBER_OF_DBS):
+        with sub_child_1.cursor(dbname=f"db{i}") as cursor:
+            cursor.execute("SELECT * FROM pg_catalog.pg_subscription")
+            res = cursor.fetchall()
+            assert len(res) == 0
