@@ -916,7 +916,7 @@ prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 {
 	uint64		min_ring_index;
 	PrefetchRequest hashkey;
-#if USE_ASSERT_CHECKING
+#ifdef USE_ASSERT_CHECKING
 	bool		any_hits = false;
 #endif
 	/* We will never read further ahead than our buffer can store. */
@@ -955,7 +955,7 @@ Retry:
 		else
 			lsns = NULL;
 
-#if USE_ASSERT_CHECKING
+#ifdef USE_ASSERT_CHECKING
 		any_hits = true;
 #endif
 
@@ -3011,7 +3011,7 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_block
 		start_ts = GetCurrentTimestamp();
 
 		if (RecoveryInProgress() && MyBackendType != B_STARTUP)
-			XLogWaitForReplayOf(reqlsns[0].request_lsn);
+			XLogWaitForReplayOf(reqlsns->request_lsn);
 
 		/*
 		 * Try to find prefetched page in the list of received pages.
@@ -3765,7 +3765,7 @@ neon_dbsize(Oid dbNode)
  *	neon_truncate() -- Truncate relation to specified number of blocks.
  */
 static void
-neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
+neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber old_blocks, BlockNumber nblocks)
 {
 	XLogRecPtr	lsn;
 
@@ -3780,7 +3780,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
-			mdtruncate(reln, forknum, nblocks);
+			mdtruncate(reln, forknum, old_blocks, nblocks);
 			return;
 
 		default:
@@ -3818,7 +3818,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
-		mdtruncate(reln, forknum, nblocks);
+		mdtruncate(reln, forknum, old_blocks, nblocks);
 #endif
 }
 

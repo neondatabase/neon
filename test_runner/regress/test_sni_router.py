@@ -116,7 +116,7 @@ def test_pg_sni_router(
     test_output_dir: Path,
 ):
     generate_tls_cert(
-        "endpoint.namespace.localtest.me",
+        "endpoint.namespace.local.neon.build",
         test_output_dir / "router.crt",
         test_output_dir / "router.key",
     )
@@ -130,7 +130,7 @@ def test_pg_sni_router(
     with PgSniRouter(
         neon_binpath=neon_binpath,
         port=router_port,
-        destination="localtest.me",
+        destination="local.neon.build",
         tls_cert=test_output_dir / "router.crt",
         tls_key=test_output_dir / "router.key",
         test_output_dir=test_output_dir,
@@ -141,7 +141,7 @@ def test_pg_sni_router(
             "select 1",
             dbname="postgres",
             sslmode="require",
-            host=f"endpoint--namespace--{pg_port}.localtest.me",
+            host=f"endpoint--namespace--{pg_port}.local.neon.build",
             hostaddr="127.0.0.1",
         )
         assert out[0][0] == 1

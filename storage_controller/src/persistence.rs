@@ -27,7 +27,7 @@ use pageserver_api::shard::ShardConfigError;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::ShardStripeSize;
 use pageserver_api::shard::{ShardCount, ShardNumber, TenantShardId};
-use rustls::client::danger::ServerCertVerifier;
+use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
 use rustls::crypto::ring;
 use scoped_futures::ScopedBoxFuture;
@@ -194,6 +194,8 @@ impl Persistence {
         timeout: Duration,
     ) -> Result<(), diesel::ConnectionError> {
         let started_at = Instant::now();
+        log_postgres_connstr_info(database_url)
+            .map_err(|e| diesel::ConnectionError::InvalidConnectionUrl(e.to_string()))?;
         loop {
             match establish_connection_rustls(database_url).await {
                 Ok(_) => {
@@ -1183,23 +1185,6 @@ impl Persistence {
         Ok(safekeepers)
     }
 
-    pub(crate) async fn safekeeper_get(
-        &self,
-        id: i64,
-    ) -> Result<SafekeeperPersistence, DatabaseError> {
-        use crate::schema::safekeepers::dsl::{id as id_column, safekeepers};
-        self.with_conn(move |conn| {
-            Box::pin(async move {
-                Ok(safekeepers
-                    .filter(id_column.eq(&id))
-                    .select(SafekeeperPersistence::as_select())
-                    .get_result(conn)
-                    .await?)
-            })
-        })
-        .await
-    }
-
     pub(crate) async fn safekeeper_upsert(
         &self,
         record: SafekeeperUpsert,
@@ -1281,6 +1266,51 @@ pub(crate) fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {
     Ok(Arc::new(store))
 }
 
+#[derive(Debug)]
+/// A verifier that accepts all certificates (but logs an error still)
+struct AcceptAll(Arc<WebPkiServerVerifier>);
+impl ServerCertVerifier for AcceptAll {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let r =
+            self.0
+                .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now);
+        if let Err(err) = r {
+            tracing::info!(
+                ?server_name,
+                "ignoring db connection TLS validation error: {err:?}"
+            );
+            return Ok(ServerCertVerified::assertion());
+        }
+        r
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls12_signature(message, cert, dss)
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls13_signature(message, cert, dss)
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.supported_verify_schemes()
+    }
+}
+
 /// Loads the root certificates and constructs a client config suitable for connecting.
 /// This function is blocking.
 fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
@@ -1290,76 +1320,12 @@ fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
             .expect("ring should support the default protocol versions");
     static DO_CERT_CHECKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let do_cert_checks =
-        DO_CERT_CHECKS.get_or_init(|| std::env::var("STORCON_CERT_CHECKS").is_ok());
+        DO_CERT_CHECKS.get_or_init(|| std::env::var("STORCON_DB_CERT_CHECKS").is_ok());
     Ok(if *do_cert_checks {
         client_config
             .with_root_certificates(load_certs()?)
             .with_no_client_auth()
     } else {
-        use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified};
-        #[derive(Debug)]
-        struct AcceptAll(Arc<WebPkiServerVerifier>);
-        impl ServerCertVerifier for AcceptAll {
-            fn verify_server_cert(
-                &self,
-                end_entity: &rustls::pki_types::CertificateDer<'_>,
-                intermediates: &[rustls::pki_types::CertificateDer<'_>],
-                server_name: &rustls::pki_types::ServerName<'_>,
-                ocsp_response: &[u8],
-                now: rustls::pki_types::UnixTime,
-            ) -> Result<ServerCertVerified, rustls::Error> {
-                let r = self.0.verify_server_cert(
-                    end_entity,
-                    intermediates,
-                    server_name,
-                    ocsp_response,
-                    now,
-                );
-                if let Err(err) = r {
-                    tracing::info!(
-                        ?server_name,
-                        "ignoring db connection TLS validation error: {err:?}"
-                    );
-                    return Ok(ServerCertVerified::assertion());
-                }
-                r
-            }
-            fn verify_tls12_signature(
-                &self,
-                message: &[u8],
-                cert: &rustls::pki_types::CertificateDer<'_>,
-                dss: &rustls::DigitallySignedStruct,
-            ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
-            {
-                let r = self.0.verify_tls12_signature(message, cert, dss);
-                if let Err(err) = r {
-                    tracing::info!(
-                        "ignoring db connection 1.2 signature TLS validation error: {err:?}"
-                    );
-                    return Ok(HandshakeSignatureValid::assertion());
-                }
-                r
-            }
-            fn verify_tls13_signature(
-                &self,
-                message: &[u8],
-                cert: &rustls::pki_types::CertificateDer<'_>,
-                dss: &rustls::DigitallySignedStruct,
-            ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
-            {
-                let r = self.0.verify_tls13_signature(message, cert, dss);
-                if let Err(err) = r {
-                    tracing::info!(
-                        "ignoring db connection 1.3 signature TLS validation error: {err:?}"
-                    );
-                    return Ok(HandshakeSignatureValid::assertion());
-                }
-                r
-            }
-            fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-                self.0.supported_verify_schemes()
-            }
-        }
         let verifier = AcceptAll(
             WebPkiServerVerifier::builder_with_provider(
                 load_certs()?,
@@ -1387,6 +1353,29 @@ fn establish_connection_rustls(config: &str) -> BoxFuture<ConnectionResult<Async
         AsyncPgConnection::try_from_client_and_connection(client, conn).await
     };
     fut.boxed()
+}
+
+#[cfg_attr(test, test)]
+fn test_config_debug_censors_password() {
+    let has_pw =
+        "host=/var/lib/postgresql,localhost port=1234 user=specialuser password='NOT ALLOWED TAG'";
+    let has_pw_cfg = has_pw.parse::<tokio_postgres::Config>().unwrap();
+    assert!(format!("{has_pw_cfg:?}").contains("specialuser"));
+    // Ensure that the password is not leaked by the debug impl
+    assert!(!format!("{has_pw_cfg:?}").contains("NOT ALLOWED TAG"));
+}
+
+fn log_postgres_connstr_info(config_str: &str) -> anyhow::Result<()> {
+    let config = config_str
+        .parse::<tokio_postgres::Config>()
+        .map_err(|_e| anyhow::anyhow!("Couldn't parse config str"))?;
+    // We use debug formatting here, and use a unit test to ensure that we don't leak the password.
+    // To make extra sure the test gets ran, run it every time the function is called
+    // (this is rather cold code, we can afford it).
+    #[cfg(not(test))]
+    test_config_debug_censors_password();
+    tracing::info!("database connection config: {config:?}");
+    Ok(())
 }
 
 /// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
@@ -1548,6 +1537,21 @@ pub(crate) struct SafekeeperPersistence {
 }
 
 impl SafekeeperPersistence {
+    pub(crate) fn from_upsert(
+        upsert: SafekeeperUpsert,
+        scheduling_policy: SkSchedulingPolicy,
+    ) -> Self {
+        crate::persistence::SafekeeperPersistence {
+            id: upsert.id,
+            region_id: upsert.region_id,
+            version: upsert.version,
+            host: upsert.host,
+            port: upsert.port,
+            http_port: upsert.http_port,
+            availability_zone_id: upsert.availability_zone_id,
+            scheduling_policy: String::from(scheduling_policy),
+        }
+    }
     pub(crate) fn as_describe_response(&self) -> Result<SafekeeperDescribeResponse, DatabaseError> {
         let scheduling_policy =
             SkSchedulingPolicy::from_str(&self.scheduling_policy).map_err(|e| {

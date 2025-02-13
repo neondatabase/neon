@@ -11,7 +11,7 @@ use tracing_subscriber::prelude::*;
 /// set `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318`. See
 /// `tracing-utils` package description.
 ///
-pub fn init_tracing_and_logging(default_log_level: &str) -> anyhow::Result<()> {
+pub async fn init_tracing_and_logging(default_log_level: &str) -> anyhow::Result<()> {
     // Initialize Logging
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_log_level));
@@ -22,7 +22,7 @@ pub fn init_tracing_and_logging(default_log_level: &str) -> anyhow::Result<()> {
         .with_writer(std::io::stderr);
 
     // Initialize OpenTelemetry
-    let otlp_layer = tracing_utils::init_tracing_without_runtime("compute_ctl");
+    let otlp_layer = tracing_utils::init_tracing("compute_ctl").await;
 
     // Put it all together
     tracing_subscriber::registry()
