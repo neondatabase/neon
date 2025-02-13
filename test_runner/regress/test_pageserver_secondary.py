@@ -921,14 +921,11 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     # Generate a bunch of small layers (we will apply a slowdown failpoint that works on a per-layer basis)
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
-    workload.write_rows(128)
-    ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
-    workload.write_rows(128)
-    ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
-    workload.write_rows(128)
-    ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
-    workload.write_rows(128)
-    ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
+    workload.write_rows(128, upload=True)
+    workload.write_rows(128, upload=True)
+    workload.write_rows(128, upload=True)
+    workload.write_rows(128, upload=True)
+    workload.stop()
 
     # Expect lots of layers
     assert len(ps_attached.list_layers(tenant_id, timeline_id)) > 10
@@ -974,7 +971,10 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     heatmap_after_migration = env.pageserver_remote_storage.heatmap_content(tenant_id)
 
     assert len(heatmap_before_migration["timelines"][0]["layers"]) > 0
-    assert len(heatmap_before_migration["timelines"][0]["layers"]) == len(
+
+    # The new layer map should contain all the layers in the pre-migration one
+    # and a new in memory layer
+    assert len(heatmap_before_migration["timelines"][0]["layers"]) + 1 == len(
         heatmap_after_migration["timelines"][0]["layers"]
     )
 
