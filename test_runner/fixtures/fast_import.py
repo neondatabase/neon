@@ -134,7 +134,7 @@ def fast_import(
         pg_distrib_dir,
         pg_version,
         workdir,
-        cleanup=cast(bool, pytestconfig.getoption("--preserve-database-files")),
+        cleanup=not cast(bool, pytestconfig.getoption("--preserve-database-files")),
     ) as fi:
         yield fi
 
