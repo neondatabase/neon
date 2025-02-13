@@ -93,7 +93,7 @@ else
     fi
     docker compose exec neon-test-extensions psql -d contrib_regression -c "\dx ${ext}"
     if ! docker compose exec neon-test-extensions sh -c /ext-src/${EXTDIR}/test-upgrade.sh; then
-      docker  compose exec neon-test-extensions  cat /ext-src/${EXTDIR}/regression.diff
+      docker  compose exec neon-test-extensions  cat /ext-src/${EXTDIR}/regression.diffs
       exit 1
     fi
     docker compose exec neon-test-extensions psql -d contrib_regression -c "alter extension ${ext} update"
