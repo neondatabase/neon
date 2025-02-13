@@ -61,6 +61,7 @@ use reqwest::StatusCode;
 use tracing::{instrument, Instrument};
 
 use crate::pageserver_client::PageserverClient;
+use http_utils::error::ApiError;
 use pageserver_api::{
     models::{
         self, LocationConfig, LocationConfigListResponse, LocationConfigMode,
@@ -81,7 +82,6 @@ use utils::{
     completion::Barrier,
     failpoint_support,
     generation::Generation,
-    http::error::ApiError,
     id::{NodeId, TenantId, TimelineId},
     pausable_failpoint,
     sync::gate::Gate,

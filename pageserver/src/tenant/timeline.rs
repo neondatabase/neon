@@ -45,13 +45,12 @@ use rand::Rng;
 use remote_storage::DownloadError;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc::Sender;
-use tokio::{
-    runtime::Handle,
-    sync::{oneshot, watch},
-};
+use tokio::sync::{oneshot, watch, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::critical;
 use utils::rate_limit::RateLimit;
 use utils::{
     fs_ext,
@@ -226,6 +225,7 @@ pub struct TimelineResources {
     pub remote_client: RemoteTimelineClient,
     pub pagestream_throttle: Arc<crate::tenant::throttle::Throttle>,
     pub pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
+    pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
@@ -425,6 +425,9 @@ pub struct Timeline {
     /// If true, the last compaction failed.
     compaction_failed: AtomicBool,
 
+    /// Notifies the tenant compaction loop that there is pending L0 compaction work.
+    l0_compaction_trigger: Arc<Notify>,
+
     /// Make sure we only have one running gc at a time.
     ///
     /// Must only be taken in two places:
@@ -531,6 +534,9 @@ impl GcInfo {
     pub(super) fn remove_child_offloaded(&mut self, child_id: TimelineId) -> bool {
         self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes)
     }
+    pub(crate) fn lsn_covered_by_lease(&self, lsn: Lsn) -> bool {
+        self.leases.contains_key(&lsn)
+    }
 }
 
 /// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this
@@ -622,6 +628,71 @@ impl From<layer_manager::Shutdown> for GetVectoredError {
     }
 }
 
+/// A layer identifier when used in the [`ReadPath`] structure. This enum is for observability purposes
+/// only and not used by the "real read path".
+pub enum ReadPathLayerId {
+    PersistentLayer(PersistentLayerKey),
+    InMemoryLayer(Range<Lsn>),
+}
+
+impl std::fmt::Display for ReadPathLayerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadPathLayerId::PersistentLayer(key) => write!(f, "{}", key),
+            ReadPathLayerId::InMemoryLayer(range) => {
+                write!(f, "in-mem {}..{}", range.start, range.end)
+            }
+        }
+    }
+}
+pub struct ReadPath {
+    keyspace: KeySpace,
+    lsn: Lsn,
+    path: Vec<(ReadPathLayerId, KeySpace, Range<Lsn>)>,
+}
+
+impl ReadPath {
+    pub fn new(keyspace: KeySpace, lsn: Lsn) -> Self {
+        Self {
+            keyspace,
+            lsn,
+            path: Vec::new(),
+        }
+    }
+
+    pub fn record_layer_visit(
+        &mut self,
+        layer_to_read: &ReadableLayer,
+        keyspace_to_read: &KeySpace,
+        lsn_range: &Range<Lsn>,
+    ) {
+        let id = match layer_to_read {
+            ReadableLayer::PersistentLayer(layer) => {
+                ReadPathLayerId::PersistentLayer(layer.layer_desc().key())
+            }
+            ReadableLayer::InMemoryLayer(layer) => {
+                ReadPathLayerId::InMemoryLayer(layer.get_lsn_range())
+            }
+        };
+        self.path
+            .push((id, keyspace_to_read.clone(), lsn_range.clone()));
+    }
+}
+
+impl std::fmt::Display for ReadPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Read path for {} at lsn {}:", self.keyspace, self.lsn)?;
+        for (idx, (layer_id, keyspace, lsn_range)) in self.path.iter().enumerate() {
+            writeln!(
+                f,
+                "{}: {} {}..{} {}",
+                idx, layer_id, lsn_range.start, lsn_range.end, keyspace
+            )?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(thiserror::Error)]
 pub struct MissingKeyError {
     key: Key,
@@ -629,6 +700,8 @@ pub struct MissingKeyError {
     cont_lsn: Lsn,
     request_lsn: Lsn,
     ancestor_lsn: Option<Lsn>,
+    /// Debug information about the read path if there's an error
+    read_path: Option<ReadPath>,
     backtrace: Option<std::backtrace::Backtrace>,
 }
 
@@ -645,8 +718,13 @@ impl std::fmt::Display for MissingKeyError {
             "could not find data for key {} (shard {:?}) at LSN {}, request LSN {}",
             self.key, self.shard, self.cont_lsn, self.request_lsn
         )?;
+
         if let Some(ref ancestor_lsn) = self.ancestor_lsn {
             write!(f, ", ancestor {}", ancestor_lsn)?;
+        }
+
+        if let Some(ref read_path) = self.read_path {
+            write!(f, "\n{}", read_path)?;
         }
 
         if let Some(ref backtrace) = self.backtrace {
@@ -798,8 +876,12 @@ pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
     ForceL0Compaction,
+    OnlyL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
+    /// Disables compaction yielding e.g. due to high L0 count. This is set e.g. when requesting
+    /// compaction via HTTP API.
+    NoYield,
 }
 
 #[serde_with::serde_as]
@@ -1065,6 +1147,7 @@ impl Timeline {
                 request_lsn: lsn,
                 ancestor_lsn: None,
                 backtrace: None,
+                read_path: None,
             })),
         }
     }
@@ -1191,6 +1274,13 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        let read_path = if self.conf.enable_read_path_debugging {
+            Some(ReadPath::new(keyspace.clone(), lsn))
+        } else {
+            None
+        };
+        reconstruct_state.read_path = read_path;
+
         let traversal_res: Result<(), _> = self
             .get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
             .await;
@@ -1467,6 +1557,7 @@ impl Timeline {
             let lsn = xlog_utils::normalize_lsn(lsn, WAL_SEGMENT_SIZE);
 
             let mut gc_info = self.gc_info.write().unwrap();
+            let planned_cutoff = gc_info.min_cutoff();
 
             let valid_until = SystemTime::now() + length;
 
@@ -1487,7 +1578,7 @@ impl Timeline {
                     existing_lease.clone()
                 }
                 Entry::Vacant(vacant) => {
-                    // Reject already GC-ed LSN (lsn < latest_gc_cutoff) if we are in AttachedSingle and
+                    // Reject already GC-ed LSN if we are in AttachedSingle and
                     // not blocked by the lsn lease deadline.
                     let validate = {
                         let conf = self.tenant_conf.load();
@@ -1498,7 +1589,10 @@ impl Timeline {
                     if init || validate {
                         let latest_gc_cutoff_lsn = self.get_latest_gc_cutoff_lsn();
                         if lsn < *latest_gc_cutoff_lsn {
-                            bail!("tried to request a page version that was garbage collected. requested at {} gc cutoff {}", lsn, *latest_gc_cutoff_lsn);
+                            bail!("tried to request an lsn lease for an lsn below the latest gc cutoff. requested at {} gc cutoff {}", lsn, *latest_gc_cutoff_lsn);
+                        }
+                        if lsn < planned_cutoff {
+                            bail!("tried to request an lsn lease for an lsn below the planned gc cutoff. requested at {} planned gc cutoff {}", lsn, planned_cutoff);
                         }
                     }
 
@@ -1700,35 +1794,48 @@ impl Timeline {
         .await
     }
 
-    /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
-    /// compaction tasks.
+    /// Outermost timeline compaction operation; downloads needed layers.
+    ///
+    /// NB: the cancellation token is usually from a background task, but can also come from a
+    /// request task.
     pub(crate) async fn compact_with_options(
         self: &Arc<Self>,
         cancel: &CancellationToken,
         options: CompactOptions,
         ctx: &RequestContext,
     ) -> Result<CompactionOutcome, CompactionError> {
-        // most likely the cancellation token is from background task, but in tests it could be the
-        // request task as well.
+        // Acquire the compaction lock and task semaphore.
+        //
+        // L0-only compaction uses a separate semaphore (if enabled) to make sure it isn't starved
+        // out by other background tasks (including image compaction). We request this via
+        // `BackgroundLoopKind::L0Compaction`.
+        //
+        // If this is a regular compaction pass, and L0-only compaction is enabled in the config,
+        // then we should yield for immediate L0 compaction if necessary while we're waiting for the
+        // background task semaphore. There's no point yielding otherwise, since we'd just end up
+        // right back here.
+        let is_l0_only = options.flags.contains(CompactFlags::OnlyL0Compaction);
+        let semaphore_kind = match is_l0_only && self.get_compaction_l0_semaphore() {
+            true => BackgroundLoopKind::L0Compaction,
+            false => BackgroundLoopKind::Compaction,
+        };
+        let yield_for_l0 = !is_l0_only
+            && self.get_compaction_l0_first()
+            && !options.flags.contains(CompactFlags::NoYield);
 
-        let prepare = async move {
+        let acquire = async move {
             let guard = self.compaction_lock.lock().await;
-
-            let permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
-                BackgroundLoopKind::Compaction,
-                ctx,
-            )
-            .await;
-
+            let permit = super::tasks::acquire_concurrency_permit(semaphore_kind, ctx).await;
             (guard, permit)
         };
 
-        // this wait probably never needs any "long time spent" logging, because we already nag if
-        // compaction task goes over it's period (20s) which is quite often in production.
         let (_guard, _permit) = tokio::select! {
-            tuple = prepare => { tuple },
-            _ = self.cancel.cancelled() => return Ok(CompactionOutcome::Done),
-            _ = cancel.cancelled() => return Ok(CompactionOutcome::Done),
+            (guard, permit) = acquire => (guard, permit),
+            _ = self.l0_compaction_trigger.notified(), if yield_for_l0 => {
+                return Ok(CompactionOutcome::YieldForL0);
+            }
+            _ = self.cancel.cancelled() => return Ok(CompactionOutcome::Skipped),
+            _ = cancel.cancelled() => return Ok(CompactionOutcome::Skipped),
         };
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -1736,7 +1843,7 @@ impl Timeline {
         // Last record Lsn could be zero in case the timeline was just created
         if !last_record_lsn.is_valid() {
             warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
-            return Ok(CompactionOutcome::Done);
+            return Ok(CompactionOutcome::Skipped);
         }
 
         let result = match self.get_compaction_algorithm_settings().kind {
@@ -2238,6 +2345,20 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.compaction_upper_limit)
     }
 
+    pub fn get_compaction_l0_first(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .compaction_l0_first
+            .unwrap_or(self.conf.default_tenant_conf.compaction_l0_first)
+    }
+
+    pub fn get_compaction_l0_semaphore(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .compaction_l0_semaphore
+            .unwrap_or(self.conf.default_tenant_conf.compaction_l0_semaphore)
+    }
+
     fn get_l0_flush_delay_threshold(&self) -> Option<usize> {
         // Disable L0 flushes by default. This and compaction needs further tuning.
         const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 0; // TODO: default to e.g. 3
@@ -2579,6 +2700,7 @@ impl Timeline {
 
                 compaction_lock: tokio::sync::Mutex::default(),
                 compaction_failed: AtomicBool::default(),
+                l0_compaction_trigger: resources.l0_compaction_trigger,
                 gc_lock: tokio::sync::Mutex::default(),
 
                 standby_horizon: AtomicLsn::new(0),
@@ -2628,7 +2750,7 @@ impl Timeline {
                 return;
             }
             FlushLoopState::Exited => {
-                warn!(
+                info!(
                     "ignoring attempt to restart exited flush_loop {}/{}",
                     self.tenant_shard_id, self.timeline_id
                 );
@@ -3052,7 +3174,7 @@ impl Timeline {
             let self_ref = &self;
             let skip_concurrency_limiter = &skip_concurrency_limiter;
             async move {
-                let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
+                let wait_for_permit = super::tasks::acquire_concurrency_permit(
                     BackgroundLoopKind::InitialLogicalSizeCalculation,
                     background_ctx,
                 );
@@ -3498,6 +3620,7 @@ impl Timeline {
                 request_lsn,
                 ancestor_lsn: Some(timeline.ancestor_lsn),
                 backtrace: None,
+                read_path: std::mem::take(&mut reconstruct_state.read_path),
             }));
         }
 
@@ -3616,6 +3739,9 @@ impl Timeline {
             }
 
             if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
+                if let Some(ref mut read_path) = reconstruct_state.read_path {
+                    read_path.record_layer_visit(&layer_to_read, &keyspace_to_read, &lsn_range);
+                }
                 let next_cont_lsn = lsn_range.start;
                 layer_to_read
                     .get_values_reconstruct_data(
@@ -3916,6 +4042,12 @@ impl Timeline {
                 }
                 let flush_duration = flush_timer.stop_and_record();
 
+                // Notify the tenant compaction loop if L0 compaction is needed.
+                let l0_count = *watch_l0.borrow();
+                if l0_count >= self.get_compaction_threshold() {
+                    self.l0_compaction_trigger.notify_one();
+                }
+
                 // Delay the next flush to backpressure if compaction can't keep up. We delay by the
                 // flush duration such that the flush takes 2x as long. This is propagated up to WAL
                 // ingestion by having ephemeral layer rolls wait for flushes.
@@ -4088,6 +4220,7 @@ impl Timeline {
                     ImageLayerCreationMode::Initial,
                     ctx,
                     LastImageLayerCreationStatus::Initial,
+                    false, // don't yield for L0, we're flushing L0
                 )
                 .await?;
             debug_assert!(
@@ -4660,6 +4793,7 @@ impl Timeline {
         mode: ImageLayerCreationMode,
         ctx: &RequestContext,
         last_status: LastImageLayerCreationStatus,
+        yield_for_l0: bool,
     ) -> Result<(Vec<ResidentLayer>, LastImageLayerCreationStatus), CreateImageLayersError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
 
@@ -4856,7 +4990,7 @@ impl Timeline {
 
             if let ImageLayerCreationMode::Try = mode {
                 // We have at least made some progress
-                if batch_image_writer.pending_layer_num() >= 1 {
+                if yield_for_l0 && batch_image_writer.pending_layer_num() >= 1 {
                     // The `Try` mode is currently only used on the compaction path. We want to avoid
                     // image layer generation taking too long time and blocking L0 compaction. So in this
                     // mode, we also inspect the current number of L0 layers and skip image layer generation
@@ -5804,10 +5938,11 @@ impl Timeline {
                 let img = match res {
                     Ok(img) => img,
                     Err(walredo::Error::Cancelled) => return Err(PageReconstructError::Cancelled),
-                    Err(walredo::Error::Other(e)) => {
+                    Err(walredo::Error::Other(err)) => {
+                        critical!("walredo failure during page reconstruction: {err:?}");
                         return Err(PageReconstructError::WalRedo(
-                            e.context("reconstruct a page image"),
-                        ))
+                            err.context("reconstruct a page image"),
+                        ));
                     }
                 };
                 Ok(img)

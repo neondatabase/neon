@@ -61,6 +61,7 @@ use crate::{
         remote_timeline_client::LayerFileMetadata,
         secondary::SecondaryTenant,
         storage_layer::{AsLayerDesc, EvictionError, Layer, LayerName, LayerVisibilityHint},
+        tasks::sleep_random,
     },
     CancellableTask, DiskUsageEvictionTask,
 };
@@ -210,14 +211,8 @@ async fn disk_usage_eviction_task(
         info!("disk usage based eviction task finishing");
     };
 
-    use crate::tenant::tasks::random_init_delay;
-    {
-        if random_init_delay(task_config.period, &cancel)
-            .await
-            .is_err()
-        {
-            return;
-        }
+    if sleep_random(task_config.period, &cancel).await.is_err() {
+        return;
     }
 
     let mut iteration_no = 0;

@@ -60,6 +60,16 @@ struct Args {
     pg_lib_dir: Utf8PathBuf,
     #[clap(long)]
     pg_port: Option<u16>, // port to run postgres on, 5432 is default
+
+    /// Number of CPUs in the system. This is used to configure # of
+    /// parallel worker processes, for index creation.
+    #[clap(long, env = "NEON_IMPORTER_NUM_CPUS")]
+    num_cpus: Option<usize>,
+
+    /// Amount of RAM in the system. This is used to configure shared_buffers
+    /// and maintenance_work_mem.
+    #[clap(long, env = "NEON_IMPORTER_MEMORY_MB")]
+    memory_mb: Option<usize>,
 }
 
 #[serde_with::serde_as]
@@ -202,7 +212,16 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     .await
     .context("initdb")?;
 
-    let nproc = num_cpus::get();
+    // If the caller didn't specify CPU / RAM to use for sizing, default to
+    // number of CPUs in the system, and pretty arbitrarily, 256 MB of RAM.
+    let nproc = args.num_cpus.unwrap_or_else(num_cpus::get);
+    let memory_mb = args.memory_mb.unwrap_or(256);
+
+    // Somewhat arbitrarily, use 10 % of memory for shared buffer cache, 70% for
+    // maintenance_work_mem (i.e. for sorting during index creation), and leave the rest
+    // available for misc other stuff that PostgreSQL uses memory for.
+    let shared_buffers_mb = ((memory_mb as f32) * 0.10) as usize;
+    let maintenance_work_mem_mb = ((memory_mb as f32) * 0.70) as usize;
 
     //
     // Launch postgres process
@@ -212,12 +231,15 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         .arg(&pgdata_dir)
         .args(["-p", &format!("{pg_port}")])
         .args(["-c", "wal_level=minimal"])
-        .args(["-c", "shared_buffers=10GB"])
+        .args(["-c", &format!("shared_buffers={shared_buffers_mb}MB")])
         .args(["-c", "max_wal_senders=0"])
         .args(["-c", "fsync=off"])
         .args(["-c", "full_page_writes=off"])
         .args(["-c", "synchronous_commit=off"])
-        .args(["-c", "maintenance_work_mem=8388608"])
+        .args([
+            "-c",
+            &format!("maintenance_work_mem={maintenance_work_mem_mb}MB"),
+        ])
         .args(["-c", &format!("max_parallel_maintenance_workers={nproc}")])
         .args(["-c", &format!("max_parallel_workers={nproc}")])
         .args(["-c", &format!("max_parallel_workers_per_gather={nproc}")])
@@ -231,6 +253,14 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         ])
         .env_clear()
         .env("LD_LIBRARY_PATH", &pg_lib_dir)
+        .env(
+            "ASAN_OPTIONS",
+            std::env::var("ASAN_OPTIONS").unwrap_or_default(),
+        )
+        .env(
+            "UBSAN_OPTIONS",
+            std::env::var("UBSAN_OPTIONS").unwrap_or_default(),
+        )
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

@@ -3011,7 +3011,7 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_block
 		start_ts = GetCurrentTimestamp();
 
 		if (RecoveryInProgress() && MyBackendType != B_STARTUP)
-			XLogWaitForReplayOf(reqlsns[0].request_lsn);
+			XLogWaitForReplayOf(reqlsns->request_lsn);
 
 		/*
 		 * Try to find prefetched page in the list of received pages.

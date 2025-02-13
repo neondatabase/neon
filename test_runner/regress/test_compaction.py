@@ -689,9 +689,7 @@ def test_pageserver_compaction_circuit_breaker(neon_env_builder: NeonEnvBuilder)
     env.pageserver.http_client().configure_failpoints((FAILPOINT, "return"))
 
     # Write some data to trigger compaction
-    workload.write_rows(1024, upload=False)
-    workload.write_rows(1024, upload=False)
-    workload.write_rows(1024, upload=False)
+    workload.write_rows(32768, upload=False)
 
     def assert_broken():
         env.pageserver.assert_log_contains(BROKEN_LOG)

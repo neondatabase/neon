@@ -39,7 +39,7 @@ use crate::{
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use utils::{id::NodeId, lsn::Lsn, postgres_client::PostgresClientProtocol};
+use utils::{critical, id::NodeId, lsn::Lsn, postgres_client::PostgresClientProtocol};
 use utils::{pageserver_feedback::PageserverFeedback, sync::gate::GateError};
 
 /// Status of the connection.
@@ -393,6 +393,13 @@ pub(super) async fn handle_walreceiver_connection(
                         .await
                         .with_context(|| {
                             format!("could not ingest record at {local_next_record_lsn}")
+                        })
+                        .inspect_err(|err| {
+                            // TODO: we can't differentiate cancellation errors with
+                            // anyhow::Error, so just ignore it if we're cancelled.
+                            if !cancellation.is_cancelled() {
+                                critical!("{err:?}")
+                            }
                         })?;
 
                     uncommitted_records += 1;
@@ -520,6 +527,13 @@ pub(super) async fn handle_walreceiver_connection(
                             .await
                             .with_context(|| {
                                 format!("could not ingest record at {next_record_lsn}")
+                            })
+                            .inspect_err(|err| {
+                                // TODO: we can't differentiate cancellation errors with
+                                // anyhow::Error, so just ignore it if we're cancelled.
+                                if !cancellation.is_cancelled() {
+                                    critical!("{err:?}")
+                                }
                             })?;
                         if !ingested {
                             tracing::debug!("ingest: filtered out record @ LSN {next_record_lsn}");
