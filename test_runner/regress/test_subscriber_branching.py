@@ -353,12 +353,6 @@ def test_multiple_subscription_branching(neon_simple_env: NeonEnv):
 
     sub_child_1 = env.endpoints.create("subscriber_child_1")
 
-    # Respec the endpoint with drop_subscriptions_before_start=True
-    # and reconfigure_concurrency=5
-    #
-    # This is not excactly the same as real workflow,
-    # because in reality we apply the drop_subscriptions_before_start on the compute start,
-    # but this is enough for the test.
     sub_child_1.respec(
         skip_pg_catalog_updates=False,
         reconfigure_concurrency=5,
