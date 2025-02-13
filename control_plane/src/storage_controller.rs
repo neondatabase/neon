@@ -579,6 +579,10 @@ impl StorageController {
             self.env.base_data_dir.display()
         ));
 
+        if self.config.timelines_onto_safekeepers {
+            args.push("--timelines-onto-safekeepers".to_string());
+        }
+
         background_process::start_process(
             COMMAND,
             &instance_dir,

@@ -394,6 +394,8 @@ pub struct Config {
     pub long_reconcile_threshold: Duration,
 
     pub use_https_pageserver_api: bool,
+
+    pub timelines_onto_safekeepers: bool,
 }
 
 impl From<DatabaseError> for ApiError {
