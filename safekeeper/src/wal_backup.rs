@@ -310,9 +310,12 @@ impl WalBackupTask {
                     retry_attempt = 0;
                 }
                 Err(e) => {
+                    // We might have managed to upload some segment even though
+                    // some later in the range failed, so log backup_lsn
+                    // separately.
                     error!(
-                        "failed while offloading range {}-{}: {:?}",
-                        backup_lsn, commit_lsn, e
+                        "failed while offloading range {}-{}, backup_lsn {}: {:?}",
+                        backup_lsn, commit_lsn, backup_lsn, e
                     );
 
                     retry_attempt = retry_attempt.saturating_add(1);
@@ -337,6 +340,13 @@ async fn backup_lsn_range(
     let remote_timeline_path = &timeline.remote_path;
     let start_lsn = *backup_lsn;
     let segments = get_segments(start_lsn, end_lsn, wal_seg_size);
+
+    info!(
+        "offloading segnos {:?} of range [{}-{})",
+        segments.iter().map(|&s| s.seg_no).collect::<Vec<_>>(),
+        start_lsn,
+        end_lsn,
+    );
 
     // Pool of concurrent upload tasks. We use `FuturesOrdered` to
     // preserve order of uploads, and update `backup_lsn` only after
@@ -374,10 +384,10 @@ async fn backup_lsn_range(
     }
 
     info!(
-        "offloaded segnos {:?} up to {}, previous backup_lsn {}",
+        "offloaded segnos {:?} of range [{}-{})",
         segments.iter().map(|&s| s.seg_no).collect::<Vec<_>>(),
-        end_lsn,
         start_lsn,
+        end_lsn,
     );
     Ok(())
 }
