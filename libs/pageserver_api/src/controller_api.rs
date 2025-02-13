@@ -107,6 +107,7 @@ pub struct TenantLocateResponseShard {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    #[serde(default)]
     pub use_https: bool,
 }
 
@@ -151,6 +152,7 @@ pub struct NodeDescribeResponse {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    #[serde(default)]
     pub use_https: bool,
 
     pub listen_pg_addr: String,
