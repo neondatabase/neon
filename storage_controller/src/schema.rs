@@ -26,6 +26,7 @@ diesel::table! {
         listen_pg_addr -> Varchar,
         listen_pg_port -> Int4,
         availability_zone_id -> Varchar,
+        use_https -> Bool,
     }
 }
 

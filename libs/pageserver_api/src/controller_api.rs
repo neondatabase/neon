@@ -57,6 +57,8 @@ pub struct NodeRegisterRequest {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    #[serde(default)]
+    pub use_https: bool,
 
     pub availability_zone_id: AvailabilityZone,
 }
@@ -105,6 +107,8 @@ pub struct TenantLocateResponseShard {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    #[serde(default)]
+    pub use_https: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -148,6 +152,8 @@ pub struct NodeDescribeResponse {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    #[serde(default)]
+    pub use_https: bool,
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
