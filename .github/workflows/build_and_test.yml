@@ -228,11 +228,10 @@ jobs:
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
   get-benchmarks-durations:
-    # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `deploy` in PRs
-    if: github.ref_name == 'main' || (contains(github.event.pull_request.labels.*.name, 'run-benchmarks') && !failure() && !cancelled())
+    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     outputs:
       json: ${{ steps.get-benchmark-durations.outputs.json }}
-    needs: [ check-permissions, build-build-tools-image, deploy ]
+    needs: [ check-permissions, build-build-tools-image ]
     runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -264,8 +263,9 @@ jobs:
           echo "json=$(jq --compact-output '.' /tmp/benchmark_durations.json)" >> $GITHUB_OUTPUT
 
   benchmarks:
-    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
-    needs: [ check-permissions, build-build-tools-image, get-benchmarks-durations ]
+    # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `deploy` in PRs
+    if: github.ref_name == 'main' || (contains(github.event.pull_request.labels.*.name, 'run-benchmarks') && !failure() && !cancelled())
+    needs: [ check-permissions, build-build-tools-image, get-benchmarks-durations, deploy ]
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
