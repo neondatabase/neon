@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 
 from fixtures.log_helper import log
@@ -247,19 +248,23 @@ def test_multiple_subscription_branching(neon_simple_env: NeonEnv):
     """
     env = neon_simple_env
 
+    NUMBER_OF_DBS = 5
+
     # Create and start endpoint so that neon_local put all the generated
     # stuff into the spec.json file.
-    endpoint = env.endpoints.create_start("main", config_lines=["max_replication_slots = 100"])
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            "max_replication_slots = 10",
+            "max_logical_replication_workers=10",
+            "max_worker_processes=10",
+        ],
+    )
 
-    NUMBER_OF_DBS = 5
     # drop the subscriber_db from the list
     TEST_DB_NAMES = [
         {
             "name": "neondb",
-            "owner": "cloud_admin",
-        },
-        {
-            "name": "subscriber_db",
             "owner": "cloud_admin",
         },
         {
@@ -288,23 +293,9 @@ def test_multiple_subscription_branching(neon_simple_env: NeonEnv):
     )
     endpoint.reconfigure()
 
-    # connect to the publisher_db and create a publication
-    with endpoint.cursor(dbname="publisher_db") as cursor:
-        cursor.execute("CREATE TABLE t(a int)")
-        cursor.execute("CREATE PUBLICATION mypub FOR TABLE t")
-        cursor.execute("select pg_catalog.pg_create_logical_replication_slot('mysub', 'pgoutput');")
-        cursor.execute("INSERT INTO t VALUES (1)")
-        cursor.execute("CHECKPOINT")
-
-    # connect to the subscriber_db and create a subscription
     connstr = endpoint.connstr(dbname="publisher_db").replace("'", "''")
-    with endpoint.cursor(dbname="subscriber_db") as cursor:
-        cursor.execute("CREATE TABLE t(a int)")
-        cursor.execute(
-            f"CREATE SUBSCRIPTION mysub CONNECTION '{connstr}' PUBLICATION mypub  WITH (create_slot = false) "
-        )
 
-    # create table and subscription for each of the databases
+    # create table, replication and subscription for each of the databases
     with endpoint.cursor(dbname="publisher_db") as publisher_cursor:
         for i in range(NUMBER_OF_DBS):
             publisher_cursor.execute(f"CREATE TABLE t{i}(a int)")
@@ -313,7 +304,6 @@ def test_multiple_subscription_branching(neon_simple_env: NeonEnv):
                 f"select pg_catalog.pg_create_logical_replication_slot('mysub{i}', 'pgoutput');"
             )
             publisher_cursor.execute(f"INSERT INTO t{i} VALUES ({i})")
-            publisher_cursor.execute("CHECKPOINT")
 
             with endpoint.cursor(dbname=f"db{i}") as cursor:
                 cursor.execute(f"CREATE TABLE t{i}(a int)")
@@ -322,26 +312,39 @@ def test_multiple_subscription_branching(neon_simple_env: NeonEnv):
                 )
 
     # wait for the subscription to be active
-    logical_replication_sync(
-        endpoint,
-        endpoint,
-        "mysub",
-        sub_dbname="subscriber_db",
-        pub_dbname="publisher_db",
-    )
+    for i in range(NUMBER_OF_DBS):
+        logical_replication_sync(
+            endpoint,
+            endpoint,
+            f"mysub{i}",
+            sub_dbname=f"db{i}",
+            pub_dbname="publisher_db",
+        )
 
     # Check that replication is working
-    with endpoint.cursor(dbname="subscriber_db") as cursor:
-        cursor.execute("SELECT * FROM t")
-        rows = cursor.fetchall()
-        assert len(rows) == 1
-        assert rows[0][0] == 1
+    for i in range(NUMBER_OF_DBS):
+        with endpoint.cursor(dbname=f"db{i}") as cursor:
+            cursor.execute(f"SELECT * FROM t{i}")
+            rows = cursor.fetchall()
+            assert len(rows) == 1
+            assert rows[0][0] == i
 
-        last_insert_lsn = query_scalar(cursor, "select pg_current_wal_insert_lsn();")
-        log.info(f"last_insert_lsn = {last_insert_lsn}")
+            last_insert_lsn = query_scalar(cursor, "select pg_current_wal_insert_lsn();")
 
-    # stop the parent subscriber so that it doesn't interfere with the test
-    endpoint.stop()
+    def start_publisher_workload(table_num: int, duration: int):
+        start = time.time()
+        with endpoint.cursor(dbname="publisher_db") as cur:
+            while time.time() - start < duration:
+                cur.execute(f"INSERT INTO t{i} SELECT FROM generate_series(1,1000)")
+
+    LOAD_DURATION = 15
+    threads = [
+        threading.Thread(target=start_publisher_workload, args=(i, LOAD_DURATION))
+        for i in range(NUMBER_OF_DBS)
+    ]
+
+    for thread in threads:
+        thread.start()
 
     sub_child_1_timeline_id = env.create_branch(
         "subscriber_child_1",
@@ -349,7 +352,7 @@ def test_multiple_subscription_branching(neon_simple_env: NeonEnv):
         ancestor_start_lsn=last_insert_lsn,
     )
 
-    sub_child_1 = env.endpoints.create_start("subscriber_child_1")
+    sub_child_1 = env.endpoints.create("subscriber_child_1")
 
     # Respec the endpoint with drop_subscriptions_before_start=True
     # and reconfigure_concurrency=5
@@ -357,18 +360,17 @@ def test_multiple_subscription_branching(neon_simple_env: NeonEnv):
     # This is not excactly the same as real workflow,
     # because in reality we apply the drop_subscriptions_before_start on the compute start,
     # but this is enough for the test.
-    sub_child_1.respec_deep(
-        **{
-            "skip_pg_catalog_updates": False,
-            "reconfigure_concurrency": 5,
-            "create_test_user": True,
-            "drop_subscriptions_before_start": True,
-            "cluster": {
-                "databases": TEST_DB_NAMES,
-            },
-        }
+    sub_child_1.respec(
+        skip_pg_catalog_updates=False,
+        reconfigure_concurrency=5,
+        drop_subscriptions_before_start=True,
+        cluster={
+            "databases": TEST_DB_NAMES,
+            "roles": [],
+        },
     )
-    sub_child_1.reconfigure()
+
+    sub_child_1.start()
 
     # ensure that subscription deletion happened on this timeline
     with sub_child_1.cursor() as scur_postgres:
@@ -384,3 +386,34 @@ def test_multiple_subscription_branching(neon_simple_env: NeonEnv):
             cursor.execute("SELECT * FROM pg_catalog.pg_subscription")
             res = cursor.fetchall()
             assert len(res) == 0
+
+            # ensure that there are no unexpected rows in the tables
+            cursor.execute(f"SELECT * FROM t{i}")
+            rows = cursor.fetchall()
+            assert len(rows) == 1
+            assert rows[0][0] == i
+
+    for thread in threads:
+        thread.join()
+
+    # ensure that logical replication is still working in main endpoint
+    # wait for it to catch up
+    for i in range(NUMBER_OF_DBS):
+        logical_replication_sync(
+            endpoint,
+            endpoint,
+            f"mysub{i}",
+            sub_dbname=f"db{i}",
+            pub_dbname="publisher_db",
+        )
+
+    # verify that the data is the same in publisher and subscriber tables
+    with endpoint.cursor(dbname="publisher_db") as publisher_cursor:
+        for i in range(NUMBER_OF_DBS):
+            with endpoint.cursor(dbname=f"db{i}") as cursor:
+                publisher_cursor.execute(f"SELECT count(*) FROM t{i}")
+                cursor.execute(f"SELECT count(*) FROM t{i}")
+                pub_res = publisher_cursor.fetchone()
+                sub_res = cursor.fetchone()
+                log.info(f"for table t{i}: pub_res = {pub_res}, sub_res = {sub_res}")
+                assert pub_res == sub_res
