@@ -626,7 +626,7 @@ pub fn make_router(
                 failpoints_handler(r, cancel).await
             })
         })
-        .get("/v1/uzilization", |r| request_span(r, utilization_handler))
+        .get("/v1/utilization", |r| request_span(r, utilization_handler))
         .delete("/v1/tenant/:tenant_id", |r| {
             request_span(r, tenant_delete_handler)
         })
