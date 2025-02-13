@@ -46,7 +46,7 @@ jobs:
           tag=$(gh api -q '[.[].tag_name | select(startswith("release-compute"))][0]'\
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "/repos/${{ github.repository }}/releases")
+            "/repos/${GITHUB_REPOSITORY}/releases")
           echo tag=${tag} >> ${GITHUB_OUTPUT}
 
       - name: Test extension upgrade
