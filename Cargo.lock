@@ -6464,6 +6464,8 @@ dependencies = [
  "routerify",
  "rustls 0.23.18",
  "rustls-native-certs 0.8.0",
+ "safekeeper_api",
+ "safekeeper_client",
  "scoped-futures",
  "scopeguard",
  "serde",
