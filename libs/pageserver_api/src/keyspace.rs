@@ -27,6 +27,55 @@ impl std::fmt::Display for KeySpace {
     }
 }
 
+pub struct KeySpaceIter<'a> {
+    ranges: &'a [Range<Key>],
+    current_range: usize,
+    current_key: Option<Key>,
+}
+
+impl<'a> Iterator for KeySpaceIter<'a> {
+    // (current_key, range_end)
+    type Item = (Key, Key);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // if we've gone through all ranges, stop iteration
+        if self.current_range >= self.ranges.len() {
+            return None;
+        }
+
+        let range = &self.ranges[self.current_range];
+
+        // if current_key is None, initialize it with range.start
+        if self.current_key.is_none() {
+            self.current_key = Some(range.start);
+        }
+
+        if let Some(current_key) = self.current_key {
+            // check if the current_key is still within the range
+            if current_key < range.end {
+                // get the next key
+                let next_key = current_key.next();
+                // move current_key forward
+                self.current_key = Some(next_key);
+                // return the range from current_key to the current range_end
+                return Some((current_key, range.end));
+            }
+        }
+
+        // move to the next range
+        self.current_range += 1;
+
+        // if there are more ranges, initialize the next key from the start of the next range
+        if self.current_range < self.ranges.len() {
+            self.current_key = Some(self.ranges[self.current_range].start);
+            self.next() // Recurse to continue iterating with the new range
+        } else {
+            // no more ranges, end iteration
+            None
+        }
+    }
+}
+
 /// A wrapper type for sparse keyspaces.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SparseKeySpace(pub KeySpace);
@@ -435,6 +484,14 @@ impl KeySpace {
     pub fn contains(&self, key: &Key) -> bool {
         self.overlaps(&(*key..key.next()))
     }
+
+    pub fn iter(&self) -> KeySpaceIter {
+        KeySpaceIter {
+            ranges: &self.ranges,
+            current_range: 0,
+            current_key: self.ranges.first().map(|r| r.start),
+        }
+    }
 }
 
 ///
@@ -618,6 +675,92 @@ mod tests {
 
     use super::*;
     use std::fmt::Write;
+
+    fn key(field1: u8, field2: u32, field6: u32) -> Key {
+        Key {
+            field1,
+            field2,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6,
+        }
+    }
+
+    #[test]
+    fn test_iter_single_range() {
+        let key_range = Range {
+            start: key(1, 0, 0),
+            end: key(1, 0, 5),
+        };
+        let keyspace = KeySpace {
+            ranges: vec![key_range],
+        };
+        let collected_ranges: Vec<_> = keyspace.iter().collect();
+
+        assert_eq!(
+            collected_ranges,
+            vec![
+                (key(1, 0, 0), key(1, 0, 5)),
+                (key(1, 0, 1), key(1, 0, 5)),
+                (key(1, 0, 2), key(1, 0, 5)),
+                (key(1, 0, 3), key(1, 0, 5)),
+                (key(1, 0, 4), key(1, 0, 5)), // Stops at field6 = 5
+            ]
+        );
+    }
+
+    #[test]
+    fn test_iter_multiple_ranges() {
+        let ranges = vec![
+            Range {
+                start: key(1, 0, 0),
+                end: key(1, 0, 3),
+            },
+            Range {
+                start: key(2, 0, 0),
+                end: key(2, 0, 2),
+            },
+        ];
+
+        let keyspace = KeySpace { ranges };
+        let collected_ranges: Vec<_> = keyspace.iter().collect();
+
+        assert_eq!(
+            collected_ranges,
+            vec![
+                (key(1, 0, 0), key(1, 0, 3)),
+                (key(1, 0, 1), key(1, 0, 3)),
+                (key(1, 0, 2), key(1, 0, 3)), // End of first range
+                (key(2, 0, 0), key(2, 0, 2)),
+                (key(2, 0, 1), key(2, 0, 2)), // End of second range
+            ]
+        );
+    }
+
+    #[test]
+    fn test_iter_empty_keyspace() {
+        let keyspace = KeySpace { ranges: vec![] };
+        let mut iter = keyspace.iter();
+
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_iter_range_with_single_key() {
+        let key_range = Range {
+            start: key(1, 42, 0),
+            end: key(1, 42, 1), // Only one step
+        };
+
+        let keyspace = KeySpace {
+            ranges: vec![key_range],
+        };
+
+        let mut iter = keyspace.iter();
+        assert_eq!(iter.next(), Some((key(1, 42, 0), key(1, 42, 1))));
+        assert_eq!(iter.next(), None);
+    }
 
     // Helper function to create a key range.
     //
