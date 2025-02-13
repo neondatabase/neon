@@ -88,7 +88,7 @@ jobs:
           BUILD_AND_TEST_RUN_ID=${TAG}
           while true; do
             gh run --repo ${GITHUB_REPOSITORY} view ${BUILD_AND_TEST_RUN_ID} --json jobs --jq '[.jobs[] | select((.name | startswith("push-neon-image-dev")) or (.name | startswith("push-compute-image-dev"))) | {"name": .name, "conclusion": .conclusion, "url": .url}]' > jobs.json
-            if [ $(jq '[.[] | select(.conclusion == "success")]' jobs.json) -eq 2 ]; then
+            if [ $(jq '[.[] | select(.conclusion == "success")] | length' jobs.json) -eq 2 ]; then
               break
             fi
             jq -c '.[]' jobs.json | while read -r job; do
