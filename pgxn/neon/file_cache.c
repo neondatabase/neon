@@ -112,7 +112,7 @@ typedef enum FileCacheBlockState
 	UNAVAILABLE, /* block is not present in cache */
 	AVAILABLE,   /* block can be used */
 	PENDING,     /* block is loaded */
-    REQUESTED    /* some other backend is waiting for block to be loaded */
+	REQUESTED    /* some other backend is waiting for block to be loaded */
 } FileCacheBlockState;
 
 
@@ -146,7 +146,7 @@ typedef struct FileCacheControl
 	uint64		time_read;		/* time spent reading (us) */
 	uint64		time_write;		/* time spent writing (us) */
 	uint64		resizes;        /* number of LFC resizes   */
-	uint64      evicted_pages;	/* number of evicted pages */
+	uint64		evicted_pages;	/* number of evicted pages */
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
 	dlist_head  holes;          /* double linked list of punched holes */
@@ -369,10 +369,11 @@ lfc_change_limit_hook(int newval, void *extra)
 {
 	uint32		new_size = SIZE_MB_TO_CHUNKS(newval);
 
-	if (!is_normal_backend())
+	if (!lfc_ctl || !is_normal_backend())
 		return;
 
-	if (!lfc_ensure_opened())
+	/* Open LFC file only if LFC was enabled or we are going to reenable it */
+	if ((newval > 0 || LFC_ENABLED()) && !lfc_ensure_opened())
 		return;
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
