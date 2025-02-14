@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::os::fd::RawFd;
 use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -1439,7 +1440,13 @@ impl Drop for SmgrOpTimer {
 }
 
 impl SmgrOpFlushInProgress {
-    pub(crate) async fn measure<Fut, O>(self, started_at: Instant, mut fut: Fut) -> O
+    /// The caller must guarantee that `socket_fd`` outlives this function.
+    pub(crate) async fn measure<Fut, O>(
+        self,
+        started_at: Instant,
+        mut fut: Fut,
+        socket_fd: RawFd,
+    ) -> O
     where
         Fut: std::future::Future<Output = O>,
     {
@@ -1470,8 +1477,24 @@ impl SmgrOpFlushInProgress {
                     } else {
                         "slow flush completed or cancelled"
                     };
+
+                    let (inq, outq) = {
+                        // SAFETY: caller guarantees that `socket_fd` outlives this function.
+                        #[cfg(target_os = "linux")]
+                        unsafe {
+                            (
+                                utils::linux_socket_ioctl::inq(socket_fd).unwrap_or(-2),
+                                utils::linux_socket_ioctl::outq(socket_fd).unwrap_or(-2),
+                            )
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            (-1, -1)
+                        }
+                    };
+
                     let elapsed_total_secs = format!("{:.6}", elapsed_total.as_secs_f64());
-                    tracing::info!(elapsed_total_secs, msg);
+                    tracing::info!(elapsed_total_secs, inq, outq, msg);
                 }
             },
             |mut observe| {
