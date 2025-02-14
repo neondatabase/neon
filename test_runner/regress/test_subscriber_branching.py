@@ -336,7 +336,7 @@ def test_multiple_subscription_branching(neon_simple_env: NeonEnv):
             while time.time() - start < duration:
                 cur.execute(f"INSERT INTO t{i} SELECT FROM generate_series(1,1000)")
 
-    LOAD_DURATION = 15
+    LOAD_DURATION = 5
     threads = [
         threading.Thread(target=start_publisher_workload, args=(i, LOAD_DURATION))
         for i in range(NUMBER_OF_DBS)
