@@ -3101,6 +3101,9 @@ impl Tenant {
                 if let Some(queue) = queue {
                     outcome = queue
                         .iteration(cancel, ctx, &self.gc_block, &timeline)
+                        .instrument(
+                            info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id),
+                        )
                         .await?;
                 }
             }
