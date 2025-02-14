@@ -1483,7 +1483,7 @@ async fn timeline_download_heatmap_layers_handler(
     json_response(StatusCode::ACCEPTED, ())
 }
 
-async fn timeline_abort_download_heatmap_layers_handler(
+async fn timeline_shutdown_download_heatmap_layers_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
@@ -1497,7 +1497,7 @@ async fn timeline_abort_download_heatmap_layers_handler(
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
 
-    timeline.abort_heatmap_layers_download();
+    timeline.shutdown_heatmap_layers_download().await;
 
     json_response(StatusCode::OK, ())
 }
@@ -3671,7 +3671,7 @@ pub fn make_router(
         )
         .delete(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_heatmap_layers",
-            |r| api_handler(r, timeline_abort_download_heatmap_layers_handler),
+            |r| api_handler(r, timeline_shutdown_download_heatmap_layers_handler),
         )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_file_name",

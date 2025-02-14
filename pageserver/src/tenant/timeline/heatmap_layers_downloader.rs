@@ -6,6 +6,8 @@
 use futures::StreamExt;
 use http_utils::error::ApiError;
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
+use utils::sync::gate::Gate;
 
 use super::Timeline;
 
@@ -19,6 +21,8 @@ pub(super) enum HeatmapLayersDownloadStatus {
 pub(super) struct HeatmapLayersDownloader {
     handle: tokio::task::JoinHandle<()>,
     status: Arc<Mutex<HeatmapLayersDownloadStatus>>,
+    cancel: CancellationToken,
+    downloads_guard: Arc<Gate>,
 }
 
 impl HeatmapLayersDownloader {
@@ -27,10 +31,17 @@ impl HeatmapLayersDownloader {
         concurrency: usize,
     ) -> Result<HeatmapLayersDownloader, ApiError> {
         let tl_guard = timeline.gate.enter().map_err(|_| ApiError::Cancelled)?;
+
+        let cancel = timeline.cancel.child_token();
+        let downloads_guard = Arc::new(Gate::default());
+
         let status = Arc::new(Mutex::new(HeatmapLayersDownloadStatus::InProgress));
 
         let handle = tokio::task::spawn({
             let status = status.clone();
+            let downloads_guard = downloads_guard.clone();
+            let cancel = cancel.clone();
+
             async move {
                 let _guard = tl_guard;
 
@@ -49,17 +60,27 @@ impl HeatmapLayersDownloader {
                     "Starting heatmap layers download"
                 );
 
-                let stream = futures::stream::iter(heatmap.layers.into_iter().map(
+                let stream = futures::stream::iter(heatmap.layers.into_iter().filter_map(
                     |layer| {
                         let tl = timeline.clone();
-                        async move {
+                        let dl_guard = match downloads_guard.enter() {
+                            Ok(g) => g,
+                            Err(_) => {
+                                // [`Self::shutdown`] was called. Don't spawn any more downloads.
+                                return None;
+                            }
+                        };
+
+                        Some(async move {
+                            let _dl_guard = dl_guard;
+
                             let res = tl.download_layer(&layer.name).await;
                             if let Err(err) = res {
                                 if !err.is_cancelled() {
                                     tracing::warn!(layer=%layer.name,"Failed to download heatmap layer: {err}")
                                 }
                             }
-                        }
+                        })
                     }
                 )).buffered(concurrency);
 
@@ -70,14 +91,19 @@ impl HeatmapLayersDownloader {
                             "Heatmap layers download completed"
                         );
                     },
-                    _ = timeline.cancel.cancelled() => {
-                        tracing::info!("Heatmap layers download cancelled. Timeline shutting down.");
+                    _ = cancel.cancelled() => {
+                        tracing::info!("Heatmap layers download cancelled");
                     }
                 }
             }
         });
 
-        Ok(Self { status, handle })
+        Ok(Self {
+            status,
+            handle,
+            cancel,
+            downloads_guard,
+        })
     }
 
     fn is_complete(&self) -> bool {
@@ -87,9 +113,17 @@ impl HeatmapLayersDownloader {
         )
     }
 
-    fn abort(&self) {
-        self.handle.abort();
-        *self.status.lock().unwrap() = HeatmapLayersDownloadStatus::Complete;
+    /// Drive any in-progress downloads to completion and stop spawning any new ones.
+    async fn shutdown(self) {
+        // Counterintuitive: close the guard before cancelling.
+        // Something needs to poll the already created download futures to completion.
+        // If we cancel first, then the underlying task exits and we lost
+        // the poller.
+        self.downloads_guard.close().await;
+        self.cancel.cancel();
+        if let Err(err) = self.handle.await {
+            tracing::warn!("Failed to join heatmap layer downloader task: {err}");
+        }
     }
 }
 
@@ -108,10 +142,14 @@ impl Timeline {
         }
     }
 
-    pub(crate) fn abort_heatmap_layers_download(&self) {
-        let locked = self.heatmap_layers_downloader.lock().unwrap();
-        if let Some(ref dl) = *locked {
-            dl.abort();
+    pub(crate) async fn shutdown_heatmap_layers_download(&self) {
+        // This can race with the start of a new downloader and lead to a situation
+        // where one donloader is shutting down and another one is in-flight.
+        // The only impact is that we'd end up using more remote storage semaphore
+        // units than expected.
+        let downloader = self.heatmap_layers_downloader.lock().unwrap().take();
+        if let Some(dl) = downloader {
+            dl.shutdown().await;
         }
     }
 }
