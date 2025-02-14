@@ -3189,15 +3189,17 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     assert len(target.get_safekeepers()) == 0
 
+    sk_0 = env.safekeepers[0]
+
     body = {
         "active": True,
         "id": fake_id,
         "created_at": "2023-10-25T09:11:25Z",
         "updated_at": "2024-08-28T11:32:43Z",
         "region_id": "aws-us-east-2",
-        "host": "safekeeper-333.us-east-2.aws.neon.build",
-        "port": 6401,
-        "http_port": 7676,
+        "host": "localhost",
+        "port": sk_0.port.pg,
+        "http_port": sk_0.port.http,
         "version": 5957,
         "availability_zone_id": "us-east-2b",
     }
@@ -3242,6 +3244,13 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     assert newest_info["scheduling_policy"] == "Decomissioned"
     # Ensure idempotency
     target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
+
+    def storcon_heartbeat():
+        assert env.storage_controller.log_contains(
+            "Heartbeat round complete for 1 safekeepers, 0 offline"
+        )
+
+    wait_until(storcon_heartbeat)
 
 
 def eq_safekeeper_records(a: dict[str, Any], b: dict[str, Any]) -> bool:

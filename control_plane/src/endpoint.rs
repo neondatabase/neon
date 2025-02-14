@@ -48,6 +48,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use compute_api::requests::ConfigurationRequest;
+use compute_api::responses::ComputeCtlConfig;
 use compute_api::spec::Database;
 use compute_api::spec::PgIdent;
 use compute_api::spec::RemoteExtSpec;
@@ -880,10 +882,13 @@ impl Endpoint {
                 self.external_http_address.port()
             ))
             .header(CONTENT_TYPE.as_str(), "application/json")
-            .body(format!(
-                "{{\"spec\":{}}}",
-                serde_json::to_string_pretty(&spec)?
-            ))
+            .body(
+                serde_json::to_string(&ConfigurationRequest {
+                    spec,
+                    compute_ctl_config: ComputeCtlConfig::default(),
+                })
+                .unwrap(),
+            )
             .send()
             .await?;
 
