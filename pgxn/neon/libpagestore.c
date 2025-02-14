@@ -379,7 +379,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	case PS_Disconnected:
 	{
 		const char *keywords[4];
-		char *values[4];
+		const char *values[4];
+		char pid_str[16];
 		int			n_pgsql_params;
 		TimestampTz	now;
 		int64		us_since_last_attempt;
@@ -426,8 +427,18 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		 */
 		n_pgsql_params = 0;
 
+		/*
+		 * Pageserver logs include this in the connection's tracing span.
+		 * This allows for reasier log correlation between compute and pageserver.
+		 */
 		keywords[n_pgsql_params] = "application_name";
-		values[n_pgsql_params] = "todo-pid-here";
+		{
+			int ret = snprintf(pid_str, sizeof(pid_str), "%d", MyProcPid);
+			if (ret < 0 || ret >= (int)(sizeof(pid_str)))
+				elog(FATAL, "stack-allocated buffer too small to hold pid");
+		}
+		/* lifetime: PQconnectStartParams strdups internally */
+		values[n_pgsql_params] = (const char*) pid_str;
 		n_pgsql_params++;
 
 		keywords[n_pgsql_params] = "dbname";
