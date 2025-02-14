@@ -236,9 +236,7 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder, with_b
     wait_until(compaction_finished, timeout=60)
 
     # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
-    env.pageserver.assert_log_contains(
-        "gc_compact_timeline.*picked .* layers for compaction"
-    )
+    env.pageserver.assert_log_contains("gc_compact_timeline.*picked .* layers for compaction")
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
@@ -340,9 +338,7 @@ def test_pageserver_gc_compaction_idempotent(
             wait_until(compaction_finished, timeout=60)
 
     # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
-    env.pageserver.assert_log_contains(
-        "gc_compact_timeline.*picked .* layers for compaction"
-    )
+    env.pageserver.assert_log_contains("gc_compact_timeline.*picked .* layers for compaction")
 
     # ensure we hit the duplicated layer key warning at least once: we did two compactions consecutively,
     # and the second one should have hit the duplicated layer key warning.
@@ -460,9 +456,7 @@ def test_pageserver_gc_compaction_interrupt(neon_env_builder: NeonEnvBuilder):
     wait_until(compaction_finished, timeout=60)
 
     # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
-    env.pageserver.assert_log_contains(
-        "gc_compact_timeline.*picked .* layers for compaction"
-    )
+    env.pageserver.assert_log_contains("gc_compact_timeline.*picked .* layers for compaction")
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
