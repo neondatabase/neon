@@ -45,7 +45,7 @@ impl HeatmapLayersDownloader {
 
                 tracing::info!(
                     resident_size=%timeline.resident_physical_size(),
-                    heatmap_leayrs=%heatmap.layers.len(),
+                    heatmap_layers=%heatmap.layers.len(),
                     "Starting heatmap layers download"
                 );
 
