@@ -52,7 +52,7 @@ jobs:
       - name: Test extension upgrade
         timeout-minutes: 20
         env:
-          NEWTAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
+          NEWTAG: latest
           OLDTAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
           PG_VERSION: ${{ matrix.pg-version }}
           FORCE_ALL_UPGRADE_TESTS: true
