@@ -8,6 +8,7 @@ use crate::reconciler::ReconcileError;
 use crate::service::{LeadershipStatus, Service, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT};
 use anyhow::Context;
 use futures::Future;
+use governor::{Quota, RateLimiter};
 use http_utils::{
     endpoint::{self, auth_middleware, check_permission_with, request_span},
     error::ApiError,
@@ -32,6 +33,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::{mgmt_api, BlockUnblock};
+use std::num::NonZero;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -516,6 +518,14 @@ async fn handle_tenant_timeline_block_unblock_gc(
     json_response(StatusCode::OK, ())
 }
 
+static PASSTHROUGH_RATE_LIMITER: std::sync::OnceLock<
+    RateLimiter<
+        TenantId,
+        governor::state::keyed::DefaultKeyedStateStore<TenantId>,
+        governor::clock::DefaultClock,
+    >,
+> = std::sync::OnceLock::new();
+
 async fn handle_tenant_timeline_passthrough(
     service: Arc<Service>,
     req: Request<Body>,
@@ -536,6 +546,19 @@ async fn handle_tenant_timeline_passthrough(
     };
 
     tracing::info!("Proxying request for tenant {} ({})", tenant_id, path);
+
+    // Proxied requests are expected to be rare on a per-tenant basis: these are things
+    // like inspecting a timeline's details or doing an LSN<->timestamp mapping.  Not anything
+    // that has high throughput.
+    let limiter = PASSTHROUGH_RATE_LIMITER.get_or_init(|| {
+        RateLimiter::new(
+            Quota::per_second(NonZero::new(10).unwrap()),
+            governor::state::keyed::DefaultKeyedStateStore::new(),
+            governor::clock::DefaultClock::default(),
+        )
+    });
+
+    limiter.until_key_ready(&tenant_id).await;
 
     // Find the node that holds shard zero
     let (node, tenant_shard_id) = service.tenant_shard0_node(tenant_id).await?;

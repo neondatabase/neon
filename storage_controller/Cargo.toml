@@ -26,6 +26,7 @@ humantime.workspace = true
 itertools.workspace = true
 lasso.workspace = true
 once_cell.workspace = true
+governor = {version = "0.8.0"}
 pageserver_api.workspace = true
 pageserver_client.workspace = true
 postgres_connection.workspace = true
