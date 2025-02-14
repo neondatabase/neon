@@ -300,6 +300,15 @@ where
     }
 }
 
+impl<'s, IO> Flush<'s, IO> {
+    pub fn as_io(&self) -> &IO {
+        match self {
+            Flush::Full { flush } => flush.as_inner(),
+            Flush::WriteOnly { flush } => flush.as_inner(),
+        }
+    }
+}
+
 pub struct PostgresBackend<IO> {
     framed: MaybeWriteOnly<IO>,
 

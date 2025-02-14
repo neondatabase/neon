@@ -245,6 +245,12 @@ fn flush<'a, S: AsyncWrite + Unpin>(stream: &mut S, write_buf: &mut BytesMut) ->
     todo!()
 }
 
+impl<'s, S> Flush<'s, S> {
+    pub fn as_inner(&self) -> &S{
+        &self.stream
+    }
+}
+
 /// Cancellation safe as long as the AsyncWrite is cancellation safe.
 async fn shutdown<S: AsyncWrite + Unpin>(
     stream: &mut S,
