@@ -3773,18 +3773,19 @@ impl Service {
             targets
         };
 
-        for (tenant_shard_id, node) in targets {
-            let client = PageserverClient::new(
-                node.get_id(),
-                node.base_url(),
-                self.config.jwt_token.as_deref(),
-            );
-
-            client
-                .timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency)
-                .await
-                .ok();
-        }
+        self.tenant_for_shards_api(
+            targets,
+            |tenant_shard_id, client| async move {
+                client
+                    .timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency)
+                    .await
+            },
+            1,
+            1,
+            SHORT_RECONCILE_TIMEOUT,
+            &self.cancel,
+        )
+        .await;
 
         Ok(())
     }
