@@ -1488,12 +1488,7 @@ WORKDIR /ext-src/pg_duckdb-src
 RUN make install -j $(getconf _NPROCESSORS_ONLN) && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control && \
     file=/usr/local/pgsql/share/extension/pg_duckdb--0.2.0--0.3.0.sql && \
-    echo 'GRANT ALL ON FUNCTION duckdb.cache(TEXT, TEXT) TO neon_superuser;' >> $file && \
-    echo 'GRANT ALL ON FUNCTION duckdb.cache_info() TO neon_superuser;' >> $file && \
-    echo 'GRANT ALL ON FUNCTION duckdb.cache_delete(cache_key TEXT) TO neon_superuser;' >> $file && \
     echo 'GRANT ALL ON FUNCTION duckdb.install_extension(TEXT) TO neon_superuser;' >> $file && \
-    echo 'GRANT ALL ON FUNCTION duckdb.raw_query(TEXT) TO neon_superuser;' >> $file && \
-    echo 'GRANT ALL ON PROCEDURE duckdb.recycle_ddb() TO neon_superuser;'  >> $file && \
     echo 'GRANT ALL ON TABLE duckdb.extensions TO neon_superuser;' >> $file && \
     echo 'GRANT ALL ON SEQUENCE duckdb.extensions_table_seq TO neon_superuser;' >> $file
         
