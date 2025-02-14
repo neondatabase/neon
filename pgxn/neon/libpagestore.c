@@ -1099,6 +1099,10 @@ pageserver_try_receive(shardno_t shard_no)
 		{
 			neon_shard_log(shard_no, LOG, "pageserver_receive: disconnect due to failure while parsing response");
 			pageserver_disconnect(shard_no);
+			/*
+			 * Malformed responses from PageServer are a reason to raise
+			 * errors and cancel transactions.
+			 */
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -1122,7 +1126,8 @@ pageserver_try_receive(shardno_t shard_no)
 		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
 		pageserver_disconnect(shard_no);
-		neon_shard_log(shard_no, ERROR, "pageserver_receive disconnect: could not read COPY data: %s", msg);
+		neon_shard_log(shard_no, LOG, "pageserver_receive disconnect: could not read COPY data: %s", msg);
+		resp = NULL;
 	}
 	else
 	{
