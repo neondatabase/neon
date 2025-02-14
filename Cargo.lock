@@ -6462,6 +6462,7 @@ dependencies = [
  "pageserver_client",
  "postgres_connection",
  "rand 0.8.5",
+ "regex",
  "reqwest",
  "routerify",
  "rustls 0.23.18",
