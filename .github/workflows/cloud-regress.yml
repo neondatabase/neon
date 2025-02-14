@@ -1,4 +1,4 @@
-name: Force Test Upgrading of Extension
+name: Cloud Regression Test
 on:
   schedule:
     # * is a special character in YAML so you have to quote this string
@@ -7,7 +7,7 @@ on:
     #          │ │ ┌───────────── day of the month (1 - 31)
     #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    - cron:  '45 2 * * *' # run once a day, timezone is utc
+    - cron:  '45 1 * * *' # run once a day, timezone is utc
   workflow_dispatch: # adds ability to run this manually
 
 defaults:
@@ -22,55 +22,109 @@ concurrency:
 permissions:
   id-token: write # aws-actions/configure-aws-credentials
   statuses: write
-  contents: read
+  contents: write
 
 jobs:
   regress:
+    env:
+      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      TEST_OUTPUT: /tmp/test_output
+      BUILD_TYPE: remote
     strategy:
       fail-fast: false
       matrix:
         pg-version: [16, 17]
 
-    runs-on: small
+    runs-on: us-east-2
+    container:
+      image: neondatabase/build-tools:pinned-bookworm
+      options: --init
 
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: false
+          submodules: true
 
-      - name: Get the last compute release tag
-        id: get-last-compute-release-tag
+      - name: Patch the test
         env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          PG_VERSION: ${{matrix.pg-version}}
         run: |
-          tag=$(gh api -q '[.[].tag_name | select(startswith("release-compute"))][0]'\
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "/repos/${{ github.repository }}/releases")
-          echo tag=${tag} >> ${GITHUB_OUTPUT}
+          cd "vendor/postgres-v${PG_VERSION}"
+          patch -p1 < "../../compute/patches/cloud_regress_pg${PG_VERSION}.patch"
 
-      - name: Test extension upgrade
-        timeout-minutes: 20
+      - name: Generate a random password
+        id: pwgen
+        run: |
+          set +x
+          DBPASS=$(dd if=/dev/random bs=48 count=1 2>/dev/null | base64)
+          echo "::add-mask::${DBPASS//\//}"
+          echo DBPASS="${DBPASS//\//}" >> "${GITHUB_OUTPUT}"
+
+      - name: Change tests according to the generated password
         env:
-          NEWTAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
-          OLDTAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
-          PG_VERSION: ${{ matrix.pg-version }}
-          FORCE_ALL_UPGRADE_TESTS: true
-        run: ./docker-compose/test_extensions_upgrade.sh
+          DBPASS: ${{ steps.pwgen.outputs.DBPASS }}
+          PG_VERSION: ${{matrix.pg-version}}
+        run: |
+          cd vendor/postgres-v"${PG_VERSION}"/src/test/regress
+          for fname in sql/*.sql expected/*.out; do
+            sed -i.bak s/NEON_PASSWORD_PLACEHOLDER/"'${DBPASS}'"/ "${fname}"
+          done
+          for ph in $(grep NEON_MD5_PLACEHOLDER expected/password.out | awk '{print $3;}' | sort | uniq); do
+            USER=$(echo "${ph}" | cut -c 22-)
+            MD5=md5$(echo -n "${DBPASS}${USER}" | md5sum | awk '{print $1;}')
+            sed -i.bak "s/${ph}/${MD5}/" expected/password.out
+          done
 
-      - name: Print logs and clean up
+      - name: Download Neon artifact
+        uses: ./.github/actions/download
+        with:
+          name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
+          path: /tmp/neon/
+          prefix: latest
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+      - name: Create a new branch
+        id: create-branch
+        uses: ./.github/actions/neon-branch-create
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
+
+      - name: Run the regression tests
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ env.BUILD_TYPE }}
+          test_selection: cloud_regress
+          pg_version: ${{matrix.pg-version}}
+          extra_params: -m remote_cluster
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        env:
+          BENCHMARK_CONNSTR: ${{steps.create-branch.outputs.dsn}}
+
+      - name: Delete branch
         if: always()
-        run: |
-          docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml logs || true
-          docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml down
+        uses: ./.github/actions/neon-branch-delete
+        with:
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
+          branch_id: ${{steps.create-branch.outputs.branch_id}}
 
-      - name: Post to the Slack channel
+      - name: Create Allure report
+        id: create-allure-report
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/allure-report-generate
+        with:
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+      - name: Post to a Slack channel
         if: ${{ github.event.schedule && failure() }}
         uses: slackapi/slack-github-action@v1
         with:
           channel-id: ${{ vars.SLACK_ON_CALL_QA_STAGING_STREAM }}
           slack-message: |
-            Test upgrading of extensions: ${{ job.status }}
+            Periodic pg_regress on staging: ${{ job.status }}
             <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+            <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
