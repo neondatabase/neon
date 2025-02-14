@@ -1905,10 +1905,11 @@ impl DatadirModification<'_> {
         }
 
         if self.tline.get_rel_size_v2_enabled() {
-            let rel_dir_key = rel_tag_sparse_key(rel.spcnode, rel.dbnode, rel.relnode, rel.forknum);
+            let sparse_rel_dir_key =
+                rel_tag_sparse_key(rel.spcnode, rel.dbnode, rel.relnode, rel.forknum);
             // check if the rel_dir_key exists in v2
             let val = self
-                .sparse_get(rel_dir_key, ctx)
+                .sparse_get(sparse_rel_dir_key, ctx)
                 .await
                 .map_err(|e| RelationError::Other(e.into()))?;
             let val = RelDirExists::decode_option(val)
@@ -1916,7 +1917,10 @@ impl DatadirModification<'_> {
             if val == RelDirExists::Exists {
                 return Err(RelationError::AlreadyExists);
             }
-            self.put(rel_dir_key, Value::Image(RelDirExists::Exists.encode()));
+            self.put(
+                sparse_rel_dir_key,
+                Value::Image(RelDirExists::Exists.encode()),
+            );
             if !dbdir_exists {
                 self.pending_directory_entries
                     .push((DirectoryKind::Rel, MetricsUpdate::Set(0)));
