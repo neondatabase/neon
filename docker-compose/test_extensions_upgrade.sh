@@ -58,7 +58,6 @@ wait_for_ready
 docker compose cp  ext-src neon-test-extensions:/
 docker compose exec neon-test-extensions psql -c "DROP DATABASE IF EXISTS contrib_regression"
 docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regression"
-docker compose exec neon-test-extensions bash -c "apt update && apt install -y libtap-parser-sourcehandler-pgtap-perl"
 create_extensions "${EXTNAMES}"
 if [ "${FORCE_ALL_UPGRADE_TESTS:-false}" = true ]; then
   exts="${EXTNAMES}"
