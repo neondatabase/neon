@@ -1303,6 +1303,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-kms",
  "aws-sdk-s3",
+ "aws-smithy-types",
  "axum",
  "base64 0.13.1",
  "bytes",
@@ -1351,6 +1352,7 @@ dependencies = [
  "utils",
  "uuid",
  "vm_monitor",
+ "walkdir",
  "workspace_hack",
  "zstd",
 ]
