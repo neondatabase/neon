@@ -20,6 +20,9 @@ from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import query_scalar, wait_until
 
 
+@pytest.mark.skip(
+    reason="We won't create future layers any more after https://github.com/neondatabase/neon/pull/10548"
+)
 @pytest.mark.parametrize(
     "attach_mode",
     ["default_generation", "same_generation"],

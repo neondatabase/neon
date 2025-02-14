@@ -139,9 +139,9 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
 
 @pytest.mark.parametrize("manual_offload", [False, True])
 def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: bool):
-    if not manual_offload:
-        # (automatic) timeline offloading defaults to false for now
-        neon_env_builder.pageserver_config_override = "timeline_offloading = true"
+    if manual_offload:
+        # (automatic) timeline offloading defaults to true
+        neon_env_builder.pageserver_config_override = "timeline_offloading = false"
 
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
@@ -396,8 +396,6 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
     with tenant migrations and timeline deletions.
     """
 
-    # Offloading is off by default at time of writing: remove this line when it's on by default
-    neon_env_builder.pageserver_config_override = "timeline_offloading = true"
     neon_env_builder.storage_controller_config = {"heartbeat_interval": "100msec"}
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
 
@@ -554,8 +552,33 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
                                 log.info(f"Timeline {state.timeline_id} is still active")
                                 shutdown.wait(0.5)
                             elif state.timeline_id in offloaded_ids:
-                                log.info(f"Timeline {state.timeline_id} is now offloaded")
-                                state.offloaded = True
+                                log.info(f"Timeline {state.timeline_id} is now offloaded in memory")
+
+                                # Hack: when we see something offloaded in the API, it doesn't guarantee that the offload
+                                # is persistent (it is marked offloaded first, then that is persisted to the tenant manifest).
+                                # So we wait until we see the manifest update before considering it offloaded, that way
+                                # subsequent checks that it doesn't revert to active on a restart will pass reliably.
+                                time.sleep(0.1)
+                                assert isinstance(env.pageserver_remote_storage, S3Storage)
+                                manifest = env.pageserver_remote_storage.download_tenant_manifest(
+                                    tenant_id
+                                )
+                                if manifest is None:
+                                    log.info(
+                                        f"Timeline {state.timeline_id} is not yet offloaded persistently (no manifest)"
+                                    )
+                                elif str(state.timeline_id) in [
+                                    t["timeline_id"] for t in manifest["offloaded_timelines"]
+                                ]:
+                                    log.info(
+                                        f"Timeline {state.timeline_id} is now offloaded persistently"
+                                    )
+                                    state.offloaded = True
+                                else:
+                                    log.info(
+                                        f"Timeline {state.timeline_id} is not yet offloaded persistently (manifest: {manifest})"
+                                    )
+
                                 break
                             else:
                                 # Timeline is neither offloaded nor active, this is unexpected: the pageserver
@@ -969,8 +992,6 @@ def test_timeline_offload_race_unarchive(
     Ensure that unarchive and timeline offload don't race each other
     """
     # Regression test for issue https://github.com/neondatabase/neon/issues/10220
-    # (automatic) timeline offloading defaults to false for now
-    neon_env_builder.pageserver_config_override = "timeline_offloading = true"
 
     failpoint = "before-timeline-auto-offload"
 

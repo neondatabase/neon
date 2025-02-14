@@ -1366,10 +1366,7 @@ impl SmgrOpTimer {
     /// The first callers receives Some, subsequent ones None.
     ///
     /// See [`SmgrOpTimerState`] for more context.
-    pub(crate) fn observe_execution_end_flush_start(
-        &mut self,
-        at: Instant,
-    ) -> Option<SmgrOpFlushInProgress> {
+    pub(crate) fn observe_execution_end(&mut self, at: Instant) -> Option<SmgrOpFlushInProgress> {
         // NB: unlike the other observe_* methods, this one take()s.
         #[allow(clippy::question_mark)] // maintain similar code pattern.
         let Some(mut inner) = self.0.take() else {
@@ -1403,7 +1400,6 @@ impl SmgrOpTimer {
             ..
         } = inner;
         Some(SmgrOpFlushInProgress {
-            flush_started_at: at,
             global_micros: global_flush_in_progress_micros,
             per_timeline_micros: per_timeline_flush_in_progress_micros,
         })
@@ -1419,7 +1415,6 @@ impl SmgrOpTimer {
 /// add another `observe_*` method to [`SmgrOpTimer`], follow the existing pattern there,
 /// and remove this struct from the code base.
 pub(crate) struct SmgrOpFlushInProgress {
-    flush_started_at: Instant,
     global_micros: IntCounter,
     per_timeline_micros: IntCounter,
 }
@@ -1438,12 +1433,13 @@ impl Drop for SmgrOpTimer {
         self.observe_throttle_start(now);
         self.observe_throttle_done(ThrottleResult::NotThrottled { end: now });
         self.observe_execution_start(now);
-        self.observe_execution_end_flush_start(now);
+        let maybe_flush_timer = self.observe_execution_end(now);
+        drop(maybe_flush_timer);
     }
 }
 
 impl SmgrOpFlushInProgress {
-    pub(crate) async fn measure<Fut, O>(mut self, mut fut: Fut) -> O
+    pub(crate) async fn measure<Fut, O>(self, mut started_at: Instant, mut fut: Fut) -> O
     where
         Fut: std::future::Future<Output = O>,
     {
@@ -1455,12 +1451,12 @@ impl SmgrOpFlushInProgress {
         let mut observe_guard = scopeguard::guard(
             || {
                 let now = Instant::now();
-                let elapsed = now - self.flush_started_at;
+                let elapsed = now - started_at;
                 self.global_micros
                     .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
                 self.per_timeline_micros
                     .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-                self.flush_started_at = now;
+                started_at = now;
             },
             |mut observe| {
                 observe();

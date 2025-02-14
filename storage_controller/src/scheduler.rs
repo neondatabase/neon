@@ -1,9 +1,10 @@
 use crate::{metrics::NodeLabelGroup, node::Node, tenant_shard::TenantShard};
+use http_utils::error::ApiError;
 use itertools::Itertools;
 use pageserver_api::{controller_api::AvailabilityZone, models::PageserverUtilization};
 use serde::Serialize;
 use std::{collections::HashMap, fmt::Debug};
-use utils::{http::error::ApiError, id::NodeId};
+use utils::id::NodeId;
 
 /// Scenarios in which we cannot find a suitable location for a tenant shard
 #[derive(thiserror::Error, Debug)]

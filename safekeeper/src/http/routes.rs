@@ -1,3 +1,4 @@
+use http_utils::failpoints::failpoints_handler;
 use hyper::{Body, Request, Response, StatusCode};
 use safekeeper_api::models;
 use safekeeper_api::models::AcceptorStateStatus;
@@ -17,25 +18,23 @@ use tokio::task;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, Instrument};
-use utils::failpoint_support::failpoints_handler;
-use utils::http::endpoint::{
+
+use http_utils::endpoint::{
     profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
-    ChannelWriter,
 };
-use utils::http::request::parse_query_param;
+use http_utils::{
+    endpoint::{self, auth_middleware, check_permission_with, ChannelWriter},
+    error::ApiError,
+    json::{json_request, json_response},
+    request::{ensure_no_body, parse_query_param, parse_request_param},
+    RequestExt, RouterBuilder,
+};
 
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::{SkTimelineInfo, TimelineCopyRequest};
 use safekeeper_api::models::{TimelineCreateRequest, TimelineTermBumpRequest};
 use utils::{
     auth::SwappableJwtAuth,
-    http::{
-        endpoint::{self, auth_middleware, check_permission_with},
-        error::ApiError,
-        json::{json_request, json_response},
-        request::{ensure_no_body, parse_request_param},
-        RequestExt, RouterBuilder,
-    },
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
 };
@@ -627,7 +626,7 @@ pub fn make_router(
                 failpoints_handler(r, cancel).await
             })
         })
-        .get("/v1/uzilization", |r| request_span(r, utilization_handler))
+        .get("/v1/utilization", |r| request_span(r, utilization_handler))
         .delete("/v1/tenant/:tenant_id", |r| {
             request_span(r, tenant_delete_handler)
         })

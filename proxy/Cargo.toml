@@ -37,6 +37,7 @@ hex.workspace = true
 hmac.workspace = true
 hostname.workspace = true
 http.workspace = true
+http-utils.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper0.workspace = true

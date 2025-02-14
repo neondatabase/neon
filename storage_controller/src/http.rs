@@ -8,6 +8,14 @@ use crate::reconciler::ReconcileError;
 use crate::service::{LeadershipStatus, Service, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT};
 use anyhow::Context;
 use futures::Future;
+use http_utils::{
+    endpoint::{self, auth_middleware, check_permission_with, request_span},
+    error::ApiError,
+    failpoints::failpoints_handler,
+    json::{json_request, json_response},
+    request::{must_get_query_param, parse_query_param, parse_request_param},
+    RequestExt, RouterBuilder,
+};
 use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
@@ -29,20 +37,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use utils::auth::{Scope, SwappableJwtAuth};
-use utils::failpoint_support::failpoints_handler;
-use utils::http::endpoint::{auth_middleware, check_permission_with, request_span};
-use utils::http::request::{must_get_query_param, parse_query_param, parse_request_param};
-use utils::id::{TenantId, TimelineId};
-
-use utils::{
-    http::{
-        endpoint::{self},
-        error::ApiError,
-        json::{json_request, json_response},
-        RequestExt, RouterBuilder,
-    },
-    id::NodeId,
-};
+use utils::id::{NodeId, TenantId, TimelineId};
 
 use pageserver_api::controller_api::{
     NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantPolicyRequest,

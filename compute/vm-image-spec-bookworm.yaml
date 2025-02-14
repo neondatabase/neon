@@ -47,7 +47,9 @@ files:
       # Allow postgres user (which is what compute_ctl runs as) to run /neonvm/bin/resize-swap
       # and /neonvm/bin/set-disk-quota as root without requiring entering a password (NOPASSWD),
       # regardless of hostname (ALL)
-      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota
+      #
+      # Also allow it to shut down the VM. The fast_import job does that when it's finished.
+      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota, /neonvm/bin/poweroff
   - filename: cgconfig.conf
     content: |
       # Configuration for cgroups in VM compute nodes
@@ -72,8 +74,8 @@ build: |
   # At time of migration to bookworm (2024-10-09), debian has a version of libcgroup/cgroup-tools 2.0.2,
   # and it _probably_ can be used as-is. However, we'll build it ourselves to minimise the changeset
   # for debian version migration.
-  #
-  FROM debian:bookworm-slim as libcgroup-builder
+  ARG BOOKWORM_SLIM_SHA=sha256:40b107342c492725bc7aacbe93a49945445191ae364184a6d24fedb28172f6f7
+  FROM debian@$BOOKWORM_SLIM_SHA as libcgroup-builder
   ENV LIBCGROUP_VERSION=v2.0.3
 
   RUN set -exu \

@@ -361,7 +361,8 @@ pub struct EndpointJwksResponse {
 pub struct JwksSettings {
     pub id: String,
     pub jwks_url: url::Url,
-    pub provider_name: String,
+    #[serde(rename = "provider_name")]
+    pub _provider_name: String,
     pub jwt_audience: Option<String>,
     pub role_names: Vec<RoleNameInt>,
 }

@@ -37,8 +37,8 @@ To play with it locally one may start proxy over a local postgres installation
 
 If both postgres and proxy are running you may send a SQL query:
 ```console
-curl -k -X POST 'https://proxy.localtest.me:4444/sql' \
-  -H 'Neon-Connection-String: postgres://stas:pass@proxy.localtest.me:4444/postgres' \
+curl -k -X POST 'https://proxy.local.neon.build:4444/sql' \
+  -H 'Neon-Connection-String: postgres://stas:pass@proxy.local.neon.build:4444/postgres' \
   -H 'Content-Type: application/json' \
   --data '{
     "query":"SELECT $1::int[] as arr, $2::jsonb as obj, 42 as num",
@@ -104,7 +104,7 @@ cases where it is hard to use rows represented as objects (e.g. when several fie
 
 ## Test proxy locally
 
-Proxy determines project name from the subdomain, request to the `round-rice-566201.somedomain.tld` will be routed to the project named `round-rice-566201`. Unfortunately, `/etc/hosts` does not support domain wildcards, so we can use *.localtest.me` which resolves to `127.0.0.1`.
+Proxy determines project name from the subdomain, request to the `round-rice-566201.somedomain.tld` will be routed to the project named `round-rice-566201`. Unfortunately, `/etc/hosts` does not support domain wildcards, so we can use *.local.neon.build` which resolves to `127.0.0.1`.
 
 We will need to have a postgres instance. Assuming that we have set up docker we can set it up as follows:
 ```sh
@@ -125,7 +125,7 @@ docker exec -it proxy-postgres psql -U postgres -c "CREATE ROLE proxy WITH SUPER
 
 Let's create self-signed certificate by running:
 ```sh
-openssl req -new -x509 -days 365 -nodes -text -out server.crt -keyout server.key -subj "/CN=*.localtest.me"
+openssl req -new -x509 -days 365 -nodes -text -out server.crt -keyout server.key -subj "/CN=*.local.neon.build"
 ```
 
 Then we need to build proxy with 'testing' feature and run, e.g.:
@@ -136,5 +136,5 @@ RUST_LOG=proxy cargo run -p proxy --bin proxy --features testing -- --auth-backe
 Now from client you can start a new session:
 
 ```sh
-PGSSLROOTCERT=./server.crt psql  "postgresql://proxy:password@endpoint.localtest.me:4432/postgres?sslmode=verify-full"
+PGSSLROOTCERT=./server.crt psql  "postgresql://proxy:password@endpoint.local.neon.build:4432/postgres?sslmode=verify-full"
 ```

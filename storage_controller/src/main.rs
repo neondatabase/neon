@@ -320,7 +320,7 @@ async fn async_main() -> anyhow::Result<()> {
     let router = make_router(service.clone(), auth, build_info)
         .build()
         .map_err(|err| anyhow!(err))?;
-    let router_service = utils::http::RouterService::new(router).unwrap();
+    let router_service = http_utils::RouterService::new(router).unwrap();
 
     // Start HTTP server
     let server_shutdown = CancellationToken::new();

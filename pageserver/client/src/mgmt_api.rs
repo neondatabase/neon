@@ -1,11 +1,12 @@
 use std::{collections::HashMap, error::Error as _};
 
 use bytes::Bytes;
-use detach_ancestor::AncestorDetached;
-use pageserver_api::{models::*, shard::TenantShardId};
 use reqwest::{IntoUrl, Method, StatusCode};
+
+use detach_ancestor::AncestorDetached;
+use http_utils::error::HttpErrorBody;
+use pageserver_api::{models::*, shard::TenantShardId};
 use utils::{
-    http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };

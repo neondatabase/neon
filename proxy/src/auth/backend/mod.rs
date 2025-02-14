@@ -108,6 +108,10 @@ impl<T> Backend<'_, T> {
             Self::Local(_) => panic!("Local backend has no API"),
         }
     }
+
+    pub(crate) fn is_local_proxy(&self) -> bool {
+        matches!(self, Self::Local(_))
+    }
 }
 
 impl<'a, T> Backend<'a, T> {

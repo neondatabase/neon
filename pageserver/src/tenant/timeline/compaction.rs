@@ -609,6 +609,11 @@ pub enum CompactionOutcome {
     /// Still has pending layers to be compacted after this round. Ideally, the scheduler
     /// should immediately schedule another compaction.
     Pending,
+    /// A timeline needs L0 compaction. Yield and schedule an immediate L0 compaction pass (only
+    /// guaranteed when `compaction_l0_first` is enabled).
+    YieldForL0,
+    /// Compaction was skipped, because the timeline is ineligible for compaction.
+    Skipped,
 }
 
 impl Timeline {
@@ -687,10 +692,25 @@ impl Timeline {
 
         // Define partitioning schema if needed
 
+        let l0_l1_boundary_lsn = {
+            // We do the repartition on the L0-L1 boundary. All data below the boundary
+            // are compacted by L0 with low read amplification, thus making the `repartition`
+            // function run fast.
+            let guard = self.layers.read().await;
+            let l0_min_lsn = guard
+                .layer_map()?
+                .level0_deltas()
+                .iter()
+                .map(|l| l.get_lsn_range().start)
+                .min()
+                .unwrap_or(self.get_disk_consistent_lsn());
+            l0_min_lsn.max(self.get_ancestor_lsn())
+        };
+
         // 1. L0 Compact
-        let l0_compaction_outcome = {
+        let l0_outcome = {
             let timer = self.metrics.compact_time_histo.start_timer();
-            let l0_compaction_outcome = self
+            let l0_outcome = self
                 .compact_level0(
                     target_file_size,
                     options.flags.contains(CompactFlags::ForceL0Compaction),
@@ -698,91 +718,103 @@ impl Timeline {
                 )
                 .await?;
             timer.stop_and_record();
-            l0_compaction_outcome
+            l0_outcome
         };
 
-        if let CompactionOutcome::Pending = l0_compaction_outcome {
-            // Yield and do not do any other kind of compaction. True means
-            // that we have pending L0 compaction tasks and the compaction scheduler
-            // will prioritize compacting this tenant/timeline again.
-            info!("skipping image layer generation and shard ancestor compaction due to L0 compaction did not include all layers.");
-            return Ok(CompactionOutcome::Pending);
+        if options.flags.contains(CompactFlags::OnlyL0Compaction) {
+            return Ok(l0_outcome);
         }
 
-        // 2. Repartition and create image layers if necessary
-        let partition_count = match self
-            .repartition(
-                self.get_last_record_lsn(), // TODO: use L0-L1 boundary
-                self.get_compaction_target_size(),
-                options.flags,
-                ctx,
-            )
-            .await
+        // Yield if we have pending L0 compaction. The scheduler will do another pass.
+        if (l0_outcome == CompactionOutcome::Pending || l0_outcome == CompactionOutcome::YieldForL0)
+            && !options.flags.contains(CompactFlags::NoYield)
         {
-            Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
-                // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
-                let image_ctx = RequestContextBuilder::extend(ctx)
-                    .access_stats_behavior(AccessStatsBehavior::Skip)
-                    .build();
+            info!("image/ancestor compaction yielding for L0 compaction");
+            return Ok(CompactionOutcome::YieldForL0);
+        }
 
-                let mut partitioning = dense_partitioning;
-                partitioning
-                    .parts
-                    .extend(sparse_partitioning.into_dense().parts);
+        if l0_l1_boundary_lsn < self.partitioning.read().1 {
+            // We never go backwards when repartition and create image layers.
+            info!("skipping image layer generation because repartition LSN is greater than L0-L1 boundary LSN.");
+        } else {
+            // 2. Repartition and create image layers if necessary
+            match self
+                .repartition(
+                    l0_l1_boundary_lsn,
+                    self.get_compaction_target_size(),
+                    options.flags,
+                    ctx,
+                )
+                .await
+            {
+                Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
+                    // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
+                    let image_ctx = RequestContextBuilder::extend(ctx)
+                        .access_stats_behavior(AccessStatsBehavior::Skip)
+                        .build();
 
-                // 3. Create new image layers for partitions that have been modified "enough".
-                let (image_layers, outcome) = self
-                    .create_image_layers(
-                        &partitioning,
-                        lsn,
-                        if options
-                            .flags
-                            .contains(CompactFlags::ForceImageLayerCreation)
-                        {
-                            ImageLayerCreationMode::Force
-                        } else {
-                            ImageLayerCreationMode::Try
-                        },
-                        &image_ctx,
-                        self.last_image_layer_creation_status
-                            .load()
-                            .as_ref()
-                            .clone(),
-                    )
-                    .await
-                    .inspect_err(|err| {
-                        if let CreateImageLayersError::GetVectoredError(
-                            GetVectoredError::MissingKey(_),
-                        ) = err
-                        {
-                            critical!("missing key during compaction: {err:?}");
-                        }
-                    })?;
+                    let mut partitioning = dense_partitioning;
+                    partitioning
+                        .parts
+                        .extend(sparse_partitioning.into_dense().parts);
 
-                self.last_image_layer_creation_status
-                    .store(Arc::new(outcome.clone()));
+                    // 3. Create new image layers for partitions that have been modified "enough".
+                    let (image_layers, outcome) = self
+                        .create_image_layers(
+                            &partitioning,
+                            lsn,
+                            if options
+                                .flags
+                                .contains(CompactFlags::ForceImageLayerCreation)
+                            {
+                                ImageLayerCreationMode::Force
+                            } else {
+                                ImageLayerCreationMode::Try
+                            },
+                            &image_ctx,
+                            self.last_image_layer_creation_status
+                                .load()
+                                .as_ref()
+                                .clone(),
+                            !options.flags.contains(CompactFlags::NoYield),
+                        )
+                        .await
+                        .inspect_err(|err| {
+                            if let CreateImageLayersError::GetVectoredError(
+                                GetVectoredError::MissingKey(_),
+                            ) = err
+                            {
+                                critical!("missing key during compaction: {err:?}");
+                            }
+                        })?;
 
-                self.upload_new_image_layers(image_layers)?;
-                if let LastImageLayerCreationStatus::Incomplete { .. } = outcome {
-                    // Yield and do not do any other kind of compaction.
-                    info!("skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction).");
-                    return Ok(CompactionOutcome::Pending);
+                    self.last_image_layer_creation_status
+                        .store(Arc::new(outcome.clone()));
+
+                    self.upload_new_image_layers(image_layers)?;
+                    if let LastImageLayerCreationStatus::Incomplete { .. } = outcome {
+                        // Yield and do not do any other kind of compaction.
+                        info!("skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction).");
+                        return Ok(CompactionOutcome::YieldForL0);
+                    }
                 }
-                partitioning.parts.len()
-            }
-            Err(err) => {
-                // no partitioning? This is normal, if the timeline was just created
-                // as an empty timeline. Also in unit tests, when we use the timeline
-                // as a simple key-value store, ignoring the datadir layout. Log the
-                // error but continue.
-                //
-                // Suppress error when it's due to cancellation
-                if !self.cancel.is_cancelled() && !err.is_cancelled() {
-                    tracing::error!("could not compact, repartitioning keyspace failed: {err:?}");
+                Err(err) => {
+                    // no partitioning? This is normal, if the timeline was just created
+                    // as an empty timeline. Also in unit tests, when we use the timeline
+                    // as a simple key-value store, ignoring the datadir layout. Log the
+                    // error but continue.
+                    //
+                    // Suppress error when it's due to cancellation
+                    if !self.cancel.is_cancelled() && !err.is_cancelled() {
+                        tracing::error!(
+                            "could not compact, repartitioning keyspace failed: {err:?}"
+                        );
+                    }
                 }
-                1
-            }
-        };
+            };
+        }
+
+        let partition_count = self.partitioning.read().0 .0.parts.len();
 
         // 4. Shard ancestor compaction
 
@@ -820,7 +852,7 @@ impl Timeline {
         //
         // Holding this read guard also blocks [`Self::gc_timeline`] from entering while we
         // are rewriting layers.
-        let latest_gc_cutoff = self.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff = self.get_applied_gc_cutoff_lsn();
 
         tracing::info!(
             "latest_gc_cutoff: {}, pitr cutoff {}",
@@ -2170,7 +2202,7 @@ impl Timeline {
 
         // TODO: ensure the child branches will not use anything below the watermark, or consider
         // them when computing the watermark.
-        gc_cutoff_lsn.min(*self.get_latest_gc_cutoff_lsn())
+        gc_cutoff_lsn.min(*self.get_applied_gc_cutoff_lsn())
     }
 
     /// Split a gc-compaction job into multiple compaction jobs. The split is based on the key range and the estimated size of the compaction job.
@@ -2238,8 +2270,11 @@ impl Timeline {
             split_key_ranges.push((start, end));
         }
         split_key_ranges.sort();
-        let guard = self.layers.read().await;
-        let layer_map = guard.layer_map()?;
+        let all_layers = {
+            let guard = self.layers.read().await;
+            let layer_map = guard.layer_map()?;
+            layer_map.iter_historic_layers().collect_vec()
+        };
         let mut current_start = None;
         let ranges_num = split_key_ranges.len();
         for (idx, (start, end)) in split_key_ranges.into_iter().enumerate() {
@@ -2251,14 +2286,23 @@ impl Timeline {
                 // We have already processed this partition.
                 continue;
             }
-            let res = layer_map.range_search(start..end, compact_below_lsn);
-            let total_size = res.found.keys().map(|x| x.layer.file_size()).sum::<u64>();
+            let overlapping_layers = {
+                let mut desc = Vec::new();
+                for layer in all_layers.iter() {
+                    if overlaps_with(&layer.get_key_range(), &(start..end))
+                        && layer.get_lsn_range().start <= compact_below_lsn
+                    {
+                        desc.push(layer.clone());
+                    }
+                }
+                desc
+            };
+            let total_size = overlapping_layers.iter().map(|x| x.file_size).sum::<u64>();
             if total_size > sub_compaction_max_job_size_mb * 1024 * 1024 || ranges_num == idx + 1 {
                 // Try to extend the compaction range so that we include at least one full layer file.
-                let extended_end = res
-                    .found
-                    .keys()
-                    .map(|layer| layer.layer.key_range.end)
+                let extended_end = overlapping_layers
+                    .iter()
+                    .map(|layer| layer.key_range.end)
                     .min();
                 // It is possible that the search range does not contain any layer files when we reach the end of the loop.
                 // In this case, we simply use the specified key range end.
@@ -2285,7 +2329,6 @@ impl Timeline {
                 current_start = Some(end);
             }
         }
-        drop(guard);
         Ok(compact_jobs)
     }
 
