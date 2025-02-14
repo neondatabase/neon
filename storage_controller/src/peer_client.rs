@@ -6,9 +6,10 @@ use std::error::Error as _;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use http_utils::error::HttpErrorBody;
 use hyper::Uri;
 use reqwest::{StatusCode, Url};
-use utils::{backoff, http::error::HttpErrorBody};
+use utils::backoff;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PeerClient {

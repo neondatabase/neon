@@ -489,7 +489,6 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
         let timeline = tenant_shard
             .get_timeline(timeline_id, true)
             .map_err(GetActiveTimelineError::Timeline)?;
-        set_tracing_field_shard_id(&timeline);
         Ok(timeline)
     }
 }
@@ -774,11 +773,11 @@ impl PageServerHandler {
 
         let batched_msg = match neon_fe_msg {
             PagestreamFeMessage::Exists(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
-                    .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
+                let span = tracing::info_span!(parent: &parent_span, "handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
                 let timer = record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetRelExists,
@@ -793,11 +792,10 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::Nblocks(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
-                    .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                let span = tracing::info_span!(parent: &parent_span, "handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
                 let timer = record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetRelSize,
@@ -812,11 +810,10 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::DbSize(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
-                    .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                let span = tracing::info_span!(parent: &parent_span, "handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
                 let timer = record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetDbSize,
@@ -831,11 +828,10 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::GetSlruSegment(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.hdr.request_lsn);
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
-                    .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                let span = tracing::info_span!(parent: &parent_span, "handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
                 let timer = record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetSlruSegment,
@@ -850,12 +846,20 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::GetPage(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_get_page_at_lsn_request_batched", req_lsn = %req.hdr.request_lsn);
+                // avoid a somewhat costly Span::record() by constructing the entire span in one go.
+                macro_rules! mkspan {
+                    (before shard routing) => {{
+                        tracing::info_span!(parent: &parent_span, "handle_get_page_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.hdr.request_lsn)
+                    }};
+                    ($shard_id:expr) => {{
+                        tracing::info_span!(parent: &parent_span, "handle_get_page_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.hdr.request_lsn, shard_id = %$shard_id)
+                    }};
+                }
 
                 macro_rules! respond_error {
-                    ($error:expr) => {{
+                    ($span:expr, $error:expr) => {{
                         let error = BatchedFeMessage::RespondError {
-                            span,
+                            span: $span,
                             error: BatchedPageStreamError {
                                 req: req.hdr,
                                 err: $error,
@@ -868,27 +872,35 @@ impl PageServerHandler {
                 let key = rel_block_to_key(req.rel, req.blkno);
                 let shard = match timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Page(key))
-                    .instrument(span.clone()) // sets `shard_id` field
                     .await
                 {
                     Ok(tl) => tl,
-                    Err(GetActiveTimelineError::Tenant(GetActiveTenantError::NotFound(_))) => {
-                        // We already know this tenant exists in general, because we resolved it at
-                        // start of connection.  Getting a NotFound here indicates that the shard containing
-                        // the requested page is not present on this node: the client's knowledge of shard->pageserver
-                        // mapping is out of date.
-                        //
-                        // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
-                        // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
-                        // and talk to a different pageserver.
-                        return respond_error!(PageStreamError::Reconnect(
-                            "getpage@lsn request routed to wrong shard".into()
-                        ));
-                    }
                     Err(e) => {
-                        return respond_error!(e.into());
+                        let span = mkspan!(before shard routing);
+                        match e {
+                            GetActiveTimelineError::Tenant(GetActiveTenantError::NotFound(_)) => {
+                                // We already know this tenant exists in general, because we resolved it at
+                                // start of connection.  Getting a NotFound here indicates that the shard containing
+                                // the requested page is not present on this node: the client's knowledge of shard->pageserver
+                                // mapping is out of date.
+                                //
+                                // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
+                                // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
+                                // and talk to a different pageserver.
+                                return respond_error!(
+                                    span,
+                                    PageStreamError::Reconnect(
+                                        "getpage@lsn request routed to wrong shard".into()
+                                    )
+                                );
+                            }
+                            e => {
+                                return respond_error!(span, e.into());
+                            }
+                        }
                     }
                 };
+                let span = mkspan!(shard.tenant_shard_id.shard_slug());
 
                 let timer = record_op_start_and_throttle(
                     &shard,
@@ -902,7 +914,7 @@ impl PageServerHandler {
                     &shard,
                     req.hdr.request_lsn,
                     req.hdr.not_modified_since,
-                    &shard.get_latest_gc_cutoff_lsn(),
+                    &shard.get_applied_gc_cutoff_lsn(),
                     ctx,
                 )
                 // TODO: if we actually need to wait for lsn here, it delays the entire batch which doesn't need to wait
@@ -910,7 +922,7 @@ impl PageServerHandler {
                 {
                     Ok(lsn) => lsn,
                     Err(e) => {
-                        return respond_error!(e);
+                        return respond_error!(span, e);
                     }
                 };
                 BatchedFeMessage::GetPage {
@@ -922,11 +934,10 @@ impl PageServerHandler {
             }
             #[cfg(feature = "testing")]
             PagestreamFeMessage::Test(req) => {
-                let span = tracing::info_span!(parent: parent_span, "handle_test_request");
                 let shard = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
-                    .instrument(span.clone()) // sets `shard_id` field
                     .await?;
+                let span = tracing::info_span!(parent: &parent_span, "handle_test_request", shard_id = %shard.tenant_shard_id.shard_slug());
                 let timer =
                     record_op_start_and_throttle(&shard, metrics::SmgrQueryType::Test, received_at)
                         .await?;
@@ -1358,7 +1369,7 @@ impl PageServerHandler {
             .take()
             .expect("implementation error: timeline_handles should not be locked");
 
-        let request_span = info_span!("request", shard_id = tracing::field::Empty);
+        let request_span = info_span!("request");
         let ((pgb_reader, timeline_handles), result) = match self.pipelining_config.clone() {
             PageServicePipeliningConfig::Pipelined(pipelining_config) => {
                 self.handle_pagerequests_pipelined(
@@ -1799,7 +1810,7 @@ impl PageServerHandler {
         req: &PagestreamExistsRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
             req.hdr.request_lsn,
@@ -1826,7 +1837,7 @@ impl PageServerHandler {
         req: &PagestreamNblocksRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
             req.hdr.request_lsn,
@@ -1853,7 +1864,7 @@ impl PageServerHandler {
         req: &PagestreamDbSizeRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
             req.hdr.request_lsn,
@@ -1943,7 +1954,7 @@ impl PageServerHandler {
         req: &PagestreamGetSlruSegmentRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
             req.hdr.request_lsn,
@@ -2039,7 +2050,8 @@ impl PageServerHandler {
     {
         fn map_basebackup_error(err: BasebackupError) -> QueryError {
             match err {
-                BasebackupError::Client(e) => QueryError::Disconnected(ConnectionError::Io(e)),
+                // TODO: passthrough the error site to the final error message?
+                BasebackupError::Client(e, _) => QueryError::Disconnected(ConnectionError::Io(e)),
                 BasebackupError::Server(e) => QueryError::Other(e),
             }
         }
@@ -2052,6 +2064,7 @@ impl PageServerHandler {
             .unwrap()
             .get(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
+        set_tracing_field_shard_id(&timeline);
 
         if timeline.is_archived() == Some(true) {
             // TODO after a grace period, turn this log line into a hard error
@@ -2059,7 +2072,7 @@ impl PageServerHandler {
             //return Err(QueryError::NotFound("timeline is archived".into()))
         }
 
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
             info!("waiting for {}", lsn);
@@ -2139,10 +2152,12 @@ impl PageServerHandler {
                 .await
                 .map_err(map_basebackup_error)?;
             }
-            writer
-                .flush()
-                .await
-                .map_err(|e| map_basebackup_error(BasebackupError::Client(e)))?;
+            writer.flush().await.map_err(|e| {
+                map_basebackup_error(BasebackupError::Client(
+                    e,
+                    "handle_basebackup_request,flush",
+                ))
+            })?;
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)

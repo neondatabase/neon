@@ -786,7 +786,7 @@ dependencies = [
 [[package]]
 name = "azure_core"
 version = "0.21.0"
-source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#66e77bdd87bf87e773acf3b0c84b532c1124367d"
+source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#c36ed4c039bb3d59b5a1705f2cc337636c73b541"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -815,7 +815,7 @@ dependencies = [
 [[package]]
 name = "azure_identity"
 version = "0.21.0"
-source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#66e77bdd87bf87e773acf3b0c84b532c1124367d"
+source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#c36ed4c039bb3d59b5a1705f2cc337636c73b541"
 dependencies = [
  "async-lock",
  "async-trait",
@@ -834,7 +834,7 @@ dependencies = [
 [[package]]
 name = "azure_storage"
 version = "0.21.0"
-source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#66e77bdd87bf87e773acf3b0c84b532c1124367d"
+source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#c36ed4c039bb3d59b5a1705f2cc337636c73b541"
 dependencies = [
  "RustyXML",
  "async-lock",
@@ -852,7 +852,7 @@ dependencies = [
 [[package]]
 name = "azure_storage_blobs"
 version = "0.21.0"
-source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#66e77bdd87bf87e773acf3b0c84b532c1124367d"
+source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#c36ed4c039bb3d59b5a1705f2cc337636c73b541"
 dependencies = [
  "RustyXML",
  "azure_core",
@@ -872,7 +872,7 @@ dependencies = [
 [[package]]
 name = "azure_svc_blobstorage"
 version = "0.21.0"
-source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#66e77bdd87bf87e773acf3b0c84b532c1124367d"
+source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#c36ed4c039bb3d59b5a1705f2cc337636c73b541"
 dependencies = [
  "azure_core",
  "bytes",
@@ -1293,6 +1293,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "jsonwebtoken",
  "regex",
  "remote_storage",
  "serde",
@@ -1320,6 +1321,7 @@ dependencies = [
  "flate2",
  "futures",
  "http 1.1.0",
+ "jsonwebtoken",
  "metrics",
  "nix 0.27.1",
  "notify",
@@ -1433,6 +1435,7 @@ dependencies = [
  "comfy-table",
  "compute_api",
  "futures",
+ "http-utils",
  "humantime",
  "humantime-serde",
  "hyper 0.14.30",
@@ -2755,6 +2758,38 @@ dependencies = [
  "serde_qs",
  "serde_urlencoded",
  "url",
+]
+
+[[package]]
+name = "http-utils"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "backtrace",
+ "bytes",
+ "fail",
+ "flate2",
+ "hyper 0.14.30",
+ "inferno 0.12.0",
+ "itertools 0.10.5",
+ "jemalloc_pprof",
+ "metrics",
+ "once_cell",
+ "pprof",
+ "regex",
+ "routerify",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "url",
+ "utils",
+ "uuid",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -4111,6 +4146,7 @@ dependencies = [
  "futures",
  "hex",
  "hex-literal",
+ "http-utils",
  "humantime",
  "humantime-serde",
  "hyper 0.14.30",
@@ -4211,6 +4247,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "futures",
+ "http-utils",
  "pageserver_api",
  "postgres",
  "reqwest",
@@ -4917,6 +4954,7 @@ dependencies = [
  "hostname",
  "http 1.1.0",
  "http-body-util",
+ "http-utils",
  "humantime",
  "humantime-serde",
  "hyper 0.14.30",
@@ -5764,6 +5802,7 @@ dependencies = [
  "futures",
  "hex",
  "http 1.1.0",
+ "http-utils",
  "humantime",
  "hyper 0.14.30",
  "itertools 0.10.5",
@@ -5828,6 +5867,7 @@ dependencies = [
 name = "safekeeper_client"
 version = "0.1.0"
 dependencies = [
+ "http-utils",
  "reqwest",
  "safekeeper_api",
  "serde",
@@ -6410,6 +6450,7 @@ dependencies = [
  "fail",
  "futures",
  "hex",
+ "http-utils",
  "humantime",
  "hyper 0.14.30",
  "itertools 0.10.5",
@@ -6421,10 +6462,13 @@ dependencies = [
  "pageserver_client",
  "postgres_connection",
  "rand 0.8.5",
+ "regex",
  "reqwest",
  "routerify",
  "rustls 0.23.18",
  "rustls-native-certs 0.8.0",
+ "safekeeper_api",
+ "safekeeper_client",
  "scoped-futures",
  "scopeguard",
  "serde",
@@ -7574,48 +7618,38 @@ dependencies = [
  "criterion",
  "diatomic-waker",
  "fail",
- "flate2",
  "futures",
  "git-version",
  "hex",
  "hex-literal",
  "humantime",
- "hyper 0.14.30",
  "inferno 0.12.0",
- "itertools 0.10.5",
- "jemalloc_pprof",
  "jsonwebtoken",
  "metrics",
  "nix 0.27.1",
  "once_cell",
  "pin-project-lite",
  "postgres_connection",
- "pprof",
  "pq_proto",
  "rand 0.8.5",
  "regex",
- "routerify",
  "scopeguard",
  "sentry",
  "serde",
  "serde_assert",
  "serde_json",
- "serde_path_to_error",
  "serde_with",
  "signal-hook",
  "strum",
  "strum_macros",
  "thiserror 1.0.69",
  "tokio",
- "tokio-stream",
  "tokio-tar",
  "tokio-util",
  "toml_edit",
  "tracing",
  "tracing-error",
  "tracing-subscriber",
- "url",
- "uuid",
  "walkdir",
 ]
 
@@ -8210,6 +8244,7 @@ dependencies = [
  "tracing-core",
  "tracing-log",
  "url",
+ "uuid",
  "zerocopy",
  "zeroize",
  "zstd",
