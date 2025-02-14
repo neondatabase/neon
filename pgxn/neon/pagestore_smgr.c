@@ -65,6 +65,7 @@
 #include "storage/fsm_internals.h"
 #include "storage/md.h"
 #include "storage/smgr.h"
+#include "utils/timeout.h"
 
 #include "neon_perf_counters.h"
 #include "pagestore_client.h"
@@ -123,6 +124,20 @@ static BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);
 static uint32 local_request_counter;
 #define GENERATE_REQUEST_ID() (((NeonRequestId)MyProcPid << 32) | ++local_request_counter)
 
+/*
+ * Various settings related to prompt (fast) handling of PageStream responses
+ * at any CHECK_FOR_INTERRUPTS point.
+ *
+ * Note: we'll trigger this every 100ms (= 0.1 seconds), which should be frequent
+ * enough to fix overhead issues without too much issues with other overheads.
+ */
+#define	PS_BACKGROUND_DELAY_MS 100
+static int		PS_TIMEOUT_ID = 0;
+static bool		timeout_set = false;
+static bool		timeout_signaled = false;
+static bool		readpage_reentrant_guard = false;
+static void reconfigure_timeout_if_needed(void);
+static void pagestore_timeout_handler(void);
 /*
  * Prefetch implementation:
  *
@@ -407,17 +422,22 @@ compact_prefetch_buffers(void)
 }
 
 /*
- * If there might be responses still in the TCP buffer, then
- * we should try to use those, so as to reduce any TCP backpressure
- * on the OS/PS side.
+ * If there might be responses still in the TCP buffer, then we should try to
+ * use those, to reduce any TCP backpressure on the OS/PS side.
  *
  * This procedure handles that.
  *
- * Note that this is only valid as long as the only pipelined
- * operations in the TCP buffer are getPage@Lsn requests.
+ * Note that this works because we don't pipeline non-getPage requests.
+ *
+ * NOTE: This procedure is not allowed to throw errors that should be handled
+ * by SMGR-related code, as this is called from CHECK_FOR_INTERRUPTS points
+ * across various places inside and outside PostgreSQL.
+ *
+ * This does throw errors on malformed responses from PS, but we can't recover
+ * from those anyway so that's "fine".
  */
 static void
-prefetch_pump_state(void)
+prefetch_pump_state(bool IsHandlingInterrupts)
 {
 	while (MyPState->ring_receive != MyPState->ring_flush)
 	{
@@ -466,6 +486,12 @@ prefetch_pump_state(void)
 			}
 		}
 	}
+
+	/* We never pump the prefetch state while handling other pages */
+	if (!IsHandlingInterrupts)
+		readpage_reentrant_guard = false;
+
+	reconfigure_timeout_if_needed();
 }
 
 void
@@ -581,14 +607,23 @@ readahead_buffer_resize(int newsize, void *extra)
 /*
  * Make sure that there are no responses still in the buffer.
  *
- * NOTE: this function may indirectly update MyPState->pfs_hash; which
- * invalidates any active pointers into the hash table.
+ * This function may indirectly update MyPState->pfs_hash; which invalidates
+ * any active pointers into the hash table.
+ *
+ * If this function throws an error, the readpage_reentrant_guard is not
+ * automatically reset. We'd have to install more callbacks for better
+ * handling, which probably isn't worth the effort; the next caller that
+ * does use consume_prefetch_responses will (re)set the guard.
  */
 static void
 consume_prefetch_responses(void)
 {
+	readpage_reentrant_guard = true;
+
 	if (MyPState->ring_receive < MyPState->ring_unused)
 		prefetch_wait_for(MyPState->ring_unused - 1);
+
+	readpage_reentrant_guard = false;
 }
 
 static void
@@ -1314,6 +1349,9 @@ page_server_request(void const *req)
 			 */
 			page_server->disconnect(shard_no);
 			MyNeonCounters->pageserver_open_requests = 0;
+
+			/* disarm the guard; we're not accessing MyPState anymore */
+			readpage_reentrant_guard = false;
 
 			PG_RE_THROW();
 		}
@@ -2942,7 +2980,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			   MyPState->ring_last <= ring_index);
 	}
 
-	prefetch_pump_state();
+	prefetch_pump_state(false);
 
 	return false;
 }
@@ -2985,7 +3023,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 	Assert(ring_index < MyPState->ring_unused &&
 		   MyPState->ring_last <= ring_index);
 
-	prefetch_pump_state();
+	prefetch_pump_state(false);
 
 	return false;
 }
@@ -3029,7 +3067,7 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 	 */
 	neon_log(SmgrTrace, "writeback noop");
 
-	prefetch_pump_state();
+	prefetch_pump_state(false);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -3277,7 +3315,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	}
 
 	/* Try to read PS results if they are available */
-	prefetch_pump_state();
+	prefetch_pump_state(false);
 
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1);
 
@@ -3299,7 +3337,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	/*
 	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
 	 */
-	prefetch_pump_state();
+	prefetch_pump_state(false);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
@@ -3410,7 +3448,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				 nblocks, PG_IOV_MAX);
 
 	/* Try to read PS results if they are available */
-	prefetch_pump_state();
+	prefetch_pump_state(false);
 
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forknum, blocknum,
 						  request_lsns, nblocks);
@@ -3455,7 +3493,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	/*
 	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
 	 */
-	prefetch_pump_state();
+	prefetch_pump_state(false);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
@@ -3625,7 +3663,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 
 	lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
 
-	prefetch_pump_state();
+	prefetch_pump_state(false);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -3680,7 +3718,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 
 	lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
 
-	prefetch_pump_state();
+	prefetch_pump_state(false);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -3971,7 +4009,7 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 
 	neon_log(SmgrTrace, "[NEON_SMGR] immedsync noop");
 
-	prefetch_pump_state();
+	prefetch_pump_state(false);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -4272,6 +4310,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	}
 	pfree(resp);
 
+	reconfigure_timeout_if_needed();
 	return n_blocks;
 }
 
@@ -4307,6 +4346,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 			}
 			break;
 	}
+	reconfigure_timeout_if_needed();
 }
 
 static const struct f_smgr neon_smgr =
@@ -4562,4 +4602,93 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 		neon_extend_rel_size(rinfo, FSM_FORKNUM, get_fsm_physical_block(blkno), end_recptr);
 	}
 	return no_redo_needed;
+}
+
+static void
+reconfigure_timeout_if_needed(void)
+{
+	bool	needs_set = MyPState->ring_receive != MyPState->ring_unused;
+
+	if (needs_set != timeout_set)
+	{
+		/* The background writer doens't (shouldn't) read any pages */
+		Assert(!AmBackgroundWriterProcess());
+		/* The checkpointer doens't (shouldn't) read any pages */
+		Assert(!AmCheckpointerProcess());
+
+		if (unlikely(PS_TIMEOUT_ID == 0))
+		{
+			PS_TIMEOUT_ID = RegisterTimeout(USER_TIMEOUT, pagestore_timeout_handler);
+		}
+
+		if (needs_set)
+		{
+#if PG_MAJORVERSION_NUM <= 14
+			enable_timeout_after(PS_TIMEOUT_ID, PS_BACKGROUND_DELAY_MS);
+#else
+			enable_timeout_every(
+				PS_TIMEOUT_ID,
+				TimestampTzPlusMilliseconds(GetCurrentTimestamp(),
+											PS_BACKGROUND_DELAY_MS),
+				PS_BACKGROUND_DELAY_MS
+			);
+#endif
+			timeout_set = true;
+		}
+		else
+		{
+			Assert(timeout_set);
+			disable_timeout(PS_TIMEOUT_ID, false);
+			timeout_set = false;
+		}
+	}
+}
+
+static void
+pagestore_timeout_handler(void)
+{
+#if PG_MAJORVERSION_NUM <= 14
+	/*
+	 * PG14: Setting a repeating timeout is not possible, so we signal here
+	 * that the timeout has already been reset, and by telling the system
+	 * that system will re-schedule it later if we need to.
+	 */
+	timeout_set = false;
+#endif
+	timeout_signaled = true;
+	InterruptPending = true;
+}
+
+static process_interrupts_callback_t prev_interrupt_cb;
+
+/*
+ * Process new data received in our active PageStream sockets.
+ *
+ * This relies on the invariant that all pipelined yet-to-be-received requests
+ * are getPage requests managed by MyPState. This is currently true, any
+ * modification will probably require some stuff to make it work again.
+ */
+static bool
+pagestore_smgr_processinterrupts(void)
+{
+	if (timeout_signaled)
+	{
+		if (!readpage_reentrant_guard)
+			prefetch_pump_state(true);
+
+		reconfigure_timeout_if_needed();
+	}
+
+	if (!prev_interrupt_cb)
+		return false;
+
+	return prev_interrupt_cb();
+}
+
+
+void
+pagestore_smgr_init(void)
+{
+	prev_interrupt_cb = ProcessInterruptsCallback;
+	ProcessInterruptsCallback = pagestore_smgr_processinterrupts;
 }
