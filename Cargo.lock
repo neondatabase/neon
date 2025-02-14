@@ -1030,12 +1030,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "boxcar"
-version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2721c3c5a6f0e7f7e607125d963fedeb765f545f67adc9d71ed934693881eb42"
-
-[[package]]
 name = "bstr"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4929,7 +4923,6 @@ dependencies = [
  "aws-sdk-iam",
  "aws-sigv4",
  "base64 0.13.1",
- "boxcar",
  "bstr",
  "bytes",
  "camino",
@@ -4981,7 +4974,6 @@ dependencies = [
  "postgres-protocol2",
  "postgres_backend",
  "pq_proto",
- "prometheus",
  "rand 0.8.5",
  "rand_distr",
  "rcgen",
@@ -5006,7 +4998,6 @@ dependencies = [
  "smallvec",
  "smol_str",
  "socket2",
- "strum",
  "strum_macros",
  "subtle",
  "thiserror 1.0.69",
@@ -5021,7 +5012,6 @@ dependencies = [
  "tracing",
  "tracing-log",
  "tracing-opentelemetry",
- "tracing-serde",
  "tracing-subscriber",
  "tracing-utils",
  "try-lock",

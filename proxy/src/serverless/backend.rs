@@ -651,7 +651,7 @@ async fn connect_http2(
                     e,
                 )));
             }
-        };
+        }
     };
 
     let (client, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
