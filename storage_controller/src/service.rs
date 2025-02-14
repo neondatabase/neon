@@ -440,8 +440,13 @@ pub struct Service {
     // that transition it to/from Active.
     node_op_locks: IdLockMap<NodeId, NodeOperations>,
 
-    // Limit how many Reconcilers we will spawn concurrently
+    // Limit how many Reconcilers we will spawn concurrently for normal-priority tasks such as background reconciliations
+    // and reconciliation on startup.
     reconciler_concurrency: Arc<tokio::sync::Semaphore>,
+
+    // Limit how many Reconcilers we will spawn concurrently for high-priority tasks such as tenant/timeline CRUD, which
+    // a human user might be waiting for.
+    priority_reconciler_concurrency: Arc<tokio::sync::Semaphore>,
 
     /// Queue of tenants who are waiting for concurrency limits to permit them to reconcile
     /// Send into this queue to promptly attempt to reconcile this shard next time units are available.
@@ -1568,6 +1573,9 @@ impl Service {
             heartbeater_sk,
             reconciler_concurrency: Arc::new(tokio::sync::Semaphore::new(
                 config.reconciler_concurrency,
+            )),
+            priority_reconciler_concurrency: Arc::new(tokio::sync::Semaphore::new(
+                config.priority_reconciler_concurrency,
             )),
             delayed_reconcile_tx,
             abort_tx,
