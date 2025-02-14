@@ -41,18 +41,18 @@ jobs:
       - name: Get the last compute release tag
         id: get-last-compute-release-tag
         env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag=$(gh api -q '[.[].tag_name | select(startswith("release-compute"))][0]'\
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "/repos/${{ github.repository }}/releases")
+            "/repos/${GITHUB_REPOSITORY}/releases")
           echo tag=${tag} >> ${GITHUB_OUTPUT}
 
       - name: Test extension upgrade
         timeout-minutes: 20
         env:
-          NEWTAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
+          NEWTAG: latest
           OLDTAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
           PG_VERSION: ${{ matrix.pg-version }}
           FORCE_ALL_UPGRADE_TESTS: true
