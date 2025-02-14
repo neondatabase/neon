@@ -572,18 +572,20 @@ impl Timeline {
         for (key, val) in results {
             let val = RelDirExists::decode(&val?)
                 .map_err(|_| PageReconstructError::Other(anyhow::anyhow!("invalid reldir key")))?;
-            if val == RelDirExists::Removed {
-                continue;
-            }
             assert_eq!(key.field6, 1);
             assert_eq!(key.field2, spcnode);
             assert_eq!(key.field3, dbnode);
-            let did_not_contain = rels.insert(RelTag {
+            let tag = RelTag {
                 spcnode,
                 dbnode,
                 relnode: key.field4,
                 forknum: key.field5,
-            });
+            };
+            if val == RelDirExists::Removed {
+                debug_assert!(!rels.contains(&tag), "removed reltag in v2");
+                continue;
+            }
+            let did_not_contain = rels.insert(tag);
             debug_assert!(did_not_contain, "duplicate reltag in v2");
         }
         Ok(rels)
