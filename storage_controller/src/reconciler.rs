@@ -91,9 +91,10 @@ pub(crate) struct ReconcilerConfigBuilder {
 }
 
 impl ReconcilerConfigBuilder {
-    pub(crate) fn new() -> Self {
+    /// Priority is special: you must pick one thoughtfully, do not just use 'normal' as the default
+    pub(crate) fn new(priority: ReconcilerPriority) -> Self {
         Self {
-            config: ReconcilerConfig::new(ReconcilerPriority::Normal),
+            config: ReconcilerConfig::new(priority),
         }
     }
 
@@ -186,7 +187,9 @@ impl ReconcilerConfig {
 
 impl From<&MigrationConfig> for ReconcilerConfig {
     fn from(value: &MigrationConfig) -> Self {
-        let mut builder = ReconcilerConfigBuilder::new();
+        // Run reconciler at high priority because MigrationConfig comes from human requests that should
+        // be presumed urgent.
+        let mut builder = ReconcilerConfigBuilder::new(ReconcilerPriority::High);
 
         if let Some(timeout) = value.secondary_warmup_timeout {
             builder = builder.secondary_warmup_timeout(timeout)

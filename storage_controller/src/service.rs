@@ -2355,7 +2355,7 @@ impl Service {
         let waiters = {
             let mut locked = self.inner.write().unwrap();
             let (nodes, tenants, _scheduler) = locked.parts_mut();
-            let config = ReconcilerConfigBuilder::new()
+            let config = ReconcilerConfigBuilder::new(ReconcilerPriority::High)
                 .tenant_creation_hint(true)
                 .build();
             tenants
@@ -7282,7 +7282,7 @@ impl Service {
         // to not stall the operation when a cold secondary is encountered.
         const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(20);
         const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-        let reconciler_config = ReconcilerConfigBuilder::new()
+        let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal)
             .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
             .secondary_download_request_timeout(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT)
             .build();
@@ -7615,7 +7615,7 @@ impl Service {
     ) -> Result<(), OperationError> {
         const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(20);
         const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-        let reconciler_config = ReconcilerConfigBuilder::new()
+        let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal)
             .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
             .secondary_download_request_timeout(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT)
             .build();
