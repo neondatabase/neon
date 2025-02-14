@@ -516,6 +516,17 @@ async fn handle_tenant_timeline_block_unblock_gc(
     json_response(StatusCode::OK, ())
 }
 
+// For metric labels where we would like to include the approximate path, but exclude high-cardinality fields like query parameters
+// and tenant/timeline IDs.  Since we are proxying to arbitrary paths, we don't have routing templates to
+// compare to, so we can just filter out our well known ID format with regexes.
+fn path_without_ids(path: &str) -> String {
+    static ID_REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    ID_REGEX
+        .get_or_init(|| regex::Regex::new(r"([0-9a-fA-F]{32}(-[0-9]{4})?|\?.*)").unwrap())
+        .replace_all(path, "")
+        .to_string()
+}
+
 async fn handle_tenant_timeline_passthrough(
     service: Arc<Service>,
     req: Request<Body>,
@@ -551,10 +562,7 @@ async fn handle_tenant_timeline_passthrough(
         .metrics_group
         .storage_controller_passthrough_request_latency;
 
-    // This is a bit awkward. We remove the param from the request
-    // and join the words by '_' to get a label for the request.
-    let just_path = path.replace(&tenant_shard_str, "");
-    let path_label = just_path
+    let path_label = path_without_ids(&path)
         .split('/')
         .filter(|token| !token.is_empty())
         .collect::<Vec<_>>()
@@ -2088,4 +2096,17 @@ pub fn make_router(
                 RequestName("v1_tenant_passthrough"),
             )
         })
+}
+
+#[cfg(test)]
+mod test {
+
+    use super::path_without_ids;
+
+    #[test]
+    fn test_path_without_ids() {
+        assert_eq!(path_without_ids("/v1/tenant/1a2b3344556677881122334455667788/timeline/AA223344556677881122334455667788"), "/v1/tenant//timeline/");
+        assert_eq!(path_without_ids("/v1/tenant/1a2b3344556677881122334455667788-0108/timeline/AA223344556677881122334455667788"), "/v1/tenant//timeline/");
+        assert_eq!(path_without_ids("/v1/tenant/1a2b3344556677881122334455667788-0108/timeline/AA223344556677881122334455667788?parameter=foo"), "/v1/tenant//timeline/");
+    }
 }

@@ -914,7 +914,7 @@ impl PageServerHandler {
                     &shard,
                     req.hdr.request_lsn,
                     req.hdr.not_modified_since,
-                    &shard.get_latest_gc_cutoff_lsn(),
+                    &shard.get_applied_gc_cutoff_lsn(),
                     ctx,
                 )
                 // TODO: if we actually need to wait for lsn here, it delays the entire batch which doesn't need to wait
@@ -1810,7 +1810,7 @@ impl PageServerHandler {
         req: &PagestreamExistsRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
             req.hdr.request_lsn,
@@ -1837,7 +1837,7 @@ impl PageServerHandler {
         req: &PagestreamNblocksRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
             req.hdr.request_lsn,
@@ -1864,7 +1864,7 @@ impl PageServerHandler {
         req: &PagestreamDbSizeRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
             req.hdr.request_lsn,
@@ -1954,7 +1954,7 @@ impl PageServerHandler {
         req: &PagestreamGetSlruSegmentRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
             req.hdr.request_lsn,
@@ -2050,7 +2050,8 @@ impl PageServerHandler {
     {
         fn map_basebackup_error(err: BasebackupError) -> QueryError {
             match err {
-                BasebackupError::Client(e) => QueryError::Disconnected(ConnectionError::Io(e)),
+                // TODO: passthrough the error site to the final error message?
+                BasebackupError::Client(e, _) => QueryError::Disconnected(ConnectionError::Io(e)),
                 BasebackupError::Server(e) => QueryError::Other(e),
             }
         }
@@ -2071,7 +2072,7 @@ impl PageServerHandler {
             //return Err(QueryError::NotFound("timeline is archived".into()))
         }
 
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
             info!("waiting for {}", lsn);
@@ -2151,10 +2152,12 @@ impl PageServerHandler {
                 .await
                 .map_err(map_basebackup_error)?;
             }
-            writer
-                .flush()
-                .await
-                .map_err(|e| map_basebackup_error(BasebackupError::Client(e)))?;
+            writer.flush().await.map_err(|e| {
+                map_basebackup_error(BasebackupError::Client(
+                    e,
+                    "handle_basebackup_request,flush",
+                ))
+            })?;
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)

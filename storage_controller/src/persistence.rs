@@ -1185,23 +1185,6 @@ impl Persistence {
         Ok(safekeepers)
     }
 
-    pub(crate) async fn safekeeper_get(
-        &self,
-        id: i64,
-    ) -> Result<SafekeeperPersistence, DatabaseError> {
-        use crate::schema::safekeepers::dsl::{id as id_column, safekeepers};
-        self.with_conn(move |conn| {
-            Box::pin(async move {
-                Ok(safekeepers
-                    .filter(id_column.eq(&id))
-                    .select(SafekeeperPersistence::as_select())
-                    .get_result(conn)
-                    .await?)
-            })
-        })
-        .await
-    }
-
     pub(crate) async fn safekeeper_upsert(
         &self,
         record: SafekeeperUpsert,
@@ -1554,6 +1537,21 @@ pub(crate) struct SafekeeperPersistence {
 }
 
 impl SafekeeperPersistence {
+    pub(crate) fn from_upsert(
+        upsert: SafekeeperUpsert,
+        scheduling_policy: SkSchedulingPolicy,
+    ) -> Self {
+        crate::persistence::SafekeeperPersistence {
+            id: upsert.id,
+            region_id: upsert.region_id,
+            version: upsert.version,
+            host: upsert.host,
+            port: upsert.port,
+            http_port: upsert.http_port,
+            availability_zone_id: upsert.availability_zone_id,
+            scheduling_policy: String::from(scheduling_policy),
+        }
+    }
     pub(crate) fn as_describe_response(&self) -> Result<SafekeeperDescribeResponse, DatabaseError> {
         let scheduling_policy =
             SkSchedulingPolicy::from_str(&self.scheduling_policy).map_err(|e| {

@@ -40,6 +40,8 @@ use remote_timeline_client::manifest::{
 use remote_timeline_client::UploadQueueNotReadyError;
 use remote_timeline_client::FAILED_REMOTE_OP_RETRIES;
 use remote_timeline_client::FAILED_UPLOAD_WARN_THRESHOLD;
+use secondary::heatmap::HeatMapTenant;
+use secondary::heatmap::HeatMapTimeline;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -55,6 +57,7 @@ use timeline::offload::OffloadError;
 use timeline::CompactFlags;
 use timeline::CompactOptions;
 use timeline::CompactionError;
+use timeline::PreviousHeatmap;
 use timeline::ShutdownMode;
 use tokio::io::BufReader;
 use tokio::sync::watch;
@@ -262,6 +265,7 @@ struct TimelinePreload {
     timeline_id: TimelineId,
     client: RemoteTimelineClient,
     index_part: Result<MaybeDeletedIndexPart, DownloadError>,
+    previous_heatmap: Option<PreviousHeatmap>,
 }
 
 pub(crate) struct TenantPreload {
@@ -1128,6 +1132,7 @@ impl Tenant {
         resources: TimelineResources,
         mut index_part: IndexPart,
         metadata: TimelineMetadata,
+        previous_heatmap: Option<PreviousHeatmap>,
         ancestor: Option<Arc<Timeline>>,
         cause: LoadTimelineCause,
         ctx: &RequestContext,
@@ -1158,6 +1163,7 @@ impl Tenant {
         let timeline = self.create_timeline_struct(
             timeline_id,
             &metadata,
+            previous_heatmap,
             ancestor.clone(),
             resources,
             CreateTimelineCause::Load,
@@ -1557,8 +1563,18 @@ impl Tenant {
             }
         }
 
+        // TODO(vlad): Could go to S3 if the secondary is freezing cold and hasn't even
+        // pulled the first heatmap. Not entirely necessary since the storage controller
+        // will kick the secondary in any case and cause a download.
+        let maybe_heatmap_at = self.read_on_disk_heatmap().await;
+
         let timelines = self
-            .load_timelines_metadata(remote_timeline_ids, remote_storage, cancel)
+            .load_timelines_metadata(
+                remote_timeline_ids,
+                remote_storage,
+                maybe_heatmap_at,
+                cancel,
+            )
             .await?;
 
         Ok(TenantPreload {
@@ -1569,6 +1585,26 @@ impl Tenant {
                 .chain(offloaded_with_prefix.into_iter().map(|id| (id, None)))
                 .collect(),
         })
+    }
+
+    async fn read_on_disk_heatmap(&self) -> Option<(HeatMapTenant, std::time::Instant)> {
+        let on_disk_heatmap_path = self.conf.tenant_heatmap_path(&self.tenant_shard_id);
+        match tokio::fs::read_to_string(on_disk_heatmap_path).await {
+            Ok(heatmap) => match serde_json::from_str::<HeatMapTenant>(&heatmap) {
+                Ok(heatmap) => Some((heatmap, std::time::Instant::now())),
+                Err(err) => {
+                    error!("Failed to deserialize old heatmap: {err}");
+                    None
+                }
+            },
+            Err(err) => match err.kind() {
+                std::io::ErrorKind::NotFound => None,
+                _ => {
+                    error!("Unexpected IO error reading old heatmap: {err}");
+                    None
+                }
+            },
+        }
     }
 
     ///
@@ -1658,7 +1694,10 @@ impl Tenant {
             match index_part {
                 MaybeDeletedIndexPart::IndexPart(index_part) => {
                     timeline_ancestors.insert(timeline_id, index_part.metadata.clone());
-                    remote_index_and_client.insert(timeline_id, (index_part, preload.client));
+                    remote_index_and_client.insert(
+                        timeline_id,
+                        (index_part, preload.client, preload.previous_heatmap),
+                    );
                 }
                 MaybeDeletedIndexPart::Deleted(index_part) => {
                     info!(
@@ -1677,7 +1716,7 @@ impl Tenant {
         // layer file.
         let sorted_timelines = tree_sort_timelines(timeline_ancestors, |m| m.ancestor_timeline())?;
         for (timeline_id, remote_metadata) in sorted_timelines {
-            let (index_part, remote_client) = remote_index_and_client
+            let (index_part, remote_client, previous_heatmap) = remote_index_and_client
                 .remove(&timeline_id)
                 .expect("just put it in above");
 
@@ -1697,6 +1736,7 @@ impl Tenant {
                     timeline_id,
                     index_part,
                     remote_metadata,
+                    previous_heatmap,
                     self.get_timeline_resources_for(remote_client),
                     LoadTimelineCause::Attach,
                     ctx,
@@ -1846,11 +1886,13 @@ impl Tenant {
     }
 
     #[instrument(skip_all, fields(timeline_id=%timeline_id))]
+    #[allow(clippy::too_many_arguments)]
     async fn load_remote_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
         index_part: IndexPart,
         remote_metadata: TimelineMetadata,
+        previous_heatmap: Option<PreviousHeatmap>,
         resources: TimelineResources,
         cause: LoadTimelineCause,
         ctx: &RequestContext,
@@ -1880,6 +1922,7 @@ impl Tenant {
             resources,
             index_part,
             remote_metadata,
+            previous_heatmap,
             ancestor,
             cause,
             ctx,
@@ -1891,14 +1934,29 @@ impl Tenant {
         self: &Arc<Tenant>,
         timeline_ids: HashSet<TimelineId>,
         remote_storage: &GenericRemoteStorage,
+        heatmap: Option<(HeatMapTenant, std::time::Instant)>,
         cancel: CancellationToken,
     ) -> anyhow::Result<HashMap<TimelineId, TimelinePreload>> {
+        let mut timeline_heatmaps = heatmap.map(|h| (h.0.into_timelines_index(), h.1));
+
         let mut part_downloads = JoinSet::new();
         for timeline_id in timeline_ids {
             let cancel_clone = cancel.clone();
+
+            let previous_timeline_heatmap = timeline_heatmaps.as_mut().and_then(|hs| {
+                hs.0.remove(&timeline_id).map(|h| PreviousHeatmap::Active {
+                    heatmap: h,
+                    read_at: hs.1,
+                })
+            });
             part_downloads.spawn(
-                self.load_timeline_metadata(timeline_id, remote_storage.clone(), cancel_clone)
-                    .instrument(info_span!("download_index_part", %timeline_id)),
+                self.load_timeline_metadata(
+                    timeline_id,
+                    remote_storage.clone(),
+                    previous_timeline_heatmap,
+                    cancel_clone,
+                )
+                .instrument(info_span!("download_index_part", %timeline_id)),
             );
         }
 
@@ -1946,6 +2004,7 @@ impl Tenant {
         self: &Arc<Tenant>,
         timeline_id: TimelineId,
         remote_storage: GenericRemoteStorage,
+        previous_heatmap: Option<PreviousHeatmap>,
         cancel: CancellationToken,
     ) -> impl Future<Output = TimelinePreload> {
         let client = self.build_timeline_client(timeline_id, remote_storage);
@@ -1961,6 +2020,7 @@ impl Tenant {
                 client,
                 timeline_id,
                 index_part,
+                previous_heatmap,
             }
         }
     }
@@ -2072,7 +2132,12 @@ impl Tenant {
             })?;
 
         let timeline_preload = self
-            .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel.clone())
+            .load_timeline_metadata(
+                timeline_id,
+                self.remote_storage.clone(),
+                None,
+                cancel.clone(),
+            )
             .await;
 
         let index_part = match timeline_preload.index_part {
@@ -2106,6 +2171,7 @@ impl Tenant {
             timeline_id,
             index_part,
             remote_metadata,
+            None,
             timeline_resources,
             LoadTimelineCause::Unoffload,
             &ctx,
@@ -2821,7 +2887,7 @@ impl Tenant {
         };
         let metadata = index_part.metadata.clone();
         self
-            .load_remote_timeline(timeline_id, index_part, metadata, resources, LoadTimelineCause::ImportPgdata{
+            .load_remote_timeline(timeline_id, index_part, metadata, None, resources, LoadTimelineCause::ImportPgdata{
                 create_guard: timeline_create_guard, activate, }, &ctx)
             .await?
             .ready_to_activate()
@@ -4030,6 +4096,7 @@ impl Tenant {
         &self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
+        previous_heatmap: Option<PreviousHeatmap>,
         ancestor: Option<Arc<Timeline>>,
         resources: TimelineResources,
         cause: CreateTimelineCause,
@@ -4053,6 +4120,7 @@ impl Tenant {
             self.conf,
             Arc::clone(&self.tenant_conf),
             new_metadata,
+            previous_heatmap,
             ancestor,
             new_timeline_id,
             self.tenant_shard_id,
@@ -4695,24 +4763,24 @@ impl Tenant {
         // We check it against both the planned GC cutoff stored in 'gc_info',
         // and the 'latest_gc_cutoff' of the last GC that was performed.  The
         // planned GC cutoff in 'gc_info' is normally larger than
-        // 'latest_gc_cutoff_lsn', but beware of corner cases like if you just
+        // 'applied_gc_cutoff_lsn', but beware of corner cases like if you just
         // changed the GC settings for the tenant to make the PITR window
         // larger, but some of the data was already removed by an earlier GC
         // iteration.
 
         // check against last actual 'latest_gc_cutoff' first
-        let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
+        let applied_gc_cutoff_lsn = src_timeline.get_applied_gc_cutoff_lsn();
         {
             let gc_info = src_timeline.gc_info.read().unwrap();
             let planned_cutoff = gc_info.min_cutoff();
             if gc_info.lsn_covered_by_lease(start_lsn) {
-                tracing::info!("skipping comparison of {start_lsn} with gc cutoff {} and planned gc cutoff {planned_cutoff} due to lsn lease", *latest_gc_cutoff_lsn);
+                tracing::info!("skipping comparison of {start_lsn} with gc cutoff {} and planned gc cutoff {planned_cutoff} due to lsn lease", *applied_gc_cutoff_lsn);
             } else {
                 src_timeline
-                    .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
+                    .check_lsn_is_in_scope(start_lsn, &applied_gc_cutoff_lsn)
                     .context(format!(
                         "invalid branch start lsn: less than latest GC cutoff {}",
-                        *latest_gc_cutoff_lsn,
+                        *applied_gc_cutoff_lsn,
                     ))
                     .map_err(CreateTimelineError::AncestorLsn)?;
 
@@ -4751,7 +4819,7 @@ impl Tenant {
             dst_prev,
             Some(src_id),
             start_lsn,
-            *src_timeline.latest_gc_cutoff_lsn.read(), // FIXME: should we hold onto this guard longer?
+            *src_timeline.applied_gc_cutoff_lsn.read(), // FIXME: should we hold onto this guard longer?
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
         );
@@ -5124,6 +5192,7 @@ impl Tenant {
             .create_timeline_struct(
                 new_timeline_id,
                 new_metadata,
+                None,
                 ancestor,
                 resources,
                 CreateTimelineCause::Load,
@@ -6130,8 +6199,8 @@ mod tests {
         make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)?;
-        let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
-        assert!(*latest_gc_cutoff_lsn > Lsn(0x25));
+        let applied_gc_cutoff_lsn = tline.get_applied_gc_cutoff_lsn();
+        assert!(*applied_gc_cutoff_lsn > Lsn(0x25));
         match tline.get(*TEST_KEY, Lsn(0x25)) {
             Ok(_) => panic!("request for page should have failed"),
             Err(err) => assert!(err.to_string().contains("not found at")),
@@ -8427,7 +8496,7 @@ mod tests {
             .await?;
         {
             tline
-                .latest_gc_cutoff_lsn
+                .applied_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x30))
                 .wait()
@@ -8535,7 +8604,7 @@ mod tests {
         // increase GC horizon and compact again
         {
             tline
-                .latest_gc_cutoff_lsn
+                .applied_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x40))
                 .wait()
@@ -8703,8 +8772,8 @@ mod tests {
 
         // Force set disk consistent lsn so we can get the cutoff at `end_lsn`.
         info!(
-            "latest_gc_cutoff_lsn: {}",
-            *timeline.get_latest_gc_cutoff_lsn()
+            "applied_gc_cutoff_lsn: {}",
+            *timeline.get_applied_gc_cutoff_lsn()
         );
         timeline.force_set_disk_consistent_lsn(end_lsn);
 
@@ -8730,7 +8799,7 @@ mod tests {
 
         // Make lease on a already GC-ed LSN.
         // 0/80 does not have a valid lease + is below latest_gc_cutoff
-        assert!(Lsn(0x80) < *timeline.get_latest_gc_cutoff_lsn());
+        assert!(Lsn(0x80) < *timeline.get_applied_gc_cutoff_lsn());
         timeline
             .init_lsn_lease(Lsn(0x80), timeline.get_lsn_lease_length(), &ctx)
             .expect_err("lease request on GC-ed LSN should fail");
@@ -8921,7 +8990,7 @@ mod tests {
         };
         {
             tline
-                .latest_gc_cutoff_lsn
+                .applied_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x30))
                 .wait()
@@ -9008,7 +9077,7 @@ mod tests {
         // increase GC horizon and compact again
         {
             tline
-                .latest_gc_cutoff_lsn
+                .applied_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x40))
                 .wait()
@@ -9461,7 +9530,7 @@ mod tests {
             .await?;
         {
             tline
-                .latest_gc_cutoff_lsn
+                .applied_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x30))
                 .wait()
@@ -9608,7 +9677,7 @@ mod tests {
         // increase GC horizon and compact again
         {
             tline
-                .latest_gc_cutoff_lsn
+                .applied_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x38))
                 .wait()
@@ -9709,7 +9778,7 @@ mod tests {
             .await?;
         {
             tline
-                .latest_gc_cutoff_lsn
+                .applied_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x30))
                 .wait()
@@ -9960,7 +10029,7 @@ mod tests {
 
         {
             parent_tline
-                .latest_gc_cutoff_lsn
+                .applied_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x10))
                 .wait()
@@ -9980,7 +10049,7 @@ mod tests {
 
         {
             branch_tline
-                .latest_gc_cutoff_lsn
+                .applied_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x50))
                 .wait()
@@ -10336,7 +10405,7 @@ mod tests {
 
         {
             tline
-                .latest_gc_cutoff_lsn
+                .applied_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x30))
                 .wait()
@@ -10721,7 +10790,7 @@ mod tests {
             .await?;
         {
             tline
-                .latest_gc_cutoff_lsn
+                .applied_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x30))
                 .wait()
@@ -10972,7 +11041,7 @@ mod tests {
             .await?;
         {
             tline
-                .latest_gc_cutoff_lsn
+                .applied_gc_cutoff_lsn
                 .lock_for_write()
                 .store_and_unlock(Lsn(0x30))
                 .wait()
