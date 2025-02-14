@@ -9,6 +9,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Poll};
@@ -142,6 +143,15 @@ pub enum MaybeTlsStream<IO> {
     Tls(Box<tokio_rustls::server::TlsStream<IO>>),
 }
 
+impl<IO> MaybeTlsStream<IO> {
+    pub fn get_io(&self) -> &IO {
+        match self {
+            Self::Unencrypted(s) => s,
+            Self::Tls(s) => s.get_ref().0,
+        }
+    }
+}
+
 impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for MaybeTlsStream<IO> {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -265,6 +275,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeWriteOnly<IO> {
             MaybeWriteOnly::Broken => panic!("IO on invalid MaybeWriteOnly"),
         }
     }
+
+    fn get_socket_fd(&self) -> impl AsRawFd {
+        match self {
+            MaybeWriteOnly::Full(framed) => framed.get_ref().get_io(),
+            MaybeWriteOnly::WriteOnly(framed_writer) => framed_writer.get_socket_fd(),
+            MaybeWriteOnly::Broken => panic!("IO on invalid MaybeWriteOnly"),
+        }
+    }
 }
 
 pub struct PostgresBackend<IO> {
@@ -325,6 +343,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
 
     pub fn get_peer_addr(&self) -> &SocketAddr {
         &self.peer_addr
+    }
+
+    pub fn get_socket_fd(&self) -> impl AsRawFd {
+        self.framed.get_socket_fd()
     }
 
     /// Read full message or return None if connection is cleanly closed with no

@@ -159,6 +159,13 @@ pub struct FramedWriter<S> {
     write_buf: BytesMut,
 }
 
+impl<S> FramedWriter<S> {
+    /// Get a shared reference to the underlying stream.
+    pub fn with_lock(&self) -> &WriteHalf<S> {
+        &self.stream
+    }
+}
+
 impl<S: AsyncWrite + Unpin> FramedWriter<S> {
     /// Write next message to the output buffer; doesn't flush.
     pub fn write_message_noflush(&mut self, msg: &BeMessage<'_>) -> Result<(), ProtocolError> {

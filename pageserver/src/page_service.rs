@@ -1286,6 +1286,7 @@ impl PageServerHandler {
             ))?;
 
             // what we want to do
+            let socket_fd = pgb_writer.get_socket_fd();
             let flush_fut = pgb_writer.flush();
             // metric for how long flushing takes
             let flush_fut = match flushing_timer {
