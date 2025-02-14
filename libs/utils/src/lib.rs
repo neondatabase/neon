@@ -93,6 +93,9 @@ pub mod try_rcu;
 
 pub mod guard_arc_swap;
 
+#[cfg(target_os = "linux")]
+pub mod linux_socket_ioctl;
+
 // Re-export used in macro. Avoids adding git-version as dep in target crates.
 #[doc(hidden)]
 pub use git_version;
