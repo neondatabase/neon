@@ -55,7 +55,9 @@ impl HeatmapLayersDownloader {
                         async move {
                             let res = tl.download_layer(&layer.name).await;
                             if let Err(err) = res {
-                                tracing::warn!(layer=%layer.name,"Failed to download heatmap layer: {err}")
+                                if !err.is_cancelled() {
+                                    tracing::warn!(layer=%layer.name,"Failed to download heatmap layer: {err}")
+                                }
                             }
                         }
                     }
