@@ -10,8 +10,8 @@ use pageserver_api::{
     controller_api::{
         AvailabilityZone, NodeAvailabilityWrapper, NodeDescribeResponse, NodeShardResponse,
         SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest, ShardSchedulingPolicy,
-        ShardsPreferredAzsRequest, SkSchedulingPolicy, TenantCreateRequest, TenantDescribeResponse,
-        TenantPolicyRequest,
+        ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, SkSchedulingPolicy,
+        TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
     },
     models::{
         EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
@@ -609,7 +609,10 @@ async fn main() -> anyhow::Result<()> {
             tenant_shard_id,
             node,
         } => {
-            let req = TenantShardMigrateRequest { node_id: node };
+            let req = TenantShardMigrateRequest {
+                node_id: node,
+                migration_config: None,
+            };
 
             storcon_client
                 .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
@@ -623,7 +626,10 @@ async fn main() -> anyhow::Result<()> {
             tenant_shard_id,
             node,
         } => {
-            let req = TenantShardMigrateRequest { node_id: node };
+            let req = TenantShardMigrateRequest {
+                node_id: node,
+                migration_config: None,
+            };
 
             storcon_client
                 .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
@@ -800,7 +806,7 @@ async fn main() -> anyhow::Result<()> {
                     .collect(),
             };
             storcon_client
-                .dispatch::<ShardsPreferredAzsRequest, ()>(
+                .dispatch::<ShardsPreferredAzsRequest, ShardsPreferredAzsResponse>(
                     Method::PUT,
                     "control/v1/preferred_azs".to_string(),
                     Some(req),
@@ -1082,7 +1088,10 @@ async fn main() -> anyhow::Result<()> {
                             .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
                                 Method::PUT,
                                 format!("control/v1/tenant/{}/migrate", mv.tenant_shard_id),
-                                Some(TenantShardMigrateRequest { node_id: mv.to }),
+                                Some(TenantShardMigrateRequest {
+                                    node_id: mv.to,
+                                    migration_config: None,
+                                }),
                             )
                             .await
                             .map_err(|e| (mv.tenant_shard_id, mv.from, mv.to, e))

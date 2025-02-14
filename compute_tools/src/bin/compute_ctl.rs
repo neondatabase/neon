@@ -34,25 +34,28 @@
 //!             -r http://pg-ext-s3-gateway \
 //! ```
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::path::Path;
 use std::process::exit;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
+use std::time::SystemTime;
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use clap::Arg;
+use clap::Parser;
 use compute_tools::disk_quota::set_disk_quota;
+use compute_tools::http::server::Server;
 use compute_tools::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use tracing::{error, info, warn};
 use url::Url;
 
-use compute_api::responses::ComputeStatus;
+use compute_api::responses::{ComputeCtlConfig, ComputeStatus};
 use compute_api::spec::ComputeSpec;
 
 use compute_tools::compute::{
@@ -60,7 +63,6 @@ use compute_tools::compute::{
 };
 use compute_tools::configurator::launch_configurator;
 use compute_tools::extension_server::get_pg_version_string;
-use compute_tools::http::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
@@ -73,10 +75,109 @@ use utils::failpoint_support;
 // in-case of not-set environment var
 const BUILD_TAG_DEFAULT: &str = "latest";
 
-fn main() -> Result<()> {
-    let scenario = failpoint_support::init();
+// Compatibility hack: if the control plane specified any remote-ext-config
+// use the default value for extension storage proxy gateway.
+// Remove this once the control plane is updated to pass the gateway URL
+fn parse_remote_ext_config(arg: &str) -> Result<String> {
+    if arg.starts_with("http") {
+        Ok(arg.trim_end_matches('/').to_string())
+    } else {
+        Ok("http://pg-ext-s3-gateway".to_string())
+    }
+}
 
-    let (build_tag, clap_args) = init()?;
+/// Generate a compute ID if one is not supplied. This exists to keep forward
+/// compatibility tests working, but will be removed in a future iteration.
+fn generate_compute_id() -> String {
+    let now = SystemTime::now();
+
+    format!(
+        "compute-{}",
+        now.duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    )
+}
+
+#[derive(Parser)]
+#[command(rename_all = "kebab-case")]
+struct Cli {
+    #[arg(short = 'b', long, default_value = "postgres", env = "POSTGRES_PATH")]
+    pub pgbin: String,
+
+    #[arg(short = 'r', long, value_parser = parse_remote_ext_config)]
+    pub remote_ext_config: Option<String>,
+
+    /// The port to bind the external listening HTTP server to. Clients running
+    /// outside the compute will talk to the compute through this port. Keep
+    /// the previous name for this argument around for a smoother release
+    /// with the control plane.
+    ///
+    /// TODO: Remove the alias after the control plane release which teaches the
+    /// control plane about the renamed argument.
+    #[arg(long, alias = "http-port", default_value_t = 3080)]
+    pub external_http_port: u16,
+
+    /// The port to bind the internal listening HTTP server to. Clients like
+    /// the neon extension (for installing remote extensions) and local_proxy.
+    #[arg(long)]
+    pub internal_http_port: Option<u16>,
+
+    #[arg(short = 'D', long, value_name = "DATADIR")]
+    pub pgdata: String,
+
+    #[arg(short = 'C', long, value_name = "DATABASE_URL")]
+    pub connstr: String,
+
+    #[cfg(target_os = "linux")]
+    #[arg(long, default_value = "neon-postgres")]
+    pub cgroup: String,
+
+    #[cfg(target_os = "linux")]
+    #[arg(
+        long,
+        default_value = "host=localhost port=5432 dbname=postgres user=cloud_admin sslmode=disable application_name=vm-monitor"
+    )]
+    pub filecache_connstr: String,
+
+    #[cfg(target_os = "linux")]
+    #[arg(long, default_value = "0.0.0.0:10301")]
+    pub vm_monitor_addr: String,
+
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub resize_swap_on_bind: bool,
+
+    #[arg(long)]
+    pub set_disk_quota_for_fs: Option<String>,
+
+    #[arg(short = 's', long = "spec", group = "spec")]
+    pub spec_json: Option<String>,
+
+    #[arg(short = 'S', long, group = "spec-path")]
+    pub spec_path: Option<OsString>,
+
+    #[arg(short = 'i', long, group = "compute-id", default_value = generate_compute_id())]
+    pub compute_id: String,
+
+    #[arg(short = 'p', long, conflicts_with_all = ["spec", "spec-path"], value_name = "CONTROL_PLANE_API_BASE_URL")]
+    pub control_plane_uri: Option<String>,
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // For historical reasons, the main thread that processes the spec and launches postgres
+    // is synchronous, but we always have this tokio runtime available and we "enter" it so
+    // that you can use tokio::spawn() and tokio::runtime::Handle::current().block_on(...)
+    // from all parts of compute_ctl.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let _rt_guard = runtime.enter();
+
+    let build_tag = runtime.block_on(init())?;
+
+    let scenario = failpoint_support::init();
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
@@ -85,13 +186,11 @@ fn main() -> Result<()> {
         // Enter startup tracing context
         let _startup_context_guard = startup_context_from_env();
 
-        let cli_args = process_cli(&clap_args)?;
+        let cli_spec = try_spec_from_cli(&cli)?;
 
-        let cli_spec = try_spec_from_cli(&clap_args, &cli_args)?;
+        let compute = wait_spec(build_tag, &cli, cli_spec)?;
 
-        let wait_spec_result = wait_spec(build_tag, cli_args, cli_spec)?;
-
-        start_postgres(&clap_args, wait_spec_result)?
+        start_postgres(&cli, compute)?
 
         // Startup is finished, exit the startup tracing span
     };
@@ -108,8 +207,8 @@ fn main() -> Result<()> {
     deinit_and_exit(wait_pg_result);
 }
 
-fn init() -> Result<(String, clap::ArgMatches)> {
-    init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
+async fn init() -> Result<String> {
+    init_tracing_and_logging(DEFAULT_LOG_LEVEL).await?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
     thread::spawn(move || {
@@ -123,66 +222,7 @@ fn init() -> Result<(String, clap::ArgMatches)> {
         .to_string();
     info!("build_tag: {build_tag}");
 
-    Ok((build_tag, cli().get_matches()))
-}
-
-fn process_cli(matches: &clap::ArgMatches) -> Result<ProcessCliResult> {
-    let pgbin_default = "postgres";
-    let pgbin = matches
-        .get_one::<String>("pgbin")
-        .map(|s| s.as_str())
-        .unwrap_or(pgbin_default);
-
-    let ext_remote_storage = matches
-        .get_one::<String>("remote-ext-config")
-        // Compatibility hack: if the control plane specified any remote-ext-config
-        // use the default value for extension storage proxy gateway.
-        // Remove this once the control plane is updated to pass the gateway URL
-        .map(|conf| {
-            if conf.starts_with("http") {
-                conf.trim_end_matches('/')
-            } else {
-                "http://pg-ext-s3-gateway"
-            }
-        });
-
-    let http_port = *matches
-        .get_one::<u16>("http-port")
-        .expect("http-port is required");
-    let pgdata = matches
-        .get_one::<String>("pgdata")
-        .expect("PGDATA path is required");
-    let connstr = matches
-        .get_one::<String>("connstr")
-        .expect("Postgres connection string is required");
-    let spec_json = matches.get_one::<String>("spec");
-    let spec_path = matches.get_one::<String>("spec-path");
-    let resize_swap_on_bind = matches.get_flag("resize-swap-on-bind");
-    let set_disk_quota_for_fs = matches.get_one::<String>("set-disk-quota-for-fs");
-
-    Ok(ProcessCliResult {
-        connstr,
-        pgdata,
-        pgbin,
-        ext_remote_storage,
-        http_port,
-        spec_json,
-        spec_path,
-        resize_swap_on_bind,
-        set_disk_quota_for_fs,
-    })
-}
-
-struct ProcessCliResult<'clap> {
-    connstr: &'clap str,
-    pgdata: &'clap str,
-    pgbin: &'clap str,
-    ext_remote_storage: Option<&'clap str>,
-    http_port: u16,
-    spec_json: Option<&'clap String>,
-    spec_path: Option<&'clap String>,
-    resize_swap_on_bind: bool,
-    set_disk_quota_for_fs: Option<&'clap String>,
+    Ok(build_tag)
 }
 
 fn startup_context_from_env() -> Option<opentelemetry::ContextGuard> {
@@ -235,48 +275,35 @@ fn startup_context_from_env() -> Option<opentelemetry::ContextGuard> {
     }
 }
 
-fn try_spec_from_cli(
-    matches: &clap::ArgMatches,
-    ProcessCliResult {
-        spec_json,
-        spec_path,
-        ..
-    }: &ProcessCliResult,
-) -> Result<CliSpecParams> {
-    let compute_id = matches.get_one::<String>("compute-id");
-    let control_plane_uri = matches.get_one::<String>("control-plane-uri");
-
+fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {
     // First, try to get cluster spec from the cli argument
-    if let Some(spec_json) = spec_json {
+    if let Some(ref spec_json) = cli.spec_json {
         info!("got spec from cli argument {}", spec_json);
         return Ok(CliSpecParams {
             spec: Some(serde_json::from_str(spec_json)?),
+            compute_ctl_config: ComputeCtlConfig::default(),
             live_config_allowed: false,
         });
     }
 
     // Second, try to read it from the file if path is provided
-    if let Some(spec_path) = spec_path {
+    if let Some(ref spec_path) = cli.spec_path {
         let file = File::open(Path::new(spec_path))?;
         return Ok(CliSpecParams {
             spec: Some(serde_json::from_reader(file)?),
+            compute_ctl_config: ComputeCtlConfig::default(),
             live_config_allowed: true,
         });
     }
 
-    let Some(compute_id) = compute_id else {
-        panic!(
-            "compute spec should be provided by one of the following ways: \
-                --spec OR --spec-path OR --control-plane-uri and --compute-id"
-        );
-    };
-    let Some(control_plane_uri) = control_plane_uri else {
-        panic!("must specify both --control-plane-uri and --compute-id or none");
+    if cli.control_plane_uri.is_none() {
+        panic!("must specify --control-plane-uri");
     };
 
-    match get_spec_from_control_plane(control_plane_uri, compute_id) {
-        Ok(spec) => Ok(CliSpecParams {
-            spec,
+    match get_spec_from_control_plane(cli.control_plane_uri.as_ref().unwrap(), &cli.compute_id) {
+        Ok(resp) => Ok(CliSpecParams {
+            spec: resp.0,
+            compute_ctl_config: resp.1,
             live_config_allowed: true,
         }),
         Err(e) => {
@@ -293,26 +320,20 @@ fn try_spec_from_cli(
 struct CliSpecParams {
     /// If a spec was provided via CLI or file, the [`ComputeSpec`]
     spec: Option<ComputeSpec>,
+    #[allow(dead_code)]
+    compute_ctl_config: ComputeCtlConfig,
     live_config_allowed: bool,
 }
 
 fn wait_spec(
     build_tag: String,
-    ProcessCliResult {
-        connstr,
-        pgdata,
-        pgbin,
-        ext_remote_storage,
-        resize_swap_on_bind,
-        set_disk_quota_for_fs,
-        http_port,
-        ..
-    }: ProcessCliResult,
+    cli: &Cli,
     CliSpecParams {
         spec,
         live_config_allowed,
+        compute_ctl_config: _,
     }: CliSpecParams,
-) -> Result<WaitSpecResult> {
+) -> Result<Arc<ComputeNode>> {
     let mut new_state = ComputeState::new();
     let spec_set;
 
@@ -324,23 +345,25 @@ fn wait_spec(
     } else {
         spec_set = false;
     }
-    let connstr = Url::parse(connstr).context("cannot parse connstr as a URL")?;
+    let connstr = Url::parse(&cli.connstr).context("cannot parse connstr as a URL")?;
     let conn_conf = postgres::config::Config::from_str(connstr.as_str())
         .context("cannot build postgres config from connstr")?;
     let tokio_conn_conf = tokio_postgres::config::Config::from_str(connstr.as_str())
         .context("cannot build tokio postgres config from connstr")?;
     let compute_node = ComputeNode {
+        compute_id: cli.compute_id.clone(),
         connstr,
         conn_conf,
         tokio_conn_conf,
-        pgdata: pgdata.to_string(),
-        pgbin: pgbin.to_string(),
-        pgversion: get_pg_version_string(pgbin),
-        http_port,
+        pgdata: cli.pgdata.clone(),
+        pgbin: cli.pgbin.clone(),
+        pgversion: get_pg_version_string(&cli.pgbin),
+        external_http_port: cli.external_http_port,
+        internal_http_port: cli.internal_http_port.unwrap_or(cli.external_http_port + 1),
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
-        ext_remote_storage: ext_remote_storage.map(|s| s.to_string()),
+        ext_remote_storage: cli.remote_ext_config.clone(),
         ext_download_progress: RwLock::new(HashMap::new()),
         build_tag,
     };
@@ -354,10 +377,13 @@ fn wait_spec(
         compute.prewarm_postgres()?;
     }
 
-    // Launch http service first, so that we can serve control-plane requests
-    // while configuration is still in progress.
-    let _http_handle =
-        launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
+    // Launch the external HTTP server first, so that we can serve control plane
+    // requests while configuration is still in progress.
+    Server::External(cli.external_http_port).launch(&compute);
+
+    // The internal HTTP server could be launched later, but there isn't much
+    // sense in waiting.
+    Server::Internal(cli.internal_http_port.unwrap_or(cli.external_http_port + 1)).launch(&compute);
 
     if !spec_set {
         // No spec provided, hang waiting for it.
@@ -389,27 +415,12 @@ fn wait_spec(
 
     launch_lsn_lease_bg_task_for_static(&compute);
 
-    Ok(WaitSpecResult {
-        compute,
-        resize_swap_on_bind,
-        set_disk_quota_for_fs: set_disk_quota_for_fs.cloned(),
-    })
-}
-
-struct WaitSpecResult {
-    compute: Arc<ComputeNode>,
-    resize_swap_on_bind: bool,
-    set_disk_quota_for_fs: Option<String>,
+    Ok(compute)
 }
 
 fn start_postgres(
-    // need to allow unused because `matches` is only used if target_os = "linux"
-    #[allow(unused_variables)] matches: &clap::ArgMatches,
-    WaitSpecResult {
-        compute,
-        resize_swap_on_bind,
-        set_disk_quota_for_fs,
-    }: WaitSpecResult,
+    cli: &Cli,
+    compute: Arc<ComputeNode>,
 ) -> Result<(Option<PostgresHandle>, StartPostgresResult)> {
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
@@ -437,7 +448,7 @@ fn start_postgres(
     let mut delay_exit = false;
 
     // Resize swap to the desired size if the compute spec says so
-    if let (Some(size_bytes), true) = (swap_size_bytes, resize_swap_on_bind) {
+    if let (Some(size_bytes), true) = (swap_size_bytes, cli.resize_swap_on_bind) {
         // To avoid 'swapoff' hitting postgres startup, we need to run resize-swap to completion
         // *before* starting postgres.
         //
@@ -464,9 +475,9 @@ fn start_postgres(
 
     // Set disk quota if the compute spec says so
     if let (Some(disk_quota_bytes), Some(disk_quota_fs_mountpoint)) =
-        (disk_quota_bytes, set_disk_quota_for_fs)
+        (disk_quota_bytes, cli.set_disk_quota_for_fs.as_ref())
     {
-        match set_disk_quota(disk_quota_bytes, &disk_quota_fs_mountpoint) {
+        match set_disk_quota(disk_quota_bytes, disk_quota_fs_mountpoint) {
             Ok(()) => {
                 let size_mib = disk_quota_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
                 info!(%disk_quota_bytes, %size_mib, "set disk quota");
@@ -509,27 +520,6 @@ fn start_postgres(
         if #[cfg(target_os = "linux")] {
             use std::env;
             use tokio_util::sync::CancellationToken;
-            let vm_monitor_addr = matches
-                .get_one::<String>("vm-monitor-addr")
-                .expect("--vm-monitor-addr should always be set because it has a default arg");
-            let file_cache_connstr = matches.get_one::<String>("filecache-connstr");
-            let cgroup = matches.get_one::<String>("cgroup");
-
-            // Only make a runtime if we need to.
-            // Note: it seems like you can make a runtime in an inner scope and
-            // if you start a task in it it won't be dropped. However, make it
-            // in the outermost scope just to be safe.
-            let rt = if env::var_os("AUTOSCALING").is_some() {
-                Some(
-                    tokio::runtime::Builder::new_multi_thread()
-                        .worker_threads(4)
-                        .enable_all()
-                        .build()
-                        .expect("failed to create tokio runtime for monitor")
-                )
-            } else {
-                None
-            };
 
             // This token is used internally by the monitor to clean up all threads
             let token = CancellationToken::new();
@@ -538,19 +528,22 @@ fn start_postgres(
             let pgconnstr = if disable_lfc_resizing.unwrap_or(false) {
                 None
             } else {
-                file_cache_connstr.cloned()
+                Some(cli.filecache_connstr.clone())
             };
 
-            let vm_monitor = rt.as_ref().map(|rt| {
-                rt.spawn(vm_monitor::start(
+            let vm_monitor = if env::var_os("AUTOSCALING").is_some() {
+                let vm_monitor = tokio::spawn(vm_monitor::start(
                     Box::leak(Box::new(vm_monitor::Args {
-                        cgroup: cgroup.cloned(),
+                        cgroup: Some(cli.cgroup.clone()),
                         pgconnstr,
-                        addr: vm_monitor_addr.clone(),
+                        addr: cli.vm_monitor_addr.clone(),
                     })),
                     token.clone(),
-                ))
-            });
+                ));
+                Some(vm_monitor)
+            } else {
+                None
+            };
         }
     }
 
@@ -560,8 +553,6 @@ fn start_postgres(
             delay_exit,
             compute,
             #[cfg(target_os = "linux")]
-            rt,
-            #[cfg(target_os = "linux")]
             token,
             #[cfg(target_os = "linux")]
             vm_monitor,
@@ -569,15 +560,13 @@ fn start_postgres(
     ))
 }
 
-type PostgresHandle = (std::process::Child, std::thread::JoinHandle<()>);
+type PostgresHandle = (std::process::Child, tokio::task::JoinHandle<Result<()>>);
 
 struct StartPostgresResult {
     delay_exit: bool,
     // passed through from WaitSpecResult
     compute: Arc<ComputeNode>,
 
-    #[cfg(target_os = "linux")]
-    rt: Option<tokio::runtime::Runtime>,
     #[cfg(target_os = "linux")]
     token: tokio_util::sync::CancellationToken,
     #[cfg(target_os = "linux")]
@@ -596,10 +585,10 @@ fn wait_postgres(pg: Option<PostgresHandle>) -> Result<WaitPostgresResult> {
             .expect("failed to start waiting on Postgres process");
         PG_PID.store(0, Ordering::SeqCst);
 
-        // Process has exited, so we can join the logs thread.
-        let _ = logs_handle
-            .join()
-            .map_err(|e| tracing::error!("log thread panicked: {:?}", e));
+        // Process has exited. Wait for the log collecting task to finish.
+        let _ = tokio::runtime::Handle::current()
+            .block_on(logs_handle)
+            .map_err(|e| tracing::error!("log task panicked: {:?}", e));
 
         info!("Postgres exited with code {}, shutting down", ecode);
         exit_code = ecode.code()
@@ -620,8 +609,6 @@ fn cleanup_after_postgres_exit(
         vm_monitor,
         #[cfg(target_os = "linux")]
         token,
-        #[cfg(target_os = "linux")]
-        rt,
     }: StartPostgresResult,
 ) -> Result<bool> {
     // Terminate the vm_monitor so it releases the file watcher on
@@ -634,10 +621,6 @@ fn cleanup_after_postgres_exit(
                 token.cancel();
                 // Kills the actual task running the monitor
                 handle.abort();
-
-                // If handle is some, rt must have been used to produce it, and
-                // hence is also some
-                rt.unwrap().shutdown_timeout(Duration::from_secs(2));
             }
         }
     }
@@ -702,105 +685,6 @@ fn deinit_and_exit(WaitPostgresResult { exit_code }: WaitPostgresResult) -> ! {
     exit(exit_code.unwrap_or(1))
 }
 
-fn cli() -> clap::Command {
-    // Env variable is set by `cargo`
-    let version = option_env!("CARGO_PKG_VERSION").unwrap_or("unknown");
-    clap::Command::new("compute_ctl")
-        .version(version)
-        .arg(
-            Arg::new("http-port")
-                .long("http-port")
-                .value_name("HTTP_PORT")
-                .default_value("3080")
-                .value_parser(clap::value_parser!(u16))
-                .required(false),
-        )
-        .arg(
-            Arg::new("connstr")
-                .short('C')
-                .long("connstr")
-                .value_name("DATABASE_URL")
-                .required(true),
-        )
-        .arg(
-            Arg::new("pgdata")
-                .short('D')
-                .long("pgdata")
-                .value_name("DATADIR")
-                .required(true),
-        )
-        .arg(
-            Arg::new("pgbin")
-                .short('b')
-                .long("pgbin")
-                .default_value("postgres")
-                .value_name("POSTGRES_PATH"),
-        )
-        .arg(
-            Arg::new("spec")
-                .short('s')
-                .long("spec")
-                .value_name("SPEC_JSON"),
-        )
-        .arg(
-            Arg::new("spec-path")
-                .short('S')
-                .long("spec-path")
-                .value_name("SPEC_PATH"),
-        )
-        .arg(
-            Arg::new("compute-id")
-                .short('i')
-                .long("compute-id")
-                .value_name("COMPUTE_ID"),
-        )
-        .arg(
-            Arg::new("control-plane-uri")
-                .short('p')
-                .long("control-plane-uri")
-                .value_name("CONTROL_PLANE_API_BASE_URI"),
-        )
-        .arg(
-            Arg::new("remote-ext-config")
-                .short('r')
-                .long("remote-ext-config")
-                .value_name("REMOTE_EXT_CONFIG"),
-        )
-        // TODO(fprasx): we currently have default arguments because the cloud PR
-        // to pass them in hasn't been merged yet. We should get rid of them once
-        // the PR is merged.
-        .arg(
-            Arg::new("vm-monitor-addr")
-                .long("vm-monitor-addr")
-                .default_value("0.0.0.0:10301")
-                .value_name("VM_MONITOR_ADDR"),
-        )
-        .arg(
-            Arg::new("cgroup")
-                .long("cgroup")
-                .default_value("neon-postgres")
-                .value_name("CGROUP"),
-        )
-        .arg(
-            Arg::new("filecache-connstr")
-                .long("filecache-connstr")
-                .default_value(
-                    "host=localhost port=5432 dbname=postgres user=cloud_admin sslmode=disable application_name=vm-monitor",
-                )
-                .value_name("FILECACHE_CONNSTR"),
-        )
-        .arg(
-            Arg::new("resize-swap-on-bind")
-                .long("resize-swap-on-bind")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("set-disk-quota-for-fs")
-                .long("set-disk-quota-for-fs")
-                .value_name("SET_DISK_QUOTA_FOR_FS")
-        )
-}
-
 /// When compute_ctl is killed, send also termination signal to sync-safekeepers
 /// to prevent leakage. TODO: it is better to convert compute_ctl to async and
 /// wait for termination which would be easy then.
@@ -810,7 +694,14 @@ fn handle_exit_signal(sig: i32) {
     exit(1);
 }
 
-#[test]
-fn verify_cli() {
-    cli().debug_assert()
+#[cfg(test)]
+mod test {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    #[test]
+    fn verify_cli() {
+        Cli::command().debug_assert()
+    }
 }

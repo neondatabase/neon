@@ -480,7 +480,7 @@ lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	if (LFC_ENABLED())
 	{
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
-		found = entry != NULL && (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) != 0;
+		found = entry != NULL && (entry->bitmap[chunk_offs >> 5] & ((uint32)1 << (chunk_offs & 31))) != 0;
 	}
 	LWLockRelease(lfc_lock);
 	return found;
@@ -509,47 +509,44 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 
-	tag.blockNum = (blkno + i) & ~(BLOCKS_PER_CHUNK - 1);
+	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
 	hash = get_hash_value(lfc_hash, &tag);
-	chunk_offs = (blkno + i) & (BLOCKS_PER_CHUNK - 1);
+	chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
 
 	LWLockAcquire(lfc_lock, LW_SHARED);
 
+	if (!LFC_ENABLED())
+	{
+		LWLockRelease(lfc_lock);
+		return 0;
+	}
 	while (true)
 	{
-		int		this_chunk = Min(nblocks, BLOCKS_PER_CHUNK - chunk_offs);
-		if (LFC_ENABLED())
-		{
-			entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
+		int		this_chunk = Min(nblocks - i, BLOCKS_PER_CHUNK - chunk_offs);
+		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
 
-			if (entry != NULL)
+		if (entry != NULL)
+		{
+			for (; chunk_offs < BLOCKS_PER_CHUNK && i < nblocks; chunk_offs++, i++)
 			{
-				for (; chunk_offs < BLOCKS_PER_CHUNK && i < nblocks; chunk_offs++, i++)
+				if ((entry->bitmap[chunk_offs >> 5] & 
+					 ((uint32)1 << (chunk_offs & 31))) != 0)
 				{
-					if ((entry->bitmap[chunk_offs >> 5] & 
-						(1 << (chunk_offs & 31))) != 0)
-					{
-						BITMAP_SET(bitmap, i);
-						found++;
-					}
+					BITMAP_SET(bitmap, i);
+					found++;
 				}
-			}
-			else
-			{
-				i += this_chunk;
 			}
 		}
 		else
 		{
-			LWLockRelease(lfc_lock);
-			return found;
+			i += this_chunk;
 		}
 
 		/*
 		 * Break out of the iteration before doing expensive stuff for
 		 * a next iteration
 		 */
-		if (i + 1 >= nblocks)
+		if (i >= nblocks)
 			break;
 
 		/*
@@ -563,8 +560,8 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	LWLockRelease(lfc_lock);
 
-#if USE_ASSERT_CHECKING
-	do {
+#ifdef USE_ASSERT_CHECKING
+	{
 		int count = 0;
 
 		for (int j = 0; j < nblocks; j++)
@@ -574,7 +571,7 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		}
 
 		Assert(count == found);
-	} while (false);
+	}
 #endif
 
 	return found;
@@ -620,7 +617,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	}
 
 	/* remove the page from the cache */
-	entry->bitmap[chunk_offs >> 5] &= ~(1 << (chunk_offs & (32 - 1)));
+	entry->bitmap[chunk_offs >> 5] &= ~((uint32)1 << (chunk_offs & (32 - 1)));
 
 	if (entry->access_count == 0)
 	{
@@ -774,7 +771,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			 * If the page is valid, we consider it "read".
 			 * All other pages will be fetched separately by the next cache
 			 */
-			if (entry->bitmap[(chunk_offs + i) / 32] & (1 << ((chunk_offs + i) % 32)))
+			if (entry->bitmap[(chunk_offs + i) / 32] & ((uint32)1 << ((chunk_offs + i) % 32)))
 			{
 				BITMAP_SET(mask, buf_offset + i);
 				iteration_hits++;
@@ -1034,7 +1031,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				{
 					lfc_ctl->used_pages += 1 - ((entry->bitmap[(chunk_offs + i) >> 5] >> ((chunk_offs + i) & 31)) & 1);
 					entry->bitmap[(chunk_offs + i) >> 5] |=
-						(1 << ((chunk_offs + i) & 31));
+						((uint32)1 << ((chunk_offs + i) & 31));
 				}
 			}
 
@@ -1282,7 +1279,7 @@ local_cache_pages(PG_FUNCTION_ARGS)
 			{
 				for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
 				{
-					if (entry->bitmap[i >> 5] & (1 << (i & 31)))
+					if (entry->bitmap[i >> 5] & ((uint32)1 << (i & 31)))
 					{
 						fctx->record[n].pageoffs = entry->offset * BLOCKS_PER_CHUNK + i;
 						fctx->record[n].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));

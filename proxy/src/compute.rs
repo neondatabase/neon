@@ -137,8 +137,8 @@ impl ConnCfg {
             match k {
                 // Only set `user` if it's not present in the config.
                 // Console redirect auth flow takes username from the console's response.
-                "user" if self.user_is_set() => continue,
-                "database" if self.db_is_set() => continue,
+                "user" if self.user_is_set() => {}
+                "database" if self.db_is_set() => {}
                 "options" => {
                     if let Some(options) = filtered_options(v) {
                         self.set_param(k, &options);
@@ -296,7 +296,6 @@ impl ConnCfg {
                 process_id,
                 secret_key,
             },
-            vec![], // TODO: deprecated, will be removed
             host.to_string(),
             user_info,
         );

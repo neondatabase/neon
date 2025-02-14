@@ -45,6 +45,26 @@ jobs:
             run cancel-previous-in-concurrency-group.yml \
               --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
 
+  files-changed:
+    needs: [ check-permissions ]
+    runs-on: [ self-hosted, small ]
+    timeout-minutes: 3
+    outputs:
+      check-rust-dependencies: ${{ steps.files-changed.outputs.rust_dependencies }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Check for file changes
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
+        id: files-changed
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          filters: .github/file-filters.yaml
+
   tag:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, small ]
@@ -170,6 +190,14 @@ jobs:
       archs: '["x64", "arm64"]'
     secrets: inherit
 
+  check-dependencies-rust:
+    needs: [ files-changed, build-build-tools-image ]
+    if: ${{ needs.files-changed.outputs.check-rust-dependencies == 'true' }}
+    uses: ./.github/workflows/cargo-deny.yml
+    with:
+      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
+    secrets: inherit
+
   build-and-test-locally:
     needs: [ tag, build-build-tools-image ]
     strategy:
@@ -235,8 +263,9 @@ jobs:
           echo "json=$(jq --compact-output '.' /tmp/benchmark_durations.json)" >> $GITHUB_OUTPUT
 
   benchmarks:
-    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
-    needs: [ check-permissions, build-and-test-locally, build-build-tools-image, get-benchmarks-durations ]
+    # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `deploy` in PRs
+    if: github.ref_name == 'main' || (contains(github.event.pull_request.labels.*.name, 'run-benchmarks') && !failure() && !cancelled())
+    needs: [ check-permissions, build-build-tools-image, get-benchmarks-durations, deploy ]
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
@@ -469,7 +498,7 @@ jobs:
 
   trigger-e2e-tests:
     if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute' }}
-    needs: [ check-permissions, promote-images-dev, tag ]
+    needs: [ check-permissions, push-neon-image-dev, push-compute-image-dev, tag ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
     secrets: inherit
 
@@ -543,21 +572,6 @@ jobs:
                                              neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-x64 \
                                              neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-arm64
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: eu-central-1
-          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-          role-duration-seconds: 3600
-
-      - name: Login to Amazon Dev ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Push multi-arch image to ECR
-        run: |
-          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{ needs.tag.outputs.build-tag }} \
-                                                                                neondatabase/neon:${{ needs.tag.outputs.build-tag }}
-
   compute-node-image-arch:
     needs: [ check-permissions, build-build-tools-image, tag ]
     permissions:
@@ -604,16 +618,6 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: eu-central-1
-          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-          role-duration-seconds: 3600
-
-      - name: Login to Amazon Dev ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
       - uses: docker/login-action@v3
         with:
           registry: cache.neon.build
@@ -654,7 +658,7 @@ jobs:
           push: true
           pull: true
           file: compute/compute-node.Dockerfile
-          target: neon-pg-ext-test
+          target: extension-tests
           cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           tags: |
             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
@@ -700,21 +704,6 @@ jobs:
                                           -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }} \
                                              neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
                                              neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: eu-central-1
-          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-          role-duration-seconds: 3600
-
-      - name: Login to Amazon Dev ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Push multi-arch compute-node-${{ matrix.version.pg }} image to ECR
-        run: |
-          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
-                                                                                neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
 
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
@@ -786,6 +775,17 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
+      - name: Get the last compute release tag
+        id: get-last-compute-release-tag
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          tag=$(gh api -q '[.[].tag_name | select(startswith("release-compute"))][0]'\
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/releases")
+          echo tag=${tag} >> ${GITHUB_OUTPUT}
+
       # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
       # Pick pageserver as currently the only binary with extra "version" features printed in the string to verify.
       # Regular pageserver version string looks like
@@ -817,139 +817,129 @@ jobs:
           TEST_VERSION_ONLY: ${{ matrix.pg_version }}
         run: ./docker-compose/docker_compose_test.sh
 
+      - name: Print logs and clean up docker-compose test
+        if: always()
+        run: |
+          docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml logs || true
+          docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml down
+
+      - name: Test extension upgrade
+        timeout-minutes: 20
+        if: ${{ needs.tag.outputs.build-tag == github.run_id }}
+        env:
+          NEWTAG: ${{ needs.tag.outputs.build-tag }}
+          OLDTAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
+        run: ./docker-compose/test_extensions_upgrade.sh
+
       - name: Print logs and clean up
         if: always()
         run: |
           docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml logs || true
           docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml down
 
-  promote-images-dev:
-    needs: [ check-permissions, tag, vm-compute-node-image, neon-image ]
+  generate-image-maps:
+    needs: [ tag ]
     runs-on: ubuntu-22.04
-
-    permissions:
-      id-token: write # aws-actions/configure-aws-credentials
-      statuses: write
-      contents: read
-
-    env:
-      VERSIONS: v14 v15 v16 v17
-
+    outputs:
+      neon-dev: ${{ steps.generate.outputs.neon-dev }}
+      neon-prod: ${{ steps.generate.outputs.neon-prod }}
+      compute-dev: ${{ steps.generate.outputs.compute-dev }}
+      compute-prod: ${{ steps.generate.outputs.compute-prod }}
     steps:
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v4
         with:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+          sparse-checkout: scripts/generate_image_maps.py
+          sparse-checkout-cone-mode: false
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: eu-central-1
-          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-          role-duration-seconds: 3600
+      - name: Generate Image Maps
+        id: generate
+        run: python scripts/generate_image_maps.py
+        env:
+          BUILD_TAG: "${{ needs.tag.outputs.build-tag }}"
+          BRANCH: "${{ github.ref_name }}"
+          DEV_ACR: "${{ vars.AZURE_DEV_REGISTRY_NAME }}"
+          PROD_ACR: "${{ vars.AZURE_PROD_REGISTRY_NAME }}"
 
-      - name: Login to Amazon Dev ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Copy vm-compute-node images to ECR
-        run: |
-          for version in ${VERSIONS}; do
-            docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }} \
-                                               neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
-          done
-
-  promote-images-prod:
-    needs: [ check-permissions, tag, test-images, promote-images-dev ]
-    runs-on: ubuntu-22.04
-    if: github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
-
-    permissions:
-      id-token: write # aws-actions/configure-aws-credentials
-      statuses: write
-      contents: read
-
-    env:
-      VERSIONS: v14 v15 v16 v17
-
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: eu-central-1
-          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-          role-duration-seconds: 3600
-
-      - name: Login to Amazon Dev ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-
-      - name: Add latest tag to images
-        if: github.ref_name == 'main'
-        run: |
-          for repo in neondatabase 369495373322.dkr.ecr.eu-central-1.amazonaws.com; do
-            docker buildx imagetools create -t $repo/neon:latest \
-                                               $repo/neon:${{ needs.tag.outputs.build-tag }}
-
-            for version in ${VERSIONS}; do
-              docker buildx imagetools create -t $repo/compute-node-${version}:latest \
-                                                 $repo/compute-node-${version}:${{ needs.tag.outputs.build-tag }}
-
-              docker buildx imagetools create -t $repo/vm-compute-node-${version}:latest \
-                                                 $repo/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
-            done
-          done
-          docker buildx imagetools create -t neondatabase/neon-test-extensions-v16:latest \
-                                              neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
-
-      - name: Configure AWS-prod credentials
-        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: eu-central-1
-          mask-aws-account-id: true
-          role-to-assume: ${{ secrets.PROD_GHA_OIDC_ROLE }}
-
-      - name: Login to prod ECR
-        uses: docker/login-action@v3
-        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
-        with:
-          registry: 093970136003.dkr.ecr.eu-central-1.amazonaws.com
-
-      - name: Copy all images to prod ECR
-        if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
-        run: |
-          for image in neon {vm-,}compute-node-{v14,v15,v16,v17}; do
-            docker buildx imagetools create -t 093970136003.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }} \
-                                               369495373322.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }}
-          done
-
-  push-to-acr-dev:
-    if: github.ref_name == 'main'
-    needs: [ tag, promote-images-dev ]
-    uses: ./.github/workflows/_push-to-acr.yml
+  push-neon-image-dev:
+    needs: [ generate-image-maps, neon-image ]
+    uses: ./.github/workflows/_push-to-container-registry.yml
     with:
-      client_id: ${{ vars.AZURE_DEV_CLIENT_ID }}
-      image_tag: ${{ needs.tag.outputs.build-tag }}
-      images: neon vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
-      registry_name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
-      subscription_id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
-      tenant_id: ${{ vars.AZURE_TENANT_ID }}
+      image-map: '${{ needs.generate-image-maps.outputs.neon-dev }}'
+      aws-region: eu-central-1
+      aws-account-ids: "369495373322"
+      azure-client-id: ${{ vars.AZURE_DEV_CLIENT_ID }}
+      azure-subscription-id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
+      azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+      acr-registry-name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
+    secrets:
+      aws-role-to-assume: "${{ vars.DEV_AWS_OIDC_ROLE_ARN }}"
+      docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+      docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-  push-to-acr-prod:
+  push-compute-image-dev:
+    needs: [ generate-image-maps, vm-compute-node-image ]
+    uses: ./.github/workflows/_push-to-container-registry.yml
+    with:
+      image-map: '${{ needs.generate-image-maps.outputs.compute-dev }}'
+      aws-region: eu-central-1
+      aws-account-ids: "369495373322"
+      azure-client-id: ${{ vars.AZURE_DEV_CLIENT_ID }}
+      azure-subscription-id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
+      azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+      acr-registry-name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
+    secrets:
+      aws-role-to-assume: "${{ vars.DEV_AWS_OIDC_ROLE_ARN }}"
+      docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+      docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+  push-neon-image-prod:
     if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
-    needs: [ tag, promote-images-prod ]
-    uses: ./.github/workflows/_push-to-acr.yml
+    needs: [ generate-image-maps, neon-image, test-images ]
+    uses: ./.github/workflows/_push-to-container-registry.yml
     with:
-      client_id: ${{ vars.AZURE_PROD_CLIENT_ID }}
-      image_tag: ${{ needs.tag.outputs.build-tag }}
-      images: neon vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
-      registry_name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
-      subscription_id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
-      tenant_id: ${{ vars.AZURE_TENANT_ID }}
+      image-map: '${{ needs.generate-image-maps.outputs.neon-prod }}'
+      aws-region: eu-central-1
+      aws-account-ids: "093970136003"
+      azure-client-id: ${{ vars.AZURE_PROD_CLIENT_ID }}
+      azure-subscription-id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
+      azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+      acr-registry-name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
+    secrets:
+      aws-role-to-assume: "${{ secrets.PROD_GHA_OIDC_ROLE }}"
+      docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+      docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+  push-compute-image-prod:
+    if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
+    needs: [ generate-image-maps, vm-compute-node-image, test-images ]
+    uses: ./.github/workflows/_push-to-container-registry.yml
+    with:
+      image-map: '${{ needs.generate-image-maps.outputs.compute-prod }}'
+      aws-region: eu-central-1
+      aws-account-ids: "093970136003"
+      azure-client-id: ${{ vars.AZURE_PROD_CLIENT_ID }}
+      azure-subscription-id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
+      azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+      acr-registry-name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
+    secrets:
+      aws-role-to-assume: "${{ secrets.PROD_GHA_OIDC_ROLE }}"
+      docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+      docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+  # This is a bit of a special case so we're not using a generated image map.
+  add-latest-tag-to-neon-extensions-test-image:
+    if: github.ref_name == 'main'
+    needs: [ tag, compute-node-image ]
+    uses: ./.github/workflows/_push-to-container-registry.yml
+    with:
+      image-map: |
+        {
+          "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}": ["docker.io/neondatabase/neon-test-extensions-v16:latest"],
+          "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.tag.outputs.build-tag }}": ["docker.io/neondatabase/neon-test-extensions-v17:latest"]
+        }
+    secrets:
+      docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+      docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
   trigger-custom-extensions-build-and-wait:
     needs: [ check-permissions, tag ]
@@ -1031,7 +1021,7 @@ jobs:
           exit 1
 
   deploy:
-    needs: [ check-permissions, promote-images-prod, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
+    needs: [ check-permissions, push-neon-image-prod, push-compute-image-prod, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait ]
     # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
     if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute') && !failure() && !cancelled()
     permissions:
@@ -1284,7 +1274,7 @@ jobs:
           done
 
   pin-build-tools-image:
-    needs: [ build-build-tools-image, promote-images-prod, build-and-test-locally ]
+    needs: [ build-build-tools-image, push-compute-image-prod, push-neon-image-prod, build-and-test-locally ]
     if: github.ref_name == 'main'
     uses: ./.github/workflows/pin-build-tools-image.yml
     with:
@@ -1307,7 +1297,10 @@ jobs:
       - build-and-test-locally
       - check-codestyle-python
       - check-codestyle-rust
-      - promote-images-dev
+      - check-dependencies-rust
+      - files-changed
+      - push-compute-image-dev
+      - push-neon-image-dev
       - test-images
       - trigger-custom-extensions-build-and-wait
     runs-on: ubuntu-22.04
@@ -1319,4 +1312,12 @@ jobs:
         if: |
           contains(needs.*.result, 'failure')
           || contains(needs.*.result, 'cancelled')
-          || contains(needs.*.result, 'skipped')
+          || (needs.check-dependencies-rust.result == 'skipped' && needs.files-changed.outputs.check-rust-dependencies == 'true')
+          || needs.build-and-test-locally.result == 'skipped'
+          || needs.check-codestyle-python.result == 'skipped'
+          || needs.check-codestyle-rust.result == 'skipped'
+          || needs.files-changed.result == 'skipped'
+          || needs.push-compute-image-dev.result == 'skipped'
+          || needs.push-neon-image-dev.result == 'skipped'
+          || needs.test-images.result == 'skipped'
+          || needs.trigger-custom-extensions-build-and-wait.result == 'skipped'

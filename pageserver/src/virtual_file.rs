@@ -234,6 +234,19 @@ impl VirtualFile {
     ) -> (FullSlice<Buf>, Result<usize, Error>) {
         self.inner.write_all(buf, ctx).await
     }
+
+    async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
+        self.inner.read_to_end(buf, ctx).await
+    }
+
+    pub(crate) async fn read_to_string(
+        &mut self,
+        ctx: &RequestContext,
+    ) -> Result<String, anyhow::Error> {
+        let mut buf = Vec::new();
+        self.read_to_end(&mut buf, ctx).await?;
+        Ok(String::from_utf8(buf)?)
+    }
 }
 
 /// Indicates whether to enable fsync, fdatasync, or O_SYNC/O_DSYNC when writing
@@ -483,7 +496,8 @@ pub(crate) fn is_fatal_io_error(e: &std::io::Error) -> bool {
 /// bad storage or bad configuration, and we can't fix that from inside
 /// a running process.
 pub(crate) fn on_fatal_io_error(e: &std::io::Error, context: &str) -> ! {
-    tracing::error!("Fatal I/O error: {e}: {context})");
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    tracing::error!("Fatal I/O error: {e}: {context})\n{backtrace}");
     std::process::abort();
 }
 
@@ -934,13 +948,18 @@ impl VirtualFileInner {
     where
         Buf: tokio_epoll_uring::IoBufMut + Send,
     {
-        let file_guard = match self.lock_file().await {
+        let file_guard = match self
+            .lock_file()
+            .await
+            .maybe_fatal_err("lock_file inside VirtualFileInner::read_at")
+        {
             Ok(file_guard) => file_guard,
             Err(e) => return (buf, Err(e)),
         };
 
         observe_duration!(StorageIoOperation::Read, {
             let ((_file_guard, buf), res) = io_engine::get().read_at(file_guard, offset, buf).await;
+            let res = res.maybe_fatal_err("io_engine read_at inside VirtualFileInner::read_at");
             if let Ok(size) = res {
                 STORAGE_IO_SIZE
                     .with_label_values(&[
@@ -992,6 +1011,24 @@ impl VirtualFileInner {
             }
             (buf, result)
         })
+    }
+
+    async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
+        let mut tmp = vec![0; 128];
+        loop {
+            let slice = tmp.slice(..128);
+            let (slice, res) = self.read_at(slice, self.pos, ctx).await;
+            match res {
+                Ok(0) => return Ok(()),
+                Ok(n) => {
+                    self.pos += n as u64;
+                    buf.extend_from_slice(&slice[..n]);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+            tmp = slice.into_inner();
+        }
     }
 }
 
@@ -1237,10 +1274,6 @@ impl VirtualFile {
     ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
         self.inner.read_blk(blknum, ctx).await
     }
-
-    async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
-        self.inner.read_to_end(buf, ctx).await
-    }
 }
 
 #[cfg(test)]
@@ -1259,24 +1292,6 @@ impl VirtualFileInner {
         Ok(crate::tenant::block_io::BlockLease::IoBufferMut(
             slice.into_inner(),
         ))
-    }
-
-    async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
-        let mut tmp = vec![0; 128];
-        loop {
-            let slice = tmp.slice(..128);
-            let (slice, res) = self.read_at(slice, self.pos, ctx).await;
-            match res {
-                Ok(0) => return Ok(()),
-                Ok(n) => {
-                    self.pos += n as u64;
-                    buf.extend_from_slice(&slice[..n]);
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-            tmp = slice.into_inner();
-        }
     }
 }
 

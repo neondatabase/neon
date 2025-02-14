@@ -3,6 +3,7 @@
 use std::fmt::Display;
 
 use chrono::{DateTime, Utc};
+use jsonwebtoken::jwk::JwkSet;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
@@ -13,11 +14,6 @@ use crate::{
 #[derive(Serialize, Debug, Deserialize)]
 pub struct GenericAPIError {
     pub error: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct InfoResponse {
-    pub num_cpus: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,13 +136,27 @@ pub struct CatalogObjects {
     pub databases: Vec<Database>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ComputeCtlConfig {
+    pub jwks: JwkSet,
+}
+
+impl Default for ComputeCtlConfig {
+    fn default() -> Self {
+        Self {
+            jwks: JwkSet {
+                keys: Vec::default(),
+            },
+        }
+    }
+}
+
 /// Response of the `/computes/{compute_id}/spec` control-plane API.
-/// This is not actually a compute API response, so consider moving
-/// to a different place.
 #[derive(Deserialize, Debug)]
 pub struct ControlPlaneSpecResponse {
     pub spec: Option<ComputeSpec>,
     pub status: ControlPlaneComputeStatus,
+    pub compute_ctl_config: ComputeCtlConfig,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

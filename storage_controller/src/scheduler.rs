@@ -1,9 +1,10 @@
 use crate::{metrics::NodeLabelGroup, node::Node, tenant_shard::TenantShard};
+use http_utils::error::ApiError;
 use itertools::Itertools;
 use pageserver_api::{controller_api::AvailabilityZone, models::PageserverUtilization};
 use serde::Serialize;
 use std::{collections::HashMap, fmt::Debug};
-use utils::{http::error::ApiError, id::NodeId};
+use utils::id::NodeId;
 
 /// Scenarios in which we cannot find a suitable location for a tenant shard
 #[derive(thiserror::Error, Debug)]
@@ -774,8 +775,9 @@ impl Scheduler {
 
         if !matches!(context.mode, ScheduleMode::Speculative) {
             tracing::info!(
-            "scheduler selected node {node_id} (elegible nodes {:?}, hard exclude: {hard_exclude:?}, soft exclude: {context:?})",
-            scores.iter().map(|i| i.node_id().0).collect::<Vec<_>>()
+            "scheduler selected node {node_id} (elegible nodes {:?}, hard exclude: {hard_exclude:?}, soft exclude: {context:?}, preferred_az: {:?})",
+            scores.iter().map(|i| i.node_id().0).collect::<Vec<_>>(),
+            preferred_az,
        );
         }
 

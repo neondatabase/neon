@@ -121,6 +121,7 @@ pub struct ConfigToml {
     pub wal_receiver_protocol: PostgresClientProtocol,
     pub page_service_pipelining: PageServicePipeliningConfig,
     pub get_vectored_concurrent_io: GetVectoredConcurrentIo,
+    pub enable_read_path_debugging: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -256,7 +257,17 @@ pub struct TenantConfigToml {
     pub compaction_period: Duration,
     /// Level0 delta layer threshold for compaction.
     pub compaction_threshold: usize,
+    /// Controls the amount of L0 included in a single compaction iteration.
+    /// The unit is `checkpoint_distance`, i.e., a size.
+    /// We add L0s to the set of layers to compact until their cumulative
+    /// size exceeds `compaction_upper_limit * checkpoint_distance`.
+    pub compaction_upper_limit: usize,
     pub compaction_algorithm: crate::models::CompactionAlgorithmSettings,
+    /// If true, compact down L0 across all tenant timelines before doing regular compaction.
+    pub compaction_l0_first: bool,
+    /// If true, use a separate semaphore (i.e. concurrency limit) for the L0 compaction pass. Only
+    /// has an effect if `compaction_l0_first` is `true`.
+    pub compaction_l0_semaphore: bool,
     /// Level0 delta layer threshold at which to delay layer flushes for compaction backpressure,
     /// such that they take 2x as long, and start waiting for layer flushes during ephemeral layer
     /// rolls. This helps compaction keep up with WAL ingestion, and avoids read amplification
@@ -317,6 +328,10 @@ pub struct TenantConfigToml {
     // How much WAL must be ingested before checking again whether a new image layer is required.
     // Expresed in multiples of checkpoint distance.
     pub image_layer_creation_check_threshold: u8,
+
+    // How many multiples of L0 `compaction_threshold` will preempt image layer creation and do L0 compaction.
+    // Set to 0 to disable preemption.
+    pub image_creation_preempt_threshold: usize,
 
     /// The length for an explicit LSN lease request.
     /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
@@ -481,7 +496,7 @@ impl Default for ConfigToml {
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
             image_compression: (DEFAULT_IMAGE_COMPRESSION),
-            timeline_offloading: false,
+            timeline_offloading: true,
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: None,
             virtual_file_io_mode: None,
@@ -500,6 +515,11 @@ impl Default for ConfigToml {
                 GetVectoredConcurrentIo::Sequential
             } else {
                 GetVectoredConcurrentIo::SidecarTask
+            },
+            enable_read_path_debugging: if cfg!(test) || cfg!(feature = "testing") {
+                Some(true)
+            } else {
+                None
             },
         }
     }
@@ -523,6 +543,14 @@ pub mod tenant_conf_defaults {
 
     pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
+
+    // This value needs to be tuned to avoid OOM. We have 3/4 of the total CPU threads to do background works, that's 16*3/4=9 on
+    // most of our pageservers. Compaction ~50 layers requires about 2GB memory (could be reduced later by optimizing L0 hole
+    // calculation to avoid loading all keys into the memory). So with this config, we can get a maximum peak compaction usage of 18GB.
+    pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 50;
+    pub const DEFAULT_COMPACTION_L0_FIRST: bool = false;
+    pub const DEFAULT_COMPACTION_L0_SEMAPHORE: bool = true;
+
     pub const DEFAULT_COMPACTION_ALGORITHM: crate::models::CompactionAlgorithm =
         crate::models::CompactionAlgorithm::Legacy;
 
@@ -536,6 +564,10 @@ pub mod tenant_conf_defaults {
     // Relevant: https://github.com/neondatabase/neon/issues/3394
     pub const DEFAULT_GC_PERIOD: &str = "1 hr";
     pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
+    // If there are more than threshold * compaction_threshold (that is 3 * 10 in the default config) L0 layers, image
+    // layer creation will end immediately. Set to 0 to disable. The target default will be 3 once we
+    // want to enable this feature.
+    pub const DEFAULT_IMAGE_CREATION_PREEMPT_THRESHOLD: usize = 0;
     pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "10 seconds";
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
@@ -563,9 +595,12 @@ impl Default for TenantConfigToml {
             compaction_period: humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
                 .expect("cannot parse default compaction period"),
             compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
+            compaction_upper_limit: DEFAULT_COMPACTION_UPPER_LIMIT,
             compaction_algorithm: crate::models::CompactionAlgorithmSettings {
                 kind: DEFAULT_COMPACTION_ALGORITHM,
             },
+            compaction_l0_first: DEFAULT_COMPACTION_L0_FIRST,
+            compaction_l0_semaphore: DEFAULT_COMPACTION_L0_SEMAPHORE,
             l0_flush_delay_threshold: None,
             l0_flush_stall_threshold: None,
             l0_flush_wait_upload: DEFAULT_L0_FLUSH_WAIT_UPLOAD,
@@ -593,9 +628,10 @@ impl Default for TenantConfigToml {
             lazy_slru_download: false,
             timeline_get_throttle: crate::models::ThrottleConfig::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
+            image_creation_preempt_threshold: DEFAULT_IMAGE_CREATION_PREEMPT_THRESHOLD,
             lsn_lease_length: LsnLease::DEFAULT_LENGTH,
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
-            timeline_offloading: false,
+            timeline_offloading: true,
             wal_receiver_protocol_override: None,
             rel_size_v2_enabled: None,
             gc_compaction_enabled: DEFAULT_GC_COMPACTION_ENABLED,

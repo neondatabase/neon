@@ -14,7 +14,7 @@
 
 #include "utils/guc.h"
 
-#include "extension_server.h" 
+#include "extension_server.h"
 #include "neon_utils.h"
 
 static int	extension_server_port = 0;
@@ -45,7 +45,7 @@ neon_download_extension_file_http(const char *filename, bool is_library)
 		handle = alloc_curl_handle();
 
 		curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, "POST");
-		curl_easy_setopt(handle, CURLOPT_TIMEOUT, 3L /* seconds */ );
+		curl_easy_setopt(handle, CURLOPT_TIMEOUT, 60L /* seconds */ );
 	}
 
 	compute_ctl_url = psprintf("http://localhost:%d/extension_server/%s%s",

@@ -136,6 +136,22 @@ pub(crate) fn local_layer_path(
     }
 }
 
+pub(crate) enum LastEviction {
+    Never,
+    At(std::time::Instant),
+    Evicting,
+}
+
+impl LastEviction {
+    pub(crate) fn happened_after(&self, timepoint: std::time::Instant) -> bool {
+        match self {
+            LastEviction::Never => false,
+            LastEviction::At(evicted_at) => evicted_at > &timepoint,
+            LastEviction::Evicting => true,
+        }
+    }
+}
+
 impl Layer {
     /// Creates a layer value for a file we know to not be resident.
     pub(crate) fn for_evicted(
@@ -340,7 +356,7 @@ impl Layer {
     /// Download the layer if evicted.
     ///
     /// Will not error when the layer is already downloaded.
-    pub(crate) async fn download(&self) -> anyhow::Result<()> {
+    pub(crate) async fn download(&self) -> Result<(), DownloadError> {
         self.0.get_or_maybe_download(true, None).await?;
         Ok(())
     }
@@ -353,7 +369,6 @@ impl Layer {
     /// while the guard exists.
     ///
     /// Returns None if the layer is currently evicted or becoming evicted.
-    #[cfg(test)]
     pub(crate) async fn keep_resident(&self) -> Option<ResidentLayer> {
         let downloaded = self.0.inner.get().and_then(|rowe| rowe.get())?;
 
@@ -404,6 +419,17 @@ impl Layer {
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
         self.0.metadata()
+    }
+
+    pub(crate) fn last_evicted_at(&self) -> LastEviction {
+        match self.0.last_evicted_at.try_lock() {
+            Ok(lock) => match *lock {
+                None => LastEviction::Never,
+                Some(at) => LastEviction::At(at),
+            },
+            Err(std::sync::TryLockError::WouldBlock) => LastEviction::Evicting,
+            Err(std::sync::TryLockError::Poisoned(p)) => panic!("Lock poisoned: {p}"),
+        }
     }
 
     pub(crate) fn get_timeline_id(&self) -> Option<TimelineId> {
@@ -530,7 +556,6 @@ impl ResidentOrWantedEvicted {
     /// This is not used on the read path (anything that calls
     /// [`LayerInner::get_or_maybe_download`]) because it was decided that reads always win
     /// evictions, and part of that winning is using [`ResidentOrWantedEvicted::get_and_upgrade`].
-    #[cfg(test)]
     fn get(&self) -> Option<Arc<DownloadedLayer>> {
         match self {
             ResidentOrWantedEvicted::Resident(strong) => Some(strong.clone()),
@@ -658,7 +683,9 @@ struct LayerInner {
 
     /// When the Layer was last evicted but has not been downloaded since.
     ///
-    /// This is used solely for updating metrics. See [`LayerImplMetrics::redownload_after`].
+    /// This is used for skipping evicted layers from the previous heatmap (see
+    /// `[Timeline::generate_heatmap]`) and for updating metrics
+    /// (see [`LayerImplMetrics::redownload_after`]).
     last_evicted_at: std::sync::Mutex<Option<std::time::Instant>>,
 
     #[cfg(test)]
@@ -701,13 +728,7 @@ impl Drop for LayerInner {
         if let Some(timeline) = timeline.as_ref() {
             // Only need to decrement metrics if the timeline still exists: otherwise
             // it will have already de-registered these metrics via TimelineMetrics::shutdown
-            if self.desc.is_delta() {
-                timeline.metrics.layer_count_delta.dec();
-                timeline.metrics.layer_size_delta.sub(self.desc.file_size);
-            } else {
-                timeline.metrics.layer_count_image.dec();
-                timeline.metrics.layer_size_image.sub(self.desc.file_size);
-            }
+            timeline.metrics.dec_layer(&self.desc);
 
             if matches!(self.access_stats.visibility(), LayerVisibilityHint::Visible) {
                 debug_assert!(
@@ -817,13 +838,7 @@ impl LayerInner {
         };
 
         // This object acts as a RAII guard on these metrics: increment on construction
-        if desc.is_delta() {
-            timeline.metrics.layer_count_delta.inc();
-            timeline.metrics.layer_size_delta.add(desc.file_size);
-        } else {
-            timeline.metrics.layer_count_image.inc();
-            timeline.metrics.layer_size_image.add(desc.file_size);
-        }
+        timeline.metrics.inc_layer(&desc);
 
         // New layers are visible by default. This metric is later updated on drop or in set_visibility
         timeline

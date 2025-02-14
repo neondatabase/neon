@@ -32,6 +32,12 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
     neon_env_builder.num_pageservers = shard_count if shard_count is not None else 1
 
     env = neon_env_builder.init_start()
+    # We restart pageserver(s), which will cause storage storage controller
+    # requests to fail and warn.
+    env.storage_controller.allowed_errors.append(".*management API still failed.*")
+    env.storage_controller.allowed_errors.append(
+        ".*Reconcile error.*error sending request for url.*"
+    )
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     branch = "main"
@@ -64,6 +70,10 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
         workload.write_rows(128)
     else:
         tenant_shard_ids = [TenantShardId(tenant_id, 0, 0)]
+
+    # Let shards finish rescheduling to other pageservers: this makes the rest of the test more stable
+    # is it won't overlap with migrations
+    env.storage_controller.reconcile_until_idle(max_interval=0.1, timeout_secs=120)
 
     output_path = neon_env_builder.test_output_dir / "snapshot"
     os.makedirs(output_path)
@@ -301,6 +311,17 @@ def test_scrubber_physical_gc_ancestors(neon_env_builder: NeonEnvBuilder, shard_
     workload.stop()
     drop_local_state(env, tenant_id)
     workload.validate()
+
+    for ps in env.pageservers:
+        # This is not okay, but it's not a scrubber bug: it's a pageserver issue that is exposed by
+        # the specific pattern of aggressive checkpointing+image layer generation + GC that this test does.
+        # TODO: remove when https://github.com/neondatabase/neon/issues/10720 is fixed
+        ps.allowed_errors.extend(
+            [
+                ".*could not find data for key.*",
+                ".*could not ingest record.*",
+            ]
+        )
 
 
 def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder):

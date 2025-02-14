@@ -32,6 +32,10 @@ postgres_connection.workspace = true
 rand.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 routerify.workspace = true
+safekeeper_api.workspace = true
+safekeeper_client.workspace = true
+regex.workspace = true
+rustls-native-certs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -39,9 +43,12 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 measured.workspace = true
+rustls.workspace = true
 scopeguard.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
+tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
 
 diesel = { version = "2.2.6", features = [
     "serde_json",
@@ -51,6 +58,7 @@ diesel-async = { version = "0.5.2", features = ["postgres", "bb8", "async-connec
 diesel_migrations = { version = "2.2.0" }
 scoped-futures = "0.1.4"
 
+http-utils = { path = "../libs/http-utils/" }
 utils = { path = "../libs/utils/" }
 metrics = { path = "../libs/metrics/" }
 control_plane = { path = "../control_plane" }

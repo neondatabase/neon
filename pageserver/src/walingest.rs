@@ -28,17 +28,9 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
-use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::fsm_logical_to_physical;
-use postgres_ffi::walrecord::*;
-use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
-use wal_decoder::models::*;
-
 use anyhow::{bail, Result};
 use bytes::{Buf, Bytes};
 use tracing::*;
-use utils::failpoint_support;
-use utils::rate_limit::RateLimit;
 
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
@@ -50,11 +42,18 @@ use crate::ZERO_PAGE;
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
+use pageserver_api::shard::ShardIdentity;
+use postgres_ffi::fsm_logical_to_physical;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi::walrecord::*;
 use postgres_ffi::TransactionId;
+use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
 use utils::bin_ser::SerializeError;
 use utils::lsn::Lsn;
+use utils::rate_limit::RateLimit;
+use utils::{critical, failpoint_support};
+use wal_decoder::models::*;
 
 enum_pgversion! {CheckPoint, pgv::CheckPoint}
 
@@ -327,93 +326,75 @@ impl WalIngest {
         let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
         let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
 
-        // Sometimes, Postgres seems to create heap WAL records with the
-        // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
-        // not set. In fact, it's possible that the VM page does not exist at all.
-        // In that case, we don't want to store a record to clear the VM bit;
-        // replaying it would fail to find the previous image of the page, because
-        // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
-        // record if it doesn't.
-        //
-        // TODO: analyze the metrics and tighten this up accordingly. This logic
-        // implicitly assumes that VM pages see explicit WAL writes before
-        // implicit ClearVmBits, and will otherwise silently drop updates.
+        // VM bits can only be cleared on the shard(s) owning the VM relation, and must be within
+        // its view of the VM relation size. Out of caution, error instead of failing WAL ingestion,
+        // as there has historically been cases where PostgreSQL has cleared spurious VM pages. See:
+        // https://github.com/neondatabase/neon/pull/10634.
         let Some(vm_size) = get_relsize(modification, vm_rel, ctx).await? else {
-            WAL_INGEST
-                .clear_vm_bits_unknown
-                .with_label_values(&["relation"])
-                .inc();
+            critical!("clear_vm_bits for unknown VM relation {vm_rel}");
             return Ok(());
         };
         if let Some(blknum) = new_vm_blk {
             if blknum >= vm_size {
-                WAL_INGEST
-                    .clear_vm_bits_unknown
-                    .with_label_values(&["new_page"])
-                    .inc();
+                critical!("new_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
                 new_vm_blk = None;
             }
         }
         if let Some(blknum) = old_vm_blk {
             if blknum >= vm_size {
-                WAL_INGEST
-                    .clear_vm_bits_unknown
-                    .with_label_values(&["old_page"])
-                    .inc();
+                critical!("old_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
                 old_vm_blk = None;
             }
         }
 
-        if new_vm_blk.is_some() || old_vm_blk.is_some() {
-            if new_vm_blk == old_vm_blk {
-                // An UPDATE record that needs to clear the bits for both old and the
-                // new page, both of which reside on the same VM page.
+        if new_vm_blk.is_none() && old_vm_blk.is_none() {
+            return Ok(());
+        } else if new_vm_blk == old_vm_blk {
+            // An UPDATE record that needs to clear the bits for both old and the new page, both of
+            // which reside on the same VM page.
+            self.put_rel_wal_record(
+                modification,
+                vm_rel,
+                new_vm_blk.unwrap(),
+                NeonWalRecord::ClearVisibilityMapFlags {
+                    new_heap_blkno,
+                    old_heap_blkno,
+                    flags,
+                },
+                ctx,
+            )
+            .await?;
+        } else {
+            // Clear VM bits for one heap page, or for two pages that reside on different VM pages.
+            if let Some(new_vm_blk) = new_vm_blk {
                 self.put_rel_wal_record(
                     modification,
                     vm_rel,
-                    new_vm_blk.unwrap(),
+                    new_vm_blk,
                     NeonWalRecord::ClearVisibilityMapFlags {
                         new_heap_blkno,
+                        old_heap_blkno: None,
+                        flags,
+                    },
+                    ctx,
+                )
+                .await?;
+            }
+            if let Some(old_vm_blk) = old_vm_blk {
+                self.put_rel_wal_record(
+                    modification,
+                    vm_rel,
+                    old_vm_blk,
+                    NeonWalRecord::ClearVisibilityMapFlags {
+                        new_heap_blkno: None,
                         old_heap_blkno,
                         flags,
                     },
                     ctx,
                 )
                 .await?;
-            } else {
-                // Clear VM bits for one heap page, or for two pages that reside on
-                // different VM pages.
-                if let Some(new_vm_blk) = new_vm_blk {
-                    self.put_rel_wal_record(
-                        modification,
-                        vm_rel,
-                        new_vm_blk,
-                        NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno,
-                            old_heap_blkno: None,
-                            flags,
-                        },
-                        ctx,
-                    )
-                    .await?;
-                }
-                if let Some(old_vm_blk) = old_vm_blk {
-                    self.put_rel_wal_record(
-                        modification,
-                        vm_rel,
-                        old_vm_blk,
-                        NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno: None,
-                            old_heap_blkno,
-                            flags,
-                        },
-                        ctx,
-                    )
-                    .await?;
-                }
             }
         }
-
         Ok(())
     }
 
