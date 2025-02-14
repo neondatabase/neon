@@ -14,6 +14,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tokio-rustls.workspace = true
 tracing.workspace = true
+pin-project-lite.workspace = true
 
 pq_proto.workspace = true
 
