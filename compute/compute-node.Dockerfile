@@ -148,7 +148,7 @@ RUN case $DEBIAN_VERSION in \
     apt install --no-install-recommends --no-install-suggests -y \
     ninja-build git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
-    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip \
+    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip g++ \
     $VERSION_INSTALLS \
     && apt clean && rm -rf /var/lib/apt/lists/*
 
@@ -1466,6 +1466,40 @@ RUN make release -j $(getconf _NPROCESSORS_ONLN) && \
 
 #########################################################################################
 #
+# Layer "pg-duckdb-pg-build"
+# compile pg_duckdb extension
+#
+#########################################################################################
+FROM build-deps AS pg_duckdb-src
+WORKDIR /ext-src
+# pg_duckdb build requires source dir to be a git repo to get submodules
+# allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only 
+# cache management functions duckdb.cache(), duckdb.cache_info(), duckdb.cache_delete()
+# extension management function duckdb.install_extension()
+# for debugging purposes raw query and reset ddb duckdb.raw_query(), duckdb.recycle_ddb()
+RUN git clone --depth 1 --branch v0.3.1 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
+    cd pg_duckdb-src && \
+    git submodule update --init --recursive 
+
+FROM pg-build AS pg_duckdb-build
+ARG PG_VERSION
+COPY --from=pg_duckdb-src /ext-src/ /ext-src/
+WORKDIR /ext-src/pg_duckdb-src
+RUN make install -j $(getconf _NPROCESSORS_ONLN) && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control && \
+    file=/usr/local/pgsql/share/extension/pg_duckdb--0.2.0--0.3.0.sql && \
+    echo 'GRANT ALL ON FUNCTION duckdb.cache(TEXT, TEXT) TO neon_superuser;' >> $file && \
+    echo 'GRANT ALL ON FUNCTION duckdb.cache_info() TO neon_superuser;' >> $file && \
+    echo 'GRANT ALL ON FUNCTION duckdb.cache_delete(cache_key TEXT) TO neon_superuser;' >> $file && \
+    echo 'GRANT ALL ON FUNCTION duckdb.install_extension(TEXT) TO neon_superuser;' >> $file && \
+    echo 'GRANT ALL ON FUNCTION duckdb.raw_query(TEXT) TO neon_superuser;' >> $file && \
+    echo 'GRANT ALL ON PROCEDURE duckdb.recycle_ddb() TO neon_superuser;'  >> $file && \
+    echo 'GRANT ALL ON TABLE duckdb.extensions TO neon_superuser;' >> $file && \
+    echo 'GRANT ALL ON SEQUENCE duckdb.extensions_table_seq TO neon_superuser;' >> $file
+        
+
+#########################################################################################
+#
 # Layer "pg_repack"
 # compile pg_repack extension
 #
@@ -1577,6 +1611,7 @@ COPY --from=pg_anon-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_duckdb-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 
 #########################################################################################
