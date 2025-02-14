@@ -15,7 +15,6 @@ use std::task::{ready, Poll};
 use std::{fmt, io};
 use std::{future::Future, str::FromStr};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::tcp::WriteHalf;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
@@ -250,14 +249,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeWriteOnly<IO> {
         }
     }
 
-    fn flush(&mut self) -> Flush<'_, IO> {
+    async fn flush(&mut self) -> io::Result<()> {
         match self {
-            MaybeWriteOnly::Full(framed) => Flush::Full {
-                flush: framed.flush(),
-            },
-            MaybeWriteOnly::WriteOnly(framed_writer) => Flush::WriteOnly {
-                flush: framed_writer.flush(),
-            },
+            MaybeWriteOnly::Full(framed) => framed.flush().await,
+            MaybeWriteOnly::WriteOnly(framed_writer) => framed_writer.flush().await,
             MaybeWriteOnly::Broken => panic!("IO on invalid MaybeWriteOnly"),
         }
     }
@@ -268,34 +263,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeWriteOnly<IO> {
             MaybeWriteOnly::Full(framed) => framed.shutdown().await,
             MaybeWriteOnly::WriteOnly(framed_writer) => framed_writer.shutdown().await,
             MaybeWriteOnly::Broken => panic!("IO on invalid MaybeWriteOnly"),
-        }
-    }
-}
-
-pin_project_lite::pin_project! {
-    #[project = FlushProj]
-    pub enum Flush<'s, IO> {
-        Full{
-            #[pin]
-            flush: pq_proto::framed::Flush<'s, MaybeTlsStream<IO>>
-        },
-        WriteOnly{
-            #[pin]
-            flush: pq_proto::framed::Flush<'s, tokio::io::WriteHalf<MaybeTlsStream<IO>>>
-        },
-    }
-}
-
-impl<'s, IO> Future for Flush<'s, IO>
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    type Output = Result<(), io::Error>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        match self.project() {
-            FlushProj::Full { flush } => flush.poll(cx),
-            FlushProj::WriteOnly { flush } => flush.poll(cx),
         }
     }
 }
@@ -393,8 +360,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
     }
 
     /// Flush output buffer into the socket.
-    pub fn flush(&mut self) -> Flush<'_, IO> {
-        self.framed.flush()
+    pub async fn flush(&mut self) -> io::Result<()> {
+        self.framed.flush().await
     }
 
     /// Polling version of `flush()`, saves the caller need to pin.

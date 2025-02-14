@@ -104,8 +104,8 @@ impl<S: AsyncWrite + Unpin> Framed<S> {
 
     /// Flush out the buffer. This function is cancellation safe: it can be
     /// interrupted and flushing will be continued in the next call.
-    pub fn flush(&mut self) -> Flush<'_, S> {
-        flush(&mut self.stream, &mut self.write_buf)
+    pub async fn flush(&mut self) -> Result<(), io::Error> {
+        flush(&mut self.stream, &mut self.write_buf).await
     }
 
     /// Flush out the buffer and shutdown the stream.
@@ -167,8 +167,8 @@ impl<S: AsyncWrite + Unpin> FramedWriter<S> {
 
     /// Flush out the buffer. This function is cancellation safe: it can be
     /// interrupted and flushing will be continued in the next call.
-    pub fn flush(&mut self) -> Flush<'_, WriteHalf<S>> {
-        flush(&mut self.stream, &mut self.write_buf)
+    pub async fn flush(&mut self) -> Result<(), io::Error> {
+        flush(&mut self.stream, &mut self.write_buf).await
     }
 
     /// Flush out the buffer and shutdown the stream.
@@ -214,35 +214,21 @@ where
     }
 }
 
-pub struct Flush<'a, S> {
-    stream: &'a mut S,
-    write_buf: &'a mut BytesMut,
-}
-
-impl<'a, S: AsyncWrite + Unpin> Future for Flush<'a, S> {
-    type Output = Result<(), io::Error>;
-
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        todo!()
-        //      while write_buf.has_remaining() {
-        //     let bytes_written = stream.write_buf(write_buf).await?;
-        //     if bytes_written == 0 {
-        //         return Err(io::Error::new(
-        //             ErrorKind::WriteZero,
-        //             "failed to write message",
-        //         ));
-        //     }
-        // }
-        // stream.flush().await
-    }
-}
-
 /// Cancellation safe as long as the AsyncWrite is cancellation safe.
-fn flush<'a, S: AsyncWrite + Unpin>(stream: &mut S, write_buf: &mut BytesMut) -> Flush<'a, S> {
-    todo!()
+async fn flush<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    write_buf: &mut BytesMut,
+) -> Result<(), io::Error> {
+    while write_buf.has_remaining() {
+        let bytes_written = stream.write_buf(write_buf).await?;
+        if bytes_written == 0 {
+            return Err(io::Error::new(
+                ErrorKind::WriteZero,
+                "failed to write message",
+            ));
+        }
+    }
+    stream.flush().await
 }
 
 /// Cancellation safe as long as the AsyncWrite is cancellation safe.
