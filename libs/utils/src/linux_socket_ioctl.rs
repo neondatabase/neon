@@ -1,6 +1,6 @@
 //! Linux-specific socket ioctls.
 //!
-//! https://elixir.bootlin.com/linux/v6.1.128/source/include/uapi/linux/sockios.h#L25-L27
+//! <https://elixir.bootlin.com/linux/v6.1.128/source/include/uapi/linux/sockios.h#L25-L27>
 
 use std::{
     io,
