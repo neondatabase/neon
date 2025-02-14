@@ -30,7 +30,10 @@ use crate::{
         AbortShardSplitStatus, ControllerPersistence, DatabaseResult, MetadataHealthPersistence,
         ShardGenerationState, TenantFilter,
     },
-    reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
+    reconciler::{
+        ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder,
+        ReconcilerPriority,
+    },
     safekeeper::Safekeeper,
     scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
     tenant_shard::{
@@ -79,7 +82,7 @@ use pageserver_api::{
     },
 };
 use pageserver_client::{mgmt_api, BlockUnblock};
-use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc::error::TrySendError, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use utils::{
     completion::Barrier,
@@ -1272,12 +1275,15 @@ impl Service {
         }
 
         // Maybe some other work can proceed now that this job finished.
+        //
+        // Only bother with this if we have some semaphore units available in the normal-priority semaphore (these
+        // reconciles are scheduled at `[ReconcilerPriority::Normal]`).
         if self.reconciler_concurrency.available_permits() > 0 {
             while let Ok(tenant_shard_id) = locked.delayed_reconcile_rx.try_recv() {
                 let (nodes, tenants, _scheduler) = locked.parts_mut();
                 if let Some(shard) = tenants.get_mut(&tenant_shard_id) {
                     shard.delayed_reconcile = false;
-                    self.maybe_reconcile_shard(shard, nodes);
+                    self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::Normal);
                 }
 
                 if self.reconciler_concurrency.available_permits() == 0 {
@@ -2824,7 +2830,8 @@ impl Service {
 
                         shard.schedule(scheduler, &mut schedule_context)?;
 
-                        let maybe_waiter = self.maybe_reconcile_shard(shard, nodes);
+                        let maybe_waiter =
+                            self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High);
                         if let Some(waiter) = maybe_waiter {
                             waiters.push(waiter);
                         }
@@ -2945,7 +2952,9 @@ impl Service {
             let (nodes, tenants, _scheduler) = locked.parts_mut();
             for (_shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
                 shard.config = config.clone();
-                if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
+                if let Some(waiter) =
+                    self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High)
+                {
                     waiters.push(waiter);
                 }
             }
@@ -3227,7 +3236,9 @@ impl Service {
                 debug_assert!(shard.intent.get_attached().is_none());
                 debug_assert!(shard.intent.get_secondary().is_empty());
 
-                if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
+                if let Some(waiter) =
+                    self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High)
+                {
                     detach_waiters.push(waiter);
                 }
             }
@@ -3379,7 +3390,7 @@ impl Service {
 
             // In case scheduling is being switched back on, try it now.
             shard.schedule(scheduler, &mut schedule_context).ok();
-            self.maybe_reconcile_shard(shard, nodes);
+            self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High);
         }
 
         Ok(())
@@ -4428,7 +4439,7 @@ impl Service {
                     tracing::warn!("Failed to schedule {tenant_shard_id} during shard abort: {e}")
                 }
 
-                self.maybe_reconcile_shard(shard, nodes);
+                self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High);
             }
 
             // We don't expect any new_shard_count shards to exist here, but drop them just in case
@@ -4594,7 +4605,11 @@ impl Service {
                         tracing::warn!("Failed to schedule child shard {child}: {e}");
                     }
                     // In the background, attach secondary locations for the new shards
-                    if let Some(waiter) = self.maybe_reconcile_shard(&mut child_state, nodes) {
+                    if let Some(waiter) = self.maybe_reconcile_shard(
+                        &mut child_state,
+                        nodes,
+                        ReconcilerPriority::High,
+                    ) {
                         waiters.push(waiter);
                     }
 
@@ -4959,7 +4974,9 @@ impl Service {
                 shard.intent.clear_secondary(scheduler);
 
                 // Run Reconciler to execute detach fo secondary locations.
-                if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
+                if let Some(waiter) =
+                    self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High)
+                {
                     waiters.push(waiter);
                 }
             }
@@ -5227,7 +5244,7 @@ impl Service {
 
             let reconciler_config = match migrate_req.migration_config {
                 Some(cfg) => (&cfg).into(),
-                None => ReconcilerConfig::default(),
+                None => ReconcilerConfig::new(ReconcilerPriority::High),
             };
 
             self.maybe_configured_reconcile_shard(shard, nodes, reconciler_config)
@@ -5293,7 +5310,7 @@ impl Service {
                 );
             }
 
-            self.maybe_reconcile_shard(shard, nodes)
+            self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High)
         };
 
         if let Some(waiter) = waiter {
@@ -5705,7 +5722,7 @@ impl Service {
                             )
                         }
 
-                        self.maybe_reconcile_shard(shard, nodes);
+                        self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::Normal);
                     }
 
                     // Here we remove an existing observed location for the node we're removing, and it will
@@ -6074,7 +6091,14 @@ impl Service {
                                     tracing::warn!(%tenant_shard_id, "Scheduling error when marking pageserver {} offline: {e}", node_id);
                                 }
                                 Ok(()) => {
-                                    if self.maybe_reconcile_shard(tenant_shard, nodes).is_some() {
+                                    if self
+                                        .maybe_reconcile_shard(
+                                            tenant_shard,
+                                            nodes,
+                                            ReconcilerPriority::Normal,
+                                        )
+                                        .is_some()
+                                    {
                                         tenants_affected += 1;
                                     };
                                 }
@@ -6105,7 +6129,11 @@ impl Service {
 
                     if let Some(observed_loc) = tenant_shard.observed.locations.get_mut(&node_id) {
                         if observed_loc.conf.is_none() {
-                            self.maybe_reconcile_shard(tenant_shard, nodes);
+                            self.maybe_reconcile_shard(
+                                tenant_shard,
+                                nodes,
+                                ReconcilerPriority::Normal,
+                            );
                         }
                     }
                 }
@@ -6469,8 +6497,36 @@ impl Service {
         &self,
         shard: &mut TenantShard,
         nodes: &Arc<HashMap<NodeId, Node>>,
+        priority: ReconcilerPriority,
     ) -> Option<ReconcilerWaiter> {
-        self.maybe_configured_reconcile_shard(shard, nodes, ReconcilerConfig::default())
+        self.maybe_configured_reconcile_shard(shard, nodes, ReconcilerConfig::new(priority))
+    }
+
+    /// Before constructing a Reconciler, acquire semaphore units from the appropriate concurrency limit (depends on priority)
+    fn get_reconciler_units(
+        &self,
+        priority: ReconcilerPriority,
+    ) -> Result<ReconcileUnits, TryAcquireError> {
+        let units = match priority {
+            ReconcilerPriority::Normal => self.reconciler_concurrency.clone().try_acquire_owned(),
+            ReconcilerPriority::High => {
+                match self
+                    .priority_reconciler_concurrency
+                    .clone()
+                    .try_acquire_owned()
+                {
+                    Ok(u) => Ok(u),
+                    Err(TryAcquireError::NoPermits) => {
+                        // If the high priority semaphore is exhausted, then high priority tasks may steal units from
+                        // the normal priority semaphore.
+                        self.reconciler_concurrency.clone().try_acquire_owned()
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        };
+
+        units.map(ReconcileUnits::new)
     }
 
     /// Wrap [`TenantShard`] reconciliation methods with acquisition of [`Gate`] and [`ReconcileUnits`],
@@ -6490,8 +6546,8 @@ impl Service {
             }
         };
 
-        let units = match self.reconciler_concurrency.clone().try_acquire_owned() {
-            Ok(u) => ReconcileUnits::new(u),
+        let units = match self.get_reconciler_units(reconciler_config.priority) {
+            Ok(u) => u,
             Err(_) => {
                 tracing::info!(tenant_id=%shard.tenant_shard_id.tenant_id, shard_id=%shard.tenant_shard_id.shard_slug(),
                     "Concurrency limited: enqueued for reconcile later");
@@ -6584,7 +6640,10 @@ impl Service {
 
             // Eventual consistency: if an earlier reconcile job failed, and the shard is still
             // dirty, spawn another rone
-            if self.maybe_reconcile_shard(shard, &pageservers).is_some() {
+            if self
+                .maybe_reconcile_shard(shard, &pageservers, ReconcilerPriority::Normal)
+                .is_some()
+            {
                 reconciles_spawned += 1;
             } else if shard.delayed_reconcile {
                 // Shard wanted to reconcile but for some reason couldn't.
@@ -6670,7 +6729,10 @@ impl Service {
             tracing::info!(tenant_shard_id=%tenant_shard_id, "Applying optimization: {optimization:?}");
             if shard.apply_optimization(scheduler, optimization) {
                 optimizations_applied += 1;
-                if self.maybe_reconcile_shard(shard, nodes).is_some() {
+                if self
+                    .maybe_reconcile_shard(shard, nodes, ReconcilerPriority::Normal)
+                    .is_some()
+                {
                     reconciles_spawned += 1;
                 }
             }
