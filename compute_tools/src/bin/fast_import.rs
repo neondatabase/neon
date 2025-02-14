@@ -46,11 +46,17 @@ const PG_WAIT_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_mi
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Runs local postgres (neon binary), restores into it,
+    /// uploads pgdata to s3 to be consumed by pageservers
     Pgdata {
+        /// Raw connection string to the source database. Used only in tests,
+        /// real scenario uses encrypted connection string in spec.json from s3.
         #[clap(long)]
         source_connection_string: Option<String>,
+        /// If specified, will not shut down the local postgres after the import. Used in local testing
         #[clap(short, long)]
         interactive: bool,
+        /// Port to run postgres on. Default is 5432.
         #[clap(long, default_value_t = 5432)]
         pg_port: u16, // port to run postgres on, 5432 is default
 
@@ -65,11 +71,16 @@ enum Command {
         memory_mb: Option<usize>,
     },
 
+    /// Runs pg_dump-pg_restore from source to destination without running local postgres.
     DumpRestore {
+        /// Raw connection string to the source database. Used only in tests,
+        /// real scenario uses encrypted connection string in spec.json from s3.
         #[clap(long)]
         source_connection_string: Option<String>,
+        /// Raw connection string to the destination database. Used only in tests,
+        /// real scenario uses encrypted connection string in spec.json from s3.
         #[clap(long)]
-        destination_connection_string: Option<String>, // will not run postgres if specified, will do pg_restore to this connection string
+        destination_connection_string: Option<String>,
     },
 }
 
