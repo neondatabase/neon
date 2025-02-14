@@ -195,6 +195,7 @@ pub(crate) enum LeadershipStatus {
 }
 
 pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
+pub const PRIORITY_RECONCILER_CONCURRENCY_DEFAULT: usize = 256;
 
 // Depth of the channel used to enqueue shards for reconciliation when they can't do it immediately.
 // This channel is finite-size to avoid using excessive memory if we get into a state where reconciles are finishing more slowly
@@ -366,8 +367,11 @@ pub struct Config {
     /// and/or upon handling the re-attach request from a node.
     pub max_warming_up_interval: Duration,
 
-    /// How many Reconcilers may be spawned concurrently
+    /// How many normal-priority Reconcilers may be spawned concurrently
     pub reconciler_concurrency: usize,
+
+    /// How many high-priority Reconcilers may be spawned concurrently
+    pub priority_reconciler_concurrency: usize,
 
     /// How large must a shard grow in bytes before we split it?
     /// None disables auto-splitting.
