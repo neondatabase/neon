@@ -82,7 +82,7 @@ pub async fn task_main(
                     error!("per-client task finished with an error: failed to set socket option: {e:#}");
                     return;
                 }
-            };
+            }
 
             let ctx = RequestContext::new(
                 session_id,
