@@ -237,7 +237,7 @@ pub async fn libpq_listener_main(
 
 type ConnectionHandlerResult = anyhow::Result<()>;
 
-#[instrument(skip_all, fields(peer_addr))]
+#[instrument(skip_all, fields(peer_addr, application_name))]
 #[allow(clippy::too_many_arguments)]
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
@@ -2463,9 +2463,16 @@ where
     fn startup(
         &mut self,
         _pgb: &mut PostgresBackend<IO>,
-        _sm: &FeStartupPacket,
+        sm: &FeStartupPacket,
     ) -> Result<(), QueryError> {
         fail::fail_point!("ps::connection-start::startup-packet");
+
+        if let FeStartupPacket::StartupMessage { params, .. } = sm {
+            if let Some(app_name) = params.get("application_name") {
+                Span::current().record("application_name", field::display(app_name));
+            }
+        };
+
         Ok(())
     }
 
