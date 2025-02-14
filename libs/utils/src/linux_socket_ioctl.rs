@@ -20,10 +20,16 @@ unsafe fn do_ioctl(socket_fd: RawFd, cmd: nix::libc::Ioctl) -> io::Result<c_int>
     }
 }
 
+/// # Safety
+///
+/// Caller must ensure that `socket_fd` is a valid TCP socket file descriptor.
 pub unsafe fn inq(socket_fd: RawFd) -> io::Result<c_int> {
     do_ioctl(socket_fd, FIONREAD)
 }
 
+/// # Safety
+///
+/// Caller must ensure that `socket_fd` is a valid TCP socket file descriptor.
 pub unsafe fn outq(socket_fd: RawFd) -> io::Result<c_int> {
     do_ioctl(socket_fd, TIOCOUTQ)
 }
