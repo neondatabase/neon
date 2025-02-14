@@ -1793,6 +1793,13 @@ impl PageServerHandler {
                 .as_millis()
                 .to_string()
         });
+
+        info!(
+            "acquired lease for {} until {}",
+            lsn,
+            valid_until_str.as_deref().unwrap_or("<unknown>")
+        );
+
         let bytes = valid_until_str.as_ref().map(|x| x.as_bytes());
 
         pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
