@@ -103,7 +103,7 @@ static uint64 pagestore_local_counter = 0;
 typedef enum PSConnectionState {
 	PS_Disconnected,			/* no connection yet */
 	PS_Connecting_Startup,		/* connection starting up */
-	PS_Connecting_PageStream,	/* negotiating pagestream */
+	PS_Connecting_PageStream,	/* negotiating pagestream */ 
 	PS_Connected,				/* connected, pagestream established */
 } PSConnectionState;
 
@@ -333,7 +333,7 @@ get_shard_number(BufferTag *tag)
 }
 
 static inline void
-CLEANUP_AND_DISCONNECT(PageServer *shard)
+CLEANUP_AND_DISCONNECT(PageServer *shard) 
 {
 	if (shard->wes_read)
 	{
@@ -355,7 +355,7 @@ CLEANUP_AND_DISCONNECT(PageServer *shard)
  * complete the connection (e.g. due to receiving an earlier cancellation
  * during connection start).
  * Returns true if successfully connected; false if the connection failed.
- *
+ * 
  * Throws errors in unrecoverable situations, or when this backend's query
  * is canceled.
  */
