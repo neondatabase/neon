@@ -2771,18 +2771,18 @@ pytest = ">=5,<8"
 
 [[package]]
 name = "pytest-timeout"
-version = "2.1.0"
+version = "2.3.1"
 description = "pytest plugin to abort hanging tests"
 optional = false
-python-versions = ">=3.6"
+python-versions = ">=3.7"
 groups = ["main"]
 files = [
-    {file = "pytest-timeout-2.1.0.tar.gz", hash = "sha256:c07ca07404c612f8abbe22294b23c368e2e5104b521c1790195561f37e1ac3d9"},
-    {file = "pytest_timeout-2.1.0-py3-none-any.whl", hash = "sha256:f6f50101443ce70ad325ceb4473c4255e9d74e3c7cd0ef827309dfa4c0d975c6"},
+    {file = "pytest-timeout-2.3.1.tar.gz", hash = "sha256:12397729125c6ecbdaca01035b9e5239d4db97352320af155b3f5de1ba5165d9"},
+    {file = "pytest_timeout-2.3.1-py3-none-any.whl", hash = "sha256:68188cb703edfc6a18fad98dc25a3c61e9f24d644b0b70f33af545219fc7813e"},
 ]
 
 [package.dependencies]
-pytest = ">=5.0.0"
+pytest = ">=7.0.0"
 
 [[package]]
 name = "pytest-xdist"
@@ -3820,4 +3820,4 @@ cffi = ["cffi (>=1.11)"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "03697c0a4d438ef088b0d397b8f0570aa3998ccf833fe612400824792498878b"
+content-hash = "00ddc42c32e235b6171845fc066dcab078282ed832cd464d5e8a0afa959dd04a"
