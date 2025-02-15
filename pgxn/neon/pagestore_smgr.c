@@ -133,7 +133,7 @@ static int		PS_TIMEOUT_ID = 0;
 static bool		timeout_set = false;
 static bool		readpage_reentrant_guard = false;
 static void reconfigure_timeout_if_needed(void);
-
+static void pagestore_timeout_handler(void);
 /*
  * Prefetch implementation:
  *
