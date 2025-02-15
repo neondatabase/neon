@@ -1,5 +1,5 @@
 diff --git a/sql/pg_duckdb--0.2.0--0.3.0.sql b/sql/pg_duckdb--0.2.0--0.3.0.sql
-index d777d76..7c1f090 100644
+index d777d76..af60106 100644
 --- a/sql/pg_duckdb--0.2.0--0.3.0.sql
 +++ b/sql/pg_duckdb--0.2.0--0.3.0.sql
 @@ -1056,3 +1056,6 @@ GRANT ALL ON FUNCTION duckdb.cache(TEXT, TEXT) TO PUBLIC;
@@ -9,4 +9,3 @@ index d777d76..7c1f090 100644
 +GRANT ALL ON FUNCTION duckdb.install_extension(TEXT) TO neon_superuser;
 +GRANT ALL ON TABLE duckdb.extensions TO neon_superuser;
 +GRANT ALL ON SEQUENCE duckdb.extensions_table_seq TO neon_superuser;
-\ No newline at end of file
