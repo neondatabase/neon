@@ -1472,27 +1472,23 @@ RUN make release -j $(getconf _NPROCESSORS_ONLN) && \
 #########################################################################################
 FROM build-deps AS pg_duckdb-src
 WORKDIR /ext-src
+COPY compute/patches/pg_duckdb_v031.patch .
 # pg_duckdb build requires source dir to be a git repo to get submodules
-# allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only 
-# cache management functions duckdb.cache(), duckdb.cache_info(), duckdb.cache_delete()
-# extension management function duckdb.install_extension()
-# for debugging purposes raw query and reset ddb duckdb.raw_query(), duckdb.recycle_ddb()
+# allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only: 
+# - extension management function duckdb.install_extension()
+# - access to duckdb.extensions table and its sequence
 RUN git clone --depth 1 --branch v0.3.1 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
     cd pg_duckdb-src && \
-    git submodule update --init --recursive 
+    git submodule update --init --recursive && \
+    patch -p1 < /ext-src/pg_duckdb_v031.patch
 
 FROM pg-build AS pg_duckdb-build
 ARG PG_VERSION
 COPY --from=pg_duckdb-src /ext-src/ /ext-src/
 WORKDIR /ext-src/pg_duckdb-src
 RUN make install -j $(getconf _NPROCESSORS_ONLN) && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control && \
-    file=/usr/local/pgsql/share/extension/pg_duckdb--0.2.0--0.3.0.sql && \
-    echo 'GRANT ALL ON FUNCTION duckdb.install_extension(TEXT) TO neon_superuser;' >> $file && \
-    echo 'GRANT ALL ON TABLE duckdb.extensions TO neon_superuser;' >> $file && \
-    echo 'GRANT ALL ON SEQUENCE duckdb.extensions_table_seq TO neon_superuser;' >> $file
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control 
         
-
 #########################################################################################
 #
 # Layer "pg_repack"
