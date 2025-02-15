@@ -129,7 +129,7 @@ static uint32 local_request_counter;
  * at any CHECK_FOR_INTERRUPTS point.
  */
 #define	PS_BACKGROUND_DELAY_MS 100
-static int		PS_TIMEOUT_ID = USER_TIMEOUT;
+static int		PS_TIMEOUT_ID = 0;
 static bool		timeout_set = false;
 static bool		readpage_reentrant_guard = false;
 static void reconfigure_timeout_if_needed(void);
@@ -4467,6 +4467,8 @@ static void
 reconfigure_timeout_if_needed(void)
 {
 	bool	needs_set = MyPState->ring_receive != MyPState->ring_unused;
+	if (unlikely(PS_TIMEOUT_ID == 0))
+		PS_TIMEOUT_ID = RegisterTimeout(USER_TIMEOUT, pagestore_timeout_handler);
 
 	if (needs_set != timeout_set)
 	{
@@ -4509,10 +4511,4 @@ pagestore_timeout_handler(void)
 	}
 
 	reconfigure_timeout_if_needed();
-}
-
-void
-pagestore_smgr_init(void)
-{
-	PS_TIMEOUT_ID = RegisterTimeout(USER_TIMEOUT, pagestore_timeout_handler);
 }
