@@ -211,7 +211,6 @@ impl PostgresProcess {
             .args(["-p", &format!("{port}")])
             .args(["-c", "wal_level=minimal"])
             .args(["-c", &format!("shared_buffers={shared_buffers_mb}MB")])
-            .args(["-c", "shared_buffers=10GB"])
             .args(["-c", "max_wal_senders=0"])
             .args(["-c", "fsync=off"])
             .args(["-c", "full_page_writes=off"])
