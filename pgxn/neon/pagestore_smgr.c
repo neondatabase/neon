@@ -4475,7 +4475,7 @@ reconfigure_timeout_if_needed(void)
 #if PG_MAJORVERSION_NUM == 14
 			enable_timeout_after(PS_TIMEOUT_ID, PS_BACKGROUND_DELAY_MS);
 #else
-			enable_timeout_every(PS_TIMEOUT_ID, PS_BACKGROUND_DELAY_MS);
+			enable_timeout_every(PS_TIMEOUT_ID, GetCurrentTimestamp(), PS_BACKGROUND_DELAY_MS);
 #endif
 			timeout_set = true;
 		}
