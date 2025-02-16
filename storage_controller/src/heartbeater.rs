@@ -188,29 +188,25 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
                         )
                         .await;
 
-                    let response = match response {
-                        Some(r) => r,
-                        None => {
+                    let status =
+                        if let Err(pageserver_client::mgmt_api::Error::Cancelled) = response {
                             // This indicates cancellation of the request.
                             // We ignore the node in this case.
                             return None;
-                        }
-                    };
-
-                    let status = if let Ok(utilization) = response {
-                        PageserverState::Available {
-                            last_seen_at: Instant::now(),
-                            utilization,
-                        }
-                    } else if let NodeAvailability::WarmingUp(last_seen_at) =
-                        node.get_availability()
-                    {
-                        PageserverState::WarmingUp {
-                            started_at: *last_seen_at,
-                        }
-                    } else {
-                        PageserverState::Offline
-                    };
+                        } else if let Ok(utilization) = response {
+                            PageserverState::Available {
+                                last_seen_at: Instant::now(),
+                                utilization,
+                            }
+                        } else if let NodeAvailability::WarmingUp(last_seen_at) =
+                            node.get_availability()
+                        {
+                            PageserverState::WarmingUp {
+                                started_at: *last_seen_at,
+                            }
+                        } else {
+                            PageserverState::Offline
+                        };
 
                     Some((*node_id, status))
                 }
