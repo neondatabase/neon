@@ -50,6 +50,7 @@ typedef enum
 
 typedef uint64 NeonRequestId;
 
+
 /* base struct for c-style inheritance */
 typedef struct
 {
@@ -228,8 +229,9 @@ extern char *neon_timeline;
 extern char *neon_tenant;
 extern int32 max_cluster_size;
 extern int  neon_protocol_version;
+extern bool lfc_store_prefetch_result;
 
-extern shardno_t get_shard_number(BufferTag* tag);
+extern int get_shard_number(NRelFileInfo rinfo, BlockNumber blocknum);
 
 extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
@@ -296,14 +298,16 @@ extern bool lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum,
 							   BlockNumber blkno);
 extern int lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum,
 							   BlockNumber blkno, int nblocks, bits8 *bitmap);
-extern void lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno);
 extern void lfc_init(void);
+extern bool lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
+						 const void* buffer, XLogRecPtr lsn);
+
 
 static inline bool
 lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		 void *buffer)
 {
-	bits8		rv = 0;
+	bits8		rv = 1;
 	return lfc_readv_select(rinfo, forkNum, blkno, &buffer, 1, &rv) == 1;
 }
 
@@ -315,8 +319,8 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 }
 
 
-extern void communicator_send_request(int shard, NeonCommunicationRequest* req);
+extern void communicator_send_request(int shard, NeonCommunicatorRequest* req);
 extern int64 communicator_receive_response(void);
-extern int64 communicator_request(int shard, NeonCommunicationRequest* req);
+extern int64 communicator_request(int shard, NeonCommunicatorRequest* req);
 
 #endif
