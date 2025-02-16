@@ -64,6 +64,8 @@ VERSIONS_COMBINATIONS = (
 # If it is not set or set to a value not equal to "false", LFC is enabled by default.
 USE_LFC = os.environ.get("USE_LFC") != "false"
 
+WITH_SANITIZERS = os.environ.get("SANITIZERS") == "enabled"
+
 
 def subprocess_capture(
     capture_dir: Path,
