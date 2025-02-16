@@ -65,6 +65,7 @@
 #include "storage/fsm_internals.h"
 #include "storage/md.h"
 #include "storage/smgr.h"
+#include "utils/timeout.h"
 
 #include "neon_perf_counters.h"
 #include "pagestore_client.h"
@@ -123,6 +124,16 @@ static BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);
 static uint32 local_request_counter;
 #define GENERATE_REQUEST_ID() (((NeonRequestId)MyProcPid << 32) | ++local_request_counter)
 
+/*
+ * Various settings related to prompt (fast) handling of PageStream responses
+ * at any CHECK_FOR_INTERRUPTS point.
+ */
+#define	PS_BACKGROUND_DELAY_MS 100
+static int		PS_TIMEOUT_ID = 0;
+static bool		timeout_set = false;
+static bool		readpage_reentrant_guard = false;
+static void reconfigure_timeout_if_needed(void);
+static void pagestore_timeout_handler(void);
 /*
  * Prefetch implementation:
  *
@@ -453,6 +464,8 @@ prefetch_pump_state(void)
 		slot->status = PRFS_RECEIVED;
 		slot->response = response;
 	}
+
+	reconfigure_timeout_if_needed();
 }
 
 void
@@ -575,8 +588,12 @@ readahead_buffer_resize(int newsize, void *extra)
 static void
 consume_prefetch_responses(void)
 {
+	readpage_reentrant_guard = true;
+
 	if (MyPState->ring_receive < MyPState->ring_unused)
 		prefetch_wait_for(MyPState->ring_unused - 1);
+
+	readpage_reentrant_guard = false;
 }
 
 static void
@@ -4157,6 +4174,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	}
 	pfree(resp);
 
+	reconfigure_timeout_if_needed();
 	return n_blocks;
 }
 
@@ -4192,6 +4210,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 			}
 			break;
 	}
+	reconfigure_timeout_if_needed();
 }
 
 static const struct f_smgr neon_smgr =
@@ -4442,4 +4461,54 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 		neon_extend_rel_size(rinfo, FSM_FORKNUM, get_fsm_physical_block(blkno), end_recptr);
 	}
 	return no_redo_needed;
+}
+
+static void
+reconfigure_timeout_if_needed(void)
+{
+	bool	needs_set = MyPState->ring_receive != MyPState->ring_unused;
+	if (unlikely(PS_TIMEOUT_ID == 0))
+		PS_TIMEOUT_ID = RegisterTimeout(USER_TIMEOUT, pagestore_timeout_handler);
+
+	if (needs_set != timeout_set)
+	{
+		if (needs_set)
+		{
+#if PG_MAJORVERSION_NUM == 14
+			enable_timeout_after(PS_TIMEOUT_ID, PS_BACKGROUND_DELAY_MS);
+#else
+			enable_timeout_every(PS_TIMEOUT_ID, GetCurrentTimestamp(), PS_BACKGROUND_DELAY_MS);
+#endif
+			timeout_set = true;
+		}
+		else
+		{
+			Assert(timeout_set);
+			disable_timeout(PS_TIMEOUT_ID, false);
+			timeout_set = false;
+		}
+	}
+}
+
+static void
+pagestore_timeout_handler(void)
+{
+#if PG_MAJORVERSION_NUM <= 14
+	/*
+	 * PG14: Setting a repeating timeout is not possible, so we signal here
+	 * that the timeout has already been reset, and by telling the system
+	 * that system will re-schedule it later if we need to.
+	 */
+	timeout_set = false;
+#else
+	/* disable the timeout if we're already done with all we needed to do */
+	reconfigure_timeout_if_needed();
+#endif
+
+	if (!readpage_reentrant_guard)
+	{
+		prefetch_pump_state();
+	}
+
+	reconfigure_timeout_if_needed();
 }
