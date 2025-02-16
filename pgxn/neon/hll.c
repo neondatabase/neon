@@ -136,7 +136,7 @@ getMaximum(const TimestampTz* reg, TimestampTz since)
 	{
 		if (reg[i] >= since)
 		{
-			max = i;
+			max = i + 1;
 		}
 	}
 
