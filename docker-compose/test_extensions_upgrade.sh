@@ -28,6 +28,7 @@ function create_extensions() {
     docker compose exec neon-test-extensions psql -X -v ON_ERROR_STOP=1 -d contrib_regression -c "CREATE EXTENSION IF NOT EXISTS ${ext} CASCADE"
   done
 }
+#XXX: add pgtap
 EXTENSIONS='[
 {"extname": "plv8", "extdir": "plv8-src"},
 {"extname": "vector", "extdir": "pgvector-src"},
@@ -42,8 +43,7 @@ EXTENSIONS='[
 {"extname": "roaringbitmap", "extdir": "pg_roaringbitmap-src"},
 {"extname": "semver", "extdir": "pg_semver-src"},
 {"extname": "pg_ivm", "extdir": "pg_ivm-src"},
-{"extname": "pgjwt", "extdir": "pgjwt-src"},
-{"extname": "pgtap", "extdir": "pgtap-src"}
+{"extname": "pgjwt", "extdir": "pgjwt-src"}
 ]'
 EXTNAMES=$(echo ${EXTENSIONS} | jq -r '.[].extname' | paste -sd ' ' -)
 TAG=${NEWTAG} docker compose --profile test-extensions up --quiet-pull --build -d
@@ -93,7 +93,7 @@ else
       exit 1
     fi
     docker compose exec neon-test-extensions psql -d contrib_regression -c "\dx ${ext}"
-    if ! docker compose exec neon-test-extensions sh -c /ext-src/${EXTDIR}/test-upgrade.sh; then
+    if ! docker compose exec -e PG_VERSION=${PG_VERSION} neon-test-extensions sh -c /ext-src/${EXTDIR}/test-upgrade.sh; then
       docker  compose exec neon-test-extensions  cat /ext-src/${EXTDIR}/regression.diffs
       exit 1
     fi
