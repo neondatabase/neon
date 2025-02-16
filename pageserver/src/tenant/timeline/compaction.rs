@@ -301,18 +301,12 @@ impl GcCompactionQueue {
                         let mut guard = self.inner.lock().unwrap();
                         guard.gc_guards.insert(id, gc_guard);
                     }
-                    let _ = timeline
-                        .compact_with_options(cancel, options, ctx)
-                        .instrument(info_span!("scheduled_compact_timeline", %timeline.timeline_id))
-                        .await?;
+                    let _ = timeline.compact_with_options(cancel, options, ctx).await?;
                     self.notify_and_unblock(id);
                 }
             }
             GcCompactionQueueItem::SubCompactionJob(options) => {
-                let _ = timeline
-                    .compact_with_options(cancel, options, ctx)
-                    .instrument(info_span!("scheduled_compact_timeline", %timeline.timeline_id))
-                    .await?;
+                let _ = timeline.compact_with_options(cancel, options, ctx).await?;
             }
             GcCompactionQueueItem::Notify(id) => {
                 self.notify_and_unblock(id);
