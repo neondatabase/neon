@@ -66,6 +66,7 @@
 #include "storage/md.h"
 #include "storage/smgr.h"
 
+#include "neon.h"
 #include "neon_perf_counters.h"
 #include "pagestore_client.h"
 #include "bitmap.h"
@@ -119,7 +120,7 @@ static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block
 static BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);
 
 void
-nm_pack_request(StringInfo* s, NeonRequest *msg)
+nm_pack_request(StringInfo s, NeonRequest *msg)
 {
 	resetStringInfo(s);
 	pq_sendbyte(s, msg->tag);
@@ -194,14 +195,13 @@ nm_pack_request(StringInfo* s, NeonRequest *msg)
 			neon_log(ERROR, "unexpected neon message tag 0x%02x", msg->tag);
 			break;
 	}
-	return s;
 }
 
 /*
  * We can not used palloc because it is not thread safe
  &*/
-void*
-static memalloc(size_t size)
+static void*
+memalloc(size_t size)
 {
 	return calloc(size, 1);
 }
@@ -690,11 +690,6 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 static void
 neon_init(void)
 {
-	Size		prfs_size;
-
-	if (MyPState != NULL)
-		return;
-
 	/*
 	 * Sanity check that theperf counters array is sized correctly. We got
 	 * this wrong once, and the formula for max number of backends and aux
@@ -959,6 +954,7 @@ static bool
 neon_exists(SMgrRelation reln, ForkNumber forkNum)
 {
 	neon_request_lsns request_lsns;
+	BlockNumber  n_blocks;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -1017,12 +1013,12 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1, NULL);
 	{
 		NeonCommunicatorRequest request = {
-			.hdr.tag = T_NeonNblocksRequest,
-			.hdr.bufid = InvalidBuffer,
-			.hdr.lsn = request_lsns.request_lsn,
-			.hdr.not_modified_since = request_lsns.not_modified_since,
+			.exists.hdr.tag = T_NeonNblocksRequest,
+			.exists.hdr.u.recepient.bufid = InvalidBuffer,
+			.exists.hdr.lsn = request_lsns.request_lsn,
+			.exists.hdr.not_modified_since = request_lsns.not_modified_since,
 			.exists.rinfo = InfoFromSMgrRel(reln),
-			.exists.forknum = forknum,
+			.exists.forknum = forkNum,
 		};
 		return communicator_request(0, &request) != 0;
 	}
@@ -1358,7 +1354,7 @@ static bool
 neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			  int nblocks)
 {
-	BufferTag	tag;
+	neon_request_lsns request_lsns[PG_IOV_MAX];
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -1374,20 +1370,24 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
+
+	neon_get_request_lsns(InfoFromSMgrRel(reln),
+						  forknum, blocknum,
+						  request_lsns, nblocks, NULL);
 	for (int i = 0; i < nblocks; i++)
 	{
 		if (!lfc_cache_contains(InfoFromSMgrRel(reln), forknum, blocknum + i))
 		{
 			NeonCommunicatorRequest request = {
-				.hdr.tag = T_NeonGetPageRequest,
-				.hdr.bufid = InvalidBuffer,
-				.hdr.lsn = request_lsns.request_lsn,
-				.hdr.not_modified_since = request_lsns.not_modified_since,
+				.page.hdr.tag = T_NeonGetPageRequest,
+				.page.hdr.u.recepient.bufid = InvalidBuffer,
+				.page.hdr.lsn = request_lsns[i].request_lsn,
+				.page.hdr.not_modified_since = request_lsns[i].not_modified_since,
 				.page.rinfo = InfoFromSMgrRel(reln),
 				.page.forknum = forknum,
-				.page.blocknum = blocknum + i,
+				.page.blkno = blocknum + i,
 			};
-			communicator_send_request(get_dhard_number(InfoFromSMgrRel(reln), blocknum + i), &request);
+			communicator_send_request(get_shard_number(InfoFromSMgrRel(reln), blocknum + i), &request);
 		}
 	}
 	return false;
@@ -1401,8 +1401,6 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 static bool
 neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 {
-	BufferTag	tag;
-
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:					/* probably shouldn't happen, but ignore it */
@@ -1419,16 +1417,22 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 
 	if (!lfc_cache_contains(InfoFromSMgrRel(reln), forknum, blocknum))
 	{
-		NeonCommunicatorRequest request = {
-			.hdr.tag = T_NeonGetPageRequest,
-			.hdr.bufid = InvalidBuffer,
-			.hdr.lsn = request_lsns.request_lsn,
-			.hdr.not_modified_since = request_lsns.not_modified_since,
-			.page.rinfo = InfoFromSMgrRel(reln),
-			.page.forknum = forknum,
-			.page.blocknum = blocknum + i,
-		};
-		communicator_send_request(get_dhard_number(InfoFromSMgrRel(reln), blocknum), &request);
+		neon_request_lsns request_lsns;
+		neon_get_request_lsns(InfoFromSMgrRel(reln),
+							  forknum, blocknum,
+							  &request_lsns, 1, NULL);
+		{
+			NeonCommunicatorRequest request = {
+				.page.hdr.tag = T_NeonGetPageRequest,
+				.page.hdr.u.recepient.bufid = InvalidBuffer,
+				.page.hdr.lsn = request_lsns.request_lsn,
+				.page.hdr.not_modified_since = request_lsns.not_modified_since,
+				.page.rinfo = InfoFromSMgrRel(reln),
+				.page.forknum = forknum,
+				.page.blkno = blocknum
+			};
+			communicator_send_request(get_shard_number(InfoFromSMgrRel(reln), blocknum), &request);
+		}
 	}
 	return false;
 }
@@ -1472,8 +1476,6 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 	 */
 	neon_log(SmgrTrace, "writeback noop");
 
-	prefetch_pump_state();
-
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
 		mdwriteback(reln, forknum, blocknum, nblocks);
@@ -1483,14 +1485,14 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 static Buffer
 GetBufferId(void const* ptr)
 {
-	Buffer buf = (size_t)(ptr -  BufferBlocks)/BLCKSZ;
+	Buffer buf = (size_t)((char*)ptr -  BufferBlocks)/BLCKSZ;
 	Assert(buf < NBuffers);
 	return buf+1;
 }
 
 static void
 #if PG_MAJORVERSION_NUM < 16
-neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber base_blockno, neon_request_lsns *request_lsns,
+neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, neon_request_lsns *request_lsns,
 				  char **buffers, BlockNumber nblocks, const bits8 *mask)
 #else
 neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, neon_request_lsns *request_lsns,
@@ -1500,15 +1502,15 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, 
 	for (int i = 0; i < nblocks; i++)
 	{
 		NeonCommunicatorRequest request = {
-			.hdr.tag = T_NeonGetPageRequest,
-			.hdr.bufid = GetBufferId(buffers[i]),
-			.hdr.lsn = request_lsns.request_lsn,
-			.hdr.not_modified_since = request_lsns.not_modified_since,
-			.page.rinfo = InfoFromSMgrRel(reln),
+			.page.hdr.tag = T_NeonGetPageRequest,
+			.page.hdr.u.recepient.bufid = GetBufferId(buffers[i]),
+			.page.hdr.lsn = request_lsns[i].request_lsn,
+			.page.hdr.not_modified_since = request_lsns[i].not_modified_since,
+			.page.rinfo = rinfo,
 			.page.forknum = forknum,
-			.page.blocknum = blocknum + i,
+			.page.blkno = blocknum + i,
 		};
-		(void)communicator_request(get_dhard_number(InfoFromSMgrRel(reln), blocknum + i), &request);
+		(void)communicator_request(get_shard_number(rinfo, blocknum + i), &request);
 	}
 }
 
@@ -1649,6 +1651,7 @@ static void
 neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		void **buffers, BlockNumber nblocks)
 {
+	bits8		read[PG_IOV_MAX / 8] = {0};
 	neon_request_lsns request_lsns[PG_IOV_MAX];
 	int			lfc_result;
 
@@ -1672,8 +1675,6 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	if (nblocks > PG_IOV_MAX)
 		neon_log(ERROR, "Read request too large: %d is larger than max %d",
 				 nblocks, PG_IOV_MAX);
-
-	memset(read, 0, sizeof(read));
 
 	/* Try to read from local file cache */
 	lfc_result = lfc_readv_select(InfoFromSMgrRel(reln), forknum, blocknum, buffers,
@@ -1973,10 +1974,10 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 
 	{
 		NeonCommunicatorRequest request = {
-			.hdr.tag = T_NeonNblocksRequest,
-			.hdr.bufid = InvalidBuffer,
-			.hdr.lsn = request_lsns.request_lsn,
-			.hdr.not_modified_since = request_lsns.not_modified_since,
+			.nblocks.hdr.tag = T_NeonNblocksRequest,
+			.nblocks.hdr.u.recepient.bufid = InvalidBuffer,
+			.nblocks.hdr.lsn = request_lsns.request_lsn,
+			.nblocks.hdr.not_modified_since = request_lsns.not_modified_since,
 			.nblocks.rinfo = InfoFromSMgrRel(reln),
 			.nblocks.forknum = forknum,
 		};
@@ -1998,10 +1999,10 @@ neon_dbsize(Oid dbNode)
 
 	{
 		NeonCommunicatorRequest request = {
-			.hdr.tag = T_NeonDbSizeRequest,
-			.hdr.bufid = InvalidBuffer,
-			.hdr.lsn = request_lsns.request_lsn,
-			.hdr.not_modified_since = request_lsns.not_modified_since,
+			.dbsize.hdr.tag = T_NeonDbSizeRequest,
+			.dbsize.hdr.u.recepient.bufid = InvalidBuffer,
+			.dbsize.hdr.lsn = request_lsns.request_lsn,
+			.dbsize.hdr.not_modified_since = request_lsns.not_modified_since,
 			.dbsize.dbNode = dbNode,
 		};
 		return communicator_request(0, &request);
@@ -2102,8 +2103,6 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 	}
 
 	neon_log(SmgrTrace, "[NEON_SMGR] immedsync noop");
-
-	prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -2415,15 +2414,14 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		 * block, which is fine and expected.
 		 */
 		NeonCommunicatorRequest request = {
-			.hdr.tag = T_NeonNblocksRequest,
-			.hdr.bufid = InvalidBuffer,
-			.hdr.lsn = end_recptr,
-			.hdr.not_modified_since = end_recptr,
-			.nblocks.rinfo = InfoFromSMgrRel(reln),
+			.nblocks.hdr.tag = T_NeonNblocksRequest,
+			.nblocks.hdr.u.recepient.bufid = InvalidBuffer,
+			.nblocks.hdr.lsn = end_recptr,
+			.nblocks.hdr.not_modified_since = end_recptr,
+			.nblocks.rinfo = rinfo,
 			.nblocks.forknum = forknum,
 		};
 		relsize = (BlockNumber)communicator_request(0, &request);
-
 		relsize = Max(relsize, blkno + 1);
 
 		set_cached_relsize(rinfo, forknum, relsize);
@@ -2559,7 +2557,12 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	if (no_redo_needed)
 	{
 		SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
-		lfc_evict(rinfo, forknum, blkno);
+		/*
+		 * Redo changes if page exists in LFC.
+		 * We should perform this check after assigning LwLSN to prevent
+		 * prefetching of some older version of the page by some other backend.
+		 */
+		no_redo_needed = !lfc_cache_contains(rinfo, forknum, blkno);
 	}
 
 	LWLockRelease(partitionLock);
