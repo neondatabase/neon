@@ -343,6 +343,7 @@ pub(super) async fn handle_walreceiver_connection(
                 let InterpretedWalRecords {
                     records,
                     next_record_lsn,
+                    raw_wal_start_lsn: _,
                 } = batch;
 
                 tracing::debug!(
