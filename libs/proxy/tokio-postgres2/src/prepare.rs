@@ -1,7 +1,6 @@
 use crate::client::InnerClient;
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
-use crate::error::SqlState;
 use crate::types::{Field, Kind, Oid, Type};
 use crate::{query, slice_iter};
 use crate::{Column, Error, Statement};
@@ -23,27 +22,11 @@ INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
 WHERE t.oid = $1
 ";
 
-// Range types weren't added until Postgres 9.2, so pg_range may not exist
-const TYPEINFO_FALLBACK_QUERY: &str = "\
-SELECT t.typname, t.typtype, t.typelem, NULL::OID, t.typbasetype, n.nspname, t.typrelid
-FROM pg_catalog.pg_type t
-INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
-WHERE t.oid = $1
-";
-
 const TYPEINFO_ENUM_QUERY: &str = "\
 SELECT enumlabel
 FROM pg_catalog.pg_enum
 WHERE enumtypid = $1
 ORDER BY enumsortorder
-";
-
-// Postgres 9.0 didn't have enumsortorder
-const TYPEINFO_ENUM_FALLBACK_QUERY: &str = "\
-SELECT enumlabel
-FROM pg_catalog.pg_enum
-WHERE enumtypid = $1
-ORDER BY oid
 ";
 
 pub(crate) const TYPEINFO_COMPOSITE_QUERY: &str = "\
@@ -191,15 +174,7 @@ async fn typeinfo_statement(client: &Arc<InnerClient>) -> Result<Statement, Erro
     }
 
     let typeinfo = "neon_proxy_typeinfo";
-    let typeinfo_fallback = "neon_proxy_typeinfo_fallback";
-
-    let stmt = match prepare_rec(client, typeinfo, TYPEINFO_QUERY, &[]).await {
-        Ok(stmt) => stmt,
-        Err(ref e) if e.code() == Some(&SqlState::UNDEFINED_TABLE) => {
-            prepare_rec(client, typeinfo_fallback, TYPEINFO_FALLBACK_QUERY, &[]).await?
-        }
-        Err(e) => return Err(e),
-    };
+    let stmt = prepare_rec(client, typeinfo, TYPEINFO_QUERY, &[]).await?;
 
     client.set_typeinfo(&stmt);
     Ok(stmt)
@@ -221,15 +196,7 @@ async fn typeinfo_enum_statement(client: &Arc<InnerClient>) -> Result<Statement,
     }
 
     let typeinfo = "neon_proxy_typeinfo_enum";
-    let typeinfo_fallback = "neon_proxy_typeinfo_enum_fallback";
-
-    let stmt = match prepare_rec(client, typeinfo, TYPEINFO_ENUM_QUERY, &[]).await {
-        Ok(stmt) => stmt,
-        Err(ref e) if e.code() == Some(&SqlState::UNDEFINED_COLUMN) => {
-            prepare_rec(client, typeinfo_fallback, TYPEINFO_ENUM_FALLBACK_QUERY, &[]).await?
-        }
-        Err(e) => return Err(e),
-    };
+    let stmt = prepare_rec(client, typeinfo, TYPEINFO_ENUM_QUERY, &[]).await?;
 
     client.set_typeinfo_enum(&stmt);
     Ok(stmt)
