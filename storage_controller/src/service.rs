@@ -1030,12 +1030,11 @@ impl Service {
                 let reconciles_spawned = self.reconcile_all();
                 if reconciles_spawned == 0 {
                     // Run optimizer only when we didn't find any other work to do
-                    let optimizations = self.optimize_all().await;
-                    if optimizations == 0 {
-                        // Run new splits only when no optimizations are pending
-                        self.autosplit_tenants().await;
-                    }
+                    self.optimize_all().await;
                 }
+                // Always attempt autosplits. Sharding is crucial for bulk ingest performance, so we
+                // must be responsive when new projects begin ingesting and reach the threshold.
+                self.autosplit_tenants().await;
             }
               _ = self.reconcilers_cancel.cancelled() => return
             }
