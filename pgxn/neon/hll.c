@@ -121,8 +121,14 @@ addSHLL(HyperLogLogState *cState, uint32 hash)
 	/* Use the first "k" (registerWidth) bits as a zero based index */
 	index = hash >> HLL_C_BITS;
 
-	/* Compute the rank of the remaining 32 - "k" (registerWidth) bits */
-	count = rho(hash << HLL_BIT_WIDTH, HLL_C_BITS);
+	/*
+	 * Compute the rank of the remaining 32 - "k" (registerWidth) bits
+ 	 * Note that rho() is the 1-based offset of the first 1 bit, so for
+  	 * 'number of zeroes' we reduce this count by 1.
+ 	 */
+	count = rho(hash << HLL_BIT_WIDTH, HLL_C_BITS) - 1;
+
+	Assert(count <= HLL_C_BITS);
 
 	cState->regs[index][count] = now;
 }
