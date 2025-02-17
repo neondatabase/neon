@@ -571,7 +571,7 @@ impl LayerMap {
     }
 
     /// Get a ref counted pointer for the first in memory layer that matches the provided predicate.
-    pub fn find_in_memory_layer<Pred>(&self, mut pred: Pred) -> Option<Arc<InMemoryLayer>>
+    pub(crate) fn find_in_memory_layer<Pred>(&self, mut pred: Pred) -> Option<Arc<InMemoryLayer>>
     where
         Pred: FnMut(&Arc<InMemoryLayer>) -> bool,
     {
@@ -898,6 +898,16 @@ impl LayerMap {
         }
         println!("End dump LayerMap");
         Ok(())
+    }
+
+    pub(crate) fn get_newest_image_after(&self, lsn: Lsn) -> Option<Arc<PersistentLayerDesc>> {
+        // TODO: an efficient equivalent, this is a crude placeholder
+        for layer in self.iter_historic_layers() {
+            if !layer.is_delta() && layer.image_layer_lsn() >= lsn {
+                return Some(layer);
+            }
+        }
+        None
     }
 
     /// `read_points` represent the tip of a timeline and any branch points, i.e. the places

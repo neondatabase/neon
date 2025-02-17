@@ -3775,6 +3775,8 @@ impl Timeline {
         let mut completed_keyspace = KeySpace::default();
         let mut image_covered_keyspace = KeySpaceRandomAccum::new();
 
+        let mut in_memory_layers_considered = Vec::new();
+
         // Prevent GC from progressing while visiting the current timeline.
         // If we are GC-ing because a new image layer was added while traversing
         // the timeline, then it will remove layers that are required for fulfilling
@@ -3810,12 +3812,34 @@ impl Timeline {
 
                 let in_memory_layer = layers.find_in_memory_layer(|l| {
                     let start_lsn = l.get_lsn_range().start;
-                    cont_lsn > start_lsn
+                    !in_memory_layers_considered.contains(&start_lsn) && cont_lsn > start_lsn
                 });
 
                 match in_memory_layer {
                     Some(l) => {
-                        let lsn_range = l.get_lsn_range().start..cont_lsn;
+                        in_memory_layers_considered.push(l.get_lsn_range().start);
+
+                        // Search for image layers that overlap with the in-memory layer: this is rare but permitted, and
+                        // we must bound the `lsn_range` of this layer to avoid skipping past the image layer.
+                        // TODO: a narrower search that only hits on image layers matching `unmapped_keyspace`
+                        let lsn_range = if let Some(image) =
+                            layers.get_newest_image_after(l.get_lsn_range().start)
+                        {
+                            // Note that this does not guarantee serving a read from an image layer, just that we will
+                            // not skip considering thge image layer in our Fringe.  We can still end up doing walredo work
+                            // in spite of the presence of an image layer, if the inmemory layers we visit contain enough
+                            // information to fully construct a page.  For example:
+                            //  - ephemeral layer contains I1, D1, D2, <LSN X>
+                            //  - image layer at LSN X contains image equal to I2
+                            //  - we will end up doing a walredo of I1+D1+D2, rather than reading from the image layer
+                            //
+                            //  This is not a problem for correctness, and is rare enough that the wasted time doing walredo
+                            //  doesn't matter.
+                            image.get_lsn_range().start + 1..cont_lsn
+                        } else {
+                            l.get_lsn_range().start..cont_lsn
+                        };
+
                         fringe.update(
                             ReadableLayer::InMemoryLayer(l),
                             unmapped_keyspace.clone(),
