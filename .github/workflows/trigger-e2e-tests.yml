@@ -36,37 +36,7 @@ jobs:
               --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
 
   tag:
-    needs: [ check-permissions ]
-    runs-on: ubuntu-22.04
-    outputs:
-      build-tag: ${{ steps.build-tag.outputs.tag }}
-
-    steps:
-      # Need `fetch-depth: 0` to count the number of commits in the branch
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Get build tag
-        env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
-          CURRENT_BRANCH: ${{ github.head_ref || github.ref_name }}
-          CURRENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "tag=$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            echo "tag=release-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
-            echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
-            echo "tag=release-compute-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -c $CURRENT_SHA -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')
-            echo "tag=$BUILD_AND_TEST_RUN_ID" | tee -a $GITHUB_OUTPUT
-          fi
-        id: build-tag
+    uses: ./.github/workflows/_tags.yml
 
   trigger-e2e-tests:
     needs: [ tag ]
