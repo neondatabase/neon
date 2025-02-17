@@ -50,7 +50,7 @@
 
 #define MIN_RECONNECT_INTERVAL_USEC 1000
 #define MAX_RECONNECT_INTERVAL_USEC 1000000
-#define RECEIVER_RETRY_DELAY        1000000
+#define RECEIVER_RETRY_DELAY_USEC   1000000
 #define MAX_REQUEST_SIZE            1024
 #define MAX_PS_QUERY_LENGTH         256
 
@@ -61,16 +61,27 @@ int32		max_cluster_size;
 char	   *page_server_connstring;
 char	   *neon_auth_token;
 
-int			readahead_buffer_size = 128;
+int			max_prefetch_distance = 128;
 int			parallel_connections = 10;
 
-int         neon_protocol_version = 2;
+int         neon_protocol_version = 3;
 
 static int	stripe_size;
 
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
+#define CHAN_TO_SHARD(chan_no) ((chan_no) / parallel_connections)
+
 void CommunicatorMain(Datum main_arg);
+
+/* Produce error message in critical section for thgread safety */
+#define neon_shard_log_cs(shard_no, tag, fmt, ...) do { 				\
+		pthread_mutex_lock(&mutex);										\
+		ereport(tag,													\
+				(errmsg(NEON_TAG "[shard %d] " fmt, shard_no, ##__VA_ARGS__), \
+				 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0))); \
+		pthread_mutex_unlock(&mutex);									\
+	} while (0)
 
 typedef struct
 {
@@ -103,7 +114,7 @@ typedef enum PSConnectionState {
 	PS_Connecting_Startup,		/* connection starting up */
 	PS_Connecting_PageStream,	/* negotiating pagestream */
 	PS_Connected,				/* connected, pagestream established */
-	PS_Expired,					/* cpnnection shopuld be reconnected */
+	PS_Expired,					/* connection should be reestablished */
 } PSConnectionState;
 
 /* This backend's per-shard connections */
@@ -145,6 +156,9 @@ static void pageserver_disconnect(int chan_no);
 static void* communicator_read_loop(void* arg);
 static void* communicator_write_loop(void* arg);
 
+/*
+ * Produce log message under mutex because it is not thread-safe
+ */
 static void
 log_error_message(NeonErrorResponse* err)
 {
@@ -156,8 +170,11 @@ log_error_message(NeonErrorResponse* err)
 	pthread_mutex_unlock(&mutex);
 }
 
+/*
+ * We stablish `parallel_connections with each shard to support parallel procerssing of requests at PS
+ */
 static Size
-NumberOfChannels(void)
+MaxNumberOfChannels(void)
 {
 	return MAX_SHARDS * parallel_connections;
 }
@@ -233,9 +250,9 @@ AssignPageserverConnstring(const char *newval, void *extra)
 	size_t 		old_num_shards;
 
 	/*
-	 * Only postmaster updates the copy in shared memory.
+	 * Only communicator background worker estblish connections with page server and need this information
 	 */
-	if (am_communicator)
+	if (!am_communicator)
 		return;
 
 	old_num_shards = shard_map.num_shards;
@@ -251,8 +268,10 @@ AssignPageserverConnstring(const char *newval, void *extra)
 
 	if (page_servers == NULL)
 	{
-		page_servers = (PageServer*)calloc(NumberOfChannels(), sizeof(PageServer));
+		page_servers = (PageServer*)calloc(MaxNumberOfChannels(), sizeof(PageServer));
 	}
+
+	/* Force to reestablish connection with old shards */
 	for (size_t i = 0; i < old_num_shards; i++)
 	{
 		if (page_servers[i].state == PS_Connected)
@@ -261,6 +280,8 @@ AssignPageserverConnstring(const char *newval, void *extra)
 			page_servers[i].state = PS_Expired;
 		}
 	}
+
+	/* Start workers for new shards */
 	for (size_t i = old_num_shards; i < shard_map.num_shards; i++)
 	{
 		pthread_t reader, writer;
@@ -269,8 +290,6 @@ AssignPageserverConnstring(const char *newval, void *extra)
 		pthread_create(&reader, NULL, communicator_read_loop, chan_no);
 	}
 }
-
-#define MB (1024*1024)
 
 int
 get_shard_number(NRelFileInfo rinfo, BlockNumber blocknum)
@@ -288,9 +307,14 @@ get_shard_number(NRelFileInfo rinfo, BlockNumber blocknum)
 	return hash % shard_map.num_shards;
 }
 
-static inline void
-cleanup_and_disconnect(PageServer *ps) 
+/*
+ * Perform disconnect in critical section because it is not thread-safe
+ */
+static void
+cleanup_and_disconnect(PageServer *ps)
 {
+	pthread_mutex_lock(&mutex);
+
 	if (ps->wes_read)
 	{
 		FreeWaitEventSet(ps->wes_read);
@@ -304,6 +328,8 @@ cleanup_and_disconnect(PageServer *ps)
 	}
 
 	ps->state = PS_Disconnected;
+
+	pthread_mutex_lock(&mutex);
 }
 
 /*
@@ -325,7 +351,7 @@ chomp(char const* in)
  * complete the connection (e.g. due to receiving an earlier cancellation
  * during connection start).
  * Returns true if successfully connected; false if the connection failed.
- * 
+ *
  * Throws errors in unrecoverable situations, or when this backend's query
  * is canceled.
  */
@@ -333,9 +359,9 @@ static bool
 pageserver_connect(int chan_no, int elevel)
 {
 	PageServer *ps = &page_servers[chan_no];
-	char		connstr[MAX_PAGESERVER_CONNSTRING_SIZE];
 	char        pagestream_query[MAX_PS_QUERY_LENGTH];
-	int			shard_no = chan_no / parallel_connections;
+	int			shard_no = CHAN_TO_SHARD(chan_no);
+	char*		connstr = shard_map.connstring[shard_no];
 
 	switch (ps->state)
 	{
@@ -350,7 +376,7 @@ pageserver_connect(int chan_no, int elevel)
 		/* Make sure we start with a clean slate */
 		cleanup_and_disconnect(ps);
 
-		neon_shard_log(shard_no, DEBUG5, "Connection state: Disconnected");
+		neon_shard_log_cs(shard_no, DEBUG5, "Connection state: Disconnected");
 
 		now = GetCurrentTimestamp();
 		us_since_last_attempt = (int64) (now - ps->last_reconnect_time);
@@ -388,7 +414,7 @@ pageserver_connect(int chan_no, int elevel)
 		 * we don't currently use that capability anywhere.
 		 */
 		keywords[0] = "dbname";
-		values[0] = shard_map.connstring[chan_no / parallel_connections];
+		values[0] = connstr;
 		n_pgsql_params = 1;
 
 		if (neon_auth_token)
@@ -421,7 +447,7 @@ pageserver_connect(int chan_no, int elevel)
 		int			ps_send_query_ret;
 		bool		connected = false;
 		int poll_result = PGRES_POLLING_WRITING;
-		neon_shard_log(shard_no, DEBUG5, "Connection state: Connecting_Startup");
+		neon_shard_log_cs(shard_no, DEBUG5, "Connection state: Connecting_Startup");
 
 		do
 		{
@@ -432,7 +458,7 @@ pageserver_connect(int chan_no, int elevel)
 				{
 					char	   *pqerr = PQerrorMessage(ps->conn);
 					char	   *msg = NULL;
-					neon_shard_log(shard_no, DEBUG5, "POLLING_FAILED");
+					neon_shard_log_cs(shard_no, DEBUG5, "POLLING_FAILED");
 
 					if (pqerr)
 						msg = chomp(pqerr);
@@ -441,14 +467,14 @@ pageserver_connect(int chan_no, int elevel)
 
 					if (msg)
 					{
-						neon_shard_log(shard_no, elevel,
-									   "could not connect to pageserver: %s",
-									   msg);
+						neon_shard_log_cs(shard_no, elevel,
+										  "could not connect to pageserver: %s",
+										  msg);
 						free(msg);
 					}
 					else
-						neon_shard_log(shard_no, elevel,
-									   "could not connect to pageserver");
+						neon_shard_log_cs(shard_no, elevel,
+										  "could not connect to pageserver");
 
 					return false;
 				}
@@ -461,7 +487,6 @@ pageserver_connect(int chan_no, int elevel)
 											   PQsocket(ps->conn),
 											   0,
 											   WAIT_EVENT_NEON_PS_STARTING);
-					elog(DEBUG5, "PGRES_POLLING_READING=>%d", rc);
 					if (rc & WL_LATCH_SET)
 					{
 						ResetLatch(MyLatch);
@@ -483,7 +508,6 @@ pageserver_connect(int chan_no, int elevel)
 											   PQsocket(ps->conn),
 											   0,
 											   WAIT_EVENT_NEON_PS_STARTING);
-					elog(DEBUG5, "PGRES_POLLING_WRITING=>%d", rc);
 					if (rc & WL_LATCH_SET)
 					{
 						ResetLatch(MyLatch);
@@ -497,12 +521,11 @@ pageserver_connect(int chan_no, int elevel)
 
 				break;
 			case PGRES_POLLING_OK:
-				neon_shard_log(shard_no, DEBUG5, "POLLING_OK");
+				neon_shard_log_cs(shard_no, DEBUG5, "POLLING_OK");
 				connected = true;
 				break;
 			}
 			poll_result = PQconnectPoll(ps->conn);
-			elog(DEBUG5, "PQconnectPoll=>%d", poll_result);
 		}
 		while (!connected);
 
@@ -533,7 +556,7 @@ pageserver_connect(int chan_no, int elevel)
 			snprintf(pagestream_query, sizeof pagestream_query, "pagestream_v2 %s %s", neon_tenant, neon_timeline);
 			break;
 		default:
-			elog(ERROR, "unexpected neon_protocol_version %d", neon_protocol_version);
+			neon_shard_log_cs(shard_no, ERROR, "unexpected neon_protocol_version %d", neon_protocol_version);
 		}
 
 		if (PQstatus(ps->conn) == CONNECTION_BAD)
@@ -555,7 +578,7 @@ pageserver_connect(int chan_no, int elevel)
 		{
 			cleanup_and_disconnect(ps);
 
-			neon_shard_log(shard_no, elevel, "could not send pagestream command to pageserver");
+			neon_shard_log_cs(shard_no, elevel, "could not send pagestream command to pageserver");
 			return false;
 		}
 
@@ -564,7 +587,7 @@ pageserver_connect(int chan_no, int elevel)
 	/* FALLTHROUGH */
 	case PS_Connecting_PageStream:
 	{
-		neon_shard_log(shard_no, DEBUG5, "Connection state: Connecting_PageStream");
+		neon_shard_log_cs(shard_no, DEBUG5, "Connection state: Connecting_PageStream");
 
 		if (PQstatus(ps->conn) == CONNECTION_BAD)
 		{
@@ -597,8 +620,8 @@ pageserver_connect(int chan_no, int elevel)
 					char	   *msg = chomp(PQerrorMessage(ps->conn));
 
 					cleanup_and_disconnect(ps);
-					neon_shard_log(shard_no, elevel, "could not complete handshake with pageserver: %s",
-								   msg);
+					neon_shard_log_cs(shard_no, elevel, "could not complete handshake with pageserver: %s",
+									  msg);
 					free(msg);
 					return false;
 				}
@@ -617,11 +640,10 @@ pageserver_connect(int chan_no, int elevel)
 		 */
 		ps->delay_us = MIN_RECONNECT_INTERVAL_USEC;
 
-		neon_shard_log(shard_no, DEBUG5, "Connection state: Connected");
-		neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s' with protocol version %d", connstr, neon_protocol_version);
+		neon_shard_log_cs(shard_no, LOG, "libpagestore: connected to '%s' with protocol version %d", connstr, neon_protocol_version);
 		return true;
 	default:
-		neon_shard_log(shard_no, ERROR, "libpagestore: invalid connection state %d", ps->state);
+		neon_shard_log_cs(shard_no, ERROR, "libpagestore: invalid connection state %d", ps->state);
 	}
 	/* This shouldn't be hit */
 	Assert(false);
@@ -642,7 +664,7 @@ call_PQgetCopyData(int chan_no, char **buffer)
 				last_log_ts,
 				since_last_log;
 	bool		logged = false;
-	int			shard_no = chan_no / parallel_connections;
+	int			shard_no = CHAN_TO_SHARD(chan_no);
 
 	/*
 	 * As a debugging aid, if we don't get a response for a long time, print a
@@ -683,7 +705,7 @@ retry:
 			{
 				char	   *msg = chomp(PQerrorMessage(pageserver_conn));
 
-				neon_shard_log(shard_no, LOG, "could not get response from pageserver: %s", msg);
+				neon_shard_log_cs(shard_no, LOG, "could not get response from pageserver: %s", msg);
 				free(msg);
 				return -1;
 			}
@@ -725,9 +747,9 @@ retry:
 				}
 			}
 #endif
-			neon_shard_log(shard_no, LOG, "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses) (socket sndbuf=%d recvbuf=%d)",
-						   INSTR_TIME_GET_DOUBLE(since_start),
-						   ps->nrequests_sent, ps->nresponses_received, sndbuf, recvbuf);
+			neon_shard_log_cs(shard_no, LOG, "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses) (socket sndbuf=%d recvbuf=%d)",
+							  INSTR_TIME_GET_DOUBLE(since_start),
+							  ps->nrequests_sent, ps->nresponses_received, sndbuf, recvbuf);
 			last_log_ts = now;
 			logged = true;
 		}
@@ -744,8 +766,8 @@ retry:
 		INSTR_TIME_SET_CURRENT(now);
 		since_start = now;
 		INSTR_TIME_SUBTRACT(since_start, start_ts);
-		neon_shard_log(shard_no, LOG, "received response from pageserver after %0.3f s",
-					   INSTR_TIME_GET_DOUBLE(since_start));
+		neon_shard_log_cs(shard_no, LOG, "received response from pageserver after %0.3f s",
+						  INSTR_TIME_GET_DOUBLE(since_start));
 	}
 
 	return ret;
@@ -770,8 +792,6 @@ pageserver_disconnect(int chan_no)
 	 * to attach wait events to the WaitEventSets.
 	 */
 	cleanup_and_disconnect(ps);
-
-	ps->state = PS_Disconnected;
 }
 
 static bool
@@ -779,14 +799,14 @@ pageserver_send(int chan_no, StringInfo msg)
 {
 	PageServer *ps = &page_servers[chan_no];
 	PGconn	   *pageserver_conn;
-	int			shard_no = chan_no / parallel_connections;
+	int			shard_no = CHAN_TO_SHARD(chan_no);
 
 	MyNeonCounters->pageserver_requests_sent_total++;
 
 	/* If the connection was lost for some reason, reconnect */
 	if (ps->state == PS_Connected && PQstatus(ps->conn) == CONNECTION_BAD)
 	{
-		neon_shard_log(shard_no, LOG, "pageserver_send disconnect bad connection");
+		neon_shard_log_cs(shard_no, LOG, "pageserver_send disconnect bad connection");
 		pageserver_disconnect(chan_no);
 		pageserver_conn = NULL;
 	}
@@ -804,7 +824,7 @@ pageserver_send(int chan_no, StringInfo msg)
 	{
 		if (ps->state == PS_Expired)
 		{
-			neon_shard_log(shard_no, LOG, "pageserver_send disconnect expired connection");
+			neon_shard_log_cs(shard_no, LOG, "pageserver_send disconnect expired connection");
 			pageserver_disconnect(chan_no);
 			pageserver_conn = NULL;
 		}
@@ -837,22 +857,30 @@ pageserver_send(int chan_no, StringInfo msg)
 		char	   *msg = chomp(PQerrorMessage(pageserver_conn));
 
 		pageserver_disconnect(chan_no);
-		neon_shard_log(shard_no, LOG, "pageserver_send disconnected: failed to send page request (try to reconnect): %s", msg);
+		neon_shard_log_cs(shard_no, LOG, "pageserver_send disconnected: failed to send page request (try to reconnect): %s", msg);
 		free(msg);
 		return false;
 	}
+	/*
+	 * TODO: may be not flush each request?
+	 */
 	if (PQflush(pageserver_conn))
 	{
 		char	   *msg = chomp(PQerrorMessage(pageserver_conn));
 
 		pageserver_disconnect(chan_no);
-		neon_shard_log(shard_no, LOG, "pageserver_flush disconnect because failed to flush page requests: %s", msg);
+		neon_shard_log_cs(shard_no, LOG, "pageserver_flush disconnect because failed to flush page requests: %s", msg);
 		free(msg);
 		return false;
 	}
 	return true;
 }
 
+/*
+ * Receive request from page server.
+ * Returns NULL if there is connection to page server.
+ * It is expected that writer thread will restablish connection.
+ */
 static NeonResponse *
 pageserver_receive(int chan_no)
 {
@@ -860,16 +888,16 @@ pageserver_receive(int chan_no)
 	NeonResponse *resp;
 	PageServer *ps = &page_servers[chan_no];
 	PGconn	   *pageserver_conn = ps->conn;
-	int			shard_no = chan_no / parallel_connections;
+	int			shard_no = CHAN_TO_SHARD(chan_no);
 	/* read response */
 	int			rc;
 
-	/* TODO: fix race condition between sender and receivcer */
+	/* TODO: fix race condition between sender and receiver */
 	if (ps->state != PS_Connected)
 	{
-		neon_shard_log(shard_no, LOG,
-					   "pageserver_receive: returning NULL for non-connected pageserver connection: 0x%02x",
-					   ps->state);
+		neon_shard_log_cs(shard_no, LOG,
+						  "pageserver_receive: returning NULL for non-connected pageserver connection: 0x%02x",
+						  ps->state);
 		return NULL;
 	}
 
@@ -881,6 +909,7 @@ pageserver_receive(int chan_no)
 		/* call_PQgetCopyData handles rc == 0 */
 		Assert(rc > 0);
 
+		/* FIXME: is it thread safe? */
 		PG_TRY();
 		{
 			resp_buff.len = rc;
@@ -890,15 +919,14 @@ pageserver_receive(int chan_no)
 		}
 		PG_CATCH();
 		{
-			neon_shard_log(shard_no, LOG, "pageserver_receive: disconnect due to failure while parsing response");
+			neon_shard_log_cs(shard_no, LOG, "pageserver_receive: disconnect due to failure while parsing response");
 			pageserver_disconnect(chan_no);
-			PG_RE_THROW();
 		}
 		PG_END_TRY();
 	}
 	else if (rc == -1)
 	{
-		neon_shard_log(shard_no, LOG, "pageserver_receive disconnect: psql end of copy data: %s", chomp(PQerrorMessage(pageserver_conn)));
+		neon_shard_log_cs(shard_no, LOG, "pageserver_receive disconnect: psql end of copy data: %s", chomp(PQerrorMessage(pageserver_conn)));
 		pageserver_disconnect(chan_no);
 		resp = NULL;
 	}
@@ -907,12 +935,12 @@ pageserver_receive(int chan_no)
 		char	   *msg = chomp(PQerrorMessage(pageserver_conn));
 
 		pageserver_disconnect(chan_no);
-		neon_shard_log(shard_no, ERROR, "pageserver_receive disconnect: could not read COPY data: %s", msg);
+		neon_shard_log_cs(shard_no, ERROR, "pageserver_receive disconnect: could not read COPY data: %s", msg);
 	}
 	else
 	{
 		pageserver_disconnect(chan_no);
-		neon_shard_log(shard_no, ERROR, "pageserver_receive disconnect: unexpected PQgetCopyData return value: %d", rc);
+		neon_shard_log_cs(shard_no, ERROR, "pageserver_receive disconnect: unexpected PQgetCopyData return value: %d", rc);
 	}
 
 	ps->nresponses_received++;
@@ -927,17 +955,23 @@ check_neon_id(char **newval, void **extra, GucSource source)
 	return **newval == '\0' || HexDecodeString(id, *newval, 16);
 }
 
+
+/*
+ * Each backend can send up to max_prefetch_distance prefetch requests and one vectored read request.
+ * Backends are splitted between parallel conntions so each worker has tpo server at most MaxBackends / parallel_connections
+ * backends.
+ */
 static Size
 RequestBufferSize(void)
 {
-	return (readahead_buffer_size + PG_IOV_MAX) * MaxBackends + (parallel_connections - 1) / parallel_connections;
+	return (max_prefetch_distance + PG_IOV_MAX) * (MaxBackends + (parallel_connections - 1) / parallel_connections);
 }
 
 static Size
 CommunicatorShmemSize(void)
 {
-	return RequestBufferSize() * NumberOfChannels() * sizeof(NeonCommunicatorRequest)
-		+ NumberOfChannels() * sizeof(NeonCommunicatorChannel)
+	return RequestBufferSize() * MaxNumberOfChannels() * sizeof(NeonCommunicatorRequest)
+		+ MaxNumberOfChannels() * sizeof(NeonCommunicatorChannel)
 		+ sizeof(NeonCommunicatorResponse) * MaxBackends;
 }
 
@@ -962,7 +996,7 @@ PagestoreShmemInit(void)
 							   &found);
 	if (!found)
 	{
-		size_t n_channels = NumberOfChannels();
+		size_t n_channels = MaxNumberOfChannels();
 		NeonCommunicatorRequest* requests = (NeonCommunicatorRequest*)(channels + n_channels);
 
 		for (size_t i = 0; i < n_channels; i++)
@@ -1016,6 +1050,12 @@ pagestore_prepare_shmem(void)
 	shmem_startup_hook = pagestore_shmem_startup_hook;
 }
 
+/*
+ * Put request in one of communication channels.
+ * We have `parallel_connections` channels with each shard.
+ * Each backend is assigned to some particular connection (it is done for better
+ * batching of subsequent requests at page server side)
+ */
 void
 communicator_send_request(int shard, NeonCommunicatorRequest* req)
 {
@@ -1031,15 +1071,25 @@ communicator_send_request(int shard, NeonCommunicatorRequest* req)
 	/* copy request */
 	chan->requests[(size_t)(write_pos % ring_size)] = *req;
 
-	/* advance read-up-tp position */
+	/* will be overwritten with response code when request will be processed */
+	responses[MyProcNumber].tag = req->hdr.tag;
+
+	/* enforce memory battier before pinging communicator */
+	pg_write_barrier();
+
+	/* advance read-up-to position */
 	do {
 		read_pos = write_pos;
-	} while (!pg_atomic_compare_exchange_u64(&chan->read_pos, &read_pos, write_pos+1) && read_pos <= write_pos);
+	} while (!pg_atomic_compare_exchange_u64(&chan->read_pos, &read_pos, write_pos+1));
 
-	responses[MyProcNumber].tag = req->hdr.tag;
 	SetLatch(&chan->latch);
 }
 
+/*
+ * Wait response from page server.
+ * We are waiting until request message tag will be replaced with response tag,
+ * using backed's latch.
+ */
 int64
 communicator_receive_response(void)
 {
@@ -1052,11 +1102,14 @@ communicator_receive_response(void)
 	}
 	if (responses[MyProcNumber].tag == T_NeonErrorResponse)
 	{
-		elog(ERROR, "Request failed"); /* detailed error reposnse is printed by communicator */
+		elog(ERROR, "Request failed"); /* detailed error message is printed by communicator */
 	}
 	return responses[MyProcNumber].value;
 }
 
+/*
+ * Send request and wait for response
+ */
 int64
 communicator_request(int shard, NeonCommunicatorRequest* req)
 {
@@ -1069,6 +1122,7 @@ void
 CommunicatorMain(Datum main_arg)
 {
 	am_communicator = true;
+
 	/* Establish signal handlers. */
 	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
@@ -1155,19 +1209,16 @@ pg_init_libpagestore(void)
 							PGC_SIGHUP,
 							GUC_UNIT_MB,
 							NULL, NULL, NULL);
-	DefineCustomIntVariable("neon.readahead_buffer_size",
-							"number of prefetches to buffer",
-							"This buffer is used to hold and manage prefetched "
-							"data; so it is important that this buffer is at "
-							"least as large as the configured value of all "
-							"tablespaces' effective_io_concurrency and "
-							"maintenance_io_concurrency, and your sessions' "
-							"values for these settings.",
-							&readahead_buffer_size,
+
+	DefineCustomIntVariable("neon.max_prefetch_distance",
+							"Maximal number of prefetch requests",
+							"effetive_io_concurrency and maintenance_io_concurrecy should not be larger than sthis value",
+							&max_prefetch_distance,
 							128, 16, 1024,
 							PGC_POSTMASTER,
 							0,	/* no flags required */
 							NULL, NULL, NULL);
+
 	DefineCustomIntVariable("neon.parallel_connections",
 							"number of connections to each shard",
 							NULL,
@@ -1176,11 +1227,12 @@ pg_init_libpagestore(void)
 							PGC_POSTMASTER,
 							0,	/* no flags required */
 							NULL, NULL, NULL);
+
 	DefineCustomIntVariable("neon.protocol_version",
 							"Version of compute<->page server protocol",
 							NULL,
 							&neon_protocol_version,
-							3,	/* use protocol version 2 */
+							3,	/* Communicator requires protocol version 3 or higher */
 							3,	/* min */
 							3,	/* max */
 							PGC_SU_BACKEND,
@@ -1210,6 +1262,9 @@ pg_init_libpagestore(void)
 	lfc_init();
 }
 
+/*
+ * Same as initStringInfo but use malloc instead of palloc for thread safety
+ */
 static void
 allocStringInfo(StringInfo s, size_t size)
 {
@@ -1218,13 +1273,16 @@ allocStringInfo(StringInfo s, size_t size)
 	resetStringInfo(s);
 }
 
+/*
+ * Main proc of writer thread
+ */
 static void*
 communicator_write_loop(void* arg)
 {
 	uint64 read_start_pos = 0;
 	size_t chan_no = (size_t)arg;
 	NeonCommunicatorChannel* chan = &channels[chan_no];
-	size_t n_channels = NumberOfChannels();
+	size_t ring_size = RequestBufferSize();
 	StringInfoData s;
 
 	allocStringInfo(&s, MAX_REQUEST_SIZE);
@@ -1234,7 +1292,7 @@ communicator_write_loop(void* arg)
 		NeonCommunicatorRequest* req;
 		uint64 read_end_pos;
 
-		/* Number of shards is decreased */
+		/* Number of shards is decreased so this worker is not needed any more */
 		if (chan_no >= shard_map.num_shards * parallel_connections)
 			return NULL;
 
@@ -1244,22 +1302,26 @@ communicator_write_loop(void* arg)
 		{
 			int events = WaitLatch(&chan->latch, WL_LATCH_SET|WL_POSTMASTER_DEATH, -1, WAIT_EVENT_NEON_PS_SEND);
 			if (events & WL_POSTMASTER_DEATH)
-				break;
+			   return NULL;
 		}
-		req = &chan->requests[read_start_pos % n_channels++];
+		req = &chan->requests[read_start_pos++ % ring_size];
 		nm_pack_request(&s, &req->hdr);
-		Assert(s.maxlen == MAX_REQUEST_SIZE); /* was not reallocated */
+		Assert(s.maxlen == MAX_REQUEST_SIZE); /* string buffer was not reallocated */
 		pageserver_send(chan_no, &s);
 		req->hdr.u.reqid = 0; /* mark requests as processed */
 	}
 }
 
+/*
+ * Main proc of reader thread
+ */
 static void*
 communicator_read_loop(void* arg)
 {
 	NeonResponse* resp;
-	int64  value = 0;
-	size_t chan_no = (size_t)arg;
+	int64	value = 0;
+	size_t	chan_no = (size_t)arg;
+	int		shard_no = CHAN_TO_SHARD(chan_no);
 
 	while (true)
 	{
@@ -1270,7 +1332,8 @@ communicator_read_loop(void* arg)
 		resp = pageserver_receive(chan_no);
 		if (resp == NULL)
 		{
-			pg_usleep(RECEIVER_RETRY_DELAY);
+			/* Assume that writer will restablish connection */
+			pg_usleep(RECEIVER_RETRY_DELAY_USEC);
 			continue;
 		}
 		switch (resp->tag)
@@ -1290,12 +1353,23 @@ communicator_read_loop(void* arg)
 				if (resp->u.recepient.bufid == InvalidBuffer)
 				{
 					/* result of prefetch */
-					lfc_prefetch(page_resp->req.rinfo, page_resp->req.forknum, page_resp->req.blkno, page_resp->page, resp->not_modified_since);
+					(void) lfc_prefetch(page_resp->req.rinfo, page_resp->req.forknum, page_resp->req.blkno, page_resp->page, resp->not_modified_since);
 					free(resp);
-					continue; /* no need to notify backend */
+					continue; /* should not notify backend */
 				}
 				else
 				{
+					BufferTag tag;
+					Buffer buf = resp->u.recepient.bufid;
+					BufferDesc *buf_desc = GetBufferDescriptor(buf - 1);
+					InitBufferTag(&tag, &page_resp->req.rinfo, page_resp->req.forknum, page_resp->req.blkno);
+					if (!BufferTagsEqual(&buf_desc->tag, &tag))
+					{
+						neon_shard_log_cs(shard_no, PANIC, "Get page request {rel=%u/%u/%u.%u block=%u} referecing wrpng buffer {rel=%u/%u/%u.%u block=%u}",
+										  RelFileInfoFmt(page_resp->req.rinfo), page_resp->req.forknum, page_resp->req.blkno,
+										  RelFileInfoFmt(BufTagGetNRelFileInfo(buf_desc->tag)), buf_desc->tag.forkNum, buf_desc->tag.blockNum);
+					}
+					/* Copy page content to shared buffer */
 					memcpy(BufferGetBlock(resp->u.recepient.bufid), page_resp->page, BLCKSZ);
 				}
 				break;
@@ -1307,6 +1381,8 @@ communicator_read_loop(void* arg)
 				break;
 		}
 		responses[resp->u.recepient.procno].value = value;
+		/* enforce write barrier before writing response code which server as received response indicator */
+		pg_write_barrier();
 		responses[resp->u.recepient.procno].tag = resp->tag;
 		SetLatch(&ProcGlobal->allProcs[resp->u.recepient.procno].procLatch);
 		free(resp);

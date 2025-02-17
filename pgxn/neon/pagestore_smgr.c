@@ -1013,7 +1013,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1, NULL);
 	{
 		NeonCommunicatorRequest request = {
-			.exists.hdr.tag = T_NeonNblocksRequest,
+			.exists.hdr.tag = T_NeonExistsRequest,
 			.exists.hdr.u.recepient.bufid = InvalidBuffer,
 			.exists.hdr.lsn = request_lsns.request_lsn,
 			.exists.hdr.not_modified_since = request_lsns.not_modified_since,
@@ -1387,7 +1387,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				.page.forknum = forknum,
 				.page.blkno = blocknum + i,
 			};
-			communicator_send_request(get_shard_number(InfoFromSMgrRel(reln), blocknum + i), &request);
+			(void)communicator_send_request(get_shard_number(InfoFromSMgrRel(reln), blocknum + i), &request);
 		}
 	}
 	return false;
@@ -1431,7 +1431,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 				.page.forknum = forknum,
 				.page.blkno = blocknum
 			};
-			communicator_send_request(get_shard_number(InfoFromSMgrRel(reln), blocknum), &request);
+			(void)communicator_send_request(get_shard_number(InfoFromSMgrRel(reln), blocknum), &request);
 		}
 	}
 	return false;
@@ -1501,16 +1501,19 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, 
 {
 	for (int i = 0; i < nblocks; i++)
 	{
-		NeonCommunicatorRequest request = {
-			.page.hdr.tag = T_NeonGetPageRequest,
-			.page.hdr.u.recepient.bufid = GetBufferId(buffers[i]),
-			.page.hdr.lsn = request_lsns[i].request_lsn,
-			.page.hdr.not_modified_since = request_lsns[i].not_modified_since,
-			.page.rinfo = rinfo,
-			.page.forknum = forknum,
-			.page.blkno = blocknum + i,
-		};
-		(void)communicator_request(get_shard_number(rinfo, blocknum + i), &request);
+		if (!PointerIsValid(mask) || BITMAP_ISSET(mask, i))
+		{
+			NeonCommunicatorRequest request = {
+				.page.hdr.tag = T_NeonGetPageRequest,
+				.page.hdr.u.recepient.bufid = GetBufferId(buffers[i]),
+				.page.hdr.lsn = request_lsns[i].request_lsn,
+				.page.hdr.not_modified_since = request_lsns[i].not_modified_since,
+				.page.rinfo = rinfo,
+				.page.forknum = forknum,
+				.page.blkno = blocknum + i,
+			};
+			(void)communicator_request(get_shard_number(rinfo, blocknum + i), &request);
+		}
 	}
 }
 
@@ -2291,7 +2294,10 @@ neon_end_unlogged_build(SMgrRelation reln)
 static int
 neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buffer)
 {
-	/* TODO: support on-demand dopwnload */
+	/*
+	 * TODO: support on-demand download.
+	 * Straightforward solution: register some dummy shared buffer for this operation.
+	 */
 	Assert(false);
 }
 
