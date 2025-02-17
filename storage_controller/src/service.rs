@@ -8030,6 +8030,51 @@ impl Service {
         global_observed
     }
 
+    pub(crate) async fn safekeepers_for_new_timeline(
+        &self,
+    ) -> Result<Vec<SafekeeperInfo>, ApiError> {
+        let mut all_safekeepers = {
+            let locked = self.inner.read().unwrap();
+            locked
+                .safekeepers
+                .iter()
+                .filter_map(|sk| {
+                    let SafekeeperState::Available {
+                        last_seen_at: _,
+                        utilization,
+                    } = sk.1.availability()
+                    else {
+                        return None;
+                    };
+                    let info = SafekeeperInfo {
+                        hostname: sk.1.skp.host.clone(),
+                        id: NodeId(sk.1.skp.id as u64),
+                    };
+                    Some((utilization, info, sk.1.skp.availability_zone_id.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        all_safekeepers.sort_by_key(|sk| sk.0.timeline_count);
+        let mut sks = Vec::new();
+        let mut azs = HashSet::new();
+        for (_sk_util, sk_info, az_id) in all_safekeepers.iter() {
+            if !azs.insert(az_id) {
+                continue;
+            }
+            sks.push(sk_info.clone());
+            if sks.len() == 3 {
+                break;
+            }
+        }
+        if sks.len() == 3 {
+            Ok(sks)
+        } else {
+            Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "couldn't find three safekeepers in different AZs for new timeline"
+            )))
+        }
+    }
+
     pub(crate) async fn safekeepers_list(
         &self,
     ) -> Result<Vec<SafekeeperDescribeResponse>, DatabaseError> {
