@@ -44,7 +44,21 @@ jobs:
     env:
       EVENT_ACTION: ${{ github.event.action }}
       GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
-      TAG: ${{ needs.tag.outputs.build-tag }}
+      TAG: >-
+        ${{
+          (github.ref_name == 'release-compute' || github.base_ref == 'release-compute')
+          && needs.tag.outputs.previous-storage-release
+          || needs.tag.outputs.build-tag
+        }}
+      COMPUTE_TAG: >-
+        ${{
+          (
+            github.ref_name == 'release' || github.base_ref == 'release'
+            || github.ref_name == 'release-proxy' || github.base_ref == 'release-proxy'
+          )
+          && needs.tag.outputs.previous-compute-release
+          || needs.tag.outputs.build-tag
+        }}
     steps:
       - name: Wait for `push-{neon,compute}-image-dev` job to finish
         # It's important to have a timeout here, the script in the step can run infinitely
@@ -127,6 +141,6 @@ jobs:
               --raw-field "commit_hash=$COMMIT_SHA" \
               --raw-field "remote_repo=${GITHUB_REPOSITORY}" \
               --raw-field "storage_image_tag=${TAG}" \
-              --raw-field "compute_image_tag=${TAG}" \
+              --raw-field "compute_image_tag=${COMPUTE_TAG}" \
               --raw-field "concurrency_group=${E2E_CONCURRENCY_GROUP}" \
               --raw-field "e2e-platforms=${E2E_PLATFORMS}"
