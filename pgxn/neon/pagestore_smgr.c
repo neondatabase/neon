@@ -131,6 +131,7 @@ static uint32 local_request_counter;
 #define	PS_BACKGROUND_DELAY_MS 100
 static int		PS_TIMEOUT_ID = 0;
 static bool		timeout_set = false;
+static bool		timeout_signaled = false;
 static bool		readpage_reentrant_guard = false;
 static void reconfigure_timeout_if_needed(void);
 static void pagestore_timeout_handler(void);
@@ -4467,14 +4468,17 @@ static void
 reconfigure_timeout_if_needed(void)
 {
 	bool	needs_set = MyPState->ring_receive != MyPState->ring_unused;
+
 	if (unlikely(PS_TIMEOUT_ID == 0))
+	{
 		PS_TIMEOUT_ID = RegisterTimeout(USER_TIMEOUT, pagestore_timeout_handler);
+	}
 
 	if (needs_set != timeout_set)
 	{
 		if (needs_set)
 		{
-#if PG_MAJORVERSION_NUM == 14
+#if PG_MAJORVERSION_NUM <= 14
 			enable_timeout_after(PS_TIMEOUT_ID, PS_BACKGROUND_DELAY_MS);
 #else
 			enable_timeout_every(PS_TIMEOUT_ID, GetCurrentTimestamp(), PS_BACKGROUND_DELAY_MS);
@@ -4500,15 +4504,34 @@ pagestore_timeout_handler(void)
 	 * that system will re-schedule it later if we need to.
 	 */
 	timeout_set = false;
-#else
-	/* disable the timeout if we're already done with all we needed to do */
-	reconfigure_timeout_if_needed();
 #endif
+	timeout_signaled = true;
+	InterruptPending = true;
+}
 
-	if (!readpage_reentrant_guard)
+static process_interrupts_callback_t prev_interrupt_cb;
+
+static bool
+pagestore_smgr_interrupt_handler(void)
+{
+	if (timeout_signaled)
 	{
-		prefetch_pump_state();
+		if (!readpage_reentrant_guard)
+			prefetch_pump_state();
+
+		reconfigure_timeout_if_needed();
 	}
 
-	reconfigure_timeout_if_needed();
+	if (!prev_interrupt_cb)
+		return false;
+
+	return prev_interrupt_cb();
+}
+
+
+void
+pagestore_smgr_init(void)
+{
+	prev_interrupt_cb = ProcessInterruptsCallback;
+	ProcessInterruptsCallback = pagestore_smgr_interrupt_handler;
 }
