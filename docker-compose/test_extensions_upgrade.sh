@@ -28,7 +28,6 @@ function create_extensions() {
     docker compose exec neon-test-extensions psql -X -v ON_ERROR_STOP=1 -d contrib_regression -c "CREATE EXTENSION IF NOT EXISTS ${ext} CASCADE"
   done
 }
-#XXX: add pgtap
 EXTENSIONS='[
 {"extname": "plv8", "extdir": "plv8-src"},
 {"extname": "vector", "extdir": "pgvector-src"},
@@ -43,6 +42,7 @@ EXTENSIONS='[
 {"extname": "roaringbitmap", "extdir": "pg_roaringbitmap-src"},
 {"extname": "semver", "extdir": "pg_semver-src"},
 {"extname": "pg_ivm", "extdir": "pg_ivm-src"},
+{"extname": "pgtap", "extdir": "pgtap-src"},
 {"extname": "pgjwt", "extdir": "pgjwt-src"}
 ]'
 EXTNAMES=$(echo ${EXTENSIONS} | jq -r '.[].extname' | paste -sd ' ' -)
@@ -59,6 +59,8 @@ wait_for_ready
 docker compose cp  ext-src neon-test-extensions:/
 docker compose exec neon-test-extensions psql -c "DROP DATABASE IF EXISTS contrib_regression"
 docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regression"
+docker compose exec neon-test-extensions psql -c "CREATE DATABASE pgtap_regression"
+docker compose exec neon-test-extensions psql -d pgtap_regression -c "CREATE EXTENSION pgtap"
 create_extensions "${EXTNAMES}"
 if [ "${FORCE_ALL_UPGRADE_TESTS:-false}" = true ]; then
   exts="${EXTNAMES}"
