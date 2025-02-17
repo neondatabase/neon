@@ -46,6 +46,9 @@ impl Safekeeper {
     pub(crate) fn set_availability(&mut self, availability: SafekeeperState) {
         self.availability = availability;
     }
+    pub(crate) fn availability(&self) -> SafekeeperState {
+        self.availability.clone()
+    }
     /// Perform an operation (which is given a [`SafekeeperClient`]) with retries
     pub(crate) async fn with_client_retries<T, O, F>(
         &self,
