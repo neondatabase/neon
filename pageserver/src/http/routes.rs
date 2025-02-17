@@ -498,6 +498,7 @@ async fn build_timeline_info_common(
         initdb_lsn,
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
+        some_new_field: 42,
         // Externally, expose the lowest LSN that can be used to create a branch as the "GC cutoff", although internally
         // we distinguish between the "planned" GC cutoff (PITR point) and the "latest" GC cutoff (where we
         // actually trimmed data to), which can pass each other when PITR is changed.
