@@ -163,7 +163,7 @@ ARG PG_VERSION
 COPY vendor/postgres-${PG_VERSION:?} postgres
 RUN cd postgres && \
     export CONFIGURE_CMD="./configure CFLAGS='-O2 -g3' --enable-debug --with-openssl --with-uuid=ossp \
-    --with-icu --with-libxml --with-libxslt --with-lz4" && \
+    --with-icu --with-libxml --with-libxslt --with-lz4 -fsigned-char" && \
     if [ "${PG_VERSION:?}" != "v14" ]; then \
         # zstd is available only from PG15
         export CONFIGURE_CMD="${CONFIGURE_CMD} --with-zstd"; \
