@@ -280,9 +280,10 @@ pub struct TimelineCreateResponseStorcon {
     #[serde(flatten)]
     pub timeline_info: TimelineInfo,
 
-    pub safekeepers: Option<SafekeeperInfo>,
+    pub safekeepers: Option<SafekeepersInfo>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SafekeepersInfo {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
