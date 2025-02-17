@@ -302,7 +302,7 @@ impl InterpretedWalReader {
                     let wal = wal_or_reset.map(|wor| wor.get_wal().expect("reset handled in select branch below"));
                     let WalBytes {
                         wal,
-                        wal_start_lsn: _,
+                        wal_start_lsn,
                         wal_end_lsn,
                         available_wal_end_lsn,
                     } = match wal {
@@ -392,6 +392,7 @@ impl InterpretedWalReader {
                             let batch = InterpretedWalRecords {
                                 records,
                                 next_record_lsn: Some(max_next_record_lsn),
+                                raw_wal_start_lsn: Some(wal_start_lsn),
                             };
 
                             let res = state.tx.send(Batch {
