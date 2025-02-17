@@ -1144,6 +1144,7 @@ pub struct TimelineInfo {
     /// The LSN up to which GC has advanced: older data may still exist but it is not available for clients.
     /// This LSN is not suitable for deciding where to create branches etc: use [`TimelineInfo::min_readable_lsn`] instead,
     /// as it is easier to reason about.
+    #[serde(default)]
     pub applied_gc_cutoff_lsn: Lsn,
 
     /// The upper bound of data which is either already GC'ed, or elegible to be GC'ed at any time based on PITR interval.
@@ -1152,6 +1153,7 @@ pub struct TimelineInfo {
     ///
     /// Note that holders of valid LSN leases may be able to create branches and read pages earlier
     /// than this LSN, but new leases may not be taken out earlier than this LSN.
+    #[serde(default)]
     pub min_readable_lsn: Lsn,
 
     pub disk_consistent_lsn: Lsn,
