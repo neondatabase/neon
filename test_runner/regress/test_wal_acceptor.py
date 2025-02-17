@@ -1445,6 +1445,7 @@ def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
 
     # roughly fills one segment
     endpoint.safe_psql("insert into t select generate_series(1,250000), 'payload'")
+    lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
     endpoint.stop()  # stop compute
 
@@ -1473,7 +1474,15 @@ def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
         "flush_lsn to get aligned",
     )
 
-    cmp_sk_wal([sk1, sk2], tenant_id, timeline_id)
+    sk1_digest = sk1.http_client().timeline_digest(
+        tenant_id, timeline_id, sk1.get_timeline_start_lsn(tenant_id, timeline_id), lsn
+    )
+
+    sk2_digest = sk1.http_client().timeline_digest(
+        tenant_id, timeline_id, sk2.get_timeline_start_lsn(tenant_id, timeline_id), lsn
+    )
+
+    assert sk1_digest == sk2_digest
 
     # stop one of safekeepers which weren't recovering and insert a bit more to check we can commit
     env.safekeepers[2].stop()
