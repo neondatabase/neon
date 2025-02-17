@@ -347,7 +347,7 @@ pub(super) async fn handle_walreceiver_connection(
                 } = batch;
 
                 tracing::debug!(
-                    "Received WAL up to {} with next_record_lsn={:?}",
+                    "Received WAL up to {} with next_record_lsn={}",
                     streaming_lsn,
                     next_record_lsn
                 );
@@ -424,12 +424,11 @@ pub(super) async fn handle_walreceiver_connection(
                 // need to advance last record LSN on all shards. If we've not ingested the latest
                 // record, then set the LSN of the modification past it. This way all shards
                 // advance their last record LSN at the same time.
-                let needs_last_record_lsn_advance = match next_record_lsn {
-                    Some(lsn) if lsn > modification.get_lsn() => {
-                        modification.set_lsn(lsn).unwrap();
-                        true
-                    }
-                    _ => false,
+                let needs_last_record_lsn_advance = if next_record_lsn > modification.get_lsn() {
+                    modification.set_lsn(next_record_lsn).unwrap();
+                    true
+                } else {
+                    false
                 };
 
                 if uncommitted_records > 0 || needs_last_record_lsn_advance {
@@ -447,9 +446,7 @@ pub(super) async fn handle_walreceiver_connection(
                     timeline.get_last_record_lsn()
                 );
 
-                if let Some(lsn) = next_record_lsn {
-                    last_rec_lsn = lsn;
-                }
+                last_rec_lsn = next_record_lsn;
 
                 Some(streaming_lsn)
             }

@@ -391,7 +391,7 @@ impl InterpretedWalReader {
 
                             let batch = InterpretedWalRecords {
                                 records,
-                                next_record_lsn: Some(max_next_record_lsn),
+                                next_record_lsn: max_next_record_lsn,
                                 raw_wal_start_lsn: Some(wal_start_lsn),
                             };
 
