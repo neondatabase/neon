@@ -127,8 +127,11 @@ static uint32 local_request_counter;
 /*
  * Various settings related to prompt (fast) handling of PageStream responses
  * at any CHECK_FOR_INTERRUPTS point.
+ *
+ * Note: we'll trigger this every 1000ms (= second), which should be frequent
+ * enough to fix overhead issues without too much issues with other overheads.
  */
-#define	PS_BACKGROUND_DELAY_MS 100
+#define	PS_BACKGROUND_DELAY_MS 1000
 static int		PS_TIMEOUT_ID = 0;
 static bool		timeout_set = false;
 static bool		timeout_signaled = false;
