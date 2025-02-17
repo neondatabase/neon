@@ -167,7 +167,7 @@ impl TryFrom<InterpretedWalRecords> for proto::InterpretedWalRecords {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(proto::InterpretedWalRecords {
             records,
-            next_record_lsn: value.next_record_lsn.map(|l| l.0),
+            next_record_lsn: Some(value.next_record_lsn.0),
             raw_wal_start_lsn: value.raw_wal_start_lsn.map(|l| l.0),
         })
     }
@@ -255,7 +255,10 @@ impl TryFrom<proto::InterpretedWalRecords> for InterpretedWalRecords {
 
         Ok(InterpretedWalRecords {
             records,
-            next_record_lsn: value.next_record_lsn.map(Lsn::from),
+            next_record_lsn: value
+                .next_record_lsn
+                .map(Lsn::from)
+                .expect("Always provided"),
             raw_wal_start_lsn: value.raw_wal_start_lsn.map(Lsn::from),
         })
     }
