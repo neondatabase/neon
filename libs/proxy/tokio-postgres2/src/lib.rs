@@ -14,10 +14,8 @@ pub use crate::row::{Row, SimpleQueryRow};
 pub use crate::simple_query::SimpleQueryStream;
 pub use crate::statement::{Column, Statement};
 pub use crate::tls::NoTls;
-pub use crate::to_statement::ToStatement;
 pub use crate::transaction::Transaction;
 pub use crate::transaction_builder::{IsolationLevel, TransactionBuilder};
-use crate::types::ToSql;
 use postgres_protocol2::message::backend::ReadyForQueryBody;
 
 /// After executing a query, the connection will be in one of these states
@@ -59,13 +57,11 @@ mod connection;
 pub mod error;
 mod generic_client;
 pub mod maybe_tls_stream;
-mod prepare;
 mod query;
 pub mod row;
 mod simple_query;
 mod statement;
 pub mod tls;
-mod to_statement;
 mod transaction;
 mod transaction_builder;
 pub mod types;
@@ -120,10 +116,4 @@ pub enum SimpleQueryMessage {
     ///
     /// The number of rows modified or selected is returned.
     CommandComplete(u64),
-}
-
-fn slice_iter<'a>(
-    s: &'a [&'a (dyn ToSql + Sync)],
-) -> impl ExactSizeIterator<Item = &'a (dyn ToSql + Sync)> + 'a {
-    s.iter().map(|s| *s as _)
 }

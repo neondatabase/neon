@@ -7,11 +7,9 @@ use crate::connection::{Request, RequestMessages};
 use crate::query::RowStream;
 use crate::simple_query::SimpleQueryStream;
 
-use crate::types::{Oid, ToSql, Type};
-
 use crate::{
-    prepare, query, simple_query, slice_iter, CancelToken, Error, ReadyForQueryStatus, Row,
-    SimpleQueryMessage, Statement, ToStatement, Transaction, TransactionBuilder,
+    query, simple_query, CancelToken, Error, ReadyForQueryStatus, SimpleQueryMessage, Transaction,
+    TransactionBuilder,
 };
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
@@ -19,7 +17,6 @@ use futures_util::{future, ready, TryStreamExt};
 use parking_lot::Mutex;
 use postgres_protocol2::message::{backend::Message, frontend};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -53,29 +50,8 @@ impl Responses {
     }
 }
 
-/// A cache of type info and prepared statements for fetching type info
-/// (corresponding to the queries in the [prepare] module).
-#[derive(Default)]
-struct CachedTypeInfo {
-    /// A statement for basic information for a type from its
-    /// OID. Corresponds to [TYPEINFO_QUERY](prepare::TYPEINFO_QUERY) (or its
-    /// fallback).
-    typeinfo: Option<Statement>,
-    /// A statement for getting information for a composite type from its OID.
-    /// Corresponds to [TYPEINFO_QUERY](prepare::TYPEINFO_COMPOSITE_QUERY).
-    typeinfo_composite: Option<Statement>,
-    /// A statement for getting information for a composite type from its OID.
-    /// Corresponds to [TYPEINFO_QUERY](prepare::TYPEINFO_COMPOSITE_QUERY) (or
-    /// its fallback).
-    typeinfo_enum: Option<Statement>,
-
-    /// Cache of types already looked up.
-    types: HashMap<Oid, Type>,
-}
-
 pub struct InnerClient {
     sender: mpsc::UnboundedSender<Request>,
-    cached_typeinfo: Mutex<CachedTypeInfo>,
 
     /// A buffer to use when writing out postgres commands.
     buffer: Mutex<BytesMut>,
@@ -91,38 +67,6 @@ impl InnerClient {
             receiver,
             cur: BackendMessages::empty(),
         })
-    }
-
-    pub fn typeinfo(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo.clone()
-    }
-
-    pub fn set_typeinfo(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo = Some(statement.clone());
-    }
-
-    pub fn typeinfo_composite(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo_composite.clone()
-    }
-
-    pub fn set_typeinfo_composite(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_composite = Some(statement.clone());
-    }
-
-    pub fn typeinfo_enum(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo_enum.clone()
-    }
-
-    pub fn set_typeinfo_enum(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_enum = Some(statement.clone());
-    }
-
-    pub fn type_(&self, oid: Oid) -> Option<Type> {
-        self.cached_typeinfo.lock().types.get(&oid).cloned()
-    }
-
-    pub fn set_type(&self, oid: Oid, type_: &Type) {
-        self.cached_typeinfo.lock().types.insert(oid, type_.clone());
     }
 
     /// Call the given function with a buffer to be used when writing out
@@ -170,7 +114,6 @@ impl Client {
         Client {
             inner: Arc::new(InnerClient {
                 sender,
-                cached_typeinfo: Default::default(),
                 buffer: Default::default(),
             }),
 
@@ -190,76 +133,6 @@ impl Client {
         &self.inner
     }
 
-    /// Creates a new prepared statement.
-    ///
-    /// Prepared statements can be executed repeatedly, and may contain query parameters (indicated by `$1`, `$2`, etc),
-    /// which are set when executed. Prepared statements can only be used with the connection that created them.
-    pub async fn prepare(&self, query: &str) -> Result<Statement, Error> {
-        self.prepare_typed(query, &[]).await
-    }
-
-    /// Like `prepare`, but allows the types of query parameters to be explicitly specified.
-    ///
-    /// The list of types may be smaller than the number of parameters - the types of the remaining parameters will be
-    /// inferred. For example, `client.prepare_typed(query, &[])` is equivalent to `client.prepare(query)`.
-    pub async fn prepare_typed(
-        &self,
-        query: &str,
-        parameter_types: &[Type],
-    ) -> Result<Statement, Error> {
-        prepare::prepare(&self.inner, query, parameter_types).await
-    }
-
-    /// Executes a statement, returning a vector of the resulting rows.
-    ///
-    /// A statement may contain parameters, specified by `$n`, where `n` is the index of the parameter of the list
-    /// provided, 1-indexed.
-    ///
-    /// The `statement` argument can either be a `Statement`, or a raw query string. If the same statement will be
-    /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
-    /// with the `prepare` method.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the number of parameters provided does not match the number expected.
-    pub async fn query<T>(
-        &self,
-        statement: &T,
-        params: &[&(dyn ToSql + Sync)],
-    ) -> Result<Vec<Row>, Error>
-    where
-        T: ?Sized + ToStatement,
-    {
-        self.query_raw(statement, slice_iter(params))
-            .await?
-            .try_collect()
-            .await
-    }
-
-    /// The maximally flexible version of [`query`].
-    ///
-    /// A statement may contain parameters, specified by `$n`, where `n` is the index of the parameter of the list
-    /// provided, 1-indexed.
-    ///
-    /// The `statement` argument can either be a `Statement`, or a raw query string. If the same statement will be
-    /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
-    /// with the `prepare` method.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the number of parameters provided does not match the number expected.
-    ///
-    /// [`query`]: #method.query
-    pub async fn query_raw<'a, T, I>(&self, statement: &T, params: I) -> Result<RowStream, Error>
-    where
-        T: ?Sized + ToStatement,
-        I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        let statement = statement.__convert().into_statement(self).await?;
-        query::query(&self.inner, statement, params).await
-    }
-
     /// Pass text directly to the Postgres backend to allow it to sort out typing itself and
     /// to save a roundtrip
     pub async fn query_raw_txt<S, I>(&self, statement: &str, params: I) -> Result<RowStream, Error>
@@ -269,55 +142,6 @@ impl Client {
         I::IntoIter: ExactSizeIterator,
     {
         query::query_txt(&self.inner, statement, params).await
-    }
-
-    /// Executes a statement, returning the number of rows modified.
-    ///
-    /// A statement may contain parameters, specified by `$n`, where `n` is the index of the parameter of the list
-    /// provided, 1-indexed.
-    ///
-    /// The `statement` argument can either be a `Statement`, or a raw query string. If the same statement will be
-    /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
-    /// with the `prepare` method.
-    ///
-    /// If the statement does not modify any rows (e.g. `SELECT`), 0 is returned.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the number of parameters provided does not match the number expected.
-    pub async fn execute<T>(
-        &self,
-        statement: &T,
-        params: &[&(dyn ToSql + Sync)],
-    ) -> Result<u64, Error>
-    where
-        T: ?Sized + ToStatement,
-    {
-        self.execute_raw(statement, slice_iter(params)).await
-    }
-
-    /// The maximally flexible version of [`execute`].
-    ///
-    /// A statement may contain parameters, specified by `$n`, where `n` is the index of the parameter of the list
-    /// provided, 1-indexed.
-    ///
-    /// The `statement` argument can either be a `Statement`, or a raw query string. If the same statement will be
-    /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
-    /// with the `prepare` method.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the number of parameters provided does not match the number expected.
-    ///
-    /// [`execute`]: #method.execute
-    pub async fn execute_raw<'a, T, I>(&self, statement: &T, params: I) -> Result<u64, Error>
-    where
-        T: ?Sized + ToStatement,
-        I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        let statement = statement.__convert().into_statement(self).await?;
-        query::execute(self.inner(), statement, params).await
     }
 
     /// Executes a sequence of SQL statements using the simple query protocol, returning the resulting rows.
@@ -415,11 +239,6 @@ impl Client {
             process_id: self.process_id,
             secret_key: self.secret_key,
         }
-    }
-
-    /// Query for type information
-    pub async fn get_type(&self, oid: Oid) -> Result<Type, Error> {
-        crate::prepare::get_type(&self.inner, oid).await
     }
 
     /// Determines if the connection to the server has already closed.
