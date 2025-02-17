@@ -509,6 +509,18 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         self.layers.values().cloned()
     }
 
+    /// Iterate all the layers in reverse order (newest LSNs first)
+    pub fn riter(&self) -> impl '_ + Iterator<Item = Value> {
+        // NOTE we can actually perform this without rebuilding,
+        //      but it's not necessary for now.
+        if !self.buffer.is_empty() {
+            panic!("rebuild pls")
+        }
+
+        // TODO: is cloned() really needed?
+        self.layers.values().rev().cloned()
+    }
+
     /// Return a reference to a queryable map, assuming all updates
     /// have already been processed using self.rebuild()
     pub fn get(&self) -> anyhow::Result<&HistoricLayerCoverage<Value>> {

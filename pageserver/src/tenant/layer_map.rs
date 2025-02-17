@@ -570,6 +570,10 @@ impl LayerMap {
         self.historic.iter()
     }
 
+    pub fn riter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<PersistentLayerDesc>> {
+        self.historic.riter()
+    }
+
     /// Get a ref counted pointer for the first in memory layer that matches the provided predicate.
     pub(crate) fn find_in_memory_layer<Pred>(&self, mut pred: Pred) -> Option<Arc<InMemoryLayer>>
     where
@@ -900,11 +904,19 @@ impl LayerMap {
         Ok(())
     }
 
+    /// Efficiency: this is a single btreemap walk to the end of the map in the common case where
+    /// we are queried for image layers after the start of an ephemeral layer.  In the general case
+    /// where we are called with some arbitrary LSN, this function is O(N) -- so don't use it like that.
     pub(crate) fn get_newest_image_after(&self, lsn: Lsn) -> Option<Arc<PersistentLayerDesc>> {
         // TODO: an efficient equivalent, this is a crude placeholder
-        for layer in self.iter_historic_layers() {
+        for layer in self.riter_historic_layers() {
             if !layer.is_delta() && layer.image_layer_lsn() >= lsn {
                 return Some(layer);
+            }
+
+            if layer.lsn_range.start < lsn {
+                // We are past the layers that could possibly intersect with the requested bound
+                break;
             }
         }
         None
