@@ -274,6 +274,7 @@ pub(super) async fn handle_walreceiver_connection(
         } => Some((format, compression)),
     };
 
+    let mut expected_wal_start = startpoint;
     while let Some(replication_message) = {
         select! {
             _ = cancellation.cancelled() => {
@@ -339,6 +340,21 @@ pub(super) async fn handle_walreceiver_connection(
                         "Failed to deserialize interpreted records ending at LSN {streaming_lsn}"
                     )
                     })?;
+
+                // Guard against WAL gaps. If the start LSN of the PG WAL section
+                // from which the interpreted records were extracted, doesn't match
+                // the end of the previous batch (or the starting point for the first batch),
+                // then kill this WAL receiver connection and start a new one.
+                if let Some(raw_wal_start_lsn) = batch.raw_wal_start_lsn {
+                    if raw_wal_start_lsn != expected_wal_start {
+                        let msg = format!(
+                            "Received batch from raw WAL start LSN {}. Expected {}",
+                            raw_wal_start_lsn, expected_wal_start,
+                        );
+                        critical!("{msg}");
+                        return Err(WalReceiverError::Other(anyhow!(msg)));
+                    }
+                }
 
                 let InterpretedWalRecords {
                     records,
@@ -447,6 +463,7 @@ pub(super) async fn handle_walreceiver_connection(
                 );
 
                 last_rec_lsn = next_record_lsn;
+                expected_wal_start = streaming_lsn;
 
                 Some(streaming_lsn)
             }
