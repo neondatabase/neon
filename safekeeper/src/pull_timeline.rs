@@ -4,10 +4,13 @@ use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
 use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
-use safekeeper_api::{models::TimelineStatus, Term};
+use safekeeper_api::{
+    models::{PullTimelineRequest, PullTimelineResponse, TimelineStatus},
+    Term,
+};
 use safekeeper_client::mgmt_api;
 use safekeeper_client::mgmt_api::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{
     cmp::min,
     io::{self, ErrorKind},
@@ -33,7 +36,7 @@ use crate::{
 };
 use utils::{
     crashsafe::fsync_async_opt,
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
+    id::{NodeId, TenantTimelineId},
     logging::SecretString,
     lsn::Lsn,
     pausable_failpoint,
@@ -378,21 +381,6 @@ impl WalResidentTimeline {
     }
 }
 
-/// pull_timeline request body.
-#[derive(Debug, Deserialize)]
-pub struct Request {
-    pub tenant_id: TenantId,
-    pub timeline_id: TimelineId,
-    pub http_hosts: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Response {
-    // Donor safekeeper host
-    pub safekeeper_host: String,
-    // TODO: add more fields?
-}
-
 /// Response for debug dump request.
 #[derive(Debug, Deserialize)]
 pub struct DebugDumpResponse {
@@ -405,10 +393,10 @@ pub struct DebugDumpResponse {
 
 /// Find the most advanced safekeeper and pull timeline from it.
 pub async fn handle_request(
-    request: Request,
+    request: PullTimelineRequest,
     sk_auth_token: Option<SecretString>,
     global_timelines: Arc<GlobalTimelines>,
-) -> Result<Response> {
+) -> Result<PullTimelineResponse> {
     let existing_tli = global_timelines.get(TenantTimelineId::new(
         request.tenant_id,
         request.timeline_id,
@@ -460,7 +448,7 @@ async fn pull_timeline(
     host: String,
     sk_auth_token: Option<SecretString>,
     global_timelines: Arc<GlobalTimelines>,
-) -> Result<Response> {
+) -> Result<PullTimelineResponse> {
     let ttid = TenantTimelineId::new(status.tenant_id, status.timeline_id);
     info!(
         "pulling timeline {} from safekeeper {}, commit_lsn={}, flush_lsn={}, term={}, epoch={}",
@@ -535,7 +523,7 @@ async fn pull_timeline(
         .load_temp_timeline(ttid, &tli_dir_path, false)
         .await?;
 
-    Ok(Response {
+    Ok(PullTimelineResponse {
         safekeeper_host: host,
     })
 }
