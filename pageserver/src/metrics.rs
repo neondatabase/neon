@@ -1489,6 +1489,7 @@ impl SmgrOpFlushInProgress {
                         }
                         #[cfg(not(target_os = "linux"))]
                         {
+                            _ = socket_fd; // appease unused lint on macOS
                             (-1, -1)
                         }
                     };
