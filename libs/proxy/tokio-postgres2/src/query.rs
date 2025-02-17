@@ -1,18 +1,60 @@
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
+use crate::types::IsNull;
 use crate::{Column, Error, ReadyForQueryStatus, Row, Statement};
-use bytes::BufMut;
+use bytes::{BufMut, Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use futures_util::{ready, Stream};
+use log::{debug, log_enabled, Level};
 use pin_project_lite::pin_project;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
-use postgres_types2::{Format, Type};
+use postgres_types2::{Format, ToSql, Type};
+use std::fmt;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+
+struct BorrowToSqlParamsDebug<'a>(&'a [&'a (dyn ToSql + Sync)]);
+
+impl fmt::Debug for BorrowToSqlParamsDebug<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.0.iter()).finish()
+    }
+}
+
+pub async fn query<'a, I>(
+    client: &InnerClient,
+    statement: Statement,
+    params: I,
+) -> Result<RowStream, Error>
+where
+    I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let buf = if log_enabled!(Level::Debug) {
+        let params = params.into_iter().collect::<Vec<_>>();
+        debug!(
+            "executing statement {} with parameters: {:?}",
+            statement.name(),
+            BorrowToSqlParamsDebug(params.as_slice()),
+        );
+        encode(client, &statement, params)?
+    } else {
+        encode(client, &statement, params)?
+    };
+    let responses = start(client, buf).await?;
+    Ok(RowStream {
+        statement,
+        responses,
+        command_tag: None,
+        status: ReadyForQueryStatus::Unknown,
+        output_format: Format::Binary,
+        _p: PhantomPinned,
+    })
+}
 
 pub async fn query_txt<S, I>(
     client: &Arc<InnerClient>,
@@ -113,6 +155,81 @@ where
         output_format: Format::Text,
         _p: PhantomPinned,
     })
+}
+
+async fn start(client: &InnerClient, buf: Bytes) -> Result<Responses, Error> {
+    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+
+    match responses.next().await? {
+        Message::BindComplete => {}
+        _ => return Err(Error::unexpected_message()),
+    }
+
+    Ok(responses)
+}
+
+pub fn encode<'a, I>(client: &InnerClient, statement: &Statement, params: I) -> Result<Bytes, Error>
+where
+    I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
+    I::IntoIter: ExactSizeIterator,
+{
+    client.with_buf(|buf| {
+        encode_bind(statement, params, "", buf)?;
+        frontend::execute("", 0, buf).map_err(Error::encode)?;
+        frontend::sync(buf);
+        Ok(buf.split().freeze())
+    })
+}
+
+pub fn encode_bind<'a, I>(
+    statement: &Statement,
+    params: I,
+    portal: &str,
+    buf: &mut BytesMut,
+) -> Result<(), Error>
+where
+    I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let param_types = statement.params();
+    let params = params.into_iter();
+
+    assert!(
+        param_types.len() == params.len(),
+        "expected {} parameters but got {}",
+        param_types.len(),
+        params.len()
+    );
+
+    let (param_formats, params): (Vec<_>, Vec<_>) = params
+        .zip(param_types.iter())
+        .map(|(p, ty)| (p.encode_format(ty) as i16, p))
+        .unzip();
+
+    let params = params.into_iter();
+
+    let mut error_idx = 0;
+    let r = frontend::bind(
+        portal,
+        statement.name(),
+        param_formats,
+        params.zip(param_types).enumerate(),
+        |(idx, (param, ty)), buf| match param.to_sql_checked(ty, buf) {
+            Ok(IsNull::No) => Ok(postgres_protocol2::IsNull::No),
+            Ok(IsNull::Yes) => Ok(postgres_protocol2::IsNull::Yes),
+            Err(e) => {
+                error_idx = idx;
+                Err(e)
+            }
+        },
+        Some(1),
+        buf,
+    );
+    match r {
+        Ok(()) => Ok(()),
+        Err(frontend::BindError::Conversion(e)) => Err(Error::to_sql(e, error_idx)),
+        Err(frontend::BindError::Serialization(e)) => Err(Error::encode(e)),
+    }
 }
 
 pin_project! {
