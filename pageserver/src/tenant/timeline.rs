@@ -5131,14 +5131,23 @@ impl Timeline {
                     };
                     let image_preempt_threshold = self.get_image_creation_preempt_threshold()
                         * self.get_compaction_threshold();
-                    if image_preempt_threshold != 0 && num_of_l0_layers >= image_preempt_threshold {
-                        tracing::info!(
-                        "preempt image layer generation at {lsn} when processing partition {}..{}: too many L0 layers {}",
-                        partition.start().unwrap(), partition.end().unwrap(), num_of_l0_layers
-                    );
-                        last_partition_processed = Some(partition.clone());
-                        all_generated = false;
-                        break;
+                    // TODO: currently we do not respect `get_image_creation_preempt_threshold` and always yield
+                    // when there is a single timeline with more than L0 threshold L0 layers. As long as the
+                    // `get_image_creation_preempt_threshold` is set to a value greater than 0, we will yield for L0 compaction.
+                    if image_preempt_threshold != 0 {
+                        let decide_yield_to_l0 = tokio::select! {
+                            _ = self.l0_compaction_trigger.notified() => true,
+                            () = async {} => false // we don't want to stuck waiting on notified
+                        };
+                        if decide_yield_to_l0 {
+                            tracing::info!(
+                                "preempt image layer generation at {lsn} when processing partition {}..{}: too many L0 layers {}",
+                                partition.start().unwrap(), partition.end().unwrap(), num_of_l0_layers
+                            );
+                            last_partition_processed = Some(partition.clone());
+                            all_generated = false;
+                            break;
+                        }
                     }
                 }
             }
