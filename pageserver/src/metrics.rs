@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::os::fd::RawFd;
 use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -129,7 +130,7 @@ pub(crate) static LAYERS_PER_READ: Lazy<HistogramVec> = Lazy::new(|| {
         "Layers visited to serve a single read (read amplification). In a batch, all visited layers count towards every read.",
         &["tenant_id", "shard_id", "timeline_id"],
         // Low resolution to reduce cardinality.
-        vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0],
+        vec![4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0],
     )
     .expect("failed to define a metric")
 });
@@ -1439,7 +1440,13 @@ impl Drop for SmgrOpTimer {
 }
 
 impl SmgrOpFlushInProgress {
-    pub(crate) async fn measure<Fut, O>(self, started_at: Instant, mut fut: Fut) -> O
+    /// The caller must guarantee that `socket_fd`` outlives this function.
+    pub(crate) async fn measure<Fut, O>(
+        self,
+        started_at: Instant,
+        mut fut: Fut,
+        socket_fd: RawFd,
+    ) -> O
     where
         Fut: std::future::Future<Output = O>,
     {
@@ -1470,8 +1477,25 @@ impl SmgrOpFlushInProgress {
                     } else {
                         "slow flush completed or cancelled"
                     };
+
+                    let (inq, outq) = {
+                        // SAFETY: caller guarantees that `socket_fd` outlives this function.
+                        #[cfg(target_os = "linux")]
+                        unsafe {
+                            (
+                                utils::linux_socket_ioctl::inq(socket_fd).unwrap_or(-2),
+                                utils::linux_socket_ioctl::outq(socket_fd).unwrap_or(-2),
+                            )
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            _ = socket_fd; // appease unused lint on macOS
+                            (-1, -1)
+                        }
+                    };
+
                     let elapsed_total_secs = format!("{:.6}", elapsed_total.as_secs_f64());
-                    tracing::info!(elapsed_total_secs, msg);
+                    tracing::info!(elapsed_total_secs, inq, outq, msg);
                 }
             },
             |mut observe| {

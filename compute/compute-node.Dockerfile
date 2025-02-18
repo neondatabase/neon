@@ -148,7 +148,7 @@ RUN case $DEBIAN_VERSION in \
     apt install --no-install-recommends --no-install-suggests -y \
     ninja-build git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
-    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip \
+    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip g++ \
     $VERSION_INSTALLS \
     && apt clean && rm -rf /var/lib/apt/lists/*
 
@@ -1466,6 +1466,31 @@ RUN make release -j $(getconf _NPROCESSORS_ONLN) && \
 
 #########################################################################################
 #
+# Layer "pg-duckdb-pg-build"
+# compile pg_duckdb extension
+#
+#########################################################################################
+FROM build-deps AS pg_duckdb-src
+WORKDIR /ext-src
+COPY compute/patches/pg_duckdb_v031.patch .
+# pg_duckdb build requires source dir to be a git repo to get submodules
+# allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only: 
+# - extension management function duckdb.install_extension()
+# - access to duckdb.extensions table and its sequence
+RUN git clone --depth 1 --branch v0.3.1 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
+    cd pg_duckdb-src && \
+    git submodule update --init --recursive && \
+    patch -p1 < /ext-src/pg_duckdb_v031.patch
+
+FROM pg-build AS pg_duckdb-build
+ARG PG_VERSION
+COPY --from=pg_duckdb-src /ext-src/ /ext-src/
+WORKDIR /ext-src/pg_duckdb-src
+RUN make install -j $(getconf _NPROCESSORS_ONLN) && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control 
+        
+#########################################################################################
+#
 # Layer "pg_repack"
 # compile pg_repack extension
 #
@@ -1577,6 +1602,7 @@ COPY --from=pg_anon-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_duckdb-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 
 #########################################################################################
@@ -1668,29 +1694,6 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then\
     && echo "${postgres_exporter_sha256} postgres_exporter" | sha256sum -c -\
     && echo "${pgbouncer_exporter_sha256} pgbouncer_exporter" | sha256sum -c -\
     && echo "${sql_exporter_sha256} sql_exporter" | sha256sum -c -
-
-#########################################################################################
-#
-# Layer "awscli"
-#
-#########################################################################################
-FROM build-deps AS awscli
-ARG TARGETARCH
-RUN set -ex; \
-    if [ "${TARGETARCH}" = "amd64" ]; then \
-        TARGETARCH_ALT="x86_64"; \
-        CHECKSUM="c9a9df3770a3ff9259cb469b6179e02829687a464e0824d5c32d378820b53a00"; \
-    elif [ "${TARGETARCH}" = "arm64" ]; then \
-        TARGETARCH_ALT="aarch64"; \
-        CHECKSUM="8181730be7891582b38b028112e81b4899ca817e8c616aad807c9e9d1289223a"; \
-    else \
-        echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
-    fi; \
-    curl --retry 5 -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
-    echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
-    unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
-    /tmp/awscliv2/aws/install; \
-    rm -rf /tmp/awscliv2.zip /tmp/awscliv2
 
 #########################################################################################
 #
@@ -1860,9 +1863,6 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     # Create remote extension download directory
     mkdir /usr/local/download_extensions && \
     chown -R postgres:postgres /usr/local/download_extensions
-
-# aws cli is used by fast_import
-COPY --from=awscli /usr/local/aws-cli /usr/local/aws-cli
 
 # pgbouncer and its config
 COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
