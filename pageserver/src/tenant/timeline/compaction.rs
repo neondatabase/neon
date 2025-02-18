@@ -11,7 +11,8 @@ use std::sync::Arc;
 use super::layer_manager::LayerManager;
 use super::{
     CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, GetVectoredError,
-    ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration, Timeline,
+    ImageLayerCreationMode, LastImageLayerCreationStatus, PageReconstructError, RecordedDuration,
+    Timeline,
 };
 
 use anyhow::{anyhow, bail, Context};
@@ -789,7 +790,8 @@ impl Timeline {
                 // Suppress error when it's due to cancellation
                 if !self.cancel.is_cancelled() && !err.is_cancelled() {
                     if let CompactionError::CollectKeySpaceError(
-                        CollectKeySpaceError::Decode(_) | CollectKeySpaceError::PageRead(_),
+                        CollectKeySpaceError::Decode(_)
+                        | CollectKeySpaceError::PageRead(PageReconstructError::MissingKey(_)),
                     ) = err
                     {
                         critical!("could not compact, repartitioning keyspace failed: {err:?}");
