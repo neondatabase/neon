@@ -2395,6 +2395,7 @@ async fn timeline_checkpoint_handler(
                     match e {
                         CompactionError::ShuttingDown => ApiError::ShuttingDown,
                         CompactionError::Offload(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
+                        CompactionError::CollectKeySpaceError(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
                         CompactionError::Other(e) => ApiError::InternalServerError(e)
                     }
                 )?;
