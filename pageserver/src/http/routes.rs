@@ -1463,6 +1463,59 @@ async fn timeline_layer_scan_disposable_keys(
     )
 }
 
+async fn timeline_download_heatmap_layers_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    // Only used in the case where remote storage is not configured.
+    const DEFAULT_MAX_CONCURRENCY: usize = 100;
+    // A conservative default.
+    const DEFAULT_CONCURRENCY: usize = 16;
+
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let desired_concurrency =
+        parse_query_param(&request, "concurrency")?.unwrap_or(DEFAULT_CONCURRENCY);
+
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    let max_concurrency = get_config(&request)
+        .remote_storage_config
+        .as_ref()
+        .map(|c| c.concurrency_limit())
+        .unwrap_or(DEFAULT_MAX_CONCURRENCY);
+    let concurrency = std::cmp::min(max_concurrency, desired_concurrency);
+
+    timeline.start_heatmap_layers_download(concurrency).await?;
+
+    json_response(StatusCode::ACCEPTED, ())
+}
+
+async fn timeline_shutdown_download_heatmap_layers_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    timeline.stop_and_drain_heatmap_layers_download().await;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn layer_download_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -3625,6 +3678,14 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer",
             |r| api_handler(r, layer_map_info_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_heatmap_layers",
+            |r| api_handler(r, timeline_download_heatmap_layers_handler),
+        )
+        .delete(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_heatmap_layers",
+            |r| api_handler(r, timeline_shutdown_download_heatmap_layers_handler),
         )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_file_name",
