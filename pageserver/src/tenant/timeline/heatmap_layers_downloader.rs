@@ -114,7 +114,14 @@ impl HeatmapLayersDownloader {
     }
 
     /// Drive any in-progress downloads to completion and stop spawning any new ones.
-    async fn shutdown(self) {
+    ///
+    /// This has two callers and they behave differently
+    /// 1. [`Timeline::shutdown`]: the drain will be immediate since downloads themselves
+    ///    are sensitive to timeline cancellation.
+    ///
+    /// 2. Endpoint handler in [`crate::http::routes`]: the drain will wait for any in-progress
+    ///    downloads to complete.
+    async fn stop_and_drain(self) {
         // Counterintuitive: close the guard before cancelling.
         // Something needs to poll the already created download futures to completion.
         // If we cancel first, then the underlying task exits and we lost
@@ -142,14 +149,14 @@ impl Timeline {
         }
     }
 
-    pub(crate) async fn shutdown_heatmap_layers_download(&self) {
+    pub(crate) async fn stop_and_drain_heatmap_layers_download(&self) {
         // This can race with the start of a new downloader and lead to a situation
         // where one donloader is shutting down and another one is in-flight.
         // The only impact is that we'd end up using more remote storage semaphore
         // units than expected.
         let downloader = self.heatmap_layers_downloader.lock().unwrap().take();
         if let Some(dl) = downloader {
-            dl.shutdown().await;
+            dl.stop_and_drain().await;
         }
     }
 }

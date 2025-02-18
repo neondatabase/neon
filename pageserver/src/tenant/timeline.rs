@@ -2043,6 +2043,11 @@ impl Timeline {
         tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
 
+        // If we have a background task downloading heatmap layers stop it.
+        // The background downloads are sensitive to timeline cancellation (done above),
+        // so the drain will be immediate.
+        self.stop_and_drain_heatmap_layers_download().await;
+
         // Ensure Prevent new page service requests from starting.
         self.handles.shutdown();
 

@@ -1511,7 +1511,7 @@ async fn timeline_shutdown_download_heatmap_layers_handler(
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
 
-    timeline.shutdown_heatmap_layers_download().await;
+    timeline.stop_and_drain_heatmap_layers_download().await;
 
     json_response(StatusCode::OK, ())
 }
