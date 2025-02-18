@@ -43,7 +43,8 @@ EXTENSIONS='[
 {"extname": "semver", "extdir": "pg_semver-src"},
 {"extname": "pg_ivm", "extdir": "pg_ivm-src"},
 {"extname": "pgjwt", "extdir": "pgjwt-src"},
-{"extname": "pgtap", "extdir": "pgtap-src"}
+{"extname": "pgtap", "extdir": "pgtap-src"},
+{"extname": "pg_repack", "extdir": "pg_repack-src"}
 ]'
 EXTNAMES=$(echo ${EXTENSIONS} | jq -r '.[].extname' | paste -sd ' ' -)
 TAG=${NEWTAG} docker compose --profile test-extensions up --quiet-pull --build -d
