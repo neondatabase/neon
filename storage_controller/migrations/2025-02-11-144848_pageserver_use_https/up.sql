@@ -1,1 +1,1 @@
-ALTER TABLE nodes ADD use_https BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE nodes ADD listen_https_port Int4;

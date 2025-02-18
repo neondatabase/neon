@@ -1,1 +1,1 @@
-ALTER TABLE nodes DROP use_https;
+ALTER TABLE nodes DROP listen_https_port;

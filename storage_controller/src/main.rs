@@ -111,6 +111,10 @@ struct Cli {
 
     #[arg(long)]
     long_reconcile_threshold: Option<humantime::Duration>,
+
+    // Flag to use https for requests to pageserver API.
+    #[arg(long, default_value = "false")]
+    use_https_pageserver_api: bool,
 }
 
 enum StrictMode {
@@ -303,6 +307,7 @@ async fn async_main() -> anyhow::Result<()> {
         address_for_peers: args.address_for_peers,
         start_as_candidate: args.start_as_candidate,
         http_service_port: args.listen.port() as i32,
+        use_https_pageserver_api: args.use_https_pageserver_api,
     };
 
     // Validate that we can connect to the database

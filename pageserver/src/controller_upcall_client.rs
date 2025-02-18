@@ -140,12 +140,11 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
                     // Since we run one time at startup, be generous in our logging and
                     // dump all metadata.
                     tracing::info!(
-                        "Loaded node metadata: postgres {}:{}, http {}:{}, use_https {}, other fields: {:?}",
+                        "Loaded node metadata: postgres {}:{}, http {}:{}, other fields: {:?}",
                         m.postgres_host,
                         m.postgres_port,
                         m.http_host,
                         m.http_port,
-                        m.use_https,
                         m.other
                     );
 
@@ -174,7 +173,7 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
                         listen_pg_port: m.postgres_port,
                         listen_http_addr: m.http_host,
                         listen_http_port: m.http_port,
-                        use_https: m.use_https,
+                        listen_https_port: None, // TODO: Support https.
                         availability_zone_id: az_id.expect("Checked above"),
                     })
                 }
