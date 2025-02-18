@@ -1,12 +1,15 @@
 pub(crate) mod split_state;
 use std::collections::HashMap;
+use std::io::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use diesel::deserialize::{FromSql, FromSqlRow};
+use diesel::expression::AsExpression;
 use diesel::pg::Pg;
 use diesel::prelude::*;
+use diesel::serialize::{IsNull, ToSql};
 use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
 use diesel_async::pooled_connection::bb8::Pool;
 use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig};
@@ -30,6 +33,7 @@ use scoped_futures::ScopedBoxFuture;
 use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId};
+use utils::lsn::Lsn;
 
 use self::split_state::SplitState;
 use crate::metrics::{
@@ -1664,4 +1668,61 @@ struct InsertUpdateSafekeeper<'a> {
     http_port: i32,
     availability_zone_id: &'a str,
     scheduling_policy: Option<&'a str>,
+}
+
+#[derive(Serialize, Deserialize, FromSqlRow, AsExpression, Eq, PartialEq, Debug, Copy, Clone)]
+#[diesel(sql_type = crate::schema::sql_types::PgLsn)]
+pub(crate) struct LsnWrapper(pub(crate) Lsn);
+
+impl From<Lsn> for LsnWrapper {
+    fn from(value: Lsn) -> Self {
+        LsnWrapper(value)
+    }
+}
+
+impl FromSql<crate::schema::sql_types::PgLsn, Pg> for LsnWrapper {
+    fn from_sql(
+        bytes: <Pg as diesel::backend::Backend>::RawValue<'_>,
+    ) -> diesel::deserialize::Result<Self> {
+        let byte_arr: diesel::deserialize::Result<[u8; 8]> = bytes
+            .as_bytes()
+            .try_into()
+            .map_err(|_| "Can't obtain lsn from sql".into());
+        Ok(LsnWrapper(Lsn(u64::from_be_bytes(byte_arr?))))
+    }
+}
+
+impl ToSql<crate::schema::sql_types::PgLsn, Pg> for LsnWrapper {
+    fn to_sql<'b>(
+        &'b self,
+        out: &mut diesel::serialize::Output<'b, '_, Pg>,
+    ) -> diesel::serialize::Result {
+        out.write_all(&u64::to_be_bytes(self.0.0))
+            .map(|_| IsNull::No)
+            .map_err(Into::into)
+    }
+}
+#[derive(Insertable, AsChangeset, Queryable, Selectable, Clone)]
+#[diesel(table_name = crate::schema::timelines)]
+pub(crate) struct TimelinePersistence {
+    pub(crate) tenant_id: String,
+    pub(crate) timeline_id: String,
+    pub(crate) start_lsn: LsnWrapper,
+    pub(crate) generation: i32,
+    pub(crate) sk_set: Vec<i64>,
+    pub(crate) new_sk_set: Option<Vec<i64>>,
+    pub(crate) cplane_notified_generation: i32,
+    pub(crate) deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = crate::schema::timelines)]
+pub(crate) struct TimelineFromDb {
+    pub(crate) tenant_id: String,
+    pub(crate) timeline_id: String,
+    pub(crate) generation: i32,
+    pub(crate) sk_set: Vec<Option<i64>>,
+    pub(crate) new_sk_set: Option<Vec<i64>>,
+    pub(crate) cplane_notified_generation: i32,
+    pub(crate) deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
