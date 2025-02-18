@@ -1156,8 +1156,6 @@ pub struct TimelineInfo {
     #[serde(default)]
     pub min_readable_lsn: Lsn,
 
-    pub some_new_field: u64,
-
     pub disk_consistent_lsn: Lsn,
 
     /// The LSN that we have succesfully uploaded to remote storage
