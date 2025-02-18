@@ -96,7 +96,7 @@ from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     COMPONENT_BINARIES,
     USE_LFC,
-    allure_add_grafana_links,
+    allure_add_grafana_link,
     assert_no_errors,
     get_dir_size,
     print_gc_result,
@@ -3247,7 +3247,7 @@ def remote_pg(
     end_ms = int(datetime.utcnow().timestamp() * 1000)
     if is_neon:
         # Add 10s margin to the start and end times
-        allure_add_grafana_links(
+        allure_add_grafana_link(
             host,
             timeline_id,
             start_ms - 10_000,
