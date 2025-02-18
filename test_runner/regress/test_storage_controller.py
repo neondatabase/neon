@@ -3751,9 +3751,9 @@ def test_storage_controller_node_flap_detach_race(
 
 def test_update_node_on_registration(neon_env_builder: NeonEnvBuilder):
     """
-    Check that storage controller handlers node_register requests with updated fields properly.
-    1. Run srorage controller and register 1 pageserver without https port.
-    2. Try register the same pageserver with https port. Check that port has been updated.
+    Check that storage controller handles node_register requests with updated fields correctly.
+    1. Run storage controller and register 1 pageserver without https port.
+    2. Try registering the same pageserver with https port. Check that port has been updated.
     3. Restart the storage controller. Check that https port is persistent.
     """
     neon_env_builder.num_pageservers = 1
