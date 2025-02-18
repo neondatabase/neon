@@ -814,6 +814,15 @@ impl TenantShard {
             return None;
         };
 
+        // If the candidate is our preferred node, then it is better than the current location, as long
+        // as it is online -- the online check is part of the score calculation we did above, so it's
+        // important that this check comes after that one.
+        if let Some(preferred) = self.preferred_node.as_ref() {
+            if preferred == &candidate {
+                return Some(true);
+            }
+        }
+
         match scheduler.compute_node_score::<T::Score>(
             current,
             &self.intent.preferred_az_id,
@@ -901,6 +910,13 @@ impl TenantShard {
         scheduler: &mut Scheduler,
         schedule_context: &ScheduleContext,
     ) -> bool {
+        // Tenant with preferred node: check if it is not already at the preferred node
+        if let Some(preferred) = self.preferred_node.as_ref() {
+            if Some(preferred) != self.intent.get_attached().as_ref() {
+                return true;
+            }
+        }
+
         // Sharded tenant: check if any locations have a nonzero affinity score
         if self.shard.count >= ShardCount(1) {
             let schedule_context = schedule_context.project_detach(self);
@@ -941,6 +957,9 @@ impl TenantShard {
     /// Optimize attachments: if a shard has a secondary location that is preferable to
     /// its primary location based on soft constraints, switch that secondary location
     /// to be attached.
+    ///
+    /// `schedule_context` should have been populated with all shards in the tenant, including
+    /// the one we're trying to optimize (this function will subtract its own contribution before making scoring decisions)
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn optimize_attachment(
         &self,
@@ -1175,21 +1194,21 @@ impl TenantShard {
         None
     }
 
-    /// Start a graceful migration of this shard to another pageserver. This works on top of the
+    /// Start or abort a graceful migration of this shard to another pageserver. This works on top of the
     /// other optimisation functions, to bias them to move to the destination node.
-    pub(crate) fn set_preferred_node(&mut self, node: NodeId) {
+    pub(crate) fn set_preferred_node(&mut self, node: Option<NodeId>) {
         if let Some(hint) = self.preferred_node.as_ref() {
-            if hint != &node {
+            if Some(hint) != node.as_ref() {
                 // This is legal but a bit surprising: we expect that administrators wouldn't usually
                 // change their mind about where to migrate something.
                 tracing::warn!(
-                    "Changing migration destination from {hint} to {node} (current intent {:?})",
+                    "Changing migration destination from {hint} to {node:?} (current intent {:?})",
                     self.intent
                 );
             }
         }
 
-        self.preferred_node = Some(node);
+        self.preferred_node = node;
     }
 
     /// Return true if the optimization was really applied: it will not be applied if the optimization's
@@ -2310,6 +2329,79 @@ pub(crate) mod tests {
 
         shard_a.intent.clear(&mut scheduler);
         shard_b.intent.clear(&mut scheduler);
+
+        Ok(())
+    }
+
+    #[test]
+    /// How the optimisation code handles a shard with a preferred node set; this is an example
+    /// of the multi-step migration, but driven by a different input.
+    fn optimize_attachment_multi_preferred_nodew() -> anyhow::Result<()> {
+        let nodes = make_test_nodes(
+            4,
+            &[
+                AvailabilityZone("az-a".to_string()),
+                AvailabilityZone("az-a".to_string()),
+                AvailabilityZone("az-b".to_string()),
+                AvailabilityZone("az-b".to_string()),
+            ],
+        );
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        // Two shards of a tenant that wants to be in AZ A
+        let mut shard_a = make_test_tenant_shard(PlacementPolicy::Attached(1));
+        shard_a.intent.preferred_az_id = Some(AvailabilityZone("az-a".to_string()));
+
+        // Initially attached in a stable location
+        shard_a.intent.set_attached(&mut scheduler, Some(NodeId(1)));
+        shard_a.intent.push_secondary(&mut scheduler, NodeId(3));
+
+        // Set the preferred node to node 2, an equally high scoring node to its current location
+        shard_a.preferred_node = Some(NodeId(2));
+
+        fn make_schedule_context(shard_a: &TenantShard) -> ScheduleContext {
+            let mut schedule_context = ScheduleContext::default();
+            schedule_context.avoid(&shard_a.intent.all_pageservers());
+            schedule_context
+        }
+
+        let schedule_context = make_schedule_context(&shard_a);
+        let optimization_a_prepare = shard_a.optimize_attachment(&mut scheduler, &schedule_context);
+        assert_eq!(
+            optimization_a_prepare,
+            Some(ScheduleOptimization {
+                sequence: shard_a.sequence,
+                action: ScheduleOptimizationAction::CreateSecondary(NodeId(2))
+            })
+        );
+        shard_a.apply_optimization(&mut scheduler, optimization_a_prepare.unwrap());
+
+        let schedule_context = make_schedule_context(&shard_a);
+        let optimization_a_migrate = shard_a.optimize_attachment(&mut scheduler, &schedule_context);
+        assert_eq!(
+            optimization_a_migrate,
+            Some(ScheduleOptimization {
+                sequence: shard_a.sequence,
+                action: ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                    old_attached_node_id: NodeId(1),
+                    new_attached_node_id: NodeId(2)
+                })
+            })
+        );
+        shard_a.apply_optimization(&mut scheduler, optimization_a_migrate.unwrap());
+
+        let schedule_context = make_schedule_context(&shard_a);
+        let optimization_a_cleanup = shard_a.optimize_attachment(&mut scheduler, &schedule_context);
+        assert_eq!(
+            optimization_a_cleanup,
+            Some(ScheduleOptimization {
+                sequence: shard_a.sequence,
+                action: ScheduleOptimizationAction::RemoveSecondary(NodeId(1))
+            })
+        );
+        shard_a.apply_optimization(&mut scheduler, optimization_a_cleanup.unwrap());
+
+        shard_a.intent.clear(&mut scheduler);
 
         Ok(())
     }

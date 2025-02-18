@@ -11,9 +11,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use hyper0::Uri;
 use nix::unistd::Pid;
 use pageserver_api::controller_api::{
-    NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
-    TenantCreateResponse, TenantLocateResponse, TenantShardMigrateRequest,
-    TenantShardMigrateResponse,
+    MigrationConfig, NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest, TenantCreateResponse, TenantLocateResponse, TenantShardMigrateRequest, TenantShardMigrateResponse
 };
 use pageserver_api::models::{
     TenantShardSplitRequest, TenantShardSplitResponse, TimelineCreateRequest, TimelineInfo,
@@ -836,7 +834,7 @@ impl StorageController {
             format!("control/v1/tenant/{tenant_shard_id}/migrate"),
             Some(TenantShardMigrateRequest {
                 node_id,
-                migration_config: None,
+                migration_config: MigrationConfig::default(),
             }),
         )
         .await

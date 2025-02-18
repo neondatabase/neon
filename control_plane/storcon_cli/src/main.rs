@@ -5,12 +5,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use pageserver_api::controller_api::{
-    AvailabilityZone, NodeAvailabilityWrapper, NodeConfigureRequest, NodeDescribeResponse,
-    NodeRegisterRequest, NodeSchedulingPolicy, NodeShardResponse, PlacementPolicy,
-    SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest, ShardSchedulingPolicy,
-    ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, SkSchedulingPolicy, TenantCreateRequest,
-    TenantDescribeResponse, TenantPolicyRequest, TenantShardMigrateRequest,
-    TenantShardMigrateResponse,
+    AvailabilityZone, MigrationConfig, NodeAvailabilityWrapper, NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, NodeSchedulingPolicy, NodeShardResponse, PlacementPolicy, SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest, ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, SkSchedulingPolicy, TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse
 };
 use pageserver_api::models::{
     EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary, ShardParameters,
@@ -622,7 +617,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let req = TenantShardMigrateRequest {
                 node_id: node,
-                migration_config: None,
+                migration_config: MigrationConfig::default(),
             };
 
             storcon_client
@@ -639,7 +634,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let req = TenantShardMigrateRequest {
                 node_id: node,
-                migration_config: None,
+                migration_config: MigrationConfig::default(),
             };
 
             storcon_client
@@ -1105,7 +1100,7 @@ async fn main() -> anyhow::Result<()> {
                                 format!("control/v1/tenant/{}/migrate", mv.tenant_shard_id),
                                 Some(TenantShardMigrateRequest {
                                     node_id: mv.to,
-                                    migration_config: None,
+                                    migration_config: MigrationConfig::default(),
                                 }),
                             )
                             .await

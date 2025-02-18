@@ -5258,12 +5258,90 @@ impl Service {
         Ok((response, waiters))
     }
 
+    /// Graceful migration: update the preferred node and let optimisation handle the migration
+    /// in the background (may take a long time as it will fully warm up a location before cutting over)
+    fn tenant_shard_migrate_graceful(
+        &self,
+        migrate_req: &TenantShardMigrateRequest,
+        shard: &mut TenantShard,
+        scheduler: &mut Scheduler,
+        schedule_context: ScheduleContext,
+    ) -> Result<Option<ScheduleOptimization>, ApiError> {
+        shard.set_preferred_node(Some(migrate_req.node_id));
+
+        // Generate whatever the initial change to the intent is: this could be creation of a secondary, or
+        // cutting over to an existing secondary.  Caller is responsible for validating this before applying it,
+        // e.g. by checking secondary is warm enough.
+        Ok(shard.optimize_attachment(scheduler, &schedule_context))
+    }
+
+    /// Immediate migration: directly update the intent state and kick off a reconciler
+    fn tenant_shard_migrate_immediate(
+        &self,
+        migrate_req: &TenantShardMigrateRequest,
+        nodes: &Arc<HashMap<NodeId, Node>>,
+        shard: &mut TenantShard,
+        scheduler: &mut Scheduler,
+    ) -> Result<Option<ReconcilerWaiter>, ApiError> {
+        // Non-graceful migration: update the intent state immediately
+        let old_attached = *shard.intent.get_attached();
+        match shard.policy {
+            PlacementPolicy::Attached(n) => {
+                // If our new attached node was a secondary, it no longer should be.
+                shard
+                    .intent
+                    .remove_secondary(scheduler, migrate_req.node_id);
+
+                shard
+                    .intent
+                    .set_attached(scheduler, Some(migrate_req.node_id));
+
+                // If we were already attached to something, demote that to a secondary
+                if let Some(old_attached) = old_attached {
+                    if n > 0 {
+                        // Remove other secondaries to make room for the location we'll demote
+                        while shard.intent.get_secondary().len() >= n {
+                            shard.intent.pop_secondary(scheduler);
+                        }
+
+                        shard.intent.push_secondary(scheduler, old_attached);
+                    }
+                }
+            }
+            PlacementPolicy::Secondary => {
+                shard.intent.clear(scheduler);
+                shard.intent.push_secondary(scheduler, migrate_req.node_id);
+            }
+            PlacementPolicy::Detached => {
+                return Err(ApiError::BadRequest(anyhow::anyhow!(
+                    "Cannot migrate a tenant that is PlacementPolicy::Detached: configure it to an attached policy first"
+                )));
+            }
+        }
+
+        tracing::info!("Migrating: new intent {:?}", shard.intent);
+        shard.sequence = shard.sequence.next();
+        shard.set_preferred_node(None); // Abort any in-flight graceful migration
+        Ok(self.maybe_configured_reconcile_shard(
+            shard,
+            nodes,
+            (&migrate_req.migration_config).into(),
+        ))
+    }
+
     pub(crate) async fn tenant_shard_migrate(
         &self,
         tenant_shard_id: TenantShardId,
         migrate_req: TenantShardMigrateRequest,
     ) -> Result<TenantShardMigrateResponse, ApiError> {
-        let waiter = {
+        // Depending on whether the migration is a change and whether it's graceful or immediate, we might
+        // get a different outcome to handle
+        enum MigrationOutcome {
+            Optimization(Option<ScheduleOptimization>),
+            Reconcile(Option<ReconcilerWaiter>),
+        }
+
+        let outcome = {
             let mut locked = self.inner.write().unwrap();
             let (nodes, tenants, scheduler) = locked.parts_mut();
 
@@ -5275,11 +5353,27 @@ impl Service {
             };
 
             if !node.is_available() {
-                // Warn but proceed: the caller may intend to manually adjust the placement of
-                // a shard even if the node is down, e.g. if intervening during an incident.
-                tracing::warn!("Migrating to unavailable node {node}");
+                if migrate_req.migration_config.force {
+                    // Warn but proceed: the caller may intend to manually adjust the placement of
+                    // a shard even if the node is down, e.g. if intervening during an incident.
+                    tracing::warn!("Forcibly migrating to unavailable node {node}");
+                } else {
+                    tracing::warn!("Node {node} is unavailable, refusing migration");
+                    return Err(ApiError::BadRequest(anyhow::anyhow!(
+                        "Node {node} is unavailable"
+                    )));
+                }
             }
 
+            // Calculate the ScheduleContext for this tenant
+            let mut schedule_context = ScheduleContext::default();
+            for (_shard_id, shard) in
+                tenants.range(TenantShardId::tenant_range(tenant_shard_id.tenant_id))
+            {
+                schedule_context.avoid(&shard.intent.all_pageservers());
+            }
+
+            // Look up the specific shard we will migrate
             let Some(shard) = tenants.get_mut(&tenant_shard_id) else {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant shard not found").into(),
@@ -5290,55 +5384,68 @@ impl Service {
                 // No-op case: we will still proceed to wait for reconciliation in case it is
                 // incomplete from an earlier update to the intent.
                 tracing::info!("Migrating: intent is unchanged {:?}", shard.intent);
+                MigrationOutcome::Reconcile(self.maybe_configured_reconcile_shard(
+                    shard,
+                    nodes,
+                    (&migrate_req.migration_config).into(),
+                ))
+            } else if migrate_req.migration_config.graceful {
+                MigrationOutcome::Optimization(self.tenant_shard_migrate_graceful(
+                    &migrate_req,
+                    shard,
+                    scheduler,
+                    schedule_context,
+                )?)
             } else {
-                let old_attached = *shard.intent.get_attached();
-
-                match shard.policy {
-                    PlacementPolicy::Attached(n) => {
-                        // If our new attached node was a secondary, it no longer should be.
-                        shard
-                            .intent
-                            .remove_secondary(scheduler, migrate_req.node_id);
-
-                        shard
-                            .intent
-                            .set_attached(scheduler, Some(migrate_req.node_id));
-
-                        // If we were already attached to something, demote that to a secondary
-                        if let Some(old_attached) = old_attached {
-                            if n > 0 {
-                                // Remove other secondaries to make room for the location we'll demote
-                                while shard.intent.get_secondary().len() >= n {
-                                    shard.intent.pop_secondary(scheduler);
-                                }
-
-                                shard.intent.push_secondary(scheduler, old_attached);
-                            }
-                        }
-                    }
-                    PlacementPolicy::Secondary => {
-                        shard.intent.clear(scheduler);
-                        shard.intent.push_secondary(scheduler, migrate_req.node_id);
-                    }
-                    PlacementPolicy::Detached => {
-                        return Err(ApiError::BadRequest(anyhow::anyhow!(
-                            "Cannot migrate a tenant that is PlacementPolicy::Detached: configure it to an attached policy first"
-                        )));
-                    }
-                }
-
-                tracing::info!("Migrating: new intent {:?}", shard.intent);
-                shard.sequence = shard.sequence.next();
+                MigrationOutcome::Reconcile(self.tenant_shard_migrate_immediate(
+                    &migrate_req,
+                    nodes,
+                    shard,
+                    scheduler,
+                )?)
             }
-
-            let reconciler_config = match migrate_req.migration_config {
-                Some(cfg) => (&cfg).into(),
-                None => ReconcilerConfig::new(ReconcilerPriority::High),
-            };
-
-            self.maybe_configured_reconcile_shard(shard, nodes, reconciler_config)
         };
 
+        // We may need to validate + apply an optimisation, or we may need to just retrive a reconcile waiter
+        let waiter = match outcome {
+            MigrationOutcome::Optimization(Some(optimization)) => {
+                // Validate and apply the optimization -- this would happen anyway in background reconcile loop, but
+                // we might as well do it more promptly as this is a direct external request.
+                let mut validated = self
+                    .optimize_all_validate(vec![(tenant_shard_id, optimization)])
+                    .await;
+                if let Some((_shard_id, optimization)) = validated.pop() {
+                    let mut locked = self.inner.write().unwrap();
+                    let (nodes, tenants, scheduler) = locked.parts_mut();
+                    let Some(shard) = tenants.get_mut(&tenant_shard_id) else {
+                        // Rare but possible: tenant is removed between generating optimisation and validating it.
+                        return Err(ApiError::NotFound(
+                            anyhow::anyhow!("Tenant shard not found").into(),
+                        ));
+                    };
+
+                    if !shard.apply_optimization(scheduler, optimization) {
+                        // This can happen but is unusual enough to warn on: something else changed in the shard that made the optimisation stale
+                        // and therefore not applied.
+                        tracing::warn!(
+                            "Schedule optimisation generated during graceful migration was not applied, shard changed?"
+                        );
+                    }
+                    self.maybe_configured_reconcile_shard(
+                        shard,
+                        nodes,
+                        (&migrate_req.migration_config).into(),
+                    )
+                } else {
+                    None
+                }
+            }
+            MigrationOutcome::Optimization(None) => None,
+            MigrationOutcome::Reconcile(waiter) => waiter,
+        };
+
+        // Finally, wait for any reconcile we started to complete.  In the case of immediate-mode migrations to cold
+        // locations, this has a good chance of timing out.
         if let Some(waiter) = waiter {
             waiter.wait_timeout(RECONCILE_TIMEOUT).await?;
         } else {
