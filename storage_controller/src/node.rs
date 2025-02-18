@@ -238,7 +238,7 @@ impl Node {
         max_retries: u32,
         timeout: Duration,
         cancel: &CancellationToken,
-    ) -> Option<mgmt_api::Result<T>>
+    ) -> mgmt_api::Result<T>
     where
         O: FnMut(PageserverClient) -> F,
         F: std::future::Future<Output = mgmt_api::Result<T>>,
@@ -291,6 +291,7 @@ impl Node {
             cancel,
         )
         .await
+        .unwrap_or(Err(mgmt_api::Error::Cancelled))
     }
 
     /// Generate the simplified API-friendly description of a node's state

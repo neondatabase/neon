@@ -910,12 +910,11 @@ impl Service {
                 }
             };
 
-            let Some(list_response) = result else {
-                tracing::info!("Shutdown during startup_reconcile");
-                break;
-            };
-
-            match list_response {
+            match result {
+                Err(mgmt_api::Error::Cancelled) => {
+                    tracing::info!("Shutdown during startup_reconcile");
+                    break;
+                }
                 Err(e) => {
                     tracing::warn!("Could not scan node {} ({e})", node_id);
                 }
@@ -1906,19 +1905,19 @@ impl Service {
             )
             .await
         {
-            None => {
+            Err(mgmt_api::Error::Cancelled) => {
                 // We're shutting down (the Node's cancellation token can't have fired, because
                 // we're the only scope that has a reference to it, and we didn't fire it).
                 return Err(ApiError::ShuttingDown);
             }
-            Some(Err(e)) => {
+            Err(e) => {
                 // This node didn't succeed listing its locations: it may not proceed to active state
                 // as it is apparently unavailable.
                 return Err(ApiError::PreconditionFailed(
                     format!("Failed to query node location configs, cannot activate ({e})").into(),
                 ));
             }
-            Some(Ok(configs)) => configs,
+            Ok(configs) => configs,
         };
         tracing::info!("Loaded {} LocationConfigs", configs.tenant_shards.len());
 
@@ -1964,12 +1963,12 @@ impl Service {
                 )
                 .await
             {
-                None => {
+                Err(mgmt_api::Error::Cancelled) => {
                     // We're shutting down (the Node's cancellation token can't have fired, because
                     // we're the only scope that has a reference to it, and we didn't fire it).
                     return Err(ApiError::ShuttingDown);
                 }
-                Some(Err(e)) => {
+                Err(e) => {
                     // Do not let the node proceed to Active state if it is not responsive to requests
                     // to detach.  This could happen if e.g. a shutdown bug in the pageserver is preventing
                     // detach completing: we should not let this node back into the set of nodes considered
@@ -1978,7 +1977,7 @@ impl Service {
                         "Node {node} failed to detach {tenant_shard_id}: {e}"
                     )));
                 }
-                Some(Ok(_)) => {}
+                Ok(_) => {}
             };
         }
 
@@ -3282,7 +3281,6 @@ impl Service {
                 &self.cancel,
             )
             .await
-            .unwrap_or(Err(mgmt_api::Error::Cancelled))
         {
             Ok(_) => {}
             Err(mgmt_api::Error::Cancelled) => {
@@ -3856,8 +3854,7 @@ impl Service {
         O: Fn(TenantShardId, PageserverClient) -> F + Copy,
         F: std::future::Future<Output = mgmt_api::Result<T>>,
     {
-        let mut futs = FuturesUnordered::new();
-        let mut results = Vec::with_capacity(locations.len());
+        let futs = FuturesUnordered::new();
 
         for (tenant_shard_id, node) in locations {
             futs.push(async move {
@@ -3873,12 +3870,7 @@ impl Service {
             });
         }
 
-        while let Some(r) = futs.next().await {
-            let r = r.unwrap_or(Err(mgmt_api::Error::Cancelled));
-            results.push(r);
-        }
-
-        results
+        futs.collect().await
     }
 
     /// Helper for safely working with the shards in a tenant remotely on pageservers, for example
@@ -4541,19 +4533,19 @@ impl Service {
                 )
                 .await
             {
-                Some(Ok(_)) => {}
-                Some(Err(e)) => {
+                Ok(_) => {}
+                Err(mgmt_api::Error::Cancelled) => {
+                    // Cancellation: we were shutdown or the node went offline. Shutdown is fine, we'll
+                    // clean up on restart. The node going offline requires a retry.
+                    return Err(TenantShardSplitAbortError::Unavailable);
+                }
+                Err(e) => {
                     // We failed to communicate with the remote node.  This is problematic: we may be
                     // leaving it with a rogue child shard.
                     tracing::warn!(
                         "Failed to detach child {child_id} from node {node} during abort"
                     );
                     return Err(e.into());
-                }
-                None => {
-                    // Cancellation: we were shutdown or the node went offline. Shutdown is fine, we'll
-                    // clean up on restart. The node going offline requires a retry.
-                    return Err(TenantShardSplitAbortError::Unavailable);
                 }
             };
         }
@@ -7047,17 +7039,17 @@ impl Service {
             )
             .await
         {
-            Some(Err(e)) => {
-                tracing::info!(
-                    "Failed to upload heatmap from {attached_node} for {tenant_shard_id}: {e}"
-                );
-            }
-            None => {
+            Err(mgmt_api::Error::Cancelled) => {
                 tracing::info!(
                     "Cancelled while uploading heatmap from {attached_node} for {tenant_shard_id}"
                 );
             }
-            Some(Ok(_)) => {
+            Err(e) => {
+                tracing::info!(
+                    "Failed to upload heatmap from {attached_node} for {tenant_shard_id}: {e}"
+                );
+            }
+            Ok(_) => {
                 tracing::info!(
                     "Successfully uploaded heatmap from {attached_node} for {tenant_shard_id}"
                 );
@@ -7083,15 +7075,15 @@ impl Service {
                 )
                 .await
             {
-                Some(Err(e)) => {
-                    tracing::info!(
-                "Failed to download heatmap from {secondary_node} for {tenant_shard_id}: {e}"
-            );
-                }
-                None => {
+                Err(mgmt_api::Error::Cancelled) => {
                     tracing::info!("Cancelled while downloading heatmap from {secondary_node} for {tenant_shard_id}");
                 }
-                Some(Ok(progress)) => {
+                Err(e) => {
+                    tracing::info!(
+                        "Failed to download heatmap from {secondary_node} for {tenant_shard_id}: {e}"
+                    );
+                }
+                Ok(progress) => {
                     tracing::info!("Successfully downloaded heatmap from {secondary_node} for {tenant_shard_id}: {progress:?}");
                 }
             }
@@ -7138,18 +7130,14 @@ impl Service {
                 )
                 .await
             {
-                Some(Ok(node_top_n)) => {
+                Ok(node_top_n) => {
                     top_n.extend(node_top_n.shards.into_iter());
                 }
-                Some(Err(mgmt_api::Error::Cancelled)) => {
+                Err(mgmt_api::Error::Cancelled) => {
                     continue;
                 }
-                Some(Err(e)) => {
+                Err(e) => {
                     tracing::warn!("Failed to fetch top N tenants from {node}: {e}");
-                    continue;
-                }
-                None => {
-                    // Node is shutting down
                     continue;
                 }
             };
@@ -7300,7 +7288,7 @@ impl Service {
             format!("Node with id {} not found", secondary),
         ))?;
 
-        match node
+        let status = node
             .with_client_retries(
                 |client| async move { client.tenant_secondary_status(tenant_shard_id).await },
                 &self.config.jwt_token,
@@ -7309,14 +7297,10 @@ impl Service {
                 Duration::from_millis(250),
                 &self.cancel,
             )
-            .await
-        {
-            Some(Ok(status)) => match status.heatmap_mtime {
-                Some(_) => Ok(Some(status.bytes_total - status.bytes_downloaded)),
-                None => Ok(None),
-            },
-            Some(Err(e)) => Err(e),
-            None => Err(mgmt_api::Error::Cancelled),
+            .await?;
+        match status.heatmap_mtime {
+            Some(_) => Ok(Some(status.bytes_total - status.bytes_downloaded)),
+            None => Ok(None),
         }
     }
 
