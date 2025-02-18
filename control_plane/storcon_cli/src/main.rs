@@ -48,6 +48,9 @@ enum Command {
         #[arg(long)]
         listen_http_port: u16,
         #[arg(long)]
+        listen_https_port: Option<u16>,
+
+        #[arg(long)]
         availability_zone_id: String,
     },
 
@@ -394,6 +397,7 @@ async fn main() -> anyhow::Result<()> {
             listen_pg_port,
             listen_http_addr,
             listen_http_port,
+            listen_https_port,
             availability_zone_id,
         } => {
             storcon_client
@@ -406,6 +410,7 @@ async fn main() -> anyhow::Result<()> {
                         listen_pg_port,
                         listen_http_addr,
                         listen_http_port,
+                        listen_https_port,
                         availability_zone_id: AvailabilityZone(availability_zone_id),
                     }),
                 )
