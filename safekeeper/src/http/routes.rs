@@ -2,6 +2,7 @@ use http_utils::failpoints::failpoints_handler;
 use hyper::{Body, Request, Response, StatusCode};
 use safekeeper_api::models;
 use safekeeper_api::models::AcceptorStateStatus;
+use safekeeper_api::models::PullTimelineRequest;
 use safekeeper_api::models::SafekeeperStatus;
 use safekeeper_api::models::TermSwitchApiEntry;
 use safekeeper_api::models::TimelineStatus;
@@ -230,7 +231,7 @@ async fn timeline_delete_handler(mut request: Request<Body>) -> Result<Response<
 async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
 
-    let data: pull_timeline::Request = json_request(&mut request).await?;
+    let data: PullTimelineRequest = json_request(&mut request).await?;
     let conf = get_conf(&request);
     let global_timelines = get_global_timelines(&request);
 
