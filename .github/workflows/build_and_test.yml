@@ -1178,6 +1178,22 @@ jobs:
             exit 1
           fi
 
+  notify-storage-release-deploy-failure:
+    needs: [ deploy ]
+    # We want this to run even if (transitive) dependencies are skipped, because deploy should really be successful on release branch workflow runs.
+    if: github.ref_name == 'release' && needs.deploy.result != 'success' && always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Post release-deploy failure to team-storage slack channel
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ vars.SLACK_STORAGE_CHANNEL_ID }}
+            text: |
+              🔴 @oncall-storage: deploy job on release branch had unexpected status "${{ needs.deploy.result }}" <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>.
+
   # The job runs on `release` branch and copies compatibility data and Neon artifact from the last *release PR* to the latest directory
   promote-compatibility-data:
     needs: [ deploy ]
