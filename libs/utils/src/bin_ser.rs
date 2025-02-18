@@ -287,6 +287,11 @@ mod tests {
     const SHORT2_ENC_LE_TRAILING: &[u8] = &[8, 0, 0, 3, 7, 0xff, 0xff, 0xff];
 
     #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct NewTypeStruct(u32);
+    const NT1: NewTypeStruct = NewTypeStruct(414243);
+    const NT1_INNER: u32 = 414243;
+
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct LongMsg {
         pub tag: u8,
         pub blockpos: u32,
@@ -406,6 +411,46 @@ mod tests {
         assert_eq!(encoded, expected);
 
         let msg2 = LongMsg::des(&encoded).unwrap();
+        assert_eq!(msg, msg2);
+    }
+
+    #[test]
+    fn be_nt() {
+        use super::BeSer;
+
+        assert_eq!(NT1.serialized_size().unwrap(), 4);
+
+        let msg = NT1;
+
+        let encoded = msg.ser().unwrap();
+        let expected = hex_literal::hex!(
+            "0006 5223"
+        );
+        assert_eq!(encoded, expected);
+
+        assert_eq!(encoded, NT1_INNER.ser().unwrap());
+
+        let msg2 = NewTypeStruct::des(&encoded).unwrap();
+        assert_eq!(msg, msg2);
+    }
+
+    #[test]
+    fn le_nt() {
+        use super::LeSer;
+
+        assert_eq!(NT1.serialized_size().unwrap(), 4);
+
+        let msg = NT1;
+
+        let encoded = msg.ser().unwrap();
+        let expected = hex_literal::hex!(
+            "2352 0600"
+        );
+        assert_eq!(encoded, expected);
+
+        assert_eq!(encoded, NT1_INNER.ser().unwrap());
+
+        let msg2 = NewTypeStruct::des(&encoded).unwrap();
         assert_eq!(msg, msg2);
     }
 }
