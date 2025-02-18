@@ -67,36 +67,7 @@ jobs:
 
   tag:
     needs: [ check-permissions ]
-    runs-on: [ self-hosted, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
-    outputs:
-      build-tag: ${{steps.build-tag.outputs.tag}}
-
-    steps:
-      # Need `fetch-depth: 0` to count the number of commits in the branch
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Get build tag
-        run: |
-          echo run:$GITHUB_RUN_ID
-          echo ref:$GITHUB_REF_NAME
-          echo rev:$(git rev-list --count HEAD)
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "tag=$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            echo "tag=release-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
-            echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
-            echo "tag=release-compute-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release', 'release-proxy', 'release-compute'"
-            echo "tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
-          fi
-        shell: bash
-        id: build-tag
+    uses: ./.github/workflows/_tags.yml
 
   build-build-tools-image:
     needs: [ check-permissions ]
@@ -504,6 +475,7 @@ jobs:
 
   neon-image-arch:
     needs: [ check-permissions, build-build-tools-image, tag ]
+    if: "!(github.ref_name == 'release-compute' || github.base_ref == 'release-compute')"
     strategy:
       matrix:
         arch: [ x64, arm64 ]
@@ -553,6 +525,7 @@ jobs:
 
   neon-image:
     needs: [ neon-image-arch, tag ]
+    if: "!(github.ref_name == 'release-compute' || github.base_ref == 'release-compute')"
     runs-on: ubuntu-22.04
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
@@ -574,6 +547,11 @@ jobs:
 
   compute-node-image-arch:
     needs: [ check-permissions, build-build-tools-image, tag ]
+    if: >-
+      !(
+        github.ref_name == 'release' || github.base_ref == 'release'
+        || github.ref_name == 'release-proxy' || github.base_ref == 'release-proxy'
+      )
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
@@ -665,6 +643,11 @@ jobs:
 
   compute-node-image:
     needs: [ compute-node-image-arch, tag ]
+    if: >-
+      !(
+        github.ref_name == 'release' || github.base_ref == 'release'
+        || github.ref_name == 'release-proxy' || github.base_ref == 'release-proxy'
+      )
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
@@ -707,6 +690,11 @@ jobs:
 
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
+    if: >-
+      !(
+        github.ref_name == 'release' || github.base_ref == 'release'
+        || github.ref_name == 'release-proxy' || github.base_ref == 'release-proxy'
+      )
     runs-on: [ self-hosted, large ]
     strategy:
       fail-fast: false
@@ -758,6 +746,8 @@ jobs:
 
   test-images:
     needs: [ check-permissions, tag, neon-image, compute-node-image ]
+    # Depends on jobs that can get skipped
+    if: "!failure() && !cancelled()"
     strategy:
       fail-fast: false
       matrix:
@@ -774,17 +764,6 @@ jobs:
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-
-      - name: Get the last compute release tag
-        id: get-last-compute-release-tag
-        env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
-        run: |
-          tag=$(gh api -q '[.[].tag_name | select(startswith("release-compute"))][0]'\
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "/repos/${{ github.repository }}/releases")
-          echo tag=${tag} >> ${GITHUB_OUTPUT}
 
       # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
       # Pick pageserver as currently the only binary with extra "version" features printed in the string to verify.
@@ -813,7 +792,21 @@ jobs:
       - name: Verify docker-compose example and test extensions
         timeout-minutes: 20
         env:
-          TAG: ${{needs.tag.outputs.build-tag}}
+          TAG: >-
+            ${{
+              (github.ref_name == 'release-compute' || github.base_ref == 'release-compute')
+              && needs.tag.outputs.previous-storage-release
+              || needs.tag.outputs.build-tag
+            }}
+          COMPUTE_TAG: >-
+            ${{
+              (
+                github.ref_name == 'release' || github.base_ref == 'release'
+                || github.ref_name == 'release-proxy' || github.base_ref == 'release-proxy'
+              )
+              && needs.tag.outputs.previous-compute-release
+              || needs.tag.outputs.build-tag
+            }}
           TEST_VERSION_ONLY: ${{ matrix.pg_version }}
         run: ./docker-compose/docker_compose_test.sh
 
@@ -828,7 +821,7 @@ jobs:
         if: ${{ needs.tag.outputs.build-tag == github.run_id }}
         env:
           NEWTAG: ${{ needs.tag.outputs.build-tag }}
-          OLDTAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
+          OLDTAG: ${{ needs.tag.outputs.previous-compute-release }}
         run: ./docker-compose/test_extensions_upgrade.sh
 
       - name: Print logs and clean up
@@ -862,6 +855,7 @@ jobs:
 
   push-neon-image-dev:
     needs: [ generate-image-maps, neon-image ]
+    if: "!(github.ref_name == 'release-compute' || github.base_ref == 'release-compute')"
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: '${{ needs.generate-image-maps.outputs.neon-dev }}'
@@ -878,6 +872,11 @@ jobs:
 
   push-compute-image-dev:
     needs: [ generate-image-maps, vm-compute-node-image ]
+    if: >-
+      !(
+        github.ref_name == 'release' || github.base_ref == 'release'
+        || github.ref_name == 'release-proxy' || github.base_ref == 'release-proxy'
+      )
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: '${{ needs.generate-image-maps.outputs.compute-dev }}'
@@ -893,7 +892,7 @@ jobs:
       docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
   push-neon-image-prod:
-    if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
+    if: github.ref_name == 'release' || github.ref_name == 'release-proxy'
     needs: [ generate-image-maps, neon-image, test-images ]
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
@@ -910,7 +909,7 @@ jobs:
       docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
   push-compute-image-prod:
-    if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
+    if: github.ref_name == 'release-compute'
     needs: [ generate-image-maps, vm-compute-node-image, test-images ]
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
@@ -1022,7 +1021,7 @@ jobs:
 
   deploy:
     needs: [ check-permissions, push-neon-image-prod, push-compute-image-prod, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait ]
-    # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
+    # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-neon-image-prod` and `push-compute-image-prod`
     if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute') && !failure() && !cancelled()
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
@@ -1201,7 +1200,7 @@ jobs:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
       contents: read
-    # `!failure() && !cancelled()` is required because the workflow transitively depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
+    # `!failure() && !cancelled()` is required because the workflow transitively depends on the job that can be skipped: `push-neon-image-prod` and `push-compute-image-prod`
     if: github.ref_name == 'release' && !failure() && !cancelled()
 
     runs-on: ubuntu-22.04
@@ -1291,7 +1290,8 @@ jobs:
 
   pin-build-tools-image:
     needs: [ build-build-tools-image, push-compute-image-prod, push-neon-image-prod, build-and-test-locally ]
-    if: github.ref_name == 'main'
+    # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
+    if: github.ref_name == 'main' && !failure() && !cancelled()
     uses: ./.github/workflows/pin-build-tools-image.yml
     with:
       from-tag: ${{ needs.build-build-tools-image.outputs.image-tag }}

@@ -1,0 +1,73 @@
+name: Generate and fetch tags
+on:
+  workflow_call:
+    outputs:
+      build-tag:
+        description: "Tag for the current workflow run"
+        value: ${{ jobs.tag.outputs.tag }}
+      previous-storage-release:
+        description: "Tag of the last storage release"
+        value: ${{ jobs.previous-releases.outputs.storage }}
+      previous-proxy-release:
+        description: "Tag of the last proxy release"
+        value: ${{ jobs.previous-releases.outputs.proxy }}
+      previous-compute-release:
+        description: "Tag of the last compute release"
+        value: ${{ jobs.previous-releases.outputs.compute }}
+
+jobs:
+  tag:
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      # Need `fetch-depth: 0` to count the number of commits in the branch
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get build tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_BRANCH: ${{ github.head_ref || github.ref_name }}
+          CURRENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            echo "tag=$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            echo "tag=release-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
+            echo "tag=release-proxy-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
+            echo "tag=release-compute-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to one of 'main', 'release', 'release-proxy' or 'release-compute'"
+            BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -c $CURRENT_SHA -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')
+            echo "tag=$BUILD_AND_TEST_RUN_ID" | tee -a $GITHUB_OUTPUT
+          fi
+
+  previous-releases:
+    runs-on: ubuntu-22.04
+    outputs:
+      compute: ${{ steps.previous-releases.outputs.compute }}
+      proxy: ${{ steps.previous-releases.outputs.proxy }}
+      storage: ${{ steps.previous-releases.outputs.storage }}
+    permissions:
+      contents: read
+    steps:
+      - name: Get the previous release-tags
+        id: previous-releases
+        run: |
+          echo storage=$(gh api -q '[.[].tag_name | select(test("^release-\\\d+$"))][0]'\
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/releases") | tee -a ${GITHUB_OUTPUT}
+          echo proxy=$(gh api -q '[.[].tag_name | select(test("^release-proxy-\\\d+$"))][0]'\
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/releases") | tee -a ${GITHUB_OUTPUT}
+          echo compute=$(gh api -q '[.[].tag_name | select(test("^release-compute-\\\d+$"))][0]'\
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/releases") | tee -a ${GITHUB_OUTPUT}
