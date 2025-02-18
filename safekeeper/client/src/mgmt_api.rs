@@ -5,7 +5,10 @@
 
 use http_utils::error::HttpErrorBody;
 use reqwest::{IntoUrl, Method, StatusCode};
-use safekeeper_api::models::{SafekeeperUtilization, TimelineCreateRequest, TimelineStatus};
+use safekeeper_api::models::{
+    PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
+    TimelineStatus,
+};
 use std::error::Error as _;
 use utils::{
     id::{NodeId, TenantId, TimelineId},
@@ -84,6 +87,12 @@ impl Client {
             "{}/v1/tenant/{}/timeline/{}",
             self.mgmt_api_endpoint, req.tenant_id, req.timeline_id
         );
+        let resp = self.post(&uri, req).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+
+    pub async fn pull_timeline(&self, req: &PullTimelineRequest) -> Result<PullTimelineResponse> {
+        let uri = format!("{}/v1/pull_timeline", self.mgmt_api_endpoint);
         let resp = self.post(&uri, req).await?;
         resp.json().await.map_err(Error::ReceiveBody)
     }

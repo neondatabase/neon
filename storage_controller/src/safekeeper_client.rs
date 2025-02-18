@@ -1,5 +1,8 @@
 use crate::metrics::PageserverRequestLabelGroup;
-use safekeeper_api::models::{SafekeeperUtilization, TimelineCreateRequest, TimelineStatus};
+use safekeeper_api::models::{
+    PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
+    TimelineStatus,
+};
 use safekeeper_client::mgmt_api::{Client, Result};
 use utils::{
     id::{NodeId, TenantId, TimelineId},
@@ -91,6 +94,19 @@ impl SafekeeperClient {
             crate::metrics::Method::Delete,
             &self.node_id_label,
             self.inner.delete_timeline(tenant_id, timeline_id).await
+        )
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn pull_timeline(
+        &self,
+        req: &PullTimelineRequest,
+    ) -> Result<PullTimelineResponse> {
+        measured_request!(
+            "pull_timeline",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner.pull_timeline(req).await
         )
     }
 

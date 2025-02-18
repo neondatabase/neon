@@ -130,7 +130,7 @@ pub(crate) static LAYERS_PER_READ: Lazy<HistogramVec> = Lazy::new(|| {
         "Layers visited to serve a single read (read amplification). In a batch, all visited layers count towards every read.",
         &["tenant_id", "shard_id", "timeline_id"],
         // Low resolution to reduce cardinality.
-        vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0],
+        vec![4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0],
     )
     .expect("failed to define a metric")
 });
@@ -1489,6 +1489,7 @@ impl SmgrOpFlushInProgress {
                         }
                         #[cfg(not(target_os = "linux"))]
                         {
+                            _ = socket_fd; // appease unused lint on macOS
                             (-1, -1)
                         }
                     };

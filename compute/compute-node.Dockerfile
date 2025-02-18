@@ -148,7 +148,7 @@ RUN case $DEBIAN_VERSION in \
     apt install --no-install-recommends --no-install-suggests -y \
     ninja-build git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
-    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip \
+    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip g++ \
     $VERSION_INSTALLS \
     && apt clean && rm -rf /var/lib/apt/lists/*
 
@@ -1466,6 +1466,31 @@ RUN make release -j $(getconf _NPROCESSORS_ONLN) && \
 
 #########################################################################################
 #
+# Layer "pg-duckdb-pg-build"
+# compile pg_duckdb extension
+#
+#########################################################################################
+FROM build-deps AS pg_duckdb-src
+WORKDIR /ext-src
+COPY compute/patches/pg_duckdb_v031.patch .
+# pg_duckdb build requires source dir to be a git repo to get submodules
+# allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only: 
+# - extension management function duckdb.install_extension()
+# - access to duckdb.extensions table and its sequence
+RUN git clone --depth 1 --branch v0.3.1 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
+    cd pg_duckdb-src && \
+    git submodule update --init --recursive && \
+    patch -p1 < /ext-src/pg_duckdb_v031.patch
+
+FROM pg-build AS pg_duckdb-build
+ARG PG_VERSION
+COPY --from=pg_duckdb-src /ext-src/ /ext-src/
+WORKDIR /ext-src/pg_duckdb-src
+RUN make install -j $(getconf _NPROCESSORS_ONLN) && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control 
+        
+#########################################################################################
+#
 # Layer "pg_repack"
 # compile pg_repack extension
 #
@@ -1483,6 +1508,73 @@ COPY --from=pg_repack-src /ext-src/ /ext-src/
 WORKDIR /ext-src/pg_repack-src
 RUN make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install
+
+
+#########################################################################################
+#
+# Layer "pgaudit"
+# compile pgaudit extension
+#
+#########################################################################################
+
+FROM build-deps AS pgaudit-src
+ARG PG_VERSION
+WORKDIR /ext-src
+RUN case "${PG_VERSION}" in \
+    "v14") \
+    export PGAUDIT_VERSION=1.6.2 \
+    export PGAUDIT_CHECKSUM=1f350d70a0cbf488c0f2b485e3a5c9b11f78ad9e3cbb95ef6904afa1eb3187eb \
+    ;; \
+    "v15") \
+    export PGAUDIT_VERSION=1.7.0 \
+    export PGAUDIT_CHECKSUM=8f4a73e451c88c567e516e6cba7dc1e23bc91686bb6f1f77f8f3126d428a8bd8 \
+    ;; \
+    "v16") \
+    export PGAUDIT_VERSION=16.0 \
+    export PGAUDIT_CHECKSUM=d53ef985f2d0b15ba25c512c4ce967dce07b94fd4422c95bd04c4c1a055fe738 \
+    ;; \
+    "v17") \
+    export PGAUDIT_VERSION=17.0 \
+    export PGAUDIT_CHECKSUM=7d0d08d030275d525f36cd48b38c6455f1023da863385badff0cec44965bfd8c \
+    ;; \
+    *) \
+    echo "pgaudit is not supported on this PostgreSQL version" && exit 1;; \
+    esac && \
+    wget https://github.com/pgaudit/pgaudit/archive/refs/tags/${PGAUDIT_VERSION}.tar.gz -O pgaudit.tar.gz && \
+    echo "${PGAUDIT_CHECKSUM} pgaudit.tar.gz" | sha256sum --check && \
+    mkdir pgaudit-src && cd pgaudit-src && tar xzf ../pgaudit.tar.gz --strip-components=1 -C .
+
+FROM pg-build AS pgaudit-build
+COPY --from=pgaudit-src /ext-src/ /ext-src/
+WORKDIR /ext-src/pgaudit-src
+RUN make install USE_PGXS=1 -j $(getconf _NPROCESSORS_ONLN)
+
+#########################################################################################
+#
+# Layer "pgauditlogtofile"
+# compile pgauditlogtofile extension
+#
+#########################################################################################
+
+FROM build-deps AS pgauditlogtofile-src
+ARG PG_VERSION
+WORKDIR /ext-src
+RUN case "${PG_VERSION}" in \
+    "v14" | "v15" | "v16" | "v17") \
+    export PGAUDITLOGTOFILE_VERSION=v1.6.4 \
+    export PGAUDITLOGTOFILE_CHECKSUM=ef801eb09c26aaa935c0dabd92c81eb9ebe338930daa9674d420a280c6bc2d70 \
+    ;; \
+    *) \
+    echo "pgauditlogtofile is not supported on this PostgreSQL version" && exit 1;; \
+    esac && \
+    wget https://github.com/fmbiete/pgauditlogtofile/archive/refs/tags/${PGAUDITLOGTOFILE_VERSION}.tar.gz -O pgauditlogtofile.tar.gz && \
+    echo "${PGAUDITLOGTOFILE_CHECKSUM} pgauditlogtofile.tar.gz" | sha256sum --check && \
+    mkdir pgauditlogtofile-src && cd pgauditlogtofile-src && tar xzf ../pgauditlogtofile.tar.gz --strip-components=1 -C .
+
+FROM pg-build AS pgauditlogtofile-build
+COPY --from=pgauditlogtofile-src /ext-src/ /ext-src/
+WORKDIR /ext-src/pgauditlogtofile-src
+RUN make install USE_PGXS=1 -j $(getconf _NPROCESSORS_ONLN)
 
 #########################################################################################
 #
@@ -1577,7 +1669,10 @@ COPY --from=pg_anon-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_duckdb-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pgaudit-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pgauditlogtofile-build /usr/local/pgsql/ /usr/local/pgsql/
 
 #########################################################################################
 #
@@ -1668,29 +1763,6 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then\
     && echo "${postgres_exporter_sha256} postgres_exporter" | sha256sum -c -\
     && echo "${pgbouncer_exporter_sha256} pgbouncer_exporter" | sha256sum -c -\
     && echo "${sql_exporter_sha256} sql_exporter" | sha256sum -c -
-
-#########################################################################################
-#
-# Layer "awscli"
-#
-#########################################################################################
-FROM build-deps AS awscli
-ARG TARGETARCH
-RUN set -ex; \
-    if [ "${TARGETARCH}" = "amd64" ]; then \
-        TARGETARCH_ALT="x86_64"; \
-        CHECKSUM="c9a9df3770a3ff9259cb469b6179e02829687a464e0824d5c32d378820b53a00"; \
-    elif [ "${TARGETARCH}" = "arm64" ]; then \
-        TARGETARCH_ALT="aarch64"; \
-        CHECKSUM="8181730be7891582b38b028112e81b4899ca817e8c616aad807c9e9d1289223a"; \
-    else \
-        echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
-    fi; \
-    curl --retry 5 -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
-    echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
-    unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
-    /tmp/awscliv2/aws/install; \
-    rm -rf /tmp/awscliv2.zip /tmp/awscliv2
 
 #########################################################################################
 #
@@ -1860,9 +1932,6 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     # Create remote extension download directory
     mkdir /usr/local/download_extensions && \
     chown -R postgres:postgres /usr/local/download_extensions
-
-# aws cli is used by fast_import
-COPY --from=awscli /usr/local/aws-cli /usr/local/aws-cli
 
 # pgbouncer and its config
 COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer

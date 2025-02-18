@@ -211,7 +211,6 @@ impl PostgresProcess {
             .args(["-p", &format!("{port}")])
             .args(["-c", "wal_level=minimal"])
             .args(["-c", &format!("shared_buffers={shared_buffers_mb}MB")])
-            .args(["-c", "shared_buffers=10GB"])
             .args(["-c", "max_wal_senders=0"])
             .args(["-c", "fsync=off"])
             .args(["-c", "full_page_writes=off"])
@@ -362,6 +361,14 @@ async fn run_dump_restore(
             // how we run it
             .env_clear()
             .env("LD_LIBRARY_PATH", &pg_lib_dir)
+            .env(
+                "ASAN_OPTIONS",
+                std::env::var("ASAN_OPTIONS").unwrap_or_default(),
+            )
+            .env(
+                "UBSAN_OPTIONS",
+                std::env::var("UBSAN_OPTIONS").unwrap_or_default(),
+            )
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -395,6 +402,14 @@ async fn run_dump_restore(
             // how we run it
             .env_clear()
             .env("LD_LIBRARY_PATH", &pg_lib_dir)
+            .env(
+                "ASAN_OPTIONS",
+                std::env::var("ASAN_OPTIONS").unwrap_or_default(),
+            )
+            .env(
+                "UBSAN_OPTIONS",
+                std::env::var("UBSAN_OPTIONS").unwrap_or_default(),
+            )
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -422,6 +437,7 @@ async fn run_dump_restore(
 
 #[allow(clippy::too_many_arguments)]
 async fn cmd_pgdata(
+    s3_client: Option<aws_sdk_s3::Client>,
     kms_client: Option<aws_sdk_kms::Client>,
     maybe_s3_prefix: Option<s3_uri::S3Uri>,
     maybe_spec: Option<Spec>,
@@ -489,9 +505,13 @@ async fn cmd_pgdata(
     // Only sync if s3_prefix was specified
     if let Some(s3_prefix) = maybe_s3_prefix {
         info!("upload pgdata");
-        aws_s3_sync::sync(Utf8Path::new(&pgdata_dir), &s3_prefix.append("/pgdata/"))
-            .await
-            .context("sync dump directory to destination")?;
+        aws_s3_sync::upload_dir_recursive(
+            s3_client.as_ref().unwrap(),
+            Utf8Path::new(&pgdata_dir),
+            &s3_prefix.append("/pgdata/"),
+        )
+        .await
+        .context("sync dump directory to destination")?;
 
         info!("write status");
         {
@@ -500,9 +520,13 @@ async fn cmd_pgdata(
             let status_file = status_dir.join("pgdata");
             std::fs::write(&status_file, serde_json::json!({"done": true}).to_string())
                 .context("write status file")?;
-            aws_s3_sync::sync(&status_dir, &s3_prefix.append("/status/"))
-                .await
-                .context("sync status directory to destination")?;
+            aws_s3_sync::upload_dir_recursive(
+                s3_client.as_ref().unwrap(),
+                &status_dir,
+                &s3_prefix.append("/status/"),
+            )
+            .await
+            .context("sync status directory to destination")?;
         }
     }
 
@@ -574,18 +598,20 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     // Initialize AWS clients only if s3_prefix is specified
-    let (aws_config, kms_client) = if args.s3_prefix.is_some() {
+    let (s3_client, kms_client) = if args.s3_prefix.is_some() {
         let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
+        let s3_client = aws_sdk_s3::Client::new(&config);
         let kms = aws_sdk_kms::Client::new(&config);
-        (Some(config), Some(kms))
+        (Some(s3_client), Some(kms))
     } else {
         (None, None)
     };
 
     let spec: Option<Spec> = if let Some(s3_prefix) = &args.s3_prefix {
         let spec_key = s3_prefix.append("/spec.json");
-        let s3_client = aws_sdk_s3::Client::new(aws_config.as_ref().unwrap());
         let object = s3_client
+            .as_ref()
+            .unwrap()
             .get_object()
             .bucket(&spec_key.bucket)
             .key(spec_key.key)
@@ -625,6 +651,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             memory_mb,
         } => {
             cmd_pgdata(
+                s3_client,
                 kms_client,
                 args.s3_prefix,
                 spec,

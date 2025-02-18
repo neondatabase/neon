@@ -491,6 +491,7 @@ class NeonEnvBuilder:
         self.test_may_use_compatibility_snapshot_binaries = False
         self.version_combination = combination
         self.mixdir = self.test_output_dir / "mixdir_neon"
+
         if self.version_combination is not None:
             assert (
                 self.compatibility_neon_binpath is not None
@@ -702,6 +703,11 @@ class NeonEnvBuilder:
 
     def _mix_versions(self):
         assert self.version_combination is not None, "version combination must be set"
+
+        # Always use a newer version of `neon_local`
+        (self.mixdir / "neon_local").hardlink_to(self.neon_binpath / "neon_local")
+        self.neon_local_binpath = self.mixdir
+
         for component, paths in COMPONENT_BINARIES.items():
             directory = (
                 self.neon_binpath
@@ -710,10 +716,11 @@ class NeonEnvBuilder:
             )
             for filename in paths:
                 destination = self.mixdir / filename
-                destination.symlink_to(directory / filename)
+                destination.hardlink_to(directory / filename)
+        self.neon_binpath = self.mixdir
+
         if self.version_combination["compute"] == "old":
             self.pg_distrib_dir = self.compatibility_pg_distrib_dir
-        self.neon_binpath = self.mixdir
 
     def overlay_mount(self, ident: str, srcdir: Path, dstdir: Path):
         """
@@ -2459,6 +2466,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         response.raise_for_status()
         return [TenantShardId.parse(tid) for tid in response.json()["updated"]]
+
+    def download_heatmap_layers(self, tenant_shard_id: TenantShardId, timeline_id: TimelineId):
+        response = self.request(
+            "POST",
+            f"{self.api}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/download_heatmap_layers",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        response.raise_for_status()
 
     def __enter__(self) -> Self:
         return self
