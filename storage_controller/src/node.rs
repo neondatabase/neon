@@ -32,12 +32,16 @@ pub(crate) struct Node {
 
     listen_http_addr: String,
     listen_http_port: u16,
+    listen_https_port: Option<u16>,
 
     listen_pg_addr: String,
     listen_pg_port: u16,
 
     availability_zone_id: AvailabilityZone,
 
+    // Pre-formatted base url in form of `http(s)://{http_addr}:{http(s)_port}`.
+    // It uses either http or https based on storcon's config.
+    base_url: String,
     // This cancellation token means "stop any RPCs in flight to this node, and don't start
     // any more". It is not related to process shutdown.
     #[serde(skip)]
@@ -56,7 +60,7 @@ pub(crate) enum AvailabilityTransition {
 
 impl Node {
     pub(crate) fn base_url(&self) -> String {
-        format!("http://{}:{}", self.listen_http_addr, self.listen_http_port)
+        self.base_url.clone()
     }
 
     pub(crate) fn get_id(&self) -> NodeId {
@@ -87,6 +91,11 @@ impl Node {
             && self.availability_zone_id == register_req.availability_zone_id
     }
 
+    // Do we need to update an existing record in DB on this registration request?
+    pub(crate) fn need_update(&self, register_req: &NodeRegisterRequest) -> bool {
+        self.listen_https_port != register_req.listen_https_port
+    }
+
     /// For a shard located on this node, populate a response object
     /// with this node's address information.
     pub(crate) fn shard_location(&self, shard_id: TenantShardId) -> TenantLocateResponseShard {
@@ -95,6 +104,7 @@ impl Node {
             node_id: self.id,
             listen_http_addr: self.listen_http_addr.clone(),
             listen_http_port: self.listen_http_port,
+            listen_https_port: self.listen_https_port,
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port,
         }
@@ -175,23 +185,28 @@ impl Node {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: NodeId,
         listen_http_addr: String,
         listen_http_port: u16,
+        listen_https_port: Option<u16>,
         listen_pg_addr: String,
         listen_pg_port: u16,
         availability_zone_id: AvailabilityZone,
+        base_url: String,
     ) -> Self {
         Self {
             id,
             listen_http_addr,
             listen_http_port,
+            listen_https_port,
             listen_pg_addr,
             listen_pg_port,
             scheduling: NodeSchedulingPolicy::Active,
             availability: NodeAvailability::Offline,
             availability_zone_id,
+            base_url,
             cancel: CancellationToken::new(),
         }
     }
@@ -202,13 +217,22 @@ impl Node {
             scheduling_policy: self.scheduling.into(),
             listen_http_addr: self.listen_http_addr.clone(),
             listen_http_port: self.listen_http_port as i32,
+            listen_https_port: self.listen_https_port.map(|x| x as i32),
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port as i32,
             availability_zone_id: self.availability_zone_id.0.clone(),
         }
     }
 
-    pub(crate) fn from_persistent(np: NodePersistence) -> Self {
+    pub(crate) fn from_persistent(np: NodePersistence, use_https: bool) -> Self {
+        let base_url = build_base_url(
+            &np.listen_http_addr,
+            np.listen_http_port as u16,
+            np.listen_https_port.map(|x| x as u16),
+            use_https,
+        )
+        .expect("Node should have https port in DB when https is enabled");
+
         Self {
             id: NodeId(np.node_id as u64),
             // At startup we consider a node offline until proven otherwise.
@@ -217,9 +241,11 @@ impl Node {
                 .expect("Bad scheduling policy in DB"),
             listen_http_addr: np.listen_http_addr,
             listen_http_port: np.listen_http_port as u16,
+            listen_https_port: np.listen_https_port.map(|x| x as u16),
             listen_pg_addr: np.listen_pg_addr,
             listen_pg_port: np.listen_pg_port as u16,
             availability_zone_id: AvailabilityZone(np.availability_zone_id),
+            base_url,
             cancel: CancellationToken::new(),
         }
     }
@@ -285,8 +311,8 @@ impl Node {
             warn_threshold,
             max_retries,
             &format!(
-                "Call to node {} ({}:{}) management API",
-                self.id, self.listen_http_addr, self.listen_http_port
+                "Call to node {} ({}) management API",
+                self.id, self.base_url,
             ),
             cancel,
         )
@@ -302,9 +328,27 @@ impl Node {
             availability_zone_id: self.availability_zone_id.0.clone(),
             listen_http_addr: self.listen_http_addr.clone(),
             listen_http_port: self.listen_http_port,
+            listen_https_port: self.listen_https_port,
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port,
         }
+    }
+}
+
+pub(crate) fn build_base_url(
+    http_addr: &str,
+    http_port: u16,
+    https_port: Option<u16>,
+    use_https: bool,
+) -> Result<String, String> {
+    if use_https {
+        if let Some(https_port) = https_port {
+            Ok(format!("https://{}:{}", http_addr, https_port))
+        } else {
+            Err("Https is enabled, but node has no https port".to_string())
+        }
+    } else {
+        Ok(format!("http://{}:{}", http_addr, http_port))
     }
 }
 
