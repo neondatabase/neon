@@ -1595,6 +1595,7 @@ def neon_env_builder(
 class PageserverPort:
     pg: int
     http: int
+    https: int = None
 
 
 class LogUtils:
@@ -1845,6 +1846,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "node_id": int(node.id),
             "listen_http_addr": "localhost",
             "listen_http_port": node.service_port.http,
+            "listen_https_port": node.service_port.https,
             "listen_pg_addr": "localhost",
             "listen_pg_port": node.service_port.pg,
             "availability_zone_id": node.az_id,
