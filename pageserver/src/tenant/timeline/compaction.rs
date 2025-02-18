@@ -794,7 +794,9 @@ impl Timeline {
                     {
                         critical!("could not compact, repartitioning keyspace failed: {err:?}");
                     } else {
-                        warn!("could not compact, repartitioning keyspace failed: {err:?}");
+                        tracing::error!(
+                            "could not compact, repartitioning keyspace failed: {err:?}"
+                        );
                     }
                 }
             }

@@ -16,7 +16,6 @@ use tracing::*;
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{self, BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
-use crate::pgdatadir_mapping::CollectKeySpaceError;
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS};
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::compaction::CompactionOutcome;
@@ -288,6 +287,7 @@ fn log_compaction_error(
     sleep_duration: Duration,
     task_cancelled: bool,
 ) {
+    use crate::pgdatadir_mapping::CollectKeySpaceError;
     use crate::tenant::upload_queue::NotInitialized;
     use crate::tenant::PageReconstructError;
     use CompactionError::*;
