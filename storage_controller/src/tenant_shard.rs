@@ -132,6 +132,10 @@ pub(crate) struct TenantShard {
     /// of state that we publish externally in an eventually consistent way.
     pub(crate) pending_compute_notification: bool,
 
+    /// To do a graceful migration, set this field to the destination pageserver, and optimization
+    /// functions will consider this node the best location and react appropriately.
+    preferred_node: Option<NodeId>,
+
     // Support/debug tool: if something is going wrong or flapping with scheduling, this may
     // be set to a non-active state to avoid making changes while the issue is fixed.
     scheduling_policy: ShardSchedulingPolicy,
@@ -555,6 +559,7 @@ impl TenantShard {
             last_error: Arc::default(),
             pending_compute_notification: false,
             scheduling_policy: ShardSchedulingPolicy::default(),
+            preferred_node: None,
         }
     }
 
@@ -854,6 +859,15 @@ impl TenantShard {
         current: NodeId,
         hard_exclude: &[NodeId],
     ) -> Option<NodeId> {
+        // If we have a migration hint, then that is our better location
+        if let Some(hint) = self.preferred_node.as_ref() {
+            if hint == &current {
+                return None;
+            }
+
+            return Some(*hint);
+        }
+
         // Look for a lower-scoring location to attach to
         let Ok(candidate_node) = scheduler.schedule_shard::<T>(
             hard_exclude,
@@ -1161,6 +1175,23 @@ impl TenantShard {
         None
     }
 
+    /// Start a graceful migration of this shard to another pageserver. This works on top of the
+    /// other optimisation functions, to bias them to move to the destination node.
+    pub(crate) fn set_preferred_node(&mut self, node: NodeId) {
+        if let Some(hint) = self.preferred_node.as_ref() {
+            if hint != &node {
+                // This is legal but a bit surprising: we expect that administrators wouldn't usually
+                // change their mind about where to migrate something.
+                tracing::warn!(
+                    "Changing migration destination from {hint} to {node} (current intent {:?})",
+                    self.intent
+                );
+            }
+        }
+
+        self.preferred_node = Some(node);
+    }
+
     /// Return true if the optimization was really applied: it will not be applied if the optimization's
     /// sequence is behind this tenant shard's
     pub(crate) fn apply_optimization(
@@ -1185,6 +1216,14 @@ impl TenantShard {
                 self.intent.demote_attached(scheduler, old_attached_node_id);
                 self.intent
                     .promote_attached(scheduler, new_attached_node_id);
+
+                if let Some(hint) = self.preferred_node.as_ref() {
+                    if hint == &new_attached_node_id {
+                        // The migration target is not a long term pin: once we are done with the migration, clear it.
+                        tracing::info!("Graceful migration to {hint} complete");
+                        self.preferred_node = None;
+                    }
+                }
             }
             ScheduleOptimizationAction::ReplaceSecondary(ReplaceSecondary {
                 old_node_id,
@@ -1703,6 +1742,10 @@ impl TenantShard {
 
         debug_assert!(!self.intent.all_pageservers().contains(&node_id));
 
+        if self.preferred_node == Some(node_id) {
+            self.preferred_node = None;
+        }
+
         intent_modified
     }
 
@@ -1750,6 +1793,7 @@ impl TenantShard {
             pending_compute_notification: false,
             delayed_reconcile: false,
             scheduling_policy: serde_json::from_str(&tsp.scheduling_policy).unwrap(),
+            preferred_node: None,
         })
     }
 
