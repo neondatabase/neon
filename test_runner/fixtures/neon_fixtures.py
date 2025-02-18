@@ -27,6 +27,7 @@ from urllib.parse import quote, urlparse
 
 import asyncpg
 import backoff
+import boto3
 import httpx
 import psycopg2
 import psycopg2.sql
@@ -37,6 +38,8 @@ from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
 from jwcrypto import jwk
+from mypy_boto3_kms import KMSClient
+from mypy_boto3_s3 import S3Client
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -197,6 +200,30 @@ def mock_s3_server(port_distributor: PortDistributor) -> Iterator[MockS3Server]:
     mock_s3_server = MockS3Server(port_distributor.get_port())
     yield mock_s3_server
     mock_s3_server.kill()
+
+
+@pytest.fixture(scope="session")
+def mock_kms(mock_s3_server: MockS3Server) -> Iterator[KMSClient]:
+    yield boto3.client(
+        "kms",
+        endpoint_url=mock_s3_server.endpoint(),
+        region_name=mock_s3_server.region(),
+        aws_access_key_id=mock_s3_server.access_key(),
+        aws_secret_access_key=mock_s3_server.secret_key(),
+        aws_session_token=mock_s3_server.session_token(),
+    )
+
+
+@pytest.fixture(scope="session")
+def mock_s3_client(mock_s3_server: MockS3Server) -> Iterator[S3Client]:
+    yield boto3.client(
+        "s3",
+        endpoint_url=mock_s3_server.endpoint(),
+        region_name=mock_s3_server.region(),
+        aws_access_key_id=mock_s3_server.access_key(),
+        aws_secret_access_key=mock_s3_server.secret_key(),
+        aws_session_token=mock_s3_server.session_token(),
+    )
 
 
 class PgProtocol:
@@ -464,6 +491,7 @@ class NeonEnvBuilder:
         self.test_may_use_compatibility_snapshot_binaries = False
         self.version_combination = combination
         self.mixdir = self.test_output_dir / "mixdir_neon"
+
         if self.version_combination is not None:
             assert (
                 self.compatibility_neon_binpath is not None
@@ -675,6 +703,11 @@ class NeonEnvBuilder:
 
     def _mix_versions(self):
         assert self.version_combination is not None, "version combination must be set"
+
+        # Always use a newer version of `neon_local`
+        (self.mixdir / "neon_local").symlink_to(self.neon_binpath / "neon_local")
+        self.neon_local_binpath = self.mixdir
+
         for component, paths in COMPONENT_BINARIES.items():
             directory = (
                 self.neon_binpath
@@ -684,9 +717,10 @@ class NeonEnvBuilder:
             for filename in paths:
                 destination = self.mixdir / filename
                 destination.symlink_to(directory / filename)
+        self.neon_binpath = self.mixdir
+
         if self.version_combination["compute"] == "old":
             self.pg_distrib_dir = self.compatibility_pg_distrib_dir
-        self.neon_binpath = self.mixdir
 
     def overlay_mount(self, ident: str, srcdir: Path, dstdir: Path):
         """

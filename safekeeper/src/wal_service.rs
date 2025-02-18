@@ -13,6 +13,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{auth::Scope, measured_stream::MeasuredStream};
 
+use std::os::fd::AsRawFd;
+
 use crate::metrics::TrafficMetrics;
 use crate::SafeKeeperConf;
 use crate::{handler::SafekeeperPostgresHandler, GlobalTimelines};
@@ -62,6 +64,7 @@ async fn handle_socket(
     global_timelines: Arc<GlobalTimelines>,
 ) -> Result<(), QueryError> {
     socket.set_nodelay(true)?;
+    let socket_fd = socket.as_raw_fd();
     let peer_addr = socket.peer_addr()?;
 
     // Set timeout on reading from the socket. It prevents hanged up connection
@@ -107,7 +110,7 @@ async fn handle_socket(
         auth_pair,
         global_timelines,
     );
-    let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
+    let pgbackend = PostgresBackend::new_from_io(socket_fd, socket, peer_addr, auth_type, None)?;
     // libpq protocol between safekeeper and walproposer / pageserver
     // We don't use shutdown.
     pgbackend

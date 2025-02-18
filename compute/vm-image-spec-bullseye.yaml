@@ -47,7 +47,9 @@ files:
       # Allow postgres user (which is what compute_ctl runs as) to run /neonvm/bin/resize-swap
       # and /neonvm/bin/set-disk-quota as root without requiring entering a password (NOPASSWD),
       # regardless of hostname (ALL)
-      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota
+      #
+      # Also allow it to shut down the VM. The fast_import job does that when it's finished.
+      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota, /neonvm/bin/poweroff
   - filename: cgconfig.conf
     content: |
       # Configuration for cgroups in VM compute nodes

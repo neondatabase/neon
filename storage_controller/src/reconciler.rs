@@ -91,9 +91,10 @@ pub(crate) struct ReconcilerConfigBuilder {
 }
 
 impl ReconcilerConfigBuilder {
-    pub(crate) fn new() -> Self {
+    /// Priority is special: you must pick one thoughtfully, do not just use 'normal' as the default
+    pub(crate) fn new(priority: ReconcilerPriority) -> Self {
         Self {
-            config: ReconcilerConfig::default(),
+            config: ReconcilerConfig::new(priority),
         }
     }
 
@@ -129,8 +130,18 @@ impl ReconcilerConfigBuilder {
     }
 }
 
-#[derive(Default, Debug, Copy, Clone)]
+// Higher priorities are used for user-facing tasks, so that a long backlog of housekeeping work (e.g. reconciling on startup, rescheduling
+// things on node changes) does not starve user-facing tasks.
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum ReconcilerPriority {
+    Normal,
+    High,
+}
+
+#[derive(Debug, Copy, Clone)]
 pub(crate) struct ReconcilerConfig {
+    pub(crate) priority: ReconcilerPriority,
+
     // During live migration give up on warming-up the secondary
     // after this timeout.
     secondary_warmup_timeout: Option<Duration>,
@@ -145,6 +156,18 @@ pub(crate) struct ReconcilerConfig {
 }
 
 impl ReconcilerConfig {
+    /// Configs are always constructed with an explicit priority, to force callers to think about whether
+    /// the operation they're scheduling is high-priority or not. Normal priority is not a safe default, because
+    /// scheduling something user-facing at normal priority can result in it getting starved out by background work.
+    pub(crate) fn new(priority: ReconcilerPriority) -> Self {
+        Self {
+            priority,
+            secondary_warmup_timeout: None,
+            secondary_download_request_timeout: None,
+            tenant_creation_hint: false,
+        }
+    }
+
     pub(crate) fn get_secondary_warmup_timeout(&self) -> Duration {
         const SECONDARY_WARMUP_TIMEOUT_DEFAULT: Duration = Duration::from_secs(300);
         self.secondary_warmup_timeout
@@ -164,7 +187,9 @@ impl ReconcilerConfig {
 
 impl From<&MigrationConfig> for ReconcilerConfig {
     fn from(value: &MigrationConfig) -> Self {
-        let mut builder = ReconcilerConfigBuilder::new();
+        // Run reconciler at high priority because MigrationConfig comes from human requests that should
+        // be presumed urgent.
+        let mut builder = ReconcilerConfigBuilder::new(ReconcilerPriority::High);
 
         if let Some(timeout) = value.secondary_warmup_timeout {
             builder = builder.secondary_warmup_timeout(timeout)

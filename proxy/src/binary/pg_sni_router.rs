@@ -5,12 +5,6 @@
 /// the outside. Similar to an ingress controller for HTTPS.
 use std::{net::SocketAddr, sync::Arc};
 
-use crate::context::RequestContext;
-use crate::metrics::{Metrics, ThreadPoolMetrics};
-use crate::protocol2::ConnectionInfo;
-use crate::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
-use crate::stream::{PqStream, Stream};
-use crate::tls::TlsServerEndPoint;
 use anyhow::{anyhow, bail, ensure, Context};
 use clap::Arg;
 use futures::future::Either;
@@ -24,6 +18,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, Instrument};
 use utils::project_git_version;
 use utils::sentry_init::init_sentry;
+
+use crate::context::RequestContext;
+use crate::metrics::{Metrics, ThreadPoolMetrics};
+use crate::protocol2::ConnectionInfo;
+use crate::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
+use crate::stream::{PqStream, Stream};
+use crate::tls::TlsServerEndPoint;
 
 project_git_version!(GIT_VERSION);
 
