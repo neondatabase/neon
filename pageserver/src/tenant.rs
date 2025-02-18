@@ -1189,6 +1189,19 @@ impl Tenant {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
             })?;
 
+        // When unarchiving, we've mostly likely lost the heatmap generated prior
+        // to the archival operation. To allow warming this timeline up, generate
+        // a previous heatmap which contains all visible layers in the layer map.
+        // This previous heatmap will be used whenever a fresh heatmap is generated
+        // for the timeline.
+        if matches!(cause, LoadTimelineCause::Unoffload) {
+            if let Some(unarchival_heatmap) = timeline.generate_unarchival_heatmap().await {
+                timeline
+                    .previous_heatmap
+                    .store(Some(Arc::new(unarchival_heatmap)));
+            }
+        }
+
         match import_pgdata {
             Some(import_pgdata) if !import_pgdata.is_done() => {
                 match cause {

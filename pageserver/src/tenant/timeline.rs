@@ -467,7 +467,7 @@ pub struct Timeline {
     /// If Some, collects GetPage metadata for an ongoing PageTrace.
     pub(crate) page_trace: ArcSwapOption<Sender<PageTraceEvent>>,
 
-    previous_heatmap: ArcSwapOption<PreviousHeatmap>,
+    pub(super) previous_heatmap: ArcSwapOption<PreviousHeatmap>,
 
     /// May host a background Tokio task which downloads all the layers from the current
     /// heatmap on demand.
@@ -3623,6 +3623,40 @@ impl Timeline {
             .collect();
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
+    }
+
+    pub(super) async fn generate_unarchival_heatmap(&self) -> Option<PreviousHeatmap> {
+        let crnt_state = self.current_state();
+        if crnt_state != TimelineState::Loading {
+            tracing::warn!(
+                "Attempted to generate heatmap on unarchival at the wrong point: {crnt_state:?}"
+            );
+            return None;
+        }
+
+        let guard = self.layers.read().await;
+
+        let now = SystemTime::now();
+        let mut heatmap_layers = Vec::default();
+        for vl in guard.visible_layers() {
+            let hl = HeatMapLayer {
+                name: vl.layer_desc().layer_name(),
+                metadata: vl.metadata(),
+                access_time: now,
+            };
+            heatmap_layers.push(hl);
+        }
+
+        tracing::info!(
+            "Generating unarchival heatmap with {} layers",
+            heatmap_layers.len()
+        );
+
+        let heatmap = HeatMapTimeline::new(self.timeline_id, heatmap_layers);
+        Some(PreviousHeatmap::Active {
+            heatmap,
+            read_at: Instant::now(),
+        })
     }
 
     /// Returns true if the given lsn is or was an ancestor branchpoint.
