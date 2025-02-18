@@ -13,6 +13,7 @@ SIGNED_CHAR_EXTRACT = """
     WHERE ARRAY['leaf'] = ((gin_page_opaque_info(page)).flags);
     """
 
+
 def test_signed_char(neon_simple_env: NeonEnv):
     env = neon_simple_env
     endpoint = env.endpoints.create_start("main")
@@ -36,6 +37,6 @@ def test_signed_char(neon_simple_env: NeonEnv):
     # Expected output is [(1, <memory at 0x1098c7a00>, 4294967295, 0, ['leaf'])]
     page1 = pages[0]
     assert page1[0] == 1
-    assert page1[-1] == ['leaf']
+    assert page1[-1] == ["leaf"]
     assert page1[-2] == 0
     assert page1[-3] == 4294967295
