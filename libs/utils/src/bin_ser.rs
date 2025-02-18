@@ -415,6 +415,7 @@ mod tests {
     }
 
     #[test]
+    /// Ensure that newtype wrappers around u32 don't change the serialization format
     fn be_nt() {
         use super::BeSer;
 
@@ -435,6 +436,7 @@ mod tests {
     }
 
     #[test]
+    /// Ensure that newtype wrappers around u32 don't change the serialization format
     fn le_nt() {
         use super::LeSer;
 
