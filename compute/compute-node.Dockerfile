@@ -1782,6 +1782,7 @@ ENV PGHOST=compute
 ENV PGPORT=55433
 ENV PGUSER=cloud_admin
 ENV PGDATABASE=postgres
+ENV PG_VERSION=${PG_VERSION:?}
 
 #########################################################################################
 #
