@@ -167,7 +167,8 @@ typedef struct
 {
 	pg_atomic_uint64 write_pos;
 	pg_atomic_uint64 read_pos;
-	Latch latch;
+	pthread_mutex_t  mutex;
+	pthread_cond_t   cond;
 	NeonCommunicatorRequest* requests;
 } NeonCommunicatorChannel;
 
