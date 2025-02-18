@@ -705,7 +705,7 @@ class NeonEnvBuilder:
         assert self.version_combination is not None, "version combination must be set"
 
         # Always use a newer version of `neon_local`
-        (self.mixdir / "neon_local").symlink_to(self.neon_binpath / "neon_local")
+        (self.mixdir / "neon_local").hardlink_to(self.neon_binpath / "neon_local")
         self.neon_local_binpath = self.mixdir
 
         for component, paths in COMPONENT_BINARIES.items():
@@ -716,7 +716,7 @@ class NeonEnvBuilder:
             )
             for filename in paths:
                 destination = self.mixdir / filename
-                destination.symlink_to(directory / filename)
+                destination.hardlink_to(directory / filename)
         self.neon_binpath = self.mixdir
 
         if self.version_combination["compute"] == "old":
