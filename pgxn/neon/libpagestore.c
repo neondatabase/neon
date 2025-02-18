@@ -36,6 +36,11 @@
 #include "pagestore_client.h"
 #include "walproposer.h"
 
+#ifdef __linux__
+#include <sys/ioctl.h>
+#include <linux/sockios.h>
+#endif
+
 #define PageStoreTrace DEBUG5
 
 #define MIN_RECONNECT_INTERVAL_USEC 1000
@@ -373,8 +378,9 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	{
 	case PS_Disconnected:
 	{
-		const char *keywords[3];
-		const char *values[3];
+		const char *keywords[4];
+		const char *values[4];
+		char pid_str[16];
 		int			n_pgsql_params;
 		TimestampTz	now;
 		int64		us_since_last_attempt;
@@ -419,14 +425,30 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		 * can override the password from the env variable. Seems useful, although
 		 * we don't currently use that capability anywhere.
 		 */
-		keywords[0] = "dbname";
-		values[0] = connstr;
-		n_pgsql_params = 1;
+		n_pgsql_params = 0;
+
+		/*
+		 * Pageserver logs include this in the connection's tracing span.
+		 * This allows for reasier log correlation between compute and pageserver.
+		 */
+		keywords[n_pgsql_params] = "application_name";
+		{
+			int ret = snprintf(pid_str, sizeof(pid_str), "%d", MyProcPid);
+			if (ret < 0 || ret >= (int)(sizeof(pid_str)))
+				elog(FATAL, "stack-allocated buffer too small to hold pid");
+		}
+		/* lifetime: PQconnectStartParams strdups internally */
+		values[n_pgsql_params] = (const char*) pid_str;
+		n_pgsql_params++;
+
+		keywords[n_pgsql_params] = "dbname";
+		values[n_pgsql_params] = connstr;
+		n_pgsql_params++;
 
 		if (neon_auth_token)
 		{
-			keywords[1] = "password";
-			values[1] = neon_auth_token;
+			keywords[n_pgsql_params] = "password";
+			values[n_pgsql_params] = neon_auth_token;
 			n_pgsql_params++;
 		}
 
@@ -728,11 +750,36 @@ retry:
 		INSTR_TIME_SUBTRACT(since_last_log, last_log_ts);
 		if (INSTR_TIME_GET_MILLISEC(since_last_log) >= LOG_INTERVAL_MS)
 		{
+			int sndbuf = -1;
+			int recvbuf = -1;
+#ifdef __linux__
+			int socketfd;
+#endif
+
 			since_start = now;
 			INSTR_TIME_SUBTRACT(since_start, start_ts);
-			neon_shard_log(shard_no, LOG, "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses)",
+
+#ifdef __linux__
+			/*
+			 * get kernel's send and recv queue size via ioctl
+			 * https://elixir.bootlin.com/linux/v6.1.128/source/include/uapi/linux/sockios.h#L25-L27
+			 */
+			socketfd = PQsocket(pageserver_conn);
+			if (socketfd != -1) {
+				int ioctl_err;
+				ioctl_err = ioctl(socketfd, SIOCOUTQ, &sndbuf);
+				if (ioctl_err!= 0) {
+					sndbuf = -errno;
+				}
+				ioctl_err = ioctl(socketfd, FIONREAD, &recvbuf);
+				if (ioctl_err != 0) {
+					recvbuf = -errno;
+				}
+			}
+#endif
+			neon_shard_log(shard_no, LOG, "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses) (socket sndbuf=%d recvbuf=%d)",
 						   INSTR_TIME_GET_DOUBLE(since_start),
-						   shard->nrequests_sent, shard->nresponses_received);
+						   shard->nrequests_sent, shard->nresponses_received, sndbuf, recvbuf);
 			last_log_ts = now;
 			logged = true;
 		}

@@ -882,6 +882,8 @@ components:
               properties:
                 reason:
                   type: string
+        gc_blocking:
+          type: string
 
     TenantCreateRequest:
       allOf:
@@ -1080,7 +1082,13 @@ components:
           type: integer
         state:
           type: string
+        min_readable_lsn:
+          type: string
+          format: hex
         latest_gc_cutoff_lsn:
+          type: string
+          format: hex
+        applied_gc_cutoff_lsn:
           type: string
           format: hex
 

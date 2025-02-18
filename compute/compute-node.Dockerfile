@@ -83,21 +83,48 @@ ARG TAG=pinned
 ARG BUILD_TAG
 ARG DEBIAN_VERSION=bookworm
 ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
-ARG ALPINE_CURL_VERSION=8.11.1
+
+# Here are the INDEX DIGESTS for the images we use.
+# You can get them following next steps for now:
+# 1. Get an authentication token from DockerHub:
+#    TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/debian:pull" | jq -r .token)
+# 2. Using that token, query index for the given tag:
+#    curl -s -H "Authorization: Bearer $TOKEN" \
+#       -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+#       "https://registry.hub.docker.com/v2/library/debian/manifests/bullseye-slim" \
+#       -I | grep -i docker-content-digest
+# 3. As a next step, TODO(fedordikarev): create script and schedule workflow to run these checks
+#    and updates on regular bases and in automated way.
+ARG BOOKWORM_SLIM_SHA=sha256:40b107342c492725bc7aacbe93a49945445191ae364184a6d24fedb28172f6f7
+ARG BULLSEYE_SLIM_SHA=sha256:e831d9a884d63734fe3dd9c491ed9a5a3d4c6a6d32c5b14f2067357c49b0b7e1
+
+# Here we use ${var/search/replace} syntax, to check
+# if base image is one of the images, we pin image index for.
+# If var will match one the known images, we will replace it with the known sha.
+# If no match, than value will be unaffected, and will process with no-pinned image.
+ARG BASE_IMAGE_SHA=debian:${DEBIAN_FLAVOR}
+ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bookworm-slim/debian@$BOOKWORM_SLIM_SHA}
+ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bullseye-slim/debian@$BULLSEYE_SLIM_SHA}
+
+# By default, build all PostgreSQL extensions. For quick local testing when you don't
+# care about the extensions, pass EXTENSIONS=none or EXTENSIONS=minimal
+ARG EXTENSIONS=all
 
 #########################################################################################
 #
 # Layer "build-deps"
 #
 #########################################################################################
-FROM debian:$DEBIAN_FLAVOR AS build-deps
+FROM $BASE_IMAGE_SHA AS build-deps
 ARG DEBIAN_VERSION
 
 # Use strict mode for bash to catch errors early
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
+# By default, /bin/sh used in debian images will treat '\n' as eol,
+# but as we use bash as SHELL, and built-in echo in bash requires '-e' flag for that.
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc \
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\nretry-on-host-error=on\n" > /root/.wgetrc && \
     echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
 
 RUN case $DEBIAN_VERSION in \
@@ -121,7 +148,7 @@ RUN case $DEBIAN_VERSION in \
     apt install --no-install-recommends --no-install-suggests -y \
     ninja-build git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
-    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd \
+    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip g++ \
     $VERSION_INSTALLS \
     && apt clean && rm -rf /var/lib/apt/lists/*
 
@@ -133,11 +160,11 @@ RUN case $DEBIAN_VERSION in \
 #########################################################################################
 FROM build-deps AS pg-build
 ARG PG_VERSION
-COPY vendor/postgres-${PG_VERSION} postgres
+COPY vendor/postgres-${PG_VERSION:?} postgres
 RUN cd postgres && \
     export CONFIGURE_CMD="./configure CFLAGS='-O2 -g3' --enable-debug --with-openssl --with-uuid=ossp \
     --with-icu --with-libxml --with-libxslt --with-lz4" && \
-    if [ "${PG_VERSION}" != "v14" ]; then \
+    if [ "${PG_VERSION:?}" != "v14" ]; then \
         # zstd is available only from PG15
         export CONFIGURE_CMD="${CONFIGURE_CMD} --with-zstd"; \
     fi && \
@@ -231,7 +258,7 @@ RUN case "${DEBIAN_VERSION}" in \
 
 # Postgis 3.5.0 supports v17
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v17") \
         export POSTGIS_VERSION=3.5.0 \
         export POSTGIS_CHECKSUM=ca698a22cc2b2b3467ac4e063b43a28413f3004ddd505bdccdd74c56a647f510 \
@@ -306,7 +333,7 @@ FROM build-deps AS pgrouting-src
 ARG DEBIAN_VERSION
 ARG PG_VERSION
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v17") \
         export PGROUTING_VERSION=3.6.2 \
         export PGROUTING_CHECKSUM=f4a1ed79d6f714e52548eca3bb8e5593c6745f1bde92eb5fb858efd8984dffa2 \
@@ -352,7 +379,7 @@ COPY compute/patches/plv8-3.1.10.patch .
 #
 # Use new version only for v17
 # because since v3.2, plv8 doesn't include plcoffee and plls extensions
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v17") \
         export PLV8_TAG=v3.2.3 \
     ;; \
@@ -366,7 +393,7 @@ RUN case "${PG_VERSION}" in \
     git clone --recurse-submodules --depth 1 --branch ${PLV8_TAG} https://github.com/plv8/plv8.git plv8-src && \
     tar -czf plv8.tar.gz --exclude .git plv8-src && \
     cd plv8-src && \
-    if [[ "${PG_VERSION}" < "v17" ]]; then patch -p1 < /ext-src/plv8-3.1.10.patch; fi
+    if [[ "${PG_VERSION:?}" < "v17" ]]; then patch -p1 < /ext-src/plv8-3.1.10.patch; fi
 
 FROM pg-build AS plv8-build
 ARG PG_VERSION
@@ -386,7 +413,7 @@ RUN \
     find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
     # don't break computes with installed old version of plv8
     cd /usr/local/pgsql/lib/ && \
-    case "${PG_VERSION}" in \
+    case "${PG_VERSION:?}" in \
     "v17") \
         ln -s plv8-3.2.3.so plv8-3.1.8.so && \
         ln -s plv8-3.2.3.so plv8-3.1.5.so && \
@@ -723,7 +750,7 @@ FROM build-deps AS timescaledb-src
 ARG PG_VERSION
 
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
       "v14" | "v15") \
         export TIMESCALEDB_VERSION=2.10.1 \
         export TIMESCALEDB_CHECKSUM=6fca72a6ed0f6d32d2b3523951ede73dc5f9b0077b38450a029a5f411fdb8c73 \
@@ -761,7 +788,7 @@ ARG PG_VERSION
 
 # version-specific, has separate releases for each version
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
       "v14") \
         export PG_HINT_PLAN_VERSION=14_1_4_1 \
         export PG_HINT_PLAN_CHECKSUM=c3501becf70ead27f70626bce80ea401ceac6a77e2083ee5f3ff1f1444ec1ad1 \
@@ -837,7 +864,7 @@ ARG PG_VERSION
 # https://github.com/rdkit/rdkit/releases/tag/Release_2024_09_1
 
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v17") \
         export RDKIT_VERSION=Release_2024_09_1 \
         export RDKIT_CHECKSUM=034c00d6e9de323506834da03400761ed8c3721095114369d06805409747a60f \
@@ -964,7 +991,7 @@ ARG PG_VERSION
 #
 # last release v0.40.0 - Jul 22, 2024
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v17") \
         export SEMVER_VERSION=0.40.0 \
         export SEMVER_CHECKSUM=3e50bcc29a0e2e481e7b6d2bc937cadc5f5869f55d983b5a1aafeb49f5425cfc \
@@ -1000,7 +1027,7 @@ ARG PG_VERSION
 # This is our extension, support stopped in favor of pgvector
 # TODO: deprecate it
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
       "v14" | "v15") \
         export PG_EMBEDDING_VERSION=0.3.5 \
         export PG_EMBEDDING_CHECKSUM=0e95b27b8b6196e2cf0a0c9ec143fe2219b82e54c5bb4ee064e76398cbe69ae9 \
@@ -1033,7 +1060,7 @@ ARG PG_VERSION
 # This is an experimental extension, never got to real production.
 # !Do not remove! It can be present in shared_preload_libraries and compute will fail to start if library is not found.
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in "v17") \
+RUN case "${PG_VERSION:?}" in "v17") \
     echo "postgresql_anonymizer does not yet support PG17" && exit 0;; \
     esac && \
     wget  https://github.com/neondatabase/postgresql_anonymizer/archive/refs/tags/neon_1.1.1.tar.gz -O pg_anon.tar.gz && \
@@ -1068,6 +1095,7 @@ ENV PATH="/home/nonroot/.cargo/bin:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 
+# See comment on the top of the file regading `echo` and `\n`
 RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
 
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
@@ -1084,7 +1112,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
 FROM pg-build-nonroot-with-cargo AS rust-extensions-build
 ARG PG_VERSION
 
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
         'v17') \
             echo 'v17 is not supported yet by pgrx. Quit' && exit 0;; \
     esac && \
@@ -1263,7 +1291,7 @@ FROM build-deps AS pgx_ulid-src
 ARG PG_VERSION
 
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v14" | "v15" | "v16") \
         ;; \
     *) \
@@ -1295,7 +1323,7 @@ FROM build-deps AS pgx_ulid-pgrx12-src
 ARG PG_VERSION
 
 WORKDIR /ext-src
-RUN case "${PG_VERSION}" in \
+RUN case "${PG_VERSION:?}" in \
     "v17") \
         ;; \
     *) \
@@ -1423,8 +1451,8 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 FROM build-deps AS pg_mooncake-src
 ARG PG_VERSION
 WORKDIR /ext-src
-RUN wget https://github.com/Mooncake-Labs/pg_mooncake/releases/download/v0.1.1/pg_mooncake-0.1.1.tar.gz -O pg_mooncake.tar.gz && \
-    echo "a2d16eff7948dde64f072609ca5d2962d6b4d07cb89d45952add473529c55f55 pg_mooncake.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/Mooncake-Labs/pg_mooncake/releases/download/v0.1.2/pg_mooncake-0.1.2.tar.gz -O pg_mooncake.tar.gz && \
+    echo "4550473784fcdd2e1e18062bc01eb9c286abd27cdf5e11a4399be6c0a426ba90 pg_mooncake.tar.gz" | sha256sum --check && \
     mkdir pg_mooncake-src && cd pg_mooncake-src && tar xzf ../pg_mooncake.tar.gz --strip-components=1 -C . && \
     echo "make -f pg_mooncake-src/Makefile.build installcheck TEST_DIR=./test SQL_DIR=./sql SRC_DIR=./src" > neon-test.sh && \
     chmod a+x neon-test.sh
@@ -1436,6 +1464,31 @@ RUN make release -j $(getconf _NPROCESSORS_ONLN) && \
     make install -j $(getconf _NPROCESSORS_ONLN) && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_mooncake.control
 
+#########################################################################################
+#
+# Layer "pg-duckdb-pg-build"
+# compile pg_duckdb extension
+#
+#########################################################################################
+FROM build-deps AS pg_duckdb-src
+WORKDIR /ext-src
+COPY compute/patches/pg_duckdb_v031.patch .
+# pg_duckdb build requires source dir to be a git repo to get submodules
+# allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only: 
+# - extension management function duckdb.install_extension()
+# - access to duckdb.extensions table and its sequence
+RUN git clone --depth 1 --branch v0.3.1 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
+    cd pg_duckdb-src && \
+    git submodule update --init --recursive && \
+    patch -p1 < /ext-src/pg_duckdb_v031.patch
+
+FROM pg-build AS pg_duckdb-build
+ARG PG_VERSION
+COPY --from=pg_duckdb-src /ext-src/ /ext-src/
+WORKDIR /ext-src/pg_duckdb-src
+RUN make install -j $(getconf _NPROCESSORS_ONLN) && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control 
+        
 #########################################################################################
 #
 # Layer "pg_repack"
@@ -1481,12 +1534,35 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
 
 #########################################################################################
 #
-# Layer "all-extensions"
+# Layer "extensions-none"
+#
+#########################################################################################
+FROM build-deps AS extensions-none
+
+RUN mkdir /usr/local/pgsql
+
+#########################################################################################
+#
+# Layer "extensions-minimal"
+#
+# This subset of extensions includes the extensions that we have in
+# shared_preload_libraries by default.
+#
+#########################################################################################
+FROM build-deps AS extensions-minimal
+
+COPY --from=pgrag-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=timescaledb-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_cron-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
+
+#########################################################################################
+#
+# Layer "extensions-all"
 # Bundle together all the extensions
 #
 #########################################################################################
-FROM build-deps AS all-extensions
-ARG PG_VERSION
+FROM build-deps AS extensions-all
 
 # Public extensions
 COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1526,9 +1602,16 @@ COPY --from=pg_anon-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_duckdb-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 
-COPY --from=neon-ext-build /usr/local/pgsql/ /usr/local/pgsql/
+#########################################################################################
+#
+# Layer "neon-pg-ext-build"
+# Includes Postgres and all the extensions chosen by EXTENSIONS arg.
+#
+#########################################################################################
+FROM extensions-${EXTENSIONS} AS neon-pg-ext-build
 
 #########################################################################################
 #
@@ -1542,7 +1625,15 @@ ENV BUILD_TAG=$BUILD_TAG
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
-RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy
+RUN --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/registry \
+    --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/git \
+    --mount=type=cache,uid=1000,target=/home/nonroot/target \
+    mold -run cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy && \
+    mkdir target-bin && \
+    cp target/release-line-debug-size-lto/compute_ctl \
+       target/release-line-debug-size-lto/fast_import \
+       target/release-line-debug-size-lto/local_proxy \
+       target-bin
 
 #########################################################################################
 #
@@ -1550,7 +1641,7 @@ RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin c
 #
 #########################################################################################
 
-FROM debian:$DEBIAN_FLAVOR AS pgbouncer
+FROM $BASE_IMAGE_SHA AS pgbouncer
 RUN set -e \
     && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
     && apt update \
@@ -1571,7 +1662,7 @@ RUN set -e \
     && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
     && cd pgbouncer \
     && ./autogen.sh \
-    && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
+    && ./configure --prefix=/usr/local/pgbouncer --without-openssl \
     && make -j $(nproc) dist_man_MANS= \
     && make install dist_man_MANS=
 
@@ -1580,12 +1671,12 @@ RUN set -e \
 # Layer "exporters"
 #
 #########################################################################################
-FROM alpine/curl:${ALPINE_CURL_VERSION} AS exporters
+FROM build-deps AS exporters
 ARG TARGETARCH
 # Keep sql_exporter version same as in build-tools.Dockerfile and
 # test_runner/regress/test_compute_metrics.py
-RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc; \
-    if [ "$TARGETARCH" = "amd64" ]; then\
+# See comment on the top of the file regading `echo`, `-e` and `\n`
+RUN if [ "$TARGETARCH" = "amd64" ]; then\
         postgres_exporter_sha256='027e75dda7af621237ff8f5ac66b78a40b0093595f06768612b92b1374bd3105';\
         pgbouncer_exporter_sha256='c9f7cf8dcff44f0472057e9bf52613d93f3ffbc381ad7547a959daa63c5e84ac';\
         sql_exporter_sha256='38e439732bbf6e28ca4a94d7bc3686d3fa1abdb0050773d5617a9efdb9e64d08';\
@@ -1610,7 +1701,8 @@ RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 30
 #
 #########################################################################################
 FROM neon-ext-build AS postgres-cleanup-layer
-COPY --from=all-extensions /usr/local/pgsql /usr/local/pgsql
+
+COPY --from=neon-pg-ext-build /usr/local/pgsql /usr/local/pgsql
 
 # Remove binaries from /bin/ that we won't use (or would manually copy & install otherwise)
 RUN cd /usr/local/pgsql/bin && rm -f ecpg raster2pgsql shp2pgsql pgtopo_export pgtopo_import pgsql2shp
@@ -1635,7 +1727,7 @@ USER nonroot
 
 COPY --chown=nonroot compute compute
 
-RUN make PG_VERSION="${PG_VERSION}" -C compute
+RUN make PG_VERSION="${PG_VERSION:?}" -C compute
 
 #########################################################################################
 #
@@ -1661,15 +1753,15 @@ COPY --from=pg_graphql-src /ext-src/ /ext-src/
 COPY --from=hypopg-src /ext-src/ /ext-src/
 COPY --from=pg_hashids-src /ext-src/ /ext-src/
 COPY --from=rum-src /ext-src/ /ext-src/
-#COPY --from=pgtap-src /ext-src/ /ext-src/
+COPY --from=pgtap-src /ext-src/ /ext-src/
 COPY --from=ip4r-src /ext-src/ /ext-src/
 COPY --from=prefix-src /ext-src/ /ext-src/
 COPY --from=hll-src /ext-src/ /ext-src/
 COPY --from=plpgsql_check-src /ext-src/ /ext-src/
 #COPY --from=timescaledb-src /ext-src/ /ext-src/
 COPY --from=pg_hint_plan-src /ext-src/ /ext-src/
-COPY compute/patches/pg_hint_plan_${PG_VERSION}.patch /ext-src
-RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan_${PG_VERSION}.patch
+COPY compute/patches/pg_hint_plan_${PG_VERSION:?}.patch /ext-src
+RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan_${PG_VERSION:?}.patch
 COPY --from=pg_cron-src /ext-src/ /ext-src/
 #COPY --from=pgx_ulid-src /ext-src/ /ext-src/
 #COPY --from=pgx_ulid-pgrx12-src /ext-src/ /ext-src/
@@ -1701,46 +1793,11 @@ ENV PGDATABASE=postgres
 # Put it all together into the final image
 #
 #########################################################################################
-FROM debian:$DEBIAN_FLAVOR
+FROM $BASE_IMAGE_SHA
 ARG DEBIAN_VERSION
-# Add user postgres
-RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
-    echo "postgres:test_console_pass" | chpasswd && \
-    mkdir /var/db/postgres/compute && mkdir /var/db/postgres/specs && \
-    mkdir /var/db/postgres/pgbouncer && \
-    chown -R postgres:postgres /var/db/postgres && \
-    chmod 0750 /var/db/postgres/compute && \
-    chmod 0750 /var/db/postgres/pgbouncer && \
-    echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig && \
-    # create folder for file cache
-    mkdir -p -m 777 /neon/cache
 
-COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
-
-# pgbouncer and its config
-COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
-COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
-
-# local_proxy and its config
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local_proxy
-RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
-
-# Metrics exporter binaries and configuration files
-COPY --from=exporters ./postgres_exporter /bin/postgres_exporter
-COPY --from=exporters ./pgbouncer_exporter /bin/pgbouncer_exporter
-COPY --from=exporters ./sql_exporter /bin/sql_exporter
-
-COPY --chown=postgres compute/etc/postgres_exporter.yml /etc/postgres_exporter.yml
-
-COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter.yml               /etc/sql_exporter.yml
-COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector.yml             /etc/neon_collector.yml
-COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
-COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
-
-# Create remote extension download directory
-RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/local/download_extensions
+# Use strict mode for bash to catch errors early
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 # Install:
 # libreadline8 for psql
@@ -1751,10 +1808,9 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 # libzstd1 for zstd
 # libboost* for rdkit
 # ca-certificates for communicating with s3 by compute_ctl
-
+# libevent for pgbouncer
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
-
 RUN apt update && \
     case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):
@@ -1789,33 +1845,54 @@ RUN apt update && \
         libxslt1.1 \
         libzstd1 \
         libcurl4 \
+        libevent-2.1-7 \
         locales \
         procps \
         ca-certificates \
-        curl \
-        unzip \
         $VERSION_INSTALLS && \
     apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 
-# aws cli is used by fast_import (curl and unzip above are at this time only used for this installation step)
-ARG TARGETARCH
-RUN set -ex; \
-    if [ "${TARGETARCH}" = "amd64" ]; then \
-        TARGETARCH_ALT="x86_64"; \
-        CHECKSUM="c9a9df3770a3ff9259cb469b6179e02829687a464e0824d5c32d378820b53a00"; \
-    elif [ "${TARGETARCH}" = "arm64" ]; then \
-        TARGETARCH_ALT="aarch64"; \
-        CHECKSUM="8181730be7891582b38b028112e81b4899ca817e8c616aad807c9e9d1289223a"; \
-    else \
-        echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
-    fi; \
-    curl --retry 5 -L "https://awscli.amazonaws.com/awscli-exe-linux-${TARGETARCH_ALT}-2.17.5.zip" -o /tmp/awscliv2.zip; \
-    echo "${CHECKSUM}  /tmp/awscliv2.zip" | sha256sum -c -; \
-    unzip /tmp/awscliv2.zip -d /tmp/awscliv2; \
-    /tmp/awscliv2/aws/install; \
-    rm -rf /tmp/awscliv2.zip /tmp/awscliv2; \
-    true
+# Add user postgres
+RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
+    echo "postgres:test_console_pass" | chpasswd && \
+    mkdir /var/db/postgres/compute && mkdir /var/db/postgres/specs && \
+    mkdir /var/db/postgres/pgbouncer && \
+    chown -R postgres:postgres /var/db/postgres && \
+    chmod 0750 /var/db/postgres/compute && \
+    chmod 0750 /var/db/postgres/pgbouncer && \
+    # create folder for file cache
+    mkdir -p -m 777 /neon/cache && \
+    # Create remote extension download directory
+    mkdir /usr/local/download_extensions && \
+    chown -R postgres:postgres /usr/local/download_extensions
+
+# pgbouncer and its config
+COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
+COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
+
+COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/fast_import /usr/local/bin/fast_import
+
+# local_proxy and its config
+COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/local_proxy /usr/local/bin/local_proxy
+RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
+
+# Metrics exporter binaries and configuration files
+COPY --from=exporters ./postgres_exporter /bin/postgres_exporter
+COPY --from=exporters ./pgbouncer_exporter /bin/pgbouncer_exporter
+COPY --from=exporters ./sql_exporter /bin/sql_exporter
+
+COPY --chown=postgres compute/etc/postgres_exporter.yml /etc/postgres_exporter.yml
+
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter.yml               /etc/sql_exporter.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector.yml             /etc/neon_collector.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
+
+# Make the libraries we built available
+RUN echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
 
 ENV LANG=en_US.utf8
 USER postgres

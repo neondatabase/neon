@@ -140,9 +140,8 @@ async fn authenticate(
     let (psql_session_id, waiter) = loop {
         let psql_session_id = new_psql_session_id();
 
-        match control_plane::mgmt::get_waiter(&psql_session_id) {
-            Ok(waiter) => break (psql_session_id, waiter),
-            Err(_e) => continue,
+        if let Ok(waiter) = control_plane::mgmt::get_waiter(&psql_session_id) {
+            break (psql_session_id, waiter);
         }
     };
 

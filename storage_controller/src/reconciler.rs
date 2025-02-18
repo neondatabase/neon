@@ -1,7 +1,7 @@
 use crate::pageserver_client::PageserverClient;
 use crate::persistence::Persistence;
 use crate::{compute_hook, service};
-use pageserver_api::controller_api::{AvailabilityZone, PlacementPolicy};
+use pageserver_api::controller_api::{AvailabilityZone, MigrationConfig, PlacementPolicy};
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig, TenantWaitLsnRequest,
 };
@@ -91,9 +91,10 @@ pub(crate) struct ReconcilerConfigBuilder {
 }
 
 impl ReconcilerConfigBuilder {
-    pub(crate) fn new() -> Self {
+    /// Priority is special: you must pick one thoughtfully, do not just use 'normal' as the default
+    pub(crate) fn new(priority: ReconcilerPriority) -> Self {
         Self {
-            config: ReconcilerConfig::default(),
+            config: ReconcilerConfig::new(priority),
         }
     }
 
@@ -115,13 +116,32 @@ impl ReconcilerConfigBuilder {
         }
     }
 
+    pub(crate) fn tenant_creation_hint(self, hint: bool) -> Self {
+        Self {
+            config: ReconcilerConfig {
+                tenant_creation_hint: hint,
+                ..self.config
+            },
+        }
+    }
+
     pub(crate) fn build(self) -> ReconcilerConfig {
         self.config
     }
 }
 
-#[derive(Default, Debug, Copy, Clone)]
+// Higher priorities are used for user-facing tasks, so that a long backlog of housekeeping work (e.g. reconciling on startup, rescheduling
+// things on node changes) does not starve user-facing tasks.
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum ReconcilerPriority {
+    Normal,
+    High,
+}
+
+#[derive(Debug, Copy, Clone)]
 pub(crate) struct ReconcilerConfig {
+    pub(crate) priority: ReconcilerPriority,
+
     // During live migration give up on warming-up the secondary
     // after this timeout.
     secondary_warmup_timeout: Option<Duration>,
@@ -129,9 +149,25 @@ pub(crate) struct ReconcilerConfig {
     // During live migrations this is the amount of time that
     // the pagserver will hold our poll.
     secondary_download_request_timeout: Option<Duration>,
+
+    // A hint indicating whether this reconciliation is done on the
+    // creation of a new tenant. This only informs logging behaviour.
+    tenant_creation_hint: bool,
 }
 
 impl ReconcilerConfig {
+    /// Configs are always constructed with an explicit priority, to force callers to think about whether
+    /// the operation they're scheduling is high-priority or not. Normal priority is not a safe default, because
+    /// scheduling something user-facing at normal priority can result in it getting starved out by background work.
+    pub(crate) fn new(priority: ReconcilerPriority) -> Self {
+        Self {
+            priority,
+            secondary_warmup_timeout: None,
+            secondary_download_request_timeout: None,
+            tenant_creation_hint: false,
+        }
+    }
+
     pub(crate) fn get_secondary_warmup_timeout(&self) -> Duration {
         const SECONDARY_WARMUP_TIMEOUT_DEFAULT: Duration = Duration::from_secs(300);
         self.secondary_warmup_timeout
@@ -142,6 +178,28 @@ impl ReconcilerConfig {
         const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT_DEFAULT: Duration = Duration::from_secs(20);
         self.secondary_download_request_timeout
             .unwrap_or(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT_DEFAULT)
+    }
+
+    pub(crate) fn tenant_creation_hint(&self) -> bool {
+        self.tenant_creation_hint
+    }
+}
+
+impl From<&MigrationConfig> for ReconcilerConfig {
+    fn from(value: &MigrationConfig) -> Self {
+        // Run reconciler at high priority because MigrationConfig comes from human requests that should
+        // be presumed urgent.
+        let mut builder = ReconcilerConfigBuilder::new(ReconcilerPriority::High);
+
+        if let Some(timeout) = value.secondary_warmup_timeout {
+            builder = builder.secondary_warmup_timeout(timeout)
+        }
+
+        if let Some(timeout) = value.secondary_download_request_timeout {
+            builder = builder.secondary_download_request_timeout(timeout)
+        }
+
+        builder.build()
     }
 }
 
@@ -934,16 +992,35 @@ impl Reconciler {
                 )
                 .await;
             if let Err(e) = &result {
-                // It is up to the caller whether they want to drop out on this error, but they don't have to:
-                // in general we should avoid letting unavailability of the cloud control plane stop us from
-                // making progress.
-                if !matches!(e, NotifyError::ShuttingDown) {
-                    tracing::warn!("Failed to notify compute of attached pageserver {node}: {e}");
-                }
-
                 // Set this flag so that in our ReconcileResult we will set the flag on the shard that it
                 // needs to retry at some point.
                 self.compute_notify_failure = true;
+
+                // It is up to the caller whether they want to drop out on this error, but they don't have to:
+                // in general we should avoid letting unavailability of the cloud control plane stop us from
+                // making progress.
+                match e {
+                    // 404s from cplane during tenant creation are expected.
+                    // Cplane only persists the shards to the database after
+                    // creating the tenant and the timeline. If we notify before
+                    // that, we'll get a 404.
+                    //
+                    // This is fine because tenant creations happen via /location_config
+                    // and that returns the list of locations in the response. Hence, we
+                    // silence the error and return Ok(()) here. Reconciliation will still
+                    // be retried because we set [`Reconciler::compute_notify_failure`] above.
+                    NotifyError::Unexpected(hyper::StatusCode::NOT_FOUND)
+                        if self.reconciler_config.tenant_creation_hint() =>
+                    {
+                        return Ok(());
+                    }
+                    NotifyError::ShuttingDown => {}
+                    _ => {
+                        tracing::warn!(
+                            "Failed to notify compute of attached pageserver {node}: {e}"
+                        );
+                    }
+                }
             }
             result
         } else {

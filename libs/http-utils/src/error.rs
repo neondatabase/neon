@@ -5,6 +5,8 @@ use std::error::Error as StdError;
 use thiserror::Error;
 use tracing::{error, info, warn};
 
+use utils::auth::AuthError;
+
 #[derive(Debug, Error)]
 pub enum ApiError {
     #[error("Bad request: {0:#?}")]
@@ -93,6 +95,15 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
         }
+    }
+}
+
+impl From<AuthError> for ApiError {
+    fn from(_value: AuthError) -> Self {
+        // Don't pass on the value of the AuthError as a precautionary measure.
+        // Being intentionally vague in public error communication hurts debugability
+        // but it is more secure.
+        ApiError::Forbidden("JWT authentication error".to_string())
     }
 }
 

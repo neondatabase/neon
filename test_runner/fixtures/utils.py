@@ -52,17 +52,19 @@ COMPONENT_BINARIES = {
 # Disable auto-formatting for better readability
 # fmt: off
 VERSIONS_COMBINATIONS = (
-    {"storage_controller": "new", "storage_broker": "new", "compute": "new", "safekeeper": "new", "pageserver": "new"},
-    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "old"},
-    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "new"},
-    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "new", "pageserver": "new"},
-    {"storage_controller": "old", "storage_broker": "old", "compute": "new", "safekeeper": "new", "pageserver": "new"},
+    {"storage_controller": "new", "storage_broker": "new", "compute": "new", "safekeeper": "new", "pageserver": "new"}, # combination: nnnnn
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "old"}, # combination: ooonn
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "new"}, # combination: ononn
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "new", "pageserver": "new"}, # combination: onnnn
+    {"storage_controller": "old", "storage_broker": "old", "compute": "new", "safekeeper": "new", "pageserver": "new"}, # combination: nnnoo
 )
 # fmt: on
 
 # If the environment variable USE_LFC is set and its value is "false", then LFC is disabled for tests.
 # If it is not set or set to a value not equal to "false", LFC is enabled by default.
 USE_LFC = os.environ.get("USE_LFC") != "false"
+
+WITH_SANITIZERS = os.environ.get("SANITIZERS") == "enabled"
 
 
 def subprocess_capture(

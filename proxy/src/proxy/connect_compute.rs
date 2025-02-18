@@ -198,7 +198,7 @@ where
 
                 warn!(error = ?e, num_retries, retriable = true, COULD_NOT_CONNECT);
             }
-        };
+        }
 
         let wait_duration = retry_after(num_retries, compute.retry);
         num_retries += 1;
