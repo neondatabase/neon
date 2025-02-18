@@ -424,9 +424,7 @@ mod tests {
         let msg = NT1;
 
         let encoded = msg.ser().unwrap();
-        let expected = hex_literal::hex!(
-            "0006 5223"
-        );
+        let expected = hex_literal::hex!("0006 5223");
         assert_eq!(encoded, expected);
 
         assert_eq!(encoded, NT1_INNER.ser().unwrap());
@@ -445,9 +443,7 @@ mod tests {
         let msg = NT1;
 
         let encoded = msg.ser().unwrap();
-        let expected = hex_literal::hex!(
-            "2352 0600"
-        );
+        let expected = hex_literal::hex!("2352 0600");
         assert_eq!(encoded, expected);
 
         assert_eq!(encoded, NT1_INNER.ser().unwrap());
