@@ -295,6 +295,10 @@ impl InterpretedWalReader {
 
         let mut wal_decoder = WalStreamDecoder::new(start_pos, self.pg_version);
 
+        // Tracks the start of the PG WAL LSN from which the current batch of
+        // interpreted records originated.
+        let mut current_batch_wal_start_lsn: Option<Lsn> = None;
+
         loop {
             tokio::select! {
                 // Main branch for reading WAL and forwarding it
@@ -314,6 +318,12 @@ impl InterpretedWalReader {
                             return Result::Err(InterpretedWalReaderError::WalStreamClosed);
                         }
                     };
+
+                    // We will already have a value if the previous chunks of WAL
+                    // did not decode into anything useful.
+                    if current_batch_wal_start_lsn.is_none() {
+                        current_batch_wal_start_lsn = Some(wal_start_lsn);
+                    }
 
                     wal_decoder.feed_bytes(&wal);
 
@@ -363,7 +373,9 @@ impl InterpretedWalReader {
 
                     let max_next_record_lsn = match max_next_record_lsn {
                         Some(lsn) => lsn,
-                        None => { continue; }
+                        None => {
+                            continue;
+                        }
                     };
 
                     // Update the current position such that new receivers can decide
@@ -376,6 +388,8 @@ impl InterpretedWalReader {
                             unreachable!()
                         }
                     }
+
+                    let batch_wal_start_lsn = current_batch_wal_start_lsn.take().unwrap();
 
                     // Send interpreted records downstream. Anything that has already been seen
                     // by a shard is filtered out.
@@ -392,7 +406,7 @@ impl InterpretedWalReader {
                             let batch = InterpretedWalRecords {
                                 records,
                                 next_record_lsn: max_next_record_lsn,
-                                raw_wal_start_lsn: Some(wal_start_lsn),
+                                raw_wal_start_lsn: Some(batch_wal_start_lsn),
                             };
 
                             let res = state.tx.send(Batch {
