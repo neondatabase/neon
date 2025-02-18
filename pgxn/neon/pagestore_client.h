@@ -301,6 +301,7 @@ extern int lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum,
 extern void lfc_init(void);
 extern bool lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 						 const void* buffer, XLogRecPtr lsn);
+extern bool lfc_enabled(void);
 
 
 static inline bool

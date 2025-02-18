@@ -337,7 +337,6 @@ nm_unpack_response(StringInfo s)
 		case T_NeonDbSizeRequest:
 		case T_NeonGetSlruSegmentRequest:
 		default:
-			neon_log(ERROR, "unexpected neon message tag 0x%02x", tag);
 			break;
 	}
 
@@ -1370,24 +1369,27 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-
-	neon_get_request_lsns(InfoFromSMgrRel(reln),
-						  forknum, blocknum,
-						  request_lsns, nblocks, NULL);
-	for (int i = 0; i < nblocks; i++)
+	/* Prefetch result will be placed in LFC, so no need to send prefetch requests if LFC is disabled */
+	if (lfc_enabled())
 	{
-		if (!lfc_cache_contains(InfoFromSMgrRel(reln), forknum, blocknum + i))
+		neon_get_request_lsns(InfoFromSMgrRel(reln),
+							  forknum, blocknum,
+							  request_lsns, nblocks, NULL);
+		for (int i = 0; i < nblocks; i++)
 		{
-			NeonCommunicatorRequest request = {
-				.page.hdr.tag = T_NeonGetPageRequest,
-				.page.hdr.u.recepient.bufid = InvalidBuffer,
-				.page.hdr.lsn = request_lsns[i].request_lsn,
-				.page.hdr.not_modified_since = request_lsns[i].not_modified_since,
-				.page.rinfo = InfoFromSMgrRel(reln),
-				.page.forknum = forknum,
-				.page.blkno = blocknum + i,
-			};
-			(void)communicator_send_request(get_shard_number(InfoFromSMgrRel(reln), blocknum + i), &request);
+			if (!lfc_cache_contains(InfoFromSMgrRel(reln), forknum, blocknum + i))
+			{
+				NeonCommunicatorRequest request = {
+					.page.hdr.tag = T_NeonGetPageRequest,
+					.page.hdr.u.recepient.bufid = InvalidBuffer,
+					.page.hdr.lsn = request_lsns[i].request_lsn,
+					.page.hdr.not_modified_since = request_lsns[i].not_modified_since,
+					.page.rinfo = InfoFromSMgrRel(reln),
+					.page.forknum = forknum,
+					.page.blkno = blocknum + i,
+				};
+				(void)communicator_send_request(get_shard_number(InfoFromSMgrRel(reln), blocknum + i), &request);
+			}
 		}
 	}
 	return false;
@@ -1415,7 +1417,9 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (!lfc_cache_contains(InfoFromSMgrRel(reln), forknum, blocknum))
+	/* Prefetch result will be placed in LFC, so no need to send prefetch requests if LFC is disabled */
+	if (lfc_enabled()
+		&& !lfc_cache_contains(InfoFromSMgrRel(reln), forknum, blocknum))
 	{
 		neon_request_lsns request_lsns;
 		neon_get_request_lsns(InfoFromSMgrRel(reln),

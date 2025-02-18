@@ -269,6 +269,12 @@ lfc_ensure_opened(void)
 	return true;
 }
 
+bool
+lfc_enabled(void)
+{
+	return !lfc_maybe_disabled();
+}
+
 static void
 lfc_shmem_startup(void)
 {
