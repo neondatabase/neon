@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from fixtures.common_types import TenantId, TenantShardId, TimelineId
+from fixtures.common_types import TenantId, TenantShardId, TimelineArchivalState, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -986,10 +986,53 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
         TenantShardId(tenant_id, shard_number=0, shard_count=0), timeline_id
     )
 
-    def all_layers_downloaded():
+    # Now archive the timeline, then unarchive it. The currently on disk heatmap
+    # does not contain any layers for our newly unarchived timeline. Warm it up
+    # by calling the heatmap layer download API.
+
+    def all_layers_downloaded(expected_layer_count: int):
         local_layers_count = len(ps_secondary.list_layers(tenant_id, timeline_id))
 
         log.info(f"{local_layers_count=} {after_migration_heatmap_layers_count=}")
-        assert local_layers_count == after_migration_heatmap_layers_count
+        assert local_layers_count == expected_layer_count
 
-    wait_until(all_layers_downloaded)
+    wait_until(lambda: all_layers_downloaded(after_migration_heatmap_layers_count))
+
+    def check_archival_state(state: TimelineArchivalState):
+        timelines = (
+            timeline["timeline_id"]
+            for timeline in ps_secondary.http_client().timeline_list(tenant_id=tenant_id)
+        )
+
+        if state == TimelineArchivalState.ARCHIVED:
+            assert str(timeline_id) not in timelines
+        elif state == TimelineArchivalState.UNARCHIVED:
+            assert str(timeline_id) in timelines
+
+    ps_secondary.http_client().timeline_archival_config(
+        tenant_id, timeline_id, TimelineArchivalState.ARCHIVED
+    )
+    ps_secondary.http_client().timeline_offload(tenant_id, timeline_id)
+
+    wait_until(lambda: check_archival_state(TimelineArchivalState.ARCHIVED))
+    assert len(ps_secondary.list_layers(tenant_id, timeline_id)) == 0
+
+    # Upload a heatmap after archiving. This forces the tenant to regenerate
+    # the heatmap and ensures that a fresh heatmap is created on unarchival.
+    ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
+    heatmap_after_archival = env.pageserver_remote_storage.heatmap_content(tenant_id)
+    assert str(timeline_id) not in [
+        htl["timelein_id"] for htl in heatmap_after_archival["timelines"]
+    ]
+
+    ps_secondary.http_client().timeline_archival_config(
+        tenant_id, timeline_id, TimelineArchivalState.UNARCHIVED
+    )
+
+    wait_until(lambda: check_archival_state(TimelineArchivalState.UNARCHIVED))
+
+    env.storage_controller.download_heatmap_layers(
+        TenantShardId(tenant_id, shard_number=0, shard_count=0), timeline_id
+    )
+
+    wait_until(lambda: all_layers_downloaded(after_migration_heatmap_layers_count))
