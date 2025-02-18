@@ -1,7 +1,10 @@
-from fixtures.neon_fixtures import NeonEnv
 import os
 
-EXPECTED_OUT_PATH = os.path.join(os.curdir, "test_runner", "regress", "data", "test_signed_char.out")
+from fixtures.neon_fixtures import NeonEnv
+
+EXPECTED_OUT_PATH = os.path.join(
+    os.curdir, "test_runner", "regress", "data", "test_signed_char.out"
+)
 SIGNED_CHAR_EXTRACT = """
     WITH
   pagenumbers AS (
@@ -39,7 +42,7 @@ def test_signed_char(neon_simple_env: NeonEnv):
     # Compare expected output
     page1 = pages[0]
     data = bytes(page1[1]).hex()
-    with open(EXPECTED_OUT_PATH, 'rb') as f:
+    with open(EXPECTED_OUT_PATH, "rb") as f:
         expected = f.read().decode("utf-8")
-    
+
     assert data == expected
