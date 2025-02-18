@@ -787,7 +787,7 @@ impl Timeline {
                 //
                 // Suppress error when it's due to cancellation
                 if !self.cancel.is_cancelled() && !err.is_cancelled() {
-                    tracing::error!("could not compact, repartitioning keyspace failed: {err:?}");
+                    critical!("could not compact, repartitioning keyspace failed: {err:?}");
                 }
             }
         };
