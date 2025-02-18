@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::Result;
 use axum::{
+    body::Body,
     extract::Request,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -16,6 +17,7 @@ use axum::{
 use http::StatusCode;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
+use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::{request_id::PropagateRequestIdLayer, trace::TraceLayer};
 use tracing::{debug, error, info, Span};
 use uuid::Uuid;
@@ -84,46 +86,85 @@ impl From<Server> for Router<Arc<ComputeNode>> {
                 .route("/terminate", post(terminate::terminate)),
         };
 
-        router.fallback(Server::handle_404).method_not_allowed_fallback(Server::handle_405).layer(
-            ServiceBuilder::new()
-                // Add this middleware since we assume the request ID exists
-                .layer(middleware::from_fn(maybe_add_request_id_header))
-                .layer(
-                    TraceLayer::new_for_http()
-                        .on_request(|request: &http::Request<_>, _span: &Span| {
-                            let request_id = request
-                                .headers()
-                                .get(X_REQUEST_ID)
-                                .unwrap()
-                                .to_str()
-                                .unwrap();
-
-                            match request.uri().path() {
-                                "/metrics" => {
-                                    debug!(%request_id, "{} {}", request.method(), request.uri())
-                                }
-                                _ => info!(%request_id, "{} {}", request.method(), request.uri()),
-                            };
-                        })
-                        .on_response(
-                            |response: &http::Response<_>, latency: Duration, _span: &Span| {
-                                let request_id = response
+        router
+            .fallback(Server::handle_404)
+            .method_not_allowed_fallback(Server::handle_405)
+            .layer(
+                ServiceBuilder::new()
+                    // Add this middleware since we assume the request ID exists
+                    .layer(middleware::from_fn(maybe_add_request_id_header))
+                    .layer(
+                        TraceLayer::new_for_http()
+                            .make_span_with(|request: &Request<Body>| {
+                                let request_id = request
                                     .headers()
                                     .get(X_REQUEST_ID)
                                     .unwrap()
                                     .to_str()
                                     .unwrap();
 
-                                info!(
-                                    %request_id,
-                                    code = response.status().as_u16(),
-                                    latency = latency.as_millis()
-                                )
-                            },
-                        ),
-                )
-                .layer(PropagateRequestIdLayer::x_request_id()),
-        )
+                                match request.uri().path() {
+                                    "/metrics" => {
+                                        tracing::span!(
+                                            tracing::Level::DEBUG,
+                                            "",
+                                            method = tracing::field::display(request.method()),
+                                            uri = tracing::field::display(request.uri()),
+                                            request_id = tracing::field::display(request_id)
+                                        )
+                                    }
+                                    _ => tracing::span!(
+                                        tracing::Level::INFO,
+                                        "",
+                                        method = tracing::field::display(request.method()),
+                                        uri = tracing::field::display(request.uri()),
+                                        request_id = tracing::field::display(request_id)
+                                    ),
+                                }
+                            })
+                            .on_request(|request: &http::Request<_>, _span: &Span| {
+                                match request.uri().path() {
+                                    "/metrics" => debug!("incoming request"),
+                                    _ => info!("incoming request"),
+                                };
+                            })
+                            .on_response(
+                                |response: &http::Response<_>, latency: Duration, _span: &Span| {
+                                    // All errors will be logged in the on_failure handler
+                                    if let 200..=399 = response.status().as_u16() {
+                                        info!(
+                                            message = "request finished",
+                                            code = %response.status().as_u16(),
+                                            latency_ms = %latency.as_millis()
+                                        )
+                                    }
+                                },
+                            )
+                            .on_failure(
+                                |error: ServerErrorsFailureClass,
+                                 latency: Duration,
+                                 _span: &Span| {
+                                    match error {
+                                        ServerErrorsFailureClass::StatusCode(code) => {
+                                            error!(
+                                                message = "request failed",
+                                                code = %code,
+                                                latency_ms = %latency.as_millis()
+                                            );
+                                        }
+                                        ServerErrorsFailureClass::Error(error) => {
+                                            error!(
+                                                message = "request failed unexpectedly",
+                                                error = %error,
+                                                latency_ms = %latency.as_millis()
+                                            );
+                                        }
+                                    }
+                                },
+                            ),
+                    )
+                    .layer(PropagateRequestIdLayer::x_request_id()),
+            )
     }
 }
 
