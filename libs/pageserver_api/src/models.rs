@@ -1080,8 +1080,7 @@ pub struct TenantInfo {
 
     /// Opaque explanation if gc is being blocked.
     ///
-    /// Only looked up for the individual tenant detail, not the listing. This is purely for
-    /// debugging, not included in openapi.
+    /// Only looked up for the individual tenant detail, not the listing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_blocking: Option<String>,
 }
