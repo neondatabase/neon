@@ -1,5 +1,7 @@
 from fixtures.neon_fixtures import NeonEnv
+import os
 
+EXPECTED_OUT_PATH = os.path.join(os.curdir, "test_runner", "regress", "data", "test_signed_char.out")
 SIGNED_CHAR_EXTRACT = """
     WITH
   pagenumbers AS (
@@ -34,9 +36,10 @@ def test_signed_char(neon_simple_env: NeonEnv):
     )
     ses1.execute(SIGNED_CHAR_EXTRACT)
     pages = ses1.fetchall()
-    # Expected output is [(1, <memory at 0x1098c7a00>, 4294967295, 0, ['leaf'])]
+    # Compare expected output
     page1 = pages[0]
-    assert page1[0] == 1
-    assert page1[-1] == ["leaf"]
-    assert page1[-2] == 0
-    assert page1[-3] == 4294967295
+    data = bytes(page1[1]).hex()
+    with open(EXPECTED_OUT_PATH, 'rb') as f:
+        expected = f.read().decode("utf-8")
+    
+    assert data == expected
