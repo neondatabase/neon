@@ -1004,7 +1004,7 @@ mod tests {
 
     use postgres_ffi::{XLogSegNo, WAL_SEGMENT_SIZE};
     use safekeeper_api::{
-        membership::{Configuration, MemberSet, SafekeeperId},
+        membership::{Configuration, MemberSet, SafekeeperGeneration, SafekeeperId},
         ServerInfo,
     };
 
@@ -1303,7 +1303,7 @@ mod tests {
             tenant_id,
             timeline_id,
             mconf: Configuration {
-                generation: 42,
+                generation: SafekeeperGeneration::new(42),
                 members: MemberSet::new(vec![SafekeeperId {
                     id: NodeId(1),
                     host: "hehe.org".to_owned(),

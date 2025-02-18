@@ -8,6 +8,14 @@ use crate::reconciler::ReconcileError;
 use crate::service::{LeadershipStatus, Service, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT};
 use anyhow::Context;
 use futures::Future;
+use http_utils::{
+    endpoint::{self, auth_middleware, check_permission_with, request_span},
+    error::ApiError,
+    failpoints::failpoints_handler,
+    json::{json_request, json_response},
+    request::{must_get_query_param, parse_query_param, parse_request_param},
+    RequestExt, RouterBuilder,
+};
 use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
@@ -29,20 +37,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use utils::auth::{Scope, SwappableJwtAuth};
-use utils::failpoint_support::failpoints_handler;
-use utils::http::endpoint::{auth_middleware, check_permission_with, request_span};
-use utils::http::request::{must_get_query_param, parse_query_param, parse_request_param};
-use utils::id::{TenantId, TimelineId};
-
-use utils::{
-    http::{
-        endpoint::{self},
-        error::ApiError,
-        json::{json_request, json_response},
-        RequestExt, RouterBuilder,
-    },
-    id::NodeId,
-};
+use utils::id::{NodeId, TenantId, TimelineId};
 
 use pageserver_api::controller_api::{
     NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantPolicyRequest,
@@ -521,6 +516,35 @@ async fn handle_tenant_timeline_block_unblock_gc(
     json_response(StatusCode::OK, ())
 }
 
+async fn handle_tenant_timeline_download_heatmap_layers(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
+
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+    let concurrency: Option<usize> = parse_query_param(&req, "concurrency")?;
+
+    service
+        .tenant_timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency)
+        .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
+// For metric labels where we would like to include the approximate path, but exclude high-cardinality fields like query parameters
+// and tenant/timeline IDs.  Since we are proxying to arbitrary paths, we don't have routing templates to
+// compare to, so we can just filter out our well known ID format with regexes.
+fn path_without_ids(path: &str) -> String {
+    static ID_REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    ID_REGEX
+        .get_or_init(|| regex::Regex::new(r"([0-9a-fA-F]{32}(-[0-9]{4})?|\?.*)").unwrap())
+        .replace_all(path, "")
+        .to_string()
+}
+
 async fn handle_tenant_timeline_passthrough(
     service: Arc<Service>,
     req: Request<Body>,
@@ -556,10 +580,7 @@ async fn handle_tenant_timeline_passthrough(
         .metrics_group
         .storage_controller_passthrough_request_latency;
 
-    // This is a bit awkward. We remove the param from the request
-    // and join the words by '_' to get a label for the request.
-    let just_path = path.replace(&tenant_shard_str, "");
-    let path_label = just_path
+    let path_label = path_without_ids(&path)
         .split('/')
         .filter(|token| !token.is_empty())
         .collect::<Vec<_>>()
@@ -2075,6 +2096,16 @@ pub fn make_router(
                 )
             },
         )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_heatmap_layers",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_download_heatmap_layers,
+                    RequestName("v1_tenant_timeline_download_heatmap_layers"),
+                )
+            },
+        )
         // Tenant detail GET passthrough to shard zero:
         .get("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(
@@ -2093,4 +2124,17 @@ pub fn make_router(
                 RequestName("v1_tenant_passthrough"),
             )
         })
+}
+
+#[cfg(test)]
+mod test {
+
+    use super::path_without_ids;
+
+    #[test]
+    fn test_path_without_ids() {
+        assert_eq!(path_without_ids("/v1/tenant/1a2b3344556677881122334455667788/timeline/AA223344556677881122334455667788"), "/v1/tenant//timeline/");
+        assert_eq!(path_without_ids("/v1/tenant/1a2b3344556677881122334455667788-0108/timeline/AA223344556677881122334455667788"), "/v1/tenant//timeline/");
+        assert_eq!(path_without_ids("/v1/tenant/1a2b3344556677881122334455667788-0108/timeline/AA223344556677881122334455667788?parameter=foo"), "/v1/tenant//timeline/");
+    }
 }

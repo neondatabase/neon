@@ -12,7 +12,8 @@ use storage_controller::persistence::Persistence;
 use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::{
     Config, Service, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
-    MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+    MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
+    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
@@ -75,9 +76,13 @@ struct Cli {
     #[arg(long)]
     split_threshold: Option<u64>,
 
-    /// Maximum number of reconcilers that may run in parallel
+    /// Maximum number of normal-priority reconcilers that may run in parallel
     #[arg(long)]
     reconciler_concurrency: Option<usize>,
+
+    /// Maximum number of high-priority reconcilers that may run in parallel
+    #[arg(long)]
+    priority_reconciler_concurrency: Option<usize>,
 
     /// How long to wait for the initial database connection to be available.
     #[arg(long, default_value = "5s")]
@@ -289,6 +294,9 @@ async fn async_main() -> anyhow::Result<()> {
         reconciler_concurrency: args
             .reconciler_concurrency
             .unwrap_or(RECONCILER_CONCURRENCY_DEFAULT),
+        priority_reconciler_concurrency: args
+            .priority_reconciler_concurrency
+            .unwrap_or(PRIORITY_RECONCILER_CONCURRENCY_DEFAULT),
         split_threshold: args.split_threshold,
         neon_local_repo_dir: args.neon_local_repo_dir,
         max_secondary_lag_bytes: args.max_secondary_lag_bytes,
@@ -320,7 +328,7 @@ async fn async_main() -> anyhow::Result<()> {
     let router = make_router(service.clone(), auth, build_info)
         .build()
         .map_err(|err| anyhow!(err))?;
-    let router_service = utils::http::RouterService::new(router).unwrap();
+    let router_service = http_utils::RouterService::new(router).unwrap();
 
     // Start HTTP server
     let server_shutdown = CancellationToken::new();

@@ -2139,12 +2139,18 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
         workload.validate()
 
 
-def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("num_azs", [1, 2])
+def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder, num_azs: int):
     """
     Graceful reststart of storage controller clusters use the drain and
     fill hooks in order to migrate attachments away from pageservers before
     restarting. In practice, Ansible will drive this process.
+
+    Test is parametrized on the number of AZs to exercise the AZ-driven behavior
+    of reliably moving shards back to their home AZ, and the behavior for AZ-agnostic
+    tenants where we fill based on a target shard count.
     """
+    neon_env_builder.num_azs = num_azs
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
     env.start()
@@ -2174,8 +2180,15 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         min_shard_count = min(shard_counts.values())
         max_shard_count = max(shard_counts.values())
 
-        flake_factor = 5 / 100
-        assert max_shard_count - min_shard_count <= int(total_shards * flake_factor)
+        if num_azs == 1:
+            # AZ-agnostic case: we expect all nodes to have the same number of shards, within some bound
+            flake_factor = 5 / 100
+            assert max_shard_count - min_shard_count <= int(total_shards * flake_factor)
+        else:
+            # AZ-driven case: we expect tenants to have been round-robin allocated to AZs,
+            # and after the restart they should all be back in their home AZ, so difference
+            # should be at most a single shard's tenants
+            assert max_shard_count - min_shard_count <= shard_count_per_tenant
 
     # Perform a graceful rolling restart
     for ps in env.pageservers:
@@ -3176,15 +3189,17 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     assert len(target.get_safekeepers()) == 0
 
+    sk_0 = env.safekeepers[0]
+
     body = {
         "active": True,
         "id": fake_id,
         "created_at": "2023-10-25T09:11:25Z",
         "updated_at": "2024-08-28T11:32:43Z",
         "region_id": "aws-us-east-2",
-        "host": "safekeeper-333.us-east-2.aws.neon.build",
-        "port": 6401,
-        "http_port": 7676,
+        "host": "localhost",
+        "port": sk_0.port.pg,
+        "http_port": sk_0.port.http,
         "version": 5957,
         "availability_zone_id": "us-east-2b",
     }
@@ -3229,6 +3244,13 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     assert newest_info["scheduling_policy"] == "Decomissioned"
     # Ensure idempotency
     target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
+
+    def storcon_heartbeat():
+        assert env.storage_controller.log_contains(
+            "Heartbeat round complete for 1 safekeepers, 0 offline"
+        )
+
+    wait_until(storcon_heartbeat)
 
 
 def eq_safekeeper_records(a: dict[str, Any], b: dict[str, Any]) -> bool:

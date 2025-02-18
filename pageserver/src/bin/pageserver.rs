@@ -592,7 +592,7 @@ fn start_pageserver(
         let router = http::make_router(router_state, launch_ts, http_auth.clone())?
             .build()
             .map_err(|err| anyhow!(err))?;
-        let service = utils::http::RouterService::new(router).unwrap();
+        let service = http_utils::RouterService::new(router).unwrap();
         let server = hyper0::Server::from_tcp(http_listener)?
             .serve(service)
             .with_graceful_shutdown({

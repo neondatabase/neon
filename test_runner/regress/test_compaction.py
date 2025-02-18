@@ -236,9 +236,7 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder, with_b
     wait_until(compaction_finished, timeout=60)
 
     # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
-    env.pageserver.assert_log_contains(
-        "scheduled_compact_timeline.*picked .* layers for compaction"
-    )
+    env.pageserver.assert_log_contains("gc_compact_timeline.*picked .* layers for compaction")
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
@@ -300,6 +298,8 @@ def test_pageserver_gc_compaction_idempotent(
     workload.churn_rows(row_count, env.pageserver.id)
     env.create_branch("child_branch")  # so that we have a retain_lsn
     workload.churn_rows(row_count, env.pageserver.id)
+    env.create_branch("child_branch_2")  # so that we have another retain_lsn
+    workload.churn_rows(row_count, env.pageserver.id)
     # compact 3 times if mode is before_restart
     n_compactions = 3 if compaction_mode == "before_restart" else 1
     ps_http.timeline_compact(
@@ -315,10 +315,6 @@ def test_pageserver_gc_compaction_idempotent(
             body={
                 "scheduled": True,
                 "sub_compaction": True,
-                "compact_key_range": {
-                    "start": "000000000000000000000000000000000000",
-                    "end": "030000000000000000000000000000000000",
-                },
                 "sub_compaction_max_job_size_mb": 16,
             },
         )
@@ -336,19 +332,13 @@ def test_pageserver_gc_compaction_idempotent(
                 body={
                     "scheduled": True,
                     "sub_compaction": True,
-                    "compact_key_range": {
-                        "start": "000000000000000000000000000000000000",
-                        "end": "030000000000000000000000000000000000",
-                    },
                     "sub_compaction_max_job_size_mb": 16,
                 },
             )
             wait_until(compaction_finished, timeout=60)
 
     # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
-    env.pageserver.assert_log_contains(
-        "scheduled_compact_timeline.*picked .* layers for compaction"
-    )
+    env.pageserver.assert_log_contains("gc_compact_timeline.*picked .* layers for compaction")
 
     # ensure we hit the duplicated layer key warning at least once: we did two compactions consecutively,
     # and the second one should have hit the duplicated layer key warning.
@@ -466,9 +456,7 @@ def test_pageserver_gc_compaction_interrupt(neon_env_builder: NeonEnvBuilder):
     wait_until(compaction_finished, timeout=60)
 
     # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
-    env.pageserver.assert_log_contains(
-        "scheduled_compact_timeline.*picked .* layers for compaction"
-    )
+    env.pageserver.assert_log_contains("gc_compact_timeline.*picked .* layers for compaction")
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
@@ -689,9 +677,7 @@ def test_pageserver_compaction_circuit_breaker(neon_env_builder: NeonEnvBuilder)
     env.pageserver.http_client().configure_failpoints((FAILPOINT, "return"))
 
     # Write some data to trigger compaction
-    workload.write_rows(1024, upload=False)
-    workload.write_rows(1024, upload=False)
-    workload.write_rows(1024, upload=False)
+    workload.write_rows(32768, upload=False)
 
     def assert_broken():
         env.pageserver.assert_log_contains(BROKEN_LOG)

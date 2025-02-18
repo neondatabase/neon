@@ -9,6 +9,8 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
+use std::os::fd::RawFd;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Poll};
@@ -268,6 +270,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeWriteOnly<IO> {
 }
 
 pub struct PostgresBackend<IO> {
+    pub socket_fd: RawFd,
     framed: MaybeWriteOnly<IO>,
 
     pub state: ProtoState,
@@ -293,9 +296,11 @@ impl PostgresBackend<tokio::net::TcpStream> {
         tls_config: Option<Arc<rustls::ServerConfig>>,
     ) -> io::Result<Self> {
         let peer_addr = socket.peer_addr()?;
+        let socket_fd = socket.as_raw_fd();
         let stream = MaybeTlsStream::Unencrypted(socket);
 
         Ok(Self {
+            socket_fd,
             framed: MaybeWriteOnly::Full(Framed::new(stream)),
             state: ProtoState::Initialization,
             auth_type,
@@ -307,6 +312,7 @@ impl PostgresBackend<tokio::net::TcpStream> {
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
     pub fn new_from_io(
+        socket_fd: RawFd,
         socket: IO,
         peer_addr: SocketAddr,
         auth_type: AuthType,
@@ -315,6 +321,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         let stream = MaybeTlsStream::Unencrypted(socket);
 
         Ok(Self {
+            socket_fd,
             framed: MaybeWriteOnly::Full(Framed::new(stream)),
             state: ProtoState::Initialization,
             auth_type,

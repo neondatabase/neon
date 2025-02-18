@@ -2816,8 +2816,8 @@ where
 }
 
 use {
-    crate::tenant::gc_result::GcResult, pageserver_api::models::TimelineGcRequest,
-    utils::http::error::ApiError,
+    crate::tenant::gc_result::GcResult, http_utils::error::ApiError,
+    pageserver_api::models::TimelineGcRequest,
 };
 
 #[cfg(test)]

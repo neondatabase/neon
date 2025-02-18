@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import concurrent.futures
+import dataclasses
 import filecmp
 import json
 import os
@@ -26,6 +27,7 @@ from urllib.parse import quote, urlparse
 
 import asyncpg
 import backoff
+import boto3
 import httpx
 import psycopg2
 import psycopg2.sql
@@ -36,6 +38,8 @@ from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
 from jwcrypto import jwk
+from mypy_boto3_kms import KMSClient
+from mypy_boto3_s3 import S3Client
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -196,6 +200,30 @@ def mock_s3_server(port_distributor: PortDistributor) -> Iterator[MockS3Server]:
     mock_s3_server = MockS3Server(port_distributor.get_port())
     yield mock_s3_server
     mock_s3_server.kill()
+
+
+@pytest.fixture(scope="session")
+def mock_kms(mock_s3_server: MockS3Server) -> Iterator[KMSClient]:
+    yield boto3.client(
+        "kms",
+        endpoint_url=mock_s3_server.endpoint(),
+        region_name=mock_s3_server.region(),
+        aws_access_key_id=mock_s3_server.access_key(),
+        aws_secret_access_key=mock_s3_server.secret_key(),
+        aws_session_token=mock_s3_server.session_token(),
+    )
+
+
+@pytest.fixture(scope="session")
+def mock_s3_client(mock_s3_server: MockS3Server) -> Iterator[S3Client]:
+    yield boto3.client(
+        "s3",
+        endpoint_url=mock_s3_server.endpoint(),
+        region_name=mock_s3_server.region(),
+        aws_access_key_id=mock_s3_server.access_key(),
+        aws_secret_access_key=mock_s3_server.secret_key(),
+        aws_session_token=mock_s3_server.session_token(),
+    )
 
 
 class PgProtocol:
@@ -463,6 +491,7 @@ class NeonEnvBuilder:
         self.test_may_use_compatibility_snapshot_binaries = False
         self.version_combination = combination
         self.mixdir = self.test_output_dir / "mixdir_neon"
+
         if self.version_combination is not None:
             assert (
                 self.compatibility_neon_binpath is not None
@@ -674,6 +703,11 @@ class NeonEnvBuilder:
 
     def _mix_versions(self):
         assert self.version_combination is not None, "version combination must be set"
+
+        # Always use a newer version of `neon_local`
+        (self.mixdir / "neon_local").hardlink_to(self.neon_binpath / "neon_local")
+        self.neon_local_binpath = self.mixdir
+
         for component, paths in COMPONENT_BINARIES.items():
             directory = (
                 self.neon_binpath
@@ -682,10 +716,11 @@ class NeonEnvBuilder:
             )
             for filename in paths:
                 destination = self.mixdir / filename
-                destination.symlink_to(directory / filename)
+                destination.hardlink_to(directory / filename)
+        self.neon_binpath = self.mixdir
+
         if self.version_combination["compute"] == "old":
             self.pg_distrib_dir = self.compatibility_pg_distrib_dir
-        self.neon_binpath = self.mixdir
 
     def overlay_mount(self, ident: str, srcdir: Path, dstdir: Path):
         """
@@ -1675,6 +1710,12 @@ class StorageControllerLeadershipStatus(StrEnum):
     CANDIDATE = "candidate"
 
 
+@dataclass
+class StorageControllerMigrationConfig:
+    secondary_warmup_timeout: str | None
+    secondary_download_request_timeout: str | None
+
+
 class NeonStorageController(MetricsGetter, LogUtils):
     def __init__(self, env: NeonEnv, port: int, auth_enabled: bool):
         self.env = env
@@ -2068,11 +2109,20 @@ class NeonStorageController(MetricsGetter, LogUtils):
         shards: list[TenantShardId] = body["new_shards"]
         return shards
 
-    def tenant_shard_migrate(self, tenant_shard_id: TenantShardId, dest_ps_id: int):
+    def tenant_shard_migrate(
+        self,
+        tenant_shard_id: TenantShardId,
+        dest_ps_id: int,
+        config: StorageControllerMigrationConfig | None = None,
+    ):
+        payload = {"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id}
+        if config is not None:
+            payload["migration_config"] = dataclasses.asdict(config)
+
         self.request(
             "PUT",
             f"{self.api}/control/v1/tenant/{tenant_shard_id}/migrate",
-            json={"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id},
+            json=payload,
             headers=self.headers(TokenScope.ADMIN),
         )
         log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
@@ -2416,6 +2466,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         response.raise_for_status()
         return [TenantShardId.parse(tid) for tid in response.json()["updated"]]
+
+    def download_heatmap_layers(self, tenant_shard_id: TenantShardId, timeline_id: TimelineId):
+        response = self.request(
+            "POST",
+            f"{self.api}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/download_heatmap_layers",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        response.raise_for_status()
 
     def __enter__(self) -> Self:
         return self
@@ -3345,7 +3403,7 @@ class NeonProxy(PgProtocol):
         metric_collection_interval: str | None = None,
     ):
         host = "127.0.0.1"
-        domain = "proxy.localtest.me"  # resolves to 127.0.0.1
+        domain = "proxy.local.neon.build"  # resolves to 127.0.0.1
         super().__init__(dsn=auth_backend.default_conn_url, host=domain, port=proxy_port)
 
         self.domain = domain
@@ -3368,7 +3426,7 @@ class NeonProxy(PgProtocol):
         # generate key of it doesn't exist
         crt_path = self.test_output_dir / "proxy.crt"
         key_path = self.test_output_dir / "proxy.key"
-        generate_proxy_tls_certs("*.localtest.me", key_path, crt_path)
+        generate_proxy_tls_certs("*.local.neon.build", key_path, crt_path)
 
         args = [
             str(self.neon_binpath / "proxy"),
@@ -3569,7 +3627,7 @@ class NeonAuthBroker:
         external_http_port: int,
         auth_backend: NeonAuthBroker.ProxyV1,
     ):
-        self.domain = "apiauth.localtest.me"  # resolves to 127.0.0.1
+        self.domain = "apiauth.local.neon.build"  # resolves to 127.0.0.1
         self.host = "127.0.0.1"
         self.http_port = http_port
         self.external_http_port = external_http_port
@@ -3586,7 +3644,7 @@ class NeonAuthBroker:
         # generate key of it doesn't exist
         crt_path = self.test_output_dir / "proxy.crt"
         key_path = self.test_output_dir / "proxy.key"
-        generate_proxy_tls_certs("apiauth.localtest.me", key_path, crt_path)
+        generate_proxy_tls_certs("apiauth.local.neon.build", key_path, crt_path)
 
         args = [
             str(self.neon_binpath / "proxy"),
@@ -3807,7 +3865,8 @@ class Endpoint(PgProtocol, LogUtils):
         env: NeonEnv,
         tenant_id: TenantId,
         pg_port: int,
-        http_port: int,
+        external_http_port: int,
+        internal_http_port: int,
         check_stop_result: bool = True,
     ):
         super().__init__(host="localhost", port=pg_port, user="cloud_admin", dbname="postgres")
@@ -3817,7 +3876,8 @@ class Endpoint(PgProtocol, LogUtils):
         self.pgdata_dir: Path | None = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
         self.pg_port = pg_port
-        self.http_port = http_port
+        self.external_http_port = external_http_port
+        self.internal_http_port = internal_http_port
         self.check_stop_result = check_stop_result
         # passed to endpoint create and endpoint reconfigure
         self.active_safekeepers: list[int] = list(map(lambda sk: sk.id, env.safekeepers))
@@ -3834,7 +3894,8 @@ class Endpoint(PgProtocol, LogUtils):
         self, auth_token: str | None = None, retries: Retry | None = None
     ) -> EndpointHttpClient:
         return EndpointHttpClient(
-            port=self.http_port,
+            external_port=self.external_http_port,
+            internal_port=self.internal_http_port,
         )
 
     def create(
@@ -3846,6 +3907,7 @@ class Endpoint(PgProtocol, LogUtils):
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
+        update_catalog: bool = False,
     ) -> Self:
         """
         Create a new Postgres endpoint.
@@ -3866,10 +3928,12 @@ class Endpoint(PgProtocol, LogUtils):
             lsn=lsn,
             hot_standby=hot_standby,
             pg_port=self.pg_port,
-            http_port=self.http_port,
+            external_http_port=self.external_http_port,
+            internal_http_port=self.internal_http_port,
             pg_version=self.env.pg_version,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            update_catalog=update_catalog,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = self.env.repo_dir / path
@@ -4258,7 +4322,8 @@ class EndpointFactory:
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
             pg_port=self.env.port_distributor.get_port(),
-            http_port=self.env.port_distributor.get_port(),
+            external_http_port=self.env.port_distributor.get_port(),
+            internal_http_port=self.env.port_distributor.get_port(),
         )
         self.num_instances += 1
         self.endpoints.append(ep)
@@ -4283,12 +4348,14 @@ class EndpointFactory:
         hot_standby: bool = False,
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
+        update_catalog: bool = False,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
             pg_port=self.env.port_distributor.get_port(),
-            http_port=self.env.port_distributor.get_port(),
+            external_http_port=self.env.port_distributor.get_port(),
+            internal_http_port=self.env.port_distributor.get_port(),
         )
 
         endpoint_id = endpoint_id or self.env.generate_endpoint_id()
@@ -4303,6 +4370,7 @@ class EndpointFactory:
             hot_standby=hot_standby,
             config_lines=config_lines,
             pageserver_id=pageserver_id,
+            update_catalog=update_catalog,
         )
 
     def stop_all(self, fail_on_error=True) -> Self:
@@ -4962,8 +5030,13 @@ def check_restored_datadir_content(
 
     restored_files = list_files_to_compare(restored_dir_path)
 
+    # pg_notify files are always ignored
+    pgdata_files = [f for f in pgdata_files if not f.startswith("pg_notify")]
+    restored_files = [f for f in restored_files if not f.startswith("pg_notify")]
+
+    # pg_xact and pg_multixact files are optional in basebackup: depending on our configuration they
+    # may be omitted and loaded on demand.
     if pgdata_files != restored_files:
-        # filter pg_xact and multixact files which are downloaded on demand
         pgdata_files = [
             f
             for f in pgdata_files
@@ -5122,12 +5195,14 @@ def wait_for_last_flush_lsn(
     timeline: TimelineId,
     pageserver_id: int | None = None,
     auth_token: str | None = None,
+    last_flush_lsn: Lsn | None = None,
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
 
     shards = tenant_get_shards(env, tenant, pageserver_id)
 
-    last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    if last_flush_lsn is None:
+        last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
     results = []
     for tenant_shard_id, pageserver in shards:

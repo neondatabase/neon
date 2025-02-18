@@ -1,7 +1,6 @@
 use crate::client::InnerClient;
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
-use crate::error::SqlState;
 use crate::types::{Field, Kind, Oid, Type};
 use crate::{query, slice_iter};
 use crate::{Column, Error, Statement};
@@ -13,21 +12,12 @@ use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 pub(crate) const TYPEINFO_QUERY: &str = "\
 SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid
 FROM pg_catalog.pg_type t
 LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid
-INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
-WHERE t.oid = $1
-";
-
-// Range types weren't added until Postgres 9.2, so pg_range may not exist
-const TYPEINFO_FALLBACK_QUERY: &str = "\
-SELECT t.typname, t.typtype, t.typelem, NULL::OID, t.typbasetype, n.nspname, t.typrelid
-FROM pg_catalog.pg_type t
 INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
 WHERE t.oid = $1
 ";
@@ -39,14 +29,6 @@ WHERE enumtypid = $1
 ORDER BY enumsortorder
 ";
 
-// Postgres 9.0 didn't have enumsortorder
-const TYPEINFO_ENUM_FALLBACK_QUERY: &str = "\
-SELECT enumlabel
-FROM pg_catalog.pg_enum
-WHERE enumtypid = $1
-ORDER BY oid
-";
-
 pub(crate) const TYPEINFO_COMPOSITE_QUERY: &str = "\
 SELECT attname, atttypid
 FROM pg_catalog.pg_attribute
@@ -56,15 +38,13 @@ AND attnum > 0
 ORDER BY attnum
 ";
 
-static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-
 pub async fn prepare(
     client: &Arc<InnerClient>,
+    name: &'static str,
     query: &str,
     types: &[Type],
 ) -> Result<Statement, Error> {
-    let name = format!("s{}", NEXT_ID.fetch_add(1, Ordering::SeqCst));
-    let buf = encode(client, &name, query, types)?;
+    let buf = encode(client, name, query, types)?;
     let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
 
     match responses.next().await? {
@@ -105,10 +85,11 @@ pub async fn prepare(
 
 fn prepare_rec<'a>(
     client: &'a Arc<InnerClient>,
+    name: &'static str,
     query: &'a str,
     types: &'a [Type],
 ) -> Pin<Box<dyn Future<Output = Result<Statement, Error>> + 'a + Send>> {
-    Box::pin(prepare(client, query, types))
+    Box::pin(prepare(client, name, query, types))
 }
 
 fn encode(client: &InnerClient, name: &str, query: &str, types: &[Type]) -> Result<Bytes, Error> {
@@ -192,13 +173,8 @@ async fn typeinfo_statement(client: &Arc<InnerClient>) -> Result<Statement, Erro
         return Ok(stmt);
     }
 
-    let stmt = match prepare_rec(client, TYPEINFO_QUERY, &[]).await {
-        Ok(stmt) => stmt,
-        Err(ref e) if e.code() == Some(&SqlState::UNDEFINED_TABLE) => {
-            prepare_rec(client, TYPEINFO_FALLBACK_QUERY, &[]).await?
-        }
-        Err(e) => return Err(e),
-    };
+    let typeinfo = "neon_proxy_typeinfo";
+    let stmt = prepare_rec(client, typeinfo, TYPEINFO_QUERY, &[]).await?;
 
     client.set_typeinfo(&stmt);
     Ok(stmt)
@@ -219,13 +195,8 @@ async fn typeinfo_enum_statement(client: &Arc<InnerClient>) -> Result<Statement,
         return Ok(stmt);
     }
 
-    let stmt = match prepare_rec(client, TYPEINFO_ENUM_QUERY, &[]).await {
-        Ok(stmt) => stmt,
-        Err(ref e) if e.code() == Some(&SqlState::UNDEFINED_COLUMN) => {
-            prepare_rec(client, TYPEINFO_ENUM_FALLBACK_QUERY, &[]).await?
-        }
-        Err(e) => return Err(e),
-    };
+    let typeinfo = "neon_proxy_typeinfo_enum";
+    let stmt = prepare_rec(client, typeinfo, TYPEINFO_ENUM_QUERY, &[]).await?;
 
     client.set_typeinfo_enum(&stmt);
     Ok(stmt)
@@ -255,7 +226,8 @@ async fn typeinfo_composite_statement(client: &Arc<InnerClient>) -> Result<State
         return Ok(stmt);
     }
 
-    let stmt = prepare_rec(client, TYPEINFO_COMPOSITE_QUERY, &[]).await?;
+    let typeinfo = "neon_proxy_typeinfo_composite";
+    let stmt = prepare_rec(client, typeinfo, TYPEINFO_COMPOSITE_QUERY, &[]).await?;
 
     client.set_typeinfo_composite(&stmt);
     Ok(stmt)

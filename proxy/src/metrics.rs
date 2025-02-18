@@ -205,7 +205,7 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Protocol::Http => "http",
             Protocol::Ws => "ws",
@@ -385,6 +385,7 @@ pub enum Waiting {
 
 #[derive(FixedCardinalityLabel, Copy, Clone)]
 #[label(singleton = "kind")]
+#[allow(clippy::enum_variant_names)]
 pub enum RedisMsgKind {
     HSet,
     HSetMultiple,

@@ -1,7 +1,21 @@
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
+use serde::{Deserialize, Serialize};
 use tracing::info;
-use utils::failpoint_support::{apply_failpoint, ConfigureFailpointsRequest};
+use utils::failpoint_support::apply_failpoint;
+
+pub type ConfigureFailpointsRequest = Vec<FailpointConfig>;
+
+/// Information for configuring a single fail point
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FailpointConfig {
+    /// Name of the fail point
+    pub name: String,
+    /// List of actions to take, using the format described in `fail::cfg`
+    ///
+    /// We also support `actions = "exit"` to cause the fail point to immediately exit.
+    pub actions: String,
+}
 
 use crate::http::{extract::Json, JsonResponse};
 

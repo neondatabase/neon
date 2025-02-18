@@ -9,13 +9,43 @@ use anyhow::bail;
 use serde::{Deserialize, Serialize};
 use utils::id::NodeId;
 
-/// Number uniquely identifying safekeeper configuration.
-/// Note: it is a part of sk control file.
-pub type Generation = u32;
 /// 1 is the first valid generation, 0 is used as
 /// a placeholder before we fully migrate to generations.
-pub const INVALID_GENERATION: Generation = 0;
-pub const INITIAL_GENERATION: Generation = 1;
+pub const INVALID_GENERATION: SafekeeperGeneration = SafekeeperGeneration::new(0);
+pub const INITIAL_GENERATION: SafekeeperGeneration = SafekeeperGeneration::new(1);
+
+/// Number uniquely identifying safekeeper configuration.
+/// Note: it is a part of sk control file.
+///
+/// Like tenant generations, but for safekeepers.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SafekeeperGeneration(u32);
+
+impl SafekeeperGeneration {
+    pub const fn new(v: u32) -> Self {
+        Self(v)
+    }
+
+    #[track_caller]
+    pub fn previous(&self) -> Option<Self> {
+        Some(Self(self.0.checked_sub(1)?))
+    }
+
+    #[track_caller]
+    pub fn next(&self) -> Self {
+        Self(self.0 + 1)
+    }
+
+    pub fn into_inner(self) -> u32 {
+        self.0
+    }
+}
+
+impl Display for SafekeeperGeneration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// Membership is defined by ids so e.g. walproposer uses them to figure out
 /// quorums, but we also carry host and port to give wp idea where to connect.
@@ -89,7 +119,7 @@ impl Display for MemberSet {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Configuration {
     /// Unique id.
-    pub generation: Generation,
+    pub generation: SafekeeperGeneration,
     /// Current members of the configuration.
     pub members: MemberSet,
     /// Some means it is a joint conf.

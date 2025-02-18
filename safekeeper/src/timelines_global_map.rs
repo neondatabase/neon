@@ -475,6 +475,8 @@ impl GlobalTimelines {
                 info!("deleting timeline {}, only_local={}", ttid, only_local);
                 timeline.shutdown().await;
 
+                info!("timeline {ttid} shut down for deletion");
+
                 // Take a lock and finish the deletion holding this mutex.
                 let mut shared_state = timeline.write_shared_state().await;
 

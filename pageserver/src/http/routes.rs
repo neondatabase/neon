@@ -13,6 +13,12 @@ use enumset::EnumSet;
 use futures::future::join_all;
 use futures::StreamExt;
 use futures::TryFutureExt;
+use http_utils::endpoint::{
+    profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
+};
+use http_utils::failpoints::failpoints_handler;
+use http_utils::request::must_parse_query_param;
+use http_utils::request::{get_request_param, must_get_query_param, parse_query_param};
 use humantime::format_rfc3339;
 use hyper::header;
 use hyper::StatusCode;
@@ -60,13 +66,6 @@ use tokio::time::Instant;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::auth::JwtAuth;
-use utils::failpoint_support::failpoints_handler;
-use utils::http::endpoint::{
-    profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
-};
-use utils::http::request::must_parse_query_param;
-use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -104,6 +103,13 @@ use crate::tenant::OffloadedTimeline;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::DEFAULT_PG_VERSION;
 use crate::{disk_usage_eviction_task, tenant};
+use http_utils::{
+    endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
+    error::{ApiError, HttpErrorBody},
+    json::{json_request, json_request_maybe, json_response},
+    request::parse_request_param,
+    RequestExt, RouterBuilder,
+};
 use pageserver_api::models::{
     StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
     TimelineInfo,
@@ -111,13 +117,6 @@ use pageserver_api::models::{
 use utils::{
     auth::SwappableJwtAuth,
     generation::Generation,
-    http::{
-        endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
-        error::{ApiError, HttpErrorBody},
-        json::{json_request, json_request_maybe, json_response},
-        request::parse_request_param,
-        RequestExt, RouterBuilder,
-    },
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
@@ -483,6 +482,11 @@ async fn build_timeline_info_common(
 
     let (pitr_history_size, within_ancestor_pitr) = timeline.get_pitr_history_stats();
 
+    let min_readable_lsn = std::cmp::max(
+        timeline.get_gc_cutoff_lsn(),
+        *timeline.get_applied_gc_cutoff_lsn(),
+    );
+
     let info = TimelineInfo {
         tenant_id: timeline.tenant_shard_id,
         timeline_id: timeline.timeline_id,
@@ -494,7 +498,12 @@ async fn build_timeline_info_common(
         initdb_lsn,
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
-        latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
+        // Externally, expose the lowest LSN that can be used to create a branch as the "GC cutoff", although internally
+        // we distinguish between the "planned" GC cutoff (PITR point) and the "latest" GC cutoff (where we
+        // actually trimmed data to), which can pass each other when PITR is changed.
+        latest_gc_cutoff_lsn: min_readable_lsn,
+        min_readable_lsn,
+        applied_gc_cutoff_lsn: *timeline.get_applied_gc_cutoff_lsn(),
         current_logical_size: current_logical_size.size_dont_care_about_accuracy(),
         current_logical_size_is_accurate: match current_logical_size.accuracy() {
             tenant::timeline::logical_size::Accuracy::Approximate => false,
@@ -561,7 +570,7 @@ async fn reload_auth_validation_keys_handler(
     let key_path = config.auth_validation_public_key_path.as_ref().unwrap();
     info!("Reloading public key(s) for verifying JWT tokens from {key_path:?}");
 
-    match JwtAuth::from_key_path(key_path) {
+    match utils::auth::JwtAuth::from_key_path(key_path) {
         Ok(new_auth) => {
             shared_auth.swap(new_auth);
             json_response(StatusCode::OK, ())
@@ -1454,6 +1463,59 @@ async fn timeline_layer_scan_disposable_keys(
     )
 }
 
+async fn timeline_download_heatmap_layers_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    // Only used in the case where remote storage is not configured.
+    const DEFAULT_MAX_CONCURRENCY: usize = 100;
+    // A conservative default.
+    const DEFAULT_CONCURRENCY: usize = 16;
+
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let desired_concurrency =
+        parse_query_param(&request, "concurrency")?.unwrap_or(DEFAULT_CONCURRENCY);
+
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    let max_concurrency = get_config(&request)
+        .remote_storage_config
+        .as_ref()
+        .map(|c| c.concurrency_limit())
+        .unwrap_or(DEFAULT_MAX_CONCURRENCY);
+    let concurrency = std::cmp::min(max_concurrency, desired_concurrency);
+
+    timeline.start_heatmap_layers_download(concurrency).await?;
+
+    json_response(StatusCode::ACCEPTED, ())
+}
+
+async fn timeline_shutdown_download_heatmap_layers_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    timeline.stop_and_drain_heatmap_layers_download().await;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn layer_download_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -2152,6 +2214,7 @@ async fn timeline_compact_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
+    flags |= CompactFlags::NoYield; // run compaction to completion
 
     if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
         flags |= CompactFlags::ForceL0Compaction;
@@ -3615,6 +3678,14 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer",
             |r| api_handler(r, layer_map_info_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_heatmap_layers",
+            |r| api_handler(r, timeline_download_heatmap_layers_handler),
+        )
+        .delete(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_heatmap_layers",
+            |r| api_handler(r, timeline_shutdown_download_heatmap_layers_handler),
         )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_file_name",

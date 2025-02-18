@@ -157,49 +157,6 @@ where
     })
 }
 
-pub async fn execute<'a, I>(
-    client: &InnerClient,
-    statement: Statement,
-    params: I,
-) -> Result<u64, Error>
-where
-    I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
-    I::IntoIter: ExactSizeIterator,
-{
-    let buf = if log_enabled!(Level::Debug) {
-        let params = params.into_iter().collect::<Vec<_>>();
-        debug!(
-            "executing statement {} with parameters: {:?}",
-            statement.name(),
-            BorrowToSqlParamsDebug(params.as_slice()),
-        );
-        encode(client, &statement, params)?
-    } else {
-        encode(client, &statement, params)?
-    };
-    let mut responses = start(client, buf).await?;
-
-    let mut rows = 0;
-    loop {
-        match responses.next().await? {
-            Message::DataRow(_) => {}
-            Message::CommandComplete(body) => {
-                rows = body
-                    .tag()
-                    .map_err(Error::parse)?
-                    .rsplit(' ')
-                    .next()
-                    .unwrap()
-                    .parse()
-                    .unwrap_or(0);
-            }
-            Message::EmptyQueryResponse => rows = 0,
-            Message::ReadyForQuery(_) => return Ok(rows),
-            _ => return Err(Error::unexpected_message()),
-        }
-    }
-}
-
 async fn start(client: &InnerClient, buf: Bytes) -> Result<Responses, Error> {
     let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
 

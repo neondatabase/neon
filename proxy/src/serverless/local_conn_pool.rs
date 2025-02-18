@@ -23,7 +23,6 @@ use indexmap::IndexMap;
 use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
 use parking_lot::RwLock;
 use postgres_client::tls::NoTlsStream;
-use postgres_client::types::ToSql;
 use postgres_client::AsyncMessage;
 use serde_json::value::RawValue;
 use tokio::net::TcpStream;
@@ -280,14 +279,13 @@ impl ClientInnerCommon<postgres_client::Client> {
             local_data.jti += 1;
             let token = resign_jwt(&local_data.key, payload, local_data.jti)?;
 
-            // initiates the auth session
+            // discard all cannot run in a transaction. must be executed alone.
             self.inner.batch_execute("discard all").await?;
-            self.inner
-                .execute(
-                    "select auth.jwt_session_init($1)",
-                    &[&&*token as &(dyn ToSql + Sync)],
-                )
-                .await?;
+
+            // initiates the auth session
+            // this is safe from query injections as the jwt format free of any escape characters.
+            let query = format!("select auth.jwt_session_init('{token}')");
+            self.inner.batch_execute(&query).await?;
 
             let pid = self.inner.get_process_id();
             info!(pid, jti = local_data.jti, "user session state init");

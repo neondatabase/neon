@@ -79,6 +79,7 @@ pq_proto.workspace = true
 remote_storage.workspace = true
 storage_broker.workspace = true
 tenant_size_model.workspace = true
+http-utils.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true
 reqwest.workspace = true

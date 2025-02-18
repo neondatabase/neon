@@ -478,7 +478,8 @@ class NeonLocalCli(AbstractNeonCli):
         self,
         branch_name: str,
         pg_port: int,
-        http_port: int,
+        external_http_port: int,
+        internal_http_port: int,
         tenant_id: TenantId,
         pg_version: PgVersion,
         endpoint_id: str | None = None,
@@ -486,6 +487,7 @@ class NeonLocalCli(AbstractNeonCli):
         lsn: Lsn | None = None,
         pageserver_id: int | None = None,
         allow_multiple=False,
+        update_catalog: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
@@ -501,8 +503,10 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--lsn", str(lsn)])
         if pg_port is not None:
             args.extend(["--pg-port", str(pg_port)])
-        if http_port is not None:
-            args.extend(["--http-port", str(http_port)])
+        if external_http_port is not None:
+            args.extend(["--external-http-port", str(external_http_port)])
+        if internal_http_port is not None:
+            args.extend(["--internal-http-port", str(internal_http_port)])
         if endpoint_id is not None:
             args.append(endpoint_id)
         if hot_standby:
@@ -511,6 +515,8 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--pageserver-id", str(pageserver_id)])
         if allow_multiple:
             args.extend(["--allow-multiple"])
+        if update_catalog:
+            args.extend(["--update-catalog"])
 
         res = self.raw_cli(args)
         res.check_returncode()

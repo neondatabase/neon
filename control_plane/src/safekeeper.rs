@@ -17,8 +17,10 @@ use camino::Utf8PathBuf;
 use postgres_connection::PgConnectionConfig;
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
+
+use http_utils::error::HttpErrorBody;
 use utils::auth::{Claims, Scope};
-use utils::{http::error::HttpErrorBody, id::NodeId};
+use utils::id::NodeId;
 
 use crate::{
     background_process,

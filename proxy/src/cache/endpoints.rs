@@ -242,7 +242,7 @@ impl EndpointsCache {
                             });
                             tracing::error!("error parsing value {value:?}: {err:?}");
                         }
-                    };
+                    }
                 }
                 if total.is_power_of_two() {
                     tracing::debug!("endpoints read {}", total);

@@ -372,7 +372,7 @@ impl PoolingBackend {
             debug!("setting up backend session state");
 
             // initiates the auth session
-            if let Err(e) = client.execute("select auth.init()", &[]).await {
+            if let Err(e) = client.batch_execute("select auth.init();").await {
                 discard.discard();
                 return Err(e.into());
             }
@@ -400,9 +400,9 @@ fn create_random_jwk() -> (SigningKey, jose_jwk::Key) {
 pub(crate) enum HttpConnError {
     #[error("pooled connection closed at inconsistent state")]
     ConnectionClosedAbruptly(#[from] tokio::sync::watch::error::SendError<uuid::Uuid>),
-    #[error("could not connection to postgres in compute")]
+    #[error("could not connect to postgres in compute")]
     PostgresConnectionError(#[from] postgres_client::Error),
-    #[error("could not connection to local-proxy in compute")]
+    #[error("could not connect to local-proxy in compute")]
     LocalProxyConnectionError(#[from] LocalProxyConnError),
     #[error("could not parse JWT payload")]
     JwtPayloadError(serde_json::Error),
@@ -651,7 +651,7 @@ async fn connect_http2(
                     e,
                 )));
             }
-        };
+        }
     };
 
     let (client, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())

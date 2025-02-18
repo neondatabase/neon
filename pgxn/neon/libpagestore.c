@@ -378,8 +378,9 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	{
 	case PS_Disconnected:
 	{
-		const char *keywords[3];
-		const char *values[3];
+		const char *keywords[4];
+		const char *values[4];
+		char pid_str[16];
 		int			n_pgsql_params;
 		TimestampTz	now;
 		int64		us_since_last_attempt;
@@ -424,14 +425,30 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		 * can override the password from the env variable. Seems useful, although
 		 * we don't currently use that capability anywhere.
 		 */
-		keywords[0] = "dbname";
-		values[0] = connstr;
-		n_pgsql_params = 1;
+		n_pgsql_params = 0;
+
+		/*
+		 * Pageserver logs include this in the connection's tracing span.
+		 * This allows for reasier log correlation between compute and pageserver.
+		 */
+		keywords[n_pgsql_params] = "application_name";
+		{
+			int ret = snprintf(pid_str, sizeof(pid_str), "%d", MyProcPid);
+			if (ret < 0 || ret >= (int)(sizeof(pid_str)))
+				elog(FATAL, "stack-allocated buffer too small to hold pid");
+		}
+		/* lifetime: PQconnectStartParams strdups internally */
+		values[n_pgsql_params] = (const char*) pid_str;
+		n_pgsql_params++;
+
+		keywords[n_pgsql_params] = "dbname";
+		values[n_pgsql_params] = connstr;
+		n_pgsql_params++;
 
 		if (neon_auth_token)
 		{
-			keywords[1] = "password";
-			values[1] = neon_auth_token;
+			keywords[n_pgsql_params] = "password";
+			values[n_pgsql_params] = neon_auth_token;
 			n_pgsql_params++;
 		}
 

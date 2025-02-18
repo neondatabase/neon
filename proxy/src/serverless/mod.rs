@@ -28,6 +28,7 @@ use futures::TryFutureExt;
 use http::{Method, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty};
+use http_utils::error::ApiError;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
@@ -41,7 +42,6 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{info, warn, Instrument};
-use utils::http::error::ApiError;
 
 use crate::cancellation::CancellationHandler;
 use crate::config::{ProxyConfig, ProxyProtocolV2};

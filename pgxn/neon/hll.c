@@ -122,8 +122,8 @@ addSHLL(HyperLogLogState *cState, uint32 hash)
 	index = hash >> HLL_C_BITS;
 
 	/* Compute the rank of the remaining 32 - "k" (registerWidth) bits */
-	count = rho(hash << HLL_BIT_WIDTH, HLL_C_BITS);
-
+	count = rho(hash << HLL_BIT_WIDTH, HLL_C_BITS) - 1;
+	Assert(count <= HLL_C_BITS);
 	cState->regs[index][count] = now;
 }
 
@@ -136,7 +136,7 @@ getMaximum(const TimestampTz* reg, TimestampTz since)
 	{
 		if (reg[i] >= since)
 		{
-			max = i;
+			max = i + 1;
 		}
 	}
 

@@ -11,6 +11,7 @@ testing = [ "pageserver_api/testing" ]
 pageserver_api.workspace = true
 thiserror.workspace = true
 reqwest = { workspace = true, features = [ "stream" ] }
+http-utils.workspace = true
 utils.workspace = true
 serde.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }

@@ -21,23 +21,17 @@ bytes.workspace = true
 camino.workspace = true
 chrono.workspace = true
 diatomic-waker.workspace = true
-flate2.workspace = true
 git-version.workspace = true
 hex = { workspace = true, features = ["serde"] }
 humantime.workspace = true
-hyper0 = { workspace = true, features = ["full"] }
 inferno.workspace = true
-itertools.workspace = true
 fail.workspace = true
 futures = { workspace = true }
-jemalloc_pprof.workspace = true
 jsonwebtoken.workspace = true
-nix.workspace = true
+nix = {workspace = true, features = [ "ioctl" ] }
 once_cell.workspace = true
 pin-project-lite.workspace = true
-pprof.workspace = true
 regex.workspace = true
-routerify.workspace = true
 serde.workspace = true
 serde_with.workspace = true
 serde_json.workspace = true
@@ -54,8 +48,6 @@ rand.workspace = true
 scopeguard.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
-url.workspace = true
-uuid.workspace = true
 walkdir.workspace = true
 
 pq_proto.workspace = true
@@ -63,12 +55,6 @@ postgres_connection.workspace = true
 metrics.workspace = true
 
 const_format.workspace = true
-
-# to use tokio channels as streams, this is faster to compile than async_stream
-# why is it only here? no other crate should use it, streams are rarely needed.
-tokio-stream = { version = "0.1.14" }
-
-serde_path_to_error.workspace = true
 
 [dev-dependencies]
 byteorder.workspace = true
