@@ -160,6 +160,8 @@ postgres-%: postgres-configure-% \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_visibility install
 	+@echo "Compiling pageinspect $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect install
+	+@echo "Compiling pg_trgm $*"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_trgm install
 	+@echo "Compiling amcheck $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/amcheck install
 	+@echo "Compiling test_decoding $*"
