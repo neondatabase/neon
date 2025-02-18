@@ -1876,7 +1876,7 @@ impl Timeline {
         // Signal compaction failure to avoid L0 flush stalls when it's broken.
         match result {
             Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
-            Err(CompactionError::Other(_)) => {
+            Err(CompactionError::Other(_)) | Err(CompactionError::CollectKeySpaceError(_)) => {
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
             // Don't change the current value on offload failure or shutdown. We don't want to
@@ -4592,7 +4592,10 @@ impl Timeline {
             ));
         }
 
-        let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
+        let (dense_ks, sparse_ks) = self
+            .collect_keyspace(lsn, ctx)
+            .await
+            .map_err(CompactionError::CollectKeySpaceError)?;
         let dense_partitioning = dense_ks.partition(&self.shard_identity, partition_size);
         let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
@@ -5305,6 +5308,8 @@ pub(crate) enum CompactionError {
     #[error("Failed to offload timeline: {0}")]
     Offload(OffloadError),
     /// Compaction cannot be done right now; page reconstruction and so on.
+    #[error("Failed to collect keyspace: {0}")]
+    CollectKeySpaceError(CollectKeySpaceError),
     #[error(transparent)]
     Other(anyhow::Error),
 }

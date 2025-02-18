@@ -16,6 +16,7 @@ use tracing::*;
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{self, BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
+use crate::pgdatadir_mapping::CollectKeySpaceError;
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS};
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::compaction::CompactionOutcome;
@@ -294,6 +295,8 @@ fn log_compaction_error(
     let level = match err {
         ShuttingDown => return,
         Offload(_) => Level::ERROR,
+        CollectKeySpaceError(CollectKeySpaceError::Cancelled) => Level::INFO,
+        CollectKeySpaceError(_) => Level::ERROR,
         _ if task_cancelled => Level::INFO,
         Other(err) => {
             let root_cause = err.root_cause();
