@@ -4,6 +4,7 @@ pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
 pub(crate) mod handle;
+mod heatmap_layers_downloader;
 pub(crate) mod import_pgdata;
 mod init;
 pub mod layer_manager;
@@ -467,6 +468,10 @@ pub struct Timeline {
     pub(crate) page_trace: ArcSwapOption<Sender<PageTraceEvent>>,
 
     previous_heatmap: ArcSwapOption<PreviousHeatmap>,
+
+    /// May host a background Tokio task which downloads all the layers from the current
+    /// heatmap on demand.
+    heatmap_layers_downloader: Mutex<Option<heatmap_layers_downloader::HeatmapLayersDownloader>>,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -2039,6 +2044,11 @@ impl Timeline {
         tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
 
+        // If we have a background task downloading heatmap layers stop it.
+        // The background downloads are sensitive to timeline cancellation (done above),
+        // so the drain will be immediate.
+        self.stop_and_drain_heatmap_layers_download().await;
+
         // Ensure Prevent new page service requests from starting.
         self.handles.shutdown();
 
@@ -2752,6 +2762,8 @@ impl Timeline {
                 page_trace: Default::default(),
 
                 previous_heatmap: ArcSwapOption::from_pointee(previous_heatmap),
+
+                heatmap_layers_downloader: Mutex::new(None),
             };
 
             result.repartition_threshold =

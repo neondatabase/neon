@@ -974,12 +974,22 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
 
     # The new layer map should contain all the layers in the pre-migration one
     # and a new in memory layer
-    assert len(heatmap_before_migration["timelines"][0]["layers"]) + 1 == len(
-        heatmap_after_migration["timelines"][0]["layers"]
+    after_migration_heatmap_layers_count = len(heatmap_after_migration["timelines"][0]["layers"])
+    assert (
+        len(heatmap_before_migration["timelines"][0]["layers"]) + 1
+        == after_migration_heatmap_layers_count
     )
 
-    log.info(
-        f'Heatmap size after cold migration is {len(heatmap_after_migration["timelines"][0]["layers"])}'
+    log.info(f"Heatmap size after cold migration is {after_migration_heatmap_layers_count}")
+
+    env.storage_controller.download_heatmap_layers(
+        TenantShardId(tenant_id, shard_number=0, shard_count=0), timeline_id
     )
 
-    # TODO: Once we have an endpoint for rescuing the cold location, exercise it here.
+    def all_layers_downloaded():
+        local_layers_count = len(ps_secondary.list_layers(tenant_id, timeline_id))
+
+        log.info(f"{local_layers_count=} {after_migration_heatmap_layers_count=}")
+        assert local_layers_count == after_migration_heatmap_layers_count
+
+    wait_until(all_layers_downloaded)
