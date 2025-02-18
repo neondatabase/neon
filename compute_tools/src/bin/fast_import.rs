@@ -361,6 +361,14 @@ async fn run_dump_restore(
             // how we run it
             .env_clear()
             .env("LD_LIBRARY_PATH", &pg_lib_dir)
+            .env(
+                "ASAN_OPTIONS",
+                std::env::var("ASAN_OPTIONS").unwrap_or_default(),
+            )
+            .env(
+                "UBSAN_OPTIONS",
+                std::env::var("UBSAN_OPTIONS").unwrap_or_default(),
+            )
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -394,6 +402,14 @@ async fn run_dump_restore(
             // how we run it
             .env_clear()
             .env("LD_LIBRARY_PATH", &pg_lib_dir)
+            .env(
+                "ASAN_OPTIONS",
+                std::env::var("ASAN_OPTIONS").unwrap_or_default(),
+            )
+            .env(
+                "UBSAN_OPTIONS",
+                std::env::var("UBSAN_OPTIONS").unwrap_or_default(),
+            )
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
