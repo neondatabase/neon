@@ -8,10 +8,10 @@ use std::{
 use clap::{Parser, Subcommand};
 use pageserver_api::{
     controller_api::{
-        AvailabilityZone, NodeAvailabilityWrapper, NodeDescribeResponse, NodeShardResponse,
-        SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest, ShardSchedulingPolicy,
-        ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, SkSchedulingPolicy,
-        TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
+        AvailabilityZone, MigrationConfig, NodeAvailabilityWrapper, NodeDescribeResponse,
+        NodeShardResponse, SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest,
+        ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
+        SkSchedulingPolicy, TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
     },
     models::{
         EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
@@ -611,7 +611,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let req = TenantShardMigrateRequest {
                 node_id: node,
-                migration_config: None,
+                migration_config: MigrationConfig::default(),
             };
 
             storcon_client
@@ -628,7 +628,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let req = TenantShardMigrateRequest {
                 node_id: node,
-                migration_config: None,
+                migration_config: MigrationConfig::default(),
             };
 
             storcon_client
@@ -1090,7 +1090,7 @@ async fn main() -> anyhow::Result<()> {
                                 format!("control/v1/tenant/{}/migrate", mv.tenant_shard_id),
                                 Some(TenantShardMigrateRequest {
                                     node_id: mv.to,
-                                    migration_config: None,
+                                    migration_config: MigrationConfig::default(),
                                 }),
                             )
                             .await

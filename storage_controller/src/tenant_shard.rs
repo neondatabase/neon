@@ -943,6 +943,9 @@ impl TenantShard {
     /// Optimize attachments: if a shard has a secondary location that is preferable to
     /// its primary location based on soft constraints, switch that secondary location
     /// to be attached.
+    ///
+    /// `schedule_context` should have been populated with all shards in the tenant, including
+    /// the one we're trying to optimize (this function will subtract its own contribution before making scoring decisions)
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn optimize_attachment(
         &self,
