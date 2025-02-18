@@ -112,16 +112,13 @@ struct Cli {
     /// outside the compute will talk to the compute through this port. Keep
     /// the previous name for this argument around for a smoother release
     /// with the control plane.
-    ///
-    /// TODO: Remove the alias after the control plane release which teaches the
-    /// control plane about the renamed argument.
-    #[arg(long, alias = "http-port", default_value_t = 3080)]
+    #[arg(long, default_value_t = 3080)]
     pub external_http_port: u16,
 
-    /// The port to bind the internal listening HTTP server to. Clients like
+    /// The port to bind the internal listening HTTP server to. Clients include
     /// the neon extension (for installing remote extensions) and local_proxy.
-    #[arg(long)]
-    pub internal_http_port: Option<u16>,
+    #[arg(long, default_value_t = 3081)]
+    pub internal_http_port: u16,
 
     #[arg(short = 'D', long, value_name = "DATADIR")]
     pub pgdata: String,
@@ -359,7 +356,7 @@ fn wait_spec(
         pgbin: cli.pgbin.clone(),
         pgversion: get_pg_version_string(&cli.pgbin),
         external_http_port: cli.external_http_port,
-        internal_http_port: cli.internal_http_port.unwrap_or(cli.external_http_port + 1),
+        internal_http_port: cli.internal_http_port,
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
@@ -383,7 +380,7 @@ fn wait_spec(
 
     // The internal HTTP server could be launched later, but there isn't much
     // sense in waiting.
-    Server::Internal(cli.internal_http_port.unwrap_or(cli.external_http_port + 1)).launch(&compute);
+    Server::Internal(cli.internal_http_port).launch(&compute);
 
     if !spec_set {
         // No spec provided, hang waiting for it.
