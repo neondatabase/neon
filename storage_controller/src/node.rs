@@ -185,6 +185,7 @@ impl Node {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: NodeId,
         listen_http_addr: String,

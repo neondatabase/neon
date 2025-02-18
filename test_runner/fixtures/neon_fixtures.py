@@ -21,7 +21,7 @@ from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, Optional
 from urllib.parse import quote, urlparse
 
 import asyncpg
@@ -1595,7 +1595,7 @@ def neon_env_builder(
 class PageserverPort:
     pg: int
     http: int
-    https: int = None
+    https: Optional[int] = None
 
 
 class LogUtils:
