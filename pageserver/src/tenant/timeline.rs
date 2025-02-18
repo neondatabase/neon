@@ -5155,14 +5155,16 @@ impl Timeline {
             .map(|l| l.metadata().file_size)
             .sum::<u64>();
 
-        info!(
-            "created {} image layers ({} bytes) in {}s, processed {} out of {} partitions",
-            image_layers.len(),
-            total_layer_size,
-            duration.as_secs_f64(),
-            partition_processed,
-            total_partitions
-        );
+        if !image_layers.is_empty() {
+            info!(
+                "created {} image layers ({} bytes) in {}s, processed {} out of {} partitions",
+                image_layers.len(),
+                total_layer_size,
+                duration.as_secs_f64(),
+                partition_processed,
+                total_partitions
+            );
+        }
 
         Ok((
             image_layers,
