@@ -11,7 +11,8 @@ use std::sync::Arc;
 use super::layer_manager::LayerManager;
 use super::{
     CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, GetVectoredError,
-    ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration, Timeline,
+    ImageLayerCreationMode, LastImageLayerCreationStatus, PageReconstructError, RecordedDuration,
+    Timeline,
 };
 
 use anyhow::{anyhow, bail, Context};
@@ -31,6 +32,7 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
+use crate::pgdatadir_mapping::CollectKeySpaceError;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::gc_block::GcBlock;
@@ -787,7 +789,17 @@ impl Timeline {
                 //
                 // Suppress error when it's due to cancellation
                 if !self.cancel.is_cancelled() && !err.is_cancelled() {
-                    tracing::error!("could not compact, repartitioning keyspace failed: {err:?}");
+                    if let CompactionError::CollectKeySpaceError(
+                        CollectKeySpaceError::Decode(_)
+                        | CollectKeySpaceError::PageRead(PageReconstructError::MissingKey(_)),
+                    ) = err
+                    {
+                        critical!("could not compact, repartitioning keyspace failed: {err:?}");
+                    } else {
+                        tracing::error!(
+                            "could not compact, repartitioning keyspace failed: {err:?}"
+                        );
+                    }
                 }
             }
         };
