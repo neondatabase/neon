@@ -1,4 +1,4 @@
-name: Test Postgres client libraries
+name: Random API Test
 
 on:
   schedule:
