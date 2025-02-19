@@ -849,12 +849,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: scripts/generate_image_maps.py
+          sparse-checkout: .github/scripts/generate_image_maps.py
           sparse-checkout-cone-mode: false
 
       - name: Generate Image Maps
         id: generate
-        run: python scripts/generate_image_maps.py
+        run: python3 .github/scripts/generate_image_maps.py
         env:
           BUILD_TAG: "${{ needs.tag.outputs.build-tag }}"
           BRANCH: "${{ github.ref_name }}"
