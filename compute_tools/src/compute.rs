@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use compute_api::spec::{Database, PgIdent, Role};
+use compute_api::spec::{ComputeAudit, Database, PgIdent, Role};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -35,15 +35,16 @@ use nix::sys::signal::{kill, Signal};
 use remote_storage::{DownloadError, RemotePath};
 use tokio::spawn;
 
+use crate::config::configure_rsyslog;
 use crate::installed_extensions::get_installed_extensions;
 use crate::local_proxy;
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::spec_apply::ApplySpecPhase::{
-    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateSchemaNeon,
-    CreateSuperUser, DropInvalidDatabases, DropRoles, FinalizeDropLogicalSubscriptions,
-    HandleNeonExtension, HandleOtherExtensions, RenameAndDeleteDatabases, RenameRoles,
-    RunInEachDatabase,
+    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreatePgauditExtension,
+    CreatePgauditlogtofileExtension, CreateSchemaNeon, CreateSuperUser, DropInvalidDatabases,
+    DropRoles, FinalizeDropLogicalSubscriptions, HandleNeonExtension, HandleOtherExtensions,
+    RenameAndDeleteDatabases, RenameRoles, RunInEachDatabase,
 };
 use crate::spec_apply::PerDatabasePhase;
 use crate::spec_apply::PerDatabasePhase::{
@@ -1163,6 +1164,16 @@ impl ComputeNode {
                 phases.push(FinalizeDropLogicalSubscriptions);
             }
 
+            match spec.audit_log_level
+            {
+                ComputeAudit::Hipaa => {
+                    phases.push(CreatePgauditExtension);
+                    phases.push(CreatePgauditlogtofileExtension); 
+                },
+                ComputeAudit::Log => { /* not implemented yet */ } 
+                ComputeAudit::Disabled => {}
+            }
+
             for phase in phases {
                 debug!("Applying phase {:?}", &phase);
                 apply_operations(
@@ -1557,6 +1568,35 @@ impl ComputeNode {
                     Err(err) => error!("could not get installed extensions: {err:?}"),
                 }
             });
+
+            let pgdata_path = Path::new(&self.pgdata);
+            let postgresql_conf_path = pgdata_path.join("postgresql.conf");
+            // TODO move it into apply_config()
+            match pspec.spec.audit_log_level {
+                ComputeAudit::Hipaa => {
+                    // TODO: clarify what events we want to log here.
+                    if config::line_in_file(
+                        &postgresql_conf_path,
+                        "pgaudit.log='write, ddl, function, role'",
+                    )? {
+                        info!("updated postgresql.conf to set pgaudit.log='write, ddl, function, role'");
+                    }
+
+                    let log_directory_path = pgdata_path.join("log");
+                    // get endpoint address from env variable AUDIT_LOGGING_ENDPOINT
+                    let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT")
+                        .unwrap_or_else(|_| "172.17.0.1:514".to_string()); // TODO error here if not set
+                    configure_rsyslog(
+                        log_directory_path.to_str().unwrap(),
+                        "hipaa",
+                        &remote_endpoint,
+                    )?;
+
+                    self.pg_reload_conf()?;
+                }
+                ComputeAudit::Log => { /* not implemented yet */ }
+                ComputeAudit::Disabled => {}
+            }
         }
 
         let startup_end_time = Utc::now();

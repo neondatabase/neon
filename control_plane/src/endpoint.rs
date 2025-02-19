@@ -67,7 +67,7 @@ use crate::postgresql_conf::PostgresConf;
 use crate::storage_controller::StorageController;
 
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse};
-use compute_api::spec::{Cluster, ComputeFeature, ComputeMode, ComputeSpec};
+use compute_api::spec::{Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec};
 
 // contents of a endpoint.json file
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -655,6 +655,7 @@ impl Endpoint {
             local_proxy_config: None,
             reconfigure_concurrency: 1,
             drop_subscriptions_before_start: self.drop_subscriptions_before_start,
+            audit_log_level: ComputeAudit::Off,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;

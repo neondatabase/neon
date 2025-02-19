@@ -60,6 +60,8 @@ pub enum ApplySpecPhase {
     CreateAndAlterDatabases,
     CreateSchemaNeon,
     RunInEachDatabase { db: DB, subphase: PerDatabasePhase },
+    CreatePgauditExtension,
+    CreatePgauditlogtofileExtension,
     HandleOtherExtensions,
     HandleNeonExtension,
     CreateAvailabilityCheck,
@@ -672,6 +674,16 @@ async fn get_operations<'a>(
             }
             Ok(Box::new(empty()))
         }
+
+        ApplySpecPhase::CreatePgauditExtension => Ok(Box::new(once(Operation {
+            query: String::from("CREATE EXTENSION IF NOT EXISTS pgaudit"),
+            comment: Some(String::from("create pgaudit extension")),
+        }))),
+
+        ApplySpecPhase::CreatePgauditlogtofileExtension => Ok(Box::new(once(Operation {
+            query: String::from("CREATE EXTENSION IF NOT EXISTS pgauditlogtofile"),
+            comment: Some(String::from("create pgauditlogtofile extension")),
+        }))),
         ApplySpecPhase::HandleNeonExtension => {
             let operations = vec![
                 Operation {
