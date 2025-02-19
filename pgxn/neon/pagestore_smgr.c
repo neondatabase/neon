@@ -122,7 +122,10 @@ static BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);
 void
 nm_pack_request(StringInfo s, NeonRequest *msg)
 {
+	int msg_len;
 	resetStringInfo(s);
+	pq_sendbyte(s, 'd'); /* copy data */
+	pq_sendint32(s, 0);  /* message length - will be filled later */
 	pq_sendbyte(s, msg->tag);
 	pq_sendint64(s, msg->u.reqid);
 	pq_sendint64(s, msg->lsn);
@@ -195,6 +198,11 @@ nm_pack_request(StringInfo s, NeonRequest *msg)
 			neon_log(ERROR, "unexpected neon message tag 0x%02x", msg->tag);
 			break;
 	}
+	/* write message length */
+	msg_len = s->len;
+	s->len = 1;
+	pq_sendint32(s, msg_len - 1); /* exclude tag */
+	s->len = msg_len;
 }
 
 /*
@@ -310,11 +318,8 @@ nm_unpack_response(StringInfo s)
 				int n_blocks;
 				msg_resp = memalloc(sizeof(NeonGetSlruSegmentResponse));
 
-				if (neon_protocol_version >= 3)
-				{
-					msg_resp->req.kind = pq_getmsgbyte(s);
-					msg_resp->req.segno = pq_getmsgint(s, 4);
-				}
+				msg_resp->req.kind = pq_getmsgbyte(s);
+				msg_resp->req.segno = pq_getmsgint(s, 4);
 				msg_resp->req.hdr = resp_hdr;
 
 				n_blocks = pq_getmsgint(s, 4);
@@ -337,6 +342,7 @@ nm_unpack_response(StringInfo s)
 		case T_NeonDbSizeRequest:
 		case T_NeonGetSlruSegmentRequest:
 		default:
+			Assert(false);
 			break;
 	}
 
