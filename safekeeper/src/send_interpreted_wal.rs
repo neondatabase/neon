@@ -396,17 +396,31 @@ impl InterpretedWalReader {
                     let mut shard_senders_to_remove = Vec::new();
                     for (shard, states) in &mut self.shard_senders {
                         for state in states {
-                            if max_next_record_lsn <= state.next_record_lsn {
-                                continue;
-                            }
-
                             let shard_sender_id = ShardSenderId::new(*shard, state.sender_id);
-                            let records = records_by_sender.remove(&shard_sender_id).unwrap_or_default();
 
-                            let batch = InterpretedWalRecords {
-                                records,
-                                next_record_lsn: max_next_record_lsn,
-                                raw_wal_start_lsn: Some(batch_wal_start_lsn),
+                            let batch = if max_next_record_lsn > state.next_record_lsn {
+                                // This batch contains at least one record that this shard has not
+                                // seen yet.
+                                let records = records_by_sender.remove(&shard_sender_id).unwrap_or_default();
+
+                                InterpretedWalRecords {
+                                    records,
+                                    next_record_lsn: max_next_record_lsn,
+                                    raw_wal_start_lsn: Some(batch_wal_start_lsn),
+                                }
+                            } else if wal_end_lsn > state.next_record_lsn {
+                                // All the records in this batch were seen by the shard
+                                // However, the batch maps to a chunk of WAL that the
+                                // shard has not yet seen. Notify if of the start LSN
+                                // of the PG WAL chunk such that it doesn't look like a gap.
+                                InterpretedWalRecords {
+                                    records: Vec::default(),
+                                    next_record_lsn: state.next_record_lsn,
+                                    raw_wal_start_lsn: Some(batch_wal_start_lsn),
+                                }
+                            } else {
+                                // The shard has seen this chunk of WAL before. Skip it.
+                                continue;
                             };
 
                             let res = state.tx.send(Batch {
@@ -418,7 +432,7 @@ impl InterpretedWalReader {
                             if res.is_err() {
                                 shard_senders_to_remove.push(shard_sender_id);
                             } else {
-                                state.next_record_lsn = max_next_record_lsn;
+                                state.next_record_lsn = std::cmp::max(state.next_record_lsn, max_next_record_lsn);
                             }
                         }
                     }
