@@ -20,9 +20,6 @@ SIGNED_CHAR_EXTRACT = """
     WHERE ARRAY['leaf'] = ((gin_page_opaque_info(page)).flags);
     """
 
-OUTPUT_DATA_DIR = "data"
-OUTPUT_DATA_FILE = "test_signed_char.out"
-
 
 def test_signed_char(neon_simple_env: NeonEnv):
     """
