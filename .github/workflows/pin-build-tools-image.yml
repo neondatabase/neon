@@ -78,7 +78,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-region: eu-central-1
+          aws-region: ${{ vars.AWS_ECR_REGION }}
           role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
           role-duration-seconds: 3600
 
@@ -104,12 +104,12 @@ jobs:
             tags=()
 
             tags+=("-t" "neondatabase/build-tools:${TO_TAG}-${debian_version}")
-            tags+=("-t" "369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${TO_TAG}-${debian_version}")
+            tags+=("-t" "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:${TO_TAG}-${debian_version}")
             tags+=("-t" "neoneastus2.azurecr.io/neondatabase/build-tools:${TO_TAG}-${debian_version}")
 
             if [ "${debian_version}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
               tags+=("-t" "neondatabase/build-tools:${TO_TAG}")
-              tags+=("-t" "369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${TO_TAG}")
+              tags+=("-t" "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:${TO_TAG}")
               tags+=("-t" "neoneastus2.azurecr.io/neondatabase/build-tools:${TO_TAG}")
             fi
 

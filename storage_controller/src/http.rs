@@ -9,7 +9,10 @@ use crate::service::{LeadershipStatus, Service, RECONCILE_TIMEOUT, STARTUP_RECON
 use anyhow::Context;
 use futures::Future;
 use http_utils::{
-    endpoint::{self, auth_middleware, check_permission_with, request_span},
+    endpoint::{
+        self, auth_middleware, check_permission_with, profile_cpu_handler, profile_heap_handler,
+        request_span,
+    },
     error::ApiError,
     failpoints::failpoints_handler,
     json::{json_request, json_response},
@@ -54,7 +57,7 @@ pub struct HttpState {
     service: Arc<crate::service::Service>,
     auth: Option<Arc<SwappableJwtAuth>>,
     neon_metrics: NeonMetrics,
-    allowlist_routes: Vec<Uri>,
+    allowlist_routes: &'static [&'static str],
 }
 
 impl HttpState {
@@ -63,15 +66,17 @@ impl HttpState {
         auth: Option<Arc<SwappableJwtAuth>>,
         build_info: BuildInfo,
     ) -> Self {
-        let allowlist_routes = ["/status", "/ready", "/metrics"]
-            .iter()
-            .map(|v| v.parse().unwrap())
-            .collect::<Vec<_>>();
         Self {
             service,
             auth,
             neon_metrics: NeonMetrics::new(build_info),
-            allowlist_routes,
+            allowlist_routes: &[
+                "/status",
+                "/ready",
+                "/metrics",
+                "/profile/cpu",
+                "/profile/heap",
+            ],
         }
     }
 }
@@ -1416,23 +1421,26 @@ pub fn prologue_leadership_status_check_middleware<
         let state = get_state(&req);
         let leadership_status = state.service.get_leadership_status();
 
-        enum AllowedRoutes<'a> {
+        enum AllowedRoutes {
             All,
-            Some(Vec<&'a str>),
+            Some(&'static [&'static str]),
         }
 
         let allowed_routes = match leadership_status {
             LeadershipStatus::Leader => AllowedRoutes::All,
             LeadershipStatus::SteppedDown => AllowedRoutes::All,
-            LeadershipStatus::Candidate => {
-                AllowedRoutes::Some(["/ready", "/status", "/metrics"].to_vec())
-            }
+            LeadershipStatus::Candidate => AllowedRoutes::Some(&[
+                "/ready",
+                "/status",
+                "/metrics",
+                "/profile/cpu",
+                "/profile/heap",
+            ]),
         };
 
-        let uri = req.uri().to_string();
         match allowed_routes {
             AllowedRoutes::All => Ok(req),
-            AllowedRoutes::Some(allowed) if allowed.contains(&uri.as_str()) => Ok(req),
+            AllowedRoutes::Some(allowed) if allowed.contains(&req.uri().path()) => Ok(req),
             _ => {
                 tracing::info!(
                     "Request {} not allowed due to current leadership state",
@@ -1541,7 +1549,8 @@ enum ForwardOutcome {
 
 /// Potentially forward the request to the current storage controler leader.
 /// More specifically we forward when:
-/// 1. Request is not one of ["/control/v1/step_down", "/status", "/ready", "/metrics"]
+/// 1. Request is not one of:
+///    ["/control/v1/step_down", "/status", "/ready", "/metrics", "/profile/cpu", "/profile/heap"]
 /// 2. Current instance is in [`LeadershipStatus::SteppedDown`] state
 /// 3. There is a leader in the database to forward to
 /// 4. Leader from step (3) is not the current instance
@@ -1562,10 +1571,17 @@ enum ForwardOutcome {
 /// Hence, if we are in the edge case scenario the leader persisted in the database is the
 /// stepped down instance that received the request. Condition (4) above covers this scenario.
 async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
-    const NOT_FOR_FORWARD: [&str; 4] = ["/control/v1/step_down", "/status", "/ready", "/metrics"];
+    const NOT_FOR_FORWARD: &[&str] = &[
+        "/control/v1/step_down",
+        "/status",
+        "/ready",
+        "/metrics",
+        "/profile/cpu",
+        "/profile/heap",
+    ];
 
-    let uri = req.uri().to_string();
-    let uri_for_forward = !NOT_FOR_FORWARD.contains(&uri.as_str());
+    let uri = req.uri();
+    let uri_for_forward = !NOT_FOR_FORWARD.contains(&uri.path());
 
     // Fast return before trying to take any Service locks, if we will never forward anyway
     if !uri_for_forward {
@@ -1765,7 +1781,7 @@ pub fn make_router(
     if auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
             let state = get_state(request);
-            if state.allowlist_routes.contains(request.uri()) {
+            if state.allowlist_routes.contains(&request.uri().path()) {
                 None
             } else {
                 state.auth.as_deref()
@@ -1778,12 +1794,18 @@ pub fn make_router(
         .get("/metrics", |r| {
             named_request_span(r, measured_metrics_handler, RequestName("metrics"))
         })
-        // Non-prefixed generic endpoints (status, metrics)
+        // Non-prefixed generic endpoints (status, metrics, profiling)
         .get("/status", |r| {
             named_request_span(r, handle_status, RequestName("status"))
         })
         .get("/ready", |r| {
             named_request_span(r, handle_ready, RequestName("ready"))
+        })
+        .get("/profile/cpu", |r| {
+            named_request_span(r, profile_cpu_handler, RequestName("profile_cpu"))
+        })
+        .get("/profile/heap", |r| {
+            named_request_span(r, profile_heap_handler, RequestName("profile_heap"))
         })
         // Upcalls for the pageserver: point the pageserver's `control_plane_api` config to this prefix
         .post("/upcall/v1/re-attach", |r| {

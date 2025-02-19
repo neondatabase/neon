@@ -68,7 +68,7 @@ jobs:
   tag:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+    container: ${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
 
@@ -859,14 +859,17 @@ jobs:
           BRANCH: "${{ github.ref_name }}"
           DEV_ACR: "${{ vars.AZURE_DEV_REGISTRY_NAME }}"
           PROD_ACR: "${{ vars.AZURE_PROD_REGISTRY_NAME }}"
+          DEV_AWS: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
+          PROD_AWS: "${{ vars.NEON_PROD_AWS_ACCOUNT_ID }}"
+          AWS_REGION: "${{ vars.AWS_ECR_REGION }}"
 
   push-neon-image-dev:
     needs: [ generate-image-maps, neon-image ]
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: '${{ needs.generate-image-maps.outputs.neon-dev }}'
-      aws-region: eu-central-1
-      aws-account-ids: "369495373322"
+      aws-region: ${{ vars.AWS_ECR_REGION }}
+      aws-account-ids: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
       azure-client-id: ${{ vars.AZURE_DEV_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -881,8 +884,8 @@ jobs:
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: '${{ needs.generate-image-maps.outputs.compute-dev }}'
-      aws-region: eu-central-1
-      aws-account-ids: "369495373322"
+      aws-region: ${{ vars.AWS_ECR_REGION }}
+      aws-account-ids: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
       azure-client-id: ${{ vars.AZURE_DEV_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -898,8 +901,8 @@ jobs:
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: '${{ needs.generate-image-maps.outputs.neon-prod }}'
-      aws-region: eu-central-1
-      aws-account-ids: "093970136003"
+      aws-region: ${{ vars.AWS_ECR_REGION }}
+      aws-account-ids: "${{ vars.NEON_PROD_AWS_ACCOUNT_ID }}"
       azure-client-id: ${{ vars.AZURE_PROD_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -915,8 +918,8 @@ jobs:
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: '${{ needs.generate-image-maps.outputs.compute-prod }}'
-      aws-region: eu-central-1
-      aws-account-ids: "093970136003"
+      aws-region: ${{ vars.AWS_ECR_REGION }}
+      aws-account-ids: "${{ vars.NEON_PROD_AWS_ACCOUNT_ID }}"
       azure-client-id: ${{ vars.AZURE_PROD_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -1029,7 +1032,7 @@ jobs:
       statuses: write
       contents: write
     runs-on: [ self-hosted, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+    container: ${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/ansible:latest
     steps:
       - uses: actions/checkout@v4
 
