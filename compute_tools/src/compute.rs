@@ -1168,9 +1168,9 @@ impl ComputeNode {
             {
                 ComputeAudit::Hipaa => {
                     phases.push(CreatePgauditExtension);
-                    phases.push(CreatePgauditlogtofileExtension); 
-                },
-                ComputeAudit::Log => { /* not implemented yet */ } 
+                    phases.push(CreatePgauditlogtofileExtension);
+                }
+                ComputeAudit::Log => { /* not implemented yet */ }
                 ComputeAudit::Disabled => {}
             }
 
