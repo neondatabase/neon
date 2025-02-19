@@ -112,7 +112,7 @@ impl Safekeeper {
             warn_threshold,
             max_retries,
             &format!(
-                "Call to node {} ({}:{}) management API",
+                "Call to safekeeper {} ({}:{}) management API",
                 self.id, self.listen_http_addr, self.listen_http_port
             ),
             cancel,
