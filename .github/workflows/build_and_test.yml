@@ -65,38 +65,11 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           filters: .github/file-filters.yaml
 
-  tag:
+  meta:
     needs: [ check-permissions ]
-    runs-on: [ self-hosted, small ]
-    container: ${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/base:pinned
-    outputs:
-      build-tag: ${{steps.build-tag.outputs.tag}}
-
-    steps:
-      # Need `fetch-depth: 0` to count the number of commits in the branch
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Get build tag
-        run: |
-          echo run:$GITHUB_RUN_ID
-          echo ref:$GITHUB_REF_NAME
-          echo rev:$(git rev-list --count HEAD)
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "tag=$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            echo "tag=release-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
-            echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
-            echo "tag=release-compute-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release', 'release-proxy', 'release-compute'"
-            echo "tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
-          fi
-        shell: bash
-        id: build-tag
+    uses: ./.github/workflows/_meta.yml
+    with:
+      github-event-name: ${{ github.event_name }}
 
   build-build-tools-image:
     needs: [ check-permissions ]
@@ -199,7 +172,7 @@ jobs:
     secrets: inherit
 
   build-and-test-locally:
-    needs: [ tag, build-build-tools-image ]
+    needs: [ meta, build-build-tools-image ]
     strategy:
       fail-fast: false
       matrix:
@@ -213,7 +186,7 @@ jobs:
     with:
       arch: ${{ matrix.arch }}
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
-      build-tag: ${{ needs.tag.outputs.build-tag }}
+      build-tag: ${{ needs.meta.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
       # Run tests on all Postgres versions in release builds and only on the latest version in debug builds.
       # Run without LFC on v17 release and debug builds only. For all the other cases LFC is enabled.
@@ -497,9 +470,11 @@ jobs:
             })
 
   trigger-e2e-tests:
-    if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute' }}
-    needs: [ check-permissions, push-neon-image-dev, push-compute-image-dev, tag ]
+    if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || contains(fromJSON('["push-main", "storage-release", "proxy-release", "compute-release"]'), needs.meta.outputs.run-kind) }}
+    needs: [ check-permissions, push-neon-image-dev, push-compute-image-dev, meta ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
+    with:
+      github-event-name: ${{ github.event_name }}
     secrets: inherit
 
   neon-image-arch:
@@ -539,7 +514,7 @@ jobs:
           build-args: |
             ADDITIONAL_RUSTFLAGS=${{ matrix.arch == 'arm64' && '-Ctarget-feature=+lse -Ctarget-cpu=neoverse-n1' || '' }}
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
+            BUILD_TAG=${{ needs.meta.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-bookworm
             DEBIAN_VERSION=bookworm
           provenance: false
@@ -549,7 +524,7 @@ jobs:
           cache-from: type=registry,ref=cache.neon.build/neon:cache-bookworm-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0}-{1},mode=max', 'bookworm', matrix.arch) || '' }}
           tags: |
-            neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-${{ matrix.arch }}
+            neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-${{ matrix.arch }}
 
   neon-image:
     needs: [ neon-image-arch, tag ]
@@ -567,10 +542,10 @@ jobs:
 
       - name: Create multi-arch image
         run: |
-          docker buildx imagetools create -t neondatabase/neon:${{ needs.tag.outputs.build-tag }} \
-                                          -t neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm \
-                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-x64 \
-                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-arm64
+          docker buildx imagetools create -t neondatabase/neon:${{ needs.meta.outputs.build-tag }} \
+                                          -t neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm \
+                                             neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-x64 \
+                                             neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-arm64
 
   compute-node-image-arch:
     needs: [ check-permissions, build-build-tools-image, tag ]
@@ -631,7 +606,7 @@ jobs:
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             PG_VERSION=${{ matrix.version.pg }}
-            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
+            BUILD_TAG=${{ needs.meta.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
             DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
@@ -641,7 +616,7 @@ jobs:
           cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
           tags: |
-            neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
+            neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
       - name: Build neon extensions test image
         if: matrix.version.pg >= 'v16'
@@ -651,7 +626,7 @@ jobs:
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             PG_VERSION=${{ matrix.version.pg }}
-            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
+            BUILD_TAG=${{ needs.meta.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
             DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
@@ -661,7 +636,7 @@ jobs:
           target: extension-tests
           cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           tags: |
-            neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
+            neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.meta.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
   compute-node-image:
     needs: [ compute-node-image-arch, tag ]
@@ -692,18 +667,18 @@ jobs:
 
       - name: Create multi-arch compute-node image
         run: |
-          docker buildx imagetools create -t neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
-                                          -t neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }} \
-                                             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
-                                             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
+          docker buildx imagetools create -t neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
+                                          -t neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }} \
+                                             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
+                                             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
       - name: Create multi-arch neon-test-extensions image
         if: matrix.version.pg >= 'v16'
         run: |
-          docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
-                                          -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }} \
-                                             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
-                                             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
+          docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
+                                          -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }} \
+                                             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
+                                             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
@@ -742,20 +717,20 @@ jobs:
       # it won't have the proper authentication (written at v0.6.0)
       - name: Pulling compute-node image
         run: |
-          docker pull neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
+          docker pull neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}
 
       - name: Build vm image
         run: |
           ./vm-builder \
             -size=2G \
             -spec=compute/vm-image-spec-${{ matrix.version.debian }}.yaml \
-            -src=neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
-            -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
+            -src=neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
+            -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
             -target-arch=linux/amd64
 
       - name: Pushing vm-compute-node image
         run: |
-          docker push neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
+          docker push neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}
 
   test-images:
     needs: [ check-permissions, tag, neon-image, compute-node-image ]
@@ -776,17 +751,6 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - name: Get the last compute release tag
-        id: get-last-compute-release-tag
-        env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
-        run: |
-          tag=$(gh api -q '[.[].tag_name | select(startswith("release-compute"))][0]'\
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "/repos/${{ github.repository }}/releases")
-          echo tag=${tag} >> ${GITHUB_OUTPUT}
-
       # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
       # Pick pageserver as currently the only binary with extra "version" features printed in the string to verify.
       # Regular pageserver version string looks like
@@ -797,7 +761,7 @@ jobs:
       - name: Verify image versions
         shell: bash # ensure no set -e for better error messages
         run: |
-          pageserver_version=$(docker run --rm neondatabase/neon:${{ needs.tag.outputs.build-tag }} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
+          pageserver_version=$(docker run --rm neondatabase/neon:${{ needs.meta.outputs.build-tag }} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
 
           echo "Pageserver version string: $pageserver_version"
 
@@ -828,8 +792,8 @@ jobs:
         timeout-minutes: 20
         if: ${{ needs.tag.outputs.build-tag == github.run_id }}
         env:
-          NEWTAG: ${{ needs.tag.outputs.build-tag }}
-          OLDTAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
+          NEWTAG: ${{ needs.meta.outputs.build-tag }}
+          OLDTAG: ${{ needs.meta.outputs.previous-compute-release }}
         run: ./docker-compose/test_extensions_upgrade.sh
 
       - name: Print logs and clean up
@@ -839,7 +803,7 @@ jobs:
           docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml down
 
   generate-image-maps:
-    needs: [ tag ]
+    needs: [ meta ]
     runs-on: ubuntu-22.04
     outputs:
       neon-dev: ${{ steps.generate.outputs.neon-dev }}
@@ -856,7 +820,7 @@ jobs:
         id: generate
         run: python3 .github/scripts/generate_image_maps.py
         env:
-          BUILD_TAG: "${{ needs.tag.outputs.build-tag }}"
+          BUILD_TAG: "${{ needs.meta.outputs.build-tag }}"
           BRANCH: "${{ github.ref_name }}"
           DEV_ACR: "${{ vars.AZURE_DEV_REGISTRY_NAME }}"
           PROD_ACR: "${{ vars.AZURE_PROD_REGISTRY_NAME }}"
@@ -937,13 +901,13 @@ jobs:
   # This is a bit of a special case so we're not using a generated image map.
   add-latest-tag-to-neon-extensions-test-image:
     if: github.ref_name == 'main'
-    needs: [ tag, compute-node-image ]
+    needs: [ meta, compute-node-image ]
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: |
         {
-          "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}": ["docker.io/neondatabase/neon-test-extensions-v16:latest"],
-          "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.tag.outputs.build-tag }}": ["docker.io/neondatabase/neon-test-extensions-v17:latest"]
+          "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}": ["docker.io/neondatabase/neon-test-extensions-v16:latest"],
+          "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}": ["docker.io/neondatabase/neon-test-extensions-v17:latest"]
         }
     secrets: inherit
 
@@ -983,7 +947,7 @@ jobs:
                 \"ci_job_name\": \"build-and-upload-extensions\",
                 \"commit_hash\": \"$COMMIT_SHA\",
                 \"remote_repo\": \"${{ github.repository }}\",
-                \"compute_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
+                \"compute_image_tag\": \"${{ needs.meta.outputs.build-tag }}\",
                 \"remote_branch_name\": \"${{ github.ref_name }}\"
               }
             }"
@@ -1029,7 +993,7 @@ jobs:
   deploy:
     needs: [ check-permissions, push-neon-image-prod, push-compute-image-prod, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait ]
     # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
-    if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute') && !failure() && !cancelled()
+    if: ${{ contains(fromJSON('["push-main", "storage-release", "proxy-release", "compute-release"]'), needs.tag.outputs.run-kind) && !failure() && !cancelled() }}
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
@@ -1040,108 +1004,103 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Create git tag and GitHub release
-        if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
+        if: ${{ contains(fromJSON('["storage-release", "proxy-release", "compute-release"]'), needs.meta.outputs.run-kind) }}
         uses: actions/github-script@v7
+        env:
+          TAG: "${{ needs.meta.outputs.build-tag }}"
+          BRANCH: "${{ github.ref_name }}"
+          PREVIOUS_RELEASE: >-
+            ${{
+              false
+              || needs.meta.outputs.run-kind == 'storage-release' && needs.meta.outputs.previous-storage-release
+              || needs.meta.outputs.run-kind == 'proxy-release' && needs.meta.outputs.previous-proxy-release
+              || needs.meta.outputs.run-kind == 'compute-release' && needs.meta.outputs.previous-compute-release
+              || 'unknown'
+            }}
         with:
           retries: 5
           script: |
-            const tag = "${{ needs.tag.outputs.build-tag }}";
-            const branch = "${{ github.ref_name }}";
+            const { TAG, BRANCH, PREVIOUS_RELEASE } = process.env
 
             try {
               const existingRef = await github.rest.git.getRef({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                ref: `tags/${tag}`,
+                ref: `tags/${TAG}`,
               });
 
               if (existingRef.data.object.sha !== context.sha) {
-                throw new Error(`Tag ${tag} already exists but points to a different commit (expected: ${context.sha}, actual: ${existingRef.data.object.sha}).`);
+                throw new Error(`Tag ${TAG} already exists but points to a different commit (expected: ${context.sha}, actual: ${existingRef.data.object.sha}).`);
               }
 
-              console.log(`Tag ${tag} already exists and points to ${context.sha} as expected.`);
+              console.log(`Tag ${TAG} already exists and points to ${context.sha} as expected.`);
             } catch (error) {
               if (error.status !== 404) {
                 throw error;
               }
 
-              console.log(`Tag ${tag} does not exist. Creating it...`);
+              console.log(`Tag ${TAG} does not exist. Creating it...`);
               await github.rest.git.createRef({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                ref: `refs/tags/${tag}`,
+                ref: `refs/tags/${TAG}`,
                 sha: context.sha,
               });
-              console.log(`Tag ${tag} created successfully.`);
+              console.log(`Tag ${TAG} created successfully.`);
             }
 
             try {
               const existingRelease = await github.rest.repos.getReleaseByTag({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                tag: tag,
+                tag: TAG,
               });
 
-              console.log(`Release for tag ${tag} already exists (ID: ${existingRelease.data.id}).`);
+              console.log(`Release for tag ${TAG} already exists (ID: ${existingRelease.data.id}).`);
             } catch (error) {
               if (error.status !== 404) {
                 throw error;
               }
 
-              console.log(`Release for tag ${tag} does not exist. Creating it...`);
+              console.log(`Release for tag ${TAG} does not exist. Creating it...`);
 
               // Find the PR number using the commit SHA
               const pullRequests = await github.rest.pulls.list({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 state: 'closed',
-                base: branch,
+                base: BRANCH,
               });
 
               const pr = pullRequests.data.find(pr => pr.merge_commit_sha === context.sha);
               const prNumber = pr ? pr.number : null;
 
-              // Find the previous release on the branch
-              const releases = await github.rest.repos.listReleases({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                per_page: 100,
-              });
-
-              const branchReleases = releases.data
-                .filter((release) => {
-                  const regex = new RegExp(`^${branch}-\\d+$`);
-                  return regex.test(release.tag_name) && !release.draft && !release.prerelease;
-                })
-                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-
-              const previousTag = branchReleases.length > 0 ? branchReleases[0].tag_name : null;
-
               const releaseNotes = [
                 prNumber
                   ? `Release PR https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${prNumber}.`
                   : 'Release PR not found.',
-                previousTag
-                  ? `Diff with the previous release https://github.com/${context.repo.owner}/${context.repo.repo}/compare/${previousTag}...${tag}.`
-                  : `No previous release found on branch ${branch}.`,
+                `Diff with the previous release https://github.com/${context.repo.owner}/${context.repo.repo}/compare/${PREVIOUS_RELEASE}...${TAG}.`
               ].join('\n\n');
 
               await github.rest.repos.createRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                tag_name: tag,
+                tag_name: TAG,
                 body: releaseNotes,
               });
-              console.log(`Release for tag ${tag} created successfully.`);
+              console.log(`Release for tag ${TAG} created successfully.`);
             }
 
       - name: Trigger deploy workflow
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          RUN_KIND: ${{ needs.meta.outputs.run-kind }}
         run: |
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f deployPreprodRegion=false
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+          case ${RUN_KIND} in
+          push-main)
+            gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.meta.outputs.build-tag}} -f deployPreprodRegion=false
+            ;;
+          storage-release)
             gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main \
               -f deployPgSniRouter=false \
               -f deployProxy=false \
@@ -1149,7 +1108,7 @@ jobs:
               -f deployStorageBroker=true \
               -f deployStorageController=true \
               -f branch=main \
-              -f dockerTag=${{needs.tag.outputs.build-tag}} \
+              -f dockerTag=${{needs.meta.outputs.build-tag}} \
               -f deployPreprodRegion=true
 
             gh workflow --repo neondatabase/infra run deploy-prod.yml --ref main \
@@ -1157,8 +1116,9 @@ jobs:
               -f deployStorageBroker=true \
               -f deployStorageController=true \
               -f branch=main \
-              -f dockerTag=${{needs.tag.outputs.build-tag}}
-          elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
+              -f dockerTag=${{needs.meta.outputs.build-tag}}
+            ;;
+          proxy-release)
             gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main \
               -f deployPgSniRouter=true \
               -f deployProxy=true \
@@ -1166,7 +1126,7 @@ jobs:
               -f deployStorageBroker=false \
               -f deployStorageController=false \
               -f branch=main \
-              -f dockerTag=${{needs.tag.outputs.build-tag}} \
+              -f dockerTag=${{needs.meta.outputs.build-tag}} \
               -f deployPreprodRegion=true
 
             gh workflow --repo neondatabase/infra run deploy-proxy-prod.yml --ref main \
@@ -1176,13 +1136,16 @@ jobs:
               -f deployProxyScram=true \
               -f deployProxyAuthBroker=true \
               -f branch=main \
-              -f dockerTag=${{needs.tag.outputs.build-tag}}
-          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
-            gh workflow --repo neondatabase/infra run deploy-compute-dev.yml --ref main -f dockerTag=${{needs.tag.outputs.build-tag}}
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main', 'release', 'release-proxy' or 'release-compute'"
+              -f dockerTag=${{needs.meta.outputs.build-tag}}
+            ;;
+          compute-release)
+            gh workflow --repo neondatabase/infra run deploy-compute-dev.yml --ref main -f dockerTag=${{needs.meta.outputs.build-tag}}
+            ;;
+          *)
+            echo "RUN_KIND (value '${RUN_KIND}') is not set to either 'push-main', 'storage-release', 'proxy-release' or 'compute-release'"
             exit 1
-          fi
+            ;;
+          esac
 
   notify-storage-release-deploy-failure:
     needs: [ deploy ]
