@@ -65,7 +65,7 @@ jobs:
         uses: ./.github/actions/run-python-test-set
         with:
           build_type: ${{ env.BUILD_TYPE }}
-          test_selection: test_api_random
+          test_selection: cloud_regress/test_api_random
           pg_version: ${{matrix.pg-version}}
           extra_params: -m remote_cluster
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
@@ -77,7 +77,6 @@ jobs:
         uses: ./.github/actions/neon-project-delete
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          admin_api_key: ${{ secrets.NEON_STAGING_ADMIN_API_KEY }}
           project_id: ${{ steps.create-project.outputs.project_id }}
 
       - name: Create Allure report
