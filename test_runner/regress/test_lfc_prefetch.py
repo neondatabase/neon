@@ -30,6 +30,7 @@ def test_lfc_prefetch(neon_simple_env: NeonEnv):
     cur = conn.cursor()
     cur.execute("create extension neon")
     cur.execute("create table t(pk integer, sk integer, filler text default repeat('x',200))")
+    cur.execute("set statement_timeout=0")
     cur.execute("insert into t values (generate_series(1,1000000),random()*1000000)")
     cur.execute("create index on t(sk)")
     cur.execute("vacuum t")
