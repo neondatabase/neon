@@ -1525,6 +1525,7 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, 
 			(void)communicator_request(get_shard_number(rinfo, blocknum + i), &request);
 		}
 	}
+	lfc_writev(rinfo, forknum, blocknum, (const void**)buffers, nblocks);
 }
 
 /*
