@@ -470,7 +470,15 @@ jobs:
             })
 
   trigger-e2e-tests:
-    if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || contains(fromJSON('["push-main", "storage-release", "proxy-release", "compute-release"]'), needs.meta.outputs.run-kind) }}
+    # Depends on jobs that can get skipped
+    if: >-
+      ${{
+        (
+          !github.event.pull_request.draft
+          || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft')
+          || contains(fromJSON('["push-main", "storage-release", "proxy-release", "compute-release"]'), needs.meta.outputs.run-kind)
+        ) && !failure() && !cancelled()
+      }}
     needs: [ check-permissions, push-neon-image-dev, push-compute-image-dev, meta ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
     with:
@@ -478,7 +486,8 @@ jobs:
     secrets: inherit
 
   neon-image-arch:
-    needs: [ check-permissions, build-build-tools-image, tag ]
+    needs: [ check-permissions, build-build-tools-image, meta ]
+    if: ${{ contains(fromJSON('["push-main", "pr-main", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
     strategy:
       matrix:
         arch: [ x64, arm64 ]
@@ -527,7 +536,8 @@ jobs:
             neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-${{ matrix.arch }}
 
   neon-image:
-    needs: [ neon-image-arch, tag ]
+    needs: [ neon-image-arch, meta ]
+    if: ${{ contains(fromJSON('["push-main", "pr-main", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
     runs-on: ubuntu-22.04
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
@@ -548,7 +558,8 @@ jobs:
                                              neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-arm64
 
   compute-node-image-arch:
-    needs: [ check-permissions, build-build-tools-image, tag ]
+    needs: [ check-permissions, build-build-tools-image, meta ]
+    if: ${{ contains(fromJSON('["push-main", "pr-main", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
@@ -639,7 +650,8 @@ jobs:
             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.meta.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
   compute-node-image:
-    needs: [ compute-node-image-arch, tag ]
+    needs: [ compute-node-image-arch, meta ]
+    if: ${{ contains(fromJSON('["push-main", "pr-main", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
@@ -681,7 +693,8 @@ jobs:
                                              neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
   vm-compute-node-image:
-    needs: [ check-permissions, tag, compute-node-image ]
+    needs: [ check-permissions, meta, compute-node-image ]
+    if: ${{ contains(fromJSON('["push-main", "pr-main", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     runs-on: [ self-hosted, large ]
     strategy:
       fail-fast: false
@@ -733,7 +746,9 @@ jobs:
           docker push neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}
 
   test-images:
-    needs: [ check-permissions, tag, neon-image, compute-node-image ]
+    needs: [ check-permissions, meta, neon-image, compute-node-image ]
+    # Depends on jobs that can get skipped
+    if: "!failure() && !cancelled()"
     strategy:
       fail-fast: false
       matrix:
@@ -760,6 +775,7 @@ jobs:
       # Ensure that we don't have bad versions.
       - name: Verify image versions
         shell: bash # ensure no set -e for better error messages
+        if: ${{ contains(fromJSON('["push-main", "pr-main", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
         run: |
           pageserver_version=$(docker run --rm neondatabase/neon:${{ needs.meta.outputs.build-tag }} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
 
@@ -778,7 +794,24 @@ jobs:
       - name: Verify docker-compose example and test extensions
         timeout-minutes: 20
         env:
-          TAG: ${{needs.tag.outputs.build-tag}}
+          TAG: >-
+            ${{
+              contains(fromJSON('["compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind)
+              && needs.meta.outputs.previous-storage-release
+              || needs.meta.outputs.build-tag
+            }}
+          COMPUTE_TAG: >-
+            ${{
+              contains(fromJSON('["storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind)
+              && needs.meta.outputs.previous-compute-release
+              || needs.meta.outputs.build-tag
+            }}
+          TEST_EXTENSIONS_TAG: >-
+            ${{
+              contains(fromJSON('["storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind)
+              && 'latest'
+              || needs.meta.outputs.build-tag
+            }}
           TEST_VERSION_ONLY: ${{ matrix.pg_version }}
         run: ./docker-compose/docker_compose_test.sh
 
@@ -790,10 +823,17 @@ jobs:
 
       - name: Test extension upgrade
         timeout-minutes: 20
-        if: ${{ needs.tag.outputs.build-tag == github.run_id }}
+        if: ${{ contains(fromJSON('["pr-main", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
         env:
-          NEWTAG: ${{ needs.meta.outputs.build-tag }}
-          OLDTAG: ${{ needs.meta.outputs.previous-compute-release }}
+          TAG: >-
+            ${{
+              false
+              || needs.meta.outputs.run-kind == 'pr-main' && needs.meta.outputs.build-tag
+              || needs.meta.outputs.run-kind == 'compute-rc-pr' && needs.meta.outputs.previous-storage-release
+            }}
+          TEST_EXTENSIONS_TAG: latest
+          NEW_COMPUTE_TAG: ${{ needs.meta.outputs.build-tag }}
+          OLD_COMPUTE_TAG: ${{ needs.meta.outputs.previous-compute-release }}
         run: ./docker-compose/test_extensions_upgrade.sh
 
       - name: Print logs and clean up
@@ -829,7 +869,8 @@ jobs:
           AWS_REGION: "${{ vars.AWS_ECR_REGION }}"
 
   push-neon-image-dev:
-    needs: [ generate-image-maps, neon-image ]
+    needs: [ meta, generate-image-maps, neon-image ]
+    if: ${{ contains(fromJSON('["push-main", "pr-main", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       id-token: write  # Required for aws/azure login
@@ -846,7 +887,8 @@ jobs:
     secrets: inherit
 
   push-compute-image-dev:
-    needs: [ generate-image-maps, vm-compute-node-image ]
+    needs: [ meta, generate-image-maps, vm-compute-node-image ]
+    if: ${{ contains(fromJSON('["push-main", "pr-main", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       id-token: write  # Required for aws/azure login
@@ -863,8 +905,8 @@ jobs:
     secrets: inherit
 
   push-neon-image-prod:
-    if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
-    needs: [ generate-image-maps, neon-image, test-images ]
+    needs: [ meta, generate-image-maps, neon-image, test-images ]
+    if: ${{ contains(fromJSON('["storage-release", "proxy-release"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       id-token: write  # Required for aws/azure login
@@ -881,8 +923,8 @@ jobs:
     secrets: inherit
 
   push-compute-image-prod:
-    if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
-    needs: [ generate-image-maps, vm-compute-node-image, test-images ]
+    needs: [ meta, generate-image-maps, vm-compute-node-image, test-images ]
+    if: ${{ needs.meta.outputs.run-kind == 'compute-release' }}
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       id-token: write  # Required for aws/azure login
@@ -912,7 +954,8 @@ jobs:
     secrets: inherit
 
   trigger-custom-extensions-build-and-wait:
-    needs: [ check-permissions, tag ]
+    needs: [ check-permissions, meta ]
+    if: ${{ contains(fromJSON('["push-main", "pr-main", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     runs-on: ubuntu-22.04
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
@@ -1260,7 +1303,8 @@ jobs:
 
   pin-build-tools-image:
     needs: [ build-build-tools-image, test-images, build-and-test-locally ]
-    if: github.ref_name == 'main'
+    # `!failure() && !cancelled()` is required because the job (transitively) depends on jobs that can be skipped
+    if: github.ref_name == 'main' && !failure() && !cancelled()
     uses: ./.github/workflows/pin-build-tools-image.yml
     with:
       from-tag: ${{ needs.build-build-tools-image.outputs.image-tag }}
@@ -1279,6 +1323,7 @@ jobs:
     # Format `needs` differently to make the list more readable.
     # Usually we do `needs: [...]`
     needs:
+      - meta
       - build-and-test-locally
       - check-codestyle-python
       - check-codestyle-rust
@@ -1302,7 +1347,7 @@ jobs:
           || needs.check-codestyle-python.result == 'skipped'
           || needs.check-codestyle-rust.result == 'skipped'
           || needs.files-changed.result == 'skipped'
-          || needs.push-compute-image-dev.result == 'skipped'
-          || needs.push-neon-image-dev.result == 'skipped'
+          || (needs.push-compute-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr-main", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
+          || (needs.push-neon-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr-main", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind))
           || needs.test-images.result == 'skipped'
-          || needs.trigger-custom-extensions-build-and-wait.result == 'skipped'
+          || (needs.trigger-custom-extensions-build-and-wait.result == 'skipped' && contains(fromJSON('["push-main", "pr-main", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
