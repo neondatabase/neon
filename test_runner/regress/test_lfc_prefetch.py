@@ -24,6 +24,7 @@ def test_lfc_prefetch(neon_simple_env: NeonEnv):
             "shared_buffers=1MB",
             "enable_bitmapscan=off",
             "enable_seqscan=off",
+            "autovacuum=off",
         ],
     )
     conn = endpoint.connect()
@@ -31,6 +32,7 @@ def test_lfc_prefetch(neon_simple_env: NeonEnv):
     cur.execute("create extension neon")
     cur.execute("create table t(pk integer, sk integer, filler text default repeat('x',200))")
     cur.execute("set statement_timeout=0")
+    cur.execute("select setseed(0.5)")
     cur.execute("insert into t values (generate_series(1,1000000),random()*1000000)")
     cur.execute("create index on t(sk)")
     cur.execute("vacuum t")
