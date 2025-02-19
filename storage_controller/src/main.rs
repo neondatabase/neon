@@ -27,6 +27,16 @@ use utils::{project_build_tag, project_git_version, tcp_listener};
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// Configure jemalloc to profile heap allocations by sampling stack traces every 2 MB (1 << 21).
+/// This adds roughly 3% overhead for allocations on average, which is acceptable considering
+/// performance-sensitive code will avoid allocations as far as possible anyway.
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(arg_required_else_help(true))]
