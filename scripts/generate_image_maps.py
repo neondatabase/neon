@@ -6,6 +6,9 @@ build_tag = os.environ["BUILD_TAG"]
 branch = os.environ["BRANCH"]
 dev_acr = os.environ["DEV_ACR"]
 prod_acr = os.environ["PROD_ACR"]
+dev_aws = os.environ["DEV_AWS"]
+prod_aws = os.environ["PROD_AWS"]
+aws_region = os.environ["AWS_REGION"]
 
 components = {
     "neon": ["neon"],
@@ -24,11 +27,11 @@ components = {
 registries = {
     "dev": [
         "docker.io/neondatabase",
-        "369495373322.dkr.ecr.eu-central-1.amazonaws.com",
+        f"{dev_aws}.dkr.ecr.{aws_region}.amazonaws.com",
         f"{dev_acr}.azurecr.io/neondatabase",
     ],
     "prod": [
-        "093970136003.dkr.ecr.eu-central-1.amazonaws.com",
+        f"{prod_aws}.dkr.ecr.{aws_region}.amazonaws.com",
         f"{prod_acr}.azurecr.io/neondatabase",
     ],
 }
