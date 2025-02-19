@@ -90,7 +90,7 @@ use utils::{
 use crate::{
     compute_hook::ComputeHook,
     heartbeater::{Heartbeater, PageserverState},
-    node::{self, AvailabilityTransition, Node},
+    node::{AvailabilityTransition, Node},
     persistence::{split_state::SplitState, DatabaseError, Persistence, TenantShardPersistence},
     reconciler::attached_location_conf,
     scheduler::Scheduler,
@@ -1305,7 +1305,7 @@ impl Service {
             .await?
             .into_iter()
             .map(|x| Node::from_persistent(x, config.use_https_pageserver_api))
-            .collect::<Vec<_>>();
+            .collect::<anyhow::Result<Vec<Node>>>()?;
         let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.get_id(), n)).collect();
         tracing::info!("Loaded {} nodes from database.", nodes.len());
         metrics::METRICS_REGISTRY
@@ -1397,8 +1397,9 @@ impl Service {
                     "".to_string(),
                     123,
                     AvailabilityZone("test_az".to_string()),
-                    "".to_string(),
-                );
+                    false,
+                )
+                .unwrap();
 
                 scheduler.node_upsert(&node);
             }
@@ -5793,16 +5794,15 @@ impl Service {
             ));
         }
 
-        let base_node_url = node::build_base_url(
-            &register_req.listen_http_addr,
-            register_req.listen_http_port,
-            register_req.listen_https_port,
-            self.config.use_https_pageserver_api,
-        );
-        let base_node_url = match base_node_url {
-            Ok(url) => url,
-            Err(message) => return Err(ApiError::PreconditionFailed(message.into())),
-        };
+        if self.config.use_https_pageserver_api && register_req.listen_https_port.is_none() {
+            return Err(ApiError::PreconditionFailed(
+                format!(
+                    "Node {} has no https port, but use_https is enabled",
+                    register_req.node_id
+                )
+                .into(),
+            ));
+        }
 
         // Ordering: we must persist the new node _before_ adding it to in-memory state.
         // This ensures that before we use it for anything or expose it via any external
@@ -5815,15 +5815,24 @@ impl Service {
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
             register_req.availability_zone_id.clone(),
-            base_node_url,
+            self.config.use_https_pageserver_api,
         );
+        let new_node = match new_node {
+            Ok(new_node) => new_node,
+            Err(error) => return Err(ApiError::InternalServerError(error)),
+        };
 
-        if registration_status == RegistrationStatus::New {
-            self.persistence.insert_node(&new_node).await?;
-        } else {
-            self.persistence
-                .update_node_on_registration(register_req.node_id, register_req.listen_https_port)
-                .await?;
+        match registration_status {
+            RegistrationStatus::New => self.persistence.insert_node(&new_node).await?,
+            RegistrationStatus::NeedUpdate => {
+                self.persistence
+                    .update_node_on_registration(
+                        register_req.node_id,
+                        register_req.listen_https_port,
+                    )
+                    .await?
+            }
+            _ => unreachable!("Other statuses have been processed earlier"),
         }
 
         let mut locked = self.inner.write().unwrap();
@@ -5839,19 +5848,23 @@ impl Service {
             .storage_controller_pageserver_nodes
             .set(locked.nodes.len() as i64);
 
-        if registration_status == RegistrationStatus::New {
-            tracing::info!(
-                "Registered pageserver {} ({}), now have {} pageservers",
-                register_req.node_id,
-                register_req.availability_zone_id,
-                locked.nodes.len()
-            );
-        } else {
-            tracing::info!(
-                "Re-registered and updated node {} ({})",
-                register_req.node_id,
-                register_req.availability_zone_id,
-            );
+        match registration_status {
+            RegistrationStatus::New => {
+                tracing::info!(
+                    "Registered pageserver {} ({}), now have {} pageservers",
+                    register_req.node_id,
+                    register_req.availability_zone_id,
+                    locked.nodes.len()
+                );
+            }
+            RegistrationStatus::NeedUpdate => {
+                tracing::info!(
+                    "Re-registered and updated node {} ({})",
+                    register_req.node_id,
+                    register_req.availability_zone_id,
+                );
+            }
+            _ => unreachable!("Other statuses have been processed earlier"),
         }
         Ok(())
     }

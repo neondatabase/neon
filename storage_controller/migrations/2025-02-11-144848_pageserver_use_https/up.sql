@@ -1,1 +1,1 @@
-ALTER TABLE nodes ADD listen_https_port Int4;
+ALTER TABLE nodes ADD listen_https_port INTEGER;
