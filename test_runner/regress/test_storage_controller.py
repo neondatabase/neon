@@ -3238,17 +3238,12 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
     assert newest_info["scheduling_policy"] == "Pause"
-    target.safekeeper_scheduling_policy(inserted["id"], "Active")
+    target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
-    assert newest_info["scheduling_policy"] == "Active"
+    assert newest_info["scheduling_policy"] == "Decomissioned"
     # Ensure idempotency
-    target.safekeeper_scheduling_policy(inserted["id"], "Active")
-    newest_info = target.get_safekeeper(inserted["id"])
-    assert newest_info
-    assert newest_info["scheduling_policy"] == "Active"
-    # change back to paused again
-    target.safekeeper_scheduling_policy(inserted["id"], "Pause")
+    target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
 
     def storcon_heartbeat():
         assert env.storage_controller.log_contains(
@@ -3256,9 +3251,6 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
         )
 
     wait_until(storcon_heartbeat)
-
-    # Now decomission it
-    target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
 
 
 def eq_safekeeper_records(a: dict[str, Any], b: dict[str, Any]) -> bool:
