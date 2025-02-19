@@ -1293,7 +1293,7 @@ jobs:
           done
 
   pin-build-tools-image:
-    needs: [ build-build-tools-image, push-compute-image-prod, push-neon-image-prod, build-and-test-locally ]
+    needs: [ build-build-tools-image, test-images, build-and-test-locally ]
     if: github.ref_name == 'main'
     uses: ./.github/workflows/pin-build-tools-image.yml
     with:
