@@ -1584,8 +1584,13 @@ impl ComputeNode {
 
                     let log_directory_path = pgdata_path.join("log");
                     // get endpoint address from env variable AUDIT_LOGGING_ENDPOINT
-                    let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT")
-                        .unwrap_or_else(|_| "172.17.0.1:514".to_string()); // TODO error here if not set
+                    let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT")?;
+
+                    if remote_endpoint.is_empty() {
+                        // Error out
+                        anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+                    }
+
                     configure_rsyslog(
                         log_directory_path.to_str().unwrap(),
                         "hipaa",
