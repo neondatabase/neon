@@ -895,6 +895,7 @@ def test_slow_secondary_downloads(neon_env_builder: NeonEnvBuilder, via_controll
     assert progress_3["bytes_total"] == progress_3["bytes_downloaded"]
 
 
+@pytest.mark.repeat(20)
 @skip_in_debug_build("only run with release build")
 @run_only_on_default_postgres("PG version is not interesting here")
 def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
@@ -903,6 +904,9 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
     )
 
+    tenant_conf = TENANT_CONF
+    tenant_conf["heatmap_period"] = "0s"
+
     env = neon_env_builder.init_configs()
     env.start()
 
@@ -910,7 +914,7 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.create_tenant(tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}')
+    env.create_tenant(tenant_id, timeline_id, conf=tenant_conf, placement_policy='{"Attached":1}')
 
     env.storage_controller.reconcile_until_idle()
 
