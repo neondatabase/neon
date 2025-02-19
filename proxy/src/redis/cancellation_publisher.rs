@@ -5,9 +5,6 @@ use pq_proto::CancelKeyData;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
-use crate::rate_limiter::{GlobalRateLimiter, RateBucketInfo};
-
 pub trait CancellationPublisherMut: Send + Sync + 'static {
     #[allow(async_fn_in_trait)]
     async fn try_publish(
@@ -77,38 +74,5 @@ impl<P: CancellationPublisherMut> CancellationPublisher for Arc<Mutex<P>> {
             .await
             .try_publish(cancel_key_data, session_id, peer_addr)
             .await
-    }
-}
-
-pub struct RedisPublisherClient {
-    #[allow(dead_code)]
-    client: ConnectionWithCredentialsProvider,
-    _region_id: String,
-    _limiter: GlobalRateLimiter,
-}
-
-impl RedisPublisherClient {
-    pub fn new(
-        client: ConnectionWithCredentialsProvider,
-        region_id: String,
-        info: &'static [RateBucketInfo],
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            client,
-            _region_id: region_id,
-            _limiter: GlobalRateLimiter::new(info.into()),
-        })
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn try_connect(&mut self) -> anyhow::Result<()> {
-        match self.client.connect().await {
-            Ok(()) => {}
-            Err(e) => {
-                tracing::error!("failed to connect to redis: {e}");
-                return Err(e);
-            }
-        }
-        Ok(())
     }
 }

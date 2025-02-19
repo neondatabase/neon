@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
 use utils::sync::gate::Gate;
 
+use http_utils::error::ApiError;
 use std::cmp::max;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -22,7 +23,6 @@ use std::time::Duration;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::{sync::watch, time::Instant};
 use tracing::*;
-use utils::http::error::ApiError;
 use utils::{
     id::{NodeId, TenantTimelineId},
     lsn::Lsn,
@@ -591,6 +591,8 @@ impl Timeline {
         // Assert that [`Self::shutdown`] was already called
         assert!(self.cancel.is_cancelled());
         assert!(self.gate.close_complete());
+
+        info!("deleting timeline {} from disk", self.ttid);
 
         // Close associated FDs. Nobody will be able to touch timeline data once
         // it is cancelled, so WAL storage won't be opened again.

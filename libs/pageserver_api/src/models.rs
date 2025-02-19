@@ -464,6 +464,10 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_algorithm: FieldPatch<CompactionAlgorithmSettings>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_l0_first: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_l0_semaphore: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub l0_flush_delay_threshold: FieldPatch<usize>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub l0_flush_stall_threshold: FieldPatch<usize>,
@@ -529,6 +533,8 @@ pub struct TenantConfig {
     pub compaction_upper_limit: Option<usize>,
     // defer parsing compaction_algorithm, like eviction_policy
     pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
+    pub compaction_l0_first: Option<bool>,
+    pub compaction_l0_semaphore: Option<bool>,
     pub l0_flush_delay_threshold: Option<usize>,
     pub l0_flush_stall_threshold: Option<usize>,
     pub l0_flush_wait_upload: Option<bool>,
@@ -567,6 +573,8 @@ impl TenantConfig {
             mut compaction_threshold,
             mut compaction_upper_limit,
             mut compaction_algorithm,
+            mut compaction_l0_first,
+            mut compaction_l0_semaphore,
             mut l0_flush_delay_threshold,
             mut l0_flush_stall_threshold,
             mut l0_flush_wait_upload,
@@ -606,6 +614,10 @@ impl TenantConfig {
             .compaction_upper_limit
             .apply(&mut compaction_upper_limit);
         patch.compaction_algorithm.apply(&mut compaction_algorithm);
+        patch.compaction_l0_first.apply(&mut compaction_l0_first);
+        patch
+            .compaction_l0_semaphore
+            .apply(&mut compaction_l0_semaphore);
         patch
             .l0_flush_delay_threshold
             .apply(&mut l0_flush_delay_threshold);
@@ -669,6 +681,8 @@ impl TenantConfig {
             compaction_threshold,
             compaction_upper_limit,
             compaction_algorithm,
+            compaction_l0_first,
+            compaction_l0_semaphore,
             l0_flush_delay_threshold,
             l0_flush_stall_threshold,
             l0_flush_wait_upload,
@@ -1066,8 +1080,7 @@ pub struct TenantInfo {
 
     /// Opaque explanation if gc is being blocked.
     ///
-    /// Only looked up for the individual tenant detail, not the listing. This is purely for
-    /// debugging, not included in openapi.
+    /// Only looked up for the individual tenant detail, not the listing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_blocking: Option<String>,
 }
@@ -1122,7 +1135,26 @@ pub struct TimelineInfo {
     pub ancestor_lsn: Option<Lsn>,
     pub last_record_lsn: Lsn,
     pub prev_record_lsn: Option<Lsn>,
+
+    /// Legacy field for compat with control plane.  Synonym of `min_readable_lsn`.
+    /// TODO: remove once control plane no longer reads it.
     pub latest_gc_cutoff_lsn: Lsn,
+
+    /// The LSN up to which GC has advanced: older data may still exist but it is not available for clients.
+    /// This LSN is not suitable for deciding where to create branches etc: use [`TimelineInfo::min_readable_lsn`] instead,
+    /// as it is easier to reason about.
+    #[serde(default)]
+    pub applied_gc_cutoff_lsn: Lsn,
+
+    /// The upper bound of data which is either already GC'ed, or elegible to be GC'ed at any time based on PITR interval.
+    /// This LSN represents the "end of history" for this timeline, and callers should use it to figure out the oldest
+    /// LSN at which it is legal to create a branch or ephemeral endpoint.
+    ///
+    /// Note that holders of valid LSN leases may be able to create branches and read pages earlier
+    /// than this LSN, but new leases may not be taken out earlier than this LSN.
+    #[serde(default)]
+    pub min_readable_lsn: Lsn,
+
     pub disk_consistent_lsn: Lsn,
 
     /// The LSN that we have succesfully uploaded to remote storage

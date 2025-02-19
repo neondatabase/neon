@@ -235,7 +235,7 @@ impl Storage for FileStorage {
 #[cfg(test)]
 mod test {
     use super::*;
-    use safekeeper_api::membership::{Configuration, MemberSet};
+    use safekeeper_api::membership::{Configuration, MemberSet, SafekeeperGeneration};
     use tokio::fs;
     use utils::lsn::Lsn;
 
@@ -246,7 +246,7 @@ mod test {
         let tempdir = camino_tempfile::tempdir()?;
         let mut state = TimelinePersistentState::empty();
         state.mconf = Configuration {
-            generation: 42,
+            generation: SafekeeperGeneration::new(42),
             members: MemberSet::empty(),
             new_members: None,
         };

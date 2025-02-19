@@ -14,7 +14,7 @@ pub async fn task_main(
     let router = make_router(conf, global_timelines)
         .build()
         .map_err(|err| anyhow::anyhow!(err))?;
-    let service = utils::http::RouterService::new(router).unwrap();
+    let service = http_utils::RouterService::new(router).unwrap();
     let server = hyper::Server::from_tcp(http_listener)?;
     server.serve(service).await?;
     Ok(()) // unreachable

@@ -69,7 +69,10 @@ def compute_reconfigure_listener(make_httpserver: HTTPServer):
             # This causes the endpoint to query storage controller for its location, which
             # is redundant since we already have it here, but this avoids extending the
             # neon_local CLI to take full lists of locations
-            reconfigure_threads.submit(lambda workload=workload: workload.reconfigure())  # type: ignore[misc]
+            fut = reconfigure_threads.submit(lambda workload=workload: workload.reconfigure())  # type: ignore[misc]
+
+            # To satisfy semantics of notify-attach API, we must wait for the change to be applied before returning 200
+            fut.result()
 
         return Response(status=200)
 

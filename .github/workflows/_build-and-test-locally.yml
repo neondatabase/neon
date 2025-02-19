@@ -20,8 +20,13 @@ on:
         required: true
         type: string
       test-cfg:
-        description: 'a json object of postgres versions and lfc/sanitizers states to build and run regression tests on'
+        description: 'a json object of postgres versions and lfc states to run regression tests on'
         required: true
+        type: string
+      sanitizers:
+        description: 'enabled or disabled'
+        required: false
+        default: 'disabled'
         type: string
 
 defaults:
@@ -48,8 +53,6 @@ jobs:
       # io_uring will account the memory of the CQ and SQ as locked.
       # More details: https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
-    strategy:
-      matrix: ${{ fromJSON(format('{{"include":{0}}}', inputs.test-cfg)) }}
     env:
       BUILD_TYPE: ${{ inputs.build-type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -89,7 +92,7 @@ jobs:
       - name: Set env variables
         env:
           ARCH: ${{ inputs.arch }}
-          SANITIZERS: ${{ matrix.sanitizers }}
+          SANITIZERS: ${{ inputs.sanitizers }}
         run: |
           CARGO_FEATURES="--features testing"
           if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
@@ -167,7 +170,7 @@ jobs:
 
       - name: Run cargo build
         env:
-          WITH_TESTS: ${{ matrix.sanitizers != 'enabled' && '--tests' || '' }}
+          WITH_TESTS: ${{ inputs.sanitizers != 'enabled' && '--tests' || '' }}
         run: |
           export ASAN_OPTIONS=detect_leaks=0
           ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins ${WITH_TESTS}
@@ -177,7 +180,7 @@ jobs:
       - name: Install rust binaries
         env:
           ARCH: ${{ inputs.arch }}
-          SANITIZERS: ${{ matrix.sanitizers }}
+          SANITIZERS: ${{ inputs.sanitizers }}
         run: |
           # Install target binaries
           mkdir -p /tmp/neon/bin/
@@ -225,7 +228,7 @@ jobs:
           role-duration-seconds: 18000 # 5 hours
 
       - name: Run rust tests
-        if: ${{ matrix.sanitizers != 'enabled' }}
+        if: ${{ inputs.sanitizers != 'enabled' }}
         env:
           NEXTEST_RETRIES: 3
         run: |
@@ -287,6 +290,7 @@ jobs:
           DATABASE_URL: postgresql://localhost:1235/storage_controller
           POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
         run: |
+          export ASAN_OPTIONS=detect_leaks=0
           /tmp/neon/bin/neon_local init
           /tmp/neon/bin/neon_local storage_controller start
 
@@ -333,7 +337,7 @@ jobs:
       - name: Pytest regression tests
         continue-on-error: ${{ matrix.lfc_state == 'with-lfc' && inputs.build-type == 'debug' }}
         uses: ./.github/actions/run-python-test-set
-        timeout-minutes: ${{ matrix.sanitizers != 'enabled' && 60 || 180 }}
+        timeout-minutes: ${{ inputs.sanitizers != 'enabled' && 60 || 180 }}
         with:
           build_type: ${{ inputs.build-type }}
           test_selection: regress
@@ -344,6 +348,10 @@ jobs:
           rerun_failed: true
           pg_version: ${{ matrix.pg_version }}
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          # `--session-timeout` is equal to (timeout-minutes - 10 minutes) * 60 seconds.
+          # Attempt to stop tests gracefully to generate test reports
+          # until they are forcibly stopped by the stricter `timeout-minutes` limit.
+          extra_params: --session-timeout=${{ inputs.sanitizers != 'enabled' && 3000 || 10200 }}
         env:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
@@ -351,7 +359,7 @@ jobs:
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
           PAGESERVER_GET_VECTORED_CONCURRENT_IO: sidecar-task
           USE_LFC: ${{ matrix.lfc_state == 'with-lfc' && 'true' || 'false' }}
-          SANITIZERS: ${{ matrix.sanitizers }}
+          SANITIZERS: ${{ inputs.sanitizers }}
 
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540
