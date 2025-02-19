@@ -1019,6 +1019,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
                 self.ws_guard
                     .walsenders
                     .record_ps_feedback(self.ws_guard.id, &ps_feedback);
+                // This here is the principal spot that updates remote_consistent_lsn.
+                // The other spot where it's updated from peers will go away.
                 self.tli
                     .update_remote_consistent_lsn(ps_feedback.remote_consistent_lsn)
                     .await;

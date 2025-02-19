@@ -503,7 +503,8 @@ impl Manager {
     ) {
         let is_active = is_wal_backup_required
             || num_computes > 0
-            || state.remote_consistent_lsn < state.commit_lsn;
+            // state.remote_consistent_lsn is the inmemo remote consistent lsn
+            || state.remote_consistent_lsn < state.commit_lsn; // this here changes with the design;
 
         // update the broker timeline set
         if self.tli_broker_active.set(is_active) {
@@ -516,7 +517,7 @@ impl Manager {
             MANAGER_ACTIVE_CHANGES.inc();
         }
 
-        // update the state in Arc<Timeline>
+        // update the state in Arc<Timeline> (which is only used for informational APIs)
         self.tli
             .broker_active
             .store(is_active, std::sync::atomic::Ordering::Relaxed);

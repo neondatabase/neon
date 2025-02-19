@@ -222,11 +222,13 @@ impl StateSK {
         state.inmem.backup_lsn = max(Lsn(sk_info.backup_lsn), state.inmem.backup_lsn);
         sync_control_file |= state.backup_lsn + wal_seg_size < state.inmem.backup_lsn;
 
+        // This will go away in the new world.
         state.inmem.remote_consistent_lsn = max(
             Lsn(sk_info.remote_consistent_lsn),
             state.inmem.remote_consistent_lsn,
         );
         sync_control_file |=
+            // WTF is this criteria?
             state.remote_consistent_lsn + wal_seg_size < state.inmem.remote_consistent_lsn;
 
         state.inmem.peer_horizon_lsn =
