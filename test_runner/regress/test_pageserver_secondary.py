@@ -904,7 +904,7 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
     )
 
-    tenant_conf = TENANT_CONF
+    tenant_conf = TENANT_CONF.copy()
     tenant_conf["heatmap_period"] = "0s"
 
     env = neon_env_builder.init_configs()
