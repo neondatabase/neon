@@ -70,14 +70,14 @@ jobs:
           extra_params: -m remote_cluster
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
-          PROJECT_ID: ${{ steps.outputs.create-project.project_id }}
+          PROJECT_ID: ${{ steps.create-project.outputs.project_id }}
 
       - name: Delete project
         if: always()
         uses: ./.github/actions/neon-project-delete
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{ steps.outputs.create-project.project_id }}
+          project_id: ${{ steps.create-project.outputs.project_id }}
 
       - name: Create Allure report
         id: create-allure-report
