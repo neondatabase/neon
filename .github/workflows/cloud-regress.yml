@@ -73,7 +73,7 @@ jobs:
         uses: ./.github/actions/run-python-test-set
         with:
           build_type: remote
-          test_selection: test_api_random
+          test_selection: random_api
           run_in_parallel: false
           extra_params: -m remote_cluster
           pg_version: ${{ env.DEFAULT_PG_VERSION }}
@@ -81,12 +81,12 @@ jobs:
         env:
           BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
 
-#      - name: Delete Neon Project
-#        if: always()
-#        uses: ./.github/actions/neon-project-delete
-#        with:
-#          project_id: ${{ steps.create-neon-project.outputs.project_id }}
-#          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+      - name: Delete Neon Project
+        if: always()
+        uses: ./.github/actions/neon-project-delete
+        with:
+          project_id: ${{ steps.create-neon-project.outputs.project_id }}
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
       - name: Create Allure report
         if: ${{ !cancelled() }}
